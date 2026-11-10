@@ -637,7 +637,9 @@ def _open_scan_local_file_with_path(
         except OSError as exc:
             # The Windows backend retains native ERROR_FILE/PATH_NOT_FOUND codes.
             if exc.errno in {2, 3}:
-                raise MissingScanLocalFileError(str(exc)) from exc
+                raise MissingScanLocalFileError(
+                    f"{context}: expected a file inside the scan directory"
+                ) from exc
             raise ContractError(str(exc)) from exc
     root_fd: int | None = None
     parent_fd: int | None = None
@@ -2389,26 +2391,6 @@ def _validate_current_findings(findings: dict[str, Any], schema_dir: Path) -> No
         _validate_schema_node(authored, finding_schema, f"findings.findings[{index}]")
 
 
-def _validate_canonical_schemas_before_projection(
-    manifest: dict[str, Any],
-    findings: dict[str, Any],
-    coverage: dict[str, Any],
-    schema_dir: Path,
-) -> None:
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
-    provisional_manifest = copy.deepcopy(manifest)
-    provisional_scan = _require_dict(provisional_manifest, "scan", "manifest")
-    provisional_scan["artifacts"] = [
-        {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
-        {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
-    ]
-    if "coverageRef" not in provisional_scan:
-        provisional_scan["mode"] = coverage["mode"]
-        provisional_scan["review"] = review_summary(coverage)
-    validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
-    validate_against_schema(findings, schema_dir / "findings.schema.json")
-
-
 def _validate_contract_refs(scan: dict[str, Any]) -> None:
     for field, expected in (
         ("coverageRef", "coverage.json"),
@@ -2812,9 +2794,9 @@ def _validate_existing_seal(
             raise ContractError(f"{context}: sealed artifact changed or is missing")
 
 
-def _read_sealed_artifacts(
+def _read_scan_artifacts(
     scan_dir: Path, scan: dict[str, Any]
-) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
     findings, findings_bytes = _read_scan_local_json_bytes(
         scan_dir, scan["findingsRef"], scan["findingsRef"]
     )
@@ -2826,8 +2808,15 @@ def _read_sealed_artifacts(
         contents[scan["coverageRef"]] = coverage_bytes
     else:
         coverage = review_state(scan)
+    return findings, coverage, contents
+
+
+def _read_sealed_artifacts(
+    scan_dir: Path, scan: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    findings, coverage, contents = _read_scan_artifacts(scan_dir, scan)
     _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
-    return findings, coverage, findings_bytes
+    return findings, coverage, contents[scan["findingsRef"]]
 
 
 def _read_sealed_scan(
@@ -3093,19 +3082,14 @@ def _prepare_scan_finalization(
         _populate_unsealed_manifest_envelope(manifest, scan, completion_binding)
     _validate_contract_refs(scan)
     if draft_documents is None:
-        findings, findings_input_bytes = _read_scan_local_json_bytes(
-            scan_dir, scan["findingsRef"], scan["findingsRef"]
-        )
-        if "coverageRef" in scan:
-            coverage, coverage_input_bytes = _read_scan_local_json_bytes(
-                scan_dir, scan["coverageRef"], scan["coverageRef"]
-            )
-        else:
-            coverage = review_state(scan)
-            coverage_input_bytes = _json_bytes(coverage)
+        findings, coverage, contents = _read_scan_artifacts(scan_dir, scan)
     else:
         findings, coverage = copy.deepcopy(draft_documents[1:])
-        findings_input_bytes, coverage_input_bytes = _json_bytes(findings), _json_bytes(coverage)
+        contents = {scan["findingsRef"]: _json_bytes(findings)}
+        if "coverageRef" in scan:
+            contents[scan["coverageRef"]] = _json_bytes(coverage)
+    if "coverageRef" not in scan:
+        _json_bytes(coverage)
     if not was_sealed:
         # Preserve legacy sealed bundles, but do not publish a completeness claim.
         coverage.pop("completeness", None)
@@ -3129,14 +3113,7 @@ def _prepare_scan_finalization(
         raise ContractError(
             f"coverage.mode: must match selected scan mode {expected_coverage_mode}"
         )
-    _validate_existing_seal(
-        scan_dir,
-        scan,
-        artifact_contents={
-            scan["findingsRef"]: findings_input_bytes,
-            **({scan["coverageRef"]: coverage_input_bytes} if "coverageRef" in scan else {}),
-        },
-    )
+    _validate_existing_seal(scan_dir, scan, artifact_contents=contents)
     scan["sealedAt"] = _require_str(scan, "completedAt", "manifest.scan")
     _validate_target(_require_dict(scan, "target", "manifest.scan"))
     _validate_completion_binding(manifest, findings, coverage, completion_binding)
@@ -3182,9 +3159,19 @@ def _prepare_scan_finalization(
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
-    _validate_canonical_schemas_before_projection(
-        manifest, findings_for_validation, coverage, schema_dir
-    )
+    provisional_manifest = copy.deepcopy(manifest)
+    provisional_manifest["scan"]["artifacts"] = [
+        {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
+        {"path": "coverage.json", "sha256": "0" * 64, "mediaType": "application/json"},
+    ]
+    inline_review = {}
+    if "coverageRef" not in scan:
+        inline_review = {"mode": coverage["mode"], "review": review_summary(coverage)}
+        provisional_manifest["scan"].update(inline_review)
+    validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
+    del provisional_manifest
+    validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
+    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
@@ -3230,9 +3217,8 @@ def _prepare_scan_finalization(
     else:
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
-        if "coverageRef" not in scan:
-            scan["mode"] = coverage["mode"]
-            scan["review"] = review_summary(coverage)
+        if inline_review:
+            scan.update(inline_review)
             candidates = unresolved_candidate_rows(coverage, findings["findings"], sealed=True)
             if candidates:
                 scan["review"]["unresolvedCandidates"] = candidates

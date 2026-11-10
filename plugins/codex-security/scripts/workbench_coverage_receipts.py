@@ -12,6 +12,7 @@ from candidate_identity import _deferred_candidate_id as candidate_task_id
 from candidate_identity import candidate_key, is_candidate_row
 from finalize_scan_contract import (
     ContractError,
+    MissingScanLocalFileError,
     _require_portable_relative_path,
     _require_str,
     _validate_schema_node,
@@ -410,9 +411,7 @@ def _generic_surface_updates(
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
                             failure = receipt_error(ref) if repaired else None
-                            replaceable = failure is not None and isinstance(
-                                failure.__cause__, FileNotFoundError
-                            )
+                            replaceable = isinstance(failure, MissingScanLocalFileError)
                             if repaired and isinstance(ref, str):
                                 try:
                                     normalized = _require_portable_relative_path(

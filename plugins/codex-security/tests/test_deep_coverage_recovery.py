@@ -1291,9 +1291,13 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, reverse):
-    refs = ["artifacts/review.md", "artifacts/Review.md"]
+@pytest.mark.parametrize(
+    ("historical", "reverse"),
+    [("missing", False), ("directory", False), ("case-variant", False), ("case-variant", True)],
+)
+def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical, reverse):
+    old_ref = "artifacts/review.md" if historical == "case-variant" else "artifacts/old.md"
+    refs = [old_ref, "artifacts/Review.md"]
     if reverse:
         refs.reverse()
     surface = {"id": "api", "label": "API", "disposition": "no_issue_found"}
@@ -1302,7 +1306,9 @@ def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, r
     output = Path(source["artifact_dir"])
     (output / "artifacts/review.md").unlink()
     (output / "artifacts/Review.md").write_text("Retained historical evidence.\n")
-    if (output / "artifacts/review.md").exists():
+    if historical == "directory":
+        (output / old_ref).mkdir()
+    elif (output / old_ref).exists():
         pytest.skip("This regression requires case-sensitive receipt paths.")
     (output / "artifacts/replacement.md").write_text("Current review evidence.\n")
     prefix = output.relative_to(tmp_path).as_posix() + "/"
@@ -1323,17 +1329,16 @@ def test_missing_historical_receipt_does_not_hide_valid_case_variant(tmp_path, r
     )
     write_checkpoint(output / "checkpoints", current, mtime_ns=300)
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Interrupted retry before checkpoint-head publication.",
-    )
-    assert documents is not None
-    retained = documents[2]["surfaces"][0]["receiptRefs"]
+    documents = recover(tmp_path, [source], warnings=warnings)
+    (row,) = documents[2]["surfaces"]
+    retained = row["receiptRefs"]
+    if historical == "directory":
+        assert row["disposition"] == "needs_follow_up"
+        assert prefix + "artifacts/Review.md" in retained
+        assert prefix + old_ref not in retained
+        assert not any("Replaced invalid saved coverage receipt" in warning for warning in warnings)
+        return
+    assert row["disposition"] == "no_issue_found"
     assert set(retained) == {prefix + "artifacts/Review.md", prefix + "artifacts/replacement.md"}
     assert any("Replaced invalid saved coverage receipt" in warning for warning in warnings)
     scan = {

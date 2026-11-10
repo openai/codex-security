@@ -4,7 +4,8 @@ import { parseJson } from "./value.js";
 const MAX_ACTIVITY_PATHS = 8;
 const MAX_PROSE_CHARACTERS = 1_000;
 const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
-const POSIX_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|(?:\\[\\ \t]|[^\s|;&<>])+/gu;
+const POSIX_TOKEN =
+  /(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^\s|;&<>'"\\])+/gu;
 const POSIX_SHELL = /(?:^|\/)(?:sh|bash|zsh)$/u;
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
@@ -130,22 +131,41 @@ function commandDetails(
   repository: string,
   shell: unknown,
 ) {
-  const text =
-    typeof value === "string" ? unwrapCommand(value) : value.join(" ");
-  return {
-    description: text.replaceAll(/\s+/gu, " "),
-    paths:
-      typeof value === "string"
-        ? commandRepositoryPaths(
-            text === value.trim() ? value : text,
-            repository,
-            shell,
-          )
-        : literalRepositoryPaths(value, repository),
-  };
+  let text: string;
+  let paths: string[];
+  if (typeof value === "string") {
+    const command = unwrapCommand(value);
+    text = command.text;
+    paths = commandRepositoryPaths(
+      command.script ?? text,
+      repository,
+      shell ?? command.recordedShell,
+    );
+  } else {
+    text = value.join(" ");
+    paths = literalRepositoryPaths(value, repository);
+  }
+  return { description: text.replaceAll(/\s+/gu, " "), paths };
 }
 
-function unwrapCommand(command: string): string {
+/** Decode one literal POSIX word without expanding variables or running a shell. */
+function literalPosixWord(argument: string) {
+  // A sticky match stops at the first unsupported fragment instead of skipping it.
+  const fragment =
+    /'([^']*)'|"((?:\\.|[^"\\$\x60])*)"|\\(.)|[^\s'"\\$\x60|;&<>()*?\[\]{}~]+/suy;
+  let word = "";
+  do {
+    const match = fragment.exec(argument);
+    if (!match) return undefined;
+    const [raw, single, double, escaped] = match;
+    if (double !== undefined)
+      word += double.replace(/\\\n|\\([$\x60"\\])/gu, "$1");
+    else if (escaped !== "\n") word += single ?? escaped ?? raw;
+  } while (fragment.lastIndex < argument.length);
+  return word;
+}
+
+function unwrapCommand(command: string) {
   const normalized = command.trim();
   const powershell =
     process.platform === "win32"
@@ -159,16 +179,20 @@ function unwrapCommand(command: string): string {
       powershell[1] ?? powershell[2]!,
     )
   ) {
-    return powershell[4]!;
+    return { text: powershell[4]! };
   }
   const match =
-    /^(?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh)\s+-[a-z]*c[a-z]*\s+(['"])(.*)$/su.exec(
+    /^((?:\/(?:usr\/)?bin\/)?(?:zsh|bash|sh))\s+-[a-z]*c[a-z]*\s+(["'].*)$/su.exec(
       normalized,
     );
-  if (match === null) return normalized;
-  const quote = match[1]!;
-  const script = match[2]!;
-  return script.endsWith(quote) ? script.slice(0, -1) : script;
+  if (match === null) return { text: normalized, script: command };
+  const argument = match[2]!;
+  const decoded = literalPosixWord(argument);
+  return {
+    text: argument.slice(1, argument.endsWith(argument[0]!) ? -1 : undefined),
+    script: decoded,
+    recordedShell: decoded === undefined ? undefined : match[1],
+  };
 }
 
 export function scanActivityFromSessionEvent(
@@ -403,7 +427,7 @@ function windowsActivityRoot(path: string): string {
     .replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
 }
 
-function repositoryPathMatcher(repository: string, literal = false) {
+function repositoryPathMatcher(repository: string, literal: boolean) {
   const root = windowsActivityRoot(repository);
   const normalize = (path: string) =>
     literal && !root ? path : path.replaceAll("\\", "/");
@@ -461,36 +485,43 @@ function commandRepositoryPaths(
   repository: string,
   shell: unknown,
 ): string[] {
-  const escapedBlanks =
-    typeof shell === "string" &&
-    POSIX_SHELL.test(shell) &&
-    /\\[ \t]/u.test(command);
+  const posixShell = typeof shell === "string" && POSIX_SHELL.test(shell);
+  const posixPaths = posixShell && windowsActivityRoot(repository) === "";
   const paths = new Set<string>();
   const roots = [
     "$CODEX_SECURITY_REPOSITORY",
     "${CODEX_SECURITY_REPOSITORY}",
     repository,
-  ].map((root) => repositoryPathMatcher(root));
-  for (const token of command.match(
-    escapedBlanks ? POSIX_TOKEN : SHELL_TOKEN,
-  ) ?? []) {
+  ].map((root) => repositoryPathMatcher(root, posixPaths));
+  for (const token of command.match(posixShell ? POSIX_TOKEN : SHELL_TOKEN) ??
+    []) {
     let value = token;
-    const singleQuoted = value.startsWith("'") && value.endsWith("'");
-    const quoted =
-      (value.startsWith('"') && value.endsWith('"')) || singleQuoted;
-    const escaped = escapedBlanks && !quoted && /\\[ \t]/u.test(token);
-    if (escaped) {
-      value = value.replace(/\\([ \t])/gu, "$1");
-      // Only the registered repository variable can be resolved in an escaped word.
-      const operand = value.replace(
-        /^\$(?:CODEX_SECURITY_REPOSITORY|\{CODEX_SECURITY_REPOSITORY\})\//u,
-        "",
+    const first = token[0]!;
+    const quote =
+      (first === "'" || first === '"') && token.endsWith(first)
+        ? first
+        : undefined;
+    const hasQuote = /['"]/u.test(token);
+    const hasEscape = posixPaths
+      ? token.includes("\\")
+      : /\\[ \t]/u.test(token);
+    const posixLiteral = posixShell && (hasQuote || hasEscape);
+    if (posixLiteral) {
+      if (!posixPaths && !hasQuote && /\\(?![ \t])/u.test(token)) continue;
+      // A single-quoted or backslash-escaped dollar sign is literal.
+      const variable =
+        /^"?(\$(?:CODEX_SECURITY_REPOSITORY|\{CODEX_SECURITY_REPOSITORY\}))/u.exec(
+          token,
+        )?.[1];
+      const literal = literalPosixWord(
+        variable ? token.replace(variable, "") : token,
       );
-      if (/["'\\\x60$()*?\[{}]/u.test(operand)) continue;
-    } else if (quoted) value = value.slice(1, -1);
-    const raw = value.replaceAll('\\"', '"');
-    value = raw.replaceAll("\\", "/");
-    if (process.platform === "win32" && !singleQuoted) {
+      if (literal === undefined || literal.startsWith("$")) continue;
+      value = (variable ?? "") + literal;
+    } else if (quote) value = value.slice(1, -1);
+    const raw = posixLiteral ? value : value.replaceAll('\\"', '"');
+    value = posixPaths ? raw : raw.replaceAll("\\", "/");
+    if (process.platform === "win32" && quote !== "'") {
       value = value.replace(
         /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
         "$CODEX_SECURITY_REPOSITORY/",
@@ -499,20 +530,17 @@ function commandRepositoryPaths(
     for (const relativeTo of roots) {
       const relative = relativeTo(raw, value);
       if (relative === null) continue;
-      const path = escaped
-        ? relative
-        : relative
-            .replace(/["'\r\n].*$/u, "")
-            .trim()
-            .replace(/\/+$/u, "")
-            .replace(/:\d+(?::\d+)?$/u, "");
-      if (
-        path !== "" &&
-        !path.startsWith("../") &&
-        !path.split("/").includes("..")
-      ) {
-        paths.add(path);
+      // Quotes, edge whitespace and colon-number suffixes can be filename data.
+      let path = relative;
+      if (!posixLiteral) {
+        // An opposite quote inside a quoted filename is literal data.
+        const boundary =
+          quote && !path.includes(quote) ? /[\r\n].*$/u : /["'\r\n].*$/u;
+        path = path.replace(boundary, "").trim();
       }
+      path = path.replace(/\/+$/u, "");
+      if (!posixLiteral) path = path.replace(/:\d+(?::\d+)?$/u, "");
+      if (path !== "" && !path.split("/").includes("..")) paths.add(path);
     }
     if (paths.size >= MAX_ACTIVITY_PATHS) break;
   }
@@ -528,16 +556,16 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
 function operandRepositoryPaths(
   candidates: unknown[],
   repository: string,
-  literal = false,
+  skipRoot = false,
 ): string[] {
   const paths = new Set<string>();
-  const relativeTo = repositoryPathMatcher(repository, literal);
+  const relativeTo = repositoryPathMatcher(repository, true);
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
     const path = relativeTo(candidate);
     if (
       path !== null &&
-      (!literal || path !== "") &&
+      (!skipRoot || path !== "") &&
       !path.split("/").includes("..")
     )
       paths.add(path);

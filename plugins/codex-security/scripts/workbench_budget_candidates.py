@@ -7,7 +7,7 @@ import json
 import os
 import re
 from collections.abc import Callable, Iterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from candidate_identity import (
@@ -1475,3 +1475,48 @@ def bind_legacy_candidate_rows(parent, sources, legacy_parent):
                     )
                     if _encoded(comparable) == _encoded(expected):
                         existing["sourceWorkerId"] = owner
+
+
+def validate_budget_candidates(candidates: list[dict[str, Any]], in_scope: set[str]) -> None:
+    candidate_ids: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise SystemExit("Canonical Deep Scan candidate ledger rows must be objects.")
+        candidate_id = candidate.get("candidate_id")
+        locations = candidate.get("locations")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.strip()
+            or candidate_id in {".", ".."}
+            or "/" in candidate_id
+            or "\\" in candidate_id
+            or candidate_id in candidate_ids
+            or not isinstance(candidate.get("summary"), str)
+            or not candidate["summary"].strip()
+            or not isinstance(candidate.get("evidence"), str)
+            or not candidate["evidence"].strip()
+            or not isinstance(locations, list)
+            or not locations
+        ):
+            raise SystemExit("Canonical Deep Scan candidate ledger contains an invalid candidate.")
+        candidate_ids.add(candidate_id)
+        for location in locations:
+            if not isinstance(location, dict):
+                raise SystemExit("Canonical Deep Scan candidate location must be an object.")
+            path = location.get("path")
+            if (
+                not isinstance(path, str)
+                or not path
+                or "\\" in path
+                or "\x00" in path
+                or re.match(r"^[A-Za-z]:", path)
+                or PurePosixPath(path).is_absolute()
+                or any(part in {".", "..", ""} for part in path.split("/"))
+            ):
+                raise SystemExit(
+                    "Canonical Deep Scan candidate location must be repository-relative."
+                )
+        if not any(location["path"] in in_scope for location in locations):
+            raise SystemExit(
+                "Canonical Deep Scan candidate must include a location in its in-scope inventory."
+            )

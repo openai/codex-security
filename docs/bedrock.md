@@ -43,7 +43,7 @@ identities from the scan process.
 
 Bedrock uses AWS credentials for inference. [Daybreak Blue and Red](#daybreak-blue-and-red)
 require separate approval and provisioning. Saved reports, `scans show`, and
-`export` are local. [Publishing to Cloud](../sdk/typescript/README.md#publish-findings-to-cloud)
+`export` are local. [Publishing to Cloud](../sdk/typescript/docs/cli.md#publish-completed-scans)
 requires ChatGPT credentials and access to the destination.
 
 If Codex reports missing model metadata, record the bundled Codex version from
@@ -53,7 +53,7 @@ An AWS inference request can succeed even when the bundled metadata is incomplet
 Bedrock defaults `model_reasoning_summary` to `none` because some models reject
 `reasoning.summary`. This setting reaches Deep Scan discovery workers,
 including resumes. To request summaries from a model that supports them, add
-`--codex 'model_reasoning_summary="auto"'` to the scan command. This explicit
+`--codex "model_reasoning_summary='auto'"` to the scan command. This explicit
 override takes precedence over the default and does not change reasoning effort.
 See [native configuration overrides](../sdk/typescript/docs/cli.md#runtime-configuration-and-worker-limits)
 for the `--codex KEY=VALUE` syntax.
@@ -93,7 +93,8 @@ Use the exact Bedrock identifier for the model your account can invoke:
 | Daybreak Blue | `openai.gpt-daybreak-blue-5.6-sol` | [Blue](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-daybreak-blue-56-sol.html) |
 | Daybreak Red  | `openai.gpt-5.6-cyber`             | [Red](https://docs.aws.amazon.com/en_en/bedrock/latest/userguide/model-card-openai-gpt-56-cyber.html)              |
 
-AWS lists `us-east-2` and the Bedrock Mantle Responses API for both models.
+AWS lists the Bedrock Mantle Responses API in `us-east-2` for both models.
+Red is also available in `us-gov-east-1`.
 The native provider handles that endpoint; no custom base URL or connector is
 needed. Access requires OpenAI Trusted Access for Cyber enrollment and approval,
 followed by AWS provisioning through your account team. Red requires separate
@@ -117,12 +118,47 @@ npx @openai/codex-security scan /path/to/repository \
   --provider amazon-bedrock --model openai.gpt-5.6-cyber --effort high
 ```
 
-Cost estimates and `--max-cost` recognize both exact Bedrock IDs using their
-AWS model cards' Standard commercial in-region rates, including the AWS fee.
-Blue reports a short/long-context range because aggregate usage does not identify
-each request's context tier. Red's card lists a 272K context window and only
-short-context pricing, so its upper estimate remains unavailable. Spending limits
-use the short-context baseline. AWS bills the actual usage.
+## Scan cost estimates
+
+Estimates and `--max-cost` use the published Standard token rates for the exact
+Bedrock model ID and inference route. For example, `openai.gpt-6.1-sol` and
+`us.openai.gpt-6.1-sol` cost $2.20 per million short-context input tokens.
+`global.openai.gpt-6.1-sol` costs $2.00. All three prices already include any
+applicable AWS fee. See the [AWS model cards](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards-openai.html).
+
+Live scans use the region in an explicit AWS Bedrock endpoint. Without an
+endpoint override, they use the selected provider's `aws.region`, then
+`AWS_REGION`, then `AWS_DEFAULT_REGION`. If the native provider obtains
+its region from an AWS profile or managed credentials, set one of those values
+to that same region for cost estimates and `--max-cost`. For a Red scan with
+`AWS_REGION=us-gov-east-1`, the short-context input rate is $16.875 per million
+tokens. The same model in Ohio costs $13.75. Open-weight GPT models can also
+have different prices between commercial regions. Each estimate records the
+price source and the rates used. When estimating from token counts in the SDK,
+pass the region as the third argument, for example
+`estimateScanCost("openai.gpt-5.6-cyber", usage, "us-gov-east-1")`.
+With only a frontier model ID and usage, the SDK uses the commercial
+in-region price for an unprefixed route.
+
+The frontier model cards and the AWS Price List give different GovCloud West
+prices for GPT-5.4, GPT-5.6 Terra, and GPT-5.6 Luna. Estimates use the
+model-card rates for those three. The GPT-5.4 GovCloud East estimate comes
+from the [regional price list](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/current/us-gov-east-1/index.json).
+
+For the open-weight models, estimates use regional Standard SKUs where available.
+For example, the GPT OSS Safeguard 120B output SKU in Tokyo and São Paulo is
+$0.73 per million tokens. The [Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/#OpenAI)
+groups both regions at $0.71. AWS bills actual usage.
+
+Usage is reported across the scan, so the estimate gives a range where AWS
+publishes both short- and long-context rates. Spending limits use the
+short-context baseline. For Red, AWS publishes only short-context rates and
+the upper estimate stays unavailable. A model or route without published rates
+has no cost estimate and cannot be used with `--max-cost`. For example, AWS
+lists global inference profiles for GPT-5.4 and GPT-5.5 but gives no exact
+Standard rate for either global profile. The GPT OSS and Safeguard cards also
+list Melbourne, Seoul, and Singapore. The regional price list has no Standard
+token rates for those models in those three regions.
 
 <a id="repeatable-live-smoke-test"></a>
 

@@ -1669,12 +1669,10 @@ def test_inherited_model_uses_same_selection_on_initial_and_frozen_publication(
     replayed = workbench_db.execute(
         "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
     ).fetchone()[0]
-    assert (
-        saved._retained_source_state(json.loads(replayed))[0]
-        == saved._retained_source_state(json.loads(retained))[0]
-    )
+    latest = saved._retained_source_state(replayed)
+    assert latest["sources"] == saved._retained_source_state(retained)["sources"]
     if legacy_format:
-        model_source = saved._retained_source_state(json.loads(replayed))[1]
+        model_source = latest.get("threatModelSource")
         if model_source is not None:
             assert (
                 json.loads((scan.scan_dir / model_source).read_text())["threatModel"]["summary"]

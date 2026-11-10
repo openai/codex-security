@@ -270,6 +270,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
     assert "No findings were reported." in report
+    assert "Validation was deferred because the scan reached its cost limit." in report
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
@@ -285,6 +286,11 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     coverage["deferred"] = [{"id": "candidate-1", "reason": "Authored review gap."}]
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))
 
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    draft["scan"]["scope"]["limitations"] = ["The deployment configuration was unavailable."]
+    manifest_path.write_text(json.dumps(draft))
+
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
@@ -299,6 +305,13 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     assert pending["id"] != "candidate-1"
     assert pending["candidateId"] == "candidate-1"
     assert pending["candidate"] == json.loads(ledger.read_text())
+
+    limitation = "Validation was deferred because the scan reached its cost limit."
+    assert json.loads(manifest_path.read_text())["scan"]["scope"]["limitations"] == [
+        "The deployment configuration was unavailable.",
+        limitation,
+    ]
+    assert limitation in (scan_dir / "report.md").read_text()
 
 
 @pytest.mark.parametrize(

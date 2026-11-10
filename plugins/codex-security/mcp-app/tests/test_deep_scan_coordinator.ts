@@ -21,7 +21,7 @@ import type {
   CodexWorkerRequest,
   CodexWorkerResult,
 } from "../src/deep-scan/types.js";
-import { after, mock, test } from "node:test";
+import { after, mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
@@ -2515,28 +2515,36 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
   if (mode === "quota") assert.match(terminal.error ?? "", /Quota exceeded/);
 }
 
-async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
+async function testDiscoveryDeadlineReducesSingleBufferedFinding(
+  t: TestContext,
+) {
   const { fixture, store } = await coordinatorFixture({
     stopAfterNoNew: 99,
     maxDiscoveryRuns: 8,
   });
-  const executor = new FakeExecutor({
-    blockDiscoveryAfterCalls: 1,
-    discoveryCandidateId: "candidate-1",
-  });
-  const coordinator = createCoordinator(fixture, store, executor, {
-    discoveryTimeoutMs: 500,
-  });
+  const first = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+  const blocked = new FakeExecutor({ blockDiscoveryAfterCalls: 0 });
+  let dispatched = 0;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const coordinator = createCoordinator(
+    fixture,
+    store,
+    {
+      run(request) {
+        return (++dispatched === 1 ? first : blocked).run(request);
+      },
+    },
+    { discoveryTimeoutMs: 500 },
+  );
+  t.after(() => coordinator.cancel("fixture cleanup"));
   coordinator.start();
-
-  await eventually(
-    () =>
-      executor.discoveryCalls === 2 &&
-      executor.runningDiscovery === 1 &&
-      [...store.workers.values()].some(
-        (worker) =>
-          worker.kind === "discovery" && worker.status === "succeeded",
-      ),
+  await blocked.discoveryStarted.promise;
+  assert.equal(dispatched, 2);
+  assert.equal(blocked.runningDiscovery, 1);
+  assert.ok(
+    [...store.workers.values()].some(
+      (worker) => worker.kind === "discovery" && worker.status === "succeeded",
+    ),
   );
   assert.equal(
     store.iterations.length,
@@ -2544,6 +2552,8 @@ async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
     "the completed scan is checkpointed before the next scan starts",
   );
 
+  t.mock.timers.tick(500);
+  t.mock.timers.reset();
   const terminal = await coordinator.wait(undefined, 5_000);
   assert.equal(terminal?.status, "succeeded", terminal?.error);
   assert.equal(terminal?.terminalReason, "capped");
@@ -2553,7 +2563,7 @@ async function testDiscoveryDeadlineReducesSingleBufferedFinding() {
     true,
   );
   assert.equal(store.failureMessages.length, 0);
-  assert.equal(executor.runningDiscovery, 0);
+  assert.equal(blocked.runningDiscovery, 0);
 
   const manifest = await readJson(terminal.manifestPath);
   assert.equal(store.iterations[0].workerIds.length, 1);
@@ -2952,7 +2962,7 @@ test(testRetryKeepsLogicalWorker);
 test(testSandboxDiagnosticSurvivesArtifactRetries);
 test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
 registerCases(testComparisonStopCondition, [["quota"], ["deadline"]]);
-test(testDiscoveryDeadlineReducesSingleBufferedFinding);
+test({ timeout: 30_000 }, testDiscoveryDeadlineReducesSingleBufferedFinding);
 test(testDiscoveryAcceptedAtDeadlineIsReduced);
 test(testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence);
 test(testDiscoveryDeadlineBeforeWorkerDispatchReturnsPartialEvidence);

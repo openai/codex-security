@@ -7,8 +7,7 @@ support gzip.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report). This example imports
-repository package vulnerabilities.
+This example imports package vulnerabilities from a repository branch.
 
 **Saved report.** Choose the file for your repository and branch or build.
 With a connected Wiz account, list findings for the repository and family,
@@ -61,8 +60,14 @@ JSON can contain a single finding, an array of selected findings, a detailed
 vulnerability report or a complete `data.vulnerabilityFindings.nodes`
 collection. JSONL can hold one package record per line. Preserve `id`, `name`,
 `detailedName`, `vulnerableAsset.id` and `vendorSeverity` or `severity`, plus
-available package, image and repository metadata. Use the Wiz finding ID for
-identity. Many package occurrences can share a CVE.
+available package, image and repository metadata. JSON uses `vendorSeverity`
+when present, then `severity`. A reported `NONE` becomes `unknown`. The Wiz
+finding ID identifies the occurrence. Many occurrences can share a CVE.
+
+For GitHub Enterprise branch assets, keep `vulnerableAsset.cloudProviderURL`
+and either `nativeType: "github#repositoryBranch"` or both
+`type: "REPOSITORY_BRANCH"` and `cloudPlatform: "GitHub"`. The reader uses
+the repository in that URL to check the import destination.
 
 Detailed package CSV requires `ID`, `Name`, `DetailedName`, `AssetID`, `WizURL`,
 `CloudPlatform` and `CloudProviderURL`. The platform must be GitHub and the

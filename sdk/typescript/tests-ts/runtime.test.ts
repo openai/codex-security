@@ -1,4 +1,5 @@
-import { runNodePython } from "./support/python-probe.js";
+import { execNodePython, runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import {
@@ -10,7 +11,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, renameSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -74,6 +75,8 @@ import {
   acquireCodexSecurityCredentialHomeLock,
   bundledPluginCandidates,
   canonicalizeModelSafePath,
+  beginCredentialLogin,
+  credentialHomeUsesFileStorage,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
@@ -81,12 +84,15 @@ import {
   executablePathForSpawn,
   inspectWindowsCredentialAcl,
   inspectWindowsCredentialAclSnapshot,
+  isLocalWindowsCredentialVolume,
+  parseWindowsTokenGroupSids,
   isPythonPathCandidate,
   planOutputArchive,
   prepareCodexSecurityCredentialHome,
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   prepareScanRegistrationOutput,
+  requireWindowsOutputPath,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -98,6 +104,8 @@ import {
   requireTrustedOutputAncestor,
   runWorkbench,
   workbenchEnvironment,
+  writeCredentialHomeConfig,
+  logoutCredentialHome,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
   windowsCredentialAncestorAclScript,
@@ -116,6 +124,11 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const { temporaryDirectory, cleanup, temporaryDirectories } =
   createApiTestFixtures("codex-security-runtime-");
+const pythonWithLauncher = useTestPython(false);
+const pythonOnPath =
+  process.platform === "win32"
+    ? pythonWithLauncher
+    : () => Bun.which("python3") ?? Bun.which("python");
 const testPosix = process.platform === "win32" ? test.skip : test;
 const restoreSpawn = (spawn: typeof childProcess.spawn) =>
   mock.module("node:child_process", () => ({ ...childProcess, spawn }));
@@ -140,6 +153,34 @@ function credentialAncestors(home: string, directory: string): string[] {
     if (ancestor === dirname(ancestor)) break;
   }
   return ancestors;
+}
+
+const credentialAclFunction = "function Write-CredentialAcl($path) {";
+
+function instrumentCredentialAcl(
+  home: string,
+  transform: (script: string) => string,
+) {
+  const originalSpawn = childProcess.spawn;
+  mock.module("node:child_process", () => ({
+    ...childProcess,
+    spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
+      const [command, args, options] = spawnArgs;
+      if (
+        options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
+        !Array.isArray(args)
+      )
+        return originalSpawn(...spawnArgs);
+      const index = args.indexOf("-Command") + 1;
+      const script = args[index];
+      if (typeof script !== "string" || !script.includes(credentialAclFunction))
+        return originalSpawn(...spawnArgs);
+      const instrumented = [...args];
+      instrumented[index] = transform(script);
+      return originalSpawn(command, instrumented, options);
+    },
+  }));
+  return () => restoreSpawn(originalSpawn);
 }
 
 function windowsTestCommand(
@@ -169,6 +210,30 @@ function windowsUserSid() {
   const sid = /"(S-1-(?:\d+-)*\d+)"\s*$/u.exec(identity.stdout)?.[1];
   expect(sid).toBeDefined();
   return sid;
+}
+
+function setWindowsTestDacl(
+  python: Parameters<typeof runNodePython>[0],
+  path: string,
+  descriptor: string,
+) {
+  const setup = runNodePython(python, [
+    "-c",
+    [
+      "import ctypes, sys",
+      "from ctypes import wintypes",
+      "adv = ctypes.WinDLL('advapi32', use_last_error=True)",
+      "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+      "sd = wintypes.LPVOID()",
+      "if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sys.argv[2], 1, ctypes.byref(sd), None): raise ctypes.WinError(ctypes.get_last_error())",
+      "try:",
+      "    if not adv.SetFileSecurityW(sys.argv[1], wintypes.DWORD(0x80000004), sd): raise ctypes.WinError(ctypes.get_last_error())",
+      "finally: kernel.LocalFree(sd)",
+    ].join("\n"),
+    win32.toNamespacedPath(path),
+    descriptor,
+  ]);
+  expect(setup.status).toBe(0);
 }
 
 function inspectWindowsTestAcl(
@@ -475,7 +540,7 @@ describe("plugin runtime preparation", () => {
   );
 
   test("preserves remediation when the filesystem device changes", async () => {
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const target = await temporaryDirectory("codex-security-remounted-target-");
     const verification = runNodePython(python!, [
@@ -842,6 +907,25 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
+  test("installs a local marketplace when the Codex home contains a literal hash", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "codex #team");
+    const source = await bundledPluginRoot();
+    const installed = await bootstrapPlugin(home, source, {
+      environment: {
+        HOME: root,
+        USERPROFILE: root,
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+      },
+    });
+
+    const manifest = join(".codex-plugin", "plugin.json");
+    expect(
+      await readFile(join(installed.installedRoot, manifest), "utf8"),
+    ).toBe(await readFile(join(source, manifest), "utf8"));
+  });
+
   test("keeps local marketplace failures separate from installer failures", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
@@ -963,7 +1047,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1041,12 +1125,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         cwd: mcp.mcpServers["codex-security"].cwd,
         startup_timeout_sec:
           mcp.mcpServers["codex-security"].startup_timeout_sec,
-        env_vars: declaredRoot
-          ? mcp.mcpServers["codex-security"].env_vars
-          : [
-              ...mcp.mcpServers["codex-security"].env_vars,
-              "CODEX_SECURITY_PLUGIN_ROOT",
-            ],
+        env_vars: [
+          ...mcp.mcpServers["codex-security"].env_vars,
+          ...(declaredRoot ? [] : ["CODEX_SECURITY_PLUGIN_ROOT"]),
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         JSON.parse(await readFile(join(selected, ".mcp.json"), "utf8")),
@@ -1072,6 +1155,11 @@ for await (const line of createInterface({ input: process.stdin })) {
               ...environment,
               CODEX_HOME: home,
               CODEX_SQLITE_HOME: sqliteHome,
+              CODEX_SECURITY_REPOSITORY: join(
+                root,
+                pluginRoot === second ? "second source" : "first source",
+              ),
+              SYNTHETIC_UNDECLARED_VALUE: "ambient fixture",
               ...(pluginRoot === undefined
                 ? {}
                 : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
@@ -1135,6 +1223,10 @@ for await (const line of createInterface({ input: process.stdin })) {
         });
         const details = server.tools.probe._meta.launch;
         expect(details.pluginRoot).toBe(await realpath(pluginRoot));
+        expect(details.repository).toBe(
+          join(root, pluginRoot === second ? "second source" : "first source"),
+        );
+        expect(details.ambient).toBeUndefined();
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
           process.platform === "win32"
@@ -1473,6 +1565,114 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
   });
 
+  test.skipIf(process.platform !== "win32").each(["released", "held"])(
+    "handles plugin ZIP publication when a Windows directory lock is %s",
+    async (lock) => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const destination = join(root, "extracted");
+      const manifest = ".codex-plugin/plugin.json";
+      const contents = JSON.stringify({
+        name: "codex-security",
+        version: "1.2.3",
+      });
+      await writeFile(archive, zipSync({ [manifest]: strToU8(contents) }));
+      const nativeRename = fsPromises.rename;
+      let blocked: NodeJS.ErrnoException | undefined;
+      let staging = "";
+      let release: (() => Promise<void>) | undefined;
+      using publication = spyOn(fsPromises, "rename").mockImplementation(
+        async (from, to) => {
+          if (to !== destination || staging) return nativeRename(from, to);
+          staging = String(from);
+          // Windows keeps a process's current directory open until the process exits.
+          const holder = childProcess.spawn(
+            "node",
+            ["-e", 'process.stdout.write("ready"); process.stdin.resume()'],
+            {
+              cwd: join(staging, ".codex-plugin"),
+              windowsHide: true,
+            },
+          );
+          const exited = once(holder, "exit");
+          release = async () => {
+            holder.stdin.end();
+            await exited;
+          };
+          await once(holder.stdout, "data");
+          try {
+            await nativeRename(from, to);
+          } catch (error) {
+            blocked = error as NodeJS.ErrnoException;
+            throw error;
+          } finally {
+            if (lock === "released") await release();
+          }
+        },
+      );
+      try {
+        const result = extractPluginZip(archive, destination);
+        if (lock === "held") {
+          const failure = await result.catch((error: unknown) => error);
+          expect((failure as Error).message).toContain(
+            `Could not remove staging directory ${staging}:`,
+          );
+          expect(failure).toMatchObject({
+            message: expect.stringMatching(/publish.*ZIP.*rename/iu),
+            cause: { syscall: "rename", dest: destination },
+          });
+          expect(existsSync(staging)).toBe(true);
+          expect(existsSync(destination)).toBe(false);
+        } else {
+          expect(await result).toBe(destination);
+          expect(await readFile(join(destination, manifest), "utf8")).toBe(
+            contents,
+          );
+          expect(existsSync(staging)).toBe(false);
+        }
+        expect(["EPERM", "EACCES", "EBUSY"]).toContain(blocked?.code ?? "");
+        expect(publication.mock.calls.length).toBeGreaterThan(1);
+      } finally {
+        if (lock === "held") await release?.();
+      }
+    },
+  );
+
+  test.each(["empty", "nonempty"])(
+    "preserves platform behavior for an existing %s plugin ZIP destination",
+    async (kind) => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const destination = join(root, "extracted");
+      await mkdir(destination);
+      const sentinel = join(destination, "previous");
+      if (kind === "nonempty") await writeFile(sentinel, "keep");
+      await writeFile(
+        archive,
+        zipSync({
+          ".codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+        }),
+      );
+      const result = extractPluginZip(archive, destination);
+      if (process.platform === "win32" || kind === "nonempty") {
+        await expect(result).rejects.toThrow(
+          process.platform === "win32"
+            ? "Destination already exists"
+            : "Invalid plugin ZIP",
+        );
+        if (kind === "nonempty")
+          expect(await readFile(sentinel, "utf8")).toBe("keep");
+        else expect(await readdir(destination)).toEqual([]);
+      } else {
+        expect(await result).toBe(destination);
+        expect(await readdir(destination)).toEqual([".codex-plugin"]);
+      }
+      expect((await readdir(root)).sort()).toEqual(["extracted", "plugin.zip"]);
+    },
+  );
+
   test("decodes flag-clear ZIP filenames with the legacy CP437 encoding", async () => {
     const root = await temporaryDirectory();
     const archive = Buffer.from(
@@ -1671,6 +1871,38 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "extracts plugin ZIPs across Windows temporary directory path limits",
+    async () => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const manifest = ".codex-plugin/plugin.json";
+      const data = JSON.stringify({ name: "codex-security", version: "1.2.3" });
+      await writeFile(
+        archive,
+        zipSync({ [`release/${manifest}`]: strToU8(data) }),
+      );
+      const templateLength = join(root, ".codex-security-plugin-XXXXXX").length;
+      using createStaging = spyOn(fsPromises, "mkdtemp");
+      for (const length of [247, 248, 259, 260, 280]) {
+        const padding = Math.max(1, length - templateLength - 1);
+        const parent = join(root, "p".repeat(padding));
+        const destination = join(parent, `extracted-${length}`);
+        const plugin = await extractPluginZip(archive, destination);
+        expect(createStaging).toHaveBeenLastCalledWith(
+          win32.toNamespacedPath(join(parent, ".codex-security-plugin-")),
+        );
+        expect(plugin).toBe(join(destination, "release"));
+        expect(await readFile(join(plugin, manifest), "utf8")).toBe(data);
+        expect(
+          (await readdir(parent)).some((entry) =>
+            entry.startsWith(".codex-security-plugin-"),
+          ),
+        ).toBe(false);
+      }
+    },
+  );
+
   test("rejects a ZIP entry with an invalid CRC-32", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "invalid-crc.zip");
@@ -1851,6 +2083,107 @@ for await (const line of createInterface({ input: process.stdin })) {
     },
   );
 
+  test.skipIf(process.platform !== "win32")(
+    "explains access denied when the SDK cannot reopen its Windows plugin installation receipt",
+    async () => {
+      const user = windowsUserSid()!;
+      if (user === "S-1-5-18") return; // SYSTEM is the independent file trustee.
+      const python = await resolvePluginPython();
+      const root = await temporaryDirectory();
+      // This fixture needs a local volume with FILE_PERSISTENT_ACLS.
+      const volume = runNodePython(python, [
+        "-c",
+        [
+          "import ctypes, sys",
+          "from ctypes import wintypes",
+          "kernel = ctypes.WinDLL('kernel32', use_last_error=True)",
+          "volume = ctypes.create_unicode_buffer(32768)",
+          "if not kernel.GetVolumePathNameW(sys.argv[1], volume, len(volume)): raise ctypes.WinError(ctypes.get_last_error())",
+          "kind = kernel.GetDriveTypeW(volume.value)",
+          "if kind in (0, 1): raise RuntimeError('Could not determine the test volume type')",
+          "flags = wintypes.DWORD()",
+          "if kind in (2, 3, 6):",
+          "    if not kernel.GetVolumeInformationW(volume.value, None, 0, None, None, ctypes.byref(flags), None, 0): raise ctypes.WinError(ctypes.get_last_error())",
+          "print('supported' if flags.value & 0x8 else 'unsupported')",
+        ].join("\n"),
+        win32.toNamespacedPath(root),
+      ]);
+      expect(volume.status, volume.stderr).toBe(0);
+      const support = volume.stdout.trim();
+      expect(["supported", "unsupported"]).toContain(support);
+      if (support === "unsupported") return;
+      const selected = await plugin(root);
+      const home = join(root, "home");
+      const marketplace = await createMarketplace(home, selected);
+      const installed = join(root, "installed");
+      await cp(selected, installed, { recursive: true });
+      await writeFile(
+        join(home, "config.toml"),
+        '[marketplaces.codex-security-sdk]\nsource_type="local"\nsource=' +
+          JSON.stringify(marketplace) +
+          '\n[plugins."codex-security@codex-security-sdk"]\nenabled=true\n',
+      );
+      const deny = "(D;OICI;FR;;;S-1-5-21-0-0-0-424242)";
+      const system = "(A;OICI;FA;;;SY)";
+      const full = "D:P" + deny + "(A;OICI;FA;;;" + user + ")" + system;
+      const receipt = join(marketplace, "installed-plugin.json");
+      let installs = 0;
+      const options = {
+        codexCommand: { command: "unused" },
+        environment: {},
+        runCodex: async (_command: unknown, args: readonly string[]) => {
+          expect(args.slice(0, 2)).toEqual(["plugin", "add"]);
+          installs++;
+          return JSON.stringify({ installedPath: installed, version: "1.2.3" });
+        },
+      };
+      setWindowsTestDacl(
+        python,
+        marketplace,
+        "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+      );
+      try {
+        expect(
+          (await bootstrapPlugin(home, selected, options)).installedRoot,
+        ).toBe(installed);
+        const original = await readFile(receipt, "utf8").then(
+          () => undefined,
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(["EPERM", "EACCES"]).toContain(original?.code ?? "");
+        const failure = await bootstrapPlugin(home, selected, options).then(
+          () => {
+            throw new Error("Expected Windows to reject reopening the receipt");
+          },
+          (error: NodeJS.ErrnoException) => error,
+        );
+        expect(failure.code).toBe(original!.code);
+        expect(failure.path).toBe(receipt);
+        expect(failure.syscall).toBe(original!.syscall);
+        expect(failure.message).toContain(original!.message);
+        expect(failure.message).toContain("permissions new files inherit");
+        expect(installs).toBe(1);
+      } finally {
+        // Correct this fixture's grant on the directory and its existing receipt.
+        setWindowsTestDacl(python, marketplace, full);
+        if (existsSync(receipt))
+          setWindowsTestDacl(
+            python,
+            receipt,
+            "D:P" + deny + "(A;;FA;;;" + user + ")" + system,
+          );
+      }
+      // A receipt newly created under the corrected parent also reopens normally.
+      await rm(receipt);
+      await bootstrapPlugin(home, selected, options);
+      expect(
+        (await bootstrapPlugin(home, selected, options)).installedRoot,
+      ).toBe(installed);
+      expect(installs).toBe(2);
+    },
+    60_000,
+  );
+
   test("uses the installed plugin path returned by Codex", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
@@ -1999,7 +2332,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         command: "./scripts/launch_codex_security_mcp_sdk",
         args: ["--stdio", "synthetic argument"],
         cwd: ".",
-        env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
+        env_vars: [
+          "CODEX_HOME",
+          "CODEX_SECURITY_PLUGIN_ROOT",
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         (await stat(join(staged, "scripts", "launch_codex_security_mcp")))
@@ -2893,7 +3230,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     };
     const parentEnvironment = pluginExecutionEnvironment(process.execPath, {
       PATH: "",
-      CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
       ...(process.env["SystemRoot"] === undefined
         ? {}
         : { SystemRoot: process.env["SystemRoot"] }),
@@ -2912,9 +3248,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     expect(workerEnvironment["CODEX_CLI_PATH"]).toBe(
       resolveCodexCommand().command,
     );
-    expect(workerEnvironment["CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS"]).toBe(
-      "1",
-    );
     expect(workerEnvironment["PYTHONUTF8"]).toBe("1");
     expect(workerEnvironment["CODEX_SECURITY_PYTHON_COMMAND"]).toBe(
       process.execPath,
@@ -2932,25 +3265,6 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     expect(nestedCodex.status).toBe(0);
     expect(nestedCodex.stdout).toMatch(/^codex-cli\s+\d/u);
-  });
-
-  test("forwards the external import setting to the plugin helper", () => {
-    const flag = "CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS";
-    const node = Bun.which("node")!;
-    const environment: NodeJS.ProcessEnv = Object.assign(
-      Object.create({ [flag]: "1" }),
-      { CODEX_CLI_PATH: node, SystemRoot: process.env["SystemRoot"] },
-    );
-    const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
-    const run = () =>
-      spawnSync(node, [helper, "list-external-findings", "--help"], {
-        env: pluginExecutionEnvironment(node, environment),
-      }).status;
-
-    expect(run()).toBe(0);
-    environment[flag] = undefined;
-    environment["Codex_Security_Enable_External_Imports"] = "1";
-    expect(run()).toBe(2);
   });
 
   test("preserves an explicit Codex executable override for nested workers", () => {
@@ -3086,27 +3400,34 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
       // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = join(root, "shared");
+      const shared = join(root, "shared");
+      let stickyParent = shared;
       await mkdir(stickyParent, { mode: 0o1777 });
       await chmod(stickyParent, 0o1777);
-      if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
+      try {
         if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
+        const stateDirectory = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
+        await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+        const home = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        });
+        await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
+        await expect(
+          requireSecureOutputAncestry(home),
+        ).resolves.toBeUndefined();
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
       }
-      const stateDirectory = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      if (stickyParent !== join(root, "shared"))
-        temporaryDirectories.track(stateDirectory);
-      await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      });
-      await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
-      await expect(requireSecureOutputAncestry(home)).resolves.toBeUndefined();
     },
   );
 
@@ -3559,6 +3880,122 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  test.each(["upgraded", "new"] as const)(
+    "logout retries a previous keyring login after revoking a newer file credential (%s)",
+    async (origin) => {
+      const { home, root } = await credentialHome(true);
+      const file = join(home, "auth.json");
+      if (origin === "upgraded") {
+        await writeFile(
+          join(home, "config.toml"),
+          'cli_auth_credentials_store = "auto"\n',
+        );
+      } else {
+        await writeCredentialHomeConfig(home, {
+          cli_auth_credentials_store: "auto",
+        });
+        // Successful auto sign-in with no fallback file used the keyring.
+        await setCodexSecurityCredentialLogout(home, false);
+      }
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "file",
+      });
+      await writeFile(file, "synthetic credential", { mode: 0o600 });
+      await setCodexSecurityCredentialLogout(home, false);
+      let keyringAvailable = false;
+      const revoke = mock(async (store?: string) => {
+        if (store === "keyring") return keyringAvailable ? 0 : 17;
+        await rm(file, { force: true });
+        return 0;
+      });
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(17);
+      expect(revoke.mock.calls).toEqual([[undefined], ["keyring"]]);
+      expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
+        false,
+      );
+      keyringAvailable = true;
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([["keyring"]]);
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([[undefined]]);
+    },
+  );
+  test("a confirmed file-only home can log out after the configured backend changes", async () => {
+    const { home, root } = await credentialHome(true);
+    const path = join(home, "auth.json");
+    await writeFile(path, "synthetic key", { mode: 0o600 });
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "auto",
+    });
+    await beginCredentialLogin(home);
+    expect(await credentialHomeUsesFileStorage(home)).toBe(false);
+    // Native auto fell back to the file because no keyring was available.
+    await setCodexSecurityCredentialLogout(home, false);
+    expect(await credentialHomeUsesFileStorage(home)).toBe(true);
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "keyring",
+    });
+    const revoke = mock(async (_store?: string) => {
+      await rm(path);
+      return 0;
+    });
+    expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+    expect(revoke.mock.calls).toEqual([["file"]]);
+  });
+
+  test.each(["auto", "file"])(
+    "logout finds a credential native auto refreshed into the keyring (current store: %s)",
+    async (store) => {
+      const { home, root } = await credentialHome(true);
+      const path = join(home, "auth.json");
+      await writeFile(path, "synthetic credential", { mode: 0o600 });
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "auto",
+      });
+      // Auto refresh saves to the keyring and unlinks the former file.
+      await rm(path);
+      if (store === "file")
+        await writeCredentialHomeConfig(home, {
+          cli_auth_credentials_store: "file",
+        });
+      const revoke = mock(async (_store?: string) => 0);
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([
+        [store === "auto" ? undefined : "keyring"],
+      ]);
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([
+        [store === "auto" ? "file" : undefined],
+      ]);
+    },
+  );
+
+  test.each(["auto", "keyring"])(
+    "logout clears an interrupted first %s login even after a later file login",
+    async (store) => {
+      const { home, root } = await credentialHome(true);
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: store,
+      });
+      await beginCredentialLogin(home);
+      // Native persisted the grant but the wrapper never got its success callback.
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "file",
+      });
+      const file = join(home, "auth.json");
+      await writeFile(file, "second synthetic login", { mode: 0o600 });
+      await setCodexSecurityCredentialLogout(home, false);
+      const revoke = mock(async (backend?: string) => {
+        if (backend === undefined) await rm(file);
+        return 0;
+      });
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([[undefined], ["keyring"]]);
+    },
+  );
   test("prevents ambient credential imports after an explicit logout", async () => {
     const { home } = await credentialHome(true);
 
@@ -3672,6 +4109,7 @@ describe("runtime directories and plugin Python boundary", () => {
       "transient missing descendant",
       "persistent missing descendant",
       "access denied",
+      "batch access denied",
       "unexpected error",
       "missing home",
       "transient path-not-found descendant",
@@ -3690,66 +4128,41 @@ describe("runtime directories and plugin Python boundary", () => {
     await requireSecureCredentialHome(home);
     const descendant = join(home, ".auth-replay.tmp");
     await writeFile(descendant, "synthetic credential\n", { mode: 0o600 });
+    const batchOnly = kind === "batch access denied";
+    if (batchOnly) await writeFile(join(home, "sibling.tmp"), "fixture\n");
+    const accessDenied = kind.endsWith("access denied");
     const pathNotFound = kind.includes("path-not-found");
     const missing = pathNotFound || kind.includes("missing");
     const transient = kind.startsWith("transient ");
     const persistent = kind.startsWith("persistent ");
-    const exception = pathNotFound
-      ? "System.Management.Automation.ItemNotFoundException"
+    const [exception, category] = pathNotFound
+      ? ["System.Management.Automation.ItemNotFoundException", "ObjectNotFound"]
       : missing
-        ? "System.IO.FileNotFoundException"
-        : kind === "access denied"
-          ? "System.UnauthorizedAccessException"
-          : "System.InvalidOperationException";
-    const errorId = pathNotFound
-      ? "GetAcl_PathNotFound_Exception,Microsoft.PowerShell.Commands.GetAclCommand"
-      : missing
-        ? "System.IO.FileNotFoundException,Microsoft.PowerShell.Commands.GetAclCommand"
-        : kind === "access denied"
-          ? "System.UnauthorizedAccessException,Microsoft.PowerShell.Commands.GetAclCommand"
-          : "SyntheticCredentialAclFailure";
-    const category =
-      kind === "access denied"
-        ? "PermissionDenied"
-        : missing && !pathNotFound
-          ? "NotSpecified"
-          : "ObjectNotFound";
+        ? ["System.IO.FileNotFoundException", "NotSpecified"]
+        : accessDenied
+          ? ["System.UnauthorizedAccessException", "PermissionDenied"]
+          : ["System.InvalidOperationException", "ObjectNotFound"];
+    const errorName = pathNotFound
+      ? "GetAcl_PathNotFound_Exception"
+      : exception;
+    const errorId =
+      missing || accessDenied
+        ? `${errorName},Microsoft.PowerShell.Commands.GetAclCommand`
+        : "SyntheticCredentialAclFailure";
     const failurePath = kind.endsWith("home")
       ? home
       : win32.toNamespacedPath(descendant);
     // Replay the native error without relying on racing a filesystem deletion.
-    const injection = `if ($path -eq '${failurePath.replaceAll("'", "''")}') { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
-    const marker = "function Write-CredentialAcl($path) {";
-    const originalSpawn = childProcess.spawn;
+    const injection = `if (@($path) -contains '${failurePath.replaceAll("'", "''")}'${batchOnly ? " -and @($path).Count -gt 1" : ""}) { throw [System.Management.Automation.ErrorRecord]::new([${exception}]::new('synthetic credential ACL error'), '${errorId}', [System.Management.Automation.ErrorCategory]::${category}, $path) };`;
     let attempts = 0;
-    mock.module("node:child_process", () => ({
-      ...childProcess,
-      spawn: (...spawnArgs: Parameters<typeof childProcess.spawn>) => {
-        const [command, args, options] = spawnArgs;
-        if (
-          options?.env?.["CODEX_SECURITY_CREDENTIAL_ACL_PATH"] !== home ||
-          !Array.isArray(args)
-        ) {
-          return originalSpawn(...spawnArgs);
-        }
-        const scriptIndex = args.indexOf("-Command") + 1;
-        const script = args[scriptIndex];
-        if (typeof script !== "string" || !script.includes(marker)) {
-          return originalSpawn(...spawnArgs);
-        }
-        attempts += 1;
-        if (transient && attempts > 1) {
-          return originalSpawn(...spawnArgs);
-        }
-        expect(script.split(marker)).toHaveLength(2);
-        const replayArgs = [...args];
-        replayArgs[scriptIndex] = script.replace(
-          marker,
-          `${marker} ${injection}`,
-        );
-        return originalSpawn(command, replayArgs, options);
-      },
-    }));
+    const restore = instrumentCredentialAcl(home, (script) => {
+      attempts += 1;
+      if (transient && attempts > 1) return script;
+      return script.replace(
+        credentialAclFunction,
+        `${credentialAclFunction} ${injection}`,
+      );
+    });
     try {
       if (transient) {
         await requireSecureCredentialHome(home);
@@ -3763,9 +4176,49 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(attempts).toBe(persistent ? 3 : 1);
       }
     } finally {
-      restoreSpawn(originalSpawn);
+      restore();
     }
   });
+
+  for (const language of ["FullLanguage", "ConstrainedLanguage"] as const) {
+    const name = `batches Windows credential ACL queries without dropping files in ${language}`;
+    test.skipIf(process.platform !== "win32")(name, async () => {
+      if (runTestInSubprocess(import.meta.path, name)) return;
+      const { root, home } = await credentialHome(false);
+      await requireSecureCredentialHome(home);
+      const cache = join(home, "cache");
+      await mkdir(cache);
+      for (let index = 0; index < 8; index++)
+        await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
+      const trace = join(root, "acl-queries.txt");
+      const append = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace.replaceAll("'", "''")}' -Value`;
+      const restore = instrumentCredentialAcl(home, (script) =>
+        [
+          language === "ConstrainedLanguage"
+            ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'"
+            : "",
+          script.replace(
+            credentialAclFunction,
+            `${credentialAclFunction} ${append} (@($path).Count);`,
+          ),
+          `${append} ('complete:' + $script:descriptorCount)`,
+        ].join("\n"),
+      );
+      try {
+        await requireSecureCredentialHome(home);
+        const rows = (await readFile(trace, "utf8")).trim().split(/\r?\n/u);
+        const expected = credentialAncestors(home, "").length + 10;
+        expect(rows.pop()).toBe(`complete:${expected}`);
+        const queries = rows.map(Number);
+        expect(queries).toContain(8);
+        expect(queries.reduce((total, count) => total + count, 0)).toBe(
+          expected,
+        );
+      } finally {
+        restore();
+      }
+    });
+  }
 
   test("retries interrupted Windows credential ACL enumeration", async () => {
     const root = await temporaryDirectory();
@@ -4437,6 +4890,69 @@ describe("runtime directories and plugin Python boundary", () => {
     });
   });
 
+  test("allows OWNER RIGHTS on a Windows ancestor only after verifying its owner", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const stranger = "S-1-5-21-111-222-333-1002";
+    for (const trustee of ["OW", "S-1-3-4"]) {
+      for (const owner of [user, "SY", "BA"]) {
+        const descriptor = `O:${owner}G:SYD:P(A;OICI;FA;;;${trustee})(A;;FA;;;${stranger})`;
+        expect(
+          inspectWindowsCredentialAcl(descriptor, user, { scope: "ancestor" })
+            .untrustedPrincipals,
+        ).toEqual([stranger]);
+      }
+      for (const owner of [stranger, "OW"]) {
+        expect(() =>
+          inspectWindowsCredentialAcl(
+            `O:${owner}G:SYD:P(A;;FA;;;${trustee})`,
+            user,
+            { scope: "ancestor" },
+          ),
+        ).toThrow(/owner/u);
+      }
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "prepares a Windows credential home beneath a protected OWNER RIGHTS ancestor",
+    async () => {
+      const parent = join(await temporaryDirectory(), "private-parent");
+      await mkdir(parent);
+      const environment = { ...process.env, QA_OWNER_RIGHTS_PARENT: parent };
+      const grant = windowsTestCommand("icacls.exe", [
+        parent,
+        "/inheritance:r",
+        "/grant:r",
+        `*${windowsUserSid()}:(OI)(CI)F`,
+        "*S-1-5-18:(OI)(CI)F",
+        "*S-1-5-32-544:(OI)(CI)F",
+        "*S-1-3-4:(OI)(CI)F",
+      ]);
+      expect(grant.status, grant.stderr).toBe(0);
+      const readParent = () =>
+        inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:QA_OWNER_RIGHTS_PARENT).Sddl",
+          ],
+          environment,
+        );
+      const before = readParent();
+      expect(before.status, before.stderr).toBe(0);
+      expect(before.stdout).toMatch(/;;;(?:OW|S-1-3-4)\)/u);
+      const state = join(parent, "state");
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }),
+      ).toBe(join(state, "codex-home"));
+      const after = readParent();
+      expect(after.status, after.stderr).toBe(0);
+      expect(after.stdout).toBe(before.stdout);
+    },
+  );
+
   test("identifies broad, foreign, and inherited Windows ACL grants", () => {
     const user = "S-1-5-21-111-222-333-1001";
     const stranger = "S-1-5-21-111-222-333-1002";
@@ -4479,6 +4995,61 @@ describe("runtime directories and plugin Python boundary", () => {
       untrustedPrincipals: [],
       deniedPrincipals: ["S-1-1-0"],
     });
+  });
+
+  test("uses local group membership only on local Windows volumes", async () => {
+    const readType = mock(async () => "4");
+    for (const path of [
+      String.raw`\\server\share\home`,
+      String.raw`\\?\UNC\server\share\home`,
+    ]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+    }
+    expect(readType).not.toHaveBeenCalled();
+    for (const path of [String.raw`X:\home`, String.raw`\\?\X:\home`]) {
+      expect(await isLocalWindowsCredentialVolume(path, readType)).toBe(false);
+      expect(readType).toHaveBeenLastCalledWith("X:");
+      expect(
+        await isLocalWindowsCredentialVolume(path, async () => "3\r\n"),
+      ).toBe(true);
+      expect(await isLocalWindowsCredentialVolume(path, async () => "")).toBe(
+        false,
+      );
+    }
+  });
+
+  test("preserves account denies only after excluding current token membership", () => {
+    const user = "S-1-5-21-111-222-333-1001";
+    const group = "S-1-5-21-111-222-333-512";
+    const other = "S-1-5-21-0-0-0-424242";
+    const currentGroupSids = parseWindowsTokenGroupSids(
+      `"Domain, Group","Group","${group}","Group used for deny only"\r\n`,
+    );
+    const descriptor = `O:${user}D:P(D;OICI;FR;;;${other})(A;OICI;FA;;;${user})`;
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user).grantsCurrentUserAccess,
+    ).toBe(false);
+    expect(
+      inspectWindowsCredentialAcl(descriptor, user, { currentGroupSids }),
+    ).toMatchObject({
+      grantsCurrentUserAccess: true,
+      deniedPrincipals: [],
+    });
+    for (const principal of [user, "DA", "WD", "OW"]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          descriptor.replace(other, principal),
+          user,
+          {
+            currentGroupSids,
+            resolvedAliases: { DA: group },
+          },
+        ).grantsCurrentUserAccess,
+      ).toBe(false);
+    }
+    for (const invalid of ["", `"a","b","${group}","c"\r\ninvalid`]) {
+      expect(() => parseWindowsTokenGroupSids(invalid)).toThrow();
+    }
   });
 
   test("requires effective, inheritable Windows credential access", () => {
@@ -5079,6 +5650,105 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
+    "preserves an unmapped Windows deny SID on a private credential home and its children",
+    async () => {
+      const root = await temporaryDirectory();
+      const state = join(root, "state");
+      const home = join(state, "codex-home");
+      await mkdir(home, { recursive: true });
+      const child = join(home, "sessions");
+      const file = join(child, "fixture.txt");
+      const unmappedSid = "S-1-5-21-0-0-0-424242";
+      const environment = {
+        ...process.env,
+        CODEX_SECURITY_TEST_ACL_PATH: win32.toNamespacedPath(home),
+        CODEX_SECURITY_TEST_CHILD: win32.toNamespacedPath(child),
+        CODEX_SECURITY_TEST_FILE: win32.toNamespacedPath(file),
+      };
+      const identity = windowsTestCommand("whoami.exe", [
+        "/user",
+        "/fo",
+        "csv",
+        "/nh",
+      ]);
+      expect(identity.status).toBe(0);
+      const userSid = identity.stdout.match(/"(S-1-[0-9-]+)"\s*$/iu)?.[1];
+      if (!userSid)
+        throw new Error("Could not identify the Windows fixture user SID");
+      const sddl = `D:P(D;OICI;FR;;;${unmappedSid})(A;OICI;FA;;;${userSid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`;
+      // Set the raw DACL without resolving the synthetic trustee or invoking PowerShell methods.
+      const python = await resolvePluginPython();
+
+      setWindowsTestDacl(python, home, sddl);
+      await mkdir(child);
+      await writeFile(file, "synthetic credential fixture\n");
+      // A subtree reset would replace this distinct protected file ACL with the home ACL.
+      setWindowsTestDacl(
+        python,
+        file,
+        `D:P(D;;FR;;;${unmappedSid})(A;;FA;;;${userSid})`,
+      );
+
+      const readDescriptors = () => {
+        const result = inspectWindowsTestAcl(
+          [
+            "$ErrorActionPreference = 'Stop'",
+            '$env:PSModulePath = "$PSHOME\\Modules"',
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_CHILD).Sddl",
+            "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_FILE).Sddl",
+          ],
+          environment,
+        );
+        if (result.status !== 0)
+          throw new Error(
+            "Fixture ACL read failed: " +
+              (result.stderr.match(
+                /FullyQualifiedErrorId\s*:\s*([\w.,-]+)/u,
+              )?.[1] ?? "unknown"),
+          );
+        return result.stdout.trim().split(/\r?\n/u);
+      };
+      const before = readDescriptors();
+      expect(before.length).toBe(3);
+      expect(before[0]!.includes("D:P") && before[2]!.includes("D:P")).toBe(
+        true,
+      );
+      expect(before[2] !== before[1]).toBe(true);
+      expect(
+        before.every((descriptor) => descriptor.includes(`;;;${unmappedSid})`)),
+      ).toBe(true);
+      const expectedHome = await realpath(home);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const prepared = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: state,
+        }).catch((error: unknown) => {
+          const cause = error instanceof Error ? error.cause : undefined;
+          if (
+            cause instanceof Error &&
+            "cmd" in cause &&
+            typeof cause.cmd === "string" &&
+            /\bicacls\.exe\b/iu.test(cause.cmd) &&
+            cause.cmd.includes(" /remove:d ") &&
+            cause.cmd.includes(`*${unmappedSid}`)
+          ) {
+            throw new Error("icacls attempted to remove the synthetic DENY");
+          }
+          throw error;
+        });
+        expect(prepared === expectedHome).toBe(true);
+        const after = readDescriptors();
+        expect(
+          after.map((descriptor, index) => descriptor === before[index]),
+        ).toEqual([true, true, true]);
+      }
+      expect(await readFile(file, "utf8")).toBe(
+        "synthetic credential fixture\n",
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
     "removes unsafe inherited Windows credential-home permissions",
     async () => {
       const root = await temporaryDirectory();
@@ -5234,6 +5904,19 @@ describe("runtime directories and plugin Python boundary", () => {
 
       expectNoEveryoneGrant(credential);
       expect(await readFile(credential, "utf8")).toContain("synthetic-nested");
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing whitespace in an explicit POSIX state directory",
+    async () => {
+      const root = await temporaryDirectory();
+      for (const suffix of [" ", "\u00a0"]) {
+        const state = join(root, `explicit-state${suffix}`);
+        expect(
+          codexSecurityStateDirectory({ CODEX_SECURITY_STATE_DIR: state }),
+        ).toBe(state);
+      }
     },
   );
 
@@ -5554,7 +6237,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await mkdir(stateDirectory);
     await mkdir(scanDirectory, { mode: 0o700 });
 
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const fixture = runNodePython(python!, [
       "-c",
@@ -5669,7 +6352,7 @@ describe("runtime directories and plugin Python boundary", () => {
   ] as const)(
     "rejects recipe scans when the agent did not create %s",
     async (_description, present) => {
-      const python = Bun.which("python3") ?? Bun.which("python");
+      const python = pythonOnPath();
       expect(python).not.toBeNull();
       const requiredDrafts = ["scan-manifest.json", "findings.json"] as const;
       const root = await temporaryDirectory("codex-security-missing-drafts-");
@@ -5876,25 +6559,30 @@ describe("runtime directories and plugin Python boundary", () => {
       const shared = join(root, "shared");
       await mkdir(shared, { mode: 0o1777 });
       await chmod(shared, 0o1777);
-      // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
-      // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = shared;
-      if (((await lstat(shared)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
-        if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+      try {
+        // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
+        // chmod; fall back to the process temp root when it is already sticky.
+        let stickyParent = shared;
+        if (((await lstat(shared)).mode & 0o1000) === 0) {
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
-      }
-      const output = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      if (stickyParent !== shared) temporaryDirectories.track(output);
+        const output = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(output);
 
-      await expect(
-        requireSecureOutputAncestry(output),
-      ).resolves.toBeUndefined();
-      expect(await prepareOutputDir(output, "repo")).toBe(output);
+        await expect(
+          requireSecureOutputAncestry(output),
+        ).resolves.toBeUndefined();
+        expect(await prepareOutputDir(output, "repo")).toBe(output);
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
+      }
     },
   );
 
@@ -5924,6 +6612,31 @@ describe("runtime directories and plugin Python boundary", () => {
       requireTrustedOutputAncestor({ mode: 0o41777, uid: 0 }, "/tmp", 1000),
     ).not.toThrow();
   });
+
+  testPosix.each([
+    [230, "a".repeat(230)],
+    [250, "é".repeat(125)],
+  ] as const)(
+    "previews and archives a %i-byte output name",
+    async (_bytes, name) => {
+      const root = await temporaryDirectory();
+      const output = join(root, name);
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "report.md"), "first report");
+      const preview = await planOutputArchive(output);
+      expect(dirname(preview!)).toBe(root);
+      await expect(lstat(preview!)).rejects.toMatchObject({ code: "ENOENT" });
+      const archived: string[] = [];
+      await prepareOutputDir(output, "repo", root, undefined, true, (path) => {
+        archived.push(path);
+      });
+      expect(archived).toHaveLength(1);
+      expect(await readFile(join(archived[0]!, "report.md"), "utf8")).toBe(
+        "first report",
+      );
+      expect(await readdir(output)).toEqual([]);
+    },
+  );
 
   test("prepares an output directory without moving prior results", async () => {
     const root = await temporaryDirectory();
@@ -6078,6 +6791,111 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "rejects a selected directory replaced in a shared parent during validation",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      const output = join(shared, "output");
+      const unrelated = join(root, "unrelated");
+      await mkdir(output, { recursive: true });
+      await chmod(shared, 0o777);
+      await mkdir(unrelated);
+      const uid = process.geteuid!();
+      using _swap = spyOn(process, "geteuid").mockImplementationOnce(() => {
+        renameSync(output, join(shared, "moved"));
+        symlinkSync(unrelated, output);
+        return uid;
+      });
+      await expect(validateOutputDir(output)).rejects.toThrow("writable");
+      expect(await realpath(output)).toBe(unrelated);
+    },
+  );
+
+  test("creates temporary output under the directory selected before an alias changes", async () => {
+    const root = await temporaryDirectory();
+    const selected = join(root, "selected");
+    const replacement = join(root, "replacement");
+    const alias = join(root, "alias");
+    await mkdir(selected);
+    await mkdir(replacement);
+    await symlink(selected, alias, "junction");
+    const output = await prepareOutputDir(undefined, "repo", alias, (path) => {
+      if (path === selected) {
+        unlinkSync(alias);
+        symlinkSync(replacement, alias, "junction");
+      }
+    });
+    expect(await realpath(alias)).toBe(replacement);
+    expect(dirname(output)).toBe(selected);
+    expect(await readdir(replacement)).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "keeps existing output validation on the selected Windows directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = join(root, "output");
+      for (const writable of [false, true]) {
+        await expect(
+          requireWindowsOutputPath(output, writable),
+        ).rejects.toThrow();
+      }
+      await mkdir(output);
+      await writeFile(join(output, "old"), "");
+      expect(await validateOutputDir(join(root, "OUTPUT"), true)).toBe(output);
+
+      const staged = join(root, "staged");
+      const unrelated = join(staged, "output");
+      await mkdir(unrelated, { recursive: true });
+      await writeFile(join(unrelated, "keep"), "");
+      const original = fsPromises.realpath;
+      const substitution = spyOn(fsPromises, "realpath").mockImplementation(
+        new Proxy(original, {
+          async apply(target, receiver, args) {
+            if (args[0] !== output)
+              return Reflect.apply(target, receiver, args);
+            const moved = join(root, "moved");
+            renameSync(output, moved);
+            symlinkSync(unrelated, output, "junction");
+            const redirected = await original(output);
+            unlinkSync(output);
+            renameSync(moved, output);
+            renameSync(staged, join(root, "saved"));
+            symlinkSync(root, staged, "junction");
+            return redirected;
+          },
+        }),
+      );
+      try {
+        // The redirected path now identifies the original leaf under a different parent.
+        await expect(validateOutputDir(output, true)).rejects.toThrow(
+          "changed during preparation",
+        );
+        expect(await readdir(join(root, "saved", "output"))).toEqual(["keep"]);
+      } finally {
+        substitution.mockRestore();
+      }
+    },
+  );
+
+  testPosix(
+    "creates private scan directories for a maximum-length repository name",
+    async () => {
+      const root = await realpath(await temporaryDirectory());
+      const repositoryName = "r".repeat(255);
+      const outputs = await Promise.all([
+        prepareOutputDir(undefined, repositoryName, root),
+        prepareOutputDir(undefined, repositoryName, root),
+      ]);
+      expect(new Set(outputs).size).toBe(2);
+      for (const output of outputs) {
+        expect(dirname(output)).toBe(root);
+        expect((await stat(output)).mode & 0o777).toBe(0o700);
+      }
+    },
+  );
+
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
@@ -6204,9 +7022,130 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  testPosix(
+    "discovers Python outside explicit targets from a filesystem-root working directory",
+    async () => {
+      if (
+        runTestInSubprocess(
+          fileURLToPath(import.meta.url),
+          "discovers Python outside explicit targets from a filesystem-root working directory",
+          {},
+          "/",
+        )
+      )
+        return;
+      const target = await temporaryDirectory();
+      const tools = await temporaryDirectory();
+      const system = pythonWithLauncher();
+      expect(system).not.toBeNull();
+      const name = "fixture-python";
+      await symlink(system!, join(tools, name));
+      await symlink(system!, join(target, name));
+      const alias = join(tools, "root-directory");
+      await symlink("/", alias, "dir");
+      expect(process.cwd()).toBe("/");
+      const environment = { PATH: [target, tools].join(":"), PYTHON: name };
+      for (const caller of ["/", alias]) {
+        const selected = await resolvePluginPython({
+          currentDirectory: caller,
+          protectedRoot: target,
+          environment,
+        });
+        expect(selected).toBe(join(tools, name));
+      }
+      await expect(
+        resolvePluginPython({
+          currentDirectory: `/${basename(target)}-missing/..`,
+          protectedRoot: target,
+          environment,
+        }),
+      ).rejects.toThrow("unavailable");
+      await expect(resolvePluginPython({ environment })).rejects.toThrow(
+        "unavailable",
+      );
+      for (const protectedRoot of [[], "/"]) {
+        await expect(
+          resolvePluginPython({ protectedRoot, environment }),
+        ).rejects.toThrow("unavailable");
+      }
+      await expect(
+        resolvePluginPython({
+          protectedRoot: target,
+          environment: { PATH: target, PYTHON: name },
+        }),
+      ).rejects.toThrow("unavailable");
+    },
+  );
+
+  testPosix(
+    "preserves literal executable override names and accepts padding",
+    async () => {
+      const tools = await realpath(await temporaryDirectory());
+      const repository = await temporaryDirectory();
+      const interpreter = pythonWithLauncher();
+      expect(interpreter).not.toBeNull();
+      const ordinary = join(tools, "tool");
+      const literal = ordinary + " ";
+      await symlink(interpreter!, ordinary);
+      await symlink(interpreter!, literal);
+
+      for (const [configured, expected] of [
+        [literal, literal],
+        [` ${ordinary} `, ordinary],
+      ] as const) {
+        expect(
+          resolveCodexCommand({ CODEX_CLI_PATH: configured }).command,
+        ).toBe(expected);
+        await expect(
+          resolvePluginPython({
+            environment: { PYTHON: configured, PATH: tools },
+            protectedRoot: repository,
+          }),
+        ).resolves.toBe(expected);
+      }
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: "tool ", PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
+
+      const paddedAbsolute = ` ${ordinary} `;
+      const shadow = join(repository, paddedAbsolute);
+      await mkdir(dirname(shadow), { recursive: true });
+      await writeFile(shadow, "#!/bin/sh\nexit 93\n", { mode: 0o700 });
+      const runtime = new URL("../src/runtime.ts", import.meta.url).href;
+      const child = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `import { resolveCodexCommand } from ${JSON.stringify(runtime)};
+         import { spawnSync } from "node:child_process";
+         const { command } = resolveCodexCommand();
+         process.exit(spawnSync(command, ["-I", "-c", "pass"]).status ?? 1);`,
+        ],
+        {
+          cwd: repository,
+          env: { ...process.env, CODEX_CLI_PATH: paddedAbsolute },
+        },
+      );
+      expect(child.status).toBe(0);
+
+      await rm(literal);
+      expect(resolveCodexCommand({ CODEX_CLI_PATH: literal }).command).toBe(
+        ordinary,
+      );
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: literal, PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
+    },
+  );
+
   test("resolves inherited Python names case-insensitively", async () => {
-    const discovered =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    const discovered = pythonWithLauncher();
     expect(discovered).not.toBeNull();
     const interpreter = join(
       await realpath(dirname(discovered!)),
@@ -6406,8 +7345,46 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
+  test.skipIf(process.platform !== "linux")(
+    "discovers system Python when the account has no home for the managed cache",
+    async () => {
+      const options = {
+        environment: {
+          PATH: process.env["PATH"],
+          LD_LIBRARY_PATH: process.env["LD_LIBRARY_PATH"],
+        },
+        protectedRoot: await temporaryDirectory(),
+      };
+      const systemPython = await resolvePluginPython({
+        ...options,
+        managedRuntimeRoots: [],
+      });
+      const homeError = new Error("home lookup failed");
+      using home = spyOn(await import("node:os"), "homedir").mockImplementation(
+        () => {
+          throw Object.assign(new Error("no home for this UID"), {
+            info: { code: "ENOENT", syscall: "uv_os_homedir" },
+          });
+        },
+      );
+      expect(await resolvePluginPython(options)).toBe(systemPython);
+      await expect(
+        resolvePluginPython({ ...options, environment: { PATH: "" } }),
+      ).rejects.toBeInstanceOf(PluginPythonUnavailableError);
+      home.mockImplementation(() => {
+        throw homeError;
+      });
+      await expect(resolvePluginPython(options)).rejects.toBe(homeError);
+    },
+  );
+
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
+    using _home = spyOn(await import("node:os"), "homedir").mockImplementation(
+      () => {
+        throw new Error("No home directory for this account");
+      },
+    );
     const configured = join(root, "configured-python");
     await writeFile(
       configured,
@@ -6461,7 +7438,6 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(
         await resolvePluginPython({
           environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
-          homeDirectory: join(root, "unused-home"),
         }),
       ).toBe(cachedPython);
     }
@@ -6515,7 +7491,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
-      const discovered = Bun.which("python3") ?? Bun.which("python");
+      const discovered = pythonOnPath();
       expect(discovered).not.toBeNull();
       if (discovered === null) return;
       const python = await realpath(discovered);
@@ -6541,9 +7517,18 @@ describe("runtime directories and plugin Python boundary", () => {
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
-      const installedPython = process.env["PYTHON"] ?? Bun.which("python");
-      expect(installedPython).not.toBeNull();
-      if (installedPython === null) return;
+      let installedPython = process.env["PYTHON"];
+      if (installedPython === undefined) {
+        const command = pythonWithLauncher();
+        expect(command).not.toBeNull();
+        if (command === null) return;
+        // The Windows py launcher and the interpreter's DLLs can live in different directories.
+        installedPython = execNodePython(
+          command,
+          ["-X", "utf8", "-c", "import sys; print(sys.executable)"],
+          process.env,
+        ).trimEnd();
+      }
       await mkdir(repository);
       const launcher = join(root, "py.exe");
       await copyFile(installedPython, launcher);
