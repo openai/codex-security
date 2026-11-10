@@ -95,9 +95,9 @@ try {
     );
     await check(t, testWorkerTerminalEvents);
     await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
+    await check(t, testAbortPropagation);
     if (process.platform !== "win32") {
       await check(t, testStreamTerminationWithoutTerminalEventFails);
-      await check(t, testAbortPropagation);
     }
   });
 
@@ -1446,6 +1446,7 @@ async function testWorkerRuntimeSettings() {
   ];
   const saved = [
     "PYTHON",
+    "PYTHONIOENCODING",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
     "HOME",
@@ -1456,6 +1457,9 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
+    "GIT_DIFF_OPTS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
     "CODEX_CLI_PATH",
     "CODEX_BROWSER_USE_NODE_PATH",
     "CODEX_HOME",
@@ -1500,14 +1504,17 @@ async function testWorkerRuntimeSettings() {
       );
       const browserNode = path.join(fixture.root, "browser node");
       process.env.CODEX_BROWSER_USE_NODE_PATH = browserNode;
-      const python = path.join(fixture.root, "selected venv", "bin", "python");
+      const systemPython = process.platform === "win32" ? "python" : "python3";
+      const python =
+        configuration === "" && process.platform !== "win32"
+          ? systemPython
+          : path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
         fixture.root,
         "helper venv",
         "bin",
         "python",
       );
-      const systemPython = process.platform === "win32" ? "python" : "python3";
       const workerPython = (index: number) =>
         index === 0 ? systemPython : `${helperPython}-${index} `;
       process.env.PYTHON = python;
@@ -1655,8 +1662,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index === 0
               ? path.join(fixture.root, `plugin-${index}`)
               : undefined;
+          const sourceReadRoot = path.join(
+            fixture.root,
+            `private source [${index}]`,
+          );
           const parentSandbox = {
             pluginReadRoot,
+            sourceReadRoot,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
               ...(nestedReceipts ? [] : [workerUsageDirectory]),
@@ -1710,6 +1722,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           };
           return {
             nativePaths,
+            pythonIoEncoding: index % 2 === 0 ? "utf-16-le" : "utf-8-sig",
             knowledgePath: path.join(fixture.root, `knowledge-${index}`),
             knowledgeDocuments: {
               "1-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
@@ -1725,6 +1738,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
+                [sourceReadRoot]: { ".": "read" },
                 ...(pluginReadRoot === undefined
                   ? {}
                   : { [pluginReadRoot]: { ".": "read" } }),
@@ -2117,6 +2131,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ]) {
               process.env[name] = path.join(fixture.root, `libraries-${index}`);
             }
+            process.env.PYTHONIOENCODING =
+              workerConfigurations[index].pythonIoEncoding;
             restoreEnv(
               "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
               workerConfigurations[index].workerConfigPath,
@@ -2240,6 +2256,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               workerLaunch.environment![name],
             );
           }
+          assert.equal(
+            invocation.runtimeEnvironment.PYTHONIOENCODING,
+            workerConfigurations[index].pythonIoEncoding,
+          );
           assert.equal(
             invocation.knowledgePath,
             workerConfigurations[index].knowledgePath,

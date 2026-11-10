@@ -54,6 +54,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
+from windows_scan_local_files import pin_replay_metadata
 from workbench import handoff
 from workbench.storage import (
     create_private_directory,
@@ -668,7 +669,8 @@ def require_working_tree_unchanged(target: Path, diff_target: dict[str, str] | N
         and diff_target["kind"] == "working_tree"
         and (
             git_revision(target) != diff_target["headRevision"]
-            or worktree_content_digest(target) != diff_target["contentDigest"]
+            or worktree_content_digest(target, expected_digest=diff_target["contentDigest"])
+            != diff_target["contentDigest"]
         )
     ):
         raise SystemExit("The selected scan target changed while the scan was starting. Try again.")
@@ -2361,7 +2363,9 @@ def require_reviewed_patch_applied(
 ) -> str | None:
     target = require_scan_target_identity(scan)
     _, content_digest = remediation_checkout_snapshot(
-        scan, expected_revision=remediation["base_revision"]
+        scan,
+        expected_revision=remediation["base_revision"],
+        expected_digest=remediation["base_content_digest"],
     )
     if content_digest == remediation["base_content_digest"]:
         raise SystemExit(
@@ -2371,12 +2375,17 @@ def require_reviewed_patch_applied(
     excluded = (Path(scan["scan_dir"]),)
     # Unborn repositories still need their config while metadata junctions are deferred.
     git_dir = git_output(target, "rev-parse", "--absolute-git-dir")
+    metadata = Path(git_dir) if git_dir is not None else None
     if not unversioned:
         repository, pathspec = git_worktree_context(target)
         if git_dir is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
         excluded += tuple(path for path, _ in git_submodule_entries(target))
-    with tempfile.TemporaryDirectory(prefix="codex-security-remediation-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="codex-security-remediation-") as temporary,
+        ExitStack() as pins,
+    ):
+        pinned_metadata = pin_replay_metadata(pins, metadata, Path(temporary))
         reviewed_patch = Path(temporary) / "reviewed.patch"
         digest = hashlib.sha256()
         with open_scan_local_file(Path(scan["scan_dir"]), patch_path) as source:
@@ -2392,36 +2401,30 @@ def require_reviewed_patch_applied(
             junctions = copy_directory_excluding(target, checkout, excluded)
         else:
             _, junctions = copy_git_worktree_files(target, checkout_root, excluded)
-        arguments = ["apply", "--reverse", "--whitespace=nowarn"]
-        if unversioned:
-            arguments.append("--no-index")
-        elif pathspec != ".":
-            arguments.append(f"--directory={pathspec}")
-        arguments.append(str(reviewed_patch))
-        applied = git_command(
-            checkout if unversioned else checkout_root,
-            *arguments,
-            text=False,
-            git_dir=Path(git_dir) if git_dir is not None else None,
-            work_tree=checkout_root if git_dir is not None else None,
+        short, replay_root = remediation_state.reverse_reviewed_patch(
+            target,
+            checkout_root,
+            metadata,
+            pinned_metadata,
+            remediation["patch_digest"],
+            pins,
+            reviewed_patch,
+            None if unversioned else pathspec,
         )
-        if applied.returncode != 0:
-            raise SystemExit(
-                "The selected checkout does not contain the reviewed remediation patch. Apply exactly that patch before recording it as applied."
-            )
         restore_directory_junctions(
             target if unversioned else repository,
             checkout if unversioned else checkout_root,
             junctions,
         )
         reverted_digest = (
-            directory_content_digest(checkout)
+            directory_content_digest(checkout, replay_git_dir=replay_root)
             if unversioned
             else worktree_content_digest_for_context(
                 checkout_root,
                 pathspec or ".",
-                git_dir=Path(git_dir),
+                git_dir=short or metadata,
                 work_tree=checkout_root,
+                expected_digest=remediation["base_content_digest"],
             )
         )
         if reverted_digest != remediation["base_content_digest"] and unversioned:
@@ -2431,12 +2434,16 @@ def require_reviewed_patch_applied(
                 checkout,
                 "-c",
                 "core.autocrlf=input",
-                *arguments,
+                "apply",
+                "--reverse",
+                "--whitespace=nowarn",
+                "--no-index",
+                str(reviewed_patch),
                 text=True,
             )
             if applied_without_conversion.returncode == 0:
                 restore_directory_junctions(target, checkout, junctions)
-                reverted_digest = directory_content_digest(checkout)
+                reverted_digest = directory_content_digest(checkout, replay_git_dir=replay_root)
         if reverted_digest != remediation["base_content_digest"]:
             raise SystemExit(
                 "The selected checkout contains changes outside the reviewed patch. Remove them before recording the patch as applied."
@@ -2451,15 +2458,15 @@ def require_remediation_checkout_unchanged(
     require_applied_content: bool = False,
     require_base_content: bool = False,
 ) -> None:
-    _, content_digest = remediation_checkout_snapshot(
-        scan, expected_revision=remediation["base_revision"]
-    )
     expected_digest = (
         remediation["applied_content_digest"]
         if require_applied_content
         else remediation["base_content_digest"]
         if require_base_content
         else None
+    )
+    _, content_digest = remediation_checkout_snapshot(
+        scan, expected_revision=remediation["base_revision"], expected_digest=expected_digest
     )
     if expected_digest is not None and content_digest != expected_digest:
         raise SystemExit(

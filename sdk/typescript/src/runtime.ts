@@ -1,4 +1,9 @@
-import { executablePathForSpawn } from "./executable-path.js";
+import {
+  configuredExecutableValue,
+  executablePathForSpawn,
+  isExplicitPathWithTrailingWhitespace,
+  isExecutableFile,
+} from "./executable-path.js";
 import { retryWindowsRename } from "./retry-windows-rename.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -7,7 +12,7 @@ import {
   PLUGIN_PYTHON_READY,
 } from "./plugin-python-probe.js";
 import { resolveBundledCodexExecutable } from "./codex-sdk-environment.js";
-import { gitProtectionRoots } from "./targets.js";
+import { abortable, gitProtectionRoots } from "./targets.js";
 import { isNonEmptyString, notify } from "./value.js";
 import {
   execFile as execFileCallback,
@@ -15,7 +20,7 @@ import {
   type ChildProcessWithoutNullStreams,
   type SpawnOptionsWithoutStdio,
 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, type Hash } from "node:crypto";
 import { shortArchivePrefix } from "./scan-archive-path.js";
 import {
   chmodSync,
@@ -36,6 +41,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
@@ -244,7 +250,11 @@ function environmentValue(
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
-  const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
+  const configured = environmentValue(
+    environment,
+    "CODEX_SECURITY_STATE_DIR",
+    process.platform !== "win32",
+  );
   const path =
     configured !== undefined
       ? resolve(expandHome(configured, environment))
@@ -2042,11 +2052,13 @@ export async function runWorkbench(
             )
           : input,
       signal,
-      registrationHandshake,
-      // Frame Python arguments on stdin to preserve NUL and long diagnostics.
-      native
-        ? undefined
-        : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
+      {
+        registrationHandshake,
+        // Frame Python arguments on stdin to preserve NUL and long diagnostics.
+        stdinPrefix: native
+          ? undefined
+          : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
+      },
     );
     if (!result.success) {
       throw new Error(
@@ -2820,10 +2832,25 @@ export async function extractPluginZip(
   destination: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  return extractValidatedPluginZip(archive, destination, signal);
+}
+
+async function extractValidatedPluginZip(
+  archive: string,
+  destination: string,
+  signal?: AbortSignal,
+  digest?: Hash,
+): Promise<string> {
   const archivePath = resolve(expandHome(archive));
-  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  const parent = dirname(destination);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  // Windows mkdtemp otherwise fails at 248 UTF-16 units, including its suffix.
+  const stagingParent =
+    process.platform === "win32"
+      ? win32.toNamespacedPath(await realpath(parent))
+      : parent;
   const staging = await realpath(
-    await mkdtemp(join(dirname(destination), ".codex-security-plugin-")),
+    await mkdtemp(join(stagingParent, ".codex-security-plugin-")),
   );
   let publishingOnWindows = false;
   try {
@@ -2874,6 +2901,7 @@ export async function extractPluginZip(
         const output = join(staging, ...path.split("/"));
         const entryMode = (entry.externalFileAttributes >>> 16) & 0xffff;
         const permissions = (entryMode || (directory ? 0o700 : 0o600)) & 0o777;
+        digest?.update(JSON.stringify([path, directory, permissions]));
         await mkdir(directory ? output : dirname(output), {
           recursive: true,
           ...(directory ? { mode: permissions } : {}),
@@ -2898,6 +2926,7 @@ export async function extractPluginZip(
           `Plugin ZIP entry failed CRC-32 validation: ${path}`,
         );
       }
+      digest?.update(createHash("sha256").update(bytes).digest());
     }
     const pluginRoot = await discoverPluginRoot(staging);
     throwIfSignalAborted(signal);
@@ -3036,23 +3065,46 @@ export async function resolvePluginPath(
   workspace: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  return (await resolvePluginSource(pluginPath, workspace, signal)).root;
+}
+
+/** @internal */
+export interface PluginZipSource {
+  path: string;
+  digest: string;
+}
+
+/** @internal */
+export async function resolvePluginSource(
+  pluginPath: string | undefined,
+  workspace: string,
+  signal?: AbortSignal,
+  pinZip = false,
+): Promise<{ root: string; zip?: PluginZipSource }> {
   try {
     if (pluginPath === undefined) {
-      return await bundledPluginRoot();
+      return { root: await bundledPluginRoot() };
     }
 
     const path = resolve(expandHome(pluginPath));
     const metadata = await lstat(path).catch(() => null);
     if (metadata?.isFile() && extname(path).toLowerCase() === ".zip") {
-      return await extractPluginZip(
-        path,
+      const digest = pinZip ? createHash("sha256") : undefined;
+      const archive = digest ? await realpath(path) : path;
+      const root = await extractValidatedPluginZip(
+        archive,
         join(workspace, "extracted-plugin"),
         signal,
+        digest,
       );
+      return {
+        root,
+        ...(digest && { zip: { path: archive, digest: digest.digest("hex") } }),
+      };
     }
     if (metadata?.isDirectory()) {
       throwIfSignalAborted(signal);
-      return await validatePluginRoot(path);
+      return { root: await validatePluginRoot(path) };
     }
     throw new PluginBootstrapError(
       `Plugin path must be a directory or ZIP: ${path}`,
@@ -3061,6 +3113,104 @@ export async function resolvePluginPath(
     if (signal?.aborted || error instanceof LocalPluginBootstrapError)
       throw error;
     throw new LocalPluginBootstrapError(errorMessage(error), { cause: error });
+  }
+}
+
+/** @internal */
+export async function prepareWindowsScanPluginZip(
+  source: PluginZipSource,
+  scanDirectory: string,
+  protectedDirectories: readonly string[],
+  validateLocation: (path: string) => void,
+  signal?: AbortSignal,
+): Promise<{ workspace: string; root: string } | undefined> {
+  throwIfSignalAborted(signal);
+  const protectedPath = (path: string) =>
+    protectedDirectories.some((directory) => isWithin(directory, path));
+  if (protectedPath(source.path)) return;
+  const metadata = await lstat(source.path).catch(nullIfMissingFileError);
+  if (metadata === null) return;
+  const changed = "The selected plugin ZIP changed after runtime preparation.";
+  if (!metadata.isFile()) throw new LocalPluginBootstrapError(changed);
+  const canonicalSource = await realpath(source.path).catch(
+    nullIfMissingFileError,
+  );
+  if (canonicalSource === null) return;
+  if (protectedPath(canonicalSource))
+    throw new LocalPluginBootstrapError(changed);
+  let workspace: string | undefined;
+  const parents = [...new Set([dirname(scanDirectory), tmpdir()])].filter(
+    (parent) => !protectedPath(parent) && !isWithin(scanDirectory, parent),
+  );
+  // PowerShell may fail to launch the selected plugin's .cmd at a long path.
+  // Prefer the shorter canonical parent, retaining the output parent on ties.
+  const candidates = await abortable(
+    () => Promise.allSettled(parents.map((path) => realpath(path))),
+    signal,
+  );
+  const length = (candidate: PromiseSettledResult<string>) =>
+    candidate.status === "fulfilled" ? candidate.value.length : Infinity;
+  for (const candidate of candidates.sort((a, b) => length(a) - length(b))) {
+    throwIfSignalAborted(signal);
+    try {
+      if (candidate.status === "rejected") throw candidate.reason;
+      const canonical = candidate.value;
+      if (protectedPath(canonical) || isWithin(scanDirectory, canonical))
+        continue;
+      // Host-side plugin helpers may execute from this copy. A sibling keeps it
+      // outside the writable scan, and the native creator verifies its parents.
+      workspace = await prepareOutputDir(
+        undefined,
+        "plugin-input",
+        canonical,
+        validateLocation,
+      );
+      break;
+    } catch (error) {
+      if (
+        !(error instanceof OutputDirectoryError) &&
+        !["EACCES", "EPERM", "ENOENT"].includes(nodeErrorCode(error) ?? "")
+      )
+        throw error;
+    }
+  }
+  // Keep existing plugin handling where neither scan input location is usable.
+  if (workspace === undefined) return;
+  try {
+    throwIfSignalAborted(signal);
+    const digest = createHash("sha256");
+    const root = await extractValidatedPluginZip(
+      source.path,
+      join(workspace, "plugin"),
+      signal,
+      digest,
+    );
+    throwIfSignalAborted(signal);
+    if (digest.digest("hex") !== source.digest) {
+      throw new LocalPluginBootstrapError(changed);
+    }
+    return { workspace, root };
+  } catch (error) {
+    try {
+      await cleanupSdkDirectory(workspace);
+    } catch (cleanupError) {
+      throwIfSignalAborted(signal);
+      throw new LocalPluginBootstrapError(
+        `${errorMessage(error)}\nCould not remove scan input directory ${workspace}: ${errorMessage(cleanupError)}`,
+        { cause: error },
+      );
+    }
+    throwIfSignalAborted(signal);
+    const cause =
+      error instanceof PluginBootstrapError ? error.cause : undefined;
+    if (
+      isRecord(cause) &&
+      cause["code"] === "ENOENT" &&
+      cause["syscall"] === "open" &&
+      cause["path"] === source.path
+    )
+      return;
+    throw error;
   }
 }
 
@@ -3153,15 +3303,12 @@ async function pluginRuntimeProjection(
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  if (
-    !Array.isArray(environment) ||
-    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
-  ) {
-    server["env_vars"] = [
-      ...(Array.isArray(environment) ? environment : []),
-      "CODEX_SECURITY_PLUGIN_ROOT",
-    ];
-  }
+  server["env_vars"] = [
+    ...(environment ?? []),
+    ...["CODEX_SECURITY_PLUGIN_ROOT", "CODEX_SECURITY_REPOSITORY"].filter(
+      (name) => !environment?.includes(name),
+    ),
+  ];
   const files: PluginRuntimeProjection["files"] = new Map();
   server["command"] =
     server["command"] === "./scripts/launch_codex_security_mcp.cmd"
@@ -3196,7 +3343,11 @@ async function pluginRuntimeProjection(
 export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
-  const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  const configured = configuredExecutableValue(
+    environmentValue(environment, "CODEX_CLI_PATH", true),
+    process.platform,
+    (value) => isExecutableFile(expandHomeForLookup(value, environment)),
+  );
   const expanded =
     configured === undefined
       ? undefined
@@ -3309,6 +3460,35 @@ export async function bootstrapPlugin(
     );
   const stagedMatches =
     staged?.version === version && (await matchesSelected(stagedRoot));
+  const matchesNativeInstall = async (
+    installedRoot: string,
+    allowRuntimeFiles = false,
+  ) =>
+    (await matchesSelected(stagedRoot)) &&
+    // Ordinary reuse permits runtime files when all selected bytes are present.
+    // The native receipt still verifies the complete generated command output.
+    ((allowRuntimeFiles && (await matchesSelected(installedRoot, true))) ||
+      (await matchesSelected(
+        installedRoot,
+        false,
+        migratedCommands(installedRoot),
+      )));
+  const nativeMigration = (installedRoot: string, allowRuntimeFiles = false) =>
+    verifiedCommandMigration(
+      installedRoot,
+      (path) => matchesNativeInstall(path, allowRuntimeFiles),
+      options.signal,
+    );
+  const matchesReceipt = async (installedRoot: string, migration: unknown) => {
+    if (
+      typeof migration === "string" &&
+      options.runCodex === undefined &&
+      (await isBundledPluginInstaller(command))
+    ) {
+      return (await nativeMigration(installedRoot, true)) === migration;
+    }
+    return matchesSelected(installedRoot, true);
+  };
 
   if (!stagedMatches) {
     if (existing !== null) {
@@ -3387,7 +3567,10 @@ export async function bootstrapPlugin(
     isRecord(previous) &&
     typeof previous["installedPath"] === "string" &&
     previous["version"] === version &&
-    (await matchesSelected(previous["installedPath"], true))
+    (await matchesReceipt(
+      previous["installedPath"],
+      previous["nativeCommandMigration"],
+    ))
   ) {
     return {
       pluginRoot: root,
@@ -3413,13 +3596,7 @@ export async function bootstrapPlugin(
   } catch (first) {
     if (!isRolledBackPluginActivation(first)) throw first;
     throwIfSignalAborted(options.signal);
-    let bundled: string;
-    try {
-      bundled = resolveBundledCodexExecutable();
-    } catch {
-      throw first;
-    }
-    if (!(await sameFile(command.command, bundled))) throw first;
+    if (!(await isBundledPluginInstaller(command))) throw first;
     // The bundled CLI restored the old cache. A short-lived Windows reader
     // of the new tree can release it before a fresh installation attempt.
     try {
@@ -3460,22 +3637,28 @@ export async function bootstrapPlugin(
     );
   }
 
-  if (retried) {
-    const installedRoot = installed["installedPath"];
-    // The pinned local installer converts plugin commands into skills here.
-    const migratedCommands = join(
-      installedRoot,
-      ".codex-plugin",
-      "migrated-command-skills",
+  // The bundled installer removes stale command skills before regenerating them.
+  const bundledInstaller =
+    retried ||
+    (options.runCodex === undefined &&
+      (await isBundledPluginInstaller(command)));
+  const hasSourceMigration =
+    bundledInstaller &&
+    (
+      await lstat(migratedCommands(root)).catch(nullIfMissingFileError)
+    )?.isDirectory() === true;
+  const nativeCommandMigration = hasSourceMigration
+    ? await nativeMigration(installed["installedPath"])
+    : undefined;
+  if (
+    retried &&
+    !(hasSourceMigration
+      ? nativeCommandMigration !== undefined
+      : await matchesNativeInstall(installed["installedPath"]))
+  ) {
+    throw new PluginBootstrapError(
+      "The retried Codex plugin install did not install the selected plugin contents.",
     );
-    if (
-      !(await matchesSelected(stagedRoot)) ||
-      !(await matchesSelected(installedRoot, false, migratedCommands))
-    ) {
-      throw new PluginBootstrapError(
-        "The retried Codex plugin install did not install the selected plugin contents.",
-      );
-    }
   }
 
   await writeFile(
@@ -3483,6 +3666,7 @@ export async function bootstrapPlugin(
     JSON.stringify({
       installedPath: installed["installedPath"],
       version,
+      ...(nativeCommandMigration ? { nativeCommandMigration } : {}),
     }),
     { mode: 0o600, signal: options.signal },
   );
@@ -3495,6 +3679,111 @@ export async function bootstrapPlugin(
     name,
     version,
   };
+}
+
+async function isBundledPluginInstaller(
+  command: CodexCommand,
+): Promise<boolean> {
+  try {
+    return await sameFile(command.command, resolveBundledCodexExecutable());
+  } catch {
+    return false;
+  }
+}
+
+function migratedCommands(plugin: string): string {
+  return join(plugin, ".codex-plugin", "migrated-command-skills");
+}
+
+// Bind a receipt to the generated files observed in this installation.
+// Entry names come from its directories, never from the saved digest.
+async function verifiedCommandMigration(
+  installedRoot: string,
+  matchesSelected: (installedRoot: string) => Promise<boolean>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const digest = createHash("sha256");
+  const record = (...fields: (string | number)[]) =>
+    digest.update(JSON.stringify(fields)).update("\n");
+  async function visit(path: string, name: string): Promise<boolean> {
+    throwIfSignalAborted(signal);
+    const metadata = await lstat(path, { bigint: true });
+    if (
+      metadata.isSymbolicLink() ||
+      relative(path, await realpath(path)) !== ""
+    )
+      return false;
+    if (metadata.isDirectory()) {
+      record("directory", name);
+      for (const entry of (await readdir(path)).sort()) {
+        const child = join(path, entry);
+        if (!(await visit(child, name ? `${name}/${entry}` : entry)))
+          return false;
+      }
+      return sameInode(metadata, await lstat(path, { bigint: true }));
+    }
+    if (!metadata.isFile()) return false;
+    const file = await open(
+      path,
+      constants.O_RDONLY |
+        (constants.O_NOFOLLOW ?? 0) |
+        (constants.O_NONBLOCK ?? 0),
+    );
+    try {
+      const opened = await file.stat({ bigint: true });
+      if (!opened.isFile()) return false;
+      if (!sameInode(metadata, opened)) {
+        if (process.platform !== "win32") return false;
+        // Some Windows Node versions report a different device on an open handle.
+        const { sameCheckedFileDevice } = await import("./contract.js");
+        if (!(await sameCheckedFileDevice(file, { path, metadata }, opened)))
+          return false;
+      }
+      const contents = createHash("sha256")
+        .update(await file.readFile({ signal }))
+        .digest("hex");
+      record("file", name, Number(opened.mode & 0o111n), contents);
+    } finally {
+      await file.close();
+    }
+    return true;
+  }
+  throwIfSignalAborted(signal);
+  const installation = await lstat(installedRoot, { bigint: true }).catch(
+    nullIfMissingFileError,
+  );
+  if (
+    !installation?.isDirectory() ||
+    installation.ino === 0n ||
+    !(await matchesSelected(installedRoot))
+  )
+    return;
+  try {
+    const directory = migratedCommands(await realpath(installedRoot));
+    const parent = dirname(directory);
+    if (
+      !(await lstat(parent)).isDirectory() ||
+      relative(parent, await realpath(parent)) !== ""
+    )
+      return;
+    const root = await lstat(directory, { bigint: true }).catch(
+      nullIfMissingFileError,
+    );
+    if (root && (!root.isDirectory() || !(await visit(directory, "")))) return;
+    // Native activation replaces the installed directory even at the same version.
+    if (!sameInode(installation, await lstat(installedRoot, { bigint: true })))
+      return;
+    throwIfSignalAborted(signal);
+    return root ? `sha256:${digest.digest("hex")}` : "absent";
+  } catch (error) {
+    throwIfSignalAborted(signal);
+    if (
+      !["ENOENT", "ENOTDIR", "ELOOP", "EISDIR", "EACCES", "EPERM"].includes(
+        nodeErrorCode(error) ?? "",
+      )
+    )
+      throw error;
+  }
 }
 
 async function pluginContentsMatch(
@@ -3651,13 +3940,11 @@ export async function resolvePluginPython(
   options: PluginPythonOptions = {},
 ): Promise<string> {
   const environment = options.environment ?? process.env;
-  const requestedRoots = options.protectedRoot ?? process.cwd();
+  const cwd = process.cwd();
+  const requestedRoots = options.protectedRoot ?? cwd;
   const protectedRoot =
     typeof requestedRoots === "string" ? [requestedRoots] : [...requestedRoots];
-  const callerDirectories = [
-    process.cwd(),
-    options.currentDirectory ?? process.cwd(),
-  ];
+  const callerDirectories = new Set([cwd, options.currentDirectory ?? cwd]);
   // Preserve target and enclosing-checkout protection for every interpreter.
   for (const directory of new Set([...callerDirectories, ...protectedRoot])) {
     for (const checkout of await gitProtectionRoots(directory, options.signal))
@@ -3665,7 +3952,21 @@ export async function resolvePluginPython(
   }
   // Named interpreters are ambient PATH discovery, even when PYTHON names one.
   // Explicit trusted paths and managed runtimes retain their existing precedence.
-  const discoveryRoots = [...protectedRoot, ...callerDirectories];
+  const discoveryRoots = [...protectedRoot];
+  for (const directory of callerDirectories) {
+    const physical =
+      directory === cwd
+        ? cwd
+        : await realpath(directory).catch(() => undefined);
+    // A filesystem-root launch directory also contains the operator's installed tools.
+    // Explicit scan roots and enclosing checkouts are already in protectedRoot.
+    if (
+      protectedRoot.length === 0 ||
+      physical === undefined ||
+      dirname(physical) !== physical
+    )
+      discoveryRoots.push(directory);
+  }
   if (options.configuredPath !== undefined) {
     return await requirePython(
       options.configuredPath,
@@ -3677,13 +3978,26 @@ export async function resolvePluginPython(
       options.signal,
     );
   }
-  const inherited = environmentValue(environment, "PYTHON");
+  const inherited = environmentValue(environment, "PYTHON", true);
   if (inherited) {
+    const roots = isPythonPathCandidate(inherited)
+      ? protectedRoot
+      : discoveryRoots;
+    // Check an explicit literal path with the same repository protections as the launch.
+    const candidate =
+      isExplicitPathWithTrailingWhitespace(inherited, process.platform) &&
+      (await resolveTrustedExecutable(
+        expandHomeForLookup(inherited, environment),
+        environment,
+        roots,
+      ))
+        ? inherited
+        : inherited.trim();
     return await requirePython(
-      inherited,
+      candidate,
       "PYTHON",
       environment,
-      isPythonPathCandidate(inherited) ? protectedRoot : discoveryRoots,
+      roots,
       options.signal,
     );
   }
@@ -3822,8 +4136,15 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
-  registrationHandshake = false,
-  stdinPrefix?: string,
+  {
+    registrationHandshake = false,
+    stdinPrefix,
+    cwd,
+  }: {
+    registrationHandshake?: boolean;
+    stdinPrefix?: string;
+    cwd?: string;
+  } = {},
 ): Promise<CodexCommandResult> {
   const cancellation = registrationHandshake
     ? new AbortController()
@@ -3834,6 +4155,7 @@ export async function runCodexCommand(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
+      cwd,
       env: environment,
       stdio: registrationHandshake
         ? ["pipe", "pipe", "pipe", "pipe"]
@@ -3967,13 +4289,21 @@ async function runPluginCommand(
   signal?: AbortSignal,
 ): Promise<string> {
   try {
-    const { success, exitCode, stdout, stderr } = await runCodexCommand(
-      command,
-      args,
-      environment,
-      undefined,
-      signal,
-    );
+    const run = (argv: readonly string[], cwd?: string) =>
+      runCodexCommand(command, argv, environment, undefined, signal, { cwd });
+    let result = await run(args);
+    const source = args[1] === "marketplace" ? args[3] : undefined;
+    if (
+      result.exitCode === 1 &&
+      source?.includes("#") &&
+      result.stderr
+        .split(/\r?\n/u)
+        .includes("Error: --ref is only supported for git marketplace sources")
+    ) {
+      // Native Codex parsed a literal hash in the local path as a Git ref.
+      result = await run(["plugin", "marketplace", "add", "."], source);
+    }
+    const { success, exitCode, stdout, stderr } = result;
     if (!success) {
       const detail =
         stderr.trim() ||

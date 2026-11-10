@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from snapshot_sqlite import readonly_sqlite_uri
 from workbench.storage import archive_source_directory, worker_usage_directory
 
 TOKEN_FIELDS = {
@@ -607,9 +607,9 @@ def _scan_worker_directories(
 
 
 def _codex_state_database() -> Path | None:
-    configured_database = os.environ.get("CODEX_STATE_DB", "").strip()
-    if configured_database:
-        path = Path(configured_database).expanduser()
+    configured_database = os.environ.get("CODEX_STATE_DB", "")
+    if configured_database.strip():
+        path = Path(os.path.expanduser(configured_database))
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
     configured_home = os.environ.get("CODEX_HOME", "")
@@ -654,7 +654,7 @@ def _discover_rollout_sessions(
     completed_at: datetime | None,
 ) -> tuple[list[RolloutSession], set[str]]:
     database = sqlite3.connect(
-        f"file:{quote(str(state_database), safe='')}?mode=ro",
+        readonly_sqlite_uri(state_database),
         uri=True,
         timeout=STATE_DATABASE_TIMEOUT_SECONDS,
     )
