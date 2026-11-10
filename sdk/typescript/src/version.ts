@@ -36,7 +36,12 @@ export function updateCommand(
     ? realpathSync(process.execPath)
     : undefined,
 ): string {
-  const path = entrypoint.replaceAll("\\", "/").toLowerCase();
+  const windowsPath =
+    !entrypoint.startsWith("/") && win32.isAbsolute(entrypoint);
+  const path =
+    process.platform === "linux" && !windowsPath
+      ? entrypoint
+      : entrypoint.replaceAll("\\", "/").toLowerCase();
   const agent = (environment["npm_config_user_agent"] ?? "").toLowerCase();
 
   if (
