@@ -1140,6 +1140,11 @@ and does not migrate existing credentials or reports.
 Sandbox startup errors include the native diagnostic followed by a command to
 reproduce it. Linux namespace and AppArmor guidance appears only on Linux.
 
+If Windows Application Control blocks `windows.node` while validating a scan
+output directory, look for the module's block event in Event Viewer under
+Applications and Services Logs → Microsoft → Windows → CodeIntegrity → Operational.
+[Microsoft's App Control event reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-control/app-control-for-business/operations/event-id-explanations)
+
 On Windows, credential-home checks require trusted ownership and permissions
 through every ancestor, including the volume root. Codex Security can repair
 the credential home and its descendants; it does not change ancestor ownership
@@ -2127,6 +2132,11 @@ codex-security scans resume SCAN_ID
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
+
+On Windows, keep the protected `.codex-security-resume` directory in the scan
+output. It lets the workbench verify the original output even before the first
+checkpoint. If an older scan stopped with an empty output, start a new scan with
+`codex-security scans rerun SCAN_ID`.
 
 Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
 settings/instructions. Knowledge-bearing scans save their extracted documents in
