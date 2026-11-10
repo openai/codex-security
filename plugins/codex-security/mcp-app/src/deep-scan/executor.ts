@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   type BigIntStats,
   constants as fsConstants,
+  createReadStream,
   existsSync,
   promises as fs,
   readdirSync,
@@ -82,6 +83,7 @@ export interface CodexSdkWorkerArtifactContext {
 interface BoundCodexExecutable {
   readonly path: string;
   readonly identity: BigIntStats;
+  readonly sha256?: string;
 }
 
 interface CodexSdkWorkerRuntimeSettings {
@@ -784,7 +786,16 @@ async function bindCodexExecutable(
     process.arch,
     originalCwd,
   );
-  return { path, identity: await codexExecutableIdentity(path) };
+  const identity = await codexExecutableIdentity(path);
+  if (process.platform !== "win32") return { path, identity };
+  const sha256 = await codexExecutableDigest(path);
+  const after = await codexExecutableIdentity(path);
+  if (
+    !sameCodexExecutableFile(after, identity) ||
+    after.ctimeNs !== identity.ctimeNs
+  )
+    throw codexExecutableChangedError(path);
+  return { path, identity, sha256 };
 }
 
 async function verifyBoundCodexExecutable(
@@ -796,15 +807,49 @@ async function verifyBoundCodexExecutable(
   } catch (error) {
     throw codexExecutableChangedError(executable.path, error);
   }
-  if (
-    identity.dev !== executable.identity.dev ||
-    identity.ino !== executable.identity.ino ||
-    identity.size !== executable.identity.size ||
-    identity.mtimeNs !== executable.identity.mtimeNs ||
-    identity.ctimeNs !== executable.identity.ctimeNs
-  ) {
+  if (!sameCodexExecutableFile(identity, executable.identity)) {
     throw codexExecutableChangedError(executable.path);
   }
+  if (identity.ctimeNs !== executable.identity.ctimeNs) {
+    if (process.platform === "win32" && executable.sha256 !== undefined) {
+      // Windows can advance change time on first execution without changing bytes.
+      try {
+        while (true) {
+          const sha256 = await codexExecutableDigest(executable.path);
+          const after = await codexExecutableIdentity(executable.path);
+          if (
+            !sameCodexExecutableFile(after, executable.identity) ||
+            sha256 !== executable.sha256
+          )
+            break;
+          if (after.ctimeNs === identity.ctimeNs) return;
+          // Confirm a stable content snapshot if change time advanced during the read.
+          identity = after;
+        }
+      } catch (error) {
+        throw codexExecutableChangedError(executable.path, error);
+      }
+    }
+    throw codexExecutableChangedError(executable.path);
+  }
+}
+
+async function codexExecutableDigest(path: string): Promise<string> {
+  const digest = createHash("sha256");
+  for await (const bytes of createReadStream(path)) digest.update(bytes);
+  return digest.digest("hex");
+}
+
+function sameCodexExecutableFile(
+  actual: BigIntStats,
+  expected: BigIntStats,
+): boolean {
+  return (
+    actual.dev === expected.dev &&
+    actual.ino === expected.ino &&
+    actual.size === expected.size &&
+    actual.mtimeNs === expected.mtimeNs
+  );
 }
 
 async function codexExecutableIdentity(path: string): Promise<BigIntStats> {
