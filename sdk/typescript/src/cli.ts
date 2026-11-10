@@ -9097,7 +9097,9 @@ async function assessPatchRisk(
     request.files === undefined
       ? []
       : ["--", ...request.files.map((file) => file)];
-  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-risk-"),
+  );
   const patchPath = join(root, "patch.diff");
   try {
     const head =
@@ -9170,7 +9172,9 @@ async function withPatchIndex<T>(
     git: (args: string[], input?: string) => Promise<string>,
   ) => Promise<T>,
 ): Promise<T> {
-  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-tree-"),
+  );
   try {
     return await operation((args, input) =>
       dependencies.runRepositoryCommand("git", args, repository, {

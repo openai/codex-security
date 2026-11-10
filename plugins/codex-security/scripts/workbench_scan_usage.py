@@ -607,9 +607,9 @@ def _scan_worker_directories(
 
 
 def _codex_state_database() -> Path | None:
-    configured_database = os.environ.get("CODEX_STATE_DB", "").strip()
-    if configured_database:
-        path = Path(configured_database).expanduser()
+    configured_database = os.environ.get("CODEX_STATE_DB", "")
+    if configured_database.strip():
+        path = Path(os.path.expanduser(configured_database))
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
     configured_home = os.environ.get("CODEX_HOME", "")

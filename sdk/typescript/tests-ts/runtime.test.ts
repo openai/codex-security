@@ -907,6 +907,25 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
+  test("installs a local marketplace when the Codex home contains a literal hash", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "codex #team");
+    const source = await bundledPluginRoot();
+    const installed = await bootstrapPlugin(home, source, {
+      environment: {
+        HOME: root,
+        USERPROFILE: root,
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+      },
+    });
+
+    const manifest = join(".codex-plugin", "plugin.json");
+    expect(
+      await readFile(join(installed.installedRoot, manifest), "utf8"),
+    ).toBe(await readFile(join(source, manifest), "utf8"));
+  });
+
   test("keeps local marketplace failures separate from installer failures", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
@@ -1028,7 +1047,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1106,12 +1125,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         cwd: mcp.mcpServers["codex-security"].cwd,
         startup_timeout_sec:
           mcp.mcpServers["codex-security"].startup_timeout_sec,
-        env_vars: declaredRoot
-          ? mcp.mcpServers["codex-security"].env_vars
-          : [
-              ...mcp.mcpServers["codex-security"].env_vars,
-              "CODEX_SECURITY_PLUGIN_ROOT",
-            ],
+        env_vars: [
+          ...mcp.mcpServers["codex-security"].env_vars,
+          ...(declaredRoot ? [] : ["CODEX_SECURITY_PLUGIN_ROOT"]),
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         JSON.parse(await readFile(join(selected, ".mcp.json"), "utf8")),
@@ -1137,6 +1155,11 @@ for await (const line of createInterface({ input: process.stdin })) {
               ...environment,
               CODEX_HOME: home,
               CODEX_SQLITE_HOME: sqliteHome,
+              CODEX_SECURITY_REPOSITORY: join(
+                root,
+                pluginRoot === second ? "second source" : "first source",
+              ),
+              SYNTHETIC_UNDECLARED_VALUE: "ambient fixture",
               ...(pluginRoot === undefined
                 ? {}
                 : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
@@ -1200,6 +1223,10 @@ for await (const line of createInterface({ input: process.stdin })) {
         });
         const details = server.tools.probe._meta.launch;
         expect(details.pluginRoot).toBe(await realpath(pluginRoot));
+        expect(details.repository).toBe(
+          join(root, pluginRoot === second ? "second source" : "first source"),
+        );
+        expect(details.ambient).toBeUndefined();
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
           process.platform === "win32"
@@ -2305,7 +2332,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         command: "./scripts/launch_codex_security_mcp_sdk",
         args: ["--stdio", "synthetic argument"],
         cwd: ".",
-        env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
+        env_vars: [
+          "CODEX_HOME",
+          "CODEX_SECURITY_PLUGIN_ROOT",
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         (await stat(join(staged, "scripts", "launch_codex_security_mcp")))
@@ -5876,6 +5907,19 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing whitespace in an explicit POSIX state directory",
+    async () => {
+      const root = await temporaryDirectory();
+      for (const suffix of [" ", "\u00a0"]) {
+        const state = join(root, `explicit-state${suffix}`);
+        expect(
+          codexSecurityStateDirectory({ CODEX_SECURITY_STATE_DIR: state }),
+        ).toBe(state);
+      }
+    },
+  );
+
   test("derives persistent state from the ambient home or explicit override", async () => {
     const root = await temporaryDirectory();
     expect(codexSecurityStateDirectory({ CODEX_HOME: root })).toBe(
@@ -6977,6 +7021,73 @@ describe("runtime directories and plugin Python boundary", () => {
       }
     }
   });
+
+  testPosix(
+    "preserves literal executable override names and accepts padding",
+    async () => {
+      const tools = await realpath(await temporaryDirectory());
+      const repository = await temporaryDirectory();
+      const interpreter = pythonWithLauncher();
+      expect(interpreter).not.toBeNull();
+      const ordinary = join(tools, "tool");
+      const literal = ordinary + " ";
+      await symlink(interpreter!, ordinary);
+      await symlink(interpreter!, literal);
+
+      for (const [configured, expected] of [
+        [literal, literal],
+        [` ${ordinary} `, ordinary],
+      ] as const) {
+        expect(
+          resolveCodexCommand({ CODEX_CLI_PATH: configured }).command,
+        ).toBe(expected);
+        await expect(
+          resolvePluginPython({
+            environment: { PYTHON: configured, PATH: tools },
+            protectedRoot: repository,
+          }),
+        ).resolves.toBe(expected);
+      }
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: "tool ", PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
+
+      const paddedAbsolute = ` ${ordinary} `;
+      const shadow = join(repository, paddedAbsolute);
+      await mkdir(dirname(shadow), { recursive: true });
+      await writeFile(shadow, "#!/bin/sh\nexit 93\n", { mode: 0o700 });
+      const runtime = new URL("../src/runtime.ts", import.meta.url).href;
+      const child = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `import { resolveCodexCommand } from ${JSON.stringify(runtime)};
+         import { spawnSync } from "node:child_process";
+         const { command } = resolveCodexCommand();
+         process.exit(spawnSync(command, ["-I", "-c", "pass"]).status ?? 1);`,
+        ],
+        {
+          cwd: repository,
+          env: { ...process.env, CODEX_CLI_PATH: paddedAbsolute },
+        },
+      );
+      expect(child.status).toBe(0);
+
+      await rm(literal);
+      expect(resolveCodexCommand({ CODEX_CLI_PATH: literal }).command).toBe(
+        ordinary,
+      );
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: literal, PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
+    },
+  );
 
   test("resolves inherited Python names case-insensitively", async () => {
     const discovered = pythonWithLauncher();

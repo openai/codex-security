@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  accessSync,
   type BigIntStats,
-  constants as fsConstants,
   existsSync,
   promises as fs,
   readdirSync,
@@ -33,7 +31,11 @@ import {
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
 import { DEEP_SCAN_SETTINGS } from "../deep-scan-settings.js";
-import { executablePathForSpawn } from "../executable-path.js";
+import {
+  configuredExecutableValue,
+  executablePathForSpawn,
+  isExecutableFile,
+} from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
 import { workerTokenUsage } from "./usage-receipt.js";
 import {
@@ -610,6 +612,8 @@ function workerPermissionProfile(
   ]);
   if (sandbox.pluginReadRoot !== undefined)
     filesystem.set(sandbox.pluginReadRoot, { ".": "read" });
+  if (sandbox.sourceReadRoot !== undefined)
+    filesystem.set(sandbox.sourceReadRoot, { ".": "read" });
   for (const path of [...sandbox.filesystemDenies, ...literalDenies])
     filesystem.set(path, "deny");
   const pointDenies = literalDenies.filter((path) => /[*?[\]]/u.test(path));
@@ -1053,11 +1057,12 @@ export function resolveCodexPath(
   originalCwd: string = process.cwd(),
 ): string {
   const searchPath = searchPathForPlatform(env, platform);
-  const configured = environmentVariable(
-    env,
-    "CODEX_CLI_PATH",
+  const configured = configuredExecutableValue(
+    environmentVariable(env, "CODEX_CLI_PATH", platform),
     platform,
-  )?.trim();
+    (value) =>
+      isExecutableFile(absoluteCodexPath(value, platform, originalCwd)),
+  );
   if (configured && (platform !== "win32" || !isWindowsAppsPath(configured))) {
     if (isBareCommandName(configured)) {
       const executableName =
@@ -1254,16 +1259,6 @@ function resolveWindowsCachedBinary(
     return undefined;
   }
   return selected?.path;
-}
-
-function isExecutableFile(value: string): boolean {
-  try {
-    if (!statSync(value).isFile()) return false;
-    accessSync(value, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function absoluteCodexPath(

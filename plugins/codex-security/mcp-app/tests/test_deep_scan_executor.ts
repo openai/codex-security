@@ -1655,8 +1655,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             index === 0
               ? path.join(fixture.root, `plugin-${index}`)
               : undefined;
+          const sourceReadRoot = path.join(
+            fixture.root,
+            `private source [${index}]`,
+          );
           const parentSandbox = {
             pluginReadRoot,
+            sourceReadRoot,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
               ...(nestedReceipts ? [] : [workerUsageDirectory]),
@@ -1725,6 +1730,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
+                [sourceReadRoot]: { ".": "read" },
                 ...(pluginReadRoot === undefined
                   ? {}
                   : { [pluginReadRoot]: { ".": "read" } }),

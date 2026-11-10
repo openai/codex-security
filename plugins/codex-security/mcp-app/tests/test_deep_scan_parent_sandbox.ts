@@ -18,6 +18,35 @@ const pinnedReadOnly = {
 };
 
 const stagedPlugin = path.resolve("bundled plugin [fixture]");
+const selectedSource = path.resolve("private source [fixture]");
+for (const access of ["read", "write"] as const) {
+  assert.deepEqual(
+    resolveDeepWorkerParentSandbox(
+      restricted([
+        rootRead,
+        { path: { type: "path", path: selectedSource }, access },
+        {
+          path: { type: "path", path: path.dirname(selectedSource) },
+          access: "read",
+        },
+        {
+          path: {
+            type: "path",
+            path: path.join(selectedSource, "config.toml"),
+          },
+          access: "deny",
+        },
+      ]),
+      stagedPlugin,
+      selectedSource,
+    ),
+    {
+      filesystemDenies: [],
+      literalFilesystemDenies: [path.join(selectedSource, "config.toml")],
+      ...(access === "read" ? { sourceReadRoot: selectedSource } : {}),
+    },
+  );
+}
 assert.deepEqual(
   resolveDeepWorkerParentSandbox(
     restricted([

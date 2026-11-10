@@ -401,6 +401,10 @@ test.each(["ready", "denied", "canceled"])(
               "filesystem"
             ] as Record<string, unknown>;
             expect(roots[dirname(profileFile)]).toEqual({ ".": "deny" });
+            if (process.platform === "win32" && operation !== "validation")
+              expect(roots[await realpath(repository)]).toEqual({
+                ".": "read",
+              });
             if (process.platform === "win32" && operation !== "validation") {
               const staged = options.env!["CODEX_SECURITY_PLUGIN_ROOT"]!;
               expect(dirname(staged)).toBe(protectedDirectory!);
@@ -624,6 +628,7 @@ test.each(["directory", "zip"])(
                       ":root": "read",
                       ":workspace_roots": "write",
                       [plugin]: { ".": "read" },
+                      [repository]: { ".": "read" },
                       [environment["CODEX_HOME"]!]: { ".": "deny" },
                     },
                   },
@@ -635,14 +640,25 @@ test.each(["directory", "zip"])(
                   ? join(workspace, "extracted-plugin")
                   : pluginPath,
               );
-              if (movedArchive)
-                expect(
-                  options.configOverrides!.some((entry) =>
-                    entry.startsWith(
-                      "permissions.codex_security_scan.filesystem=",
-                    ),
+              if (movedArchive) {
+                const overrides = options.configOverrides!.find((entry) =>
+                  entry.startsWith(
+                    "permissions.codex_security_scan.filesystem=",
                   ),
-                ).toBe(false);
+                )!;
+                expect(parseToml(overrides)).toEqual({
+                  permissions: {
+                    codex_security_scan: {
+                      filesystem: {
+                        ":root": "read",
+                        ":workspace_roots": "write",
+                        [repository]: { ".": "read" },
+                        [environment["CODEX_HOME"]!]: { ".": "deny" },
+                      },
+                    },
+                  },
+                });
+              }
             }
             const codex = codexFactory(async function () {
               throw new Error("synthetic scan reached");

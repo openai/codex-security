@@ -1,4 +1,9 @@
-import { executablePathForSpawn } from "./executable-path.js";
+import {
+  configuredExecutableValue,
+  executablePathForSpawn,
+  isExplicitPathWithTrailingWhitespace,
+  isExecutableFile,
+} from "./executable-path.js";
 import { retryWindowsRename } from "./retry-windows-rename.js";
 export { executablePathForSpawn } from "./executable-path.js";
 import {
@@ -244,7 +249,11 @@ function environmentValue(
 export function codexSecurityStateDirectory(
   environment: ProcessEnvironment = process.env,
 ): string {
-  const configured = environmentValue(environment, "CODEX_SECURITY_STATE_DIR");
+  const configured = environmentValue(
+    environment,
+    "CODEX_SECURITY_STATE_DIR",
+    process.platform !== "win32",
+  );
   const path =
     configured !== undefined
       ? resolve(expandHome(configured, environment))
@@ -2042,11 +2051,13 @@ export async function runWorkbench(
             )
           : input,
       signal,
-      registrationHandshake,
-      // Frame Python arguments on stdin to preserve NUL and long diagnostics.
-      native
-        ? undefined
-        : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
+      {
+        registrationHandshake,
+        // Frame Python arguments on stdin to preserve NUL and long diagnostics.
+        stdinPrefix: native
+          ? undefined
+          : `${JSON.stringify(arguments_.map((argument) => argument.toWellFormed()))}\n`,
+      },
     );
     if (!result.success) {
       throw new Error(
@@ -3291,15 +3302,12 @@ async function pluginRuntimeProjection(
   }
   const environment = server["env_vars"];
   if (environment !== undefined && !Array.isArray(environment)) return;
-  if (
-    !Array.isArray(environment) ||
-    !environment.includes("CODEX_SECURITY_PLUGIN_ROOT")
-  ) {
-    server["env_vars"] = [
-      ...(Array.isArray(environment) ? environment : []),
-      "CODEX_SECURITY_PLUGIN_ROOT",
-    ];
-  }
+  server["env_vars"] = [
+    ...(environment ?? []),
+    ...["CODEX_SECURITY_PLUGIN_ROOT", "CODEX_SECURITY_REPOSITORY"].filter(
+      (name) => !environment?.includes(name),
+    ),
+  ];
   const files: PluginRuntimeProjection["files"] = new Map();
   server["command"] =
     server["command"] === "./scripts/launch_codex_security_mcp.cmd"
@@ -3334,7 +3342,11 @@ async function pluginRuntimeProjection(
 export function resolveCodexCommand(
   environment: ProcessEnvironment = process.env,
 ): CodexCommand {
-  const configured = environmentValue(environment, "CODEX_CLI_PATH");
+  const configured = configuredExecutableValue(
+    environmentValue(environment, "CODEX_CLI_PATH", true),
+    process.platform,
+    (value) => isExecutableFile(expandHomeForLookup(value, environment)),
+  );
   const expanded =
     configured === undefined
       ? undefined
@@ -3815,13 +3827,26 @@ export async function resolvePluginPython(
       options.signal,
     );
   }
-  const inherited = environmentValue(environment, "PYTHON");
+  const inherited = environmentValue(environment, "PYTHON", true);
   if (inherited) {
+    const roots = isPythonPathCandidate(inherited)
+      ? protectedRoot
+      : discoveryRoots;
+    // Check an explicit literal path with the same repository protections as the launch.
+    const candidate =
+      isExplicitPathWithTrailingWhitespace(inherited, process.platform) &&
+      (await resolveTrustedExecutable(
+        expandHomeForLookup(inherited, environment),
+        environment,
+        roots,
+      ))
+        ? inherited
+        : inherited.trim();
     return await requirePython(
-      inherited,
+      candidate,
       "PYTHON",
       environment,
-      isPythonPathCandidate(inherited) ? protectedRoot : discoveryRoots,
+      roots,
       options.signal,
     );
   }
@@ -3960,8 +3985,15 @@ export async function runCodexCommand(
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
   signal?: AbortSignal,
-  registrationHandshake = false,
-  stdinPrefix?: string,
+  {
+    registrationHandshake = false,
+    stdinPrefix,
+    cwd,
+  }: {
+    registrationHandshake?: boolean;
+    stdinPrefix?: string;
+    cwd?: string;
+  } = {},
 ): Promise<CodexCommandResult> {
   const cancellation = registrationHandshake
     ? new AbortController()
@@ -3972,6 +4004,7 @@ export async function runCodexCommand(
     executablePathForSpawn(command.command),
     [...(command.args ?? []), ...args],
     {
+      cwd,
       env: environment,
       stdio: registrationHandshake
         ? ["pipe", "pipe", "pipe", "pipe"]
@@ -4105,13 +4138,21 @@ async function runPluginCommand(
   signal?: AbortSignal,
 ): Promise<string> {
   try {
-    const { success, exitCode, stdout, stderr } = await runCodexCommand(
-      command,
-      args,
-      environment,
-      undefined,
-      signal,
-    );
+    const run = (argv: readonly string[], cwd?: string) =>
+      runCodexCommand(command, argv, environment, undefined, signal, { cwd });
+    let result = await run(args);
+    const source = args[1] === "marketplace" ? args[3] : undefined;
+    if (
+      result.exitCode === 1 &&
+      source?.includes("#") &&
+      result.stderr
+        .split(/\r?\n/u)
+        .includes("Error: --ref is only supported for git marketplace sources")
+    ) {
+      // Native Codex parsed a literal hash in the local path as a Git ref.
+      result = await run(["plugin", "marketplace", "add", "."], source);
+    }
+    const { success, exitCode, stdout, stderr } = result;
     if (!success) {
       const detail =
         stderr.trim() ||
