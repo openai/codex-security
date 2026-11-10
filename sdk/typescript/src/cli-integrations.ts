@@ -4,307 +4,275 @@ import { dirname, join } from "node:path";
 import { parseArgs, promisify } from "node:util";
 
 const cliName = "codex-security";
-const agent = z
-  .array(z.string().min(1))
-  .optional()
-  .describe("Target a specific agent. Repeat to select more agents.");
-const noGlobal = z
-  .boolean()
-  .optional()
-  .describe("Install to the current project instead of the user profile.");
 const depth = z
   .number()
   .int()
   .nonnegative()
   .optional()
   .describe("Grouping depth for generated skill files (default: 1).");
-const groupOptions = {
-  "mcp add": z.object({
-    agent,
-    command: z
-      .string()
-      .min(1)
-      .optional()
-      .describe("Override the command agents will run."),
-    noGlobal,
-  }),
-  "mcp doctor": z.object({}),
-  "skills add": z.object({ depth, noGlobal }),
-  "skills list": z.object({ depth }),
-};
-const groupDescriptions = {
-  mcp: "Register the read-only info tool or check its server startup and catalog.",
+const noGlobal = z
+  .boolean()
+  .optional()
+  .describe("Install to the current project instead of the user profile.");
+const descriptions = {
   skills:
     "Manage generated CLI command guidance. The Codex Security plugin provides scan and remediation workflows.",
+  mcp: "Register the read-only info tool or check its server startup and catalog.",
 };
-const descriptions: Record<keyof typeof groupOptions, string> = {
-  "mcp add":
-    "Register this CLI’s read-only info tool with an agent. Registers in the user profile by default; Amp supports only user registration.",
-  "mcp doctor":
-    "Check the current CLI's MCP startup and tool catalog. Connect from your client to test its registered launcher.",
-  "skills add":
-    "Install generated CLI command guidance in the user profile or current project.",
-  "skills list":
-    "List generated CLI guidance for one grouping depth. Use the same depth as skills add to check an installation.",
+
+// Node's tokenizer rejects surplus positionals and missing values such as
+// --command --no-global before an installer can consume the scope switch.
+const boolean = { type: "boolean" } as const;
+const string = { type: "string" } as const;
+const formatOptions = {
+  json: boolean,
+  format: string,
+  "full-output": boolean,
+  "filter-output": string,
+  "token-count": boolean,
+  "token-limit": string,
+  "token-offset": string,
 };
 const outputOptions = {
-  help: { type: "boolean", short: "h" },
-  schema: { type: "boolean" },
-  version: { type: "boolean" },
-  llms: { type: "boolean" },
-  "llms-full": { type: "boolean" },
-  json: { type: "boolean" },
-  format: { type: "string" },
-  "full-output": { type: "boolean" },
-  "filter-output": { type: "string" },
-  "token-count": { type: "boolean" },
-  "token-limit": { type: "string" },
-  "token-offset": { type: "string" },
+  ...formatOptions,
+  help: { ...boolean, short: "h" },
+  schema: boolean,
+  version: boolean,
+  llms: boolean,
+  "llms-full": boolean,
+};
+const options = {
+  ...outputOptions,
+  depth: string,
+  "no-global": boolean,
+  command: { ...string, short: "c" },
+  agent: { ...string, multiple: true },
 } as const;
 
-/** Incur's built-in installers precede schema and version dispatch and skip option validation. */
+/** Incur dispatches its built-in writers before schema and version. Serve
+ * ordinary command groups so its normal parser and metadata handling run first. */
 export async function serveIntegration(
   argv: string[],
   cli: Cli.Cli,
   cliOptions: Cli.create.Options,
   output: Cli.serve.Options,
 ): Promise<boolean> {
-  const { description } = cliOptions;
-  if (
+  const manifest =
     (argv.includes("--llms") || argv.includes("--llms-full")) &&
-    !argv.some((arg) => ["--help", "-h", "--version", "--schema"].includes(arg))
-  ) {
-    // Incur renders manifests from registered commands before it dispatches its
-    // built-ins. Register the integration descriptions for this read only.
-    for (const group of ["mcp", "skills"] as const) {
-      const section = Cli.create(group, {
-        description: groupDescriptions[group],
-        aliases: group === "skills" ? ["skill"] : [],
-      });
-      for (const [path, options] of Object.entries(groupOptions)) {
-        const [parent, verb] = path.split(" ");
-        if (parent === group)
-          section.command(verb!, {
-            description: descriptions[path as keyof typeof groupOptions],
-            options,
-            aliases: path === "skills list" ? ["ls"] : [],
-            run: () => undefined,
-          });
-      }
-      cli.command(section);
-    }
-    cli.command("completions", {
-      description: "Generate a shell completion script.",
-      args: z.object({ shell: z.enum(["bash", "fish", "nushell", "zsh"]) }),
-      run: () => undefined,
-    });
-    await cli.serve(
-      argv.filter((arg) => arg !== "--update"),
-      output,
+    !argv.some((arg) =>
+      ["--help", "-h", "--version", "--schema"].includes(arg),
     );
-    return true;
-  }
-  if (!argv.some((arg) => arg === "skills" || arg === "skill" || arg === "mcp"))
+  if (
+    !manifest &&
+    !argv.some((arg) => ["mcp", "skills", "skill"].includes(arg))
+  )
     return false;
-  // Recognize groups in the same position as Incur after removing its output controls.
-  const { positionals } = parseArgs({
+  const words = parseArgs({
     args: argv,
     options: outputOptions,
     strict: false,
     allowPositionals: true,
-  });
-  const [first, second] =
-    positionals[0] === cliName ? positionals.slice(1) : positionals;
-  const group = first === "skill" ? "skills" : first;
-  if (group !== "mcp" && group !== "skills") return false;
-  const verb = group === "skills" && second === "ls" ? "list" : second;
-  const name = `${group} ${verb}`;
-  if (!verb) {
-    const { values } = parseArgs({
-      args: argv,
-      options: outputOptions,
-      allowPositionals: true,
-    });
-    if (values.version && !values.help) await cli.serve(["--version"], output);
-    else {
-      const commands = Object.entries(descriptions)
-        .filter(([path]) => path.startsWith(group + " "))
-        .map(([path, description]) => ({
-          name: path.slice(group.length + 1),
-          description,
-        }));
-      output.stdout?.(
-        Help.formatRoot(`${cliName} ${group}`, {
-          description: groupDescriptions[group],
-          aliases: group === "skills" ? ["skill"] : [],
-          commands,
-        }) + "\n",
-      );
-    }
-    return true;
+  }).positionals;
+  // Incur also accepts its binary name before a built-in command.
+  if (words[0] === cliName) {
+    argv = argv.toSpliced(argv.indexOf(cliName), 1);
+    words.shift();
   }
-  // Preserve the built-in's suggestions without forwarding unrelated action flags.
-  if (!Object.hasOwn(groupOptions, name)) {
-    await cli.serve([group, verb, "--help"], output);
-    return true;
-  }
-  const path = name as keyof typeof groupOptions;
-  const {
-    values,
-    positionals: actual,
-    tokens,
-  } = parseArgs({
+  const group = words[0] === "skill" ? "skills" : words[0];
+  if (!manifest && group !== "mcp" && group !== "skills") return false;
+  const { tokens, positionals, values } = parseArgs({
     args: argv,
+    options,
     allowPositionals: true,
     tokens: true,
-    options: {
-      ...outputOptions,
-      ...(verb === "add" ? { "no-global": { type: "boolean" as const } } : {}),
-      ...(group === "skills" ? { depth: { type: "string" as const } } : {}),
-      ...(path === "mcp add"
-        ? {
-            agent: { type: "string" as const, multiple: true },
-            command: { type: "string" as const, short: "c" },
-          }
-        : {}),
-    },
+    strict: group === "mcp" || group === "skills",
   });
-  if (actual.length !== (actual[0] === cliName ? 3 : 2))
-    throw new Error(`Unexpected positional argument for ${name}.`);
-  if (values.help) {
+  const plain = !Object.keys(formatOptions).some((key) =>
+    Object.hasOwn(values, key),
+  );
+  const full = values["full-output"];
+  const commands = Cli.toCommands.get(cli)!;
+  const config = {
+    sync: false,
+    update: false,
+    version: cliOptions.version,
+  } as const;
+  const prefix = manifest ? "" : cliName + " ";
+  async function builtin(args: string[]) {
+    let text = "";
+    await cli.serve(args, {
+      ...output,
+      stdout: (chunk) => {
+        text += chunk;
+      },
+    });
+    return text.trimEnd();
+  }
+
+  const skills = Cli.create(prefix + "skills", {
+    ...config,
+    description: descriptions.skills,
+    aliases: ["skill"],
+  })
+    .command("add", {
+      description:
+        "Install generated CLI command guidance in the user profile or current project.",
+      options: z.object({ depth, noGlobal }),
+      async run({ options: { depth, noGlobal } }) {
+        if (plain)
+          return builtin([
+            "skills",
+            "add",
+            ...(noGlobal ? ["--no-global"] : []),
+            ...(depth === undefined ? [] : ["--depth", String(depth)]),
+          ]);
+        const result = await SyncSkills.sync(cliName, commands, {
+          depth,
+          global: !noGlobal,
+          description: cliOptions.description,
+        });
+        return {
+          skills: result.paths,
+          ...(full ? { agents: result.agents } : {}),
+        };
+      },
+    })
+    .command("list", {
+      aliases: ["ls"],
+      description:
+        "List generated CLI guidance for one grouping depth. Use the same depth as skills add to check an installation.",
+      options: z.object({ depth }),
+      async run({ options: { depth } }) {
+        if (plain) {
+          cliOptions.sync = { ...(cliOptions.sync || {}), depth };
+          return `Skill grouping depth: ${depth ?? 1}\n${await builtin(["skills", "list"])}`;
+        }
+        return SyncSkills.list(cliName, commands, {
+          depth,
+          description: cliOptions.description,
+        });
+      },
+    });
+  const mcp = Cli.create(prefix + "mcp", {
+    ...config,
+    description: descriptions.mcp,
+  })
+    .command("doctor", {
+      description:
+        "Check the current CLI's MCP startup and tool catalog. Connect from your client to test its registered launcher.",
+      run: async () => JSON.parse(await builtin(["mcp", "doctor", "--json"])),
+    })
+    .command("add", {
+      description:
+        "Register this CLI’s read-only info tool with an agent. Registers in the user profile by default; Amp supports only user registration.",
+      options: z.object({
+        agent: z
+          .array(z.string().min(1))
+          .optional()
+          .describe("Target a specific agent. Repeat to select more agents."),
+        command: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Override the command agents will run."),
+        noGlobal,
+      }),
+      alias: { command: "c" },
+      async run({ options }) {
+        const agents = [...new Set(options.agent)];
+        if (options.noGlobal && agents.includes("amp"))
+          throw new Error(
+            "The MCP installer can register Amp only in the user profile. For a project installation, select a project-capable client with --no-global --agent NAME.",
+          );
+        const launch = options.command ?? cliOptions.mcp!.command!;
+        const result =
+          options.noGlobal && !agents.length
+            ? await registerProjectMcp(launch)
+            : await SyncMcp.register(cliName, {
+                agents,
+                command: launch,
+                global: !options.noGlobal,
+              });
+        if (agents.includes("amp") && !result.agents.includes("Amp"))
+          throw new Error(
+            "The Amp settings file could not be updated. Check its JSON and retry.",
+          );
+        if (plain)
+          return [
+            `✓ Registered ${cliName} as MCP server`,
+            ...(result.agents.length
+              ? [`  Agents: ${result.agents.join(", ")}`]
+              : []),
+          ].join("\n");
+        return { name: cliName, ...result };
+      },
+    });
+  if (manifest) {
+    cli
+      .command(skills)
+      .command(mcp)
+      .command("completions", {
+        description: "Generate a shell completion script.",
+        args: z.object({ shell: z.enum(["bash", "fish", "nushell", "zsh"]) }),
+        run: () => undefined,
+      });
+    // Put the mode first so a missing format/filter operand cannot consume it
+    // and fall through to a command handler.
+    const flag = argv.includes("--llms-full") ? "--llms-full" : "--llms";
+    await cli.serve(
+      [
+        flag,
+        ...argv.filter(
+          (arg) => !["--llms", "--llms-full", "--update"].includes(arg),
+        ),
+      ],
+      output,
+    );
+    return true;
+  }
+  if (group !== "mcp" && group !== "skills") return false;
+  const section = group === "mcp" ? mcp : skills;
+  const [, verb, ...extra] = positionals;
+  if (extra.length)
+    throw new Error(`Unexpected positional argument for ${group} ${verb}.`);
+  if (!verb && !values.version) {
+    const invalid = tokens.find(
+      (token) =>
+        token.kind === "option" && !Object.hasOwn(outputOptions, token.name),
+    );
+    if (invalid?.kind === "option")
+      throw new Error(`Unknown option for ${group}: ${invalid.rawName}`);
+    const children = Array.from(Cli.toCommands.get(section)!).flatMap(
+      ([name, entry]) =>
+        "description" in entry
+          ? [{ name, description: entry.description }]
+          : [],
+    );
     output.stdout?.(
-      Help.formatCommand(`${cliName} ${path}`, {
-        description: descriptions[path],
-        options: Object.keys(groupOptions[path].shape).length
-          ? groupOptions[path]
-          : undefined,
-        alias: path === "mcp add" ? { command: "c" } : undefined,
-        aliases: path === "skills list" ? ["ls"] : undefined,
-        hideGlobalOptions: true,
+      Help.formatRoot(`${cliName} ${group}`, {
+        aliases: section === skills ? ["skill"] : [],
+        description: descriptions[group],
+        commands: children,
       }) + "\n",
     );
     return true;
   }
-  if (values.version) {
-    await cli.serve(["--version"], output);
+  if (verb && !Cli.toCommands.get(section)!.has(verb)) {
+    await cli.serve([group, verb, "--help"], output);
     return true;
   }
-  // Let the ordinary formatter validate all output options before invoking a writer.
-  const formatArgs = tokens.flatMap((token) =>
-    token.kind === "option" &&
-    Object.hasOwn(outputOptions, token.name) &&
-    !["schema", "llms", "llms-full"].includes(token.name)
-      ? [
-          `--${token.name}`,
-          ...(typeof token.value === "string" ? [token.value] : []),
-        ]
-      : [],
-  );
-  if (values.schema) {
-    const schema = {
-      options: z.toJSONSchema(groupOptions[path], { io: "input" }),
-    };
-    await Cli.create(`${cliName} ${group}`, { sync: false, update: false })
-      .command(verb!, { run: () => schema })
-      .serve([verb!, ...formatArgs], output);
-    return true;
+  // The public flag names a scope directly. Incur reserves --no-* for
+  // negation; pass its schema's field name after Node tokenizes the CLI flag.
+  const args = argv.slice();
+  const groupToken = tokens.find((token) => token.kind === "positional")!;
+  for (const token of tokens) {
+    if (token.kind !== "option") continue;
+    if (token.name === "depth" && !token.value?.trim())
+      throw new Error("--depth requires a nonnegative integer.");
+    if (token.name === "no-global") args[token.index] = "--noGlobal";
   }
-
-  const local = groupOptions[path].parse({
-    ...(values.agent === undefined ? {} : { agent: values.agent }),
-    ...(values.command === undefined ? {} : { command: values.command }),
-    ...(values.depth === undefined
-      ? {}
-      : {
-          depth:
-            typeof values.depth === "string" && values.depth.trim()
-              ? Number(values.depth)
-              : NaN,
-        }),
-    ...(values["no-global"] === undefined
-      ? {}
-      : { noGlobal: values["no-global"] }),
-  });
-  if (path === "mcp doctor") {
-    await cli.serve([group, verb!, ...formatArgs], output);
-    return true;
-  }
-
-  const commands = Cli.toCommands.get(cli)!;
-  const groupingDepth = "depth" in local ? local.depth : undefined;
-  const project = "noGlobal" in local && local.noGlobal === true;
-  const targets =
-    "agent" in local && local.agent ? [...new Set(local.agent)] : undefined;
-  if (path === "mcp add" && project && targets?.includes("amp")) {
-    throw new Error(
-      "The MCP installer can register Amp only in the user profile. For a project installation, select a project-capable client with --no-global --agent NAME.",
-    );
-  }
-  const defaultProjectInstall =
-    path === "mcp add" && project && !targets?.length;
-  if (formatArgs.length === 0 && path !== "mcp add") {
-    // Preserve the native terminal presentation. Rebuild options from parsed
-    // values because the native installer does not understand every equals form.
-    const nativeArgs = [group, verb!];
-    if (project) nativeArgs.push("--no-global");
-    if (path === "skills list") {
-      output.stdout?.(`Skill grouping depth: ${groupingDepth ?? 1}\n`);
-      if (groupingDepth !== undefined)
-        cliOptions.sync = { ...(cliOptions.sync || {}), depth: groupingDepth };
-    } else if (groupingDepth !== undefined) {
-      nativeArgs.push("--depth", String(groupingDepth));
-    }
-    await cli.serve(nativeArgs, output);
-    return true;
-  }
-
-  const render = Cli.create(`${cliName} ${group}`, {
-    update: false,
-    sync: false,
-  }).command(verb!, {
-    async run() {
-      if (path === "skills list")
-        return SyncSkills.list(cliName, commands, {
-          description,
-          depth: groupingDepth,
-        });
-      if (path === "skills add") {
-        const result = await SyncSkills.sync(cliName, commands, {
-          global: !project,
-          depth: groupingDepth,
-          description,
-        });
-        return {
-          skills: result.paths,
-          ...(values["full-output"] ? { agents: result.agents } : {}),
-        };
-      }
-      const command =
-        ("command" in local ? local.command : undefined) ??
-        cliOptions.mcp!.command!;
-      const result = defaultProjectInstall
-        ? await registerProjectMcp(command)
-        : await SyncMcp.register(cliName, {
-            agents: targets,
-            command,
-            global: !project,
-          });
-      if (targets?.includes("amp") && !result.agents.includes("Amp"))
-        throw new Error(
-          "The Amp settings file could not be updated. Check its JSON and retry.",
-        );
-
-      if (formatArgs.length === 0)
-        return [
-          `✓ Registered ${cliName} as MCP server`,
-          ...(result.agents.length
-            ? [`  Agents: ${result.agents.join(", ")}`]
-            : []),
-        ].join("\n");
-      return { name: cliName, ...result };
-    },
-  });
-  await render.serve([verb!, ...formatArgs], output);
+  args.splice(groupToken.index, 1);
+  await section.serve(args, output);
   return true;
 }
 

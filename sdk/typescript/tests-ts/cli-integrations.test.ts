@@ -40,6 +40,23 @@ describe("integration command dispatch", () => {
     },
     { args: ["skill", "add", "--version"], mode: "version" },
     { args: ["mcp", "--version"], mode: "version" },
+    {
+      args: [
+        "--json",
+        "codex-security",
+        "mcp",
+        "add",
+        "--agent=amp",
+        "--schema",
+      ],
+      mode: "schema",
+    },
+    { args: ["mcp", "add", "--command", "--no-global"], mode: "error" },
+    { args: ["skills", "add", "surplus"], mode: "error" },
+    {
+      args: ["mcp", "add", "--agent=amp", "--filter-output", "--llms"],
+      mode: "error",
+    },
     { args: ["skills", "--deph"], mode: "error" },
     { args: ["mcp", "add", "--agent", "amp", "--version"], mode: "version" },
     { args: ["skills", "add", "--no-glboal"], mode: "error" },
