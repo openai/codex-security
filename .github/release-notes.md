@@ -49,6 +49,7 @@
 - preserve long Git metadata in reviewed patch replay ([#2543](https://github.com/openai/codex-security/pull/2543))
 - reuse verified generated plugin cache content ([#2538](https://github.com/openai/codex-security/pull/2538))
 - use UTF-8 for workbench responses and diagnostics ([#2566](https://github.com/openai/codex-security/pull/2566))
+- report local failures from mock scans ([#2567](https://github.com/openai/codex-security/pull/2567))
 
 </details>
 
