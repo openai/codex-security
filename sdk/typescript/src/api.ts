@@ -7037,7 +7037,7 @@ function environmentApiKeyEntry(
 
 function reconnectAttempt(message: string): [number, number] | null {
   const match =
-    /^Reconnecting(?:\.\.\.|â€¦)[ \t]+([1-9]\d{0,2})\/([1-9]\d{0,2})(?=[ \t(]|$)/u.exec(
+    /^Reconnecting(?:\.\.\.|…)[ \t]+([1-9]\d{0,2})\/([1-9]\d{0,2})(?=[ \t(]|$)/u.exec(
       message,
     );
   if (match === null) return null;
