@@ -22,14 +22,18 @@ export { parseDeepScan } from "./response.js";`,
   },
 });
 
-export const verifyBoundCodexExecutable: (executable: {
-  path: string;
-  identity: import("node:fs").BigIntStats;
-  sha256?: string;
-}) => Promise<void> = executor.verifyBoundCodexExecutable;
+export const verifyBoundCodexExecutable: (
+  executable: {
+    path: string;
+    identity: import("node:fs").BigIntStats;
+    sha256?: string;
+  },
+  signal?: AbortSignal,
+) => Promise<void> = executor.verifyBoundCodexExecutable;
 
 export const bindCodexExecutable: (
   environment: NodeJS.ProcessEnv,
   cwd: string,
+  signal?: AbortSignal,
 ) => Promise<Parameters<typeof verifyBoundCodexExecutable>[0]> =
   executor.bindCodexExecutable;
