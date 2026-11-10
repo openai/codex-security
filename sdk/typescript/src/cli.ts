@@ -117,7 +117,7 @@ import {
   formatDeepScanReviews,
   type DeepScanProgress,
 } from "./scan-progress.js";
-import { isRecord as isJsonObject } from "./record.js";
+import { asRecord, isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
@@ -2522,7 +2522,8 @@ export async function main(
       const message = errorMessage(outcome.error);
       if (!argv.includes("--full-output")) {
         const data = { status: "failed", code, message };
-        if (frameworkFlags.filterOutput) filteredScanFailure = { format, data };
+        if (frameworkFlags.filters.length)
+          filteredScanFailure = { format, data };
         return data;
       }
       // Incur would wrap returned data in an ok: true envelope.
@@ -4333,7 +4334,7 @@ export async function main(
             if (
               machineFormat &&
               (!argv.includes("--full-output") || selection !== undefined) &&
-              frameworkFlags.filterOutput
+              frameworkFlags.filters.length
             )
               filteredScanFailure = { format, data: failure };
             return structured ? failure : undefined;
@@ -7543,20 +7544,10 @@ export async function main(
 
   function validateCliArguments(): string | undefined {
     if (argv.includes("--help") || argv.includes("-h")) return undefined;
-    if (malformedFilter)
+    if (frameworkFlags.malformedFilter)
       return "--filter-output requires matching brackets for array slices.";
     if (command === undefined || !commands.has(command)) return undefined;
-    const structuredOutput = argv.some(
-      (value, index) =>
-        value === "--json" ||
-        ((value === "--format" ||
-          value === "--format=json" ||
-          value === "--format=jsonl") &&
-          (value.endsWith("=json") ||
-            value.endsWith("=jsonl") ||
-            argv[index + 1] === "json" ||
-            argv[index + 1] === "jsonl")),
-    );
+    const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
       ["validate", "login", "logout"].includes(command) &&
@@ -7590,21 +7581,10 @@ export async function main(
       }
     }
     if (command === "scan" && !argv.includes("--schema")) {
-      if (
-        argv.some(
-          (value) =>
-            value === "--filter-output" || value.startsWith("--filter-output="),
-        )
-      ) {
+      if (frameworkFlags.filters.length) {
         return "--filter-output is not supported for scan results.";
       }
-      if (
-        argv.some(
-          (value, index) =>
-            value === "--format=md" ||
-            (value === "--format" && argv[index + 1] === "md"),
-        )
-      ) {
+      if (frameworkFlags.formats.includes("md")) {
         return "Markdown output is not supported for scan results.";
       }
     }
@@ -7624,26 +7604,14 @@ export async function main(
       cliOptions.sync = false;
     }
     if (command === "info") {
-      for (let index = 0; index < argv.length; index += 1) {
-        const argument = argv[index]!;
-        if (
-          argument !== "--filter-output" &&
-          !argument.startsWith("--filter-output=")
-        ) {
-          continue;
-        }
-        const selector = argument.includes("=")
-          ? argument.slice(argument.indexOf("=") + 1)
-          : argv[index + 1];
-        if (
-          selector !== undefined &&
-          !selector.split(/,(?!\d+\])/u).every((field) => {
-            const match = /^([\w-]+)(?:\.[\w-]+|\[\d+,\d+\])*$/u.exec(field);
-            return match !== null && Object.hasOwn(infoOutput.shape, match[1]!);
-          })
-        ) {
+      for (const selector of frameworkFlags.filters) {
+        if (selector === undefined) continue;
+        const valid = selector.split(/,(?!\d+\])/u).every((field) => {
+          const match = /^([\w-]+)(?:\.[\w-]+|\[\d+,\d+\])*$/u.exec(field);
+          return match !== null && Object.hasOwn(infoOutput.shape, match[1]!);
+        });
+        if (!valid)
           return "--filter-output must select an info metadata field.";
-        }
       }
     }
     for (
@@ -7701,70 +7669,26 @@ export async function main(
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
     }
   }
-  const firstImportOption = scanImport ? commandIndex + 2 : argv.length;
-  const frameworkArgv: string[] = [];
-  let malformedFilter = false;
-  for (let index = 0; index < argv.length; index++) {
-    const argument = argv[index]!;
-    const next = argv[index + 1];
-    const separator = argument.indexOf("=");
-    if (
-      argument === "--filter-output" ||
-      argument.startsWith("--filter-output=")
-    ) {
-      const selector = separator < 0 ? next : argument.slice(separator + 1);
-      // Incur's filter parser cannot advance past an unterminated array slice.
-      if (
-        selector !== undefined &&
-        !/^(?:[^\[\]]|\[[^\[\]]*\])*$/u.test(selector)
-      ) {
-        malformedFilter = true;
-        if (separator < 0) index++;
-        continue;
-      }
-    }
-    if (
-      index >= firstImportOption &&
-      argument === "--json" &&
-      next !== undefined &&
-      !next.startsWith("--") &&
-      next !== "-h"
-    ) {
-      // Incur reserves bare --json for output, but parses --json=FILE normally.
-      frameworkArgv.push(`--json=${next}`);
-      index++;
-    } else if (
-      separator >= 0 &&
-      FRAMEWORK_VALUE_OPTIONS.has(argument.slice(0, separator))
-    ) {
-      frameworkArgv.push(
-        argument.slice(0, separator),
-        argument.slice(separator + 1),
-      );
-    } else {
-      frameworkArgv.push(argument);
-    }
-  }
-  const frameworkFlags = frameworkOutputFlags(frameworkArgv);
-  const policyFullOutput =
-    command === "policy" && argv.includes("--full-output");
+  const frameworkFlags = parseFrameworkArguments(
+    argv,
+    scanImport ? commandIndex + 2 : argv.length,
+  );
+  const frameworkArgv = frameworkFlags.args;
+  const { jsonFormat } = frameworkFlags;
+  const policyFullOutput = command === "policy" && frameworkFlags.fullOutput;
   const scanErrorFormat =
-    command === "scan" &&
-    !scanImport &&
-    frameworkFlags.fullOutput &&
-    (frameworkFlags.format === "json" || frameworkFlags.format === "jsonl")
-      ? frameworkFlags.format
+    command === "scan" && !scanImport && frameworkFlags.fullOutput
+      ? jsonFormat
       : undefined;
-  const argumentFailure = (message: string) => {
-    const error = { code: "SCAN_FAILED", message };
-    return (
-      JSON.stringify(
-        { ok: false, error, meta: { command: "scan" } },
-        null,
-        scanErrorFormat === "json" ? 2 : undefined,
-      ) + "\n"
-    );
-  };
+  const argumentFailure = (message: string) =>
+    Formatter.format(
+      {
+        ok: false,
+        error: { code: "SCAN_FAILED", message },
+        meta: { command: "scan" },
+      },
+      scanErrorFormat,
+    ) + "\n";
   const argumentError = validateCliArguments();
   if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
@@ -7933,31 +7857,19 @@ export async function main(
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
-      const jsonFormat =
-        frameworkFlags.format === "json" || frameworkFlags.format === "jsonl";
       const envelope = jsonFormat
         ? parseJson(() => frameworkOutput)
         : undefined;
+      const record = asRecord(envelope);
       const error =
-        isJsonObject(envelope) && envelope["ok"] === false
-          ? envelope["error"]
-          : envelope;
-      const validationError =
-        isJsonObject(error) && error["code"] === "VALIDATION_ERROR"
-          ? error
-          : undefined;
-      if (!scanErrorFormat && !validationError) {
-        // Other framework failures already have a stderr format used by callers.
-        errorOutput.write(
-          `codex-security: ${diagnosticLines(await incurErrorMessage(frameworkOutput))}\n`,
-        );
-        return 2;
-      }
+        record?.["ok"] === false ? asRecord(record["error"]) : record;
+      const validationError = error?.["code"] === "VALIDATION_ERROR";
+      const structuredFailure = Boolean(scanErrorFormat || validationError);
       let message =
-        isJsonObject(error) && typeof error["message"] === "string"
+        structuredFailure && typeof error?.["message"] === "string"
           ? error["message"]
           : await incurErrorMessage(frameworkOutput);
-      if (validationError && Array.isArray(validationError["fieldErrors"])) {
+      if (validationError && Array.isArray(error["fieldErrors"])) {
         const entry = command ? commands.get(command) : undefined;
         const leaf =
           entry && "_group" in entry
@@ -7965,7 +7877,7 @@ export async function main(
             : entry;
         const options =
           leaf && "options" in leaf ? leaf.options?.shape : undefined;
-        const messages = validationError["fieldErrors"].map((field) => {
+        const messages = error["fieldErrors"].map((field) => {
           if (!isJsonObject(field) || typeof field["path"] !== "string")
             return message;
           const detail =
@@ -7982,21 +7894,17 @@ export async function main(
           return detail;
         });
         message = messages.join("\n");
-        validationError["message"] = message;
-        frameworkOutput =
-          JSON.stringify(
-            envelope,
-            null,
-            frameworkFlags.format === "json" ? 2 : undefined,
-          ) + "\n";
+        error["message"] = message;
+        frameworkOutput = Formatter.format(envelope, jsonFormat) + "\n";
       }
       errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
+      if (!structuredFailure) return 2;
       exitCode = 2;
       // Errors in built-in flags precede Incur's format selection. Its other
       // parse errors already carry the requested envelope or token view.
       if (
         scanErrorFormat &&
-        !(isJsonObject(envelope) && envelope["ok"] === false) &&
+        record?.["ok"] !== false &&
         !(
           typeof envelope === "number" &&
           frameworkFlags.tokenArguments.includes("--token-count")
@@ -8389,39 +8297,84 @@ function describeCommandInputs(
   }
 }
 
-function frameworkOutputFlags(argv: readonly string[]) {
-  let fullOutput = false;
-  let format: string | undefined;
+function isJsonFormat(format: string | undefined): format is "json" | "jsonl" {
+  return format === "json" || format === "jsonl";
+}
+
+function parseFrameworkArguments(
+  argv: readonly string[],
+  firstImportOption: number,
+) {
+  const args: string[] = [];
+  const formats: string[] = [];
+  const filters: (string | undefined)[] = [];
   const tokenArguments: string[] = [];
-  let filterOutput = false;
+  let fullOutput = false;
+  let malformedFilter = false;
   for (let index = 0; index < argv.length; index++) {
-    const value = argv[index]!;
-    if (value === "--full-output") fullOutput = true;
-    if (value === "--json") format = "json";
-    if (value === "--token-count") tokenArguments.push(value);
-    if (FRAMEWORK_VALUE_OPTIONS.has(value)) {
-      const next = argv[index + 1];
-      // A missing operand must not consume a later output flag when reporting
-      // the argument error (for example --token-limit --json --full-output).
-      const operand = next?.startsWith("--") ? undefined : next;
-      if (operand !== undefined) index++;
-      if (value === "--filter-output") filterOutput = true;
-      if (
-        (value === "--token-limit" || value === "--token-offset") &&
-        operand !== undefined
-      )
-        tokenArguments.push(value, operand);
-      if (value === "--format") format = operand;
+    const argument = argv[index]!;
+    const next = argv[index + 1];
+    if (
+      index >= firstImportOption &&
+      argument === "--json" &&
+      next !== undefined &&
+      !next.startsWith("--") &&
+      next !== "-h"
+    ) {
+      // Incur accepts the import's JSON input in the equals form.
+      args.push(`--json=${next}`);
+      index++;
+      continue;
     }
+    const equals = argument.indexOf("=");
+    const flag = equals < 0 ? argument : argument.slice(0, equals);
+    if (!FRAMEWORK_VALUE_OPTIONS.has(flag)) {
+      args.push(argument);
+      if (argument === "--json") formats.push("json");
+      if (argument === "--full-output") fullOutput = true;
+      if (argument === "--token-count") tokenArguments.push(argument);
+      continue;
+    }
+    // Leave a following flag available when the option is missing its operand.
+    const operand =
+      equals >= 0
+        ? argument.slice(equals + 1)
+        : next?.startsWith("--")
+          ? undefined
+          : next;
+    if (equals < 0 && operand !== undefined) index++;
+    if (flag === "--filter-output") {
+      filters.push(operand);
+      // Incur cannot advance past an unterminated array slice.
+      if (
+        operand !== undefined &&
+        !/^(?:[^\[\]]|\[[^\[\]]*\])*$/u.test(operand)
+      ) {
+        malformedFilter = true;
+        continue;
+      }
+    }
+    args.push(flag);
+    if (operand !== undefined) args.push(operand);
+    if (flag === "--format" && operand) formats.push(operand);
+    if (
+      (flag === "--token-limit" || flag === "--token-offset") &&
+      operand !== undefined
+    )
+      tokenArguments.push(flag, operand);
   }
+  const format = formats.at(-1);
+  const jsonFormat = isJsonFormat(format) ? format : undefined;
   return {
-    format,
+    args,
+    formats,
+    jsonFormat,
     fullOutput,
-    rawStructuredOutput:
-      !fullOutput &&
-      (format === "json" || format === "jsonl" || format === "yaml"),
-    filterOutput,
+    malformedFilter,
+    filters,
     tokenArguments,
+    rawStructuredOutput:
+      !fullOutput && (jsonFormat !== undefined || format === "yaml"),
   };
 }
 

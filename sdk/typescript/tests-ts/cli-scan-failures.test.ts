@@ -502,6 +502,8 @@ test("scan discovery accepts caller inputs and validates the reported result var
 
 test.each([
   { args: ["--max-cost"] },
+  { args: ["--format"] },
+  { args: ["--format", "--json"] },
   { args: ["--token-limit", "--json"] },
   { args: ["--max-cost", "invalid"] },
   { args: ["--path", "src", "--diff", "HEAD"] },
