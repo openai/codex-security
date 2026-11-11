@@ -839,8 +839,15 @@ export async function gitHistoryIdentity(
   repository: string,
   git: TrustedExecutable,
   signal?: AbortSignal,
-): Promise<{ commonDirectory: string | null; origin: string | null }> {
-  const read = async (args: readonly string[]): Promise<string | null> => {
+): Promise<{
+  commonDirectory: string | null;
+  origin: string | null;
+  relativePath: string | null;
+}> {
+  const read = async (
+    args: readonly string[],
+    allowEmpty = false,
+  ): Promise<string | null> => {
     try {
       const { stdout } = await execFile(
         git.executable,
@@ -852,20 +859,22 @@ export async function gitHistoryIdentity(
           maxBuffer: Infinity,
         },
       );
-      return (
-        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
-        null
+      const value = stdout.replace(
+        process.platform === "win32" ? /\r?\n$/u : /\n$/u,
+        "",
       );
+      return value || (allowEmpty ? "" : null);
     } catch {
       throwIfAborted(signal);
       return null;
     }
   };
-  const [commonDirectory, origin] = await Promise.all([
+  const [commonDirectory, origin, relativePath] = await Promise.all([
     read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     read(["remote", "get-url", "origin"]),
+    read(["rev-parse", "--show-prefix"], true),
   ]);
-  return { commonDirectory, origin };
+  return { commonDirectory, origin, relativePath };
 }
 
 /** Resolve Git and its sanitized executable search path for a single selected checkout. */
@@ -966,6 +975,17 @@ export async function gitOutput(
   );
 }
 
+/** Bound repository-supplied document links to the selected checkout or directory. */
+export async function documentSourceRoot(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (
+    (await gitMarkerRoot(repository, signal, "nearest")) ??
+    (await realpath(repository))
+  );
+}
+
 export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
@@ -986,7 +1006,7 @@ export async function gitMarkerRoot(
       const code = (error as NodeJS.ErrnoException).code;
       if (
         search !== "outermost" ||
-        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(code ?? "")
       )
         throw error;
       const parent = dirname(candidate);
@@ -1027,7 +1047,8 @@ async function walkGitMarkers(
       if (
         code !== "ENOENT" &&
         code !== "ENOTDIR" &&
-        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+        (search !== "outermost" ||
+          !["EACCES", "EPERM", "ELOOP"].includes(code ?? ""))
       )
         throw error;
     }

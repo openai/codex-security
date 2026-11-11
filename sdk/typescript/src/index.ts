@@ -232,9 +232,17 @@ export type {
 } from "./external-findings-publish.js";
 export {
   prepareNormalizedLocalImport,
+  listLocalExternalImports,
   listLocalExternalFindings,
+  listLocalFindingPublications,
+  selectLocalExternalFindings,
 } from "./external-findings-local.js";
 export type {
+  ExternalFindingProvenance,
+  LocalExternalFindingSelection,
+  SelectedLocalExternalFindings,
+  StoredExternalImport,
+  StoredFindingPublication,
   StoredExternalFinding,
   NormalizedLocalImportOptions,
   LocalExternalImportDependencies,
@@ -370,6 +378,11 @@ export {
   prepareLocalExternalImport,
   type LocalExternalImportOptions,
 } from "./external-findings-import.js";
+export {
+  prepareStoredFindingsPublication,
+  type StoredFindingsPublication,
+  type StoredFindingsPublicationGroup,
+} from "./stored-findings-publication.js";
 export { readTenableFindings } from "./tenable-findings.js";
 export {
   normalizeOpenGrepFindings,

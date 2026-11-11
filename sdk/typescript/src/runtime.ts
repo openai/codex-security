@@ -218,6 +218,10 @@ export interface PluginPythonOptions {
   homeDirectory?: string;
   managedRuntimeRoots?: readonly string[];
   protectedRoot?: string | readonly string[];
+  /** @internal Additional roots excluded only from ambient interpreter discovery. */
+  discoveryProtectedRoots?: readonly string[];
+  /** @internal Ambient PATH lookup requires a known boundary for saved Git targets. */
+  allowPathLookup?: boolean;
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -2024,7 +2028,10 @@ export async function runWorkbench(
         "store-findings",
         "list-stored-findings",
         "store-external-findings",
-        "list-external-findings",
+        "read-external-findings",
+        "list-external-imports",
+        "record-external-finding-publications",
+        "list-external-finding-publications",
         "find-potential-duplicates",
         "store-dedupe-groups",
         "list-dedupe-groups",
@@ -2126,7 +2133,23 @@ export async function runWorkbench(
       (process.platform === "win32" ||
         (args.includes("--archive-existing") &&
           !args.includes("--archived-scan-dir")));
-    stdout = await run(args, input, registrationHandshake);
+    try {
+      stdout = await run(args, input, registrationHandshake);
+    } catch (error) {
+      const focusedIndex = args.indexOf("--after-scan-id");
+      if (
+        args[0] !== "list-unmatched-scan-pairs" ||
+        focusedIndex === -1 ||
+        !/unrecognized arguments: --after-scan-id(?:\s+\S+)?$/u.test(
+          processErrorDetail(error),
+        )
+      )
+        throw error;
+      options.signal?.throwIfAborted();
+      const legacyArgs = [...args];
+      legacyArgs.splice(focusedIndex, 2);
+      stdout = await run(legacyArgs, input, registrationHandshake);
+    }
   } catch (error) {
     if (options.signal?.aborted) throw error;
     const detail = processErrorDetail(error);
@@ -4063,7 +4086,10 @@ export async function resolvePluginPython(
   }
   // Named interpreters are ambient PATH discovery, even when PYTHON names one.
   // Explicit trusted paths and managed runtimes retain their existing precedence.
-  const discoveryRoots = [...protectedRoot];
+  const discoveryRoots = [
+    ...protectedRoot,
+    ...(options.discoveryProtectedRoots ?? []),
+  ];
   for (const directory of callerDirectories) {
     const physical =
       directory === cwd
@@ -4078,7 +4104,14 @@ export async function resolvePluginPython(
     )
       discoveryRoots.push(directory);
   }
+  const missingBoundaryMessage =
+    "Could not establish the saved checkout boundary for Python discovery. Set PYTHON to an absolute trusted interpreter.";
   if (options.configuredPath !== undefined) {
+    if (
+      !isPythonPathCandidate(options.configuredPath) &&
+      options.allowPathLookup === false
+    )
+      throw new PluginPythonUnavailableError(missingBoundaryMessage);
     return await requirePython(
       options.configuredPath,
       "configured plugin Python",
@@ -4091,6 +4124,8 @@ export async function resolvePluginPython(
   }
   const inherited = environmentValue(environment, "PYTHON", true);
   if (inherited) {
+    if (!isPythonPathCandidate(inherited) && options.allowPathLookup === false)
+      throw new PluginPythonUnavailableError(missingBoundaryMessage);
     const roots = isPythonPathCandidate(inherited)
       ? protectedRoot
       : discoveryRoots;
@@ -4154,6 +4189,8 @@ export async function resolvePluginPython(
     }
   }
 
+  if (options.allowPathLookup === false)
+    throw new PluginPythonUnavailableError(missingBoundaryMessage);
   for (const candidate of process.platform === "win32"
     ? ["python", "python3", "py"]
     : ["python3", "python"]) {

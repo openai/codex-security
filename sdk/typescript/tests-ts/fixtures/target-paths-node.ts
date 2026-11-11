@@ -14,15 +14,14 @@ import {
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { TestClient } from "../support/api-client.js";
-import type { JsonObject } from "../../src/config.js";
 import { main } from "../../src/cli.js";
 import { runComponentScans } from "../../src/component-scan.js";
-import { runWorkbench } from "../../src/runtime.js";
+import { resolvePluginPython, runWorkbench } from "../../src/runtime.js";
 import { runArtifactExport } from "../../src/artifact-export.js";
 import { prepareNormalizedLocalImport } from "../../src/external-findings-local.js";
 import { dependencies, fakeResult } from "../cli-fixtures.js";
 import { createCliTest } from "../support/cli-run.js";
-import { copyCompletedScan } from "../plugin-root.js";
+import { copyCompletedScan, PLUGIN_ROOT } from "../plugin-root.js";
 
 const root = process.argv[2]!;
 const entry = join(root, "entry");
@@ -290,44 +289,83 @@ try {
   }
   await mkdir(sibling, { mode: 0o700 });
   const savedAlias = join(root, "owner", "alias");
+  const historyState = join(root, "history-state");
+  await mkdir(historyState);
+  const historyPython = await resolvePluginPython();
+  execFileSync(
+    historyPython,
+    [
+      "-c",
+      String.raw`
+import sqlite3, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import workbench_db as workbench
+from filesystem_identity import serialize_filesystem_identity
+state, sibling, physical = map(Path, sys.argv[2:5])
+with sqlite3.connect(state / "workbench.sqlite3") as connection:
+    connection.row_factory = sqlite3.Row
+    workbench.apply_migrations(connection)
+    def insert(table, **values):
+        connection.execute(f"INSERT INTO {table} ({','.join(values)}) VALUES ({','.join('?' for _ in values)})", tuple(values.values()))
+    timestamp = "2026-08-01T00:00:00Z"
+    for name, target in (("sibling", sibling), ("physical", physical)):
+        metadata = target.stat()
+        insert("security_targets", id=name, current_path=str(target), display_name=name, created_at=timestamp, updated_at=timestamp)
+        insert("workspaces", id=name, target_id=name, created_at=timestamp, updated_at=timestamp)
+        insert("scans", id=name, workspace_id=name, target_id=name, target_path=str(target), target_revision="unversioned", target_device=serialize_filesystem_identity(metadata.st_dev), target_inode=serialize_filesystem_identity(metadata.st_ino), scope=".", mode="standard", scan_dir=str(state / name), status="complete", phase="reporting", started_at=timestamp, completed_at=timestamp, created_at=timestamp, updated_at=timestamp)
+        insert("scan_progress", scan_id=name, updated_at=timestamp)
+        insert("findings", id=name, fingerprint=name, rule_id="synthetic-rule", identity_anchor=name, created_at=timestamp, updated_at=timestamp)
+        insert("finding_occurrences", id=name, finding_id=name, scan_id=name, title=name + " finding", summary="Synthetic finding", severity="high", confidence="high", remediation="Constrain the path", details_json="{}", created_at=timestamp)
+`,
+      join(PLUGIN_ROOT, "scripts"),
+      historyState,
+      sibling,
+      repository,
+    ],
+    { encoding: "utf8" },
+  );
   async function checkHistory(
     expectedTarget: string | undefined,
     requested = requestedRepository,
   ) {
     const history = createCliTest(main);
-    let selectedTarget: string | undefined;
     assert.equal(
       await history.runCli(
         ["findings", "list", requested, "--json"],
         dependencies({
           currentDirectory: root,
-          onWorkbench: (args): JsonObject => {
-            if (args[0] === "list-repositories") {
-              return {
-                repositories: [
-                  { targetId: "sibling", targetPath: sibling },
-                  { targetId: "physical", targetPath: repository },
-                  { targetId: "saved-alias", targetPath: savedAlias },
-                ],
-              };
-            }
-            selectedTarget = args[2];
-            return {
-              findings: [{ title: `${selectedTarget} finding` }],
-              nextOffset: null,
-            };
-          },
+          onWorkbench: (args, input) =>
+            runWorkbench(
+              {
+                python: historyPython,
+                pluginRoot: PLUGIN_ROOT,
+                environment: {
+                  PATH: process.env["PATH"],
+                  CODEX_SECURITY_STATE_DIR: historyState,
+                },
+              },
+              args,
+              input,
+            ),
         }),
       ),
-      0,
+      expectedTarget === undefined ? 2 : 0,
       history.stderr.text(),
     );
-    assert.equal(selectedTarget, expectedTarget);
+    if (expectedTarget === undefined) {
+      assert.match(
+        history.stderr.text(),
+        /Repository findings are unavailable/,
+      );
+      assert.equal(history.stdout.text(), "");
+      return;
+    }
     assert.deepEqual(
-      JSON.parse(history.stdout.text()).findings,
-      expectedTarget === undefined
-        ? []
-        : [{ title: `${expectedTarget} finding` }],
+      JSON.parse(history.stdout.text()).findings.map(
+        (finding: { title: string }) => finding.title,
+      ),
+      [`${expectedTarget} finding`],
     );
   }
   await checkHistory("physical");
@@ -515,8 +553,8 @@ try {
       "Source",
     );
   }
-  await checkHistory("saved-alias", savedAlias);
-  await checkHistory("saved-alias", "owner/tools/../alias");
+  await checkHistory("physical", savedAlias);
+  await checkHistory("physical", "owner/tools/../alias");
   const requestedAlias = `${owner}/tools/../alias`;
   const alias = createCliTest(main);
   assert.equal(
