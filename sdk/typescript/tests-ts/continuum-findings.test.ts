@@ -141,6 +141,15 @@ test("oversized Continuum validation preserves the Cloud issue and its structure
           remediation_instructions: first.mitigation,
           code: { snippet: first.vulnerableCode },
         },
+        source_data: {
+          findings: [
+            {
+              findingId: first.findingId,
+              validation: { verdict: first.validation.verdict },
+            },
+            { findingId: "two" },
+          ],
+        },
       },
     },
   ]);

@@ -474,6 +474,16 @@ function normalizeContinuumIssues(
         environmentId,
         issue,
       };
+      const compactSource = structuredClone({
+        ...source,
+        findings: linked.map((finding) => issueFindingEvidence(finding, false)),
+      });
+      const findingsWithVerdicts = compactSource.findings.map(
+        (finding, index) => {
+          const verdict = text(findings[index]?.validation?.["verdict"]);
+          return verdict ? { ...finding, validation: { verdict } } : finding;
+        },
+      );
       return validateEnrichedExternalEvidence(
         {
           title: requiredText(issue["name"], "Continuum issue name"),
@@ -487,12 +497,7 @@ function normalizeContinuumIssues(
           source_updated_at:
             statusUpdatedAt(issue["updatedAt"]) ??
             statusUpdatedAt(issue["statusUpdatedAt"]),
-          source_data: structuredClone({
-            ...source,
-            findings: linked.map((finding) =>
-              issueFindingEvidence(finding, false),
-            ),
-          }),
+          source_data: compactSource,
         },
         target,
         {
@@ -500,8 +505,13 @@ function normalizeContinuumIssues(
           ...dependencyEvidence,
           source_data: structuredClone({ ...source, findings }),
         },
-        // If linked evidence exceeds the Cloud record limit, retain the issue
-        // and as much of its structured evidence as fits.
+        // Bulky linked validation evidence can exceed the Cloud record limit.
+        // Keep the per-finding verdicts with the structured review fields if they fit.
+        {
+          ...reviewDetails,
+          ...dependencyEvidence,
+          source_data: { ...compactSource, findings: findingsWithVerdicts },
+        },
         dependencyEvidence
           ? { ...reviewDetails, ...dependencyEvidence }
           : undefined,

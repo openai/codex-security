@@ -94,11 +94,12 @@ finding's snippet and end line. When the issue summary is empty, the first
 linked mitigation in issue order supplies remediation instructions. Validation
 is stored alongside each contributing finding in `evidence.source_data.findings`.
 
-In Cloud, up to 100 locations are navigable. Linked evidence is subject to the
-Cloud record size limit, and the original export retains the complete linked
-findings. Use the same source key when repeating an issue import. Issue imports
-use `updatedAt` when available and fall back to `statusUpdatedAt`. Previous
-imports keyed by finding ARN remain separate records.
+In Cloud, up to 100 locations are navigable. If the full linked evidence exceeds
+the Cloud record size limit, publication tries to keep each linked finding's
+verdict with the snippet and remediation. The original export retains the
+complete linked findings. Use the same source key when repeating an issue
+import. Issue imports use `updatedAt` when available and fall back to
+`statusUpdatedAt`. Previous imports keyed by finding ARN remain separate records.
 
 Finding summaries and details use the finding ARN. In the local workbench,
 importing a detail response under the same source key updates the existing
