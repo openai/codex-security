@@ -1139,18 +1139,6 @@ async function preparePublicationInput(
     options.provider === "semgrep" &&
     "sourceFormat" in parsed &&
     isSemgrepPlatformFormat(parsed.sourceFormat);
-  function matchesSavedDestination(requests: FindingImportRequest[]): boolean {
-    return (
-      requests.length > 0 &&
-      requests.every(
-        (batch) =>
-          batch.repository.id === destination.id &&
-          batch.repository.repo_connector_id ===
-            destination.repo_connector_id &&
-          canonicalJson(batch.source) === canonicalJson(source),
-      )
-    );
-  }
   function wasReset(content: SavedSubmission) {
     return content.requests.some(
       ({ repository }) => repository.reset_marker !== destination.reset_marker,
@@ -1196,11 +1184,19 @@ async function preparePublicationInput(
     )
       throw new Error("Saved import account or requests do not match.");
     content.requests = content.requests.map(validateImportRequest);
-    for (const finding of submissionFindings(content.requests))
-      checkRetainedTrivyProvider(options.provider, finding);
-    if (!matchesSavedDestination(content.requests))
-      throw new Error("Saved import destination does not match.");
     const actual = submissionFindings(content.requests);
+    for (const finding of actual)
+      checkRetainedTrivyProvider(options.provider, finding);
+    if (
+      content.requests.some(
+        (batch) =>
+          batch.repository.id !== destination.id ||
+          batch.repository.repo_connector_id !==
+            destination.repo_connector_id ||
+          canonicalJson(batch.source) !== canonicalJson(source),
+      )
+    )
+      throw new Error("Saved import destination does not match.");
     checkFindingProvider({ ...parsed, findings: actual }, options.provider);
     const expected = repositoryFindings(parsed, content.repositorySeverities);
     if (canonicalJson(actual) !== canonicalJson(expected.map(wireFinding)))
