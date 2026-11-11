@@ -11,7 +11,10 @@ import {
   semgrepPlatformFindingBinding,
   semgrepPlatformFindingRepository,
 } from "../src/semgrep-platform-findings.js";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import {
+  prepareNormalizedLocalImport,
+  selectLocalExternalFindings,
+} from "../src/external-findings-local.js";
 import { hostedRepositoryUrlKey } from "../src/hosted-git-repository.js";
 import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import { dependencies } from "./cli-fixtures.js";
@@ -1664,6 +1667,11 @@ test("a verified alias remains replayable with or without a reader platform hint
   const read = (saved: typeof report) =>
     normalizeSemgrepFindings(saved, { sourceRepositories }, "local");
   expect(read(report).findings[0]).toEqual(row);
+  const changedSpelling = await prepareNormalizedLocalImport(input, settings, {
+    ...dependencies,
+    sourceRepositories: [{ url: remote.toLowerCase(), platform: "github" }],
+  });
+  expect((await changedSpelling.import()).counts.updated).toBe(1);
 
   const withoutProof = read({
     ...report,
@@ -1676,6 +1684,20 @@ test("a verified alias remains replayable with or without a reader platform hint
   expect(() =>
     semgrepPlatformFindingRepository(withoutProof, "semgrep"),
   ).toThrow(/witness/);
+  const dependentImport = await prepareNormalizedLocalImport(
+    { read: 1, findings: [withoutProof], excluded: [] },
+    settings,
+    dependencies,
+  );
+  const saved = await dependentImport.import();
+  expect(saved.counts.updated).toBe(1);
+  const retained = await selectLocalExternalFindings(
+    { repository: settings.repository, importId: saved.importId! },
+    dependencies,
+  );
+  expect(retained.findings[0]?.provenance?.sourceRepositories).toEqual(
+    sourceRepositories,
+  );
   for (const witness of [
     { name: "other", id: "77" },
     { ...repository, id: "99" },

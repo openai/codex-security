@@ -119,6 +119,7 @@ EXPECTED_MIGRATIONS = [
     (69, "distinguish unvalidated workspace targets"),
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
+    (72, "retain external finding import selections and provenance"),
 ]
 
 
@@ -257,7 +258,8 @@ def test_repository_preview_history_keeps_original_application_times_after_budge
     assert [
         tuple(row)
         for row in connection.execute(
-            "SELECT version, applied_at FROM schema_migrations WHERE version >= 67 ORDER BY version"
+            "SELECT version, applied_at FROM schema_migrations "
+            "WHERE version BETWEEN 67 AND 71 ORDER BY version"
         )
     ] == [(version, f"preview-{version - 4}") for version in range(67, 72)]
     assert (
@@ -3279,7 +3281,10 @@ def test_identity_migrations_skip_unavailable_historical_git(
             (workspace_id, target_id, historical, timestamp, timestamp, timestamp),
         )
     apply_migrations(connection)
-    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 71
+    assert (
+        connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+        == EXPECTED_MIGRATIONS[-1][0]
+    )
     assert tuple(
         connection.execute(
             "SELECT id, current_path, repository_identity FROM security_targets"

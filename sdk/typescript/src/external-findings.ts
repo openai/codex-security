@@ -222,16 +222,14 @@ export function cloneImportPreview<T extends ExternalFindings>(input: T): T {
 }
 
 /** Capture the caller's import settings before reading an export or resolving its destination. */
-export function snapshotImportOptions<
-  P extends LocalExternalImportOptions["provider"],
->({
+export function snapshotImportOptions<P extends string>({
   repository,
   provider,
   sourceKey,
   sourceRepositoryUrl,
   trivyScanRoot,
   inspectorProjectMap,
-}: LocalExternalImportOptions & { provider: P }) {
+}: Omit<LocalExternalImportOptions, "provider"> & { provider: P }) {
   if (provider === "trivy" && sourceRepositoryUrl !== undefined)
     throw new CodexSecurityError(
       "Trivy reads repository provenance from the report; do not supply --source-repository-url.",

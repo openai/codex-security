@@ -88,6 +88,7 @@
 - simplify finding imports and protect export files ([#2595](https://github.com/openai/codex-security/pull/2595))
 - preserve JSON errors and token windows ([#2593](https://github.com/openai/codex-security/pull/2593))
 - keep scans running while Codex waits for the network ([#2411](https://github.com/openai/codex-security/pull/2411))
+- publish versioned workbench findings through the shared Cloud transport ([#2603](https://github.com/openai/codex-security/pull/2603))
 
 </details>
 
