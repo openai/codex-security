@@ -56,3 +56,33 @@ test("cleans staged dependency reports when replacement fails", async () => {
     "sca-result.json",
   ]);
 });
+
+test("removes a partial dependency report and preserves the previous checkpoint", async () => {
+  const result = await checkpoint();
+  const report = join(result.outputDir, "report.md");
+  await fs.writeFile(report, "previous checkpoint");
+  const failure = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+  const open = fs.open;
+  using allocation = spyOn(fs, "open").mockImplementation(
+    async (path, ...options) => {
+      const file = await open(path, ...options);
+      if (String(path).startsWith(report + ".")) {
+        const write = file.writeFile.bind(file);
+        spyOn(file, "writeFile").mockImplementationOnce(async () => {
+          await write("partial");
+          throw failure;
+        });
+      }
+      return file;
+    },
+  );
+
+  await expect(saveDependencyScan(result)).rejects.toBe(failure);
+
+  expect(allocation).toHaveBeenCalled();
+  expect(await fs.readFile(report, "utf8")).toBe("previous checkpoint");
+  expect((await fs.readdir(result.outputDir)).sort()).toEqual([
+    "report.md",
+    "sca-result.json",
+  ]);
+});
