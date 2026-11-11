@@ -1084,7 +1084,12 @@ describe("CLI", () => {
         definitions.options?.properties ?? {},
       )) {
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
-        expect(help.text()).toContain(flag);
+        // The CSV input belongs to the internal publication destination.
+        if (command.join(" ") === "publish scan" && flag === "--csv") {
+          expect(help.text()).not.toContain(flag);
+        } else {
+          expect(help.text()).toContain(flag);
+        }
         expect(typeof option.description).toBe("string");
         expect(option.description?.trim().length).toBeGreaterThan(0);
       }
