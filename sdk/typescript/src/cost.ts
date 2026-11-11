@@ -415,6 +415,7 @@ interface SessionUsage {
 type WorkerReceipt = {
   threadId: string | null;
   usage: ScanTokenUsage | null;
+  comparison: boolean;
 };
 
 function sessionObservation<T>(
@@ -2702,8 +2703,16 @@ export class ScanCostTracker {
       this.#workerReceipts,
     );
     collectionErrors.push(...workerReceipts.errors);
+    const executionRoots = new Set(this.#attribution?.executionThreadIds);
+    for (const id of workerReceipts.comparisonThreads) {
+      // Comparisons start dedicated threads without a discovery worker row.
+      if (id !== this.#attribution?.owner.threadId) executionRoots.add(id);
+    }
     const included = this.#attribution
-      ? attributedScanThreads(this.#sessions.values(), this.#attribution)
+      ? attributedScanThreads(this.#sessions.values(), {
+          ...this.#attribution,
+          executionThreadIds: [...executionRoots],
+        })
       : new Set([
           this.#threadId,
           ...this.#receipts.keys(),
@@ -2775,18 +2784,13 @@ export class ScanCostTracker {
     const usages = new Map<string, ScanTokenUsage | null>(
       [...included].map((threadId) => [
         threadId,
-        this.#attribution &&
-        !this.#attribution.executionThreadIds.includes(threadId)
+        this.#attribution && !executionRoots.has(threadId)
           ? null
           : (this.#receipts.get(threadId) ?? null),
       ]),
     );
     for (const [threadId, receipt] of workerReceipts.usages) {
-      if (
-        this.#attribution &&
-        !this.#attribution.executionThreadIds.includes(threadId)
-      )
-        continue;
+      if (this.#attribution && !executionRoots.has(threadId)) continue;
       const current = usages.get(threadId);
       if (
         receipt !== null &&
@@ -3716,6 +3720,7 @@ async function readWorkerReceipts(
   retained: Map<string, WorkerReceipt>,
 ): Promise<{
   usages: Map<string, ScanTokenUsage | null>;
+  comparisonThreads: Set<string>;
   unknownAttempts: number;
   attemptIds: Set<string>;
   errors: unknown[];
@@ -3724,6 +3729,7 @@ async function readWorkerReceipts(
   const attempts = new Set<string>();
   const result = {
     usages,
+    comparisonThreads: new Set<string>(),
     unknownAttempts: 0,
     attemptIds: attempts,
     errors: [] as unknown[],
@@ -3763,6 +3769,7 @@ async function readWorkerReceipts(
         continue;
       attempts.add(receipt["attemptId"]);
       retained.set(receipt["attemptId"], {
+        comparison: receipt["kind"] === "compare",
         threadId:
           typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
         usage: tokenUsage(receipt["usage"]),
@@ -3773,12 +3780,13 @@ async function readWorkerReceipts(
   }
   // As with native sessions, a later read failure cannot erase observed usage.
   // Keep attempts separate so a worker's initial unknown identity can resolve.
-  for (const [attemptId, { threadId, usage }] of retained) {
+  for (const [attemptId, { threadId, usage, comparison }] of retained) {
     attempts.add(attemptId);
     if (threadId === null) {
       result.unknownAttempts += 1;
       continue;
     }
+    if (comparison) result.comparisonThreads.add(threadId);
     const existing = usages.get(threadId) ?? null;
     // Native SDK completions include earlier turns of a resumed thread.
     usages.set(

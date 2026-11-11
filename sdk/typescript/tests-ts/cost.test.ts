@@ -7211,6 +7211,78 @@ describe("live scan cost tracking", () => {
     },
   );
 
+  test("attributes protected comparison receipts and their descendants to the scan", async () => {
+    const home = await codexHome();
+    const scanId = "comparison-scan";
+    const directory = join(home, "worker-usage", scanId);
+    await mkdir(directory, { recursive: true });
+    const at = "2026-09-01T00:00:02Z";
+    for (const [id, count, parent] of [
+      ["owner", 100],
+      ["comparison", 1_000],
+      ["child", 50, "comparison"],
+      ["other", 10_000],
+    ] as const) {
+      const path = await writeSession(home, id, {}, { parent });
+      await appendFile(
+        path,
+        jsonLines([
+          {
+            timestamp: at,
+            type: "turn_context",
+            payload: { turn_id: "scan-turn", model: "gpt-6-astra" },
+          },
+          {
+            timestamp: at,
+            type: "token_usage_record",
+            payload: {
+              thread_id: id,
+              turn_id: "scan-turn",
+              response_id: id,
+              model: "gpt-6-astra",
+              usage: { input_tokens: count, output_tokens: 0 },
+            },
+          },
+        ]) + "\n",
+      );
+    }
+    for (const [id, owner] of [
+      ["comparison", scanId],
+      ["other", "other-scan"],
+    ]) {
+      await writeFile(
+        join(directory, id + ".json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "thread_cumulative",
+          kind: "compare",
+          scanId: owner,
+          attemptId: id,
+          threadId: id,
+          usage: { input_tokens: 1_000, output_tokens: 0 },
+        }),
+      );
+    }
+    const tracker = costTracker(home, {
+      workerReceipts: { directory, scanId },
+    });
+    tracker.setAttributionReader(async () => ({
+      formatVersion: 1,
+      executionThreadIds: [],
+      startedAt: at,
+      completedAt: null,
+      owner: { threadId: "owner", turnId: "scan-turn", startedAt: at },
+    }));
+    tracker.start("owner");
+    const snapshot = await tracker.stop();
+    expect(snapshot.measurement).toMatchObject({
+      coverage: "complete",
+      threadCount: 3,
+    });
+    expect(snapshot.cost?.inputTokens).toBe(1_150);
+  });
+
   test("retains cumulative resumed worker receipts without counting earlier turns twice", async () => {
     const home = await codexHome();
     const scanDirectory = join(home, "scans", "receipts");

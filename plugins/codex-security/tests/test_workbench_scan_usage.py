@@ -956,9 +956,10 @@ def test_completion_distinguishes_missing_cache_writes_from_zero(
         reported.pop("cache_write_input_tokens")
     else:
         reported["cache_write_input_tokens"] = cache_writes
+    context = _event(counted, "turn_context", {"model": "gpt-6-astra"})
     _state_graph(
         fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [event])},
+        {"scan-parent": _rollout(tmp_path, "scan-parent", [context, event])},
         [],
     )
     live = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
@@ -967,6 +968,10 @@ def test_completion_distinguishes_missing_cache_writes_from_zero(
     assert measurement["totalTokens"] == 135
     assert measurement["cacheWriteInputTokens"] == (cache_writes or 0)
     assert measurement["coverage"] == "complete"
+    [subtotal] = measurement["modelUsage"]
+    assert subtotal["model"] == "gpt-6-astra"
+    assert subtotal["cacheWriteInputTokens"] == (cache_writes or 0)
+    assert subtotal.get("cacheWriteInputTokensReported", True) is (cache_writes is not None)
     if cache_writes is None:
         assert measurement["cacheWriteInputTokensReported"] is False
         assert measurement["byRole"]["parent"]["cacheWriteInputTokensReported"] is False

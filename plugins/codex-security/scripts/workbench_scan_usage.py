@@ -574,10 +574,7 @@ def collect_scan_usage(
         for model, part in models.items():
             _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), part)
     if model_usage and (attribution or any(model is not None for model in model_usage)):
-        result["modelUsage"] = [
-            {"model": model, **{key: counts[key] for key in TOKEN_FIELDS.values()}}
-            for model, counts in model_usage.items()
-        ]
+        result["modelUsage"] = [{"model": model, **counts} for model, counts in model_usage.items()]
     return result
 
 

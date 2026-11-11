@@ -194,8 +194,15 @@ def _valid_measured_scan_usage(usage: object) -> bool:
         parts = usage["modelUsage"]
         if not isinstance(parts, list) or not parts:
             return False
+        keys = {"model", *SCAN_USAGE_TOKEN_KEYS}
         for part in parts:
-            if not isinstance(part, dict) or set(part) != {"model", *SCAN_USAGE_TOKEN_KEYS}:
+            if (
+                not isinstance(part, dict)
+                or not keys.issubset(part)
+                or not set(part).issubset({*keys, "cacheWriteInputTokensReported"})
+                or "cacheWriteInputTokensReported" in part
+                and type(part["cacheWriteInputTokensReported"]) is not bool
+            ):
                 return False
             if part["model"] is not None and not isinstance(part["model"], str):
                 return False
