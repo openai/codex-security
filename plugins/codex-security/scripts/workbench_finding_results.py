@@ -18,6 +18,7 @@ from finding_preview import bounded_finding_details
 from workbench_constants import (
     FINDING_ABSOLUTE_PATH_BYTES,
     FINDING_LEVEL_BYTES,
+    FINDING_LOCATION_ORDER_SQL,
     FINDING_LOCATION_PATH_BYTES,
     FINDING_LOCATION_ROLE_BYTES,
     FINDING_LOCATIONS_LIMIT,
@@ -96,11 +97,11 @@ def finding_result(
         except SystemExit:
             target = None
     for row in connection.execute(
-        """
+        f"""
         SELECT relative_path, start_line, end_line, role
         FROM finding_locations
         WHERE occurrence_id = ?
-        ORDER BY CASE WHEN role = 'root_control' THEN 0 ELSE 1 END, sort_order
+        ORDER BY {FINDING_LOCATION_ORDER_SQL}
         LIMIT ?
         """,
         (occurrence["id"], -1 if full_details else FINDING_LOCATIONS_LIMIT),

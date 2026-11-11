@@ -13,7 +13,12 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
-from workbench_constants import DEFAULT_PAGE_SIZE, FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES
+from workbench_constants import (
+    DEFAULT_PAGE_SIZE,
+    FINDING_SUMMARY_BYTES,
+    FINDING_TITLE_BYTES,
+    PRIMARY_FINDING_LOCATION_SQL,
+)
 from workbench_validation import bounded_output_text, timestamp_key
 
 
@@ -182,7 +187,7 @@ def _indexed_findings(
 
     grouped: dict[tuple[str, str], list[sqlite3.Row]] = {}
     for row in connection.execute(
-        """
+        f"""
         SELECT
             occurrences.id AS occurrence_id,
             occurrences.finding_id,
@@ -217,15 +222,7 @@ def _indexed_findings(
              ORDER BY decisions.decision_sequence DESC LIMIT 1) AS decision_admission_sequence,
             occurrences.title,
             occurrences.summary,
-            (
-                SELECT locations.relative_path
-                FROM finding_locations AS locations
-                WHERE locations.occurrence_id = occurrences.id
-                ORDER BY
-                    CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
-                    locations.sort_order
-                LIMIT 1
-            ) AS location_path
+            (SELECT relative_path {PRIMARY_FINDING_LOCATION_SQL}) AS location_path
         FROM finding_occurrences AS occurrences
         JOIN scans ON scans.id = occurrences.scan_id
         LEFT JOIN scan_admissions AS admissions ON admissions.scan_id = scans.id

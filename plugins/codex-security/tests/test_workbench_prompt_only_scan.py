@@ -122,7 +122,7 @@ def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> 
     assert workspace["userContext"] == user_context
     assert scan["mode"] == "standard"
     assert scan["progress"]["status"] == "running"
-    assert scan["progress"]["phase"] == "preflight"
+    assert scan["progress"]["phase"] == "threat_model"
     assert scan["handoffStatus"] == "delivered"
     assert scan["continuationThreadId"] == "thread-headless-standard-scan"
     assert str(uuid.UUID(str(scan["handoffClaimToken"]))) == scan["handoffClaimToken"]
@@ -190,6 +190,33 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
     assert workspace["id"]
     assert workspace["setup"] == {"submitted": True}
     assert workspace["results"]["scanId"] == scan["scanId"]
+
+
+def test_prompt_only_rejoin_follows_the_attached_continuation(tmp_path: Path) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    scan_root = tmp_path / "scans"
+    started = start_prompt_only_scan(state_dir, target, scan_root)
+    scan_id = str(started["scan"]["scanId"])
+    continuation = "attached-prompt-thread"
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", continuation)
+    context = "Review the password-reset flow."
+    scan_command(
+        state_dir,
+        "update-scan-context",
+        scan_id,
+        "--thread-id",
+        continuation,
+        "--user-context",
+        context,
+    )
+
+    replacement = start_prompt_only_scan(state_dir, target, scan_root)
+    assert replacement["startDisposition"] == "created"
+    assert replacement["scan"]["scanId"] != scan_id
+    joined = start_prompt_only_scan(state_dir, target, scan_root, thread_id=continuation)
+    assert joined["startDisposition"] == "joined"
+    assert joined["scan"]["scanId"] == scan_id
+    assert joined["scan"]["userContext"] == context
 
 
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(

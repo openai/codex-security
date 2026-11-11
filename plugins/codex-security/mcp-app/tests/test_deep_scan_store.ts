@@ -3,7 +3,7 @@ import { mock } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { availableParallelism, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importModule } from "./import-module.ts";
 import type { WorkbenchDeepScanStore as Store } from "../src/deep-scan/store.js";
@@ -94,10 +94,7 @@ async function testBeginProtocolAndParsing() {
   assert.equal(calls[0].args.includes("--user-context-stdin"), true);
   assert.equal(calls[0].input, "focus on archive parsing");
   assert.equal(flagValue(calls[0].args, "--scan-root"), "/fixture/scans");
-  assert.equal(
-    flagValue(calls[0].args, "--available-parallelism"),
-    String(availableParallelism()),
-  );
+  assert.equal(calls[0].args.includes("--available-parallelism"), false);
   assert.equal(
     flagValue(calls[0].args, "--workflow-version"),
     "deep-scan-mcp/v1",

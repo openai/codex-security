@@ -1222,8 +1222,6 @@ def deep_scan_fixture(
             ".",
             "--scan-root",
             str(tmp_path / "scans"),
-            "--available-parallelism",
-            "16",
             environment=environment,
         )["deepScan"]
         scan_id = str(begun["scanId"])

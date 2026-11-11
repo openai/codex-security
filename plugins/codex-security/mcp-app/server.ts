@@ -400,6 +400,8 @@ const scanReadSchema = {
 };
 const scanContextSchema = {
   ...scanReadSchema,
+  requestId: z.string().uuid().optional(),
+  actionToken: z.string().uuid().optional(),
   handoffClaimToken: handoffClaimTokenSchema
     .optional()
     .describe(
@@ -559,55 +561,14 @@ export function createCodexSecurityServer(): McpServer {
       },
     },
     (_input, extra) => {
-      const metadata = requestMetadataFromExtra(extra);
-      const threadId =
-        typeof metadata?.threadId === "string" && metadata.threadId.trim()
-          ? metadata.threadId.trim()
-          : undefined;
-      const parsed = threadId
-        ? daybreakEntitlementContextSchema.safeParse(
-            metadata?.["openai/entitlementContext"],
-          )
-        : undefined;
-      const snapshot = parsed?.success
-        ? parsed.data.entitlements.cyber_trusted_access
-        : {
-            schemaVersion: 1 as const,
-            status: "unknown" as const,
-            grants: [],
-            checkedAt: new Date().toISOString(),
-            stale: false,
-          };
-      const status = snapshot.stale ? "unknown" : snapshot.status;
-      const programs =
-        status === "granted"
-          ? [
-              ...new Set(
-                snapshot.grants.map(({ level }) =>
-                  level === "tac3" || level === "government"
-                    ? "Daybreak Red"
-                    : "Daybreak Blue",
-                ),
-              ),
-            ]
-          : [];
-      const access = {
-        schemaVersion: snapshot.schemaVersion,
-        status,
-        programs,
-        checkedAt: snapshot.checkedAt,
-        stale: snapshot.stale,
-        ...(snapshot.enrollmentUrl
-          ? { enrollmentUrl: snapshot.enrollmentUrl }
-          : {}),
-      };
+      const access = daybreakAccess(extra);
       const warning =
         access.status === "not_granted"
           ? " This ChatGPT account check is advisory: a scan may run, but protected results associated with this account may not be displayable. It does not determine Amazon Bedrock model access or access to local CLI results."
           : "";
       return scanActionResult(
         access,
-        `Codex Security Daybreak access: status=${access.status}; programs=${programs.join(", ") || "none"}; checkedAt=${access.checkedAt}; stale=${access.stale}.${warning}`,
+        `Codex Security Daybreak access: status=${access.status}; programs=${access.programs.join(", ") || "none"}; checkedAt=${access.checkedAt}; stale=${access.stale}.${warning}`,
       );
     },
   );
@@ -617,7 +578,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Start or Join Codex Security Standard Scan",
       description:
-        "Headless and CLI only. Start or rejoin a Standard security scan. Do not use for desktop scans, Review changes, Deep Scan, or an existing SDK-owned scan. Use the returned authoritative scanId, scanDir, and handoffClaimToken throughout preflight, reporting, and completion.",
+        "Start or rejoin a Standard scan from its owning conversation. Returns the bound target, scope, progress and handoff token.",
       inputSchema: startHeadlessStandardScanSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
@@ -634,50 +595,46 @@ export function createCodexSecurityServer(): McpServer {
         threadId,
         codexModelSettingsFromExtra(extra),
       );
-      const scan = isJsonObject(started.scan) ? started.scan : undefined;
+      const scan = startedScanSchema.safeParse(started).data?.scan;
       const progress = isJsonObject(scan?.progress) ? scan.progress : undefined;
-      const workspace = isJsonObject(started.workspace)
-        ? started.workspace
-        : undefined;
-      const workspaceResults = isJsonObject(workspace?.results)
-        ? workspace.results
-        : undefined;
-      const scanId = scan?.scanId;
-      const scanDir = scan?.scanDir;
       const handoffClaimToken = scan?.handoffClaimToken;
       if (
-        (started.startDisposition !== "created" &&
-          started.startDisposition !== "joined") ||
-        typeof scanId !== "string" ||
-        !z.string().uuid().safeParse(scanId).success ||
+        !scan ||
         typeof handoffClaimToken !== "string" ||
-        !z.string().uuid().safeParse(handoffClaimToken).success ||
-        typeof scanDir !== "string" ||
-        !scanDir.trim() ||
-        scan?.mode !== "standard" ||
-        scan.handoffStatus !== "delivered" ||
+        !scanSchema.scanId.safeParse(handoffClaimToken).success ||
+        scan.mode !== "standard" ||
         scan.continuationThreadId !== threadId ||
         progress?.status !== "running" ||
         (started.startDisposition === "created" &&
-          progress.phase !== "preflight") ||
-        workspaceResults?.scanId !== scanId
+          progress.phase !== "threat_model")
       ) {
         return toolErrorResult(
-          "Codex Security returned malformed Standard scan ownership; no headless scan can continue.",
+          "Codex Security returned malformed Standard scan ownership.",
         );
       }
+      const { scanId, scanDir } = scan;
       authenticatedArtifactClaims.set(scanId, {
         claimToken: handoffClaimToken,
         threadId,
       });
+      const advisory =
+        started.startDisposition === "created"
+          ? standardAccessGuidance
+          : undefined;
       return scanActionResult(
         {
-          ...redactHandoffClaimToken(started),
+          startDisposition: started.startDisposition,
           scanId,
           scanDir,
           handoffClaimToken,
+          scan: modelScanContext({ scan }, { omitHandoffClaim: true }).scan,
         },
-        `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. When the scan is in preflight, follow references/scan-runtime.md, then advance to threat_model before reviewing the target. Use available workers or parent fallback. Preserve the returned handoffClaimToken for scan progress, the semantic draft, and completion.`,
+        [
+          advisory,
+          `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. Use its target, scope and token for this review.`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
         scanId,
       );
     },
@@ -1054,6 +1011,7 @@ export function createCodexSecurityServer(): McpServer {
           userContext: normalizedUserContext,
           handoffClaimToken,
           threadId,
+          modelThreadId: threadId,
           projectConfigPath,
           ...modelSettings,
           serviceTier:
@@ -1280,7 +1238,9 @@ export function createCodexSecurityServer(): McpServer {
           "Open the scan's continuation thread and try again, or cancel it from the Codex Security workbench.",
         );
       }
-      return cancelSecurityScan(scanId, threadId);
+      const canceled = await cancelSecurityScan(scanId, threadId);
+      modelScanContext(canceled.structuredContent);
+      return canceled;
     },
   );
 
@@ -1416,33 +1376,53 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Get Codex Security Scan Context",
       description:
-        "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan. Validated legacy finding details may be migrated.",
+        "Load the authoritative target, mode, optional user context, artifact directory, live progress, and optional selected finding for a launched scan. For a remediation stage, pass the supplied occurrenceId, requestId and actionToken to read only its assigned finding. Providing a launch token records delivery. Loading a running Standard scan with its token from the owning conversation advances preflight to threat_model unless a finding was selected. Validated legacy finding details may be migrated.",
       inputSchema: scanContextSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ scanId, occurrenceId, handoffClaimToken }, extra) => {
-      const threadId = threadIdFromExtra(extra);
-      if (handoffClaimToken) {
-        await workbench("mark-handoff-delivered", {
-          scanId,
-          claimToken: handoffClaimToken,
-          threadId,
-        });
+    async (
+      { scanId, occurrenceId, requestId, actionToken, handoffClaimToken },
+      extra,
+    ) => {
+      if (requestId || actionToken) {
+        if (!occurrenceId || !requestId || !actionToken) {
+          throw new Error(
+            "Remediation context requires occurrenceId, requestId and actionToken.",
+          );
+        }
+        return scanActionResult(
+          await workbench("get-scan", {
+            scanId,
+            occurrenceId,
+            requestId,
+            actionToken,
+          }),
+          "Loaded the assigned remediation finding.",
+        );
       }
-      const scanContext = await workbench("get-scan", { scanId, occurrenceId });
+      const threadId = threadIdFromExtra(extra);
+      const cached = authenticatedArtifactClaims.get(scanId);
+      const { beganStandardReview, ...scanContext } = handoffClaimToken
+        ? await workbench("mark-handoff-delivered", {
+            scanId,
+            claimToken: handoffClaimToken,
+            threadId,
+            returnContext: true,
+            occurrenceId,
+          })
+        : await workbench("get-scan", {
+            scanId,
+            occurrenceId,
+            modelThreadId: threadId ?? "",
+            contextClaimToken:
+              threadId && cached?.threadId === threadId
+                ? cached.claimToken
+                : "",
+          });
       const scan = isJsonObject(scanContext.scan)
         ? scanContext.scan
         : undefined;
-      if (!handoffClaimToken && scan?.handoffStatus === "pending") {
-        const detail =
-          typeof scan.handoffClaimToken === "string"
-            ? "Pass the handoffClaimToken returned by the Codex Security scan launcher."
-            : "Claim the pending Codex Security scan handoff before loading its context.";
-        throw new Error(
-          `This Codex Security scan handoff has not been delivered. ${detail}`,
-        );
-      }
       if (
         handoffClaimToken &&
         threadId &&
@@ -1457,8 +1437,9 @@ export function createCodexSecurityServer(): McpServer {
         });
       }
       return scanActionResult(
-        redactHandoffClaimToken(scanContext),
-        "Loaded Codex Security scan context.",
+        modelScanContext(scanContext, { omitHandoffClaim: true }),
+        (beganStandardReview === true && standardAccessGuidance) ||
+          "Loaded Codex Security scan context.",
       );
     },
   );
@@ -1497,7 +1478,10 @@ export function createCodexSecurityServer(): McpServer {
       },
       input.userContext,
     );
-    return scanActionResult(updated, "Updated Codex Security scan context.");
+    return scanActionResult(
+      input.threadId ? modelScanContext(updated) : updated,
+      "Updated Codex Security scan context.",
+    );
   };
 
   server.registerTool(
@@ -1580,48 +1564,27 @@ export function createCodexSecurityServer(): McpServer {
       extra,
     ) => {
       const modelSettings = codexModelSettingsFromExtra(extra);
-      const current = await workbench("get-scan", { scanId });
-      const scan = isJsonObject(current.scan) ? current.scan : undefined;
-      const progress =
-        scan && isJsonObject(scan.progress) ? scan.progress : undefined;
-      if (
-        progress?.status === "running" &&
-        typeof scan?.handoffClaimToken === "string" &&
-        scan.handoffClaimToken !== handoffClaimToken
-      ) {
-        return toolErrorResult(
-          "Scan updates are owned by another continuation.",
-        );
-      }
-      if (
-        scan?.mode === "deep" &&
-        progress?.phase === "preflight" &&
-        progress.status === "running"
-      ) {
-        return scanActionResult(
-          redactHandoffClaimToken(current),
-          "Deep Scan is still preparing. Discovery progress begins after its setup worker succeeds.",
-        );
-      }
+      const { scan, deepPreflight } = await workbench("update-progress", {
+        scanId,
+        modelUpdate: true,
+        modelThreadId: threadIdFromExtra(extra) ?? "",
+        coordinatorGeneration: deepScanStore.coordinatorGeneration(scanId),
+        ...modelSettings,
+        claimToken: handoffClaimToken,
+        deepReviewPass,
+        phase,
+        phaseItemsTotal,
+        phaseItemsCompleted,
+        phaseProgressUnit,
+        reviewItemsTotal,
+        reviewItemsCompleted,
+        reportableFindingsCount,
+      });
       return scanActionResult(
-        await workbench("update-progress", {
-          scanId,
-          coordinatorGeneration:
-            scan?.mode === "deep"
-              ? deepScanStore.coordinatorGeneration(scanId)
-              : undefined,
-          ...modelSettings,
-          claimToken: handoffClaimToken,
-          deepReviewPass,
-          phase,
-          phaseItemsTotal,
-          phaseItemsCompleted,
-          phaseProgressUnit,
-          reviewItemsTotal,
-          reviewItemsCompleted,
-          reportableFindingsCount,
-        }),
-        "Updated Codex Security scan progress.",
+        { scan },
+        deepPreflight === true
+          ? "Deep Scan is still preparing. Discovery progress begins after its setup worker succeeds."
+          : "Updated Codex Security scan progress.",
       );
     },
   );
@@ -1638,14 +1601,16 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ scanId, handoffClaimToken }, extra) => {
       try {
+        const threadId = threadIdFromExtra(extra);
         const completed = await workbench("complete-scan", {
           scanId,
           claimToken: handoffClaimToken,
-          threadId: threadIdFromExtra(extra),
+          threadId,
+          modelThreadId: threadId ?? "",
           turnId: securityScanTurnId(extra),
         });
         return scanActionResult(
-          completed,
+          modelScanContext(completed),
           "Validated and indexed the completed Codex Security scan.",
           isJsonObject(completed.scan) ? completed.scan.scanId : undefined,
         );
@@ -1692,9 +1657,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: destructiveAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ scanId, message, handoffClaimToken }) => {
+    async ({ scanId, message, handoffClaimToken }, extra) => {
       const failed = await workbench("fail-scan", {
         scanId,
+        modelThreadId: threadIdFromExtra(extra) ?? "",
         message,
         claimToken: handoffClaimToken,
       });
@@ -1703,7 +1669,7 @@ export function createCodexSecurityServer(): McpServer {
       if (isJsonObject(progress) && progress["status"] === "failed")
         deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
       return scanActionResult(
-        failed,
+        modelScanContext(failed),
         "Recorded the Codex Security scan failure.",
         isJsonObject(scan) ? scan.scanId : undefined,
       );
@@ -1846,10 +1812,7 @@ export function createCodexSecurityServer(): McpServer {
       scanActionResult(
         await workbench(
           "set-finding-remediation",
-          {
-            ...fields,
-            patchStdin: patch !== undefined,
-          },
+          { ...fields, patchStdin: patch !== undefined, assignedFinding: true },
           typeof patch === "object"
             ? Buffer.from(patch.content, patch.encoding)
             : patch,
@@ -1904,6 +1867,7 @@ export function createCodexSecurityServer(): McpServer {
   registerFindingIssueTools(server, runWorkbench);
   registerCompactArtifactTools(server, {
     runWorkbench,
+    threadIdFromExtra,
     pluginRoot: PLUGIN_ROOT,
     resolveScanRoot: scanRoot,
     resolveHandoffClaimToken: (scanId, requestContext) => {
@@ -2068,22 +2032,25 @@ function openWorkspaceResult(workspace: WorkspaceState) {
   return result;
 }
 
-function redactHandoffClaimToken(result: JsonObject) {
-  const scan = isJsonObject(result.scan) ? result.scan : undefined;
-  if (scan) {
-    delete scan.handoffClaimToken;
-  }
-  const workspace = isJsonObject(result.workspace)
-    ? result.workspace
+function modelScanContext<T extends JsonObject>(
+  context: T,
+  options?: { omitHandoffClaim: boolean },
+): T {
+  const workspace = isJsonObject(context.workspace)
+    ? context.workspace
     : undefined;
-  const workspaceResults =
-    workspace && isJsonObject(workspace.results)
-      ? workspace.results
-      : undefined;
-  if (workspaceResults) {
-    delete workspaceResults.handoffClaimToken;
+  // Only a workbench action handoff authorizes a model to act on a finding.
+  for (const scan of [context.scan, workspace?.results]) {
+    if (!isJsonObject(scan)) continue;
+    if (options?.omitHandoffClaim) delete scan.handoffClaimToken;
+    if (!Array.isArray(scan.findings)) continue;
+    for (const finding of scan.findings) {
+      if (isJsonObject(finding) && isJsonObject(finding.remediationState)) {
+        delete finding.remediationState.actionClaimToken;
+      }
+    }
   }
-  return result;
+  return context;
 }
 
 function workspaceResult(workspace: WorkspaceState, scanId?: unknown) {
@@ -2102,32 +2069,38 @@ function workspaceResult(workspace: WorkspaceState, scanId?: unknown) {
   );
 }
 
+const standardAccessGuidance =
+  "For a ChatGPT-backed scan, follow the optional account check in the plugin's references/access-advisory.md before review. Skip it for Amazon Bedrock or API-key-only scans.";
+const startedScanSchema = z
+  .object({
+    startDisposition: z.enum(["created", "joined"]),
+    scan: z.looseObject({
+      scanId: scanSchema.scanId,
+      scanDir: z.string().refine((value) => value.trim().length > 0),
+      handoffStatus: z.literal("delivered"),
+    }),
+    workspace: z.object({ results: z.object({ scanId: z.string() }) }),
+  })
+  .refine(({ scan, workspace }) => scan.scanId === workspace.results.scanId);
+
 function promptOnlyScanResult(promptOnly: JsonObject) {
-  const startDisposition = promptOnly.startDisposition;
-  const scan = isJsonObject(promptOnly.scan) ? promptOnly.scan : undefined;
-  const workspace = isJsonObject(promptOnly.workspace)
-    ? promptOnly.workspace
-    : undefined;
-  const workspaceResults = isJsonObject(workspace?.results)
-    ? workspace.results
-    : undefined;
-  const scanId = scan?.scanId;
-  const scanDir = scan?.scanDir;
-  if (
-    (startDisposition !== "created" && startDisposition !== "joined") ||
-    !z.string().uuid().safeParse(scanId).success ||
-    typeof scanDir !== "string" ||
-    !scanDir.trim() ||
-    scan?.handoffStatus !== "delivered" ||
-    workspaceResults?.scanId !== scanId
-  ) {
+  const start = startedScanSchema.safeParse(promptOnly).data;
+  if (!start) {
     return toolErrorResult(
       "Codex Security prompt-only scan returned malformed context; no prompt-driven scan was started.",
     );
   }
+  const {
+    startDisposition,
+    scan: { scanId },
+  } = start;
+  const advisory =
+    start.scan.mode === "standard" && startDisposition === "created"
+      ? standardAccessGuidance
+      : undefined;
   return scanActionResult(
-    promptOnly,
-    `${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
+    modelScanContext(promptOnly),
+    `${advisory ? advisory + "\n" : ""}${startDisposition === "joined" ? "Rejoined" : "Started"} prompt-driven scan ${scanId}. Use the returned scanId and scanDir for every phase. Save progress and the final semantic draft with record_codex_security_scan_draft; the workbench writes the unsealed canonical files. Then call complete_codex_security_scan once to seal and index the completed findings.`,
     scanId,
   );
 }
@@ -2336,6 +2309,51 @@ function securityScanTurnId(extra: unknown): string | undefined {
     metadata.turn_id
     ? metadata.turn_id
     : undefined;
+}
+
+function daybreakAccess(extra: unknown) {
+  const metadata = requestMetadataFromExtra(extra);
+  const threadId =
+    typeof metadata?.threadId === "string" && metadata.threadId.trim()
+      ? metadata.threadId.trim()
+      : undefined;
+  const parsed = threadId
+    ? daybreakEntitlementContextSchema.safeParse(
+        metadata?.["openai/entitlementContext"],
+      )
+    : undefined;
+  const snapshot = parsed?.success
+    ? parsed.data.entitlements.cyber_trusted_access
+    : {
+        schemaVersion: 1 as const,
+        status: "unknown" as const,
+        grants: [],
+        checkedAt: new Date().toISOString(),
+        stale: false,
+      };
+  const status = snapshot.stale ? "unknown" : snapshot.status;
+  const programs =
+    status === "granted"
+      ? [
+          ...new Set(
+            snapshot.grants.map(({ level }) =>
+              level === "tac3" || level === "government"
+                ? "Daybreak Red"
+                : "Daybreak Blue",
+            ),
+          ),
+        ]
+      : [];
+  return {
+    schemaVersion: snapshot.schemaVersion,
+    status,
+    programs,
+    checkedAt: snapshot.checkedAt,
+    stale: snapshot.stale,
+    ...(snapshot.enrollmentUrl
+      ? { enrollmentUrl: snapshot.enrollmentUrl }
+      : {}),
+  };
 }
 
 function requestMetadataFromExtra(extra: unknown): JsonObject | undefined {

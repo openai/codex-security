@@ -117,6 +117,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     )
 
     begin_deep_scan = add_command("begin-deep-scan", "--thread-id")
+    begin_deep_scan.add_argument("--model-thread-id")
     begin_target = begin_deep_scan.add_mutually_exclusive_group(required=True)
     begin_target.add_argument("--scan-id")
     begin_target.add_argument("--target-path")
@@ -193,6 +194,10 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     publication_failure.add_argument("--coordinator-generation", type=positive_int)
 
     get_scan = add_command("get-scan", "--scan-id")
+    get_scan.add_argument("--model-thread-id")
+    get_scan.add_argument("--context-claim-token")
+    get_scan.add_argument("--request-id")
+    get_scan.add_argument("--action-token")
     detail = get_scan.add_mutually_exclusive_group()
     detail.add_argument("--occurrence-id")
     detail.add_argument("--progress-only", action="store_true")
@@ -291,6 +296,11 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     list_findings.add_argument("--limit", type=positive_int, default=DEFAULT_PAGE_SIZE)
 
     update_progress = add_command("update-progress", "--scan-id")
+    update_progress.add_argument("--model-update", action="store_true")
+    update_progress.add_argument(
+        "--refresh-scope-file-count", action="store_true", help=argparse.SUPPRESS
+    )
+    update_progress.add_argument("--model-thread-id")
     update_progress.add_argument("--phase", choices=PHASES)
     update_progress.add_argument("--phase-items-total", type=non_negative_int)
     update_progress.add_argument("--phase-items-completed", type=non_negative_int)
@@ -308,6 +318,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     prepare_scan_completion.add_argument("--claim-token")
 
     complete_scan = add_command("complete-scan", "--scan-id")
+    complete_scan.add_argument("--model-thread-id")
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")
     complete_scan.add_argument("--thread-id")
@@ -330,6 +341,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     cancel_scan.add_argument("--cost-json")
 
     fail_scan = add_command("fail-scan", "--scan-id", "--message")
+    fail_scan.add_argument("--model-thread-id")
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
 
@@ -345,11 +357,13 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     recover_scan.add_argument("--scan-id", required=True, help="ID of the stopped scan to recover.")
 
     write_scan_draft = add_command("write-scan-draft", "--scan-id", "--draft-path")
+    write_scan_draft.add_argument("--model-thread-id")
     write_scan_draft.add_argument("--checkpoint-path")
     write_scan_draft.add_argument("--expected-draft-digest")
     write_scan_draft.add_argument("--claim-token")
 
     save_scan_artifact = add_command("save-scan-artifact", "--scan-id", "--artifact-path")
+    save_scan_artifact.add_argument("--model-thread-id")
     save_scan_artifact.add_argument("--claim-token")
 
     for command in ("save-artifact", "read-artifact"):
@@ -357,6 +371,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     mark_handoff_delivered = add_command("mark-handoff-delivered", "--scan-id", "--claim-token")
     mark_handoff_delivered.add_argument("--thread-id")
+    mark_handoff_delivered.add_argument("--return-context", action="store_true")
+    mark_handoff_delivered.add_argument("--occurrence-id")
 
     claim_handoff_delivery = add_command("claim-handoff-delivery", "--scan-id", "--claim-token")
     claim_handoff_delivery.add_argument("--take-over-stale", action="store_true")
@@ -398,6 +414,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     set_finding_remediation.add_argument(
         "--state", choices=REMEDIATION_UPDATE_STATES, required=True
     )
+    set_finding_remediation.add_argument("--assigned-finding", action="store_true")
     set_finding_remediation.add_argument("--summary")
     set_finding_remediation.add_argument("--patch-stdin", action="store_true")
     set_finding_remediation.add_argument("--patch-path")

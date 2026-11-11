@@ -1280,25 +1280,25 @@ describe("custom validation", () => {
   });
 
   test("renders only the discovery portion of the shipped workflows", async () => {
-    const { prompt: standard } = await customDiscoveryPrompt(
+    const { prompt: standard, sourceDigests } = await customDiscoveryPrompt(
       PLUGIN_ROOT,
       "security-scan",
+      true,
     );
     const { prompt: diff } = await customDiscoveryPrompt(
       PLUGIN_ROOT,
       "security-diff-scan",
+      false,
     );
-    expect(standard.match(/^1\. .+$/mu)?.[0]).toContain(
-      "make-hosted-repo-scope-input",
+    expect(sourceDigests["references/core-scan.md"]).toBe(
+      createHash("sha256")
+        .update(await readFile(join(PLUGIN_ROOT, "references/core-scan.md")))
+        .digest("hex"),
     );
-    expect(standard).toContain("## Baseline Auditor Prompt");
-    expect(standard).toContain("## Focused Investigator Prompt");
-    expect(standard).toContain("<plugin_dir>/references/scan-prologue.md");
+    expect(standard).toContain("<plugin_dir>/references/core-scan.md");
+    expect(standard).not.toContain("validate-scan-findings.md");
+    expect(standard).not.toContain("security-scan/SKILL.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
-    expect(standard).toContain("`complete: false` checkpoint");
-    expect(standard).toContain("retain the model in an early");
-    expect(standard).toContain("`followup_task`");
-    expect(standard).toContain("`send_message`");
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
@@ -1324,7 +1324,7 @@ describe("custom validation", () => {
       "Changed workflow\n",
     );
     await expect(
-      customDiscoveryPrompt(changed, "security-diff-scan"),
+      customDiscoveryPrompt(changed, "security-diff-scan", false),
     ).rejects.toThrow("incompatible");
   });
 

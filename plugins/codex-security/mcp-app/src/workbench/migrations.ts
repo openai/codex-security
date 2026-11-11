@@ -27,19 +27,29 @@ function columns(database: DatabaseSync, table: string): Set<string> {
   );
 }
 
-function addColumn(database: DatabaseSync, statement: string): void {
+function addColumn(database: DatabaseSync, statement: string): boolean {
   const [, table, column] = /^ALTER TABLE\s+(\w+)\s+ADD COLUMN\s+(\w+)/u.exec(
     statement,
   )!;
-  if (!columns(database, table).has(column)) database.exec(statement);
+  if (columns(database, table).has(column)) return false;
+  database.exec(statement);
+  return true;
 }
 
-function repairAdditive(database: DatabaseSync, version: number): void {
-  for (const statement of migration(version).statements) {
-    if (statement.startsWith("CREATE INDEX IF NOT EXISTS "))
-      database.exec(statement);
-    else addColumn(database, statement);
-  }
+function applyRepairStatement(database: DatabaseSync, statement: string): void {
+  if (statement.startsWith("ALTER TABLE ")) addColumn(database, statement);
+  else
+    database.exec(
+      statement.replace(
+        /^CREATE (UNIQUE INDEX|INDEX|TABLE) /u,
+        "CREATE $1 IF NOT EXISTS ",
+      ),
+    );
+}
+
+function repairSchema(database: DatabaseSync, version: number): void {
+  for (const statement of migration(version).statements)
+    applyRepairStatement(database, statement);
 }
 
 function normalizeHistory(database: DatabaseSync): void {
@@ -48,7 +58,7 @@ function normalizeHistory(database: DatabaseSync): void {
       .prepare(query.join("\n"))
       .all({ ":history": repairHistory })) {
       if (operation === "error") throw new Error(String(value));
-      if (operation === "additive") repairAdditive(database, Number(value));
+      if (operation === "additive") repairSchema(database, Number(value));
       else if (operation === "column") addColumn(database, String(value));
       else if (operation === "timestamp")
         database.prepare(String(value)).run(new Date().toISOString());
@@ -77,22 +87,9 @@ function repairDeepScan(database: DatabaseSync): void {
     "deep_scan_dedup_inputs",
   ];
   if (!missingOwner && expected.every((name) => existing.has(name))) return;
-  addColumn(
-    database,
-    "ALTER TABLE scans ADD COLUMN deep_scan_owner_thread_id TEXT;",
-  );
   for (const statement of migration(11).statements) {
-    if (
-      statement.startsWith("ALTER TABLE scans") ||
-      (statement.startsWith("UPDATE scans") && !missingOwner)
-    )
-      continue;
-    database.exec(
-      statement.replace(
-        /^CREATE (UNIQUE INDEX|INDEX|TABLE) /u,
-        "CREATE $1 IF NOT EXISTS ",
-      ),
-    );
+    if (statement.startsWith("UPDATE scans") && !missingOwner) continue;
+    applyRepairStatement(database, statement);
     if (
       statement.startsWith("UPDATE scans") &&
       scanColumns.has("continuation_thread_id")
@@ -116,16 +113,7 @@ function repairStableTargets(database: DatabaseSync): boolean {
     existing.length === 2
   )
     return false;
-  for (const statement of migration(16).statements) {
-    if (statement.startsWith("ALTER TABLE")) addColumn(database, statement);
-    else
-      database.exec(
-        statement.replace(
-          /^CREATE (TABLE|INDEX) /u,
-          "CREATE $1 IF NOT EXISTS ",
-        ),
-      );
-  }
+  repairSchema(database, 16);
   database.exec(
     "UPDATE scans SET target_id = NULL WHERE target_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM security_targets WHERE security_targets.id = scans.target_id)",
   );
@@ -225,21 +213,17 @@ export function applyMigrations(
     let backfill = false;
     for (const item of selected) {
       if (item.version === 6) {
-        addColumn(
-          database,
-          "ALTER TABLE workspaces ADD COLUMN thread_id TEXT;",
-        );
-        database.exec(
-          "CREATE INDEX IF NOT EXISTS workspaces_by_thread_and_updated_at ON workspaces(thread_id, updated_at DESC)",
-        );
+        // Preserve the original one-line index declaration in sqlite_schema.
+        for (const statement of migration(6).statements)
+          applyRepairStatement(database, statement.replaceAll("\n", " "));
       } else if (item.version === 16) backfill = repairStableTargets(database);
       else if (applied.has(item.version)) {
         if (
           [
-            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61, 67,
+            2, 12, 13, 26, 28, 31, 32, 42, 47, 50, 54, 55, 58, 59, 60, 61, 70,
           ].includes(item.version)
         )
-          repairAdditive(database, item.version);
+          repairSchema(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
       } else {
         database.exec(item.statements.join("\n"));
@@ -254,15 +238,8 @@ export function applyMigrations(
       }
     }
     if (applied.has(27)) {
-      const [threshold, count] = migration(27).statements;
-      const missing = !columns(database, "deep_scan_runs").has(
-        "stop_after_consecutive_errors",
-      );
-      addColumn(database, threshold);
-      if (missing)
-        database.exec(
-          "UPDATE deep_scan_runs SET stop_after_consecutive_errors = stop_after_no_new",
-        );
+      const [threshold, count, backfillThreshold] = migration(27).statements;
+      if (addColumn(database, threshold)) database.exec(backfillThreshold);
       addColumn(database, count);
     }
     if (backfill) backfillTargets(database);

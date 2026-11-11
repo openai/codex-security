@@ -3,12 +3,89 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
+import sqlite3
 import stat
 from pathlib import Path, PurePosixPath
+from typing import Any
 
-from finalize_scan_contract import _open_posix_file_with_path, open_scan_local_file_descriptor
+from finalize_scan_contract import (
+    _open_posix_file_with_path,
+    _read_scan_local_json_bytes,
+    open_scan_local_file_descriptor,
+)
+from workbench_constants import ARTIFACTS
+
+
+def scan_instruction_digests(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str] | None:
+    if (prepared := scan["prepared_instruction_digests_json"]) is not None:
+        return json.loads(prepared)
+    parent = scan["instruction_digest"]
+    if parent is None:
+        return None
+    digests = [parent]
+    if scan["mode"] == "deep":
+        workers = connection.execute(
+            """
+            SELECT instruction_digest FROM deep_scan_workers
+            WHERE scan_id = ? AND kind IN ('discovery', 'dedup') AND started_at IS NOT NULL
+            GROUP BY instruction_digest
+            -- A whole UTC second sorts before its fractions once the trailing Z is removed.
+            ORDER BY MIN(rtrim(started_at, 'Z')), instruction_digest
+            """,
+            (scan["id"],),
+        )
+        for (digest,) in workers:
+            if digest is None:
+                return None
+            if digest != parent:
+                digests.append(digest)
+    return digests
+
+
+def pin_prepared_instruction_digests(
+    connection: sqlite3.Connection, scan_id: str, producer: dict[str, Any]
+) -> None:
+    connection.execute(
+        """UPDATE scans SET prepared_instruction_digests_json = ?
+           WHERE id = ? AND prepared_instruction_digests_json IS NULL""",
+        (json.dumps(producer.get("instructionDigests")), scan_id),
+    )
+
+
+def verify_sealed_instruction_digests(
+    scan: sqlite3.Row, manifest_scan: dict[str, Any], connection: sqlite3.Connection
+) -> None:
+    # SQL NULL is unprepared. JSON null pins the absence of a list in an admitted seal.
+    prepared = scan["prepared_instruction_digests_json"]
+    producer = manifest_scan.get("producer")
+    if prepared is not None:
+        if not isinstance(producer, dict) or json.loads(prepared) != producer.get(
+            "instructionDigests"
+        ):
+            raise SystemExit("manifest.scan.producer.instructionDigests changed after preparation.")
+    elif isinstance(producer, dict) and "instructionDigests" in producer:
+        if (recorded := scan["seal_manifest_digest"]) is not None:
+            manifest, raw = _read_scan_local_json_bytes(
+                Path(scan["scan_dir"]), ARTIFACTS["manifest"], "scan manifest"
+            )
+            if (
+                f"sha256:{hashlib.sha256(raw).hexdigest()}" != recorded
+                or manifest.get("scan") != manifest_scan
+            ):
+                raise SystemExit("The sealed scan manifest changed after completion.")
+        elif producer["instructionDigests"] != scan_instruction_digests(connection, scan):
+            raise SystemExit(
+                "manifest.scan.producer.instructionDigests must match the workbench scan."
+            )
+
+
+def selected_instruction_digest(expected_sources: dict[str, str] | None = None) -> str | None:
+    return bundled_instruction_digest(
+        os.environ.get("_CODEX_SECURITY_INSTRUCTION_ROOT"), expected_sources=expected_sources
+    )
 
 
 def _open_instruction_file(root: Path, relative: PurePosixPath) -> int:
