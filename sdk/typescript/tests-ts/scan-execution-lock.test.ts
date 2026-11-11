@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { afterEach, expect, test } from "bun:test";
-import { acquireScanExecutionLock } from "../src/scan-execution-lock.js";
+import { acquireScanExecutionLock } from "../src/runtime.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
@@ -12,19 +12,20 @@ test("scan execution excludes a second process and recovers after the owner exit
   const state = join(root, "state");
   const scan = join(root, "scan");
   await mkdir(scan);
-  const module = new URL("../src/scan-execution-lock.ts", import.meta.url).href;
+  const module = new URL("../src/runtime.ts", import.meta.url).href;
   const child = Bun.spawn(
     [
       process.execPath,
       "--eval",
       `
     const { acquireScanExecutionLock } = await import(${JSON.stringify(module)});
-    await acquireScanExecutionLock(${JSON.stringify(state)}, ${JSON.stringify(scan)});
+    const release = await acquireScanExecutionLock(${JSON.stringify(state)}, ${JSON.stringify(scan)});
     console.log("locked");
-    process.stdin.resume();
+    process.on("exit", release);
+    setInterval(() => {}, 60_000);
   `,
     ],
-    { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+    { stdout: "pipe", stderr: "pipe" },
   );
   try {
     const reader = child.stdout.getReader();
@@ -36,7 +37,7 @@ test("scan execution excludes a second process and recovers after the owner exit
       "already running",
     );
   } finally {
-    child.kill();
+    child.kill("SIGKILL");
     await child.exited;
   }
   const release = await acquireScanExecutionLock(state, scan);

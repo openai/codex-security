@@ -2,7 +2,7 @@ import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
-import { readJsonLines } from "./support/json.js";
+import { readJson, readJsonLines, writeJson } from "./support/json.js";
 import { hash, randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
@@ -41,7 +41,11 @@ import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import {
+  completedEvents,
+  failedEvents,
+  preparedRuntime,
+} from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
 
@@ -385,10 +389,19 @@ test.skipIf(process.platform !== "win32").each(["deep", "standard"] as const)(
   },
 );
 
-test.each(["failed", "canceled", "changed", "replaced", "wrong-owner"])(
-  "resume refuses %s scans without altering their saved state",
-  async (scenario) => {
-    const f = await interruptedScan();
+test.each([
+  ["standard", "failed"],
+  ["standard", "canceled"],
+  ["standard", "changed"],
+  ["deep", "failed"],
+  ["deep", "canceled"],
+  ["deep", "changed"],
+  ["deep", "replaced"],
+  ["deep", "wrong-owner"],
+] as const)(
+  "%s resume refuses %s scans without altering their saved state",
+  async (mode, scenario) => {
+    const f = await interruptedScan(mode);
     if (scenario === "failed")
       await f.command([
         "fail-scan",
@@ -775,26 +788,48 @@ test("Standard resume preserves checkpoints through another disconnect and compl
     maxTimeMinutes: 5,
     ownerSuggestions: false,
   });
-  await copyCompletedScanFixture(f.scanDir);
-  const manifestPath = join(f.scanDir, "scan-manifest.json");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  manifest.scan.id = f.scanId;
-  manifest.scan.target = { kind: "directory_snapshot" };
-  manifest.scan.complete = false;
-  delete manifest.scan.sealedAt;
-  delete manifest.scan.artifacts;
-  await writeFile(manifestPath, JSON.stringify(manifest));
-  for (const name of ["coverage.json", "findings.json"]) {
-    const path = join(f.scanDir, name);
-    const document = JSON.parse(await readFile(path, "utf8"));
-    document.scanId = f.scanId;
-    await writeFile(path, JSON.stringify(document));
+  const draftPath = join(f.scanDir, "drafts", `${f.scanId}.json`);
+  await mkdir(dirname(draftPath), { recursive: true });
+  async function saveDraft(complete: boolean) {
+    await writeJson(draftPath, {
+      manifest: {
+        scan: { complete, scope: { includePaths: ["."], excludePaths: [] } },
+      },
+      findings: { findings: [] },
+      reviewState: {
+        inventoryStrategy: "directory",
+        surfaces: [
+          {
+            id: "source",
+            label: "Source review",
+            disposition: "no_issue_found",
+            receiptRefs: [],
+          },
+        ],
+        deferred: [],
+        explicitExclusions: [],
+      },
+    });
+    await f.command([
+      "write-scan-draft",
+      "--scan-id",
+      f.scanId,
+      "--draft-path",
+      draftPath,
+    ]);
   }
-  const original = await Promise.all(
-    ["scan-manifest.json", "findings.json", "coverage.json"].map((name) =>
-      readFile(join(f.scanDir, name), "utf8"),
-    ),
+  await saveDraft(false);
+  const head = await readJson<{ checkpoint: string }>(
+    join(f.scanDir, "checkpoint-head.json"),
   );
+  const checkpoint = join(f.scanDir, "checkpoints", head.checkpoint);
+  const readDraft = () =>
+    Promise.all(
+      ["scan-manifest.json", "findings.json", "checkpoint-head.json"].map(
+        (name) => readFile(join(f.scanDir, name), "utf8"),
+      ),
+    );
+  const original = await readDraft();
   let attempts = 0;
   const initial = await f.command([
     "get-cli-scan-resume",
@@ -812,13 +847,7 @@ test("Standard resume preserves checkpoints through another disconnect and compl
           expect(prompt).toContain(
             new Date(initial["startedAt"] as string).toISOString(),
           );
-          expect(
-            await Promise.all(
-              ["scan-manifest.json", "findings.json", "coverage.json"].map(
-                (name) => readFile(join(f.scanDir, name), "utf8"),
-              ),
-            ),
-          ).toEqual(original);
+          expect(await readDraft()).toEqual(original);
           attempts++;
           await appendFile(
             f.sessionPath,
@@ -835,18 +864,11 @@ test("Standard resume preserves checkpoints through another disconnect and compl
               },
             }) + "\n",
           );
-          if (attempts === 1) {
-            async function* disconnected() {
-              yield { type: "thread.started" as const, thread_id: id };
-              yield {
-                type: "turn.failed" as const,
-                error: { message: "Connection failed: error sending request" },
-              };
-            }
-            return { events: disconnected() };
-          }
-          delete manifest.scan.complete;
-          await writeFile(manifestPath, JSON.stringify(manifest));
+          if (attempts === 1)
+            return {
+              events: failedEvents("Connection failed: error sending request"),
+            };
+          await saveDraft(true);
           return { events: completedEvents(id) };
         },
       };
@@ -876,7 +898,9 @@ test("Standard resume preserves checkpoints through another disconnect and compl
     progress: { status: "complete" },
     usage: { totalTokens: 12240 },
   });
-  expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
+  expect(hash("sha256", await readFile(checkpoint)) + ".json").toBe(
+    head.checkpoint,
+  );
   await expect(
     f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
   ).rejects.toThrow("running scan");
@@ -905,10 +929,6 @@ test("a new default Standard scan remains resumable after a network failure", as
           );
           async function* disconnected() {
             yield { type: "thread.started" as const, thread_id: f.threadId };
-            await writeFile(
-              join(scanDir, "checkpoint.json"),
-              '{"validated":"saved"}\n',
-            );
             yield {
               type: "error" as const,
               message:
@@ -950,38 +970,7 @@ test("a new default Standard scan remains resumable after a network failure", as
       target: { kind: "paths", paths: ["source.py"] },
     },
   });
-  expect(await readFile(join(scanDir, "checkpoint.json"), "utf8")).toBe(
-    '{"validated":"saved"}\n',
-  );
 });
-
-test.each(["failed", "canceled", "changed"])(
-  "Standard resume refuses %s scans",
-  async (scenario) => {
-    const f = await interruptedScan("standard");
-    if (scenario === "failed")
-      await f.command([
-        "fail-scan",
-        "--scan-id",
-        f.scanId,
-        "--message",
-        "Synthetic failure",
-      ]);
-    if (scenario === "canceled")
-      await f.command(["cancel-scan", "--scan-id", f.scanId]);
-    if (scenario === "changed")
-      await writeFile(join(f.repository, "source.py"), "# changed\n");
-    const before = await f.command(["get-scan", "--scan-id", f.scanId]);
-    await expect(
-      f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
-    ).rejects.toThrow(
-      scenario === "changed" ? "revision or contents changed" : "running scan",
-    );
-    expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
-      before,
-    );
-  },
-);
 
 test.each(["access", "local"])(
   "a Standard resume %s failure stops the scan",
@@ -999,13 +988,7 @@ test.each(["access", "local"])(
               throw new Error(
                 "Invalid network configuration in saved settings",
               );
-            async function* failed() {
-              yield {
-                type: "turn.failed" as const,
-                error: { message: "403 forbidden: access denied" },
-              };
-            }
-            return { events: failed() };
+            return { events: failedEvents("403 forbidden: access denied") };
           },
         }),
       })),

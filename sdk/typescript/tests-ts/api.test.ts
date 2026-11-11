@@ -18329,13 +18329,7 @@ if __name__ == "__main__":
         },
       })),
       resolveCodexCommand: () => ({ command: executable }),
-      resolvePluginPython: async () => {
-        Object.defineProperty(process, "platform", {
-          value: "win32",
-          configurable: true,
-        });
-        return "/managed/python";
-      },
+      resolvePluginPython: async () => "/managed/python",
       prepareOutputDir: async () => scanDir,
       repositoryRevision: async () => "deadbeef",
       createCodex: (options) => ({
@@ -18353,9 +18347,16 @@ if __name__ == "__main__":
       }),
     });
     try {
-      await expect(client.run(repository)).rejects.toThrow(
-        "child environment captured",
-      );
+      await expect(
+        client.run(repository, {
+          onOutputDirReady() {
+            Object.defineProperty(process, "platform", {
+              value: "win32",
+              configurable: true,
+            });
+          },
+        }),
+      ).rejects.toThrow("child environment captured");
       expect(childPath?.split(delimiter)).toEqual([
         bundledTools,
         inheritedTools,

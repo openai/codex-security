@@ -338,6 +338,7 @@ def collect_scan_usage(
                 completed_turn_id=completed_turn_id if session.thread_id == thread_id else None,
                 resume_owner=(
                     scan["mode"] == "standard"
+                    and "recipe_json" in scan.keys()
                     and scan["recipe_json"] is not None
                     and session.thread_id == scan["continuation_thread_id"]
                 ),
@@ -1156,19 +1157,16 @@ def _read_rollout_usage(
                     resume_owner
                     and receipt_turn_id == current_turn_id
                     and current_turn_id in started_turns
+                    and (open_turns - {current_turn_id} or failed_turns)
                 ):
-                    earlier_open = open_turns - {current_turn_id}
-                    if earlier_open or failed_turns:
-                        # A new owner turn supersedes the crashed turn. Reconcile its
-                        # receipts (and any failed reconnects) against native thread
-                        # totals before retiring their missing end or usage markers.
-                        cumulative = _usage_counts(payload.get("thread_token_usage"))
-                        if cumulative is not None and all(
-                            cumulative[key] == total[key] + response_usage[key]
-                            for key in TOKEN_FIELDS.values()
-                        ):
-                            open_turns.difference_update(earlier_open)
-                            closed_turns.difference_update(failed_turns - {current_turn_id})
+                    # Matching thread totals account for turns left open or failed before resume.
+                    cumulative = _usage_counts(payload.get("thread_token_usage"))
+                    if cumulative is not None and all(
+                        cumulative[key] == total[key] + response_usage[key]
+                        for key in TOKEN_FIELDS.values()
+                    ):
+                        open_turns.intersection_update({current_turn_id})
+                        closed_turns.difference_update(failed_turns - {current_turn_id})
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue

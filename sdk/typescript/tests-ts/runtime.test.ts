@@ -6380,6 +6380,7 @@ describe("runtime directories and plugin Python boundary", () => {
           ),
         ),
       );
+      const beforeCompletion = (await readdir(scanDir)).sort();
       const missing = requiredDrafts.filter(
         (filename) => !present.some((candidate) => candidate === filename),
       );
@@ -6395,7 +6396,7 @@ describe("runtime directories and plugin Python boundary", () => {
           ", ",
         )}. Check that the scan agent can run shell commands and write to the scan directory before retrying.`,
       );
-      expect((await readdir(scanDir)).sort()).toEqual([...present].sort());
+      expect((await readdir(scanDir)).sort()).toEqual(beforeCompletion);
       const stored = await runWorkbench(workbenchOptions, [
         "get-scan",
         "--scan-id",

@@ -84,7 +84,6 @@ from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
-    bind_scan_thread,
     insert_running_scan,
     loaded_plugin_version,
     prepare_cli_scan_target,
@@ -1581,12 +1580,7 @@ def register_cli_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Register a CLI scan and its selected target before execution begins.
-
-    Record the launch recipe and target identity with the new scan. When reusing
-    an output directory, coordinate archiving with registration so previous results
-    can still be located. Return the scan ID, contract, and target metadata.
-    """
+    """Register the scan recipe and target identity, archiving any previous output atomically."""
     # A selected plugin may replace __main__ while delegating to this workbench.
     before_output_change = before_archive or getattr(
         sys, "_codex_security_before_output_change", None
@@ -1809,7 +1803,14 @@ def register_cli_scan(
 
 def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
-    bind_scan_thread(connection, scan["id"], args.thread_id, args.time_budget_started_at, now())
+    with connection:
+        connection.execute(
+            """UPDATE scans SET continuation_thread_id = ?1, updated_at = ?2,
+               recipe_json = CASE WHEN ?3 IS NULL THEN recipe_json
+                   ELSE json_insert(recipe_json, '$.timeBudgetStartedAt', ?3) END
+               WHERE id = ?4""",
+            (args.thread_id, now(), getattr(args, "time_budget_started_at", None), scan["id"]),
+        )
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
 

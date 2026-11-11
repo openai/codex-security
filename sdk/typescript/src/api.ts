@@ -117,7 +117,6 @@ import type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
-import { acquireScanExecutionLock } from "./scan-execution-lock.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
   deepScanParentToolOverrides,
@@ -256,6 +255,7 @@ import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
+  acquireScanExecutionLock,
   withCredentialHomeLock,
   writeCredentialHomeConfig,
   bootstrapPlugin,
@@ -2238,8 +2238,7 @@ export class CodexSecurity {
     let latestMeasurement: Readonly<ScanUsageMeasurement> | null = null;
     let notifiedLimit: number | undefined;
     let scanDir = "";
-    let releaseScanExecution: (() => void) | undefined;
-    let standardScan = false;
+    let releaseStandardScan: (() => void) | undefined;
     let targetPathsFile: string | null = null;
     let stagedPluginRoot: string | undefined;
     let stagedPluginDirectory: string | undefined;
@@ -2418,10 +2417,6 @@ export class CodexSecurity {
         ),
       };
       const hosted = this.#dependencies.hostedScan !== undefined;
-      standardScan =
-        mode === "standard" &&
-        !hosted &&
-        (normalized.kind === "repository" || normalized.kind === "paths");
       for (const root of [
         (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
         ...(knowledgeBase?.protectedRoots ?? []),
@@ -2470,8 +2465,12 @@ export class CodexSecurity {
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
-      if (standardScan) {
-        releaseScanExecution = await acquireScanExecutionLock(
+      if (
+        !hosted &&
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        releaseStandardScan = await acquireScanExecutionLock(
           stateDirectory,
           scanDir,
         );
@@ -3481,7 +3480,7 @@ export class CodexSecurity {
         prompt +=
           mode === "deep"
             ? "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan."
-            : "\nResume this same Standard scan in its original session and output directory. Read the saved scan-manifest.json, findings.json, and scan.reviewState checkpoints when present. Preserve completed analysis, validation decisions, evidence, and stable finding/surface IDs. Continue unfinished validation and deferred work; do not restart completed analysis or recreate the scan directory. If the review is finished, complete this same scan using its saved results.";
+            : "\nContinue this Standard scan from the saved scan-manifest.json, findings.json, and review checkpoints in its output directory. Keep existing evidence, validation decisions, finding IDs, and surface IDs. Finish outstanding work and finalize the same scan.";
       }
       if (
         falsePositiveExamples.length > 0 &&
@@ -3668,7 +3667,6 @@ export class CodexSecurity {
         prompt += `\n\n${renderScanTimeBudgetPolicy(timePolicy, timing)}`;
       }
       tracker.beginParentTurn(resumeThreadId !== undefined);
-      scanTurnStatus = "in_progress";
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
             onDiagnostic: this.#onDeepScanDiagnostic,
@@ -3685,6 +3683,7 @@ export class CodexSecurity {
             signal,
           })
         : (await thread.runStreamed(prompt, turnOptions)).events;
+      scanTurnStatus = "in_progress";
       checkOpen();
 
       let result = await runScanEvents({
@@ -4286,14 +4285,13 @@ export class CodexSecurity {
       }
       if (
         activeScan !== null &&
-        standardScan &&
+        releaseStandardScan !== undefined &&
         !signal.aborted &&
         options.validationPrompt === undefined &&
         scanTurnStatus !== null &&
         terminalTurnStatus !== "completed" &&
         failure instanceof CodexConnectionError
       ) {
-        // Keep the existing running scan only when its saved session and inputs can resume.
         const saved = await workbench(
           { ...activeScan.options, signal: undefined },
           workbenchArgs("get-cli-scan-resume", {
@@ -4311,11 +4309,11 @@ export class CodexSecurity {
           runPostScan = null;
         }
       }
-      // Deep Scan orchestration persists its own terminal failures and cancellations.
-      // Standard scans have no coordinator, so fatal errors and cancellation still stop them.
+      // A resumed Deep Scan persists its own terminal status.
       if (
         activeScan !== null &&
-        (options.resumeScanId === undefined || standardScan)
+        (options.resumeScanId === undefined ||
+          releaseStandardScan !== undefined)
       ) {
         if (
           options.validationPrompt !== undefined &&
@@ -4398,7 +4396,7 @@ export class CodexSecurity {
         warnCleanupFailed(options, error);
       }
       observeSettledScan(options, activeScan);
-      releaseScanExecution?.();
+      releaseStandardScan?.();
     }
   }
 

@@ -2258,17 +2258,13 @@ versions when its saved checkout identity can be verified. If the workbench
 cannot verify it, resume with the Python runtime that started the scan or use
 `codex-security scans rerun SCAN_ID` to start a new scan.
 
-Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
-settings/instructions. Standard scans continue the original Codex session from
-saved analysis, findings, and review checkpoints; they do not start a new scan.
-Only one CLI or SDK call can run a Standard scan at a time. A network failure
-after the session is saved leaves the scan resumable and prints the recovery
-command. The original `--max-cost` limit and `--max-time-minutes` deadline still
-apply. Work not saved before the interruption may need to be repeated.
-Explicit cancellation, authentication failures, and other terminal failures
-still require a rerun. This does not reopen scans marked failed by older versions.
-Custom-validation scans still require their original validation instructions and
-are not supported by `scans resume`.
+Resume keeps the scan ID, saved settings and instructions, completed workers, artifacts,
+and accumulated cost. A Standard scan continues in its original Codex session with
+the same `--max-cost` limit and `--max-time` deadline. Only one CLI or SDK call
+can run it at a time. If the connection fails after the session is saved, the CLI
+prints the resume command. Work since the last checkpoint may need to be repeated.
+Use `scans rerun` for canceled or failed scans, including authentication failures.
+For custom validation, rerun with the original validation instructions.
 
 Knowledge-bearing scans save their extracted documents in
 the private `.scan-knowledge.json` continuation file beside the scan artifacts.

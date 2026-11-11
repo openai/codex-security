@@ -2,7 +2,6 @@ const distModules = [
   "api",
   "batch-cost",
   "scan-executor",
-  "scan-execution-lock",
   "host-protocol",
   "hosted-remediation",
   "hosted-remediation-protocol",
