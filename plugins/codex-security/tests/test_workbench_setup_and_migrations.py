@@ -1237,6 +1237,7 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
     assert after == [
         {
             **row,
+            "investigation_policy": None,
             "log_completed_at": None,
             "windows_resume_output_identity": None,
             "windows_resume_target_identity": None,
@@ -2199,8 +2200,7 @@ def test_legacy_delivered_scan_waits_for_its_thread(
     assert "awaiting its owning Codex thread" in previous["stderr"]
 
     mark_deep_coordinator_succeeded(state_dir, scan_id, Path(begun["deepScan"]["scanDir"]))
-    replacement = run_workbench(
-        state_dir,
+    replacement_args = (
         "begin-deep-scan",
         "--target-path",
         str(target),
@@ -2212,6 +2212,12 @@ def test_legacy_delivered_scan_waits_for_its_thread(
         begun["deepScan"]["userContext"],
         "--workflow-version",
         "fixture",
+    )
+    pending = run_workbench(state_dir, *replacement_args)
+    assert pending["confirmationRequired"] is True
+    assert [scan["scanId"] for scan in pending["otherRunningDeepScans"]] == [scan_id]
+    replacement = run_workbench(
+        state_dir, *replacement_args, "--confirmed-concurrent-scan-id", scan_id
     )
     assert replacement["startDisposition"] == "created"
     assert replacement["deepScan"]["scanId"] != scan_id
