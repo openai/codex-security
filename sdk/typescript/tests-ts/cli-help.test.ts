@@ -383,6 +383,55 @@ describe("CLI help", () => {
     expect(stderr.text()).toMatch(/must be used alone|Unknown flag/);
   });
 
+  test.each(["--filter-output", "--format", "--token-limit", "--token-offset"])(
+    "%s cannot turn a following switch into a value and dispatch a write",
+    async (flag) => {
+      await using temp = await scopedTemporaryDirectory("cli-missing-global-");
+      const deps = dependencies({ currentDirectory: temp.path });
+      for (const next of [
+        "-h",
+        "--help",
+        "--version",
+        "--schema",
+        "--llms",
+        "--llms-full",
+        "--mcp",
+        "--update",
+        "--incur-update-check",
+        "--json",
+        "--full-output",
+        "-c",
+      ]) {
+        const stderr = capture();
+        expect(
+          await main(
+            [flag, next, "init", "new.yaml"],
+            capture().stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toMatch(
+          /Missing value|must be used alone|Unknown flag/,
+        );
+      }
+      expect(await readdir(temp.path)).toEqual([]);
+    },
+  );
+
+  test("the equals form keeps a dash-leading filter value literal", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-explicit-filter-");
+    expect(
+      await main(
+        ["--filter-output=-h", "init", "new.yaml"],
+        capture().stream,
+        capture().stream,
+        dependencies({ currentDirectory: temp.path }),
+      ),
+    ).toBe(0);
+    expect(await readdir(temp.path)).toEqual(["new.yaml"]);
+  });
+
   test("passes option-shaped filenames after -- through positional validation", async () => {
     await using temp = await scopedTemporaryDirectory("cli-literal-args-");
     const deps = dependencies({ currentDirectory: temp.path });

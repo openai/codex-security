@@ -8949,11 +8949,14 @@ function parseFrameworkArguments(argv: readonly string[]) {
     const operand =
       equals >= 0
         ? argument.slice(equals + 1)
-        : next?.startsWith("--")
+        : /^-(?:-|[a-z])/iu.test(next ?? "")
           ? undefined
           : next;
     if (equals < 0 && operand !== undefined) index++;
-    if ((flag === "--filter-output" || flag === "--format") && !operand) {
+    if (
+      operand === undefined ||
+      (!operand && (flag === "--filter-output" || flag === "--format"))
+    ) {
       argumentError ??= `Missing value for flag: ${flag}`;
     }
     if (flag === "--filter-output") {
