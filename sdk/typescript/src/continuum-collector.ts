@@ -9,6 +9,7 @@ import {
 import { CodexSecurityError } from "./errors.js";
 import { localGitProtectionRoots } from "./local-git-metadata.js";
 import { array, record } from "./scanner-import.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
@@ -25,6 +26,7 @@ const nativeRecord = z.record(z.string(), z.unknown());
 export const continuumIssueExport = z.object({
   format: z.literal(continuumIssueFormat),
   environmentId: continuumEnvironmentId,
+  sourceRepositoryUrl: z.string().optional(),
   issues: z.array(
     z.object({ issue: nativeRecord, findings: z.array(nativeRecord) }),
   ),
@@ -40,6 +42,55 @@ interface ContinuumCollectionOptions {
 }
 
 type AwsCommand = (args: string[]) => Promise<Record<string, unknown>>;
+
+const environmentSources = z.object({
+  configuration: z
+    .object({
+      codeConfiguration: z
+        .object({
+          sourceConfiguration: z
+            .object({ repositorySources: z.array(z.unknown()).optional() })
+            .optional(),
+        })
+        .optional(),
+    })
+    .optional(),
+});
+const repositorySource = z.object({
+  integrationId: continuumId,
+  repository: z.string().regex(/^[a-z0-9_.-]+(?:\/[a-z0-9_.-]+)+$/iu),
+});
+const gitLabIntegration = z.object({
+  providerDetails: z.object({
+    gitlab: z.object({ instanceUrl: z.string().startsWith("https://") }),
+  }),
+});
+
+async function firstRepositoryUrl(
+  environment: Record<string, unknown>,
+  getIntegration: (id: string) => Promise<Record<string, unknown>>,
+): Promise<string | undefined> {
+  const { configuration } = environmentSources.parse(environment);
+  const first =
+    configuration?.codeConfiguration?.sourceConfiguration
+      ?.repositorySources?.[0];
+  if (first === undefined) return;
+  const { integrationId, repository } = repositorySource.parse(first);
+  const integration = await getIntegration(integrationId);
+  const type = integration["integrationType"];
+  if (type !== "GITHUB" && type !== "GITLAB")
+    throw new CodexSecurityError(
+      "Expected a GitHub or GitLab integration for the Continuum repository.",
+    );
+  const base =
+    type === "GITHUB"
+      ? "https://github.com"
+      : gitLabIntegration.parse(integration).providerDetails.gitlab.instanceUrl;
+  return declaredScannerRepositoryUrl(
+    `${base.replace(/\/$/u, "")}/${repository}`,
+    "Continuum",
+  );
+}
 
 async function awsCommand({
   cwd,
@@ -73,23 +124,26 @@ export async function collectContinuumIssues(
   const { environmentId, profile, region, signal } = options;
   signal?.throwIfAborted();
   const run = runAws ?? (await awsCommand(options));
-  const scopeArgs = [
-    "--environment-id",
-    environmentId,
+  const awsArgs = [
     "--output",
     "json",
     "--no-cli-pager",
     ...(profile === undefined ? [] : ["--profile", profile]),
     ...(region === undefined ? [] : ["--region", region]),
   ];
-  const request = (operation: string, ...args: string[]) => {
+  const request = (operation: string, scope: string[], ...args: string[]) => {
     signal?.throwIfAborted();
-    return run(["continuum", operation, ...scopeArgs, ...args]);
+    return run(["continuum", operation, ...scope, ...awsArgs, ...args]);
   };
+  const environmentArgs = ["--environment-id", environmentId];
+  const sourceRepositoryUrl = await firstRepositoryUrl(
+    await request("get-environment", environmentArgs),
+    (id) => request("get-integration", ["--integration-id", id]),
+  );
 
   // Let the AWS CLI assemble every page. A continuation token means the
   // capture is incomplete and cannot be published as the environment's report.
-  const list = await request("list-code-issues");
+  const list = await request("list-code-issues", environmentArgs);
   if (Object.hasOwn(list, "nextToken") || Object.hasOwn(list, "NextToken"))
     throw new CodexSecurityError("Expected a complete Continuum issue list.");
 
@@ -109,7 +163,12 @@ export async function collectContinuumIssues(
       );
     environmentScope = selected.scope;
     seenIssues.add(selected.id);
-    const issue = await request("get-code-issue", "--issue-id", selected.id);
+    const issue = await request(
+      "get-code-issue",
+      environmentArgs,
+      "--issue-id",
+      selected.id,
+    );
     if (issueIdentity(issue).arn !== selected.arn)
       throw new CodexSecurityError(
         `Unexpected detail for Continuum issue ${selected.id}.`,
@@ -124,7 +183,12 @@ export async function collectContinuumIssues(
     for (const id of ids) {
       let finding = fetchedFindings.get(id);
       if (!finding) {
-        finding = await request("get-code-finding", "--finding-id", id);
+        finding = await request(
+          "get-code-finding",
+          environmentArgs,
+          "--finding-id",
+          id,
+        );
         const identity = findingIdentity(finding);
         if (identity.id !== id || identity.scope !== selected.scope)
           throw new CodexSecurityError(
@@ -137,5 +201,10 @@ export async function collectContinuumIssues(
     issues.push({ issue, findings });
   }
   signal?.throwIfAborted();
-  return { format: continuumIssueFormat, environmentId, issues };
+  return {
+    format: continuumIssueFormat,
+    environmentId,
+    ...(sourceRepositoryUrl && { sourceRepositoryUrl }),
+    issues,
+  };
 }

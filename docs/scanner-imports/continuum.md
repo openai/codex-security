@@ -20,20 +20,21 @@ report=/private/path/continuum.json
 ```
 
 <a id="export-findings-for-one-repository"></a>
+<a id="export-issues-for-one-repository"></a>
 
-### Export issues for one repository
+### Export issues from an environment
 
 Use AWS CLI v2.38.5 or later and sign in to the environment's AWS account and
-Region. Verify that the environment contains issues for only the intended
-repository before using the bulk export. AWS lists issues by environment and
-does not return a repository URL on the issue. The export needs permissions for
-`ListCodeIssues`, `GetCodeIssue`, and `GetCodeFinding`.
+Region. The export needs permissions for `GetEnvironment`, `ListCodeIssues`,
+`GetCodeIssue`, and `GetCodeFinding`. When a Git repository is configured, it also
+needs `GetIntegration` for that repository's integration.
 [AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html)
 
 Pass the short Continuum environment ID to `codex-security import continuum`.
-It uses `list-code-issues` to collect all pages, `get-code-issue` for each issue,
-and `get-code-finding` for each distinct contributing finding ID. The command
-returns a single report after all requests succeed.
+The command records the first configured Git repository as `sourceRepositoryUrl`
+and ignores S3 sources when choosing the repository. It still collects all issue
+pages, issue details, and linked findings across the environment. Before
+publishing, verify that the issues belong to the recorded repository.
 
 Use `--aws-profile PROFILE` to select AWS credentials, including a profile
 that assumes a role in the environment's account. Use `--aws-region REGION`
@@ -50,12 +51,14 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 
 ### Preview and import
 
-Preview the report with the verified Git URL and a source key for this
-environment and repository.
+Preview the report with a source key for this environment and repository.
+The importer uses the repository URL saved in the issue export. For an
+S3-only environment or a saved report without a repository URL, add
+`--source-repository-url URL` with the verified Git URL.
 
 ```sh
 codex-security publish findings "$report" --to local --repository . \
-  --provider continuum --source-repository-url https://github.com/example/project \
+  --provider continuum \
   --source-key "continuum/$ENVIRONMENT_ID/example/project" \
   --dry-run --format json
 ```
@@ -72,7 +75,7 @@ Preview the file and source key using your connected repository URL.
 ```sh
 repo=https://github.com/example/project
 codex-security publish findings "$report" --to cloud --repository "$repo" \
-  --provider continuum --source-repository-url "$repo" \
+  --provider continuum \
   --source-key "continuum/$ENVIRONMENT_ID/example/project" \
   --dry-run --format json
 ```
@@ -108,7 +111,8 @@ the AWS status and validation results. [AWS detail fields](https://docs.aws.amaz
 
 Use these AWS CLI exports when you want finding records identified by their
 finding ARN. Pass the saved report to the same
-[preview and publish commands](#preview-and-import).
+[preview and publish commands](#preview-and-import) with the verified
+`--source-repository-url URL`.
 
 Use detail exports to keep locations, mitigation, and validation evidence.
 A local summary import replaces richer evidence saved for the same finding

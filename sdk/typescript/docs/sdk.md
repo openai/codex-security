@@ -770,10 +770,14 @@ to check the Sonar binding before fetching issues.
 For AWS Continuum, use `readContinuumFindings(path, sourceRepositoryUrl)` with a
 saved issue export or finding response. Use
 `normalizeContinuumFindings(input, sourceRepositoryUrl)` with parsed JSON.
-Verify the source repository before passing its Git URL.
-
-Pass `"local"` as the third argument to retain full patch contents in collector captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"` for patch contents that exceed the evidence budget. Available patches are in `evidence.source_data.patches`.
+Issue exports with a saved repository URL can omit the second argument.
+For other reports, pass the verified source repository URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
+
+Pass `"local"` as the third argument to retain full patch contents in collector
+captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
+when the patch contents exceed the evidence budget. Available patches are in
+`evidence.source_data.patches`.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.

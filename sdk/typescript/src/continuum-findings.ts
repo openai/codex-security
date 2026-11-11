@@ -5,6 +5,7 @@ import {
   CLOUD_EVIDENCE_BYTES,
   DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
+  repositoryUrlKey,
   validateEnrichedExternalEvidence,
   validateExternalEvidenceJson,
 } from "./external-import-contract.js";
@@ -489,16 +490,41 @@ function normalizeContinuumIssues(
 
 export function normalizeContinuumFindings(
   input: unknown,
-  sourceRepositoryUrl: string,
+  sourceRepositoryUrl?: string,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
+  const issueReport =
+    isRecord(input) && input["format"] === continuumIssueFormat;
+  const capturedSource =
+    issueReport && input["sourceRepositoryUrl"] !== undefined
+      ? declaredScannerRepositoryUrl(
+          input["sourceRepositoryUrl"],
+          "Continuum",
+          target,
+        )
+      : undefined;
   const repository = declaredScannerRepositoryUrl(
-    sourceRepositoryUrl,
+    sourceRepositoryUrl || capturedSource,
     "Continuum",
     target,
   );
-  if (isRecord(input) && input["format"] === continuumIssueFormat)
-    return normalizeContinuumIssues(input, repository, target);
+  if (issueReport) {
+    if (
+      capturedSource &&
+      repositoryUrlKey(capturedSource) !== repositoryUrlKey(repository)
+    )
+      throw new Error(
+        "The Continuum export repository does not match the declared source repository.",
+      );
+    const findings = normalizeContinuumIssues(
+      input,
+      capturedSource ?? repository,
+      target,
+    );
+    return capturedSource
+      ? { ...findings, report: { sourceRepositoryUrl: capturedSource } }
+      : findings;
+  }
   const { rows, summary } = reportRows(input);
   const scopes = new Set<string>();
   const output = normalizeRecords(

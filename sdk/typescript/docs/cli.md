@@ -1615,10 +1615,13 @@ SARIF compatibility, and the local preview.
 
 `import continuum ENVIRONMENT_ID --format json` writes one report to standard
 output after collecting every issue page and fetching each issue's linked
-findings. Pass the short Continuum environment ID. Optional
+findings. The report records the environment's first configured Git repository,
+when available. Collection covers the whole environment. Pass the short
+Continuum environment ID. Optional
 `--aws-profile PROFILE` and `--aws-region REGION` override the AWS CLI's
 credential and Region selection. Preview and import the report separately
-with `publish findings FILE --provider continuum`.
+with `publish findings FILE --provider continuum`. Pass
+`--source-repository-url URL` when the report has no saved repository URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
 ## Import SonarQube Cloud issues

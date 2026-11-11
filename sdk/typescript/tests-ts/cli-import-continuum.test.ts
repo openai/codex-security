@@ -11,7 +11,7 @@ import {
 
 const command = ["import", "continuum", "example", "--format", "json"];
 
-function awsFixture() {
+function awsFixture(provider: "github" | "gitlab" | "s3" = "github") {
   const report = continuumIssueExport();
   const { issue, findings } = report.issues[0]!;
   const [shared, first] = findings;
@@ -30,7 +30,42 @@ function awsFixture() {
   const lookup = new Map<string, Record<string, unknown>>(
     [issue, secondIssue].map((item) => [item.issueId, item]),
   );
+  const repository =
+    provider === "gitlab" ? "example/team/project" : "example/project";
+  const sourceRepositoryUrl =
+    provider === "gitlab"
+      ? "https://gitlab.example.com/example/team/project"
+      : continuumRepository;
   const run = async (args: string[]): Promise<Record<string, unknown>> => {
+    if (args[1] === "get-environment")
+      return {
+        configuration: {
+          codeConfiguration: {
+            sourceConfiguration: {
+              s3Sources: [{ integrationId: "archive", codePrefix: "code/" }],
+              ...(provider !== "s3" && {
+                repositorySources: [
+                  { integrationId: "first", repository },
+                  { integrationId: "second", repository: "example/other" },
+                ],
+              }),
+            },
+          },
+        },
+      };
+    if (
+      args[1] === "get-integration" &&
+      args[3] === "first" &&
+      provider !== "s3"
+    )
+      return provider === "github"
+        ? { integrationType: "GITHUB" }
+        : {
+            integrationType: "GITLAB",
+            providerDetails: {
+              gitlab: { instanceUrl: "https://gitlab.example.com/" },
+            },
+          };
     if (args[1] === "list-code-issues") return list;
     const id = args.at(-1);
     const detail =
@@ -44,6 +79,7 @@ function awsFixture() {
     run,
     report: {
       ...report,
+      ...(provider !== "s3" && { sourceRepositoryUrl }),
       issues: [
         { issue, findings: [first!, shared!] },
         { issue: secondIssue, findings: [shared!] },
@@ -69,9 +105,7 @@ test.each([false, true])(
       }),
     ).toBe(0);
     expect(cli.stderr.text()).toBe("");
-    const args = [
-      "--environment-id",
-      "example",
+    const awsArgs = [
       "--output",
       "json",
       "--no-cli-pager",
@@ -79,7 +113,18 @@ test.each([false, true])(
         ? ["--profile", "example role", "--region", "us-east-1"]
         : []),
     ];
+    const args = ["--environment-id", "example", ...awsArgs];
     expect(aws.mock.calls).toEqual([
+      [["continuum", "get-environment", ...args]],
+      [
+        [
+          "continuum",
+          "get-integration",
+          "--integration-id",
+          "first",
+          ...awsArgs,
+        ],
+      ],
       [["continuum", "list-code-issues", ...args]],
       [["continuum", "get-code-issue", ...args, "--issue-id", "issue1"]],
       [["continuum", "get-code-finding", ...args, "--finding-id", "one"]],
@@ -88,18 +133,31 @@ test.each([false, true])(
     ]);
     const captured = JSON.parse(cli.stdout.text());
     expect(captured).toEqual(report);
-    expect(
-      normalizeContinuumFindings(captured, continuumRepository),
-    ).toMatchObject({
+    expect(normalizeContinuumFindings(captured)).toMatchObject({
       read: 2,
       excluded: [],
     });
   },
 );
 
-test.each(["list", "finding"] as const)(
+test.each(["gitlab", "s3"] as const)(
+  "import continuum resolves the repository association for a %s environment",
+  async (provider) => {
+    const { run, report } = awsFixture(provider);
+    const captured = await collectContinuumIssues(
+      { environmentId: "example", cwd: ".", environment: {} },
+      run,
+    );
+    expect(captured).toEqual(report);
+  },
+);
+test.each([
+  ["list-code-issues", "complete Continuum issue list"],
+  ["get-integration", "AWS AccessDenied"],
+  ["get-code-finding", "AWS AccessDenied"],
+] as const)(
   "import continuum leaves JSON output empty on a %s failure",
-  async (failure) => {
+  async (operation, error) => {
     const { run } = awsFixture();
     const cli = createCliTest(main);
     expect(
@@ -107,18 +165,15 @@ test.each(["list", "finding"] as const)(
         ...dependencies(),
         collectContinuumIssues: (options) =>
           collectContinuumIssues(options, async (args) => {
-            if (failure === "list")
+            if (args[1] !== operation) return run(args);
+            if (operation === "list-code-issues")
               return { ...(await run(args)), NextToken: "next" };
-            if (args[1] === "get-code-finding")
-              throw new Error("AWS AccessDenied");
-            return run(args);
+            throw new Error(error);
           }),
       }),
     ).toBe(2);
     expect(cli.stdout.text()).toBe("");
-    expect(cli.stderr.text()).toContain(
-      failure === "list" ? "complete Continuum issue list" : "AWS AccessDenied",
-    );
+    expect(cli.stderr.text()).toContain(error);
   },
 );
 

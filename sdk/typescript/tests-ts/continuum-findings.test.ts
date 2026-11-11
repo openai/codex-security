@@ -129,11 +129,18 @@ test("local issue import keeps all ranges and reprojects them for Cloud publicat
     {
       provider: "continuum",
       sourceKey: "continuum/example/project",
-      sourceRepositoryUrl: continuumRepository,
     },
     { remote: continuumRepository },
   );
-  await fixture.writeJson(report);
+  await fixture.writeJson({
+    ...report,
+    sourceRepositoryUrl: continuumRepository,
+  });
+  await expect(
+    fixture.prepare({
+      sourceRepositoryUrl: "https://github.com/example/other",
+    }),
+  ).rejects.toThrow("Continuum export repository does not match");
   const stored = await createAndReplayFinding(fixture);
   expect(stored.evidence.locations).toHaveLength(104);
   const cloud = projectStoredFinding(stored, []);
@@ -152,7 +159,10 @@ test("local issue import keeps all ranges and reprojects them for Cloud publicat
 
   const legacy = continuumDetail();
   await fixture.writeJson(legacy);
-  expect((await (await fixture.prepare()).import()).counts.created).toBe(1);
+  const legacyImport = await fixture.prepare({
+    sourceRepositoryUrl: continuumRepository,
+  });
+  expect((await legacyImport.import()).counts.created).toBe(1);
   expect(
     new Set((await fixture.read()).map((finding) => finding.sourceFindingId)),
   ).toEqual(new Set([stored.sourceFindingId, legacy.findingArn]));

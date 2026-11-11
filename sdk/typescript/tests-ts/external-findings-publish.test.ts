@@ -3653,15 +3653,21 @@ test("Continuum Cloud publication checks repository and provider and replays an 
 });
 
 test("Continuum Cloud publication preserves issue identity and linked source ranges", async () => {
-  const report = continuumIssueExport();
+  const report = {
+    ...continuumIssueExport(),
+    sourceRepositoryUrl: continuumRepository,
+  };
   const { issue } = report.issues[0]!;
   const f = await fixture(report, continuumRepository);
   const selected = {
     ...options,
     provider: "continuum" as const,
     sourceKey: "continuum/example/project",
-    sourceRepositoryUrl: continuumRepository,
   };
+  const other = await fixture(report, "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(other.file, selected, other.deps),
+  ).rejects.toThrow("does not match the selected Cloud repository");
   const prepared = await prepareExternalPublication(f.file, selected, f.deps);
   expect(prepared.preview.requests[0]?.items).toMatchObject([
     {

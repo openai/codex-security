@@ -56,7 +56,7 @@ export function continuumIssueExport() {
     endLine: 24,
   };
   return {
-    format: "aws-continuum-code-issues/v1",
+    format: "aws-continuum-code-issues/v1" as const,
     environmentId: first.environmentId,
     issues: [
       {
