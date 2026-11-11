@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
@@ -156,7 +156,7 @@ second,${source.path},${source.revision}
 
   const linkedPromptGit =
     "excludes every selected repository from Git lookup for linked bulk prompts";
-  testPosix(linkedPromptGit, async () => {
+  test(linkedPromptGit, async () => {
     if (runTestInSubprocess(import.meta.path, linkedPromptGit)) return;
     const { paths, source } = await repositoryFixture("first");
     const second = await repository(paths.root, "second");
@@ -166,10 +166,13 @@ second,${source.path},${source.revision}
     );
     await writeFile(join(paths.root, "prompt.md"), "External prompt.");
     const docs = join(source.path, "docs");
-    await symlink(paths.root, docs, "dir");
+    await symlink(paths.root, docs, "junction");
     const marker = join(paths.root, "untrusted-git-ran");
     const hostGit = Bun.which("git")!;
-    const shim = join(second.path, "git");
+    const shim = join(
+      second.path,
+      process.platform === "win32" ? "git.exe" : "git",
+    );
     await writeFile(
       shim,
       '#!/bin/sh\necho called > "$SHIM_MARKER"\nexec "$HOST_GIT" "$@"\n',
@@ -177,7 +180,7 @@ second,${source.path},${source.revision}
     );
     process.env["SHIM_MARKER"] = marker;
     process.env["HOST_GIT"] = hostGit;
-    process.env["PATH"] = `${second.path}:${process.env["PATH"]}`;
+    process.env["PATH"] = [second.path, process.env["PATH"]].join(delimiter);
     await expect(
       runMultiscan(
         options(paths, client(completeRun), {
@@ -186,6 +189,19 @@ second,${source.path},${source.revision}
       ),
     ).rejects.toThrow("repository directory links");
     expect(await Bun.file(marker).exists()).toBe(false);
+    const internal = join(source.path, "internal");
+    await mkdir(internal);
+    await writeFile(join(internal, "prompt.md"), "Internal prompt.");
+    const alias = join(source.path, "alias");
+    await symlink(internal, alias, "junction");
+    const security = client(async (_checkout, scan = {}) => {
+      expect(scan.scanPrompt).toBe("Internal prompt.");
+      return await completedScan(scan.outputDir!);
+    });
+    const result = await runMultiscan(
+      options(paths, security, { scanPromptFile: join(alias, "prompt.md") }),
+    );
+    expect(result).toMatchObject({ completed: 2, failed: 0 });
   });
 
   test("checks linked bulk documents against the selected Git layout", async () => {
