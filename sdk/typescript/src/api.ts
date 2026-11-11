@@ -1227,6 +1227,12 @@ export class CodexSecurity {
           networkAccessEnabled: false,
           webSearchMode: "disabled",
         };
+        let checkpointingTurn = false;
+        let pendingLimit: ScanCostLimitExceededError | undefined;
+        const finishCheckpoint = (): void => {
+          checkpointingTurn = false;
+          if (pendingLimit !== undefined) budgetController.abort(pendingLimit);
+        };
         const reportCost = (
           cost: Readonly<ScanCost>,
           complete = true,
@@ -1235,14 +1241,15 @@ export class CodexSecurity {
           if (
             options.maxCostUsd !== undefined &&
             cost.estimatedUsd > options.maxCostUsd
-          )
-            budgetController.abort(
-              new ScanCostLimitExceededError(
-                options.maxCostUsd,
-                cost,
-                outputDir,
-              ),
+          ) {
+            const exceeded = new ScanCostLimitExceededError(
+              options.maxCostUsd,
+              cost,
+              outputDir,
             );
+            if (checkpointingTurn) pendingLimit ??= exceeded;
+            else budgetController.abort(exceeded);
+          }
         };
         const reportTrackingError = (error: unknown): void => {
           if (options.maxCostUsd !== undefined) budgetController.abort(error);
@@ -1296,6 +1303,8 @@ export class CodexSecurity {
                   throwIfAborted(signal, outputDir);
                 },
               });
+              // A completed turn spends no more tokens while its source and verdict are checked.
+              checkpointingTurn = turn.status === "completed";
               tracker.recordUsage(turn.usage, turn.threadId);
               result.model.threadId = turn.threadId;
               if (turn.threadId !== null)
@@ -1339,6 +1348,7 @@ export class CodexSecurity {
             if (threadId !== undefined) assessment.threadId = threadId;
             result.assessments[index] = assessment;
             await saveDependencyScan(result);
+            finishCheckpoint();
             const snapshot = await tracker.refresh().catch((error: unknown) => {
               reportTrackingError(error);
               if (options.maxCostUsd !== undefined) throw error;
@@ -1348,6 +1358,7 @@ export class CodexSecurity {
             throwIfAborted(signal, outputDir);
           }
         } finally {
+          finishCheckpoint();
           const snapshot = await tracker.stop().catch((error: unknown) => {
             reportTrackingError(error);
             if (options.maxCostUsd !== undefined) throw error;

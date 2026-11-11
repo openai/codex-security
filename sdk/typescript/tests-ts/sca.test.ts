@@ -172,6 +172,7 @@ function triage(): TriageFinding {
 async function fixture(
   options: {
     chooseDependencyAuthentication?: DependencyAuthChooser;
+    beforeSourceSnapshot?: () => Promise<void>;
     matched?: boolean;
     turns?: (
       | "completed"
@@ -326,6 +327,7 @@ process.exit(child.status ?? 1);
   };
   const sourceSnapshot = async (path: string) => {
     expect(path).toBe(repository);
+    if (options.beforeSourceSnapshot) await options.beforeSourceSnapshot();
     if (options.abortAt === "source")
       options.controller!.abort("cancel during source snapshot");
     if (++snapshotCalls === options.snapshotErrorAt)
@@ -2016,37 +2018,73 @@ test.each(["unauthorized", "source_changed", "cancelled"] as const)(
   },
 );
 
-test("cumulative match costs stop the next thread without discarding completed assessments", async () => {
-  const { client, repository, outputDir, turns } = await fixture({
-    turns: ["completed", "completed", "completed"],
-  });
-  const perTurn = estimateScanCost("gpt-5.6-sol", {
-    input_tokens: 1000,
-    cached_input_tokens: 0,
-    cache_write_input_tokens: 0,
-    output_tokens: 1000,
-    reasoning_output_tokens: 0,
-  })!.estimatedUsd;
-  await using security = client;
-  await expect(
-    security.scanDependencies({
+test.each(["stable source", "changed source", "user cancellation"] as const)(
+  "a live budget poll after turn completion checkpoints only verified assessments: %s",
+  async (scenario) => {
+    const controller = new AbortController();
+    const record = ScanCostTracker.prototype.recordUsage;
+    let receipts = 0;
+    let poll: Promise<unknown> | undefined;
+    using usage = spyOn(
+      ScanCostTracker.prototype,
+      "recordUsage",
+    ).mockImplementation(function (this: ScanCostTracker, value, threadId) {
+      record.call(this, value, threadId);
+      if (value && ++receipts === 2) poll = this.refresh(true);
+    });
+    const { client, repository, outputDir, turns } = await fixture({
+      turns: ["completed", "completed", "completed"],
+      beforeSourceSnapshot: async () => {
+        if (poll === undefined) return;
+        await poll;
+        if (scenario === "changed source") {
+          await writeFile(
+            join(repository, "usage.txt"),
+            "changed during verification",
+          );
+        } else if (scenario === "user cancellation") {
+          controller.abort("cancel during verification");
+        }
+      },
+    });
+    const perTurn = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 1000,
+      reasoning_output_tokens: 0,
+    })!.estimatedUsd;
+    await using security = client;
+    const operation = security.scanDependencies({
       repositoryPath: repository,
       outputDir,
       maxCostUsd: perTurn * 1.5,
-    }),
-  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
-  expect(turns).toHaveLength(2);
-  const saved = JSON.parse(
-    await readFile(join(outputDir, "sca-result.json"), "utf8"),
-  ) as ScaResult;
-  expect(saved.status).toBe("partial");
-  expect(saved.model.costUsd).toBeCloseTo(perTurn * 2);
-  expect(saved.assessments.map((item) => item.status)).toEqual([
-    "completed",
-    "completed",
-    "cancelled",
-  ]);
-});
+      signal: controller.signal,
+    });
+    if (scenario === "user cancellation") {
+      await expect(operation).rejects.toMatchObject({
+        cause: "cancel during verification",
+      });
+    } else {
+      await expect(operation).rejects.toBeInstanceOf(
+        ScanCostLimitExceededError,
+      );
+    }
+    expect(usage).toHaveBeenCalled();
+    expect(poll).toBeDefined();
+    expect(turns).toHaveLength(2);
+    const saved = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    ) as ScaResult;
+    expect(saved.status).toBe("partial");
+    expect(saved.model.costUsd).toBeCloseTo(perTurn * 2);
+    expect(saved.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      scenario === "stable source" ? "completed" : "cancelled",
+      "cancelled",
+    ]);
+  },
+);
 
 test.each(["unauthorized", "forbidden"] as const)(
   "a later %s event stops assessment without retrying the remaining matches",
