@@ -5094,6 +5094,7 @@ export async function main(
   const cli = Cli.create("codex-security", cliOptions)
     .command("update", {
       description: "Update the CLI or show the command for this installation.",
+      destructive: true,
       async run({ format, error }) {
         try {
           await installUpdate(dependencies.environment);
