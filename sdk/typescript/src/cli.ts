@@ -220,6 +220,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { batchScanBudget } from "./batch-cost.js";
 import {
   formatScanCost,
   formatScanCostTokens,
@@ -5426,7 +5427,9 @@ export async function main(
           patch: z
             .boolean()
             .default(false)
-            .describe("Patch and verify confirmed findings after the scan."),
+            .describe(
+              "Patch and verify findings after a scan without a cost limit.",
+            ),
           validate: z
             .boolean()
             .default(false)
@@ -6202,6 +6205,9 @@ export async function main(
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop each component scan if estimated USD cost exceeds AMOUNT.",
           ),
+          maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching.",
+          ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
         })
@@ -6295,6 +6301,7 @@ export async function main(
               ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
+              maxTotalCostUsd: options.maxTotalCost,
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
@@ -6315,6 +6322,7 @@ export async function main(
             outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
             planOnly: options.planOnly,
+            maxTotalCostUsd: options.maxTotalCost,
             workers: options.workers,
             config,
             scanOptions: {
@@ -6325,6 +6333,10 @@ export async function main(
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
             onPlan: (components) => {
+              if (dashboard === null && options.maxTotalCost !== undefined)
+                errorOutput.write(
+                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching is skipped.\n`,
+                );
               for (const component of components)
                 componentNames.set(component.id, component.name);
               dashboard?.setComponents(components);
@@ -6339,7 +6351,9 @@ export async function main(
                     const line = componentScanEventLine(
                       componentName,
                       event,
-                      options.showCost || settings.maxCostUsd !== undefined,
+                      options.showCost ||
+                        settings.maxCostUsd !== undefined ||
+                        options.maxTotalCost !== undefined,
                       settings.auth,
                     );
                     if (line !== null) errorOutput.write(line);
@@ -6358,16 +6372,22 @@ export async function main(
             signal: controller.signal,
             onProgress: (component) => {
               if (dashboard !== null) dashboard.updateComponent(component);
-              else
+              else {
+                const budget =
+                  component.status === "started" &&
+                  component.maxCostUsd !== undefined
+                    ? ` (${formatUsd(component.maxCostUsd)} per component)`
+                    : "";
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
+                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${budget}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
+              }
             },
             onComplete: (result) => {
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(
@@ -6503,6 +6523,9 @@ export async function main(
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
+        maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching.",
+        ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
       usage: [
@@ -6588,6 +6611,10 @@ export async function main(
                     ).options,
                   ]),
                 );
+          if (options.maxTotalCost !== undefined)
+            errorOutput.write(
+              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching is skipped.\n`,
+            );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -6595,6 +6622,7 @@ export async function main(
             workers: options.workers,
             mode: settings.mode,
             maxAttempts: options.maxAttempts,
+            maxTotalCostUsd: options.maxTotalCost,
             ...(settings.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: settings.maxCostUsd }),
@@ -6636,6 +6664,7 @@ export async function main(
                         signal: controller.signal,
                       });
                       return {
+                        alreadyCompleted: true,
                         manifest: contract.manifest,
                         findings: contract.findings,
                         cost:
@@ -6689,6 +6718,10 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        ...batchScanBudget(
+                          prompts.maxTotalCostShareUsd,
+                          recipe,
+                        ),
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         telemetryContext: prompts.telemetryContext,
                         onTelemetry: prompts.onTelemetry,
@@ -6707,10 +6740,21 @@ export async function main(
                 }
               : {}),
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error, warning }) => {
+            onProgress: ({
+              repository,
+              status,
+              attempt,
+              maxCostUsd,
+              error,
+              warning,
+            }) => {
               const detail = error ?? warning;
+              const budget =
+                maxCostUsd === undefined
+                  ? ""
+                  : `, ${formatUsd(maxCostUsd)} per repository attempt`;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt}${budget})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
           });
@@ -11051,6 +11095,10 @@ async function executeScan(
   let usageFreshness: string | null = null;
   let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
+  if (maxCostUsd !== undefined && arguments_.patch)
+    throw new CodexSecurityError(
+      "--patch cannot be combined with a scan cost limit. Run the bounded scan first, then use `codex-security patch --scan SCAN_ID` separately.",
+    );
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
@@ -12153,6 +12201,7 @@ async function executeScan(
   try {
     if (
       !arguments_.mock &&
+      maxCostUsd === undefined &&
       actionableFindings.length > 0 &&
       arguments_.patchSeverity === undefined &&
       progress?.interactive === true &&

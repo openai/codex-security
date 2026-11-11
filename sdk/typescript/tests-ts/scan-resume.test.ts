@@ -58,6 +58,7 @@ async function interruptedScan(
   settings: Pick<
     ScanOptions,
     | "safetyIdentifier"
+    | "maxCostUsd"
     | "postScanPrompt"
     | "auth"
     | "knowledgeBasePaths"
@@ -769,6 +770,46 @@ test.each([false, true])(
     expect(JSON.stringify(saved)).not.toContain(
       "synthetic-private-replay-value",
     );
+  },
+);
+
+test.each([
+  [undefined, 2],
+  [1, 1],
+])(
+  "applies the invocation share when recovering a scan with saved limit %p",
+  async (savedLimit, expected) => {
+    const f = await interruptedScan("deep", true, { maxCostUsd: savedLimit });
+    const seen: ScanOptions[] = [];
+    const deps = dependencies({
+      environment: f.environment,
+      currentDirectory: f.root,
+      onTurn: (_repo, options) => seen.push(options),
+    });
+    deps.runWorkbench = f.command;
+    const { runCli } = createCliTest(main);
+    await runCli(
+      [
+        "bulk-scan",
+        f.input,
+        "--output-dir",
+        f.root,
+        "--recover",
+        "--max-attempts",
+        "2",
+        "--max-total-cost",
+        "4",
+        "--json",
+      ],
+      deps,
+    );
+    expect(seen).toMatchObject([
+      {
+        resumeScanId: f.scanId,
+        maxCostUsd: expected,
+        skipFindingMatching: true,
+      },
+    ]);
   },
 );
 

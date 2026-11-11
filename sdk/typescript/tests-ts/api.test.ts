@@ -14287,6 +14287,7 @@ if __name__ == "__main__":
   test.each([
     ["semantic matching fails", "matcher", "matcher unavailable"],
     ["the repository index fails", "index", "index unavailable"],
+    ["a batch cost limit skips unmetered matching", "batch-budget", undefined],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
       "cost-limited matching needs additional context",
@@ -14326,7 +14327,9 @@ if __name__ == "__main__":
             [nativeHeader]: " synthetic-required-header ",
           }
         : {};
-      const limited = failure === "budget" || failure === "budget-context";
+      const boundedBatch = failure === "batch-budget";
+      const limited =
+        boundedBatch || failure === "budget" || failure === "budget-context";
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const current = {
         findingId: "csf_852f90d6e1177502ff113d4a",
@@ -14744,6 +14747,7 @@ if __name__ == "__main__":
       try {
         const result = await client.run(repository, {
           ownerSuggestions: ownerSpy !== undefined,
+          skipFindingMatching: boundedBatch,
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
           onProgress() {},
@@ -14756,7 +14760,7 @@ if __name__ == "__main__":
         expect(
           result.repositoryFindings?.map(({ findingId }) => findingId),
         ).toEqual(
-          failure === "budget"
+          failure === "budget" || boundedBatch
             ? ["another-open-finding"]
             : failure === "dismissed" ||
                 failure === "managed" ||
@@ -14764,12 +14768,15 @@ if __name__ == "__main__":
               ? []
               : undefined,
         );
-        expect(modelCalled).toBe(failure !== "index");
+        expect(modelCalled).toBe(failure !== "index" && !boundedBatch);
         expect(observedSingleTurn).toBe(
-          failure === "index" ? undefined : limited,
+          failure === "index" || boundedBatch ? undefined : limited,
         );
         expect(matchingTurns).toBe(
-          failure === "index" || failure === "matcher" || failure === "managed"
+          boundedBatch ||
+            failure === "index" ||
+            failure === "matcher" ||
+            failure === "managed"
             ? 0
             : 1,
         );

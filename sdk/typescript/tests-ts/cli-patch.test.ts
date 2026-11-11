@@ -2348,6 +2348,24 @@ describe("scan and patch workflow", () => {
     }
   });
 
+  test("shows findings without offering interactive patches on a budgeted scan", async () => {
+    const confirmPatchReview = mock(resolving(true));
+    const patchEditor = mock(resolving(null));
+    const outcome = await runWorkflow(
+      ["scan", "--max-cost", "1"],
+      { result: resultWithFindings(["high"]) },
+      {
+        interactive: true,
+        configure: (value) =>
+          Object.assign(value, { confirmPatchReview, patchEditor }),
+      },
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stderr).toContain("FINDINGS");
+    expect(confirmPatchReview).not.toHaveBeenCalled();
+    expect(patchEditor).not.toHaveBeenCalled();
+  });
+
   test("shows normal scan findings before optionally opening patch review", async () => {
     for (const review of [true, false]) {
       let opened = false;
