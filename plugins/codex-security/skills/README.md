@@ -15,8 +15,8 @@ With the plugin enabled, you can ask Codex to "check my uncommitted changes for 
 
 ## Security policy and threat models
 
-- [define-security-policy](define-security-policy/SKILL.md) helps you spell out in `SECURITY.md` what reviewers should check and what's out of scope.
-- [threat-model](threat-model/SKILL.md) maps what the system protects and where an attacker could get in.
+- [define-security-policy](define-security-policy/SKILL.md) writes or updates `SECURITY.md` in the repo root or a component folder. Use it to set the rules for future reviews, including what counts as a finding and what's out of scope.
+- [threat-model](threat-model/SKILL.md) maps what the current code protects and where an attacker could get in. Look for `threatmodel.md` in the scan output directory, or in the plugin's artifact storage for that repo if you run the skill on its own.
 - [threat-model-visualize](threat-model-visualize/SKILL.md) turns an existing model into a diagram you can explore.
 
 ## Investigating a finding
