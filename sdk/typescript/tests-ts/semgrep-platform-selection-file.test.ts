@@ -17,6 +17,7 @@ import { normalizeSemgrepFindings } from "../src/semgrep-findings.js";
 import {
   normalizeSemgrepPlatformFindings,
   selectSemgrepPlatformFindings,
+  storedSemgrepCloudEvidence,
 } from "../src/semgrep-platform-findings.js";
 import { semgrepSarif } from "./support/semgrep-import-fixtures.js";
 import { localReportFixture as reportFixture } from "./external-findings-local-helpers.js";
@@ -130,15 +131,23 @@ test("Semgrep message titles stay intact by default and fall back above 512 Clou
     ).findings[0]?.evidence.title,
   ).toBe(exact);
   const report = selectRow({ rule: { message } });
-  expect(
-    normalizeSemgrepPlatformFindings(report).findings[0]?.evidence.title,
-  ).toBe(message);
-  expect(
-    normalizeSemgrepPlatformFindings(report, {}, "cloud").findings[0]?.evidence,
-  ).toMatchObject({
+  const stored = normalizeSemgrepPlatformFindings(report).findings[0]!;
+  const cloud = normalizeSemgrepPlatformFindings(report, {}, "cloud")
+    .findings[0]!.evidence;
+  expect(stored.evidence.title).toBe(message);
+  expect(cloud).toMatchObject({
     title: "Semgrep finding 8",
     description: message,
   });
+  expect(storedSemgrepCloudEvidence(stored)).toEqual(cloud);
+  const amended = {
+    ...stored.evidence,
+    title: message + "!",
+    description: message + "!",
+  };
+  expect(
+    storedSemgrepCloudEvidence({ ...stored, evidence: amended }),
+  ).toBeUndefined();
 });
 
 test("two selected Platform SAST IDs from separate pages replay unchanged in SQLite", async () => {

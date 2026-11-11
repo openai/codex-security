@@ -97,10 +97,21 @@ import { normalizeTrivyFindings } from "../src/trivy-findings.js";
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
 import {
   trivyReport,
+  trivyReportWithManyLocations,
   trivyRepositoryHeader,
 } from "./support/trivy-import-fixtures.js";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import {
+  prepareNormalizedLocalImport,
+  type LocalExternalFindingSelection,
+} from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
+import {
+  collectSelectedSemgrepGuardianFindings,
+  listLocalExternalFindings,
+  listLocalFindingPublications,
+  prepareLocalExternalImport,
+  prepareStoredFindingsPublication,
+} from "../src/index.js";
 import {
   inspectorCodeFinding,
   inspectorReport,
@@ -472,6 +483,7 @@ async function fixture(
     catalogHeaders: {} as Record<string, string>,
     sourceLookups: [] as string[],
     postBudget: Infinity,
+    conflictingFindingId: undefined as string | undefined,
     finalError: false,
   };
   const destination = () => ({
@@ -564,6 +576,17 @@ async function fixture(
           return json(response, { error: { message: "Slow down" } }, 429);
         }
         state.postBudget--;
+        if (
+          state.conflictingFindingId &&
+          request.items.some(
+            (item) => item.source_finding_id === state.conflictingFindingId,
+          )
+        )
+          return json(
+            response,
+            { error: { message: "stale expected version" } },
+            409,
+          );
         if (request.repository.reset_marker !== state.marker)
           return json(
             response,
@@ -730,6 +753,321 @@ async function fixture(
     },
   };
 }
+
+test.each([0, 1])(
+  "stored Trivy and Guardian findings survive source deletion and a lost Cloud response in group %i",
+  async (index) => {
+    const cloud = await fixture();
+    await using local = await storedPublicationFixture(cloud);
+    const { repository, deps } = local;
+    const report = trivyReport();
+    report.Results.push({
+      ...structuredClone(report.Results[0]!),
+      Target: "packages/other/package-lock.json",
+    });
+    const trivyFile = cloud.file;
+    await writeFile(trivyFile, JSON.stringify(report));
+    const prepareTrivy = () =>
+      prepareLocalExternalImport(
+        trivyFile,
+        {
+          repository,
+          provider: "trivy",
+          sourceKey: "npm/main",
+          trivyScanRoot: ".",
+        },
+        deps,
+      );
+    expect((await (await prepareTrivy()).import()).counts.created).toBe(2);
+    report.Results[0]!.Vulnerabilities[0]!.Title = "Updated local evidence";
+    await writeFile(trivyFile, JSON.stringify(report));
+    expect((await (await prepareTrivy()).import()).counts).toEqual({
+      created: 0,
+      updated: 1,
+      unchanged: 1,
+    });
+    await rm(trivyFile);
+
+    const examples = new URL(
+      "../../../examples/normalized-import/",
+      import.meta.url,
+    );
+    const readExample = async (name: string) =>
+      JSON.parse(await readFile(new URL(name, examples), "utf8"));
+    const guardian = await collectSelectedSemgrepGuardianFindings(
+      await readExample("guardian-selection.json"),
+      { callTool: () => readExample("guardian-response.json") },
+    );
+    const guardianImport = await local.store(
+      "semgrep",
+      normalizeSemgrepFindings(guardian, {}, "local"),
+    );
+    expect(guardianImport.counts.created).toBe(1);
+
+    const rows = await listLocalExternalFindings({ repository }, deps);
+    const selected = [
+      rows.find((row) => row.provider === "trivy" && row.version === 2)!,
+      rows.find((row) => row.provider === "semgrep")!,
+    ];
+    const selection = {
+      repository,
+      findings: selected.map(({ id, version }) => ({ id, version })),
+    };
+    const { groups } = await local.prepare(selection);
+    expect(groups).toHaveLength(2);
+    const reviewedEnvironment = cloud.state.environmentId;
+    cloud.state.environmentId = "different-environment";
+    const changed = await local.prepare(selection);
+    await expect(
+      changed.groups[0]!.publish(groups[0]!.reviewId),
+    ).rejects.toThrow(/review/i);
+    cloud.state.environmentId = reviewedEnvironment;
+    expect(cloud.posts).toHaveLength(0);
+
+    // The caller saves the reviewed selections before sending through the existing transport.
+    for (const group of groups.slice(0, index))
+      expect((await group.publish(group.reviewId)).status).toBe("complete");
+    cloud.state.loseResponse = true;
+    const interrupted = groups[index]!;
+    await expect(
+      interrupted.publish(interrupted.reviewId),
+    ).rejects.toMatchObject({
+      result: { status: "interrupted" },
+    });
+    expect(cloud.posts).toHaveLength(index + 1);
+    const lost = cloud.posts[index]!;
+    if (index === 1) {
+      const completed = (await local.prepare(groups[0]!.selection)).groups[0]!;
+      await expect(completed.publish(groups[0]!.reviewId)).rejects.toThrow(
+        /review/i,
+      );
+    }
+
+    for (const group of groups.slice(index)) {
+      const retry = await local.prepare(group.selection);
+      expect(retry.groups).toHaveLength(1);
+      const resumed = retry.groups[0]!;
+      // Changing the display copy cannot redirect the approved request or its receipt.
+      resumed.preview.findings[0]!.source_finding_id = "different-id";
+      resumed.preview.destination.id = "different-destination";
+      expect((await resumed.publish(group.reviewId)).status).toBe("complete");
+    }
+    expect(cloud.posts).toHaveLength(3);
+    expect(cloud.posts.filter((body) => body === lost)).toHaveLength(2);
+    expect(cloud.reports.size).toBe(2);
+    const history = await listLocalFindingPublications({ repository }, deps);
+    expect(history).toHaveLength(2);
+    for (const row of selected) {
+      const remoteRow = cloud.reports.get(row.sourceFindingId)!;
+      expect(remoteRow).toMatchObject({
+        source: { provider: row.provider, source_key: row.sourceKey },
+        source_finding_id: row.sourceFindingId,
+        version: 1,
+        evidence: { title: row.evidence.title },
+      });
+      const link = history.find((item) => item.id === row.id)!;
+      expect(link).toMatchObject({
+        version: row.version,
+        outcome: "created",
+        cloudFindingId: remoteRow.canonical_finding_id,
+        destinationId: options.repository,
+      });
+      expect(cloud.receipts.has(link.receiptId)).toBe(true);
+    }
+    expect(await listLocalExternalFindings({ repository }, deps)).toEqual(rows);
+  },
+);
+
+test.each(["complete", "conflict"])(
+  "stored publication recovers SQLite receipts before retiring a %s submission",
+  async (finish) => {
+    const cloud = await fixture();
+    const rows = Array.from(
+      { length: finish === "conflict" ? 101 : 1 },
+      (_, i) => localFinding("row-" + i),
+    );
+    if (finish === "conflict") cloud.state.conflictingFindingId = "row-100";
+    await using local = await storedPublicationFixture(cloud);
+    const imported = await local.store("wiz", {
+      read: rows.length,
+      findings: rows,
+      excluded: [],
+    });
+    const { repository } = local;
+    const [group] = (
+      await local.prepare({ repository, importId: imported.importId! })
+    ).groups;
+    using database = new Database(
+      join(local.stateDirectory, "workbench.sqlite3"),
+    );
+    database.exec(`CREATE TRIGGER reject_receipts BEFORE INSERT ON external_finding_publications
+      BEGIN SELECT RAISE(ABORT, 'receipt write interrupted'); END`);
+    await expect(group!.publish(group!.reviewId)).rejects.toThrow(
+      /receipt write interrupted/,
+    );
+    expect(cloud.receipts.size).toBe(1);
+    const [originalReceiptId] = cloud.receipts.keys();
+    expect(
+      await listLocalFindingPublications({ repository }, local.deps),
+    ).toEqual([]);
+    database.exec("DROP TRIGGER reject_receipts");
+    cloud.state.conflictingFindingId = undefined;
+
+    const [retry] = (await local.prepare(group!.selection)).groups;
+    expect(retry!.reviewId).toBe(group!.reviewId);
+    const result = await retry!.publish(group!.reviewId);
+    expect(result.status).toBe("complete");
+    const firstBatch = cloud.posts[0]!;
+    expect(cloud.posts.filter((body) => body === firstBatch)).toHaveLength(1);
+    const links = await listLocalFindingPublications(
+      { repository },
+      local.deps,
+    );
+    expect(links).toHaveLength(rows.length);
+    expect(links).toContainEqual(
+      expect.objectContaining({
+        id: imported.findings[0]!.id,
+        receiptId: originalReceiptId,
+        outcome: "created",
+      }),
+    );
+  },
+);
+
+test("a reset retains the saved request until SQLite records its accepted receipt", async () => {
+  const cloud = await fixture();
+  await using local = await storedPublicationFixture(cloud);
+  const imported = await local.store("wiz", {
+    read: 1,
+    findings: [localFinding("scope")],
+    excluded: [],
+  });
+  const selection = {
+    repository: local.repository,
+    importId: imported.importId!,
+  };
+  const [group] = (await local.prepare(selection)).groups;
+  using database = new Database(
+    join(local.stateDirectory, "workbench.sqlite3"),
+  );
+  database.exec(
+    "CREATE TRIGGER reject_links BEFORE INSERT ON external_finding_publications BEGIN SELECT RAISE(ABORT,'cannot record'); END",
+  );
+  await expect(group!.publish(group!.reviewId)).rejects.toThrow(
+    "cannot record",
+  );
+  expect(cloud.posts).toHaveLength(1);
+  const [receiptId] = cloud.receipts.keys();
+  cloud.state.marker = "generation-2";
+  cloud.reports.clear();
+  await expect(local.prepare(selection)).rejects.toThrow("cannot record");
+  database.exec("DROP TRIGGER reject_links");
+  await expect(local.prepare(selection)).rejects.toThrow("reset");
+  const links = await listLocalFindingPublications(
+    { repository: local.repository },
+    local.deps,
+  );
+  expect(links).toHaveLength(1);
+  expect(links[0]?.receiptId).toBe(receiptId);
+  const [fresh] = (await local.prepare(selection)).groups;
+  await expect(fresh!.publish(group!.reviewId)).rejects.toThrow("changed");
+  expect(cloud.posts).toHaveLength(1);
+});
+
+test("identical evidence at a later local version cannot inherit an earlier receipt", async () => {
+  const cloud = await fixture();
+  await using local = await storedPublicationFixture(cloud);
+  const row = localFinding("pinned");
+  const store = (finding: typeof row) =>
+    local.store("wiz", { read: 1, findings: [finding], excluded: [] });
+  const first = await store(row);
+  const selection = (importId: string) => ({
+    repository: local.repository,
+    importId,
+  });
+  const [original] = (await local.prepare(selection(first.importId!))).groups;
+  using database = new Database(
+    join(local.stateDirectory, "workbench.sqlite3"),
+  );
+  database.exec(
+    "CREATE TRIGGER reject_links BEFORE INSERT ON external_finding_publications BEGIN SELECT RAISE(ABORT,'cannot record'); END",
+  );
+  await expect(original!.publish(original!.reviewId)).rejects.toThrow(
+    "cannot record",
+  );
+  database.exec("DROP TRIGGER reject_links");
+
+  const direct = await prepareNormalizedExternalPublication(
+    { read: 1, findings: [row], excluded: [] },
+    { repository: options.repository, provider: "wiz", sourceKey: "selected" },
+    local.deps,
+  );
+  expect(direct.preview.resumed).toBe(false);
+
+  await store({
+    ...row,
+    evidence: { ...row.evidence, title: "Changed title" },
+  });
+  const restored = await store(row);
+  expect(restored.findings[0]!.version).toBe(3);
+  cloud.state.marker = "generation-2";
+  cloud.reports.clear();
+  const [current] = (await local.prepare(selection(restored.importId!))).groups;
+  expect(current!.preview.resumed).toBe(false);
+  await expect(current!.publish(original!.reviewId)).rejects.toThrow("changed");
+  expect(
+    await listLocalFindingPublications(
+      { repository: local.repository },
+      local.deps,
+    ),
+  ).toEqual([]);
+  expect(cloud.posts).toHaveLength(1);
+});
+
+test("stored findings recover a private inbox upload and retain its job receipt", async () => {
+  const { f, inbox, deps, uploads, jobs } = await privateUploadFixture(
+    [],
+    "wiz",
+  );
+  await using local = await storedPublicationFixture(f, deps.fetch);
+  const { repository } = local;
+  const row = localFinding();
+  const imported = await local.store("wiz", {
+    read: 1,
+    findings: [row],
+    excluded: [],
+  });
+  const selection = { repository, importId: imported.importId! };
+  const [first] = (await local.prepare(selection)).groups;
+  expect(first!.preview.privateImport).toBeDefined();
+  expect(first!.selection).toEqual(selection);
+  await expect(first!.publish(first!.reviewId)).rejects.toMatchObject({
+    result: { status: "interrupted" },
+  });
+  expect(
+    await listLocalFindingPublications({ repository }, local.deps),
+  ).toEqual([]);
+  inbox.recoverUpload = true;
+  const [retry] = (await local.prepare(first!.selection)).groups;
+  expect((await retry!.publish(first!.reviewId)).status).toBe("complete");
+  expect(uploads).toHaveLength(1);
+  expect(JSON.parse(uploads[0]!.bytes).findings[0].source_finding_id).toBe(
+    row.source_finding_id,
+  );
+  expect(jobs).toHaveLength(1);
+  const receipts = await listLocalFindingPublications(
+    { repository },
+    local.deps,
+  );
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]).toMatchObject({
+    id: imported.findings[0]!.id,
+    version: 1,
+    outcome: "private_job",
+    destinationId: options.repository,
+    receiptId: "import_" + "b".repeat(32),
+  });
+});
 
 test.each([true, false])(
   "repository severity exclusions keep the approved requests on retry (initial advertisement %s)",
@@ -2588,11 +2926,35 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   ).toBe(2);
   expect(JSON.parse(unavailable.stdout.text()).local.counts.created).toBe(1);
 
+  f.state.loseResponse = true;
+  const interrupted = createCliTest(main);
+  expect(await interrupted.runCli([...args, "--yes"], deps)).toBe(2);
+  expect(JSON.parse(interrupted.stdout.text()).cloud.status).toBe(
+    "interrupted",
+  );
+  expect(f.posts).toHaveLength(1);
+  const retry = createCliTest(main);
+  expect(await retry.runCli([...previewArgs, "--dry-run"], deps)).toBe(0);
+  expect(JSON.parse(retry.stdout.text()).capture).toBe(reviewed.capture);
+  expect(f.posts).toHaveLength(1);
+
   const replay = createCliTest(main);
   expect(await replay.runCli([...args, "--yes"], deps)).toBe(0);
   const result = JSON.parse(replay.stdout.text());
   expect(result.local.counts.unchanged).toBe(1);
   expect(result.cloud.verified).toBe(1);
+  expect(f.posts).toHaveLength(2);
+  expect(f.posts[1]).toBe(f.posts[0]);
+  expect(f.reports.size).toBe(1);
+  const receipts = await listLocalFindingPublications(
+    { repository: checkout },
+    { environment },
+  );
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]).toMatchObject({
+    version: 1,
+    cloudFindingId: f.reports.get("issue-1")!.canonical_finding_id,
+  });
   const posted = JSON.parse(f.posts[0]!);
   expect(posted.source).toEqual({
     provider: "sonar",
@@ -2612,6 +2974,29 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   expect(posted.items[0].evidence.source_data.issue.flows).toEqual(
     source.pages[0]!.issues[0]!.flows,
   );
+
+  // An intervening local edit supersedes the saved pins. A fresh review of
+  // the original evidence must still allow it to be imported as a new version.
+  const changed = structuredClone(source);
+  changed.pages[0]!.issues[0]!.message += " (changed)";
+  const changedPath = join(f.root, "changed.json");
+  await writeFile(changedPath, JSON.stringify(changed));
+  async function importSonar(path: string, ...flags: string[]) {
+    const cli = createCliTest(main);
+    const command = ["import", "sonar", path, ...flags, "--format", "json"];
+    expect(await cli.runCli(command, deps), cli.stderr.text()).toBe(0);
+    return JSON.parse(cli.stdout.text());
+  }
+  const changedPreview = await importSonar(changedPath, "--dry-run");
+  await importSonar(changedPreview.capture, "--yes");
+  const fresh = await importSonar(capture, "--to", "cloud", "--dry-run");
+  expect(fresh.capture).not.toBe(reviewed.capture);
+  await importSonar(fresh.capture, "--to", "cloud", "--yes");
+  const history = await listLocalFindingPublications(
+    { repository: checkout },
+    { environment },
+  );
+  expect(history.map((row) => row.version).sort()).toEqual([1, 3]);
 });
 
 test("normalized Sonar publication checks retained bindings on preview and retry", async () => {
@@ -8567,3 +8952,148 @@ test("a private structured report retains occurrence IDs, unknown severity and s
     privateReport(input, { ...limits, max_record_bytes: 32 }),
   ).toThrow("record limit");
 });
+
+function localFinding(id?: string, severity?: string) {
+  const row = normalized(id, severity);
+  return { ...row, evidence: validateExternalEvidence(row.evidence, "local") };
+}
+
+/** Use one disposable checkout and SQLite database for import, review and receipt lookup. */
+async function storedPublicationFixture(
+  cloud: Awaited<ReturnType<typeof fixture>>,
+  fetch = cloud.deps.fetch,
+) {
+  const local = await localFindingsFixture({
+    remote: cloud.state.repositoryUrl,
+  });
+  const { repository } = local;
+  const deps = {
+    fetch,
+    environment: {
+      ...local.environment,
+      CODEX_HOME: cloud.environment.CODEX_HOME,
+    },
+  };
+  return {
+    ...local,
+    deps,
+    prepare: (selection: LocalExternalFindingSelection) =>
+      prepareStoredFindingsPublication(selection, options, deps),
+    async store(
+      provider: string,
+      input: ExternalFindings,
+      sourceRepositoryUrl?: string,
+    ) {
+      const prepared = await prepareNormalizedLocalImport(
+        input,
+        { repository, provider, sourceKey: "selected", sourceRepositoryUrl },
+        deps,
+      );
+      return prepared.import();
+    },
+  };
+}
+
+test("stored publication reports unsupported providers and Cloud-only exclusions against their local versions", async () => {
+  const cloud = await fixture();
+  await using local = await storedPublicationFixture(cloud);
+  const { repository, deps } = local;
+  cloud.state.catalogHeaders["Codex-Security-Repository-Import-Severities"] =
+    "high";
+  const store = (
+    provider: string,
+    ids: string[],
+    report?: Record<string, unknown>,
+  ) =>
+    local.store(
+      provider,
+      {
+        read: ids.length,
+        findings: ids.map((id) =>
+          localFinding(id, id === "unscored" ? "unknown" : "high"),
+        ),
+        excluded: [],
+        report,
+      },
+      cloud.state.repositoryUrl,
+    );
+  await store("wiz", ["ready", "unscored", "too-long-" + "x".repeat(512)]);
+  await store("tenant-scanner", ["local-only"]);
+  const rows = await listLocalExternalFindings({ repository }, deps);
+  const selection = {
+    repository,
+    findings: rows.map(({ id, version }) => ({ id, version })),
+  };
+  const excluded = rows.filter((row) => row.sourceFindingId !== "ready");
+  const prepared = await local.prepare(selection);
+  const group = prepared.groups[0]!;
+  expect(group.preview.findings.map((f) => f.source_finding_id)).toEqual([
+    "ready",
+  ]);
+  for (const { id, version, provider, sourceFindingId } of excluded) {
+    expect(prepared.excluded).toContainEqual(
+      expect.objectContaining({
+        id,
+        version,
+        reason: expect.stringMatching(
+          provider !== "wiz"
+            ? /tenant-scanner/
+            : sourceFindingId === "unscored"
+              ? /unknown/
+              : /512/,
+        ),
+      }),
+    );
+  }
+  expect((await group.publish(group.reviewId)).status).toBe("partial");
+  expect(cloud.posts).toHaveLength(1);
+  expect(
+    (await listLocalFindingPublications({ repository }, deps)).map((r) => r.id),
+  ).toEqual([rows.find((r) => r.sourceFindingId === "ready")!.id]);
+  const failed = await store("wiz", ["z".repeat(513)], {
+    errors: ["scanner permission denied"],
+  });
+  await expect(
+    local.prepare({ repository, importId: failed.importId! }),
+  ).rejects.toThrow(/scanner permission denied/);
+  cloud.state.repositoryUrl = "https://github.com/example/another";
+  await expect(local.prepare(selection)).rejects.toThrow(/does not match/);
+  expect(cloud.posts).toHaveLength(1);
+});
+
+test.each(["trivy", "endor"] as const)(
+  "stored native %s rows use the file reader's Cloud projection when enriched fields exceed its limits",
+  async (provider) => {
+    const cloud = await fixture();
+    await using local = await storedPublicationFixture(cloud);
+    const base = endorFinding();
+    const { target_dependency_name: _, ...spec } = base.spec;
+    const raw = {
+      ...base,
+      spec: { ...spec, target_dependency_package_name: "x".repeat(513) },
+    };
+    const report = trivyReportWithManyLocations();
+    const read = (target: "local" | "cloud") =>
+      provider === "trivy"
+        ? normalizeTrivyFindings(report, target, ".")
+        : normalizeEndorFindings(raw, target);
+    const input = read("local");
+    const expected = read("cloud");
+    if (provider === "trivy")
+      expect(
+        input.findings.some((f) => f.evidence.locations!.length > 100),
+      ).toBe(true);
+    else
+      expect(input.findings[0]!.evidence.packages).not.toEqual(
+        expected.findings[0]!.evidence.packages,
+      );
+    const result = await local.store(provider, input);
+    const prepared = await local.prepare({
+      repository: local.repository,
+      importId: result.importId!,
+    });
+    expect(prepared.groups[0]!.preview.findings).toEqual(expected.findings);
+    expect(prepared.excluded).toEqual([]);
+    expect(cloud.posts).toHaveLength(0);
+  },
+);

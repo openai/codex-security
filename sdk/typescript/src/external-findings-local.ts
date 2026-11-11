@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   semgrepPlatformFindingBinding,
   semgrepPlatformReportScope,
@@ -12,6 +13,7 @@ import {
   isPublicGitHost,
   gitTransportBytes,
   hostedRepositoryMatches,
+  normalizeHostedGitRepositoryUrl,
 } from "./hosted-git-repository.js";
 import {
   checkRetainedTrivyProvider,
@@ -27,6 +29,7 @@ import {
   externalImportDisposition,
   NoPublishableFindingsError,
   cloneImportPreview,
+  reportForJson,
   snapshotImportOptions,
   snapshotNormalizedFindings,
   snapshotSourceRepositories,
@@ -44,9 +47,10 @@ import type {
   Provider,
 } from "./external-import-models.js";
 import {
+  EXTERNAL_FINDINGS_PROVIDERS,
+  EXTERNAL_FINDINGS_READERS,
   localFindingRepositories,
   semgrepSarifRepositories,
-  type LocalFindingProvider,
 } from "./external-findings-read.js";
 import {
   tenableReportFormat,
@@ -108,7 +112,7 @@ import {
 export interface StoredExternalFinding {
   id: string;
   repository: string;
-  provider: LocalFindingProvider;
+  provider: string;
   sourceKey: string;
   sourceFindingId: string;
   evidence: ExternalFindingEvidence;
@@ -116,12 +120,66 @@ export interface StoredExternalFinding {
   version: number;
   createdAt: string;
   updatedAt: string;
+  /** Reader context required to publish this version without the original file. */
+  provenance?: ExternalFindingProvenance;
+}
+
+export interface ExternalFindingProvenance {
+  sourceRepositories?: ExternalSourceRepository[];
+  inspectorProjectMap?: [string, string][];
+}
+
+export type LocalExternalFindingSelection = { repository: string } & (
+  | {
+      importId: string;
+      findings?: never;
+      /** Return an empty selection if the import is missing or any pinned version has changed. */
+      ifCurrent?: boolean;
+    }
+  | {
+      findings: readonly Pick<StoredExternalFinding, "id" | "version">[];
+      importId?: never;
+    }
+);
+
+export interface SelectedLocalExternalFindings extends Omit<
+  ExternalFindings,
+  "findings"
+> {
+  findings: StoredExternalFinding[];
+}
+
+export interface StoredExternalImport {
+  importId: string;
+  createdAt: string;
+  provider: string;
+  sourceKey: string;
+  count: number;
+}
+
+export interface LocalFindingReceipt {
+  id: string;
+  version: number;
+  receiptId: string;
+  outcome: "created" | "updated" | "unchanged" | "private_job";
+  cloudFindingId?: string;
+}
+
+interface CloudFindingDestination {
+  cloudApiUrl: string;
+  accountId: string;
+  destinationId: string;
+}
+
+export interface StoredFindingPublication
+  extends LocalFindingReceipt, CloudFindingDestination {
+  createdAt: string;
 }
 
 export interface NormalizedLocalImportOptions {
   /** Local checkout or source directory to associate with these records. */
   repository: string;
-  provider: LocalFindingProvider;
+  provider: string;
   /** Stable scanner organization/project/branch namespace across imports. */
   sourceKey: string;
   /** Verified Git repository URL for readers that bind a finding to a checkout. */
@@ -140,10 +198,15 @@ export interface LocalExternalImportDependencies {
 
 export interface LocalExternalImportPreview extends ExternalFindings {
   repository: string;
-  source: { provider: LocalFindingProvider; source_key: string };
+  source: {
+    provider: string;
+    source_key: string;
+  };
 }
 
 export interface LocalExternalImportResult {
+  /** Present when the import saved a nonempty selection, including unchanged rows. */
+  importId?: string;
   repository: string;
   read: number;
   report?: ExternalFindings["report"];
@@ -168,6 +231,29 @@ function requireIdentity(
     throw new CodexSecurityError(
       `${field} must be nonempty and contain no NUL characters.`,
     );
+  if (!value.isWellFormed())
+    throw new CodexSecurityError(`${field} must contain valid Unicode.`);
+}
+
+function validateFindingIds(current: ExternalFindings) {
+  const identities = new Set<string>();
+  for (const finding of current.findings) {
+    requireIdentity(finding.source_finding_id, "Source finding id");
+    if (identities.has(finding.source_finding_id))
+      throw new CodexSecurityError(
+        `Duplicate source finding id ${JSON.stringify(finding.source_finding_id)}.`,
+      );
+    identities.add(finding.source_finding_id);
+    if (!isRecord(finding.evidence))
+      throw new CodexSecurityError("Imported evidence must be an object.");
+    if (
+      typeof finding.evidence.title !== "string" ||
+      typeof finding.evidence.severity !== "string"
+    )
+      throw new CodexSecurityError(
+        "Imported evidence requires a title and severity.",
+      );
+  }
 }
 
 function checkStoredNumber(value: number): void {
@@ -541,6 +627,21 @@ export async function configuredFetchRemotes(
   return remotes;
 }
 
+async function hostedCheckoutRemotes(
+  repository: string,
+  protectedRoots: readonly string[],
+  environment: WorkbenchCommandOptions["environment"],
+  signal?: AbortSignal,
+) {
+  if (!(await hasGitMetadata(repository, signal))) return undefined;
+  return readHostedGitRemotes(
+    repository,
+    [...protectedRoots, await canonicalConfigPath(process.cwd())],
+    environment,
+    signal,
+  );
+}
+
 async function requireMatchingRepository(
   repository: string,
   provider: Provider,
@@ -559,13 +660,9 @@ async function requireMatchingRepository(
   if (!snyk && sources.length === 0 && hostedSources.length === 0) return false;
   let allSourcesMatched = true;
   if (snyk || hostedSources.length) {
-    if (!(await hasGitMetadata(repository, signal))) return false;
-    const remotes = await readHostedGitRemotes(
+    const remotes = await hostedCheckoutRemotes(
       repository,
-      [
-        ...protectedRoots,
-        await abortable(() => canonicalConfigPath(process.cwd()), signal),
-      ],
+      protectedRoots,
       environment,
       signal,
     );
@@ -663,6 +760,7 @@ export function sonarCheckoutMatchesSource(
   );
 }
 
+/** @internal Resolve and protect the local checkout and workbench state directory. */
 async function localContext(
   selectedRepository: string,
   dependencies: LocalExternalImportDependencies,
@@ -736,11 +834,105 @@ export async function prepareNormalizedLocalImport(
   options: NormalizedLocalImportOptions,
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<PreparedLocalExternalImport> {
-  dependencies.signal?.throwIfAborted();
-  return prepareLocalImport(
-    input,
-    snapshotImportOptions(options),
+  const { signal } = dependencies;
+  signal?.throwIfAborted();
+  const settings = snapshotImportOptions(options);
+  const reader = EXTERNAL_FINDINGS_READERS.find(
+    (name) => name === settings.provider,
+  );
+  if (reader)
+    return prepareLocalImport(
+      input,
+      { ...settings, provider: EXTERNAL_FINDINGS_PROVIDERS[reader] },
+      dependencies,
+    );
+
+  const references = snapshotSourceRepositories(
+    dependencies.sourceRepositories,
+  );
+  requireIdentity(settings.provider, "Provider");
+  requireIdentity(settings.sourceKey, "Source key");
+  const current = snapshotNormalizedFindings(input, checkStoredNumber);
+  validateFindingIds(current);
+  if (current.report !== undefined && !isRecord(current.report))
+    throw new CodexSecurityError("Report metadata must be an object.");
+  if (current.read !== current.findings.length + current.excluded.length)
+    throw new CodexSecurityError(
+      "Every source record must be accounted for by a finding or exclusion.",
+    );
+  const positions = new Set<number>();
+  for (const { position, source_finding_id, reason } of current.excluded) {
+    if (
+      !Number.isSafeInteger(position) ||
+      position < 1 ||
+      position > current.read ||
+      positions.has(position)
+    )
+      throw new CodexSecurityError(
+        "An excluded position must be unique and within the reported record count.",
+      );
+    positions.add(position);
+    requireIdentity(reason, "Exclusion reason");
+    if (source_finding_id !== null)
+      requireIdentity(source_finding_id, "Excluded source finding id");
+  }
+
+  const platform = references.find((ref) => ref.platform)?.platform;
+  const urls = new Set(references.map(({ url }) => url));
+  if (settings.sourceRepositoryUrl !== undefined)
+    urls.add(settings.sourceRepositoryUrl);
+  for (const finding of current.findings) {
+    finding.evidence = validateExternalEvidence(finding.evidence, "local");
+    const repository = finding.evidence.details?.repository;
+    if (repository) urls.add(repository.url);
+  }
+  const sources = Array.from(urls, (url) => ({
+    url: declaredScannerRepositoryUrl(url, settings.provider, "local"),
+    platform,
+  }));
+  const [source] = sources;
+  const context = await localContext(settings.repository, dependencies);
+  let matched = false;
+  if (source) {
+    if (
+      references.some((ref) => ref.platform && ref.platform !== platform) ||
+      sources.some(({ url }) => !hostedRepositoryMatches(source, url))
+    )
+      throw new CodexSecurityError(
+        "The findings declare conflicting source repositories.",
+      );
+    const remotes = await hostedCheckoutRemotes(
+      context.repository,
+      context.options.protectedRoot,
+      context.options.environment,
+      signal,
+    );
+    matched =
+      remotes?.some((remote) => hostedRepositoryMatches(source, remote)) ??
+      false;
+    if (
+      !matched &&
+      remotes?.some((remote) =>
+        /^https?:\/\//iu.test(
+          normalizeHostedGitRepositoryUrl(
+            remote,
+            undefined,
+            platform !== undefined,
+          ),
+        ),
+      )
+    )
+      throw new CodexSecurityError(
+        `Imported repository ${JSON.stringify(source.url)} does not match a configured fetch remote of ${context.repository}.`,
+      );
+  }
+  return preparedLocalStorage(
+    current,
+    settings,
+    context,
     dependencies,
+    matched,
+    { sourceRepositories: sources },
   );
 }
 
@@ -767,11 +959,21 @@ export async function prepareLocalImport(
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
   ),
-  parsedInput: readonly ExternalSourceRepository[] = [],
+  parsedInput?: readonly ExternalSourceRepository[],
   fetchRemotes?: readonly ConfiguredFetchRemote[],
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
-  const parsedSources = distinctSourceRepositories(parsedInput);
+  const parsedSources = distinctSourceRepositories(parsedInput ?? []);
+  // File readers interpret their source option while parsing. For normalized
+  // input the caller declares one repository for the whole selection.
+  const normalizedSource =
+    parsedInput === undefined && options.sourceRepositoryUrl !== undefined
+      ? declaredScannerRepositoryUrl(
+          options.sourceRepositoryUrl,
+          options.provider,
+          "local",
+        )
+      : undefined;
   const current = snapshotNormalizedFindings(
     input,
     checkStoredNumber,
@@ -790,16 +992,8 @@ export async function prepareLocalImport(
     );
   checkTrivyReportProvider(options.provider, current.report);
   let dependabotSource: string | undefined;
-  const identities = new Set<string>();
+  validateFindingIds(current);
   for (const finding of current.findings) {
-    requireIdentity(finding.source_finding_id, "Source finding id");
-    if (identities.has(finding.source_finding_id))
-      throw new CodexSecurityError(
-        `Duplicate source finding id ${JSON.stringify(finding.source_finding_id)}.`,
-      );
-    identities.add(finding.source_finding_id);
-    if (!isRecord(finding.evidence))
-      throw new CodexSecurityError("Imported evidence must be an object.");
     checkRetainedTrivyProvider(options.provider, finding, "local");
     if (options.provider !== "github") continue;
     const native = dependabotRepository(finding);
@@ -825,15 +1019,9 @@ export async function prepareLocalImport(
       options.sourceRepositoryUrl,
       [...readerSources, ...parsedSources],
     );
-    const remotes = await readHostedGitRemotes(
+    const remotes = await hostedCheckoutRemotes(
       context.repository,
-      [
-        ...context.options.protectedRoot,
-        await abortable(
-          () => canonicalConfigPath(process.cwd()),
-          dependencies.signal,
-        ),
-      ],
+      context.options.protectedRoot,
       context.options.environment,
       dependencies.signal,
     );
@@ -841,7 +1029,9 @@ export async function prepareLocalImport(
       throw new CodexSecurityError(
         "Tenable's source repository must match a configured Git fetch remote of the selected checkout.",
       );
-    return preparedLocalStorage(current, options, context, dependencies, true);
+    return preparedLocalStorage(current, options, context, dependencies, true, {
+      sourceRepositories: [source],
+    });
   }
   const { repository, options: workbenchOptions } = context;
   const sources = new Map<string, ExternalSourceRepository>();
@@ -866,7 +1056,7 @@ export async function prepareLocalImport(
   );
   const mixed = projected.length > 0 && readerSources.length > 0;
   const nativeSources = new Map(
-    (mixed ? current.findings : projected)
+    (mixed || normalizedSource ? current.findings : projected)
       .filter(
         ({ evidence }) =>
           options.provider !== "endor" ||
@@ -980,7 +1170,12 @@ export async function prepareLocalImport(
     const retained =
       bound.get(finding.source_finding_id) ?? checkmarxRepository(finding);
     const native = nativeSources.get(finding) ?? [];
-    const sarif = hasPlatformEvidence ? semgrepSarifRepositories(finding) : [];
+    const sarif =
+      hasPlatformEvidence ||
+      (normalizedSource && options.provider === "semgrep")
+        ? semgrepSarifRepositories(finding)
+        : [];
+    if (normalizedSource) for (const source of sarif) known.add(source.url);
     const semgrep = semgrepPlatformFindingBinding(
       finding,
       options.provider,
@@ -1309,6 +1504,19 @@ export async function prepareLocalImport(
         "The normalized repository does not match the Snyk reader's repository.",
       );
   }
+  if (normalizedSource && !snyk) {
+    if (
+      !sameRepositories([normalizedSource, ...sources.keys(), ...known]) ||
+      hosted.some(
+        (source) => !semgrepReferenceMatches(source, normalizedSource),
+      )
+    )
+      throw new CodexSecurityError(
+        "The declared repository does not match the normalized finding source.",
+      );
+    if (!hosted.length && !sources.size)
+      sources.set(normalizedSource, { url: normalizedSource });
+  }
   const ordinarySources = [...sources.values()];
   // A reader can identify the VCS for both a hosted project and an ordinary row.
   const loosePlatformFor = localRepositoryPlatform(
@@ -1343,35 +1551,94 @@ export async function prepareLocalImport(
             ? (url) => checkmarxKeys.has(identify(url).key)
             : undefined,
         );
+  let storedSources = [...references, ...ordinarySources, ...hosted];
+  const [project] = hosted;
+  if (
+    options.provider === "semgrep" &&
+    !hasOrdinaryRows &&
+    !ordinarySources.length &&
+    hosted.length === 1 &&
+    project &&
+    references.every(({ url }) => url === project.url)
+  ) {
+    // A typed hint and a bare URL can be two witnesses for the same native
+    // project. Keep the hint if any stored occurrence needs it to verify its scope.
+    storedSources = [project];
+    const native = semgrepPlatformRepositoryReference(project.url, []);
+    if (native.platform !== project.platform) {
+      try {
+        if (
+          current.findings.every((finding) => {
+            const binding = semgrepPlatformFindingBinding(finding, "semgrep", [
+              native,
+            ]);
+            return (
+              binding?.url === native.url &&
+              !binding.migration &&
+              isDeepStrictEqual(
+                binding.sourceData,
+                finding.evidence.source_data,
+              )
+            );
+          })
+        )
+          storedSources = [native];
+      } catch {
+        // A private SCM alias or SSH mapping can require the reader's platform.
+      }
+    }
+  }
+  if (snyk)
+    storedSources.push({
+      url: snyk.url,
+      platform:
+        snyk.platform === "github"
+          ? "github"
+          : snyk.gitlab
+            ? "gitlab"
+            : undefined,
+    });
   return preparedLocalStorage(
     current,
     options,
     context,
     dependencies,
     matchesRepositoryRemote,
+    {
+      sourceRepositories: distinctSourceRepositories(storedSources),
+      inspectorProjectMap: options.inspectorProjectMap
+        ? [...options.inspectorProjectMap]
+        : undefined,
+    },
   );
 }
 
+/** @internal Prepare the transactional write after validating the report and repository. */
 function preparedLocalStorage(
   current: ExternalFindings,
-  options: NormalizedLocalImportOptions,
+  { provider, sourceKey }: NormalizedLocalImportOptions,
   {
     repository,
     options: workbenchOptions,
   }: Awaited<ReturnType<typeof localContext>>,
   dependencies: LocalExternalImportDependencies,
   matchesRepositoryRemote: boolean,
+  provenance: ExternalFindingProvenance,
 ): PreparedLocalExternalImport {
   dependencies.signal?.throwIfAborted();
   const preview = {
     ...cloneImportPreview(current),
     repository,
-    source: { provider: options.provider, source_key: options.sourceKey },
+    source: { provider, source_key: sourceKey },
   };
   const payload = JSON.stringify({
     repository,
-    provider: options.provider,
-    sourceKey: options.sourceKey,
+    provider,
+    sourceKey,
+    read: current.read,
+    excluded: current.excluded,
+    report: reportForJson(current.report),
+    provenance,
     findings: current.findings.map(({ source_finding_id, evidence }) => ({
       source_finding_id,
       evidence,
@@ -1436,6 +1703,7 @@ function preparedLocalStorage(
       }, dependencies.signal);
       return {
         ...summary,
+        importId: result["importId"] as string,
         findings: result["findings"] as unknown as StoredExternalFinding[],
         counts: result["counts"] as LocalExternalImportResult["counts"],
       };
@@ -1457,8 +1725,93 @@ export async function readLocalExternalFindings(
 ) {
   dependencies.signal?.throwIfAborted();
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
-  const { repository, selectedPath, options } = await localContext(
+  const { selectedPath, result } = await runLocalFindingWorkbench(
     selection.repository,
+    "read-external-findings",
+    { id: selection.id },
+    dependencies,
+  );
+  return {
+    repository: selectedPath,
+    findings: result["findings"] as unknown as StoredExternalFinding[],
+  };
+}
+
+/** Read the precise versions selected by the caller or captured by an earlier import. */
+export async function selectLocalExternalFindings(
+  selection: LocalExternalFindingSelection,
+  dependencies: LocalExternalImportDependencies = {},
+): Promise<SelectedLocalExternalFindings> {
+  const { repository, importId, findings } = selection;
+  if ((importId === undefined) === (findings === undefined))
+    throw new CodexSecurityError(
+      "Select one import ID or a list of versioned findings.",
+    );
+  const { result } = await runLocalFindingWorkbench(
+    repository,
+    "read-external-findings",
+    importId !== undefined
+      ? { importId, ifCurrent: selection.ifCurrent }
+      : { findings: findings!.map(({ id, version }) => ({ id, version })) },
+    dependencies,
+  );
+  return result as unknown as SelectedLocalExternalFindings;
+}
+
+/** List this checkout's nonempty imports, most recent first. */
+export async function listLocalExternalImports(
+  { repository }: { repository: string },
+  dependencies: LocalExternalImportDependencies = {},
+): Promise<StoredExternalImport[]> {
+  const { result } = await runLocalFindingWorkbench(
+    repository,
+    "list-external-imports",
+    {},
+    dependencies,
+  );
+  return result["imports"] as unknown as StoredExternalImport[];
+}
+
+/** @internal Attach Cloud acknowledgements to the versions that were submitted. */
+export async function recordExternalFindingPublications(
+  input: CloudFindingDestination & {
+    repository: string;
+    entries: LocalFindingReceipt[];
+  },
+  dependencies: LocalExternalImportDependencies = {},
+): Promise<void> {
+  const { repository, ...receipt } = input;
+  await runLocalFindingWorkbench(
+    repository,
+    "record-external-finding-publications",
+    receipt,
+    dependencies,
+  );
+}
+
+/** Read the destination and receipt for each acknowledged finding version. */
+export async function listLocalFindingPublications(
+  { repository, id }: { repository: string; id?: string },
+  dependencies: LocalExternalImportDependencies = {},
+): Promise<StoredFindingPublication[]> {
+  const { result } = await runLocalFindingWorkbench(
+    repository,
+    "list-external-finding-publications",
+    { id },
+    dependencies,
+  );
+  return result["publications"] as unknown as StoredFindingPublication[];
+}
+
+/** @internal Run a command against the workbench for the selected checkout. */
+async function runLocalFindingWorkbench(
+  path: string,
+  command: string,
+  selection: Record<string, unknown>,
+  dependencies: LocalExternalImportDependencies,
+) {
+  const { repository, selectedPath, options } = await localContext(
+    path,
     dependencies,
     "read",
   );
@@ -1466,12 +1819,9 @@ export async function readLocalExternalFindings(
     dependencies.signal?.throwIfAborted();
     return (dependencies.runWorkbench ?? runWorkbench)(
       options,
-      ["list-external-findings"],
-      JSON.stringify({ repository, id: selection.id }),
+      [command],
+      JSON.stringify({ repository, ...selection }),
     );
   }, dependencies.signal);
-  return {
-    repository: selectedPath,
-    findings: result["findings"] as unknown as StoredExternalFinding[],
-  };
+  return { selectedPath, result };
 }
