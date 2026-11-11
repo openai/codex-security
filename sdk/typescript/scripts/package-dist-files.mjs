@@ -1,5 +1,6 @@
 const distModules = [
   "api",
+  "command-words",
   "scan-executor",
   "host-protocol",
   "hosted-remediation",
