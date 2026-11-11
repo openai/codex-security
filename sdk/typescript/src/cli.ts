@@ -9877,7 +9877,7 @@ async function prepareSavedPatchPublication(
       return tree;
     },
     async record(
-      paths: string[],
+      verifiedKeys: ReadonlySet<string>,
       before: SavedPatchTrees,
       after: SavedPatchTrees,
     ) {
@@ -9886,14 +9886,8 @@ async function prepareSavedPatchPublication(
       // of the same mode and object. Never select neighboring directory leaves.
       const previous = new Map<string, string>();
       const turn = await diff(before.tree, after.tree, ["."], previous);
-      // Git emits root-relative byte paths. Use the exact directory-entry names
-      // accepted by finding verification, including descendants of a selected directory.
       const changes = new Map(
-        [...turn].filter(([path]) =>
-          paths.some(
-            (selected) => path === selected || path.startsWith(selected + "/"),
-          ),
-        ),
+        [...turn].filter(([path]) => verifiedKeys.has(path)),
       );
       const filtered = (path: string) =>
         before.filteredInputs?.has(path) || after.filteredInputs?.has(path);
@@ -14149,19 +14143,18 @@ async function runFindingPatches(
           base !== undefined && !(base instanceof Map)
             ? base.root
             : selected.repository;
-        const changes = changedKeys.map((file) =>
-          relativePatchPath(
+        const changes = changedKeys.map((key) => ({
+          key,
+          path: relativePatchPath(
             repositoryKey,
-            resolve(rootKey, canonicalPatchPath(root, file)),
+            resolve(rootKey, canonicalPatchPath(root, key)),
           ),
+        }));
+        // Match physical directory entries, then publish the corresponding raw Git keys.
+        const matched = changes.filter(({ path }) =>
+          files.some((file) => path === file || path.startsWith(file + sep)),
         );
-        if (
-          !files.some((file) =>
-            changes.some(
-              (changed) => !isOutsidePath(relativePatchPath(file, changed)),
-            ),
-          )
-        )
+        if (matched.length === 0)
           patch = failed(
             "Patch verification did not identify any changed files.",
             changedFiles,
@@ -14172,12 +14165,12 @@ async function runFindingPatches(
           base &&
           !(base instanceof Map)
         ) {
+          if (new Set(matched.map(({ path }) => path)).size !== matched.length)
+            throw new CodexSecurityError(
+              "Multiple changed Git paths resolve to the same filesystem entry. Review the changes before publishing.",
+            );
           const reason = await options.publication.verified.record(
-            files.map((file) =>
-              relativePatchPath(rootKey, resolve(repositoryKey, file))
-                .split(sep)
-                .join("/"),
-            ),
+            new Set(matched.map(({ key }) => key)),
             base,
             observed,
           );
@@ -14185,11 +14178,11 @@ async function runFindingPatches(
             const nested = [...observed.gitlinks.keys()].find(
               (directory) =>
                 changes.some(
-                  (changed) =>
+                  ({ path }) =>
                     !isOutsidePath(
                       relativePatchPath(
                         resolve(rootKey, directory),
-                        resolve(repositoryKey, changed),
+                        resolve(repositoryKey, path),
                       ),
                     ),
                 ) &&
