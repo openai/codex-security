@@ -47,7 +47,14 @@ test("SDK registration measures the shell-visible instructions separately from u
   await mkdir(codexHome);
   await mkdir(plugin);
   await writeFile(join(repository, "example.ts"), "export {};");
-  for (const dir of ["scripts", "shared", "schemas", "skills", "references"]) {
+  for (const dir of [
+    ".codex-plugin",
+    "scripts",
+    "shared",
+    "schemas",
+    "skills",
+    "references",
+  ]) {
     await cp(join(PLUGIN_ROOT, dir), join(plugin, dir), { recursive: true });
   }
   const runtime = preparedRuntime(codexHome);
@@ -59,7 +66,7 @@ test("SDK registration measures the shell-visible instructions separately from u
     });
   }
   runtime.plugin.installedRoot = installed;
-  const python = Bun.which("python3") ?? Bun.which("python")!;
+  const python = pythonExecutable()!;
   const register = async (
     options: { scanPrompt?: string; validationPrompt?: string },
     beforeRegistration?: () => Promise<void>,
