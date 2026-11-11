@@ -86,6 +86,7 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { abortable, normalizeTarget } from "../src/targets.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import {
   copyCompletedScan,
   copyCredentialTestPlugin,
@@ -503,6 +504,8 @@ describe("CodexSecurity orchestration", () => {
       "sqlite3.OperationalError: unable to open database file\nwith closing(connect()) as connection:",
       "Could not save the Codex Security scan: database connection failed",
       "Codex Security workbench: permission denied",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      "ENOENT: could not open /synthetic/timed.out/result.json",
     ]) {
       expect(classifyConnectionFailure(message)).toBe("unknown");
     }
@@ -516,6 +519,44 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
+    ["invalid.api.key", "unauthorized"],
+    ["token.expired", "unauthorized"],
+    ["expired.token", "unauthorized"],
+    ["model.access", "forbidden"],
+    ["model.not.found", "forbidden"],
+  ] as const)(
+    "bounds diagnostic code %s without matching endpoint components",
+    (code, classification) => {
+      for (const detail of [
+        code,
+        `${code}: synthetic provider detail`,
+        `error: '${code}'`,
+        `${code}.`,
+        JSON.stringify({ error: { message: `${code}.` } }),
+        `error=${code}`,
+        `error sending request for url (https://example.test/v1) ${code}`,
+      ])
+        expect(classifyConnectionFailure(new Error(detail))).toBe(
+          classification,
+        );
+      for (const url of [
+        `https://${code}.example/v1`,
+        `https://example.test/${code}/v1`,
+        `https://example.test/${code}`,
+        `https://example.test/v1?error=${code}`,
+        `https://example.test/v1?${code}=synthetic`,
+        `https://example.test/v1#${code}`,
+        `https://example.test/v1#error=${code}`,
+      ])
+        expect(
+          classifyConnectionFailure(
+            new Error(`error sending request for url (${url})`),
+          ),
+        ).toBe("network_error");
+    },
+  );
+
+  test.each([
     ["HTTP 403 ExpiredTokenException", "unauthorized"],
     ["HTTP 403 UnrecognizedClientException", "unauthorized"],
     ["HTTP 400 IncompleteSignature", "unauthorized"],
@@ -524,8 +565,19 @@ describe("CodexSecurity orchestration", () => {
     ["HTTP 401 NotAuthorized", "forbidden"],
     ["OptInRequired", "forbidden"],
     ["ThrottlingException", "rate_limited"],
+    [
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "unauthorized",
+    ],
+    ["Provider configured in config.toml returned 403 Forbidden", "forbidden"],
+    [
+      "Provider configured in config.toml returned 429 Too Many Requests",
+      "rate_limited",
+    ],
+    ["Provider configured in config.toml returned ECONNRESET", "network_error"],
+    ["Provider configured in config.toml timed out", "timeout"],
   ] as const)(
-    "classifies Bedrock error %s as %s",
+    "classifies provider error %s as %s",
     (message, classification) => {
       expect(classifyConnectionFailure(new Error(message))).toBe(
         classification,
@@ -1262,6 +1314,7 @@ describe("CodexSecurity orchestration", () => {
       const environment = {
         OPENAI_API_KEY: "synthetic-openai-key",
         [competingApiKey]: "synthetic-competing-provider-key",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
         [apiKey]: `synthetic-${provider}-key`,
       };
       const client = new TestClient(
@@ -2666,7 +2719,7 @@ describe("CodexSecurity orchestration", () => {
         : afterRename
           ? "insert_running_scan"
           : "directory_snapshot_regular_file_count";
-      const framedArgument = "--fixture-message=出力\0literal\nsecond line";
+      const framedArgument = "--fixture-message=å‡ºåŠ›\0literal\nsecond line";
       const entrypoint = join(pluginRoot, "scripts", "workbench_db.py");
       const controlledScript = guardCreated
         ? join(pluginRoot, "scripts", "registration_fixture.py")
@@ -2786,7 +2839,7 @@ if __name__ == "__main__":
               ...options,
               mode: deep ? "deep" : "standard",
               mock: mode === "mock",
-              scanPrompt: "Review café boundaries.\nPreserve the second line.",
+              scanPrompt: "Review cafÃ© boundaries.\nPreserve the second line.",
             })
       ).catch((error: unknown) => error);
       let closing: Promise<void> | undefined;
@@ -16128,7 +16181,7 @@ if __name__ == "__main__":
       "fail-scan",
       "--scan-id",
       "scan_example_001",
-      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
+      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488â€“$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
       "--cost-json",
       expect.any(String),
     ]);
@@ -16311,7 +16364,7 @@ if __name__ == "__main__":
           if (missingWorker) expect(recovered.cost).toBeNull();
           else expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
+            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488â€“$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
           expect(
@@ -16627,7 +16680,7 @@ if __name__ == "__main__":
   test.each([
     ["plain", ""],
     ["NUL", "\0literal"],
-    ["Unicode", "\0high\ud800.low\udfff.pair😀"],
+    ["Unicode", "\0high\ud800.low\udfff.pairðŸ˜€"],
     ["long", `${"detail ".repeat(20_000)}final cause`],
   ])(
     "preserves original failures in saved scan history (%s)",
@@ -18594,6 +18647,61 @@ if __name__ == "__main__":
     }
   });
 
+  test.skipIf(process.platform === "win32")(
+    "rejects campaign Codex launches through a selected source interpreter",
+    async () => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const interpreter = join(root, "interpreter");
+      await symlink("/bin/sh", join(repository, "shell"));
+      await symlink(join(repository, "shell"), interpreter);
+      const executable = join(root, "codex");
+      const marker = join(root, "launched");
+      await writeFile(
+        executable,
+        `#!${interpreter}\nprintf ran > "${marker}"\n`,
+        { mode: 0o700 },
+      );
+      const tools = join(root, "tools");
+      await mkdir(tools);
+      await symlink(Bun.which("git")!, join(tools, "git"));
+      const environment = {
+        OPENAI_API_KEY: "ambient-key",
+        CODEX_CLI_PATH: executable,
+        PATH: tools,
+      };
+      const createCodex = mock(completedCodex(root));
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        environment,
+        prepareRuntime: runtimePreparer(codexHome, () => ({
+          environment: { ...environment, CODEX_HOME: codexHome },
+        })),
+        createCodex,
+      });
+      try {
+        await withProtectedExecutableRoots([repository], async () => {
+          const refused = `trusted PATH: ${executable}`;
+          const timeout = spyOn(AbortSignal, "timeout");
+          try {
+            await expect(
+              runtime.probeCodexSandbox({ command: executable }, environment),
+            ).rejects.toThrow(refused);
+            expect(timeout).not.toHaveBeenCalled();
+          } finally {
+            timeout.mockRestore();
+          }
+          await expect(client.run(repository)).rejects.toThrow(refused);
+        });
+        expect(existsSync(marker)).toBe(false);
+        expect(createCodex).not.toHaveBeenCalled();
+        await runtime.probeCodexSandbox({ command: executable }, environment);
+        expect(existsSync(marker)).toBe(true);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test.each(["native", "shim"])(
     "uses one spawnable Codex executable for scans and nested workers (%s)",
     async (kind) => {
@@ -18661,6 +18769,7 @@ if __name__ == "__main__":
     "missing tools",
     "non-directory tools",
     "blank override",
+    "bulk campaign",
   ])("preserves default SDK bundled tools for %s", async (scenario) => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const executable = join(
@@ -18672,7 +18781,7 @@ if __name__ == "__main__":
     );
     const toolsDirectory = join(dirname(dirname(executable)), "codex-path");
     const otherTools = join(root, "other tools");
-    const pathEnvironment: Record<string, string> =
+    let pathEnvironment: Record<string, string> =
       scenario === "no PATH"
         ? {}
         : scenario === "mixed-case alias"
@@ -18691,7 +18800,10 @@ if __name__ == "__main__":
       mkdir(otherTools),
       mkdir(dirname(executable), { recursive: true }),
     ]);
-    await writeFile(executable, "synthetic executable; never launched\n");
+    if (scenario === "bulk campaign") pathEnvironment = { PATH: otherTools };
+    await writeFile(executable, "synthetic executable; never launched\n", {
+      mode: 0o700,
+    });
     const hasTools =
       scenario !== "missing tools" && scenario !== "non-directory tools";
     if (hasTools) await mkdir(toolsDirectory);
@@ -18717,12 +18829,20 @@ if __name__ == "__main__":
       createCodex,
     });
     try {
-      await client.run(repository);
+      if (scenario === "bulk campaign") {
+        await withProtectedExecutableRoots([repository], () =>
+          client.run(repository),
+        );
+      } else {
+        await client.run(repository);
+      }
       const options = createCodex.mock.lastCall?.[0] ?? null;
       expect(options?.codexPathOverride).toBe(
         process.platform === "win32"
           ? win32.toNamespacedPath(executable)
-          : undefined,
+          : scenario === "bulk campaign"
+            ? executable
+            : undefined,
       );
       expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
       const pathValues = Object.fromEntries(

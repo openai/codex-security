@@ -2,10 +2,13 @@
 # Use LF line endings so POSIX can execute this script directly from Windows-built packages.
 set -eu
 
-PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-export PATH
+# The SDK may have removed directories containing repository-owned executables.
+if [ -z "${_CODEX_SECURITY_SDK_NODE_SEARCH_PATH+x}" ]; then
+  PATH="${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+  export PATH
+fi
 
-launcher_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+launcher_dir=$(CDPATH= cd "$(command -p dirname "$0")" && pwd)
 server_path=$launcher_dir/../mcp/server.mjs
 if [ "${1:-}" = "--helper" ]; then
   server_path=$launcher_dir/../mcp/helpers.mjs
@@ -34,7 +37,7 @@ launch_node() {
     trap 'forward_signal HUP 129' HUP
     trap 'forward_signal INT 130' INT
     trap 'forward_signal TERM 143' TERM
-    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | od -An -v -tx1 | tr -d ' \n' | {
+    printf '%s\000' "${HOME+x}" "${HOME-}" "$@" | command -p od -An -v -tx1 | command -p tr -d ' \n' | {
       # BusyBox ash requires a literal close redirection for a closed stdin.
       if [ "$helper_stdin_open" = true ]; then
         exec 0<&4
@@ -86,6 +89,12 @@ can_load_native() {
   # This Linux runtime can still run helpers without SQLite. Prefer a system
   # installation if available, without expanding discovery into the caller's PATH.
   for system_candidate in /usr/local/bin/node /usr/bin/node /bin/node; do
+    if [ -n "${_CODEX_SECURITY_SDK_NODE_SEARCH_PATH+x}" ]; then
+      case ":$_CODEX_SECURITY_SDK_NODE_SEARCH_PATH:" in
+        *":${system_candidate%/*}:"*) ;;
+        *) continue ;;
+      esac
+    fi
     if [ -x "$system_candidate" ] &&
       _native_probe_output=$("$system_candidate" -e 'require("node:sqlite")' </dev/null 2>&1); then
       selected_node=$system_candidate
@@ -106,8 +115,12 @@ do
   fi
 done
 
-remaining_path=$PATH
-while :; do
+remaining_path=${PATH-}
+if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ] && [ -n "${_CODEX_SECURITY_SDK_NODE_SEARCH_PATH:-}" ]; then
+  # Only Node lookup uses the SDK-inspected fallback directories.
+  remaining_path=${remaining_path:+$remaining_path:}$_CODEX_SECURITY_SDK_NODE_SEARCH_PATH
+fi
+while [ -n "$remaining_path" ]; do
   path_entry=${remaining_path%%:*}
   node_path=${path_entry:-.}/node
   if [ -x "$node_path" ] && can_load_native "$node_path"; then

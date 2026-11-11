@@ -38,7 +38,11 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
-import { runWorkbench } from "../src/runtime.js";
+import {
+  runWorkbench,
+  SDK_NODE_SEARCH_PATH,
+  sdkNodeSearchPath,
+} from "../src/runtime.js";
 import { readSavedScanLifecycle } from "../src/saved-scan-bootstrap.js";
 import { useTestPython } from "./support/python.js";
 import { git } from "./git-fixture.js";
@@ -509,6 +513,11 @@ test("hosted execution preserves inspected runtime tool paths", async () => {
     for (const directory of executableAliases)
       expect(paths).not.toContain(directory);
     expect(paths).toContain(trustedTools);
+    expect(environment[SDK_NODE_SEARCH_PATH]).toBe(
+      process.platform === "win32"
+        ? undefined
+        : await sdkNodeSearchPath([input.repository]),
+    );
     expect(isAbsolute(environment["CODEX_SECURITY_GIT"] ?? "")).toBe(true);
     expect(isAbsolute(environment["PYTHON"] ?? "")).toBe(true);
   } finally {
