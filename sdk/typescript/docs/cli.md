@@ -2107,7 +2107,7 @@ attach only their owner's session. Unrecorded earlier retry sessions may be abse
 ## Scan history and reruns
 
 Commands default to the current repository. IDs accept unique prefixes of at
-least eight characters.
+least eight characters. Reading empty history leaves the workbench database uninitialized.
 
 Linked Git worktrees share scans, findings, and reviewer decisions when their
 scans record the same repository generation in the selected state database.
@@ -2125,8 +2125,7 @@ in the workbench, without changing sealed report timestamps.
 | `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                                       |
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active.                       |
 | `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                                               |
-| `scans rerun [SCAN_ID]`                               | Repeat on the current checkout.                                                  |
-| `scans match BEFORE AFTER`                            | Link findings with the same root cause.                                          |
+| `scans rerun [SCAN_ID]`                               | Rerun a saved recipe in its checkout.                                            |
 | `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees. |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                                 |
 | `findings list [REPOSITORY]`                          | List open findings.                                                              |
@@ -2138,9 +2137,11 @@ Copy that ID into `findings false-positive` with your reason. Subsequent scans c
 use the explanation while it applies. In `scans show SCAN_ID --json`, each
 displayed occurrence has its saved rationale in `triage.note` after dismissal. The list identifies
 a repository with no saved scan history separately from one with zero open findings.
+From an unregistered Git subdirectory with no scan history of its own, it uses the worktree root.
 
-Without an ID, `scans show` selects the latest completed scan, while `scans logs`
-selects the latest scan of any status. After a successful scan followed by a
+With an omitted ID or the literal `latest`, `scans show` selects the latest completed scan, while `scans logs`
+selects the latest scan of any status. Both prefer a scan in the current
+worktree when one qualifies. After a successful scan followed by a
 failed or active scan, these defaults refer to different runs. Human output
 identifies the selected run, labels its saved update time, and gives matching
 commands with its full scan ID:
@@ -2158,7 +2159,10 @@ history. Inspect its saved status before choosing resume or rerun, and supply
 the original custom prompt files for reruns. Structured history and log output
 and command selection defaults are unchanged.
 
-Reruns use the current checkout/context files and do not reload project files.
+Without an ID, rerun selects the latest completed scan in the current worktree.
+If only a related checkout has a completed scan, rerun shows its ID, path, and
+revision. Pass that ID to run the saved recipe using the files currently at its
+saved checkout and context paths. Reruns do not reload project files.
 The readable scan recipe records your authentication choice. A separate private
 replay profile stores explicit `openai_base_url`, `chatgpt_base_url`, and custom
 `model_providers` settings, including any credentials written directly in
@@ -2262,7 +2266,10 @@ to update campaign receipts. Individual resume does not update `results.jsonl`.
 
 ### Matching saved scans
 
-Matching uses sealed artifacts and cached decisions unless `--force` is supplied.
+Use `scans compare BEFORE AFTER` to compare a pair. A cache miss can use the model
+and save its matching decisions. Pass `--force` to recompute saved matches.
+The older `scans match BEFORE AFTER` spelling is also supported.
+Use `scans match --all` to match completed scans in this repository generation, including linked worktrees.
 Comparisons classify findings as new, persisting, reopened, not observed, resolved,
 or unknown. An absent finding in the later scope is not observed; absence alone
 does not verify remediation. A finding is resolved only after it was explicitly
