@@ -3,6 +3,7 @@ import { parseJsonLines } from "./support/json.js";
 import { writeFileSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -1176,7 +1177,13 @@ describe("CLI", () => {
         { mode: 0o700 },
       );
     }
-    for (const selected of [component, join(alias, "component")]) {
+    const selections = [component, join(alias, "component")];
+    if (process.platform !== "win32") {
+      const componentLink = join(caller, "component-link");
+      await symlink(component, componentLink);
+      selections.push(componentLink + "/..");
+    }
+    for (const selected of selections) {
       const { stdout, stderr, runCli } = createCliTest(main);
       const status = await runCli(
         ["install-hook", selected, "--json"],
@@ -1284,14 +1291,15 @@ describe("CLI", () => {
         hook,
         "#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity medium\n",
       );
-      const migratedHook = captureCli(main, "stdout");
+      const migratedHook = createCliTest(main);
       expect(
-        await migratedHook.run(
+        await migratedHook.runCli(
           ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
           deps,
         ),
+        migratedHook.stderr.text(),
       ).toBe(0);
-      const migrated = JSON.parse(migratedHook.text()) as {
+      const migrated = JSON.parse(migratedHook.stdout.text()) as {
         hook: string;
         failOnSeverity: string;
       };
@@ -1304,19 +1312,18 @@ describe("CLI", () => {
       ]) {
         await writeFile(hook, trustedHook.replace(/^unset .*\n/m, unset));
         expect(
-          await migratedHook.run(
+          await migratedHook.runCli(
             ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
             deps,
           ),
+          migratedHook.stderr.text(),
         ).toBe(0);
         expect(await readFile(hook, "utf8")).toBe(trustedHook);
       }
 
-      const existingHook = captureCli(main, "stderr");
-      expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
-      expect(existingHook.text()).toContain("A pre-commit hook already exists");
-      expect(await readFile(hook, "utf8")).toContain(
-        "--fail-on-severity medium",
+      expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(0);
+      expect(await readFile(hook, "utf8")).toBe(
+        trustedHook.replace("severity medium", "severity high"),
       );
 
       const customHook = "#!/bin/sh\nexit 0\n";
@@ -1332,7 +1339,20 @@ describe("CLI", () => {
         "A pre-commit hook already exists",
       );
       expect(await readFile(hook, "utf8")).toBe(customHook);
-      await writeFile(hook, trustedHook);
+      const other = join(root, "other-hook");
+      await writeFile(other, trustedHook);
+      await rm(hook);
+      await link(other, hook);
+      expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
+      expect(await readFile(other, "utf8")).toBe(trustedHook);
+      await rm(hook);
+      if (process.platform !== "win32") {
+        await symlink(other, hook);
+        expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
+        expect(await readFile(other, "utf8")).toBe(trustedHook);
+        await rm(hook);
+      }
+      await writeFile(hook, trustedHook, { mode: 0o755 });
 
       const binaries = join(root, "test-binaries");
       await mkdir(binaries);
@@ -1603,6 +1623,50 @@ describe("CLI", () => {
     }
   });
 
+  test.skipIf(process.platform === "win32").each(["present", "missing"])(
+    "reads the physical bulk scan CSV through a symlink parent with the lexical CSV %s",
+    async (lexicalCsv) => {
+      const root = await temporaryDirectory("codex-security-cli-csv-link-");
+      const currentDirectory = join(root, "entry");
+      const physical = join(root, "physical");
+      const output = join(root, "results");
+      try {
+        await mkdir(currentDirectory);
+        await mkdir(join(physical, "child"), { recursive: true });
+        await multiscanInventory(physical);
+        if (lexicalCsv === "present")
+          await multiscanInventory(currentDirectory);
+        await symlink(join(physical, "child"), join(currentDirectory, "link"));
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "bulk-scan",
+              "link/../repositories.csv",
+              "--output-dir",
+              output,
+              "--json",
+            ],
+            dependencies({ currentDirectory }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          total: 1,
+          completed: 1,
+          failed: 0,
+        });
+        expect(
+          parseJsonLines(await readFile(join(output, "results.jsonl"), "utf8")),
+        ).toMatchObject([
+          { repository: join(physical, "repository"), status: "completed" },
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("expands home-relative bulk scan paths", async () => {
     const root = await temporaryDirectory("codex-security-cli-home-");
     const home = join(root, "home");
@@ -1816,6 +1880,7 @@ describe("CLI", () => {
         "--knowledge-base",
         "/shared/threat-models",
       ],
+      ["bulk-scan", "--output-dir", "results"],
       ["bulk-scan", "--provider", "openrouter"],
       ["bulk-scan", "--provider=openrouter", "--model", "openai/gpt-5.4"],
       ["bulk-scan", "--provider", "fireworks"],
@@ -1847,19 +1912,6 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("--output-dir is required");
     expect(stdout.text()).toBe("");
-  });
-
-  test("rejects an output directory without a repository CSV", async () => {
-    const stderr = captureCli(main, "stderr");
-    expect(
-      await stderr.run(
-        ["bulk-scan", "--output-dir", "results"],
-        dependencies(),
-      ),
-    ).toBe(2);
-    expect(stderr.text()).toContain(
-      "--output-dir can only be used with a repository CSV",
-    );
   });
 
   test("exposes only typed, read-only SDK metadata over MCP", async () => {
@@ -2894,12 +2946,15 @@ describe("CLI", () => {
   ] as const)(
     "shows the resolved directory name in the scan title for %p",
     async (repository, name) => {
+      await using temp = await scopedTemporaryDirectory("scan-title-");
+      const currentDirectory = join(temp.path, "workspace", "repository");
+      await mkdir(join(currentDirectory, "child"), { recursive: true });
       const { stderr, runCli } = createCliTest(main, { stderr: true });
       expect(
         await runCli(
           ["scan", ...(repository === undefined ? [] : [repository])],
           dependencies({
-            currentDirectory: resolve("/workspace/repository"),
+            currentDirectory,
             environment: { NO_COLOR: "1" },
           }),
         ),
