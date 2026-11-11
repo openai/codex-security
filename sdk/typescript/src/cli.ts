@@ -50,6 +50,7 @@ import {
   isAbsolute,
   join,
   parse,
+  posix,
   relative,
   resolve,
   sep,
@@ -9710,6 +9711,7 @@ async function prepareSavedPatchPublication(
     dependencies.runRepositoryCommand("git", args, repository, options);
   const parentTree = await git(["rev-parse", parent + "^{tree}"]);
   let tree = parentTree;
+  const removedPaths = new Set<string>();
   // Capture the input to clean filters separately. An operator's filter can
   // produce different blobs each time Git stages identical worktree bytes.
   const keys = await dependencies.runRepositoryCommand(
@@ -9873,6 +9875,7 @@ async function prepareSavedPatchPublication(
   return {
     parent,
     capture,
+    removedPaths,
     get tree() {
       return tree;
     },
@@ -9964,6 +9967,10 @@ async function prepareSavedPatchPublication(
       )
         return "The selected changes also replace an unreported path. Local edits were kept for review.";
       for (const path of changed) {
+        if (changes.get(path)!.startsWith("000000 ")) {
+          for (let key = path; key !== "."; key = posix.dirname(key))
+            removedPaths.add(key);
+        }
         const input = after.filteredInputs?.get(path);
         if (input === undefined) verifiedInputs?.delete(path);
         else verifiedInputs?.set(path, input);
@@ -12520,13 +12527,21 @@ async function createPatchPullRequest(
         throwIfNoEntry: false,
       })?.isDirectory()
     );
-  // A later verified turn may remove a path introduced by an earlier finding.
+  const treePath = (file: string) =>
+    relativePatchPath(
+      patchPathKey(root),
+      resolve(patchPathKey(directory), file),
+    )
+      .split(sep)
+      .join("/");
+  // Only previously verified removals may disappear from the reported pathspecs.
   const stagingCandidates = [
     ...new Set([
       ...selectedFiles,
       ...reportedFiles.filter(
         (file) =>
-          !publication.verified || existsSync(patchFilePath(repository, file)),
+          !publication.verified?.removedPaths.has(treePath(file)) ||
+          existsSync(patchFilePath(directory, file)),
       ),
     ]),
   ];
@@ -12581,13 +12596,6 @@ async function createPatchPullRequest(
     throw new CodexSecurityError(
       "The patch base changed during verification. Local edits were kept for review.",
     );
-  const treePath = (file: string) =>
-    relativePatchPath(
-      patchPathKey(root),
-      resolve(patchPathKey(directory), file),
-    )
-      .split(sep)
-      .join("/");
   const stagedTreePaths = stagePaths.map(treePath);
   const isStagedPath = (file: string) =>
     stagedTreePaths.some(
