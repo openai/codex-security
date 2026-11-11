@@ -283,7 +283,7 @@ describe("CLI skill commands", () => {
             command,
             `${command}.txt`,
             `${command} literal`,
-            "C:\\tmp\\finding one.txt",
+            "text:C:\\tmp\\finding one.txt",
             "\\\\server\\share\\issue.txt",
           ],
           dependencies({
