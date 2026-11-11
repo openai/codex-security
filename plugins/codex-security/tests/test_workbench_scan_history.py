@@ -893,6 +893,34 @@ def test_scan_history_resolves_unique_prefixes_and_rejects_ambiguity(tmp_path: P
     assert get_scan(state_dir, scan["scanId"])["scan"]["scanId"] == scan["scanId"]
 
 
+def test_reading_empty_history_leaves_state_uninitialized(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    initialized = tmp_path / "initialized"
+    run_workbench(initialized, "database-info")
+    for command, key in (
+        ("list-scans", "scans"),
+        ("list-repositories", "repositories"),
+        ("list-global-findings", "findings"),
+    ):
+        args = (command, "--limit", "2", "--offset", "1")
+        empty = run_workbench(state_dir, *args)
+        assert empty == run_workbench(initialized, *args)
+        assert empty == {
+            key: [],
+            "nextOffset": None,
+            "limit": 2,
+            "offset": 1,
+            **({"projectionAvailable": True} if command == "list-global-findings" else {}),
+        }
+    for target in (str(tmp_path), str(tmp_path / "missing" / "..")):
+        args = ("list-global-findings", "--repository", target)
+        assert run_workbench(state_dir, *args) == run_workbench(initialized, *args)
+    for scan_id, message in (("short", "eight characters"), (str(uuid.uuid4()), "scan not found")):
+        missing = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
+        assert missing["returncode"] != 0 and message in missing["stderr"]
+    assert not state_dir.exists()
+
+
 def test_scan_list_shares_worktree_history_without_including_clones(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
@@ -926,6 +954,21 @@ def test_scan_list_shares_worktree_history_without_including_clones(tmp_path: Pa
             original_scan["scanId"],
         ]
 
+    for target, expected in (
+        (repository, original_scan),
+        (worktree, worktree_scan),
+        (clone, clone_scan),
+    ):
+        nested = target / "nested"
+        nested.mkdir()
+        local = run_workbench(
+            state_dir, "list-scans", "--repository", str(nested), "--prefer-worktree"
+        )
+        assert local["scans"][0]["scanId"] == expected["scanId"]
+        assert [scan["inCurrentWorktree"] for scan in local["scans"]] == (
+            [True] if target == clone else [True, False]
+        )
+
     for offset, expected in enumerate((worktree_scan, original_scan)):
         page = run_workbench(
             state_dir,
@@ -958,6 +1001,24 @@ def test_scan_list_shares_worktree_history_without_including_clones(tmp_path: Pa
     assert [scan["scanId"] for scan in scoped] == [worktree_scan["scanId"]]
     other = run_workbench(state_dir, "list-scans", "--repository", str(unrelated))["scans"]
     assert [scan["scanId"] for scan in other] == [unrelated_scan["scanId"]]
+
+
+def test_nested_finding_history_uses_saved_scope_before_worktree_root(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    nested = repository / "src"
+    nested.mkdir()
+    state = tmp_path / "state"
+    root_scan = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    findings = run_workbench(state, "list-global-findings", "--repository", str(nested))["findings"]
+    assert [finding["scanId"] for finding in findings] == [root_scan["scanId"]]
+
+    nested_scan = create_cli_scan(state, tmp_path / "results", nested, complete=False)
+    assert (
+        run_workbench(state, "list-global-findings", "--repository", str(nested))["findings"] == []
+    )
+    saved = run_workbench(state, "list-scans", "--repository", str(nested), "--prefer-worktree")
+    assert [scan["scanId"] for scan in saved["scans"]] == [nested_scan["scanId"]]
 
 
 def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_path: Path) -> None:
@@ -1075,7 +1136,7 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
 
     rejected = compare_scan_pair(state_dir, before, after, "--require-matches", check=False)
     assert rejected["returncode"] != 0
-    assert "Run 'codex-security scans match BEFORE AFTER' first" in rejected["stderr"]
+    assert "Run 'codex-security scans compare BEFORE AFTER' first" in rejected["stderr"]
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
@@ -2593,7 +2654,7 @@ def test_portable_identity_decodes_git_line_protocol_without_changing_path_bytes
 @pytest.mark.parametrize("reopen", (False, True))
 def test_portable_identity_history_lookup_uses_indexes(tmp_path: Path, reopen: bool) -> None:
     state = tmp_path / "state"
-    run_workbench(state, "list-repositories")
+    run_workbench(state, "database-info")
     if reopen:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute("DROP INDEX IF EXISTS scans_by_target_path")

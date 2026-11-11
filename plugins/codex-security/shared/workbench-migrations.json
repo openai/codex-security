@@ -580,6 +580,17 @@
   },
   {
     "version": 72,
+    "name": "retain external finding import selections and provenance",
+    "statements": [
+      "CREATE TABLE external_finding_imports (\n    id TEXT PRIMARY KEY,\n    repository TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    provider TEXT NOT NULL,\n    source_key TEXT NOT NULL,\n    provenance_json TEXT,\n    selection_json TEXT NOT NULL\n);",
+      "CREATE INDEX external_finding_imports_by_repository ON external_finding_imports (repository, created_at);",
+      "CREATE TABLE external_finding_import_members (\n    import_id TEXT NOT NULL REFERENCES external_finding_imports(id),\n    position INTEGER NOT NULL,\n    finding_id TEXT NOT NULL REFERENCES external_source_reports(id),\n    version INTEGER NOT NULL,\n    PRIMARY KEY (import_id, position)\n) WITHOUT ROWID;",
+      "CREATE INDEX external_finding_members_by_version\nON external_finding_import_members (finding_id, version);",
+      "CREATE TABLE external_finding_publications (\n    finding_id TEXT NOT NULL REFERENCES external_source_reports(id),\n    version INTEGER NOT NULL,\n    cloud_api_url TEXT NOT NULL,\n    account_id TEXT NOT NULL,\n    destination_id TEXT NOT NULL,\n    receipt_id TEXT NOT NULL,\n    outcome TEXT NOT NULL,\n    cloud_finding_id TEXT,\n    created_at TEXT NOT NULL,\n    PRIMARY KEY (finding_id, version, cloud_api_url, account_id, destination_id, receipt_id)\n) WITHOUT ROWID;"
+    ]
+  },
+  {
+    "version": 73,
     "name": "retain deep scan attempts and exact merge inputs",
     "statements": [
       "CREATE TABLE deep_scan_attempts (\n            scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n            worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n            attempt INTEGER NOT NULL,\n            status TEXT NOT NULL,\n            started_at TEXT NOT NULL,\n            completed_at TEXT,\n            end_reason TEXT,\n            error_message TEXT,\n            accepted_result_path TEXT,\n            accepted_result_sha256 TEXT,\n            receipt_json TEXT,\n            PRIMARY KEY (worker_id, attempt)\n        );",
@@ -591,21 +602,21 @@
     ]
   },
   {
-    "version": 73,
+    "version": 74,
     "name": "persist selected deep scan finalization input",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;"
     ]
   },
   {
-    "version": 74,
+    "version": 75,
     "name": "bind original deep scan parent usage turn",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;"
     ]
   },
   {
-    "version": 75,
+    "version": 76,
     "name": "bind original deep scan execution settings",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN execution_settings_json TEXT;"

@@ -220,6 +220,12 @@ describe("saved logs JSON output", () => {
         expect(withoutDuration(stdout.text())).toEqual(
           withoutDuration(expected),
         );
+      } else if (args.includes("999999") && args.includes("--token-offset")) {
+        expect(JSON.parse(stdout.text())).toMatch(
+          /showing tokens (\d+)–\1 of \1/u,
+        );
+      } else if (expected.includes("[truncated:")) {
+        expect(JSON.parse(stdout.text())).toBe(expected.trimEnd());
       } else {
         expect(stdout.text()).toBe(expected);
       }

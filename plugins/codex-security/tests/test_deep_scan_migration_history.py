@@ -17,9 +17,9 @@ from test_workbench_setup_and_migrations import (
 @pytest.mark.parametrize("preview_offset", [0, 3, 4])
 def test_durable_recovery_preview_preserves_receipts_and_saved_input(preview_offset: int) -> None:
     preview = tuple(
-        (version - 5 - preview_offset, name, sql)
+        (version - 6 - preview_offset, name, sql)
         for version, name, sql in SCHEMA.MIGRATIONS
-        if 72 <= version <= 75
+        if 73 <= version <= 76
     )
     db, migrate = create_historical_database(67 - preview_offset)
     with closing(db):
@@ -42,9 +42,9 @@ def test_durable_recovery_preview_preserves_receipts_and_saved_input(preview_off
             assert [
                 tuple(row)
                 for row in db.execute(
-                    "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 72 ORDER BY version"
+                    "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 73 ORDER BY version"
                 )
-            ] == [(version + 5 + preview_offset, name, timestamp) for version, name, _ in preview]
+            ] == [(version + 6 + preview_offset, name, timestamp) for version, name, _ in preview]
             assert tuple(
                 db.execute(
                     "SELECT finalization_input_json, usage_owner_json, execution_settings_json, worker_usage_gap "

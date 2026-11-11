@@ -2977,7 +2977,14 @@ def _is_sealed_artifact(scan_dir: Path, relative_output: str, artifact_paths: li
     return False
 
 
-def write_export_output(scan_dir: Path, output: Path, export_format: str, contents: bytes) -> None:
+def write_export_output(
+    scan_dir: Path,
+    output: Path,
+    export_format: str,
+    contents: bytes,
+    *,
+    replace_existing: bool = True,
+) -> None:
     output_paths = {**EXPORT_PATHS, "md": THREAT_MODEL_EXPORT_PATH}
     if export_format not in output_paths:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -3008,6 +3015,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
                 output.name,
                 contents,
                 external_name=True,
+                replace_existing=replace_existing,
                 owner_read_write=export_format == "md",
             )
             return
@@ -3032,7 +3040,11 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
             f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
         )
     write_scan_local_bytes(
-        scan_dir, relative_output, contents, owner_read_write=export_format == "md"
+        scan_dir,
+        relative_output,
+        contents,
+        owner_read_write=export_format == "md",
+        replace_existing=replace_existing,
     )
 
 
@@ -3375,6 +3387,7 @@ def main() -> int:
     parser.add_argument("--export-format", choices=[*sorted(EXPORT_PATHS), "md"])
     parser.add_argument("--avit-template", type=Path)
     parser.add_argument("--export-output", type=Path)
+    parser.add_argument("--no-clobber", action="store_true")
     parser.add_argument("--export-metadata", action="store_true")
     parser.add_argument("--describe-threat-model", action="store_true")
     parser.add_argument("--write-threat-model", action="store_true")
@@ -3436,7 +3449,20 @@ def main() -> int:
             if args.export_output is None:
                 sys.stdout.buffer.write(contents)
             else:
-                write_export_output(args.scan_dir, args.export_output, args.export_format, contents)
+                try:
+                    write_export_output(
+                        args.scan_dir,
+                        args.export_output,
+                        args.export_format,
+                        contents,
+                        replace_existing=not args.no_clobber,
+                    )
+                except FileExistsError:
+                    if not args.no_clobber:
+                        raise
+                    raise ContractError(
+                        f"{args.export_output} already exists. Use --output FILE to choose or replace a file."
+                    ) from None
                 if args.export_metadata:
                     sys.stdout.buffer.write(
                         _json_bytes({**description, "path": str(args.export_output.absolute())})

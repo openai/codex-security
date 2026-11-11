@@ -54,12 +54,14 @@ export class OutputDirectoryError extends CodexSecurityError {}
 export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
   public constructor(
     public readonly directory: string,
-    operation: "scan" | "policy" = "scan",
+    operation: "scan" | "policy" | "component" = "scan",
   ) {
     super(
-      operation === "policy"
-        ? `Policy output directory is not empty: ${directory}. Choose a new or empty directory.`
-        : `Scan output directory is not empty: ${directory}. To keep the existing results and start a new scan, add --archive-existing.`,
+      operation === "component"
+        ? `Component output directory is not empty: ${directory}. Choose a new or empty directory with --output-dir.`
+        : operation === "policy"
+          ? `Policy output directory is not empty: ${directory}. Choose a new or empty directory.`
+          : `Scan output directory is not empty: ${directory}. To keep the existing results and start a new scan, add --archive-existing.`,
     );
   }
 }

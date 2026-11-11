@@ -321,6 +321,26 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
   },
 );
 
+test("validation rejects knowledge selected through a checkout link", async () => {
+  const input = await fixture({});
+  git(input.repository, "init", "--quiet");
+  const link = join(input.repository, "documents");
+  await symlink(input.configDirectory, link, "junction");
+  for (const command of [
+    ["scan", "--validate"],
+    ["validate", "candidate"],
+  ]) {
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        [...command, "--knowledge-base", join(link, "scan.json")],
+        dependencies({ currentDirectory: input.repository }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("repository directory links");
+  }
+});
+
 test("a missing operator-selected environment file fails without falling back", async () => {
   const input = await fixture({});
   const onConfig = mock();
@@ -422,6 +442,7 @@ test.each(["instructions_file", "validation_file"] as const)(
       scan: { [file]: "../repository/linked/prompt.md" },
       output: { directory: "../batch-results" },
     });
+    git(input.repository, "init", "--quiet");
     const external = join(input.root, "external");
     await mkdir(external);
     await writeFile(join(external, "prompt.md"), "Synthetic external data.");

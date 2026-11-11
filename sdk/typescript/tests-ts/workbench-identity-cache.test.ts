@@ -1550,6 +1550,7 @@ with ExitStack() as stack:
             "foldedLegacyScopesEqual": originals["scope-upper"] == originals["scope-lower"],
             "currentScopesDistinct": first["scope-upper"] != first["scope-lower"],
             "targetCount": len(first),
+            "expectedMigrations": [version for version, _, _ in MIGRATIONS],
             "migrations": [row["version"] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
             "expectedMigrations": [version for version, _, _ in MIGRATIONS],
         }))

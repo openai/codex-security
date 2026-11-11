@@ -1021,16 +1021,18 @@ export class CodexSecurity {
     try {
       throwIfAborted(signal);
       const finding = standaloneFindingForPrompt(options.finding);
-      const snapshot = options.knowledgeBasePaths?.length
-        ? (options.knowledgeBaseSnapshot ??
-          (await readKnowledgeBaseSnapshot(options.knowledgeBasePaths, signal)))
-        : undefined;
+      let repository = options.repositoryPath;
+      let snapshot: KnowledgeBaseSnapshot | undefined;
       let protectedRoots: string[] | undefined;
-      if (snapshot !== undefined) {
-        const repository = await normalizeRepository(
-          resolveRepositoryPath(options.repositoryPath),
-          signal,
-        );
+      if (options.knowledgeBasePaths?.length) {
+        repository = await normalizeRepository(repository, signal);
+        snapshot =
+          options.knowledgeBaseSnapshot ??
+          (await readKnowledgeBaseSnapshot(
+            options.knowledgeBasePaths,
+            signal,
+            repository,
+          ));
         protectedRoots = [
           (await enclosingGitWorktreeRoot(repository, signal)) ?? repository,
           ...(await knowledgeBaseProtectedRoots(snapshot, signal)),
@@ -1039,7 +1041,7 @@ export class CodexSecurity {
       // Cached validation may already own this output. Regeneration below still
       // requires an empty directory through prepareOutputDir.
       const inputs = await this.#prepareLocalInputs(
-        options.repositoryPath,
+        repository,
         options,
         signal,
         protectedRoots,
@@ -1735,10 +1737,24 @@ export class CodexSecurity {
       await realpath(tmpdir()),
       "temporary",
     );
+    if (
+      this.#dependencies.hostedScan === undefined &&
+      options.rubricPath !== undefined &&
+      options.severityRubric === undefined &&
+      inputs.retryRecipe === undefined &&
+      options.resumeScanId === undefined
+    ) {
+      await readSeverityRubricFile(
+        resolve(expandHome(options.rubricPath)),
+        inputs.protectedRoot,
+      );
+    }
     if (options.knowledgeBasePaths?.length) {
       const knowledgeBase = await prepareKnowledgeBase(
         options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
         options.signal,
+        undefined,
+        inputs.repository,
       );
       await knowledgeBase.cleanup();
     }
@@ -1945,6 +1961,7 @@ export class CodexSecurity {
           options.knowledgeBasePaths,
           signal,
           outputDir,
+          inputs.repository,
         );
       }
       notifyObserver(options, "onOutputDirReady")(outputDir);
@@ -2381,6 +2398,7 @@ export class CodexSecurity {
             (await readKnowledgeBaseSnapshot(
               options.knowledgeBasePaths,
               signal,
+              repo,
             )),
         };
         knowledgeBase = await prepareKnowledgeBase(
@@ -5630,6 +5648,8 @@ export class CodexSecurity {
         const knowledgeBase = await prepareKnowledgeBase(
           options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
           signal,
+          undefined,
+          local.repository,
         );
         await knowledgeBase.cleanup();
       }
@@ -6469,8 +6489,9 @@ async function readCodexTurn(options: {
           throw new CodexSecurityError(message);
         }
         const reconnect = reconnectAttempt(message);
-        if (reconnect === null) throw new CodexSecurityError(message);
-        options.onReconnect?.(message, reconnect);
+        if (reconnect !== null) options.onReconnect?.(message, reconnect);
+        else if (!waitingForNetwork(message))
+          throw new CodexSecurityError(message);
       }
     },
   });
@@ -7305,6 +7326,13 @@ function reconnectAttempt(message: string): [number, number] | null {
   const attempt = Number(match[1]);
   const maxAttempts = Number(match[2]);
   return attempt <= maxAttempts ? [attempt, maxAttempts] : null;
+}
+
+// Codex keeps retrying a dropped connection without a retry count.
+function waitingForNetwork(message: string): boolean {
+  return /^Reconnecting(?:\.\.\.|…)[ \t]+waiting for network(?=[ \t(]|$)/u.test(
+    message,
+  );
 }
 
 function reconnectDetails(message: string): ScanReconnectDetails | undefined {

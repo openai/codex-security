@@ -119,10 +119,11 @@ EXPECTED_MIGRATIONS = [
     (69, "distinguish unvalidated workspace targets"),
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
-    (72, "retain deep scan attempts and exact merge inputs"),
-    (73, "persist selected deep scan finalization input"),
-    (74, "bind original deep scan parent usage turn"),
-    (75, "bind original deep scan execution settings"),
+    (72, "retain external finding import selections and provenance"),
+    (73, "retain deep scan attempts and exact merge inputs"),
+    (74, "persist selected deep scan finalization input"),
+    (75, "bind original deep scan parent usage turn"),
+    (76, "bind original deep scan execution settings"),
 ]
 
 
@@ -261,7 +262,8 @@ def test_repository_preview_history_keeps_original_application_times_after_budge
     assert [
         tuple(row)
         for row in connection.execute(
-            "SELECT version, applied_at FROM schema_migrations WHERE version BETWEEN 67 AND 71 ORDER BY version"
+            "SELECT version, applied_at FROM schema_migrations "
+            "WHERE version BETWEEN 67 AND 71 ORDER BY version"
         )
     ] == [(version, f"preview-{version - 4}") for version in range(67, 72)]
     assert (

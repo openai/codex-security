@@ -1488,7 +1488,7 @@ test("Node initialization leaves repository migration semantics to the Python co
       pythonMigrations(controlPath);
       await databaseInfo(directory);
       const initialized = new DatabaseSync(databasePath);
-      assertMigrationNames(initialized, 48, 49, 53, 54, 55, 56, 60);
+      assertMigrationNames(initialized, 48, 49, 53, 54, 55, 56, 60, 72);
       assert.deepEqual(
         initialized.prepare("SELECT * FROM external_source_reports").all(),
         originalReports,
@@ -1696,6 +1696,9 @@ with sqlite3.connect(sys.argv[2]) as connection:
           !newDeepTables.includes(String(name)) &&
           name !== "deep_scan_worker_threads" &&
           name !== "external_source_reports" &&
+          name !== "external_finding_imports" &&
+          name !== "external_finding_import_members" &&
+          name !== "external_finding_publications" &&
           name !== "sqlite_sequence",
       )
       .map(([name, rows]) => {
