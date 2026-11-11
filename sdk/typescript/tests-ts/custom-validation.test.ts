@@ -1319,6 +1319,7 @@ describe("custom validation", () => {
     expect(standard).not.toContain("validate-scan-findings.md");
     expect(standard).not.toContain("security-scan/SKILL.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
+    expect(diff).toContain("at the scan's exact base commit");
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
