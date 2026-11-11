@@ -16,6 +16,7 @@ from workbench_test_support import (
     read_review_state,
     saved_draft,
     select_checkpoint,
+    sort_checkpoint_entries,
     write_checkpoint,
 )
 
@@ -656,6 +657,7 @@ def test_evidence_repair_preserves_selected_deadline_findings(
             mtime_ns=100,
         )
         earlier_checkpoints[earlier] = earlier.read_bytes()
+        sort_checkpoint_entries(monkeypatch, key=lambda name: (name != earlier.name, name))
     draft = saved_draft(scan.scan_id, findings=[worker_finding], surfaces=[surface])
     if checkpoint != "late":
         source = write_checkpoint(output / "checkpoints", draft)
@@ -747,6 +749,7 @@ def test_evidence_repair_preserves_selected_deadline_findings(
         assert completed["warnings"].count(deferred["reason"]) == 1
         assert sealed_coverage["deferred"][:-1] == coverage["deferred"]
         if checkpoint == "sparse-collision":
+            assert selected_surface["id"].startswith(f"{worker_id}/entry-")
             independent = next(
                 row for row in coverage["surfaces"] if row["label"] == "Independent clean path"
             )
