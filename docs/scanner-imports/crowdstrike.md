@@ -49,7 +49,7 @@ Every detection's file must exist in `--repository` with the content that FCS sc
 
 Add `--source-repository-url https://github.com/example/project` to record the repository. With it, findings get typed `iac` or `secret` details. If `--repository` is a Git checkout, the URL must match one of its fetch remotes. Without the URL, each finding has a title, severity, description and location, and `evidence.source_data` keeps the native FCS rule and detection.
 
-Remove `--dry-run` and confirm to save. Run `codex-security findings imported /path/to/project --format json` to read back the findings and their initial `not_assessed` Codex assessment.
+Remove `--dry-run` and confirm to save. Run `codex-security findings imported /path/to/project --format json` to read back the findings and their initial `not_assessed` Codex assessment. To check a finding against the code, see [Work with imported findings](README.md#work-with-imported-findings).
 
 ## Read the evidence
 
@@ -90,25 +90,3 @@ This shortened report has one detection. The reader keeps its file and line as t
 ## Repeat an import
 
 FCS has no stable detection ID. The reader identifies a detection by rule UUID, file, line, resource type and name, reason and module path. Keep the same source key for one project and branch. When a later scan reports a detection on a different line, it is imported as a new finding, and the earlier finding stays stored.
-
-## Check findings with Codex
-
-Imported findings start as `not_assessed`. To check them against the code, save them to a file and give it to `codex-security validate` from the project directory. Validation sends the evidence to your configured model provider. Its review tools can read the checkout, with network access disabled.
-
-```sh
-cd /path/to/project
-codex-security findings imported . --format json > "$reports/findings.json"
-codex-security validate "$reports/findings.json" > "$reports/assessment.md"
-```
-
-The saved findings include those from earlier scans and from other scanners imported into this checkout. To check one scan, select the findings whose `evidence.source_scan_id` is the report's `scan_uuid`. This example also skips informational findings:
-
-```sh
-scan=$(jq -r .scan_uuid "$report") &&
-  jq --arg scan "$scan" '.findings |= map(select(
-    .evidence.source_scan_id == $scan and .evidence.severity != "informational"))' \
-    "$reports/findings.json" > "$reports/selected.json" &&
-  codex-security validate "$reports/selected.json" > "$reports/assessment.md"
-```
-
-Give `validate` the imported findings, not the FCS report. Each imported finding has its own `id` and location, but one FCS rule UUID can cover several detections. For options such as `--context` and `--output-schema`, see [Validate and patch findings](../../sdk/typescript/docs/cli.md#validate-and-patch-findings).
