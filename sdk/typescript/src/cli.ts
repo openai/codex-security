@@ -1618,7 +1618,6 @@ interface CliDependencies {
     {
       observed: Map<string, string | undefined>;
       indexStamp: string | undefined;
-      indexDigest: string;
     }
   >;
   createSecurity(
@@ -13739,9 +13738,6 @@ async function snapshotPatchTree(
           { encoding: "base64" },
         );
         const indexEntries = sparseIndexEntries(indexOutput);
-        const indexDigest = createHash("sha256")
-          .update(indexOutput)
-          .digest("hex");
         const indexPath = (
           await workingIndex([
             "rev-parse",
@@ -13781,13 +13777,9 @@ async function snapshotPatchTree(
             // with a skip-worktree entry. Unrelated staged paths do not affect it.
             if (entry?.startsWith("S ")) {
               if (previous.observed.get(path) !== entry) continue;
-              // A sparse reapply can rewrite an identical index while removing the
-              // working file. That is indistinguishable from an unrelated rewrite
-              // followed by a real deletion. Require an explicit index decision.
-              if (
-                previous.indexStamp !== indexStamp &&
-                previous.indexDigest === indexDigest
-              ) {
+              // Reapply and a deliberate removal can leave the same skipped
+              // entry. Staging other files can rewrite the index in either case.
+              if (previous.indexStamp !== indexStamp) {
                 const bytes = Buffer.from(path, "latin1");
                 const label = isUtf8(bytes)
                   ? JSON.stringify(bytes.toString("utf8"))
@@ -13827,7 +13819,6 @@ async function snapshotPatchTree(
           observed: new Map(
             [...observed].map((path) => [path, indexEntries.get(path)]),
           ),
-          indexDigest,
           indexStamp,
         });
         return tree;

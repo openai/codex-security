@@ -2647,6 +2647,13 @@ For Git LFS storage outside the checkout, select the cache in your user or
 system Git configuration, pass it through Git's command environment, or grant
 the snapshot workspace write access to the cache.
 
+In a sparse checkout, Git can remove a materialized out-of-cone file when it
+reapplies the sparse rules. If the patch sees the file disappear after an index
+rewrite and cannot determine whether you intended to delete it, it stops before
+publishing. For an intended deletion, stage it with
+`git rm --cached --sparse -- <path>` and retry. To keep the file, restore it
+before retrying.
+
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.

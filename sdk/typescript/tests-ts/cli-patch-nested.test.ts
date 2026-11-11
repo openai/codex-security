@@ -1215,6 +1215,7 @@ describe("patch change tracking", () => {
 
   test.each([
     "reapply",
+    "reapply and stage another file",
     "switch",
     "stage another file",
     "commit another file",
@@ -1241,6 +1242,25 @@ describe("patch change tracking", () => {
       git("sparse-checkout", "set", "--cone", "inside");
       await mkdir(join(root, "outside"), { recursive: true });
       await writeFile(join(root, path), "original\n");
+      // Keep the materialized file's stat data in its skipped index entry.
+      // A clean reapply can then remove the file without changing that entry.
+      git(
+        "-c",
+        "core.sparseCheckout=false",
+        "update-index",
+        "--no-skip-worktree",
+        "--",
+        path,
+      );
+      git("-c", "core.sparseCheckout=false", "update-index", "--refresh");
+      git(
+        "-c",
+        "core.sparseCheckout=false",
+        "update-index",
+        "--skip-worktree",
+        "--",
+        path,
+      );
       let tree = "";
       const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
         currentDirectory: root,
@@ -1255,7 +1275,10 @@ describe("patch change tracking", () => {
           return output;
         },
         onCodex: async (_args, output) => {
-          if (operation === "reapply") {
+          if (
+            operation === "reapply" ||
+            operation === "reapply and stage another file"
+          ) {
             git("update-index", "--refresh");
             git("sparse-checkout", "reapply");
           } else if (operation === "switch") git("switch", "replacement");
@@ -1267,7 +1290,11 @@ describe("patch change tracking", () => {
               git("rm", "--cached", "--sparse", "--", path);
           }
           await writeFile(join(root, "inside/other"), "edited\n");
-          if (operation === "stage another file") git("add", "inside/other");
+          if (
+            operation === "stage another file" ||
+            operation === "reapply and stage another file"
+          )
+            git("add", "inside/other");
           if (operation === "commit another file")
             git("commit", "-m", "Other edit", "--", "inside/other");
           output!.stdout.write("Completed synthetic change.");
@@ -1276,22 +1303,22 @@ describe("patch change tracking", () => {
       });
       if (
         operation === "rewrite the same index and delete" ||
-        (operation === "reapply" && result.exitCode !== 0)
+        operation === "stage another file" ||
+        operation === "commit another file" ||
+        (operation === "reapply" && result.exitCode !== 0) ||
+        (operation === "reapply and stage another file" &&
+          result.exitCode !== 0)
       ) {
         expect(result.exitCode).toBe(2);
         expect(result.stdout + result.stderr).toContain(
-          "Cannot distinguish a sparse checkout reapply from a file deletion",
+          "Use git rm --cached --sparse -- <path> to stage an intended deletion",
         );
         return;
       }
       expect(result.exitCode, result.stderr).toBe(0);
       expect(tree).not.toBe("");
       expect(git("ls-tree", tree, path)).toBe(
-        operation === "stage the deletion" ||
-          operation === "stage another file" ||
-          operation === "commit another file"
-          ? ""
-          : git("ls-tree", "HEAD", path),
+        operation === "stage the deletion" ? "" : git("ls-tree", "HEAD", path),
       );
       expect(git("show", `${tree}:inside/other`)).toBe("edited");
     },
