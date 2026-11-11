@@ -33,6 +33,7 @@ import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject } from "./config.js";
 import { ContractSchemaError, loadContract, readScanFile } from "./contract.js";
 import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
+import { BatchCostPool, batchScanBudget } from "./batch-cost.js";
 import { deepScanOptions } from "./deep-config.js";
 import { readThreatModelPath } from "./artifact-export.js";
 import {
@@ -56,6 +57,7 @@ import {
 import {
   DiffTarget,
   UNSUPPORTED_GIT_ENVIRONMENT,
+  resolveTargetPath,
   type ScanMode,
 } from "./targets.js";
 import {
@@ -122,6 +124,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
     scanDir: string,
     prompts: ScanPromptSettings &
       Pick<ScanOptions, "onMeasurement" | "onTelemetry"> & {
+        maxTotalCostShareUsd?: number;
         knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
         /** @internal Preserve correlation when the resumed SDK has no saved binding. */
         telemetryContext?: { operationId: string; parentAttemptId?: string };
@@ -129,10 +132,12 @@ export interface MultiscanOptions extends ScanPromptSettings {
   ): Promise<
     | (Pick<ScanResult, "manifest" | "cost" | "findings"> & {
         usage?: JsonObject;
+        alreadyCompleted?: boolean;
       })
     | undefined
   >;
   maxCostUsd?: number;
+  maxTotalCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
   scanOptionsByMode?: Partial<
     Record<ScanMode, Omit<ScanSettings, keyof ScanPromptSettings>>
@@ -146,6 +151,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
     repository: string;
     status: "started" | "completed" | "failed";
     attempt: number;
+    maxCostUsd?: number;
     error?: string;
     warning?: string;
   }): void;
@@ -173,7 +179,7 @@ export async function runMultiscan(
   }
   const tasks = parseInventory(
     await readFile(options.inputPath, "utf8"),
-    dirname(resolve(options.inputPath)),
+    dirname(resolveTargetPath(options.inputPath)),
     options.mode,
   );
   for (const mode of new Set(tasks.map((task) => task.mode))) {
@@ -431,6 +437,13 @@ async function runCampaign(
   });
   if (pending.length === 0) return summarize();
 
+  const pool =
+    options.maxTotalCostUsd === undefined
+      ? undefined
+      : new BatchCostPool(
+          options.maxTotalCostUsd,
+          pending.length * options.maxAttempts,
+        );
   let next = 0;
   let receiptTail = Promise.resolve();
   const worker = async (
@@ -441,6 +454,11 @@ async function runCampaign(
       const task = pending[next++];
       if (task === undefined) return;
       const knowledge = knowledgeByMode[task.mode];
+      const scanSettings = options.scanOptionsByMode?.[task.mode];
+      const budget = batchScanBudget(pool?.share, {
+        ...options,
+        maxCostUsd: options.maxCostUsd ?? scanSettings?.maxCostUsd,
+      });
       const history = receipts.get(task.id.toLowerCase());
       let operationId = history?.scan?.operationId;
       let maxAttempt = history?.maxAttempt ?? 0;
@@ -478,9 +496,11 @@ async function runCampaign(
         let attemptPolicyFailed: boolean | undefined;
         let cost: Readonly<ScanCost> | null = null;
         let measurement: Readonly<ScanUsageMeasurement> | null = null;
+        let reservation: ReturnType<BatchCostPool["reserve"]> | undefined;
         let savedUsage: JsonObject | undefined;
         const observers: Pick<ScanOptions, "onMeasurement" | "onTelemetry"> = {
           onMeasurement: (value) => {
+            reservation?.record(value.cost);
             measurement = value;
             cost = value.cost;
           },
@@ -494,11 +514,14 @@ async function runCampaign(
         let knowledgeBaseFailure = false;
         let checkoutOccupied = false;
         try {
+          reservation = pool?.reserve(budget.maxCostUsd);
+          const maxCostUsd = reservation?.maxCostUsd ?? budget.maxCostUsd;
           await ensureOutputDirectory(artifactRoot);
           let result:
             | (Pick<ScanResult, "manifest" | "cost" | "findings"> &
                 Partial<Pick<ScanResult, "threatModelPath">> & {
                   usage?: JsonObject;
+                  alreadyCompleted?: boolean;
                 })
             | undefined;
           if (
@@ -528,6 +551,7 @@ async function runCampaign(
                 repository: task.id,
                 attempt,
                 status: "started",
+                maxCostUsd,
               });
               if (knowledge?.failure !== undefined) {
                 knowledgeBaseFailure = true;
@@ -535,6 +559,9 @@ async function runCampaign(
               }
               result = await options.recoverScan(scanDir, {
                 ...options,
+                ...(options.maxTotalCostUsd === undefined
+                  ? {}
+                  : { maxTotalCostShareUsd: maxCostUsd }),
                 knowledgeBaseSnapshot: knowledge?.snapshot,
                 ...observers,
                 ...(operationId === undefined
@@ -544,7 +571,6 @@ async function runCampaign(
               attemptedResume = result !== undefined;
             }
           }
-          const scanSettings = options.scanOptionsByMode?.[task.mode];
           if (result === undefined) {
             if (options.recoverScan !== undefined) attempt = nextAttempt();
             scanDir = join(artifactRoot, `attempt-${attempt}`);
@@ -552,6 +578,7 @@ async function runCampaign(
               repository: task.id,
               attempt,
               status: "started",
+              maxCostUsd,
             });
             if (options.recoverScan === undefined)
               await validateOutputDir(scanDir);
@@ -632,9 +659,8 @@ async function runCampaign(
               ...(options.postScanPrompt === undefined
                 ? {}
                 : { postScanPrompt: options.postScanPrompt }),
-              ...(options.maxCostUsd === undefined
-                ? {}
-                : { maxCostUsd: options.maxCostUsd }),
+              ...budget,
+              maxCostUsd,
               ...observers,
               onWarning: (warning) => {
                 runWarnings.push(warning);
@@ -652,6 +678,7 @@ async function runCampaign(
           }
           threatModelPath = result.threatModelPath;
           cost = result.cost;
+          if (!result.alreadyCompleted) reservation?.record(cost);
           savedUsage = result.usage;
           const failureSeverity = scanSettings?.failureSeverity;
           if (failureSeverity !== undefined) {
@@ -666,8 +693,10 @@ async function runCampaign(
           // Recovery retains its resumable attempt and checkout; SDK telemetry records cancellation.
           if (options.signal?.aborted && options.recoverScan !== undefined)
             options.signal.throwIfAborted();
+          if (pool && !reservation) exhaustedBudget = true;
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;
+            reservation?.record(cost);
             exhaustedBudget = true;
           }
           requiresRecovery = error instanceof OutputDirectoryNotEmptyError;
@@ -1312,9 +1341,10 @@ function parseInventory(
     ) {
       throw new Error("Multiscan scope must stay inside its repository.");
     }
+    const repository = normalizeRepository(get("repository"), directory);
     return {
       id,
-      repository: normalizeRepository(get("repository"), directory),
+      repository,
       revision,
       mode: mode as ScanMode,
       ...(scope ? { scope } : {}),
@@ -1331,7 +1361,7 @@ function normalizeRepository(repository: string, directory: string): string {
   }
   if (/^[^@\s/:]+@[^:\s/]+:.+$/u.test(repository)) return repository;
   if (!repository.includes("://")) {
-    const path = resolve(directory, repository);
+    const path = resolveTargetPath(repository, directory);
     if (process.platform !== "win32") return path;
     try {
       return realpathSync.native(path);

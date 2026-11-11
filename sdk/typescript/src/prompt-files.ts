@@ -1,9 +1,13 @@
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { sameCheckedFileDevice } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
-import { expandHome } from "./runtime.js";
+import {
+  resolveInputPath,
+  resolveParentTraversal,
+  validateDirectoryLinks,
+} from "./runtime.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
 
@@ -26,7 +30,7 @@ export async function resolveScanPrompts(
     inline !== undefined || file === undefined
       ? inline
       : await readRegularInputFile(
-          resolve(directory, expandHome(file)),
+          resolveInputPath(file, directory),
           repository,
         );
   const [scanPrompt, validationPrompt, postScanPrompt] = await Promise.all([
@@ -68,24 +72,23 @@ export async function readRegularInputFile(
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
-  const canonicalParent = await realpath(dirname(path));
+  const canonicalParent = await realpath(
+    await resolveParentTraversal(dirname(path)),
+  );
   const repositories =
     typeof repository === "string" ? [repository] : repository;
   for (const repository of repositories) {
-    const canonicalRepository = await realpath(repository);
+    const canonicalRepository = await realpath(
+      await resolveParentTraversal(repository),
+    );
     if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
-      for (let ancestor = dirname(path); ; ancestor = dirname(ancestor)) {
-        if (
-          !isOutsidePath(
-            relative(canonicalRepository, await realpath(ancestor)),
-          )
-        ) {
+      await validateDirectoryLinks(path, (link) => {
+        if (!isOutsidePath(relative(canonicalRepository, link))) {
           throw new CodexSecurityError(
             "Input files must not follow repository directory links outside the selected repository.",
           );
         }
-        if (dirname(ancestor) === ancestor) break;
-      }
+      });
     }
   }
   const canonicalPath = join(canonicalParent, basename(path));

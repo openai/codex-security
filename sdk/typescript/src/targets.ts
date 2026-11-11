@@ -1,5 +1,6 @@
 import {
   expandHome,
+  resolveTargetPath,
   isolatedGitEnvironment,
   walkGitMarkers,
   normalizeRepository,
@@ -16,6 +17,7 @@ export {
   UNSUPPORTED_GIT_ENVIRONMENT,
   normalizeRepository,
   resolveRepositoryPath,
+  resolveTargetPath,
   enclosingGitWorktreeRoot,
   gitMetadataDirectories,
   gitObjectDirectories,
@@ -277,9 +279,7 @@ export async function normalizeTarget(
       );
     }
     requireUtf8Path("Path target", value);
-    const candidate = isAbsolute(expandHome(value))
-      ? resolve(expandHome(value))
-      : resolve(root, expandHome(value));
+    const candidate = resolveTargetPath(expandHome(value), root);
     let canonical: string;
     try {
       // Some runtimes cannot canonicalize special files to filesystem paths.
@@ -483,8 +483,15 @@ export async function gitHistoryIdentity(
   repository: string,
   git: TrustedExecutable,
   signal?: AbortSignal,
-): Promise<{ commonDirectory: string | null; origin: string | null }> {
-  const read = async (args: readonly string[]): Promise<string | null> => {
+): Promise<{
+  commonDirectory: string | null;
+  origin: string | null;
+  relativePath: string | null;
+}> {
+  const read = async (
+    args: readonly string[],
+    allowEmpty = false,
+  ): Promise<string | null> => {
     try {
       const { stdout } = await execFile(
         git.executable,
@@ -496,20 +503,22 @@ export async function gitHistoryIdentity(
           maxBuffer: Infinity,
         },
       );
-      return (
-        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
-        null
+      const value = stdout.replace(
+        process.platform === "win32" ? /\r?\n$/u : /\n$/u,
+        "",
       );
+      return value || (allowEmpty ? "" : null);
     } catch {
       throwIfAborted(signal);
       return null;
     }
   };
-  const [commonDirectory, origin] = await Promise.all([
+  const [commonDirectory, origin, relativePath] = await Promise.all([
     read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     read(["remote", "get-url", "origin"]),
+    read(["rev-parse", "--show-prefix"], true),
   ]);
-  return { commonDirectory, origin };
+  return { commonDirectory, origin, relativePath };
 }
 
 /** Protect both the stored path's checkout and its resolved destination. */

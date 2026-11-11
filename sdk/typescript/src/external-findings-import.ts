@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import { InvalidTargetError } from "./errors.js";
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
@@ -17,6 +19,7 @@ import {
   snapshotImportOptions,
   snapshotSourceRepositories,
 } from "./external-findings.js";
+import { resolveInputPath } from "./runtime.js";
 import { abortable } from "./targets.js";
 
 export interface LocalExternalImportOptions
@@ -34,6 +37,15 @@ export async function prepareLocalExternalImport(
   const settings = snapshotImportOptions(options);
   const readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
+  );
+  const requested = resolveInputPath(
+    settings.repository,
+    process.cwd(),
+    dependencies.environment,
+  );
+  const selected = await abortable(
+    () => stat(requested, { bigint: true }).catch(() => null),
+    dependencies.signal,
   );
   const parsed = await abortable(
     () => readExternalFindings(path, settings, "local", readerSources),
@@ -75,11 +87,24 @@ export async function prepareLocalExternalImport(
       ];
   }
   const { environment, runWorkbench, signal } = dependencies;
-  return prepareLocalImport(
+  const prepared = await prepareLocalImport(
     parsed.findings,
     normalizedOptions,
     { environment, runWorkbench, signal },
     readerSources,
     sourceRepositories,
   );
+  const destination = await abortable(
+    () => stat(prepared.preview.repository, { bigint: true }),
+    dependencies.signal,
+  );
+  if (
+    !selected ||
+    selected.dev !== destination.dev ||
+    selected.ino !== destination.ino
+  )
+    throw new InvalidTargetError(
+      `Repository path changed while reading external findings: ${requested}`,
+    );
+  return prepared;
 }
