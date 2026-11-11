@@ -322,6 +322,37 @@ describe("SCA input selection", () => {
     },
   );
 
+  test.skipIf(process.platform !== "linux")(
+    "filesystem inventory reports undecodable requirements and directories",
+    async () => {
+      const { repository } = await setup();
+      await writeFile(join(repository, "package-lock.json"), npmLock());
+      const bytes = (prefix: string, suffix = "") =>
+        Buffer.concat([
+          Buffer.from(prefix),
+          Buffer.from([0xff]),
+          Buffer.from(suffix),
+        ]);
+      const raw = (name: Buffer) =>
+        Buffer.concat([Buffer.from(`${repository}/`), name]);
+      const requirement = bytes("requirements-", ".txt");
+      const directory = bytes("component-");
+      await writeFile(raw(requirement), "synthetic==1.2.3\n");
+      await mkdir(raw(directory));
+      await writeFile(raw(bytes("ordinary-", ".txt")), "unrelated");
+      const result = await discoverScaInputs(repository);
+      expect(result.inputs.map((input) => input.path)).toEqual([
+        "package-lock.json",
+      ]);
+      expect(result.diagnostics).toHaveLength(2);
+      for (const name of [requirement, directory])
+        expect(result.diagnostics.join("\n")).toContain(name.toString("hex"));
+      expect(result.limitations).toEqual(
+        expect.arrayContaining(result.diagnostics),
+      );
+    },
+  );
+
   test("Git inventory preserves UTF-8 replacement characters and leading BOMs", async () => {
     const { repository } = await setup();
     await execFile("git", ["init", "--quiet", repository]);

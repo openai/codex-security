@@ -611,6 +611,8 @@ async function repositoryFiles(
   }
   const files: string[] = [];
   const nestedRepositories: string[] = [];
+  const diagnostics: string[] = [];
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const pending = [repository];
   while (pending.length) {
     signal?.throwIfAborted();
@@ -629,12 +631,35 @@ async function repositoryFiles(
         continue;
       }
     }
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "node_modules") continue;
-      const path = join(directory, entry.name);
+    for (const entry of await readdir(directory, {
+      withFileTypes: true,
+      encoding: "latin1",
+    })) {
+      const bytes = Buffer.from(entry.name, "latin1");
+      let name: string;
+      try {
+        name = utf8.decode(bytes);
+      } catch {
+        if (
+          entry.isDirectory() ||
+          primaryScaFormat(entry.name) !== null ||
+          additionalScaFormat(entry.name) !== null
+        ) {
+          const prefix = slash(relative(repository, directory));
+          const pathBytes = Buffer.concat([
+            Buffer.from(prefix ? prefix + "/" : ""),
+            bytes,
+          ]);
+          diagnostics.push(
+            `Dependency path bytes ${pathBytes.toString("hex")} cannot be decoded as UTF-8; coverage is incomplete.`,
+          );
+        }
+        continue;
+      }
+      if (name === ".git" || name === "node_modules") continue;
+      const path = join(directory, name);
       if (entry.isDirectory()) {
-        if (installedDependencyDirectory(entry.name, basename(directory)))
-          continue;
+        if (installedDependencyDirectory(name, basename(directory))) continue;
         pending.push(path);
       } else files.push(relative(repository, path));
     }
@@ -644,7 +669,7 @@ async function repositoryFiles(
     submodules: [],
     nestedRepositories,
     skipWorktree: [],
-    diagnostics: [],
+    diagnostics: diagnostics.sort(),
   };
 }
 
