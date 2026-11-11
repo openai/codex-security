@@ -1589,7 +1589,7 @@ interface CliDependencies {
 
 // Apply coordinator-owned Git bindings after native shell environment filtering.
 const snapshotCredentialName =
-  /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK)(?:_FILE)?$/iu;
+  /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu;
 export const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
 const { readSync, writeSync } = require("node:fs");
@@ -11959,6 +11959,7 @@ async function changedPatchFiles(
     "diff",
     "--name-only",
     "--no-renames",
+    "--ignore-submodules=none",
     "-z",
     typeof base === "string" ? base : base.tree,
     typeof head === "string" ? head : head.tree,
