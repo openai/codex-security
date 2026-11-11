@@ -4913,7 +4913,7 @@ export class CodexSecurity {
 
   #createSessionEnvironment(
     session: PreparedSession,
-    runtimePaths: Record<string, string>,
+    runtimePaths: ProcessEnvironment,
     auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
   ): ProcessEnvironment {
