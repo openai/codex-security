@@ -20,6 +20,7 @@ import sys
 from collections import Counter
 from contextlib import ExitStack, redirect_stderr
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -53,7 +54,6 @@ def deep_fixture_dependency(name):
 
 scenario = sys.argv[2]
 timestamp = "2026-08-01T00:00:00Z"
-root = Path.cwd() / "synthetic-identity-fixture"
 connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.execute("PRAGMA foreign_keys = ON")
@@ -245,6 +245,11 @@ def legacy_hash(identity, with_description=False):
 
 
 with ExitStack() as stack:
+    # Windows scan output validates every ancestor. Hosted checkouts can live on an
+    # untrusted drive, so keep the fixture in a private directory under the profile.
+    root = Path(stack.enter_context(TemporaryDirectory(
+        prefix="workbench-identity-", dir=Path.home() if os.name == "nt" else None,
+    )))
     stack.enter_context(patch.object(Path, "resolve", resolve_path))
     stack.enter_context(patch.object(Path, "stat", stat_path))
     stack.enter_context(patch.object(Path, "lstat", lstat_path))
@@ -520,9 +525,6 @@ with ExitStack() as stack:
             mocks.enter_context(patch.object(deep_workbench.dependencies(), "require_scan", side_effect=lambda database, scan_id: database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()))
             mocks.enter_context(patch.object(deep_workbench, "ensure_deep_scan_run"))
             mocks.enter_context(patch.object(deep_workbench, "deep_scan_result", side_effect=lambda database, scan_id, **kwargs: {"scanId": scan_id}))
-            mocks.enter_context(patch.object(Path, "mkdir"))
-            mocks.enter_context(patch.object(Path, "resolve", lambda path, *a, **k: path))
-            mocks.enter_context(patch.object(scan_start.tempfile, "mkdtemp", return_value=str(root / "artifacts" / "deep")))
             deep = deep_workbench.begin_deep_scan_for_target(connection, argparse.Namespace(
                 target_path=str(target), scope=".", workflow_version="synthetic", scan_root=str(root / "artifacts"),
                 user_context=None, model=None, reasoning_effort=None,
@@ -1127,8 +1129,6 @@ with ExitStack() as stack:
         add_scan("historical", "requested")
         target = Path(paths["requested"])
         target_root = root / "scan-output"
-        original_mkdir = Path.mkdir
-        stack.enter_context(patch.object(Path, "mkdir", lambda path, *args, **kwargs: None if path == target_root else original_mkdir(path, *args, **kwargs)))
         stack.enter_context(patch.object(workbench, "require_uuid", side_effect=lambda value, label: value))
         stack.enter_context(patch.object(workbench, "require_target", return_value=target))
         stack.enter_context(patch.object(workbench, "require_remediation_target", return_value=target))
