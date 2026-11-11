@@ -1252,12 +1252,7 @@ def complete_scan_locked(
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     handoff.require_tokenless_scan_owner(connection, scan, model_thread_id)
-    if scan["status"] == "complete":
-        deep_scan.find_supported_deep_scan_run(connection, scan_id)
-        return saved_results.refresh_completed_scan(
-            _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
-        )
-    if scan["status"] != "running":
+    if scan["status"] not in {"running", "complete"}:
         raise SystemExit("Only a running scan can be completed.")
     handoff.require_current_continuation(
         scan,
@@ -1265,6 +1260,7 @@ def complete_scan_locked(
         error_message="Scan completion is owned by another continuation.",
     )
     if scan["status"] == "complete":
+        deep_scan.find_supported_deep_scan_run(connection, scan_id)
         return saved_results.refresh_completed_scan(
             _WORKBENCH_DB_CONTEXT, connection, scan, cost_json
         )
