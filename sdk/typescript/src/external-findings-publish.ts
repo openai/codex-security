@@ -712,7 +712,7 @@ export async function prepareNormalizedPublication(
   input: ExternalFindings,
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
-  workbench?: WorkbenchPublication,
+  workbench?: WorkbenchPublication | "preview",
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
   requireCloudReader(settings);
@@ -1013,11 +1013,11 @@ async function preparePublicationInput(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
   readerSources: readonly ExternalSourceRepository[],
-  workbench?: WorkbenchPublication,
+  workbench?: WorkbenchPublication | "preview",
   declaredUrl?: string,
   fileRepositories?: () => readonly ExternalSourceRepository[],
 ): Promise<PreparedExternalPublication> {
-  const record = workbench?.record;
+  const record = workbench !== "preview" && workbench?.record;
   function withReceipts(
     scope: ExternalPublicationPreview,
     prepared: {
@@ -1243,7 +1243,11 @@ async function preparePublicationInput(
       destination.repo_connector_id,
       source,
       publicationIdentity(parsed, options.provider),
-      ...(workbench ? [workbench.checkout, workbench.findings] : []),
+      ...(workbench === "preview"
+        ? ["preview"]
+        : workbench
+          ? [workbench.checkout, workbench.findings]
+          : []),
     ]),
   );
   const pendingPath = join(state, key + ".pending.json");

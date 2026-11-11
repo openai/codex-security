@@ -35,6 +35,7 @@ export interface ExternalFindingSelection {
   repository: string;
   id?: string;
   importId?: string;
+  ifCurrent?: boolean;
   findings?: Pick<StoredExternalFinding, "id" | "version">[];
 }
 
@@ -275,8 +276,10 @@ export function listExternalFindings(
           "SELECT selection_json FROM external_finding_imports WHERE repository = ? AND id = ?",
         )
         .get(repository, importId);
-      if (!batch)
+      if (!batch) {
+        if (selection.ifCurrent) return { read: 0, excluded: [], findings: [] };
         throw new Error("Import does not exist in the selected repository.");
+      }
       summary = parseJson(String(batch.selection_json)) as Record<
         string,
         unknown
@@ -310,11 +313,14 @@ export function listExternalFindings(
        ORDER BY p.position`,
       )
       .all(input, repository);
+    const stale = rows.find((row) => row.version !== row.pinned_version);
+    if (stale) {
+      if (selection.ifCurrent) return { read: 0, excluded: [], findings: [] };
+      throw new Error(
+        `Finding ${stale.pinned_id} version ${stale.pinned_version} is missing or has changed. Review the current selection.`,
+      );
+    }
     const findings = rows.map((row) => {
-      if (row.version !== row.pinned_version)
-        throw new Error(
-          `Finding ${row.pinned_id} version ${row.pinned_version} is missing or has changed. Review the current selection.`,
-        );
       return {
         ...fromRow(row),
         ...(row.provenance_json != null && {

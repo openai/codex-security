@@ -1,5 +1,12 @@
 import { hash } from "node:crypto";
-import { lstat, open, readlink, realpath, stat } from "node:fs/promises";
+import {
+  lstat,
+  open,
+  readFile,
+  readlink,
+  realpath,
+  stat,
+} from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { resolveConfigPath } from "./config-path.js";
 import { collectSonarIssues } from "./sonar-collector.js";
@@ -15,7 +22,7 @@ import {
   cloudReviewDigest,
   ExternalPublicationError,
   externalPublicationStateDirectory,
-  prepareNormalizedExternalPublication,
+  prepareNormalizedPublication,
   writeAtomicJson,
   type ExternalPublicationDependencies,
   type ExternalPublicationPreview,
@@ -31,7 +38,11 @@ import {
   requireOutputOutsideRepositories,
   workbenchEnvironment,
 } from "./runtime.js";
-import { gitMarkerRoot, normalizeRepository } from "./targets.js";
+import {
+  gitMarkerRoot,
+  normalizeRepository,
+  nullIfMissingFile,
+} from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
 import {
@@ -286,6 +297,17 @@ export async function prepareSonarImport(
       [],
       fetchRemotes,
     );
+    // Record the selection before submitting so a lost response can be replayed
+    // with the workbench checkpoint for these exact finding versions.
+    const selectionPath = `${localCapture}.import`;
+    const storedPublication = async (importId: string, ifCurrent = false) =>
+      (
+        await prepareStoredFindingsPublication(
+          { repository, importId, ifCurrent },
+          { repository: repositoryUrl },
+          dependencies,
+        )
+      ).groups[0];
     let cloud: ExternalPublicationPreview | undefined;
     let cloudError: string | undefined;
     const reviewedCapturePath = (preview: ExternalPublicationPreview) =>
@@ -314,15 +336,25 @@ export async function prepareSonarImport(
           "This checkout has no matching Git remote. Verify the Sonar project's repository and pass --source-repository-url to preview Cloud publication.";
         if (!confirmedRepository && !reviewedCheckout)
           throw new Error(bindingError);
-        const prepared = await prepareNormalizedExternalPublication(
-          normalizeSonarFindings(
-            report,
-            options.sourceRepositoryUrl ?? "",
-            "cloud",
-          ),
-          { repository: repositoryUrl, ...source },
-          dependencies,
+        const savedId = await readFile(selectionPath, "utf8").catch(
+          nullIfMissingFile,
         );
+        const previous =
+          savedId === null
+            ? undefined
+            : await storedPublication(JSON.parse(savedId), true);
+        const prepared =
+          previous ??
+          (await prepareNormalizedPublication(
+            normalizeSonarFindings(
+              report,
+              options.sourceRepositoryUrl ?? "",
+              "cloud",
+            ),
+            { repository: repositoryUrl, ...source },
+            dependencies,
+            "preview",
+          ));
         const reviewedCapture = reviewedCapturePath(prepared.preview);
         if (input !== reviewedCapture) {
           if (!confirmedRepository) throw new Error(bindingError);
@@ -359,13 +391,7 @@ export async function prepareSonarImport(
         if (!cloud) return { ...saved, cloudError, cloud: undefined };
         try {
           if (!importId) throw new Error("No stored Sonar import to publish.");
-          const {
-            groups: [publication],
-          } = await prepareStoredFindingsPublication(
-            { repository, importId },
-            { repository: repositoryUrl },
-            dependencies,
-          );
+          const publication = await storedPublication(importId);
           if (
             !publication ||
             reviewedCapturePath(publication.preview) !== capture
@@ -373,6 +399,7 @@ export async function prepareSonarImport(
             throw new Error(
               "The stored findings or Cloud destination have changed. Preview the Sonar capture again with --to cloud --dry-run.",
             );
+          await writeAtomicJson(selectionPath, importId);
           return {
             ...saved,
             cloud: await publication.publish(publication.reviewId),

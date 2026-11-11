@@ -130,7 +130,12 @@ export interface ExternalFindingProvenance {
 }
 
 export type LocalExternalFindingSelection = { repository: string } & (
-  | { importId: string; findings?: never }
+  | {
+      importId: string;
+      findings?: never;
+      /** Return an empty selection if the import is missing or any pinned version has changed. */
+      ifCurrent?: boolean;
+    }
   | {
       findings: readonly Pick<StoredExternalFinding, "id" | "version">[];
       importId?: never;
@@ -1746,7 +1751,7 @@ export async function selectLocalExternalFindings(
     repository,
     "read-external-findings",
     importId !== undefined
-      ? { importId }
+      ? { importId, ifCurrent: selection.ifCurrent }
       : { findings: findings!.map(({ id, version }) => ({ id, version })) },
     dependencies,
   );

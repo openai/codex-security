@@ -2920,11 +2920,34 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   ).toBe(2);
   expect(JSON.parse(unavailable.stdout.text()).local.counts.created).toBe(1);
 
+  f.state.loseResponse = true;
+  const interrupted = createCliTest(main);
+  expect(await interrupted.runCli([...args, "--yes"], deps)).toBe(2);
+  expect(JSON.parse(interrupted.stdout.text()).cloud.status).toBe(
+    "interrupted",
+  );
+  expect(f.posts).toHaveLength(1);
+  const retry = createCliTest(main);
+  expect(await retry.runCli([...previewArgs, "--dry-run"], deps)).toBe(0);
+  expect(JSON.parse(retry.stdout.text()).capture).toBe(reviewed.capture);
+  expect(f.posts).toHaveLength(1);
+
   const replay = createCliTest(main);
   expect(await replay.runCli([...args, "--yes"], deps)).toBe(0);
   const result = JSON.parse(replay.stdout.text());
   expect(result.local.counts.unchanged).toBe(1);
   expect(result.cloud.verified).toBe(1);
+  expect(f.posts).toEqual([f.posts[0], f.posts[0]]);
+  expect(f.reports.size).toBe(1);
+  const receipts = await listLocalFindingPublications(
+    { repository: checkout },
+    { environment },
+  );
+  expect(receipts).toHaveLength(1);
+  expect(receipts[0]).toMatchObject({
+    version: 1,
+    cloudFindingId: f.reports.get("issue-1")!.canonical_finding_id,
+  });
   const posted = JSON.parse(f.posts[0]!);
   expect(posted.source).toEqual({
     provider: "sonar",
@@ -2944,6 +2967,29 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   expect(posted.items[0].evidence.source_data.issue.flows).toEqual(
     source.pages[0]!.issues[0]!.flows,
   );
+
+  // An intervening local edit supersedes the saved pins. A fresh review of
+  // the original evidence must still allow it to be imported as a new version.
+  const changed = structuredClone(source);
+  changed.pages[0]!.issues[0]!.message += " (changed)";
+  const changedPath = join(f.root, "changed.json");
+  await writeFile(changedPath, JSON.stringify(changed));
+  async function importSonar(path: string, ...flags: string[]) {
+    const cli = createCliTest(main);
+    const command = ["import", "sonar", path, ...flags, "--format", "json"];
+    expect(await cli.runCli(command, deps), cli.stderr.text()).toBe(0);
+    return JSON.parse(cli.stdout.text());
+  }
+  const changedPreview = await importSonar(changedPath, "--dry-run");
+  await importSonar(changedPreview.capture, "--yes");
+  const fresh = await importSonar(capture, "--to", "cloud", "--dry-run");
+  expect(fresh.capture).not.toBe(reviewed.capture);
+  await importSonar(fresh.capture, "--to", "cloud", "--yes");
+  const history = await listLocalFindingPublications(
+    { repository: checkout },
+    { environment },
+  );
+  expect(history.map((row) => row.version).sort()).toEqual([1, 3]);
 });
 
 test("normalized Sonar publication checks retained bindings on preview and retry", async () => {
