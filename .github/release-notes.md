@@ -91,6 +91,7 @@
 - publish versioned workbench findings through the shared Cloud transport ([#2603](https://github.com/openai/codex-security/pull/2603))
 - clarify blocked patch results ([#2609](https://github.com/openai/codex-security/pull/2609))
 - guide Codex through scanner imports and workbench publication ([#2604](https://github.com/openai/codex-security/pull/2604))
+- add ArmorCode findings support ([#2608](https://github.com/openai/codex-security/pull/2608))
 
 </details>
 
