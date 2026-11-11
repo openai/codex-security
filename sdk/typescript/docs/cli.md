@@ -1886,15 +1886,17 @@ or effort. A successful
 run also writes `severity-classification.json`, but publication reads the database. Original findings and sealed artifacts remain
 unchanged.
 
-Repeat `--finding-id ID` for a subset from the selected scan. Dedupe's
-`uniqueFindingIds` can represent findings from another scan; replace an outside-scan
-representative with a member of its `duplicateGroups` entry from this scan.
+Repeat `--finding-id ID` for a subset from the selected scan. Dedupe returns
+`scanRepresentativeFindingIds` for this selection, in the same order as its
+corpus-wide `uniqueFindingIds`.
 Linear publication defaults to saved classification selection, omits exclusions,
 and uses assessed severity for title and priority. Descriptions retain original
 severity and add the classification rationale. Publication rejects incomplete or
 stale assessments. It never reclassifies or rereads the rubric at publication time.
 
 ```bash
+# List the IDs you can pass to --finding-id.
+codex-security dedupe --scan SCAN_ID --json | jq -r '.scanRepresentativeFindingIds[]'
 codex-security classify-severity --scan SCAN_ID --rubric /path/to/policy.md \
   --finding-id FINDING_ID
 codex-security publish scan --scan SCAN_ID --to linear --linear-team TEAM_ID --dry-run
@@ -1909,46 +1911,32 @@ import {
   classifySeverity,
   classifyScanSeverity,
   classifyScanDirectorySeverity,
+  deduplicateScanDirectory,
   publishScan,
-  type FindingsDocument,
 } from "@openai/codex-security";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 
 // Assess supplied reports in memory.
-const classification = await classifySeverity(findings, {
+await classifySeverity(findings, {
   rubricPath: "/path/to/policy.md",
   knowledgeBasePaths: ["/path/to/context.md"],
 });
 
 // Save assessments for a scan ID or sealed directory.
 await classifyScanSeverity("SCAN_ID", { rubricPath: "/path/to/policy.md" });
-const scanFindings = (
-  JSON.parse(
-    await readFile(join(scanDirectory, "findings.json"), "utf8"),
-  ) as FindingsDocument
-).findings;
-const scanFindingIds = new Set(
-  scanFindings.map((finding) => finding.findingId),
-);
-// dedupeResult was produced by deduplicating this same scan.
-const selectedIds = dedupeResult.uniqueFindingIds.map((representative) => {
-  if (scanFindingIds.has(representative)) return representative;
-  return dedupeResult.duplicateGroups
-    .find((group) => group.includes(representative))!
-    .find((member) => scanFindingIds.has(member))!;
+const dedupeResult = await deduplicateScanDirectory(scanDirectory, {
+  repository: "/path/to/repository",
 });
-await classifyScanDirectorySeverity(scanDirectory, {
+const classification = await classifyScanDirectorySeverity(scanDirectory, {
   rubricPath: "/path/to/policy.md",
-  findingIds: selectedIds,
+  findingIds: dedupeResult.scanRepresentativeFindingIds,
 });
 
-// Or supply an in-memory assessment directly to publication.
+// Preview Linear publication for those same findings using their assessments.
 await publishScan(scanDirectory, {
   destination: "linear",
   teamId: "TEAM_ID",
   classification,
-  findingIds: classification.assessments.map(({ findingId }) => findingId),
+  findingIds: dedupeResult.scanRepresentativeFindingIds,
   dryRun: true,
 });
 ```
@@ -2071,6 +2059,12 @@ least eight characters.
 | `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.         |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                |
 
+In the terminal, `findings list` shows the occurrence ID for each open finding.
+Copy that ID into `findings false-positive` with your reason. Subsequent scans can
+use the explanation while it applies. In `scans show SCAN_ID --json`, each
+displayed occurrence has its saved rationale in `triage.note` after dismissal. The list identifies
+a repository with no saved scan history separately from one with zero open findings.
+
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
 selects the latest scan of any status. After a successful scan followed by a
 failed or active scan, these defaults refer to different runs. Human output
@@ -2143,6 +2137,10 @@ reads concatenated frames and reports truncated streams as collection errors.
 codex-security scans list --scan-root /path/to/security-scans
 codex-security scans resume SCAN_ID
 ```
+
+The terminal list shows the full scan ID and labels the last activity of a
+`running` scan after 24 hours without an update. For a Deep Scan with a saved
+launch recipe and its original session, it also shows the resume command to use after interruption.
 
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
