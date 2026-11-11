@@ -1022,20 +1022,18 @@ export class CodexSecurity {
     try {
       throwIfAborted(signal);
       const finding = standaloneFindingForPrompt(options.finding);
-      const snapshot = options.knowledgeBasePaths?.length
-        ? (options.knowledgeBaseSnapshot ??
+      let repository = options.repositoryPath;
+      let snapshot: KnowledgeBaseSnapshot | undefined;
+      let protectedRoots: string[] | undefined;
+      if (options.knowledgeBasePaths?.length) {
+        repository = await normalizeRepository(repository, signal);
+        snapshot =
+          options.knowledgeBaseSnapshot ??
           (await readKnowledgeBaseSnapshot(
             options.knowledgeBasePaths,
             signal,
-            resolveRepositoryPath(options.repositoryPath),
-          )))
-        : undefined;
-      let protectedRoots: string[] | undefined;
-      if (snapshot !== undefined) {
-        const repository = await normalizeRepository(
-          resolveRepositoryPath(options.repositoryPath),
-          signal,
-        );
+            repository,
+          ));
         protectedRoots = [
           (await enclosingGitWorktreeRoot(repository, signal)) ?? repository,
           ...(await knowledgeBaseProtectedRoots(snapshot, signal)),
@@ -1044,7 +1042,7 @@ export class CodexSecurity {
       // Cached validation may already own this output. Regeneration below still
       // requires an empty directory through prepareOutputDir.
       const inputs = await this.#prepareLocalInputs(
-        options.repositoryPath,
+        repository,
         options,
         signal,
         protectedRoots,
