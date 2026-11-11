@@ -1,5 +1,6 @@
 import { readReviewState } from "./support/review-state.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { useTestPython } from "./support/python.js";
 import { execFileSync } from "node:child_process";
 import {
   appendFile,
@@ -28,6 +29,7 @@ import { ScanCostTracker } from "../src/cost.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
+const testPython = useTestPython();
 afterEach(cleanup);
 const threadId = "1af317a1-c9ed-4c73-b428-cb0d160cf8e8";
 const followUp = "Explain the selected finding.";
@@ -66,7 +68,7 @@ for (const boundary of ["registration", "stream-start"] as const) {
           ...preparedRuntime(codexHome),
           environment,
         }),
-        resolvePluginPython: async () => "python3",
+        resolvePluginPython: async () => testPython()!,
         prepareOutputDir: async () => scanDir,
         runWorkbench: async (options, args, input) => {
           savedOptions = options;
@@ -159,11 +161,18 @@ const cases: {
   budgetCompletionFault?: BudgetCompletionFault;
   initialResumeUsage?: boolean;
   archivedWorkerUsage?: boolean;
+  missingWorkerUsage?: boolean;
   compressionRuntime?: (typeof compressionRuntimes)[number];
   unpricedUsage?: boolean;
   cancellationFault?: "status-read" | "deep-state-read" | "cancel-response";
 }[] = [
   ...outcomes.map((outcome) => ({ outcome })),
+  { outcome: "budget-during-publication", missingWorkerUsage: true },
+  {
+    outcome: "budget-during-publication",
+    missingWorkerUsage: true,
+    budgetCompletionFault: "lost",
+  },
   ...(
     [
       "budget-during-publication",
@@ -230,6 +239,7 @@ for (const {
   cancellationFault,
   initialResumeUsage,
   archivedWorkerUsage,
+  missingWorkerUsage,
   compressionRuntime,
   unpricedUsage,
 } of cases) {
@@ -246,7 +256,7 @@ for (const {
   const name =
     outcome === "followup-canceled"
       ? "SDK preserves a selected aggregate when its follow-up is canceled"
-      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${archivedWorkerUsage ? " (compressed archived worker)" : ""}${compressionRuntime ? ` (${compressionRuntime})` : ""}${unpricedUsage ? " (unpriced remainder)" : ""}`;
+      : `SDK handles selected aggregate: ${outcome}${budgetCompletionFault ? ` (budget completion ${budgetCompletionFault})` : ""}${cancellationFault ? ` (cancellation ${cancellationFault})` : ""}${initialResumeUsage ? " (initial resume cost)" : ""}${archivedWorkerUsage ? " (compressed archived worker)" : ""}${compressionRuntime ? ` (${compressionRuntime})` : ""}${unpricedUsage ? " (unpriced remainder)" : ""}${missingWorkerUsage ? " (missing worker usage)" : ""}`;
   const runCase = async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -391,10 +401,20 @@ for (const {
               plugin: { ...runtime.plugin, version: manifest.version },
             };
           },
-          resolvePluginPython: async () => "python3",
+          resolvePluginPython: async () => testPython()!,
           prepareOutputDir: async () => scanDir,
           runWorkbench: async (options, args, input) => {
             workbenchOptions = options;
+            if (
+              missingWorkerUsage &&
+              args[0] === "complete-budget-exhausted-scan"
+            ) {
+              expect(
+                JSON.parse(args[args.indexOf("--cost-json") + 1]!),
+              ).toMatchObject({
+                lowerBound: { coverage: "partial" },
+              });
+            }
             if (args[0] === "get-cli-scan-resume")
               originalResumeSignal = options.signal;
             commands.push(args[0]!);
@@ -594,7 +614,7 @@ for (const {
                   };
                   const seeded = JSON.parse(
                     execFileSync(
-                      "python3",
+                      testPython()!,
                       [
                         fileURLToPath(
                           new URL(
@@ -612,7 +632,7 @@ for (const {
                           terminalReason: loseCompletionResponse
                             ? "capped"
                             : "saturated",
-                          ...(archivedWorkerUsage
+                          ...(archivedWorkerUsage || missingWorkerUsage
                             ? {
                                 ownerThreadId: threadId,
                                 worker: {
@@ -630,7 +650,7 @@ for (const {
                   );
                   // Exercise the dedicated function bridge, without extending CLI arguments.
                   const selectionOutput = execFileSync(
-                    "python3",
+                    testPython()!,
                     [
                       "-c",
                       "import runpy, sys; script = sys.argv.pop(1); runpy.run_path(script)['main'](select_finalization=True)",
@@ -1038,9 +1058,11 @@ for (const {
           expect(result.manifest.scan.warnings?.join(" ")).toMatch(
             /cost limit|budget baseline .* exceeded .* limit/,
           );
-          if (unpricedUsage) {
-            expect(result.cost).toBeNull();
-            expect(reportedCosts).toEqual([]);
+          if (unpricedUsage || missingWorkerUsage) {
+            if (unpricedUsage) {
+              expect(result.cost).toBeNull();
+              expect(reportedCosts).toEqual([]);
+            }
             const saved = await runWorkbench(workbenchOptions!, [
               "get-scan",
               "--scan-id",

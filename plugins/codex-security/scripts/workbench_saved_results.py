@@ -1250,7 +1250,10 @@ def retain_unmerged_budget_coverage(
             if "surfaceIds" in item:
                 item["surfaceIds"] = [surfaces.get(value, value) for value in item["surfaceIds"]]
             retain(field, item)
-    retain("reviews", {**provenance, "completeness": source["completeness"]})
+    review = dict(provenance)
+    if "completeness" in source:
+        review["completeness"] = source["completeness"]
+    retain("reviews", review)
     for index, limitation in enumerate(draft.get("scope", {}).get("limitations", [])):
         retain(
             "deferred",

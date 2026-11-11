@@ -442,6 +442,7 @@ def test_completion_counts_native_responses_and_compaction_without_legacy_duplic
     [
         ("before", False, False),
         ("counted", False, True),
+        ("restarted", False, True),
         ("after", False, False),
         ("completion_turn", False, True),
         ("counted", True, False),
@@ -471,6 +472,8 @@ def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
         else _token_event(started, 10, 1),
     ]
     events.insert(0 if scope == "before" else len(events), marker)
+    if scope == "restarted":
+        events.extend([_token_event(started, 2, 0), _token_event(started, 4, 1)])
     events.append(_event(completed, "event_msg", {"type": "task_complete"}))
     parent = _rollout(tmp_path, "scan-parent", events)
 
@@ -482,7 +485,7 @@ def test_legacy_compaction_usage_is_unverifiable_only_inside_scan_window(
         completed_turn_id="turn-scan-parent" if scope == "completion_turn" else None,
     )
 
-    assert usage.tokens == _counts(10, 0, 1)
+    assert usage.tokens == (_counts(14, 0, 2) if scope == "restarted" else _counts(10, 0, 1))
     assert usage.warnings == ({"compaction_usage_unavailable"} if expected_warning else set())
 
 

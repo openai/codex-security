@@ -335,10 +335,10 @@ def test_reader_budget_validates_publication_before_changing_the_projection(
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_bytes())
     findings = json.loads((scan.scan_dir / "findings.json").read_bytes())
     coverage = read_review_state(workbench_db, scan.scan_dir)
-    assert selection_after.pop("sealedPublicationSha256") == publication_digest(
-        manifest, findings, coverage
-    )
-    assert manifest["scan"].pop("warnings") == [BUDGET_WARNING]
+    sealed_sha256 = selection_after.pop("sealedPublicationSha256")
+    assert sealed_sha256 == publication_digest(manifest, findings, coverage)
+    warnings = manifest["scan"].pop("warnings")
+    assert warnings == [BUDGET_WARNING]
     assert publication_digest(manifest, findings, coverage) == after_publication_sha256
     assert selection_after == selection_before
     assert "completeness" not in coverage
@@ -355,6 +355,56 @@ def test_reader_budget_validates_publication_before_changing_the_projection(
     with pytest.raises(SystemExit, match="Only a running CLI Deep Scan"):
         workbench_api["complete_budget_exhausted_scan"](workbench_db, args)
     assert snapshot() == sealed
+
+
+def test_reader_budget_retains_accepted_review_state_without_legacy_completeness(
+    workbench_api, workbench_db, publication_scan
+):
+    from test_workbench_db import BUDGET_COST, BUDGET_WARNING
+
+    scan = publication_scan()
+    selected_publication(workbench_api, workbench_db, scan, digest_bound=False)
+    result = scan.add_worker(workbench_db)
+    worker_id = result.parent.name
+    draft = {
+        "scanId": scan.scan_id,
+        "complete": True,
+        "findings": [],
+        "reviewState": {
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [{"id": "outstanding", "reason": "Review the remaining entry point."}],
+        },
+    }
+    raw = json.dumps(draft).encode()
+    digest = hashlib.sha256(raw).hexdigest()
+    accepted = result.parent / f"{digest}.json"
+    accepted.write_bytes(raw)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?", (worker_id,)
+        )
+        workbench_db.execute(
+            "INSERT INTO deep_scan_attempts (scan_id, worker_id, attempt, status, started_at, "
+            "completed_at, accepted_result_path, accepted_result_sha256) "
+            "VALUES (?, ?, 1, 'succeeded', ?, ?, ?, ?)",
+            (scan.scan_id, worker_id, scan.timestamp, scan.timestamp, str(accepted), digest),
+        )
+        recipe = json.loads(workbench_db.execute("SELECT recipe_json FROM scans").fetchone()[0])
+        recipe["maxCostUsd"] = 0.005
+        workbench_db.execute("UPDATE scans SET recipe_json = ?", (json.dumps(recipe),))
+
+    args = Namespace(
+        scan_id=scan.scan_id, cost_json=json.dumps(BUDGET_COST), message=BUDGET_WARNING
+    )
+    completed = workbench_api["complete_budget_exhausted_scan"](workbench_db, args)
+    assert completed["scan"]["progress"]["status"] == "complete"
+    state = read_review_state(workbench_db, scan.scan_dir)
+    assert {"workerId": worker_id, "attempt": 1} in state["reviews"]
+    assert any(
+        item.get("provenance", {}).get("sourceId") == "outstanding" for item in state["deferred"]
+    )
+    assert accepted.read_bytes() == raw
 
 
 @pytest.mark.parametrize(

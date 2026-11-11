@@ -4,8 +4,8 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
-import * as zlib from "node:zlib";
 import { isRecord } from "../record.js";
+import { createZstdDecompress } from "../session-decompression.js";
 
 /** Read the original owner's canonical native rollout, including archived copies. */
 export async function readOriginalParentEvents(
@@ -78,9 +78,7 @@ async function* sessionFiles(directory: string): AsyncGenerator<string> {
     if (entry.isDirectory()) yield* sessionFiles(path);
     else if (
       entry.isFile() &&
-      (entry.name.endsWith(".jsonl") ||
-        (typeof zlib.createZstdDecompress === "function" &&
-          entry.name.endsWith(".jsonl.zst")))
+      (entry.name.endsWith(".jsonl") || entry.name.endsWith(".jsonl.zst"))
     )
       yield path;
   }
@@ -92,7 +90,7 @@ async function sessionEvents(
   const events: Record<string, unknown>[] = [];
   const file = createReadStream(path);
   const stream = path.endsWith(".zst")
-    ? pipeline(file, zlib.createZstdDecompress(), () => {})
+    ? pipeline(file, createZstdDecompress(), () => {})
     : file;
   const lines = createInterface({ input: stream, crlfDelay: Infinity });
   try {
@@ -119,14 +117,13 @@ async function sessionEvents(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       // This lookup needs one exact parent, not its descendants. A native
       // filename can exclude another thread only before metadata is decoded.
-      const archivedThreadId =
+      const fileThreadId =
         events.length === 0
-          ? /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})(?:_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})?\.jsonl\.zst$/u.exec(
+          ? /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})(?:_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})?\.jsonl(?:\.zst)?$/u.exec(
               basename(path),
             )?.[1]
           : undefined;
-      if (archivedThreadId !== undefined && archivedThreadId !== threadId)
-        return [];
+      if (fileThreadId !== undefined && fileThreadId !== threadId) return [];
       throw error;
     }
   } finally {

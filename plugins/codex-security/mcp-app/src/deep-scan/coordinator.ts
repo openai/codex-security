@@ -1321,11 +1321,3 @@ function errorKind(error: unknown): string {
   if (!(error instanceof Error)) return typeof error;
   return errorNameWithCode(error);
 }
-
-function unique(values: string[]): string[] {
-  return [...new Set(values)];
-}
-function removeValue(values: string[], value: string): void {
-  for (let index = values.length - 1; index >= 0; index--)
-    if (values[index] === value) values.splice(index, 1);
-}

@@ -143,100 +143,91 @@ async function originalParentSettings(
 ): Promise<Partial<DeepScanExecutionSettings>> {
   // Native config/read represents omitted selections as null. Recover recorded
   // selections from the original parent; some native records omit the summary.
-  // History can be disabled or unavailable; configured selections still work.
-  try {
-    const events = await readOriginalParentEvents(codexHome, parent.threadId);
-    const settings: Partial<DeepScanExecutionSettings> = {};
-    let applied: Partial<DeepScanExecutionSettings> | undefined;
-    let summaryIsCompatibilityOnly = false;
-    const cutoff =
-      parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
-    for (const event of events) {
-      const timestamp =
-        typeof event.timestamp === "string"
-          ? Date.parse(event.timestamp)
-          : undefined;
-      if (timestamp !== undefined && timestamp > cutoff) continue;
-      const payload = event.payload;
-      if (!payload || typeof payload !== "object" || Array.isArray(payload))
-        continue;
-      const context = payload as Record<string, unknown>;
+  const events = await readOriginalParentEvents(codexHome, parent.threadId);
+  const settings: Partial<DeepScanExecutionSettings> = {};
+  let applied: Partial<DeepScanExecutionSettings> | undefined;
+  let summaryIsCompatibilityOnly = false;
+  const cutoff =
+    parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
+  for (const event of events) {
+    const timestamp =
+      typeof event.timestamp === "string"
+        ? Date.parse(event.timestamp)
+        : undefined;
+    if (timestamp !== undefined && timestamp > cutoff) continue;
+    const payload = event.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload))
+      continue;
+    const context = payload as Record<string, unknown>;
+    if (
+      event.type === "event_msg" &&
+      context.type === "thread_settings_applied"
+    ) {
       if (
-        event.type === "event_msg" &&
-        context.type === "thread_settings_applied"
-      ) {
-        if (
-          typeof context.thread_id === "string" &&
-          context.thread_id !== parent.threadId
-        )
-          continue;
-        const snapshot = context.thread_settings;
-        if (
-          !snapshot ||
-          typeof snapshot !== "object" ||
-          Array.isArray(snapshot)
-        )
-          continue;
-        const value = snapshot as Record<string, unknown>;
-        applied = {
-          model: typeof value.model === "string" ? value.model : undefined,
-          modelProvider:
-            typeof value.model_provider_id === "string"
-              ? value.model_provider_id
+        typeof context.thread_id === "string" &&
+        context.thread_id !== parent.threadId
+      )
+        continue;
+      const snapshot = context.thread_settings;
+      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot))
+        continue;
+      const value = snapshot as Record<string, unknown>;
+      applied = {
+        model: typeof value.model === "string" ? value.model : undefined,
+        modelProvider:
+          typeof value.model_provider_id === "string"
+            ? value.model_provider_id
+            : undefined,
+        reasoningEffort:
+          typeof value.reasoning_effort === "string"
+            ? value.reasoning_effort
+            : undefined,
+        reasoningSummary:
+          typeof value.reasoning_summary === "string"
+            ? value.reasoning_summary
+            : undefined,
+        // A persisted native absent tier and explicit standard both omit the
+        // request tier. This does not infer a tier from missing history.
+        serviceTier:
+          typeof value.service_tier === "string"
+            ? value.service_tier
+            : value.service_tier === undefined
+              ? "default"
               : undefined,
-          reasoningEffort:
-            typeof value.reasoning_effort === "string"
-              ? value.reasoning_effort
-              : undefined,
-          reasoningSummary:
-            typeof value.reasoning_summary === "string"
-              ? value.reasoning_summary
-              : undefined,
-          // A persisted native absent tier and explicit standard both omit the
-          // request tier. This does not infer a tier from missing history.
-          serviceTier:
-            typeof value.service_tier === "string"
-              ? value.service_tier
-              : value.service_tier === undefined
-                ? "default"
-                : undefined,
-          ...(value.service_tier === undefined
-            ? { nativeServiceTierAbsent: true as const }
-            : {}),
-        };
-      }
-      if (event.type === "session_meta") {
-        if (typeof context.model_provider === "string")
-          settings.modelProvider = context.model_provider;
-        // Codex 0.133 replaced turn_context.summary with a compatibility default.
-        // Fresh threads need not have a thread_settings_applied record to replace it.
-        const version =
-          typeof context.cli_version === "string"
-            ? /^(\d+)\.(\d+)\./u.exec(context.cli_version)
-            : null;
-        summaryIsCompatibilityOnly =
-          version !== null &&
-          (Number(version[1]) > 0 || Number(version[2]) >= 133);
-      }
-      if (event.type === "turn_context") {
-        if (parent.turnId && context.turn_id !== parent.turnId) continue;
-        settings.cyberAccessProgram =
-          typeof context.cyber_access_program === "string"
-            ? (context.cyber_access_program as CyberAccessProgram)
-            : undefined;
-        if (typeof context.model === "string") settings.model = context.model;
-        if (typeof context.effort === "string")
-          settings.reasoningEffort = context.effort;
-        if (!summaryIsCompatibilityOnly && typeof context.summary === "string")
-          settings.reasoningSummary = context.summary;
-      }
+        ...(value.service_tier === undefined
+          ? { nativeServiceTierAbsent: true as const }
+          : {}),
+      };
     }
-    // Applied snapshots contain native selected values. Newer turn-context
-    // summaries are only a compatibility field, not the active selection.
-    return { ...settings, ...applied };
-  } catch {
-    return {};
+    if (event.type === "session_meta") {
+      if (typeof context.model_provider === "string")
+        settings.modelProvider = context.model_provider;
+      // Codex 0.133 replaced turn_context.summary with a compatibility default.
+      // Fresh threads need not have a thread_settings_applied record to replace it.
+      const version =
+        typeof context.cli_version === "string"
+          ? /^(\d+)\.(\d+)\./u.exec(context.cli_version)
+          : null;
+      summaryIsCompatibilityOnly =
+        version !== null &&
+        (Number(version[1]) > 0 || Number(version[2]) >= 133);
+    }
+    if (event.type === "turn_context") {
+      if (parent.turnId && context.turn_id !== parent.turnId) continue;
+      settings.cyberAccessProgram =
+        typeof context.cyber_access_program === "string"
+          ? (context.cyber_access_program as CyberAccessProgram)
+          : undefined;
+      if (typeof context.model === "string") settings.model = context.model;
+      if (typeof context.effort === "string")
+        settings.reasoningEffort = context.effort;
+      if (!summaryIsCompatibilityOnly && typeof context.summary === "string")
+        settings.reasoningSummary = context.summary;
+    }
   }
+  // Applied snapshots contain native selected values. Newer turn-context
+  // summaries are only a compatibility field, not the active selection.
+  return { ...settings, ...applied };
 }
 
 /** Read recorded execution settings or original legacy facts. */

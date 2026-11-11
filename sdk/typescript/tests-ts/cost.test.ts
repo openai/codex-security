@@ -13,6 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import * as filesystem from "node:fs/promises";
 import { basename, dirname, join, parse, sep } from "node:path";
 import zlib from "node:zlib";
@@ -63,6 +64,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const commandHead = "h".repeat(32_743);
 const commandTail = "t".repeat(32_743);
 const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
+const testPython = useTestPython();
 const commandOutput = (middle: string) =>
   `${commandHead}\n${middle}\n${commandTail}`;
 
@@ -2174,6 +2176,125 @@ function nativeUsageRecord(
   };
 }
 
+test.each([
+  "compacted",
+  "continuous-counter",
+  "distinct-turn-receipt",
+  "delayed-receipt",
+] as const)("retains earlier owned usage across %s", async (scenario) => {
+  const home = await codexHome();
+  const start = "2026-07-26T10:00:00Z";
+  const parent = await writeSession(home, "parent", {}, { timestamp: start });
+  const path = await writeSession(home, "worker", {}, { timestamp: start });
+  const event = (type: string, payload: Record<string, unknown>) => ({
+    timestamp: start,
+    type,
+    payload,
+  });
+  const counts = (input: number) => ({ input_tokens: input, output_tokens: 0 });
+  const counter = (input: number) =>
+    event("event_msg", {
+      type: "token_count",
+      info: { total_token_usage: counts(input) },
+    });
+  await appendFile(
+    parent,
+    jsonLines([
+      event("turn_context", { turn_id: "owner", model: "gpt-5.6-sol" }),
+      counter(0),
+    ]) + "\n",
+  );
+  await appendFile(
+    path,
+    jsonLines([
+      event("turn_context", { turn_id: "first", model: "gpt-5.6-sol" }),
+      counter(1000),
+      ...(scenario === "compacted" || scenario === "continuous-counter"
+        ? [
+            event("compacted", {}),
+            counter(scenario === "compacted" ? 100 : 1100),
+            counter(scenario === "compacted" ? 300 : 1300),
+          ]
+        : [
+            event("turn_context", { turn_id: "second", model: "gpt-5.6-sol" }),
+            event("token_usage_record", {
+              thread_id: "worker",
+              turn_id: "second",
+              model: "gpt-5.6-sol",
+              response_id: "second-response",
+              usage: counts(500),
+              thread_token_usage: counts(1500),
+            }),
+            ...(scenario === "delayed-receipt"
+              ? [
+                  event("token_usage_record", {
+                    thread_id: "worker",
+                    turn_id: "first",
+                    model: "gpt-5.6-sol",
+                    response_id: "first-response",
+                    usage: counts(1000),
+                    thread_token_usage: counts(1000),
+                  }),
+                ]
+              : []),
+          ]),
+    ]) + "\n",
+  );
+  const tracker = costTracker(home);
+  tracker.setAttributionReader(async () => ({
+    formatVersion: 1,
+    owner: { threadId: "parent", turnId: "owner", startedAt: start },
+    executionThreadIds: ["worker"],
+    startedAt: start,
+    completedAt: null,
+  }));
+  tracker.start("parent");
+  const snapshot = await tracker.stop();
+  const expected =
+    scenario === "compacted" || scenario === "continuous-counter" ? 1300 : 1500;
+  expect(snapshot.usage).toMatchObject({ input_tokens: expected });
+  expect(snapshot.measurement.cost?.inputTokens).toBe(expected);
+});
+
+test.each([true, false])(
+  "counts a restarted counter once when its receipt arrives first: %p",
+  async (receiptFirst) => {
+    const home = await codexHome();
+    const path = await writeSession(home, "parent", {});
+    const count = (input_tokens: number) => ({
+      input_tokens,
+      output_tokens: 0,
+    });
+    const receipt = nativeUsageRecord(
+      "parent",
+      "second-response",
+      count(1300),
+      count(1400),
+    );
+    const latest = legacyUsageRecord(count(1400));
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          payload: { turn_id: "first", model: "gpt-5.6-sol" },
+        },
+        legacyUsageRecord(count(1000)),
+        { type: "compacted", payload: {} },
+        legacyUsageRecord(count(100)),
+        {
+          type: "turn_context",
+          payload: { turn_id: "second", model: "gpt-5.6-sol" },
+        },
+        ...(receiptFirst ? [receipt, latest] : [latest, receipt]),
+      ]) + "\n",
+    );
+    const tracker = costTracker(home);
+    tracker.start("parent");
+    expect((await tracker.stop()).usage).toMatchObject({ input_tokens: 2400 });
+  },
+);
+
 function legacyUsageRecord(usage: Record<string, number>) {
   return {
     type: "event_msg",
@@ -2464,7 +2585,7 @@ describe("scan cost", () => {
     "keeps workbench cache-write normalization aligned with SDK usage for %j as %p tokens",
     async (cacheWrites, expectedCacheWrites) => {
       const { PLUGIN_ROOT } = await import("./plugin-root.js");
-      const python = Bun.which("python3") ?? Bun.which("python");
+      const python = testPython();
       expect(python).not.toBeNull();
       const usage = {
         input_tokens: 100,
@@ -8720,7 +8841,7 @@ test.each(["after-completion", "foreign-turn", "owned-turn", "pre-window"])(
         scenario === "owned-turn" ? "partial" : undefined,
       );
       const python = spawnSync(
-        Bun.which("python3") ?? "python",
+        testPython()!,
         [
           "-I",
           "-B",
@@ -8886,7 +9007,7 @@ test.each([
       );
       if (!copied) {
         const python = spawnSync(
-          Bun.which("python3") ?? "python",
+          testPython()!,
           [
             "-I",
             "-B",

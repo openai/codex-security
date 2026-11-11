@@ -178,6 +178,7 @@ try {
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
     await check(t, testRuntimeSnapshotReadRetry);
+    await check(t, testIsolatedReconstructedWorkers);
     if (process.platform !== "win32") {
       await check(
         t,

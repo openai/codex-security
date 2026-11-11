@@ -1314,6 +1314,7 @@ def _read_rollout_usage(
     counter_total = _empty_token_usage()
     warnings = result.warnings
     previous = _empty_token_usage()
+    after_compaction = False
     previous_cache_writes_reported = True
     prefix_unclassified = 0
     prefix_missing_cache: set[str] = set()
@@ -1565,6 +1566,7 @@ def _read_rollout_usage(
             ):
                 break
             if event.get("type") == "compacted":
+                after_compaction = True
                 timestamp = _timestamp(event.get("timestamp"))
                 if (
                     timestamp is not None
@@ -1692,6 +1694,13 @@ def _read_rollout_usage(
                 warnings.add("token_record_invalid")
                 continue
             reset = snapshot["totalTokens"] < previous["totalTokens"]
+            if reset and after_compaction:
+                previous = _empty_token_usage()
+                previous_cache_writes_reported = True
+                prefix_unclassified = 0
+                prefix_missing_cache.clear()
+                reset = False
+            after_compaction = False
             if (
                 reset
                 and current_turn_id is not None

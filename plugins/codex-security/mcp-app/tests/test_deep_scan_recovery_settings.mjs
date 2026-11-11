@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1014,6 +1021,49 @@ access_key_id = "synthetic-secret"
     assert.equal(replayed.reasoningEffort, "ultra");
     assert.equal(replayed.reasoningSummary, "concise");
   }
+  {
+    const home = join(root, "framed-owner");
+    const archive = join(home, "archived_sessions");
+    const threadId = "fixture-archived-owner";
+    const owner = { threadId, startedAt: "2026-01-01T00:01:00Z" };
+    const environment = { CODEX_HOME: home, CODEX_CLI_PATH: process.execPath };
+    await mkdir(archive, { recursive: true });
+    const file = join(archive, `${threadId}.jsonl.zst`);
+    // One session_meta and one turn_context, independently compressed so the
+    // supported Node versions without built-in Zstandard run the same case.
+    const frames = [
+      "KLUv/SBCEQIAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6ImZpeHR1cmUtYXJjaGl2ZWQtb3duZXIifX0K",
+      "KLUv/SBNRQIAcsQPFpDHDVxkLMSuFRi/F0l2d144ivO8GQTAez8DOsc3Y2P2JNA10Cksj0+rTNzhNTm1XCfvY1txERQr+vhdre8CAQBEw4QC",
+    ].map((frame) => Buffer.from(frame, "base64"));
+    await writeFile(file, Buffer.concat(frames));
+    const capture = () =>
+      captureSettings(
+        { usageOwner: owner },
+        { filesystemDenies: [] },
+        environment,
+      );
+    const captured = await capture();
+    assert.equal(captured.model, "archived-model");
+    assert.equal(captured.reasoningEffort, "high");
+    await writeFile(
+      file,
+      Buffer.concat([frames[0], frames[1].subarray(0, -1)]),
+    );
+    await assert.rejects(capture, /unexpected EOF/);
+    await assert.rejects(
+      loadSettings(
+        join(home, "legacy"),
+        {
+          workflowVersion: "deep-security-scan/v1",
+          usageOwner: owner,
+          createdAt: owner.startedAt,
+        },
+        async () => ({ config: {} }),
+        environment,
+      ),
+      /unexpected EOF/,
+    );
+  }
   if (typeof zlib.zstdCompressSync === "function") {
     const parentId = "0198ff20-1b40-7000-8000-000000000001";
     const foreignId = "0198ff20-1b40-7000-8000-000000000002";
@@ -1081,6 +1131,15 @@ access_key_id = "synthetic-secret"
         CODEX_CLI_PATH: process.execPath,
       };
       const incompleteDir = join(home, "incomplete");
+      if (process.platform !== "win32" && process.getuid() !== 0) {
+        const unreadable = join(
+          archive,
+          `rollout-2026-09-01T00-00-00-${foreignId}${suffix}.jsonl`,
+        );
+        await writeFile(unreadable, "");
+        await chmod(unreadable, 0);
+        await assert.rejects(readFile(unreadable), { code: "EACCES" });
+      }
       await writeSnapshot(incompleteDir, {
         codexPath: process.execPath,
         codexHome: home,

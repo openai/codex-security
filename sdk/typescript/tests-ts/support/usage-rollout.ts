@@ -1,9 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { runNodePython } from "./python-probe.js";
+import { useTestPython } from "./python.js";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
 
+const testPython = useTestPython();
 export const scanThreadId = "scan-thread";
 export const lowerUuid7Turn = "019f9e4d-b3ba-7000-8000-000000000001";
 export const childUuid7Thread = "019f9e4d-b3ba-7000-8000-000000000002";
@@ -142,7 +144,7 @@ export function readPythonRolloutUsage(
   pluginRoot: string,
   rolloutPath: string,
 ): unknown {
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = testPython();
   assert.notEqual(python, null);
   const probe = [
     "import json, sys",
