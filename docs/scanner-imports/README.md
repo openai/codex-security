@@ -20,6 +20,7 @@ The guides cover local and Cloud imports unless an input is marked local only.
 | Guide                                                       | `--provider` | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | `inspector`  | Inspector2 `ListFindings` JSON for one Code Security repository                 |
+| [ArmorCode](armorcode.md)                                   | `armorcode`  | Findings API response JSON (`data.findings`)                                    |
 | [AWS Continuum](continuum.md)                               | `continuum`  | Summaries or selected code finding details for one verified repository          |
 | [Black Duck SCA](blackduck.md)                              | `blackduck`  | BOM-6 vulnerable components for one project version                             |
 | [Checkmarx SAST](checkmarx.md)                              | `checkmarx`  | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |

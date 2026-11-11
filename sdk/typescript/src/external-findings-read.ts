@@ -60,12 +60,14 @@ import {
   readVendorFindingsForPublication,
   wizFindingRepository,
 } from "./wiz-findings.js";
+import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 
 export type LocalFindingProvider = Provider | "tenable";
 
 /** File reader names mapped to the provider stored with each finding. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
+  armorcode: "armorcode",
   snyk: "snyk",
   semgrep: "semgrep",
   trivy: "trivy",
@@ -260,6 +262,10 @@ export async function readExternalFindings(
     if (!sourceRepositories.length && options.sourceRepositoryUrl)
       sourceRepositories.push({ url: options.sourceRepositoryUrl });
     return { findings, sourceRepositories };
+  }
+  if (provider === "armorcode") {
+    const input = await readScannerJson(path);
+    return { findings: normalizeArmorCodeFindings(input, target) };
   }
   if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
