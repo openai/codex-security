@@ -1998,7 +1998,8 @@ describe("multiscan", () => {
       {
         status: "failed",
         attempt: 2,
-        error: `Bulk checkout is already occupied: ${checkout}. Inspect and move the retained checkout before retrying.`,
+        checkoutOccupied: true,
+        error: `Bulk checkout is already occupied: ${checkout}. Retry with --recover to use a fresh checkout, or inspect and move the retained checkout before an ordinary retry.`,
       },
     ]);
     const moved = join(paths.root, "retained-checkout");
