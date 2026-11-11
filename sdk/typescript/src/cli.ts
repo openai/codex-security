@@ -93,6 +93,7 @@ export { exportEnvironment } from "./artifact-export.js";
 import { parse as parseToml } from "smol-toml";
 import {
   classifyConnectionFailure,
+  connectionAdviceDetail,
   CodexSecurity,
   environmentValue,
   formatEnvironmentVariableRemovalGuidance,
@@ -11165,19 +11166,19 @@ export function skillCommandFailure(
   detail: string,
   authentication: ScanAuthentication | null = null,
 ): string {
-  // Paths may contain provider error codes as filenames. Keep the original for display.
+  // Exclude paths and parser locations from advice, but keep the original diagnostic for display.
   const containsParserError =
     /\b(?:syntax\s*error|pars(?:e|er|ing)|unexpected token|at (?:line|column) \d+)\b/iu.test(
       detail,
     );
   // Keep a neutral token so a quoted provider/model remains a named model in the message.
-  const withoutPaths = detail
-    .replace(/\bhttps?:\/\/[^\s"'`<>]+/giu, "")
-    .replace(/[^\s"'`()<>,]+/gu, (token) =>
+  const withoutPaths = connectionAdviceDetail(detail).replace(
+    /[^\s"'`()<>,]+/gu,
+    (token) =>
       /[/\\]/u.test(token) && !/^HTTP\/\d+(?:\.\d+)?$/iu.test(token)
         ? "[path]"
         : token,
-    );
+  );
   const diagnosticDetail = containsParserError
     ? withoutPaths.replace(/\binvalid[ _-]token\b/giu, "")
     : withoutPaths;
@@ -11189,9 +11190,7 @@ export function skillCommandFailure(
   let advice: string | undefined;
   if (
     classification === "unauthorized" ||
-    /\b(?:authorizationrequired|invalid[._ -]api[._ -]key|token[._ -]expired)\b/iu.test(
-      classificationDetail,
-    )
+    /\bauthorizationrequired\b/iu.test(classificationDetail)
   ) {
     advice = authenticationFailureMessage(authentication);
   } else if (
@@ -11199,14 +11198,14 @@ export function skillCommandFailure(
       classificationDetail,
     ) ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
-      /\bmodel[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found\b/iu.test(
+      /(?<![\w./\\-])model[ \t]+(?:'[^'\r\n]+'|"[^"\r\n]+"|`[^`\r\n]+`)[ \t]+not[ \t]+found(?!\.?[\w/\\-])/iu.test(
         classificationDetail,
       )) ||
-    /\b(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))\b/iu.test(
+    /(?<![\w./\\-])(?:model[._ -]not[._ -]found|model[._ -]?access[._ -]?denied|access[._ -]?(?:denied[._ -]?to[._ -]?model|to[._ -]?model[._ -]?denied))(?!\.?[\w/\\-])/iu.test(
       classificationDetail,
     ) ||
     (classification === "forbidden" &&
-      /\b403\b|\bforbidden\b|\bmodel[ _-]?(?:not[ _-]?found|access)\b|\baccess.*model\b/iu.test(
+      /\b403\b|\bforbidden\b|\bmodel[ ._-]?(?:not[ ._-]?found|access)\b|\baccess.*model\b/iu.test(
         classificationDetail,
       ))
   ) {
@@ -11229,7 +11228,7 @@ export function skillCommandFailure(
     classification === "network_error" ||
     classification === "timeout" ||
     (!/\b(?:sqlite3?|database|workbench)\b/iu.test(classificationDetail) &&
-      /\b(?:ECONNABORTED|timed[._ -]out|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
+      /\b(?:ECONNABORTED|network[._ -]?error|(?:(?:network|request)[._ -]?)?timeout(?:[._ -]?error)?)\b/iu.test(
         classificationDetail,
       ))
   ) {
@@ -12778,8 +12777,7 @@ function scanFailureMessage(
     return error instanceof IncompleteScanError
       ? diagnosticValue(error)
       : nativeRefreshRecovery;
-  const detail =
-    error instanceof IncompleteScanError ? `${diagnosticValue(error)}\n` : "";
+  const detail = `${diagnosticValue(error)}\n`;
   const refreshFailure = message.match(
     /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu,
   );
