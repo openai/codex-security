@@ -6325,7 +6325,7 @@ export async function main(
             "Stop each component scan if estimated USD cost exceeds AMOUNT.",
           ),
           maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching.",
+            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching and owner suggestions.",
           ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
@@ -6457,7 +6457,7 @@ export async function main(
             onPlan: (components) => {
               if (dashboard === null && options.maxTotalCost !== undefined)
                 errorOutput.write(
-                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching is skipped.\n`,
+                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
                 );
               for (const component of components)
                 componentNames.set(component.id, component.name);
@@ -6599,7 +6599,7 @@ export async function main(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
         maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching.",
+          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching and owner suggestions.",
         ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
@@ -6693,7 +6693,7 @@ export async function main(
                 );
           if (options.maxTotalCost !== undefined)
             errorOutput.write(
-              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching is skipped.\n`,
+              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
             );
           const result = await runMultiscan({
             inputPath,

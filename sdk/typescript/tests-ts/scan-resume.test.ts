@@ -59,6 +59,7 @@ async function interruptedScan(
     ScanOptions,
     | "safetyIdentifier"
     | "maxCostUsd"
+    | "ownerSuggestions"
     | "postScanPrompt"
     | "auth"
     | "knowledgeBasePaths"
@@ -779,7 +780,10 @@ test.each([
 ])(
   "applies the invocation share when recovering a scan with saved limit %p",
   async (savedLimit, expected) => {
-    const f = await interruptedScan("deep", true, { maxCostUsd: savedLimit });
+    const f = await interruptedScan("deep", true, {
+      maxCostUsd: savedLimit,
+      ownerSuggestions: true,
+    });
     const seen: ScanOptions[] = [];
     const deps = dependencies({
       environment: f.environment,
@@ -808,6 +812,7 @@ test.each([
         resumeScanId: f.scanId,
         maxCostUsd: expected,
         skipFindingMatching: true,
+        ownerSuggestions: false,
       },
     ]);
   },

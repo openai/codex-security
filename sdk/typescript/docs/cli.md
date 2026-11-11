@@ -885,6 +885,7 @@ scan ID in the summary, including when the scan fails.
 Use `--max-total-cost USD` with explicit components to split one estimated
 budget among them. The smaller of each component's share and its per-scan
 limit applies. Findings stay separate because model-based matching is skipped.
+The total limit also skips owner suggestions, including when enabled in project configuration.
 Automatic planning and post-scan prompts must run separately.
 
 `--model` and `--effort` also apply to matching. `--auth` applies throughout.
@@ -1383,8 +1384,8 @@ estimated limit among the pending repositories and their possible attempts for
 this invocation, including recovery. For example, a $12 limit with three pending
 repositories and `--max-attempts 2` reserves up to $2 per attempt. An earlier
 overrun reduces the remaining budget for queued attempts. In-flight work can
-exceed a limit. Model-based matching is skipped and post-scan prompts must run
-separately when using the total limit. A resumed scan also respects its saved
+exceed a limit. The total limit skips model-based matching and owner suggestions,
+including during recovery. Run post-scan prompts separately. A resumed scan also respects its saved
 limit and includes prior recorded usage in its cost estimate.
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.

@@ -354,7 +354,8 @@ planning, result matching, or total campaign time.
 
 Use `--max-total-cost USD` for a whole invocation. It divides the estimate among
 explicit components or pending repository attempts, including retries. A tighter
-configured per-scan limit still applies. See the [component scan](../sdk/typescript/docs/cli.md#scan-project-components)
+configured per-scan limit still applies. The total limit skips model-based matching
+and owner suggestions, including when `scan.owner_suggestions` is enabled. See the [component scan](../sdk/typescript/docs/cli.md#scan-project-components)
 and [bulk scan](../sdk/typescript/docs/cli.md#bulk-scans) guides for planning and recovery behavior.
 
 A bulk CSV row's mode and scope override the file's defaults for that repository.

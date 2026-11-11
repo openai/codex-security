@@ -62,6 +62,7 @@ second,${source.path},${source.revision}
         client(async (_checkout, scan = {}) => {
           limits.push(scan.maxCostUsd!);
           expect(scan.skipFindingMatching).toBe(true);
+          expect(scan.ownerSuggestions).toBe(false);
           if (scan.outputDir!.endsWith("attempt-1")) {
             if (limits.length === 2) bothStarted.resolve();
             await bothStarted.promise;
@@ -69,7 +70,13 @@ second,${source.path},${source.revision}
           }
           return completedScan(scan.outputDir!);
         }),
-        { maxCostUsd: 12, maxTotalCostUsd: 8, workers: 2, maxAttempts: 2 },
+        {
+          maxCostUsd: 12,
+          maxTotalCostUsd: 8,
+          workers: 2,
+          maxAttempts: 2,
+          scanOptionsByMode: { standard: { ownerSuggestions: true } },
+        },
       ),
     );
     expect(summary).toMatchObject({ completed: 2, failed: 0 });
