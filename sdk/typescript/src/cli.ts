@@ -8887,7 +8887,7 @@ function parseFrameworkArguments(
     const operand =
       equals >= 0
         ? argument.slice(equals + 1)
-        : next?.startsWith("--")
+        : next?.startsWith("--") || next === "-h"
           ? undefined
           : next;
     if (equals < 0 && operand !== undefined) index++;

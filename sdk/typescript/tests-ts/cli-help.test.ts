@@ -383,6 +383,21 @@ describe("CLI help", () => {
     expect(stderr.text()).toMatch(/must be used alone|Unknown flag/);
   });
 
+  test("a missing filter value before short help cannot dispatch a write", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-short-help-");
+    const stderr = capture();
+    expect(
+      await main(
+        ["--filter-output", "-h", "init", "new.yaml"],
+        capture().stream,
+        stderr.stream,
+        dependencies({ currentDirectory: temp.path }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("Missing value for flag: --filter-output");
+    expect(await readdir(temp.path)).toEqual([]);
+  });
+
   test("passes option-shaped filenames after -- through positional validation", async () => {
     await using temp = await scopedTemporaryDirectory("cli-literal-args-");
     const deps = dependencies({ currentDirectory: temp.path });
