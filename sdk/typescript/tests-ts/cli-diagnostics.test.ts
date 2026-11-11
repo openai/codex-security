@@ -346,8 +346,8 @@ describe("CLI diagnostics", () => {
         await runCli(
           [
             ...command,
-            "--filter-output",
-            "--help",
+            "--format",
+            "json",
             "--format",
             "md",
             "--full-output",
