@@ -151,14 +151,16 @@ export async function prepareScanPublication(
       if (assessment?.decision === "excluded") return [];
       const level = assessment?.level ?? finding.severity.level;
       const priority = LINEAR_PRIORITIES[level];
+      const credentialTitle = credentialExposureTitle(finding);
       return {
         findingId: finding.findingId,
         occurrenceId: finding.occurrenceId,
-        title: `[Codex Security][${level.toUpperCase()}] ${finding.title}`,
+        title: `[Codex Security][${level.toUpperCase()}] ${credentialTitle ?? finding.title}`,
         description: renderFindingDescription(
           contract,
           finding,
           uploadedAt,
+          credentialTitle !== undefined,
           assessment,
         ),
         ...(priority === undefined ? {} : { priority }),
@@ -167,13 +169,41 @@ export async function prepareScanPublication(
   };
 }
 
-function renderFindingDescription(
-  contract: LoadedContract,
+function credentialExposureTitle(finding: Finding): string | undefined {
+  // Existing scans may predate the credential-exposure category.
+  const category = finding.taxonomy.category
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[-_]+/g, " ");
+  const namedExposure = [category, finding.title].some(
+    (label) =>
+      /\b(?:credentials?|passwords?|secrets?|keys?|tokens?)\b/i.test(label) &&
+      /\b(?:exposure|exposed|disclosure|disclosed|leak(?:ed)?|hard[- ]?coded|embedded|plaintext|cleartext)\b/i.test(
+        label,
+      ),
+  );
+  const credentialWeakness = finding.taxonomy.cwe.some((cwe) =>
+    /^CWE-(?:256|257|259|260|321|522|798)$/i.test(cwe.trim()),
+  );
+  if (
+    !namedExposure &&
+    !credentialWeakness &&
+    !/\bvalidity unchecked\b/i.test(finding.summary)
+  )
+    return undefined;
+  const kind = category + " " + finding.title;
+  if (/\bpasswords?\b/i.test(kind)) return "Password exposure";
+  if (/\b(?:private|signing|cryptographic) keys?\b/i.test(kind))
+    return "Cryptographic key exposure";
+  if (/\bapi keys?\b/i.test(kind)) return "API key exposure";
+  if (/\btokens?\b/i.test(kind)) return "Token exposure";
+  return "Credential exposure";
+}
+
+function renderFindingDetails(
+  target: ScanTargetRecord,
   finding: Finding,
-  uploadedAt: string,
   assessment?: SeverityAssessment,
-): string {
-  const { scan } = contract.manifest;
+): string[] {
   const lines = ["## Summary", "", finding.summary];
   if (assessment?.source === "rubric") {
     lines.push(
@@ -231,10 +261,29 @@ function renderFindingDescription(
   if (codeEvidence.length > 0) {
     lines.push("", "## Source-code evidence");
     for (const [index, evidence] of codeEvidence.entries()) {
-      lines.push("", ...renderCodeEvidence(scan.target, evidence, index));
+      lines.push("", ...renderCodeEvidence(target, evidence, index));
     }
   }
+  return lines;
+}
 
+function renderFindingDescription(
+  contract: LoadedContract,
+  finding: Finding,
+  uploadedAt: string,
+  credentialExposure: boolean,
+  assessment?: SeverityAssessment,
+): string {
+  const { scan } = contract.manifest;
+  // A sealed credential finding can contain the value in prose and legacy
+  // evidence aliases as well as in the canonical source snippet.
+  const lines = credentialExposure
+    ? [
+        "## Summary",
+        "",
+        "Review the credential exposure at the affected source locations. The sealed scan contains the original evidence and remediation details.",
+      ]
+    : renderFindingDetails(scan.target, finding, assessment);
   lines.push(
     "",
     "---",

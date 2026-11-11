@@ -23,7 +23,7 @@ New drafts and imports use `codeEvidence`, `rootCause`, `attackPath.dataflow`, a
 
 ### Credential exposure
 
-Identify the credential type, where it could be obtained, and who could obtain it. Keep the value out of titles and prose. State in `validation.limitations` when live validity is unchecked. Base severity on the access and impact supported by the evidence.
+Identify the credential type, where it could be obtained, and who could obtain it. Use `credential-exposure` as the taxonomy category for a finding that includes credential material in its evidence. Keep the value out of titles and prose. External tickets cite the affected source locations. Keep the original evidence in the sealed scan. State in `validation.limitations` when live validity is unchecked. Base severity on the access and impact supported by the evidence.
 
 In `remediation`, tell the code owner how to close the disclosure. Replace a committed literal with the project's secret-store lookup, or stop a runtime leak, for example by removing a token from a public status response. A committed credential is exposed to source readers. If past runtime disclosure is unknown, ask the owner to check affected deployments and rotate any credentials they exposed. For a committed or otherwise disclosed credential, name the issuer when known and explain how to replace or revoke the credential, update consumers, confirm the old value is disabled, and review prior use.
 
