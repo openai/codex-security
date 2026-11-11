@@ -2,7 +2,10 @@ import { reseal } from "./support/sealed-scan.js";
 import { chmod, mkdir, readFile, realpath, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
-import { prepareScanPublication } from "../src/publication.js";
+import {
+  linearPublicationArguments,
+  prepareScanPublication,
+} from "../src/publication.js";
 import type {
   CoverageDocument,
   FindingsDocument,
@@ -145,6 +148,83 @@ describe("scan publication preparation", () => {
       issue.description.indexOf("**Scan ID:**"),
     );
     expect(issue.description).not.toContain("/blob/deadbeef/");
+  });
+
+  test.each([
+    { category: "credential-exposure", cwe: ["CWE-312"], status: "" },
+    { category: "configuration", cwe: ["CWE-798"], status: "" },
+    { category: "hardcodedProviderToken", cwe: ["CWE-312"], status: "" },
+    { category: "deployment configuration", cwe: ["CWE-312"], status: "" },
+    {
+      category: "information exposure",
+      cwe: ["CWE-200"],
+      status: "Validity unchecked.",
+    },
+  ])(
+    "keeps credential evidence in the sealed scan for $category",
+    async ({ category, cwe, status }) => {
+      const scanDirectory = await copyExample();
+      const path = join(scanDirectory, "findings.json");
+      const findings = await readJson<FindingsDocument>(path);
+      const finding = findings.findings[0]!;
+      const token = "synthetic-provider-token-for-publication-check";
+      const assignment = `SERVICE_TOKEN="${token}"`;
+      finding.taxonomy = { category, cwe: [...cwe] };
+      const label =
+        category === "deployment configuration"
+          ? "Hardcoded provider token"
+          : "Provider token";
+      finding.title = `${label} ${token}`;
+      finding.summary =
+        `A source reader can obtain ${assignment}. ${status}`.trim();
+      finding.locations = [{ path: "config/release.env", startLine: 7 }];
+      finding.rootCause = { summary: assignment, code: assignment };
+      finding.codeEvidence = [
+        {
+          id: "token-assignment",
+          label: "Provider token assignment",
+          ...finding.locations[0]!,
+          code: assignment,
+          explanation: "The assignment contains the provider credential.",
+        },
+      ];
+      finding.code_evidence = [{ id: "legacy-copy", code: assignment }];
+      await writeJson(path, findings);
+      await reseal(scanDirectory);
+      const saved = await readFile(path, "utf8");
+      const prepared = await prepareScanPublication(
+        scanDirectory,
+        publicationOptions(scanDirectory),
+      );
+      const payload = linearPublicationArguments(
+        prepared.destination,
+        prepared.issues[0]!,
+      );
+      expect(JSON.stringify(payload)).not.toContain(token);
+      expect(payload.description).toContain("config/release.env:7");
+      expect(payload.description).toContain(finding.fingerprints.primary);
+      expect(payload.title).toBe("[Codex Security][HIGH] Token exposure");
+      expect(await readFile(path, "utf8")).toBe(saved);
+      expect(saved).toContain(token);
+    },
+  );
+
+  test("keeps ordinary evidence for password reset authorization bugs", async () => {
+    const scanDirectory = await copyExample();
+    const path = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(path);
+    const finding = findings.findings[0]!;
+    finding.taxonomy = {
+      category: "password reset authorization",
+      cwe: ["CWE-862"],
+    };
+    finding.rootCause = {
+      summary: "Missing account authorization.",
+      code: "reset(account)",
+    };
+    await writeJson(path, findings);
+    await reseal(scanDirectory);
+    expect(await issueDescription(scanDirectory)).toContain("reset(account)");
   });
 
   test("keeps the reproduction and validation limits ahead of scan metadata", async () => {
