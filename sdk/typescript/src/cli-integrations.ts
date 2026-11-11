@@ -285,10 +285,10 @@ export async function serveIntegration(
       throw new Error(
         `Unexpected positional argument for ${group}${verb ? " " + verb : ""}.`,
       );
-    if (verb && !Cli.toCommands.get(section)!.has(verb))
-      throw new Error(
-        `Unknown command ${group} ${verb}. Use codex-security ${group} --help.`,
-      );
+    if (verb && !Cli.toCommands.get(section)!.has(verb)) {
+      await cli.serve([group, verb, "--help"], output);
+      return true;
+    }
   }
   if (manifest) {
     // Put the mode first so a missing format/filter operand cannot consume it
