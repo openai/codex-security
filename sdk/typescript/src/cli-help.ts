@@ -244,11 +244,11 @@ function globalRows(rows: Row[], command: string): Row[] {
 }
 
 /** Present Incur's generated help without changing its routing or command output. */
-export function formatCliHelp(text: string, columns = 80): string {
+export function formatCliHelp(text: string, columns = 80): string | undefined {
   const header = text.match(
     /^(codex-security(?:@[^\s]+)?((?: [a-z][a-z-]*)*))(?: — ([^\n]*))?\n\nUsage: /u,
   );
-  if (!header) return text;
+  if (!header) return undefined;
   const command = header[2]!.trim();
   const sections: string[] = [];
   // Presentation width only; long paths and copyable commands remain intact.

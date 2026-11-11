@@ -2750,7 +2750,7 @@ retain exit codes `130` and `143` without a result.
 
 Start with `codex-security --help` for the task groups and shared output and agent options. Each command’s help shows its inputs and supported output formats. Use `import --help` to choose between a live collector, a saved scanner report, and a Codex Security CSV or JSON export.
 
-Use `--llms` for the command manifest, `--llms-full` for argument details, and `scan --schema --format json` for the scan schema. The manifests and shell completion include `scan import` alongside the ordinary `scan [repository]` command. Generate completions with `completions bash|fish|nushell|zsh`. Scan output supports
+Use `--llms` for the command manifest, `--llms-full` for argument details, and `scan --schema --format json` for the scan schema. The manifests and shell completion include `scan import` alongside the ordinary `scan [repository]` command. Generate completions with `completions bash|fish|nushell|zsh`. Add `--json` to return the generated script as a JSON string. The same option returns the menu text when an omitted command or subcommand displays help. With `--full-output`, the text is in `data`. Scan output supports
 `--format toon|json|yaml|jsonl` and `--full-output`. The existing `--format`,
 `--filter-output`, `--token-limit`, and `--token-offset` options accept either
 `--option value` or `--option=value`.

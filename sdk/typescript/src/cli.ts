@@ -8496,8 +8496,23 @@ export async function main(
         )}\n`;
       }
     }
-    let response =
-      renderedOutput ?? formatCliHelp(frameworkOutput, output.columns);
+    const help = formatCliHelp(frameworkOutput, output.columns);
+    let response = renderedOutput ?? help ?? frameworkOutput;
+    // Incur writes menus and completion scripts directly as plain text.
+    if (
+      jsonFormat &&
+      !inspection &&
+      exitCode === 0 &&
+      (help !== undefined || command === "completions")
+    ) {
+      response =
+        Formatter.format(
+          frameworkFlags.fullOutput
+            ? { ok: true, data: response, meta: { command: commandPath } }
+            : response,
+          jsonFormat,
+        ) + "\n";
+    }
     if (jsonFormat && unfilteredFailure && !failedResultOutput)
       response = Formatter.format(unfilteredFailure, jsonFormat) + "\n";
     if (jsonFormat && frameworkFlags.tokenView && !inspection)

@@ -5,6 +5,7 @@ import { main } from "../src/cli.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 async function help(args: readonly string[], columns?: number) {
   const stdout = capture(true);
@@ -357,6 +358,40 @@ describe("CLI help", () => {
     ).toBe(2);
     expect(stderr.text()).toContain(`Did you mean '${verb}'?`);
   });
+
+  test.each([
+    { command: [], expected: "Usage: codex-security" },
+    ...["skills", "mcp", "import", "publish", "completions"].map((name) => ({
+      command: [name],
+      expected: `Usage: codex-security ${name}`,
+    })),
+    { command: ["completions", "zsh"], expected: "#compdef" },
+  ])(
+    "formats the text from $command before applying JSON token controls",
+    async ({ command, expected }) => {
+      async function run(...flags: string[]) {
+        const { runCli, stdout, stderr } = createCliTest(main);
+        expect(await runCli([...command, ...flags], dependencies())).toBe(0);
+        expect(stderr.text()).toBe("");
+        return stdout.text();
+      }
+      const plain = await run();
+      expect(plain).toContain(expected);
+      expect(JSON.parse(await run("--json"))).toBe(plain);
+      const flags = ["--format=jsonl", "--full-output"];
+      expect(JSON.parse(await run(...flags))).toMatchObject({
+        ok: true,
+        data: plain,
+      });
+      expect(JSON.parse(await run(...flags, "--token-count"))).toBeGreaterThan(
+        0,
+      );
+      expect(JSON.parse(await run(...flags, "--token-limit=1"))).toMatchObject({
+        ok: true,
+        meta: { nextOffset: 1 },
+      });
+    },
+  );
 
   test("uses the completion shell schema without generating a script", async () => {
     const schema = JSON.parse(
