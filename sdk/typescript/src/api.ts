@@ -1247,11 +1247,14 @@ export class CodexSecurity {
           networkAccessEnabled: false,
           webSearchMode: "disabled",
         };
-        let checkpointingTurn = false;
-        let pendingLimit: ScanCostLimitExceededError | undefined;
+        let checkpointBudget: AbortController | undefined;
+        const stopForBudget = (reason: unknown): void => {
+          (checkpointBudget ?? budgetController).abort(reason);
+        };
         const finishCheckpoint = (): void => {
-          checkpointingTurn = false;
-          if (pendingLimit !== undefined) budgetController.abort(pendingLimit);
+          if (checkpointBudget?.signal.aborted)
+            budgetController.abort(checkpointBudget.signal.reason);
+          checkpointBudget = undefined;
         };
         const reportCost = (
           cost: Readonly<ScanCost>,
@@ -1263,18 +1266,18 @@ export class CodexSecurity {
             options.maxCostUsd !== undefined &&
             cost.estimatedUsd > options.maxCostUsd
           ) {
-            const exceeded = new ScanCostLimitExceededError(
-              options.maxCostUsd,
-              cost,
-              outputDir,
+            stopForBudget(
+              new ScanCostLimitExceededError(
+                options.maxCostUsd,
+                cost,
+                outputDir,
+              ),
             );
-            if (checkpointingTurn) pendingLimit ??= exceeded;
-            else budgetController.abort(exceeded);
           }
           if (complete && notify) onCost(cost, options.maxCostUsd);
         };
         const reportTrackingError = (error: unknown): void => {
-          if (options.maxCostUsd !== undefined) budgetController.abort(error);
+          if (options.maxCostUsd !== undefined) stopForBudget(error);
           else
             result!.diagnostics.push(`Cost tracking: ${errorMessage(error)}`);
         };
@@ -1357,10 +1360,14 @@ export class CodexSecurity {
                       id: `${match.id}:${activity.id}`,
                     });
                   throwIfAborted(signal, outputDir);
+                  // The SDK can continue draining its stream after the terminal event.
+                  if (
+                    event.type === "turn.completed" &&
+                    options.maxCostUsd !== undefined
+                  )
+                    checkpointBudget ??= new AbortController();
                 },
               });
-              // A completed turn spends no more tokens while its source and verdict are checked.
-              checkpointingTurn = turn.status === "completed";
               tracker.recordUsage(turn.usage, turn.threadId);
               result.model.threadId = turn.threadId;
               if (turn.threadId !== null)
