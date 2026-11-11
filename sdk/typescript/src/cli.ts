@@ -4116,7 +4116,7 @@ export async function main(
           },
         },
       ],
-      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.",
+      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. For findings already in the workbench, use the SDK's prepareStoredFindingsPublication. The installed @openai/codex-security package includes the workflow in docs/sdk.md under Import external findings. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.",
       destructive: true,
       args: z.object({
         file: z

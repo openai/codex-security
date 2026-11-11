@@ -3,6 +3,11 @@
 Preview a scanner report with the CLI, then save the findings in the local
 workbench or send a supported report to Codex Security Cloud.
 
+In Codex, ask to import a saved report or fetch selected findings with an
+available CLI, API, or MCP connection. You can publish selected findings from
+the local workbench in a later session using their stored IDs and versions.
+[Walk through acquisition, local import, and publication in Codex](workbench.md)
+
 ## Choose your input
 
 | Starting point                 | Command                                                                                                                                                                |
