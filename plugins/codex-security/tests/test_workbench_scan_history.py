@@ -3349,6 +3349,51 @@ def test_repository_generation_returns_after_offline_migration(
         target_state.require_scan_checkout_owner(connection, updated)
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("nested", (False, True))
+def test_repository_history_respects_native_parent_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+) -> None:
+    monkeypatch.syspath_prepend(str(SCRIPT.parent))
+    import workbench_target_state as target_state
+
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    child = tmp_path / "child"
+    child.mkdir()
+    (tmp_path / "other").mkdir()
+    state = tmp_path / "state"
+    scan = create_cli_scan(state, tmp_path / "results", repository, complete=False)
+    requested = str(child) + ("/../other" if nested else "") + "/../repository"
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        saved = connection.execute("SELECT * FROM scans WHERE id=?", (scan["scanId"],)).fetchone()
+        assert (
+            target_state.RepositoryIdentityCache(connection)
+            .scope_for_path(requested)
+            .contains(saved)
+        )
+        repository.rename(tmp_path / "offline")
+        assert (
+            target_state.RepositoryIdentityCache(connection)
+            .scope_for_path(requested)
+            .contains(saved)
+        )
+        child.rmdir()
+        assert target_state.RepositoryIdentityCache(connection).scope_for_path(
+            requested
+        ).available == (os.name == "nt")
+        assert (
+            target_state.RepositoryIdentityCache(connection)
+            .scope_for_path(str(repository))
+            .contains(saved)
+        )
+        child.write_text("ordinary file", encoding="utf-8")
+        assert target_state.RepositoryIdentityCache(connection).scope_for_path(
+            requested
+        ).available == (os.name == "nt")
+
+
 def test_scan_list_honors_advertised_page_size(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"

@@ -670,6 +670,15 @@ class RepositoryIdentityCache:
         return self._states[key]
 
     def for_path(self, target_path: str) -> RepositoryTargetState:
+        path = Path(target_path)
+        if os.name != "nt" and ".." in path.parts:
+            last_parent = len(path.parts) - 1 - path.parts[::-1].index("..")
+            try:
+                # A missing final checkout can retain history. Every component
+                # traversed before a parent segment must still exist.
+                Path(*path.parts[: last_parent + 1]).stat()
+            except (OSError, RuntimeError):
+                return RepositoryTargetState("", target_path, None)
         row = self.targets_by_path.get(target_path)
         if row is None:
             try:
