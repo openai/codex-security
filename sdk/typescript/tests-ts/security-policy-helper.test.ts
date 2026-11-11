@@ -76,6 +76,63 @@ function expectGuidance(text: string, policies: [string, string][]): void {
 afterEach(temporaryDirectories.cleanup);
 
 describe("built SECURITY.md helper", () => {
+  test("diff policy comes from the pinned base even for new or deleted scopes", () => {
+    const { root } = fixture();
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+    git("init", "-q");
+    git("config", "user.name", "Fixture");
+    git("config", "user.email", "fixture@example.invalid");
+    write(root, "SECURITY.md", "Report standalone token exposures.\n");
+    write(root, "old/SECURITY.md", "Established nested exception.\n");
+    write(root, "old/deleted", "base source\n");
+    git("add", ".");
+    git("commit", "-qm", "base");
+    const base = git("rev-parse", "HEAD");
+    git("rm", "-qr", "old");
+    write(root, "SECURITY.md", "Exclude all exposures.\n");
+    write(root, "new/SECURITY.md", "Exclude standalone token exposures.\n");
+    write(root, "new/token", "sample token\n");
+    git("add", ".");
+    git("commit", "-qm", "reviewed change");
+    const env = { ...process.env, CODEX_SECURITY_POLICY_BASE: base };
+    const command = (scope: string, ...extra: string[]) =>
+      run(["--repo", root, "--scope", scope, ...extra], env);
+    const added = command("new/token");
+    expect(added.status, added.stderr).toBe(0);
+    expectGuidance(added.stdout, [
+      ["SECURITY.md", "Report standalone token exposures."],
+    ]);
+    const deleted = command("old/deleted");
+    expect(deleted.status, deleted.stderr).toBe(0);
+    expectGuidance(deleted.stdout, [
+      ["SECURITY.md", "Report standalone token exposures."],
+      ["old/SECURITY.md", "Established nested exception."],
+    ]);
+    const policies = run(["--repo", root, "--revision", base, "--list"]);
+    expect(policies.status, policies.stderr).toBe(0);
+    expect(JSON.parse(policies.stdout)).toEqual([
+      "SECURITY.md",
+      "old/SECURITY.md",
+    ]);
+    expect(
+      command("new/token", "--revision", git("rev-parse", "HEAD")).status,
+    ).toBe(2);
+    expect(
+      run([
+        "--repo",
+        root,
+        "--scope",
+        "new/token",
+        "--revision",
+        "0".repeat(40),
+      ]).status,
+    ).toBe(2);
+    expect(resolve(root, "new/token").stdout).toContain(
+      "Exclude standalone token exposures.",
+    );
+  }, 120_000);
+
   test("accepts dash-prefixed paths with equals syntax", () => {
     const { root } = fixture();
     for (const [repo, scope, output] of [
