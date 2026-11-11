@@ -82,11 +82,16 @@ describe("CLI help", () => {
     expect(sectionFor("init")).toBe(sectionFor("login"));
     expect(sectionFor("completions")).toBeGreaterThan(sectionFor("scan"));
     expect(text).toContain("Aliases: cs");
-    for (const command of ["login", "policy .", "scan .", "findings"]) {
+    for (const command of [
+      "scan . --dry-run",
+      "login",
+      "scan .",
+      "scans show",
+    ]) {
       expect(text).toContain(`  codex-security ${command}`);
     }
-    expect(text.indexOf("codex-security policy .")).toBeLessThan(
-      text.indexOf("codex-security scan ."),
+    expect(text.indexOf("codex-security scan . --dry-run")).toBeLessThan(
+      text.indexOf("codex-security login"),
     );
     expect(text).toContain("<command> --help");
   });
@@ -152,6 +157,7 @@ describe("CLI help", () => {
     { command: ["scan"] },
     { command: ["scan", "import"] },
     { command: ["scans", "rerun"] },
+    { command: ["scans", "resume"] },
   ])("advertises supported formats for $command", async ({ command }) => {
     const text = await help([...command, "--help"]);
     const format = option(text, "--format");
@@ -249,10 +255,122 @@ describe("CLI help", () => {
       usage: "codex-security findings [command]",
     },
     { args: ["login", "status", "--help"], usage: "codex-security login" },
-    { args: ["unknown", "--help"], usage: "codex-security <command>" },
   ])("preserves help routing for $args", async ({ args, usage }) => {
     const text = await help(args);
     expect(text).toContain(`Usage: ${usage}`);
+  });
+
+  test.each([
+    {
+      args: ["sacn", "--help"],
+      missing: "sacn",
+      recovery: "codex-security --help",
+    },
+    {
+      args: ["scans", "foo", "--help"],
+      missing: "scans foo",
+      recovery: "codex-security scans --help",
+    },
+  ])(
+    "identifies an unresolved help path $args",
+    async ({ args, missing, recovery }) => {
+      const out = capture();
+      const err = capture();
+      expect(await main(args, out.stream, err.stream, dependencies())).toBe(2);
+      expect(out.text()).toBe("");
+      expect(err.text()).toContain(missing);
+      expect(err.text()).toContain(recovery);
+    },
+  );
+
+  test.each([
+    ["imports", "--json"],
+    ["--json", "./import"],
+  ])(
+    "inspects repository scans with shared flags in either position (%s, %s)",
+    async (first, second) => {
+      const args = ["scan", first, second];
+      expect(await help([...args, "--help"])).toContain(
+        "Usage: codex-security scan [repository]",
+      );
+      const schema = JSON.parse(await help([...args, "--schema"]));
+      expect(schema.args.properties.repository.type).toBe("string");
+    },
+  );
+
+  test("links both file import routes and keeps the vendor preview copyable", async () => {
+    const menu = (await help(["import", "--help"])).replace(/\s+/gu, " ");
+    expect(menu).toContain("publish findings --help");
+    expect(menu).toContain("scan import --help");
+    const vendor = await help(["publish", "findings", "--help"], 60);
+    const preview = vendor
+      .split("\n")
+      .find((line) => line.startsWith("  codex-security publish findings "));
+    for (const flag of [
+      "--provider",
+      "--source-key",
+      "--repository",
+      "--to",
+      "--dry-run",
+    ]) {
+      expect(preview).toContain(flag);
+    }
+  });
+
+  test("exposes the scan and its import child in both manifests", async () => {
+    for (const flag of ["--llms", "--llms-full"]) {
+      const manifest = JSON.parse(await help([flag, "--format", "json"]));
+      const names = manifest.commands.map(({ name }: { name: string }) => name);
+      expect(names.filter((name: string) => name === "scan")).toHaveLength(1);
+      expect(
+        names.filter((name: string) => name === "scan import"),
+      ).toHaveLength(1);
+    }
+  });
+
+  test("publishes runnable examples with the same flags in help and the full manifest", async () => {
+    const manifest = JSON.parse(
+      await help(["--llms-full", "--format", "json"]),
+    ) as {
+      commands: { name: string; examples?: { command: string }[] }[];
+    };
+    for (const [name, flags] of [
+      ["scan", ["--path src --path tests"]],
+      ["scan-components", ["--auto --plan-only", "--output-dir"]],
+      ["publish findings", ["--source-key", "--dry-run"]],
+    ] as const) {
+      const example = manifest.commands
+        .find((command) => command.name === name)
+        ?.examples?.find(({ command }) =>
+          flags.every((flag) => command.includes(flag)),
+        )?.command;
+      expect(example).toBeDefined();
+      expect(example).not.toMatch(
+        /--[a-z-]+[A-Z]|--(?:auto|plan-only|dry-run) true/u,
+      );
+      expect(await help([...name.split(" "), "--help"], 60)).toContain(
+        `  codex-security ${example}`,
+      );
+    }
+  });
+
+  test("completes scan import and its file options from the command registry", async () => {
+    const previousShell = process.env["COMPLETE"];
+    const previousIndex = process.env["_COMPLETE_INDEX"];
+    try {
+      process.env["COMPLETE"] = "bash";
+      process.env["_COMPLETE_INDEX"] = "2";
+      expect((await help(["--", "cs", "scan", "im"])).trim()).toBe("import");
+      process.env["_COMPLETE_INDEX"] = "3";
+      expect((await help(["--", "cs", "scan", "import", "--cs"])).trim()).toBe(
+        "--csv",
+      );
+    } finally {
+      if (previousShell === undefined) delete process.env["COMPLETE"];
+      else process.env["COMPLETE"] = previousShell;
+      if (previousIndex === undefined) delete process.env["_COMPLETE_INDEX"];
+      else process.env["_COMPLETE_INDEX"] = previousIndex;
+    }
   });
 
   test.each([
