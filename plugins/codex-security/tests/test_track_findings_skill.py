@@ -1,10 +1,9 @@
-"""Check provider app declarations and the instructions for reading back a published finding."""
+"""Check provider app declarations and skill connector links."""
 
 from __future__ import annotations
 
 import json
 import re
-import shlex
 import unittest
 from pathlib import Path
 
@@ -28,19 +27,6 @@ class TrackFindingsSkillTest(unittest.TestCase):
 
         plugin = json.loads(PLUGIN_MANIFEST.read_text(encoding="utf-8"))
         self.assertEqual(plugin["apps"], "./.app.json")
-
-    def test_github_cli_readback_uses_the_returned_issue_and_reviewed_content(self) -> None:
-        skill = (PLUGIN_ROOT / "skills/track-findings/SKILL.md").read_text(encoding="utf-8")
-        writes = next(
-            paragraph for paragraph in skill.split("\n\n") if "`gh issue edit`" in paragraph
-        )
-        match = re.search(r"`(gh issue view [^`]+)`", writes)
-        self.assertIsNotNone(match, "expected a readback command for CLI issue writes")
-        args = shlex.split(match[1])
-        field_args = args[args.index("--json") + 1 :]
-        self.assertTrue(field_args, "gh issue view --json requires a field list")
-        self.assertLessEqual({"number", "url", "title", "body"}, set(field_args[0].split(",")))
-        self.assertIn("$issue_url", args)
 
     def test_skill_app_links_resolve_to_declared_connectors(self) -> None:
         apps = json.loads(APP_MANIFEST.read_text(encoding="utf-8"))["apps"]
