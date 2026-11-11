@@ -67,6 +67,7 @@ import {
   createWindowsOutputDirectory,
   environmentValue,
   expandHome,
+  expandHomeForLookup,
   isPythonPathCandidate,
   executablePathForSpawn,
   pluginHelperEnvironment,
@@ -1840,13 +1841,11 @@ async function loadResumableScan(
         let candidates: string[];
         if (isPythonPathCandidate(configuredPythonPath)) {
           candidates = [
-            resolve(
-              expandHome(configuredPythonPath, environment) +
-                (process.platform === "win32" &&
-                extname(configuredPythonPath) === ""
-                  ? ".exe"
-                  : ""),
-            ),
+            expandHomeForLookup(configuredPythonPath, environment) +
+              (process.platform === "win32" &&
+              extname(configuredPythonPath) === ""
+                ? ".exe"
+                : ""),
           ];
         } else {
           const inspected = await inspectTrustedExecutable(
@@ -2199,6 +2198,7 @@ async function checkoutRevision(
     const pending = execFile(
       command.executable,
       [
+        "--no-replace-objects",
         "-c",
         "core.hooksPath=/dev/null",
         ...buildGitHubCredentialArgs(githubHost),
@@ -2418,20 +2418,29 @@ async function checkoutRevision(
       task.revision,
     );
   }
+  const retainedHead =
+    restoreIncomplete &&
+    (await git("rev-parse", "--verify", "--quiet", "HEAD").catch(
+      (error: unknown) => {
+        if ((error as { code?: number }).code === 1) return undefined;
+        throw error;
+      },
+    ));
   if (
     restoreIncomplete &&
     !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
   ) {
     // Rebuild the lost index without restoring unrelated deleted worktree files.
-    await git("read-tree", task.revision);
+    await git("read-tree", retainedHead || task.revision);
   }
-  await git(
-    "checkout",
-    "--quiet",
-    "--detach",
-    ...(restoreIncomplete ? ["--no-overwrite-ignore"] : []),
-    task.revision,
-  );
+  if (!retainedHead)
+    await git(
+      "checkout",
+      "--quiet",
+      "--detach",
+      ...(restoreIncomplete ? ["--no-overwrite-ignore"] : []),
+      task.revision,
+    );
   if (restoreIncomplete) {
     const ignoreCase =
       (
@@ -2591,7 +2600,10 @@ async function checkoutRevision(
     for (const directory of requiredDirectories)
       await mkdir(directory, { recursive: true });
   }
-  if ((await git("rev-parse", "HEAD")).toLowerCase() !== task.revision) {
+  if (
+    (await git("rev-parse", "HEAD")).toLowerCase() !==
+    (retainedHead || task.revision)
+  ) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
   }
 }

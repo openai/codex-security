@@ -2980,6 +2980,33 @@ for (const staged of [false, true]) {
     const checkout = recoveryCheckout(paths);
     git(paths.root, "clone", "--quiet", source.path, checkout);
     const expectedApp = await readFile(join(checkout, "src", "app.ts"));
+    const unrelated = join(checkout, "unrelated.txt");
+    if (staged) {
+      await writeFile(unrelated, "Retained commit.\n");
+      const onlyAtRetainedHead = join(
+        checkout,
+        "src",
+        "only-at-retained-head.ts",
+      );
+      await writeFile(onlyAtRetainedHead, "Retained-only source.\n");
+      git(checkout, "add", "unrelated.txt", "src/only-at-retained-head.ts");
+      commitFixture(checkout, "Advance the retained checkout");
+      await rm(onlyAtRetainedHead);
+      await writeFile(unrelated, "Uncommitted user edit.\n");
+    } else {
+      const replacement = join(paths.root, "replacement.txt");
+      await writeFile(
+        replacement,
+        "Replacement object must not enter recovery.\n",
+      );
+      git(
+        checkout,
+        "replace",
+        git(checkout, "rev-parse", "HEAD:src/app.ts"),
+        git(checkout, "hash-object", "-w", replacement),
+      );
+    }
+    const originalHead = git(checkout, "rev-parse", "HEAD");
     if (staged) git(checkout, "rm", "--quiet", "src/app.ts");
     else await rm(join(checkout, "src", "app.ts"));
     git(checkout, "rm", "--quiet", "README.md");
@@ -2996,6 +3023,15 @@ for (const staged of [false, true]) {
       "Preserve staged replacement content.\n",
     );
     expect(git(checkout, "diff", "--cached", "--name-only")).toBe(stagedBefore);
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(originalHead);
+    if (staged) {
+      expect(await readFile(unrelated, "utf8")).toBe(
+        "Uncommitted user edit.\n",
+      );
+      await expect(
+        lstat(join(checkout, "src", "only-at-retained-head.ts")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
     expect(await readFile(initial.resultsPath)).toEqual(ledger);
     expect(runs).toHaveBeenCalledTimes(1);
   });
@@ -3229,16 +3265,23 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
     return;
   const paths = await fixture();
   const source = await repository(paths.root, "extensionless-python-source");
-  await symlink(await realpath(PYTHON), join(source.path, "python.exe"));
+  const interpreterPath =
+    process.platform === "win32" ? "python.exe" : join("tools", "python.exe");
+  if (process.platform !== "win32") {
+    await mkdir(join(source.path, "tools", "child"), { recursive: true });
+    await writeFile(join(source.path, "tools", "child", "marker"), "");
+    await symlink("tools/child", join(source.path, "jump"));
+  }
+  await symlink(await realpath(PYTHON), join(source.path, interpreterPath));
   git(source.path, "add", ".");
   commitFixture(source.path, "Tracked interpreter link");
   const revision = git(source.path, "rev-parse", "HEAD");
   await writeRecoveryTask(paths, source, undefined, revision);
   const checkout = recoveryCheckout(paths);
-  const alias = join(
-    checkout,
-    process.platform === "win32" ? "python" : "python.exe",
-  );
+  const alias =
+    process.platform === "win32"
+      ? join(checkout, "python")
+      : `${checkout}/jump/../python.exe`;
   await runMultiscan(
     options(paths, client(rejecting("Interrupted")), {
       maxAttempts: 1,
@@ -3285,9 +3328,9 @@ test("retained spelling recovery restores a tracked interpreter selection", asyn
     "Refresh this synthetic report.\n",
   );
 
-  await rm(join(checkout, "python.exe"));
+  await rm(join(checkout, interpreterPath));
   await expectReused(campaign);
-  expect(await realpath(join(checkout, "python.exe"))).toBe(
+  expect(await realpath(join(checkout, interpreterPath))).toBe(
     await realpath(PYTHON),
   );
   expect(runs).toHaveBeenCalledTimes(1);
