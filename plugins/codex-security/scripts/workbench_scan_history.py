@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from filesystem_identity import serialize_filesystem_identity, stored_filesystem_identity_matches
+from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
@@ -31,6 +31,7 @@ from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
 from workbench_target import (
     git_output,
+    has_windows_checkout_binding,
     require_remediation_target,
     require_scan_target_identity,
     verified_windows_checkout,
@@ -287,6 +288,26 @@ def _windows_path_key(value: str) -> str:
     return os.path.normcase(os.path.realpath(value))
 
 
+CheckoutIdentity = tuple[int | str, int | str]
+
+
+def _stat_identity(metadata: os.stat_result) -> CheckoutIdentity:
+    return serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(
+        metadata.st_ino
+    )
+
+
+def _checkout_matches(scan: sqlite3.Row, path: Path, metadata: os.stat_result) -> bool:
+    if has_windows_checkout_binding(scan):
+        # A Windows Deep Scan may record a wider file ID than this Python exposes through stat.
+        try:
+            require_scan_target_identity(scan, target_path=str(path))
+        except (OSError, SystemExit):
+            return False
+        return True
+    return (scan["target_device"], scan["target_inode"]) == _stat_identity(metadata)
+
+
 def _same_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
@@ -322,9 +343,7 @@ def _same_repository(
             metadata = Path(target).stat()
         except OSError:
             return False
-        if not stored_filesystem_identity_matches(
-            device, metadata.st_dev
-        ) or not stored_filesystem_identity_matches(inode, metadata.st_ino):
+        if not _checkout_matches(scan, Path(target), metadata):
             return False
     if before_target_id and before_target_id == after_target_id:
         fields = ("target_device", "target_inode")
@@ -545,13 +564,13 @@ def _requested_repository(
         return requested, None
     recorded = connection.execute(
         """
-        SELECT target_path, target_device, target_inode, target_revision
+        SELECT ? AS target_path, scans.*
         FROM scans
         WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
         ORDER BY rowid DESC
         LIMIT 1
         """,
-        (target_id,),
+        (str(repository), target_id),
     ).fetchone()
     if recorded is None:
         return requested, None
@@ -561,23 +580,8 @@ def _requested_repository(
         return requested, None
     except OSError:
         metadata = None
-    if (
-        metadata is not None
-        and stored_filesystem_identity_matches(recorded["target_device"], metadata.st_dev)
-        and stored_filesystem_identity_matches(recorded["target_inode"], metadata.st_ino)
-    ):
-        return (
-            connection.execute(
-                "SELECT ? AS target_id, ? AS target_path, ? AS target_device, ? AS target_inode",
-                (
-                    target_id,
-                    str(repository),
-                    recorded["target_device"],
-                    recorded["target_inode"],
-                ),
-            ).fetchone(),
-            None,
-        )
+    if metadata is not None and _checkout_matches(recorded, repository, metadata):
+        return recorded, None
     return (
         connection.execute(
             "SELECT '' AS target_id, ? AS target_path", (str(repository),)
@@ -588,7 +592,7 @@ def _requested_repository(
 
 def _verified_target_metadata(
     connection: sqlite3.Connection, target_id: str, repository: Path
-) -> tuple[os.stat_result | None, bool] | None:
+) -> tuple[CheckoutIdentity | None, bool] | None:
     requested, _ = _requested_repository(connection, repository)
     if requested["target_id"] != target_id:
         return None
@@ -596,24 +600,13 @@ def _verified_target_metadata(
         metadata = repository.stat()
     except OSError:
         return None, False
-    recorded = connection.execute(
-        """
-        SELECT 1
-        FROM scans
-        WHERE target_id = ? AND target_device = ? AND target_inode = ?
-        LIMIT 1
-        """,
-        (
-            target_id,
-            serialize_filesystem_identity(metadata.st_dev),
-            serialize_filesystem_identity(metadata.st_ino),
-        ),
-    ).fetchone()
-    return metadata, recorded is not None
+    if "target_device" in requested.keys():
+        return (requested["target_device"], requested["target_inode"]), True
+    return _stat_identity(metadata), False
 
 
 def _ownership_epoch_start(
-    connection: sqlite3.Connection, target_id: str, metadata: os.stat_result
+    connection: sqlite3.Connection, target_id: str, identity: CheckoutIdentity
 ) -> int | None:
     previous_owner = connection.execute(
         """
@@ -624,11 +617,7 @@ def _ownership_epoch_start(
         ORDER BY rowid DESC
         LIMIT 1
         """,
-        (
-            target_id,
-            serialize_filesystem_identity(metadata.st_dev),
-            serialize_filesystem_identity(metadata.st_ino),
-        ),
+        (target_id, *identity),
     ).fetchone()
     return previous_owner["ownership_sequence"] if previous_owner is not None else None
 
@@ -679,7 +668,7 @@ def repository_scan_scope(
         repository = Path(repository).expanduser().resolve()
         requested_repository, replaced_target_id = _requested_repository(connection, repository)
         requested_target_id = requested_repository["target_id"]
-        verified_targets: dict[str, tuple[os.stat_result | None, bool]] = {}
+        verified_targets: dict[str, tuple[CheckoutIdentity | None, bool]] = {}
         if requested_target_id:
             requested_metadata = _verified_target_metadata(
                 connection, requested_target_id, repository
@@ -841,20 +830,7 @@ def repository_scan_scope(
                 )
                 if target_metadata is None:
                     continue
-                metadata, recorded = target_metadata
-                verified_target = connection.execute(
-                    "SELECT ? AS target_id, ? AS target_path, ? AS target_device, ? AS target_inode",
-                    (
-                        target["target_id"],
-                        target["target_path"],
-                        serialize_filesystem_identity(metadata.st_dev)
-                        if metadata is not None and recorded
-                        else None,
-                        serialize_filesystem_identity(metadata.st_ino)
-                        if metadata is not None and recorded
-                        else None,
-                    ),
-                ).fetchone()
+                verified_target, _ = _requested_repository(connection, Path(target["target_path"]))
                 if not _same_repository(
                     verified_target,
                     comparison_repository,
@@ -896,8 +872,7 @@ def repository_scan_scope(
                 target_device = identity["target_device"]
             elif recorded:
                 epoch_start = _ownership_epoch_start(connection, target_id, metadata)
-                target_inode = serialize_filesystem_identity(metadata.st_ino)
-                target_device = serialize_filesystem_identity(metadata.st_dev)
+                target_device, target_inode = metadata
             else:
                 continue
             legacy_history = (
@@ -1103,7 +1078,7 @@ def list_unmatched_scan_pairs(
         metadata = repository.stat()
     except OSError:
         metadata = None
-    verified_targets: dict[str, tuple[os.stat_result | None, bool] | None] = {}
+    verified_targets: dict[str, tuple[CheckoutIdentity | None, bool] | None] = {}
     ownership_epochs: dict[str, int | None] = {}
 
     def belongs_to_current_owner(scan: sqlite3.Row) -> bool:
@@ -1131,8 +1106,7 @@ def list_unmatched_scan_pairs(
             return True
         return (
             target_metadata[1]
-            and stored_filesystem_identity_matches(scan["target_device"], target_metadata[0].st_dev)
-            and stored_filesystem_identity_matches(scan["target_inode"], target_metadata[0].st_ino)
+            and (scan["target_device"], scan["target_inode"]) == target_metadata[0]
             and (epoch_start is None or scan["ownership_sequence"] > epoch_start)
         )
 
@@ -1291,7 +1265,17 @@ def _same_registered_repository(
             except OSError:
                 return False
             else:
-                epoch_start = _ownership_epoch_start(connection, scan["target_id"], metadata)
+                has_identity = scan["target_device"] is not None or scan["target_inode"] is not None
+                if has_identity and not _checkout_matches(
+                    scan, Path(target["current_path"]), metadata
+                ):
+                    return False
+                identity = (
+                    (scan["target_device"], scan["target_inode"])
+                    if has_identity
+                    else _stat_identity(metadata)
+                )
+                epoch_start = _ownership_epoch_start(connection, scan["target_id"], identity)
                 # Migrated seals predate filesystem identity; retain the existing
                 # legacy allowance only before a recorded ownership transition.
                 if (
@@ -1303,9 +1287,7 @@ def _same_registered_repository(
                         "target_device": serialize_filesystem_identity(metadata.st_dev),
                         "target_inode": serialize_filesystem_identity(metadata.st_ino),
                     }
-                elif not stored_filesystem_identity_matches(
-                    scan["target_device"], metadata.st_dev
-                ) or not stored_filesystem_identity_matches(scan["target_inode"], metadata.st_ino):
+                elif not has_identity:
                     return False
             if epoch_start is not None:
                 sequence = connection.execute(

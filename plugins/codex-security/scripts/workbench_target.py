@@ -1630,12 +1630,8 @@ def verified_windows_checkout(
         yield
 
 
-@contextmanager
-def checked_scan_target(scan: sqlite3.Row, *, target_path: str | None = None) -> Iterator[Path]:
-    """Keep any recorded Windows checkout binding intact while a caller reads the target."""
-    target = require_remediation_target(scan["target_path"] if target_path is None else target_path)
-    replaced = "Remediation is unavailable because the selected checkout path was replaced. Start a new scan."
-    if (
+def has_windows_checkout_binding(scan: sqlite3.Row) -> bool:
+    return (
         os.name == "nt"
         and "windows_resume_target_identity" in scan.keys()
         and (
@@ -1646,7 +1642,15 @@ def checked_scan_target(scan: sqlite3.Row, *, target_path: str | None = None) ->
                 and scan["recipe_json"] is not None
             )
         )
-    ):
+    )
+
+
+@contextmanager
+def checked_scan_target(scan: sqlite3.Row, *, target_path: str | None = None) -> Iterator[Path]:
+    """Keep any recorded Windows checkout binding intact while a caller reads the target."""
+    target = require_remediation_target(scan["target_path"] if target_path is None else target_path)
+    replaced = "Remediation is unavailable because the selected checkout path was replaced. Start a new scan."
+    if has_windows_checkout_binding(scan):
         with ExitStack() as pins:
             try:
                 pins.enter_context(
