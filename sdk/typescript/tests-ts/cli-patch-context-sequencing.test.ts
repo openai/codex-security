@@ -105,6 +105,10 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
             : environment;
         git(["add", "."], recorded);
         git(["commit", "-m", "Synthetic filter baseline"], recorded);
+        const originalDataBlob = git(
+          ["rev-parse", `HEAD:${dataPath}`],
+          recorded,
+        );
         const index = await readFile(join(directory, ".git", "index"));
         const trees: string[] = [];
         let assessedPatch = "";
@@ -279,13 +283,9 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
           expect(trees).toHaveLength(2);
           expect(trees[0]).toBe(trees[1]);
         } else if (inline) {
-          expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(
-            policy === "control" ? 0 : 2,
-          );
-          if (policy !== "control")
-            expect(outcome.stderr).toContain(
-              "uncommitted changes before patching",
-            );
+          // The requested directory contains a pre-existing policy difference.
+          // Only the two leaves actually edited in the finding's turn can publish.
+          expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
         } else {
           expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
           expect(JSON.parse(outcome.stdout).files).toEqual(
@@ -304,7 +304,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
           await expect(readFile(outsideWrite)).rejects.toMatchObject({
             code: "ENOENT",
           });
-        if (publish && !(inline && policy !== "control")) {
+        if (publish) {
           const published = repositoryGit(remote);
           const branch = published(
             "for-each-ref",
@@ -330,8 +330,8 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
                   .join(""),
               );
           }
-          expect(published("show", `${branch}:${dataPath}`)).toBe(
-            `Unchanged filter input\n${effective}`,
+          expect(published("rev-parse", `${branch}:${dataPath}`)).toBe(
+            originalDataBlob,
           );
         } else
           expect(await readFile(join(directory, ".git", "index"))).toEqual(

@@ -100,6 +100,14 @@ describe("saved-finding Git publication", () => {
     git("config", "diff.ignoreSubmodules", "all");
     git("config", "submodule.src/dependency.ignore", "all");
     git("push", "--set-upstream", "origin", "main");
+    // A real bare remote without push-options support rejects any leaked option.
+    git("config", "--add", "push.pushOption", "merge_request.create");
+    git(
+      "config",
+      "--add",
+      "push.pushOption",
+      "secret_push_protection.skip_all",
+    );
     await writeFile(join(repository, "unrelated.ts"), "staged separately\n");
     git("add", "--", "unrelated.ts");
 

@@ -1504,6 +1504,8 @@ interface CliDependencies {
 }
 
 // Apply coordinator-owned Git bindings after native shell environment filtering.
+const snapshotCredentialName =
+  /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK)(?:_FILE)?$/iu;
 const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
 const { readSync, writeSync } = require("node:fs");
@@ -1535,10 +1537,9 @@ for (const [name, value] of bindings) {
   else process.env[name] = value;
 }
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
-if (stripAwsCredentials) {
-  for (const name of Object.keys(process.env)) {
-    if (/^AWS_/i.test(name)) delete process.env[name];
-  }
+for (const name of Object.keys(process.env)) {
+  if (${snapshotCredentialName}.test(name) || (stripAwsCredentials && /^AWS_/i.test(name)))
+    delete process.env[name];
 }
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
@@ -1655,6 +1656,7 @@ export async function runRepositoryCommand(
       for (const name of Object.keys(environment)) {
         if (
           name.toUpperCase() === "CODEX_HOME" ||
+          snapshotCredentialName.test(name) ||
           (sandbox.stripAwsCredentials && /^AWS_/i.test(name)) ||
           credentialVariables.some(
             (key) => key.toUpperCase() === name.toUpperCase(),
@@ -10066,6 +10068,7 @@ async function patchTransportEnvironment(
   repository: string,
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv = {},
+  pushing = false,
 ): Promise<NodeJS.ProcessEnv> {
   if (remotes.some((remote) => remote.startsWith("git://"))) {
     const override = environmentEntry(
@@ -10104,14 +10107,6 @@ async function patchTransportEnvironment(
         environment = { ...environment, GIT_PROXY_COMMAND: "" };
     }
   }
-  if (!remotes.some((remote) => /^https?:\/\//u.test(remote)))
-    return environment;
-  // Git accumulates credential helpers until an empty helper resets them.
-  const entries = await patchScopedConfig(
-    "^((http|credential)\\..*|core\\.askpass)$",
-    repository,
-    dependencies,
-  );
   const pinned = { ...environment };
   let count = Number(
     environment["GIT_CONFIG_COUNT"] ??
@@ -10121,7 +10116,17 @@ async function patchTransportEnvironment(
   const set = (key: string, value: string) => {
     pinned[`GIT_CONFIG_KEY_${count}`] = key;
     pinned[`GIT_CONFIG_VALUE_${count++}`] = value;
+    pinned["GIT_CONFIG_COUNT"] = String(count);
   };
+  // An empty command-scope value clears every inherited server-side push option.
+  if (pushing) set("push.pushOption", "");
+  if (!remotes.some((remote) => /^https?:\/\//u.test(remote))) return pinned;
+  // Git accumulates credential helpers until an empty helper resets them.
+  const entries = await patchScopedConfig(
+    "^((http|credential)\\..*|core\\.askpass)$",
+    repository,
+    dependencies,
+  );
   set("credential.helper", "");
   set("core.askPass", "");
   for (let i = 0; i + 2 < entries.length; i += 3) {
@@ -10150,7 +10155,6 @@ async function patchTransportEnvironment(
       );
     }
   }
-  pinned["GIT_CONFIG_COUNT"] = String(count);
   return pinned;
 }
 
@@ -11452,6 +11456,7 @@ async function publishPatchBranch(
             remotes.some(isSshPatchRemote)
               ? { GIT_SSH_COMMAND: await getSshCommand() }
               : {},
+            true,
           ),
         },
       );
