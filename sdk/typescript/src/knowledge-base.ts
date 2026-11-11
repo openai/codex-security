@@ -365,6 +365,9 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     let tabStops = false;
     // Content controls mark unfilled prompt text with w:showingPlcHdr.
     const placeholders: boolean[] = [];
+    // Word does not display runs whose properties contain w:vanish.
+    const hiddenRuns: boolean[] = [];
+    let propertyContext = 0;
     const wordAttribute = (
       attributes: Record<string, string>,
       localName: string,
@@ -407,7 +410,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         localName === "delText" ||
         localName === "delInstrText" ||
         localName === "moveFrom" ||
-        (localName === "sdtContent" && placeholders.at(-1))
+        (localName === "sdtContent" && placeholders.at(-1)) ||
+        hiddenRuns.at(-1)
       ) {
         ignoredDepth++;
         return;
@@ -415,6 +419,14 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (localName === "sdt") placeholders.push(false);
       else if (localName === "showingPlcHdr" && placeholders.length)
         placeholders[placeholders.length - 1] = !["0", "false", "off"].includes(
+          wordAttribute(attributes, "val"),
+        );
+      else if (localName === "r") hiddenRuns.push(false);
+      // Paragraph marks and earlier formatting have their own w:vanish.
+      else if (localName === "pPr" || localName === "rPrChange")
+        propertyContext++;
+      else if (localName === "vanish" && !propertyContext && hiddenRuns.length)
+        hiddenRuns[hiddenRuns.length - 1] = !["0", "false", "off"].includes(
           wordAttribute(attributes, "val"),
         );
       if (localName === "txbxContent") {
@@ -450,6 +462,9 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         return;
       }
       if (localName === "sdt") placeholders.pop();
+      else if (localName === "r") hiddenRuns.pop();
+      else if (localName === "pPr" || localName === "rPrChange")
+        propertyContext--;
       if (localName === "txbxContent") {
         while (fields.length > 0) finishField(false);
         const content = text.join("");

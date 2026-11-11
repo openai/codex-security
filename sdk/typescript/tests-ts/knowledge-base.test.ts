@@ -545,6 +545,15 @@ describe("scan knowledge bases", () => {
       ),
     );
     await writeFile(
+      join(root, "hidden-text.docx"),
+      docxBody(
+        "<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>" +
+          "<w:r><w:t>Rotate keys.</w:t></w:r>" +
+          '<w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve"> Replace this guidance.</w:t></w:r>' +
+          '<w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t xml:space="preserve"> Audit weekly.</w:t></w:r></w:p>',
+      ),
+    );
+    await writeFile(
       join(root, "field-code.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
@@ -567,6 +576,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
+    expect(documents).toContain("Rotate keys. Audit weekly.\n");
     expect(documents).toContain("Owner: \nData: Confidential\n");
   });
 
