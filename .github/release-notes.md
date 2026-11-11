@@ -77,6 +77,7 @@
 - bump fast-xml-parser from 5.11.1 to 5.12.0 in /evals/triage-finding ([#2587](https://github.com/openai/codex-security/pull/2587))
 - retain shared history across worktree changes ([#456](https://github.com/openai/codex-security/pull/456))
 - update the Linear SDK to 101.1.0 ([#2601](https://github.com/openai/codex-security/pull/2601))
+- update the Codex CLI and SDK to 0.167.1 ([#2600](https://github.com/openai/codex-security/pull/2600))
 
 </details>
 
