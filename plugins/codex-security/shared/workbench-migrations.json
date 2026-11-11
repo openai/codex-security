@@ -520,6 +520,25 @@
   },
   {
     "version": 64,
+    "name": "persist scan log completion boundaries",
+    "statements": ["ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"]
+  },
+  {
+    "version": 65,
+    "name": "bind Windows Deep Scan resume output directories",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_output_identity TEXT;"
+    ]
+  },
+  {
+    "version": 66,
+    "name": "bind Windows Deep Scan resume checkouts",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_target_identity TEXT;"
+    ]
+  },
+  {
+    "version": 67,
     "name": "retain native investigation time allowances",
     "statements": ["ALTER TABLE scans ADD COLUMN investigation_policy TEXT;"]
   }

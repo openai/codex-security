@@ -1,6 +1,6 @@
 # Workbench remediation
 
-Follow only the stage authorized by the workbench handoff. Apply the common requirements below and read the matching stage protocol before acting:
+When loading or refreshing an assigned finding, pass the supplied `scanId`, `occurrenceId`, `requestId`, and `actionToken` to `get_codex_security_scan_context`. Follow only the stage authorized by the workbench handoff. Apply the common requirements below and read the matching stage protocol before acting:
 
 - Generate or Regenerate — [workbench-generate.md](workbench-generate.md)
 - Apply — [workbench-apply.md](workbench-apply.md)

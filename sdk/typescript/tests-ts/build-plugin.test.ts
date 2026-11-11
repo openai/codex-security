@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   stat,
   symlink,
   writeFile,
@@ -36,6 +37,23 @@ async function writeFixture(
   const destination = join(root, ...path.split("/"));
   await mkdir(join(destination, ".."), { recursive: true });
   await writeFile(destination, contents);
+}
+
+async function copyBuildEntrypoint(root: string): Promise<void> {
+  for (const path of [
+    "package.json",
+    "scripts/build-plugin.mjs",
+    "scripts/check-plugin-source.mjs",
+    "scripts/is-main.mjs",
+    "scripts/plugin-contract.mjs",
+    "src/retry-windows-rename.js",
+  ]) {
+    await writeFixture(
+      root,
+      path,
+      await readFile(new URL(`../${path}`, import.meta.url), "utf8"),
+    );
+  }
 }
 
 async function files(root: string, prefix = ""): Promise<string[]> {
@@ -112,7 +130,16 @@ describe("bundled plugin build", () => {
     const plugin = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
     );
-    const source = join(root, "plugin");
+    const ordinarySource = join(root, "plugin");
+    const manifestLength = join(
+      ordinarySource,
+      "mcp-app",
+      "package.json",
+    ).length;
+    const source =
+      process.platform === "win32"
+        ? ordinarySource + "p".repeat(Math.max(0, 263 - manifestLength))
+        : ordinarySource;
     await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),
@@ -181,23 +208,56 @@ describe("bundled plugin build", () => {
       process.platform === "win32" ? "@exit /b 91\r\n" : "#!/bin/sh\nexit 91\n",
     );
     if (process.platform !== "win32") await chmod(join(bin, launcher), 0o755);
+    if (process.platform === "win32") {
+      const manifest = join(source, "mcp-app", "package.json");
+      const pkg = JSON.parse(await readFile(manifest, "utf8"));
+      pkg.scripts.build += " && node scripts/record-build.mjs";
+      await writeFile(manifest, JSON.stringify(pkg));
+      await writeFixture(
+        source,
+        "mcp-app/scripts/record-build.mjs",
+        'import { writeFileSync } from "node:fs"; writeFileSync("build-receipt.json", JSON.stringify([process.env.NODE_RUN_SCRIPT_NAME, process.env.NODE_RUN_PACKAGE_JSON_PATH]));\n',
+      );
+      await writeFixture(
+        root,
+        "package.json",
+        JSON.stringify({ scripts: { build: 'node -e "process.exit(91)"' } }),
+      );
+      await writeFixture(bin, "tsc.cmd", "@exit /b 92\r\n");
+    }
 
     const destination = join(root, "mcp");
-    await execFileAsync(
-      "node",
-      [
-        join(source, "mcp-app", "scripts", "build_mcp_app.mjs"),
-        "--output",
-        destination,
-      ],
-      {
-        env: {
-          ...process.env,
-          PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
-        },
+    await writeFixture(destination, "helpers.mjs.br.part-000", "stale");
+    const buildArgs = [
+      join(source, "mcp-app", "scripts", "build_mcp_app.mjs"),
+      "--output",
+      destination,
+    ];
+    await execFileAsync("node", buildArgs, {
+      env: {
+        ...process.env,
+        PATH: [bin, process.env["PATH"]].filter(Boolean).join(delimiter),
       },
-    );
+    });
 
+    if (process.platform === "win32") {
+      const [script, manifest] = JSON.parse(
+        await readFile(join(source, "mcp-app", "build-receipt.json"), "utf8"),
+      );
+      expect(script).toBe("build");
+      expect(await realpath(manifest)).toBe(
+        await realpath(join(source, "mcp-app", "package.json")),
+      );
+      const pkg = JSON.parse(await readFile(manifest, "utf8"));
+      pkg.scripts.build = `node -e "require('node:fs').writeFileSync('bun-build-receipt', process.env.npm_lifecycle_event); process.exit(72)"`;
+      await writeFile(manifest, JSON.stringify(pkg));
+      await expect(
+        execFileAsync(process.execPath, buildArgs),
+      ).rejects.toThrow();
+      expect(
+        await readFile(join(source, "mcp-app", "bun-build-receipt"), "utf8"),
+      ).toBe("build");
+    }
     const contract = JSON.parse(
       await readFile(
         new URL(
@@ -213,15 +273,8 @@ describe("bundled plugin build", () => {
         .map((path) => path.slice(4))
         .sort(),
     );
-    const chunks = (await readdir(destination))
-      .filter((name) => name.startsWith("helpers.mjs.br.part-"))
-      .sort();
     const runtime = brotliDecompressSync(
-      Buffer.concat(
-        await Promise.all(
-          chunks.map((name) => readFile(join(destination, name))),
-        ),
-      ),
+      await readFile(join(destination, "helpers.mjs.br")),
     ).toString("utf8");
     for (const marker of [
       "platform-source-marker",
@@ -436,6 +489,56 @@ describe("bundled plugin build", () => {
     },
   );
 
+  test.skipIf(process.platform !== "win32").each(["released", "held"])(
+    "publishes the bundle while the previous Windows addon is %s",
+    async (mode) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "source");
+      const destination = join(root, "_bundled_plugin");
+      const manifest = ".codex-plugin/plugin.json";
+      const otherStage = ".plugin-build-other";
+      await writeFixture(root, `${otherStage}/keep.txt`, "other build");
+      await writeFixture(source, manifest, "replacement");
+      await writeFixture(destination, manifest, "previous");
+      await writeFixture(
+        source,
+        "contract.json",
+        JSON.stringify({ externalOwnedExact: [manifest], shippedExact: [] }),
+      );
+      const fixture = fileURLToPath(
+        new URL("./fixtures/loaded-bundle-build.mjs", import.meta.url),
+      );
+      const { stdout, stderr } = await execFileAsync("node", [
+        fixture,
+        root,
+        mode,
+      ]);
+      const outcome = JSON.parse(stdout);
+      expect(["EPERM", "EACCES", "EBUSY"]).toContain(outcome.lockCode);
+      expect(outcome.files).toEqual([manifest]);
+      expect(await files(destination)).toEqual([manifest]);
+      expect(await readFile(join(destination, manifest), "utf8")).toBe(
+        "replacement",
+      );
+      expect(await readFile(join(root, otherStage, "keep.txt"), "utf8")).toBe(
+        "other build",
+      );
+      const stages = (await readdir(root)).filter(
+        (name) => name.startsWith(".plugin-build-") && name !== otherStage,
+      );
+      if (mode === "released") {
+        expect(stages).toEqual([]);
+        expect(stderr).toBe("");
+      } else {
+        expect(stages).toHaveLength(1);
+        const stage = join(root, stages[0]!);
+        expect(await files(stage)).toEqual([`previous/${outcome.nativePath}`]);
+        expect(stderr).toContain(stage);
+        expect(stderr).toContain(outcome.lockCode);
+      }
+    },
+  );
+
   test.each(["compiler", "file contract"])(
     "preserves the previous bundle when the %s fails",
     async (failure) => {
@@ -443,16 +546,7 @@ describe("bundled plugin build", () => {
       const packageRoot = join(root, "sdk", "typescript");
       const source = join(root, "plugins", "codex-security");
       const destination = join(packageRoot, "_bundled_plugin");
-      for (const script of ["build-plugin", "plugin-contract", "is-main"]) {
-        await writeFixture(
-          packageRoot,
-          `scripts/${script}.mjs`,
-          await readFile(
-            new URL(`../scripts/${script}.mjs`, import.meta.url),
-            "utf8",
-          ),
-        );
-      }
+      await copyBuildEntrypoint(packageRoot);
       await writeFixture(source, ".codex-plugin/plugin.json", "{}\n");
       await writeFixture(
         source,
@@ -495,30 +589,15 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
   );
 
   test("builds from a source snapshot without Git metadata", async () => {
-    const root = await temporaryDirectory();
+    const temporary = await temporaryDirectory();
+    const root =
+      process.platform === "win32"
+        ? join(temporary, "p".repeat(Math.max(1, 260 - temporary.length)))
+        : temporary;
     const packageRoot = join(root, "sdk", "typescript");
     const source = join(root, "plugins", "codex-security");
 
-    await writeFixture(
-      packageRoot,
-      "package.json",
-      await readFile(new URL("../package.json", import.meta.url), "utf8"),
-    );
-    for (const script of [
-      "build-plugin",
-      "check-plugin-source",
-      "is-main",
-      "plugin-contract",
-    ]) {
-      await writeFixture(
-        packageRoot,
-        `scripts/${script}.mjs`,
-        await readFile(
-          new URL(`../scripts/${script}.mjs`, import.meta.url),
-          "utf8",
-        ),
-      );
-    }
+    await copyBuildEntrypoint(packageRoot);
     await writeFixture(
       source,
       "plugin-files.json",
@@ -540,6 +619,11 @@ await writeFile(join(output, "unexpected.txt"), "undeclared output");\n`,
         "utf8",
       ),
     ).toBe("#!/bin/sh\nexit 0\n");
+    expect(
+      (await readdir(packageRoot)).filter((name) =>
+        name.startsWith(".plugin-build-"),
+      ),
+    ).toEqual([]);
   });
 
   test("stages only declared runtime files from the canonical plugin source", async () => {

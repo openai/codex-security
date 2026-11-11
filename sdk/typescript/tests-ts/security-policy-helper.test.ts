@@ -1,5 +1,5 @@
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -9,7 +9,6 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { userInfo } from "node:os";
 import { dirname, join, relative, sep, win32 } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -18,6 +17,19 @@ import { windowsHelperFixture } from "./windows-helper-command.js";
 
 const helper = join(PLUGIN_ROOT, "mcp", "helpers.mjs");
 const temporaryDirectories = createTemporaryDirectoriesSync();
+
+function posixAccount(): { username: string; homedir: string } {
+  // Bun's userInfo can reflect USER and HOME instead of the account database.
+  return JSON.parse(
+    execFileSync(
+      "node",
+      ["-p", "JSON.stringify(require('node:os').userInfo())"],
+      {
+        encoding: "utf8",
+      },
+    ),
+  );
+}
 
 function fixture(name = "repository") {
   const directory = temporaryDirectories.create("security-policy-helper-");
@@ -738,7 +750,7 @@ binding.readdir = function (...args) {
         [`${root}/`, "~/project"],
         [`${root}///`, "~/project"],
         ["/", `~${project}`],
-        [undefined, `~/${relative(userInfo().homedir, project)}`],
+        [undefined, `~/${relative(posixAccount().homedir, project)}`],
         ["", `~${project}`],
       ] as const) {
         const result = spawnSync(
@@ -756,7 +768,7 @@ binding.readdir = function (...args) {
     "expands named homes with quoted and control characters in the remaining path",
     () => {
       const { root } = fixture();
-      const info = userInfo();
+      const info = posixAccount();
       const directory = 'space "quote" back\\slash\nline\ttab\b';
       write(root, `${directory}/SECURITY.md`, "named-home policy\n");
       const path = `~${info.username}/${relative(info.homedir, join(root, directory))}`;
@@ -784,7 +796,7 @@ binding.readdir = function (...args) {
         );
         chmodSync(join(tools, name), 0o755);
       }
-      const info = userInfo();
+      const info = posixAccount();
       const path = `~${info.username}/${relative(info.homedir, root)}`;
       const result = spawnSync(
         "/bin/sh",

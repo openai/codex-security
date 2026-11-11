@@ -1,5 +1,5 @@
 import { runNodePython } from "./support/python-probe.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { nodeCommand } from "./support/shell.js";
 import { windowsHelperFixture } from "./windows-helper-command.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
@@ -18,6 +18,8 @@ import {
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+
+const pythonExecutable = useTestPython();
 
 const temporaryRoots = createTemporaryDirectoriesSync(true);
 const testPosix = process.platform === "win32" ? test.skip : test;

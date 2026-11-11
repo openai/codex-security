@@ -103,8 +103,6 @@ def test_native_scan_materializes_false_positive_feedback(tmp_path: Path, mode: 
             "begin-deep-scan",
             "--thread-id",
             "feedback-parent",
-            "--available-parallelism",
-            "4",
             "--target-path",
             str(target),
             "--scan-root",

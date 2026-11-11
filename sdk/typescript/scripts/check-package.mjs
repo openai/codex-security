@@ -15,14 +15,12 @@ import { gunzipSync } from "node:zlib";
 import { packageDistFiles } from "./package-dist-files.mjs";
 import {
   assertPublicPackageContents,
+  assertPublicText,
   MAX_EXPANDED_ASSET_BYTES,
 } from "./package-public-content.mjs";
 import { assertExpectedGitHead } from "./package-provenance.mjs";
 import { packageSmokeTimeouts } from "./package-smoke-timeouts.mjs";
-import {
-  assertStoredSparseContents,
-  readTarArchive,
-} from "./package-tar-entries.mjs";
+import { readTarArchive } from "./package-tar-entries.mjs";
 import {
   assertTarListingSizes,
   regularTarListingLines,
@@ -57,7 +55,7 @@ const rawEntries = storedArchive.entries;
 validatePackagePaths(rawEntries.map(({ path }) => path));
 assertPublicPackageContents(
   storedArchive.files,
-  Buffer.concat(storedArchive.metadata.filter(Buffer.isBuffer)),
+  Buffer.concat(storedArchive.metadata),
 );
 const processEnvironment = { ...process.env };
 delete processEnvironment.TAR_OPTIONS;
@@ -79,9 +77,19 @@ function tar(args, encoding = "buffer") {
     ...tarOptions,
     encoding,
   });
+  const stderr = result.stderr?.toString().trim() ?? "";
+  if (
+    result.status !== 0 &&
+    stderr.startsWith("tar: unrecognized option: ignore-zeros\nBusyBox ")
+  ) {
+    // BusyBox can exit before Node finishes writing a larger archive to stdin.
+    throw new Error(
+      `Package validation requires tar with --ignore-zeros. On Alpine Linux, install GNU tar with 'apk add tar'.\n${stderr}`,
+      { cause: result.error },
+    );
+  }
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0 || result.stderr.length !== 0) {
-    const stderr = result.stderr.toString().trim();
     throw new Error(
       `npm tarball contains an invalid tar entry${stderr === "" ? "." : `: ${stderr}`}`,
     );
@@ -101,6 +109,7 @@ function validatePackagePaths(entries) {
     "package/package.json",
     "package/README.md",
     "package/docs/cli.md",
+    "package/docs/sdk.md",
     "package/docs/findings-service.md",
     "package/docs/dedupe-records.md",
     "package/docs/classify-severity-records.md",
@@ -119,30 +128,19 @@ function validatePackagePaths(entries) {
     "package/_bundled_plugin/.codex-plugin/plugin.json",
   ];
 
-  for (const file of required) {
-    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
+  const allowedFiles = new Set();
+  function requireFile(path) {
+    if (!files.has(path)) throw new Error(`npm tarball is missing ${path}.`);
+    allowedFiles.add(path);
   }
+  for (const path of required) requireFile(path);
 
   const contract = JSON.parse(readFileSync(contractPath, "utf8"));
   const pluginPaths = pluginContractFiles(contract);
-  if (new Set(pluginPaths).size !== pluginPaths.length) {
-    throw new Error("Plugin projection contract contains duplicate paths.");
-  }
 
-  const pluginEntries = new Set();
-  for (const file of pluginPaths) {
-    const pluginArchivePath = `package/_bundled_plugin/${file}`;
-    pluginEntries.add(pluginArchivePath);
-    if (!files.has(pluginArchivePath)) {
-      throw new Error(`npm tarball is missing ${pluginArchivePath}.`);
-    }
-  }
-
-  const distFiles = new Set(packageDistFiles);
-  for (const file of distFiles) {
-    if (!files.has(file)) throw new Error(`npm tarball is missing ${file}.`);
-  }
-  const allowedFiles = new Set([...required, ...distFiles, ...pluginEntries]);
+  for (const path of pluginPaths)
+    requireFile(`package/_bundled_plugin/${path}`);
+  for (const path of packageDistFiles) requireFile(path);
   for (const file of [...allowedFiles]) {
     const parts = file.split("/");
     for (let index = 1; index < parts.length; index++) {
@@ -194,15 +192,26 @@ const listingSizes = assertTarListingSizes(
   listingLines,
   MAX_EXPANDED_ASSET_BYTES,
 );
+if (rawEntries.some(({ size }, index) => size !== listingSizes[index]))
+  invalidTarEntry();
+const posixMcpLauncher =
+  "package/_bundled_plugin/scripts/launch_codex_security_mcp";
 for (const [path, name] of [
   ["package/bin/codex-security.mjs", "CLI"],
-  ["package/_bundled_plugin/scripts/launch_codex_security_mcp", "MCP"],
+  [posixMcpLauncher, "MCP"],
 ]) {
   const permissions =
     listingLines[entries.indexOf(path)]?.split(/\s/u, 1)[0] ?? "";
   if ([3, 6, 9].some((index) => permissions[index] !== "x")) {
     throw new Error(`npm package ${name} launcher is not executable.`);
   }
+}
+if (
+  [storedArchive.files, storedArchive.npmFiles].some((files) =>
+    files.get(posixMcpLauncher)?.includes("\r\n"),
+  )
+) {
+  throw new Error("npm package POSIX MCP launcher contains CRLF line endings.");
 }
 
 function privateExtractionDirectories(directory) {
@@ -215,21 +224,15 @@ function privateExtractionDirectories(directory) {
 }
 
 function extractedArchiveFiles() {
-  const logicalSizes = new Map();
-  const expectedPaths = new Map();
-  for (const [index, { path }] of rawEntries.entries()) {
-    const directory = path.endsWith("/");
-    const extractedPath = directory ? path.slice(0, -1) : path;
-    const type = directory ? "directory" : "file";
-    const previousType = expectedPaths.get(extractedPath);
-    if (previousType !== undefined && previousType !== type) invalidTarEntry();
-    if (!directory) logicalSizes.set(path, listingSizes[index]);
-    expectedPaths.set(extractedPath, type);
-    const parts = extractedPath.split("/");
-    for (let index = 1; index < parts.length; index++) {
-      const directory = parts.slice(0, index).join("/");
-      if (logicalSizes.has(directory)) invalidTarEntry();
-      expectedPaths.set(directory, "directory");
+  const expectedSizes = new Map(
+    entries.map((path, index) => [path, listingSizes[index]]),
+  );
+  for (const path of entries) {
+    const parts = path.split("/");
+    for (let depth = 1; depth < parts.length; depth++) {
+      const parent = parts.slice(0, depth).join("/");
+      if (expectedSizes.has(parent)) invalidTarEntry();
+      expectedSizes.set(parent + "/", 0);
     }
   }
 
@@ -239,7 +242,8 @@ function extractedArchiveFiles() {
   try {
     chmodSync(extractionRoot, 0o700);
     const fileList = join(extractionRoot, "members.list");
-    writeFileSync(fileList, [...logicalSizes.keys(), ""].join("\0"));
+    const fileNames = entries.filter((path) => !path.endsWith("/"));
+    writeFileSync(fileList, [...fileNames, ""].join("\0"));
     try {
       tar([
         "-m",
@@ -262,41 +266,33 @@ function extractedArchiveFiles() {
     rmSync(fileList);
 
     const archiveFiles = new Map();
-    let expandedBytes = 0;
     function visit(directory, relative = "") {
       for (const name of readdirSync(directory)) {
         const path = relative === "" ? name : `${relative}/${name}`;
-        const expectedType = expectedPaths.get(path);
-        if (expectedType === undefined) invalidTarEntry();
         const extractedPath = join(extractionRoot, path);
         const stats = lstatSync(extractedPath);
-        expectedPaths.delete(path);
-
-        if (expectedType === "directory") {
+        if (expectedSizes.delete(path + "/")) {
           if (!stats.isDirectory()) invalidTarEntry();
           visit(extractedPath, path);
           continue;
         }
-
         if (
           !stats.isFile() ||
           stats.nlink !== 1 ||
-          stats.size !== logicalSizes.get(path) ||
-          stats.size > MAX_EXPANDED_ASSET_BYTES ||
-          expandedBytes > MAX_EXPANDED_ASSET_BYTES - stats.size
+          stats.size !== expectedSizes.get(path)
         ) {
           invalidTarEntry();
         }
-        expandedBytes += stats.size;
+        expectedSizes.delete(path);
         chmodSync(extractedPath, 0o600);
-        archiveFiles.set(path, readFileSync(extractedPath));
+        const contents = readFileSync(extractedPath);
+        if (!storedArchive.files.get(path)?.equals(contents)) invalidTarEntry();
+        archiveFiles.set(path, contents);
       }
     }
     visit(extractionRoot);
 
-    if (expectedPaths.size !== 0 || archiveFiles.size !== logicalSizes.size) {
-      invalidTarEntry();
-    }
+    if (expectedSizes.size !== 0) invalidTarEntry();
     return archiveFiles;
   } finally {
     rmSync(extractionRoot, { force: true, recursive: true });
@@ -319,7 +315,10 @@ assertExpectedGitHead(
 );
 
 assertPublicPackageContents(archiveFiles);
-assertStoredSparseContents(storedArchive, archiveFiles);
+// Keep the separate UTF-8 decoding of headers and padding alongside the raw metadata scan.
+assertPublicText(
+  storedArchive.metadata.map((part) => part.toString("utf8")).join(""),
+);
 for (const path of archiveFiles.keys()) {
   if (
     /\.(?:png|br(?:\.part-[0-9]+)?)$/iu.test(path) &&

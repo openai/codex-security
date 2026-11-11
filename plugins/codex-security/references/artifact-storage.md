@@ -19,6 +19,8 @@ Identify the owner with exactly one of:
 
 Choose `persistent` for documents and evidence that must survive the scan. Choose `temporary` for disposable staging and execution output. Keep temporary paths out of canonical findings and coverage.
 
+Relative storage overrides resolve from the plugin directory, matching the workbench, regardless of the MCP launch directory. On POSIX, `CODEX_SECURITY_SCAN_ROOT` preserves trailing whitespace. A value with leading padding is trimmed. Use an absolute path or a `./` prefix for a relative directory name that begins with whitespace.
+
 To prepare the directory, omit `path`, `content` and `sourcePath`. Use the `directory` returned by the tool. To save a file, supply `path` and exactly one of `content` or `sourcePath`.
 
 Example for a running scan:

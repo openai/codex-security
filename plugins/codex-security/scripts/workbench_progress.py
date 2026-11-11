@@ -1,7 +1,9 @@
 """Progress transition helpers for the Codex Security workbench."""
 
 import argparse
+import json
 import math
+import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -9,8 +11,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from deep_scan_workbench import require_current_coordinator
-from workbench.handoff import require_current_continuation
+from deep_scan_workbench import independent_review_progress, require_current_coordinator
+from finalize_scan_contract import open_scan_local_file_descriptor
+from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench_constants import PHASES
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -105,6 +108,138 @@ def update_context(
     return wb.scan_context(connection, scan_id, include_investigation_policy=True)
 
 
+def scan_progress_result(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> tuple[dict[str, Any], str]:
+    independent_reviews = (
+        independent_review_progress(
+            connection, scan["id"], parent_running=scan["status"] == "running"
+        )
+        if scan["mode"] == "deep"
+        else None
+    )
+    progress_result = {
+        "candidates": {"reportable": scan["reportable_findings_count"]},
+        "coverage": {
+            "closedRows": scan["review_items_completed"],
+            "filesTotal": scan["scope_file_count"],
+            "worklistRows": scan["review_items_total"],
+        },
+        "phase": scan["phase"],
+        "phaseProgress": {
+            "completed": scan["phase_items_completed"],
+            "total": scan["phase_items_total"],
+            "unit": scan["phase_progress_unit"],
+        },
+        "preflightProgress": {
+            "completed": scan["preflight_checks_completed"],
+            "total": scan["preflight_checks_total"],
+        },
+        "preflightIssues": json.loads(scan["preflight_issues_json"]),
+        "reviewPass": scan["deep_review_pass"],
+        "status": "canceled" if scan["canceled_at"] else scan["status"],
+        "updatedAt": scan["progress_updated_at"],
+    }
+    review_updated_at = ""
+    if independent_reviews is not None:
+        review_updated_at = str(independent_reviews.pop("updatedAt"))
+        progress_result["independentReviews"] = independent_reviews
+    return progress_result, review_updated_at
+
+
+def model_progress(wb: Any, connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
+    scan = wb.scan_history.scan_with_progress(connection, scan_id)
+    progress, _ = scan_progress_result(connection, scan)
+    result = {"scanId": scan["id"], "progress": progress, "userContext": scan["user_context"]}
+    if warnings := json.loads(scan["completion_warnings_json"]):
+        result["warnings"] = warnings
+    return result
+
+
+def deep_preflight(scan: sqlite3.Row) -> bool:
+    return scan["mode"] == "deep" and scan["phase"] == "preflight" and scan["canceled_at"] is None
+
+
+def reported_scope_file_count(wb: Any, scan: sqlite3.Row) -> int | None:
+    """Read the scoped helper's optional progress count, independently of scan evidence."""
+    if (
+        scan["mode"] != "standard"
+        or scan["launch_kind"] not in (None, "scan")
+        or not scan["recipe_json"]
+    ):
+        return None
+    try:
+        recipe = json.loads(scan["recipe_json"])
+        target = recipe.get("target") if isinstance(recipe, dict) else None
+        if not isinstance(target, dict) or target.get("kind") != "paths":
+            return None
+        repositories = (scan["target_path"], recipe.get("repository"))
+        largest_count = 2**53 - 1  # The SDK reports this value as a JavaScript safe integer.
+        maximum = (
+            max(
+                len(json.dumps({"scanId": scan["id"], "repository": repo, "count": largest_count}))
+                for repo in repositories
+                if isinstance(repo, str)
+            )
+            + 1
+        )  # The helper includes a trailing newline.
+        scan_dir = wb.require_canonical_scan_directory(Path(scan["scan_dir"]))
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir, "scoped-source-input.receipt.json", "Scoped inventory count"
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            data = stream.read(maximum + 1)
+        if len(data) > maximum:
+            return None
+        report = json.loads(data)
+        if (
+            isinstance(report, dict)
+            and report.get("scanId") == scan["id"]
+            and isinstance(report.get("repository"), str)
+            and report["repository"] in repositories
+            and type(count := report.get("count")) is int
+            and 0 <= count <= largest_count
+        ):
+            return count
+    except (OSError, ValueError, RecursionError, SystemExit):
+        # An unreadable optional report leaves the stored estimate in place so the scan can continue.
+        pass
+    return None
+
+
+def refresh_scope_file_count(
+    wb: Any, connection: sqlite3.Connection, scan_id: str, claim_token: str | None
+) -> dict[str, int | None]:
+    scan = wb.require_scan(connection, scan_id)
+    if scan["status"] != "running":
+        return {"scopeFileCount": None}
+    ownership_error = "Scan updates are owned by another continuation."
+    require_current_continuation(scan, claim_token, error_message=ownership_error)
+    count = reported_scope_file_count(wb, scan)
+    if count is None:
+        return {"scopeFileCount": None}
+    timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+    try:
+        connection.execute("PRAGMA busy_timeout = 0")
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = wb.require_scan(connection, scan_id)
+            if current["status"] != "running" or current["scan_dir"] != scan["scan_dir"]:
+                return {"scopeFileCount": None}
+            require_current_continuation(current, claim_token, error_message=ownership_error)
+            connection.execute(
+                "UPDATE scan_progress SET scope_file_count = ?, updated_at = ? WHERE scan_id = ?",
+                (count, wb.now(), scan_id),
+            )
+    except sqlite3.OperationalError as exc:
+        if not wb.sqlite_busy(exc):
+            raise
+        return {"scopeFileCount": None, "retry": True}
+    finally:
+        connection.execute(f"PRAGMA busy_timeout = {timeout}")
+    return {"scopeFileCount": count}
+
+
 def update_progress(
     wb: Any,
     connection: sqlite3.Connection,
@@ -117,14 +252,34 @@ def update_progress(
     with zero completed items. Invalid progress raises SystemExit.
     """
     scan_id = require_uuid(args.scan_id, "scan-id")
+    if args.refresh_scope_file_count:
+        return refresh_scope_file_count(wb, connection, scan_id, args.claim_token)
     model = optional_text(args.model, maximum=200)
     reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
-    connection.execute("BEGIN IMMEDIATE")
     with connection:
+        scan = None
+        if args.model_update:
+            connection.execute("BEGIN")
+            scan = wb.require_scan(connection, scan_id)
+            if not deep_preflight(scan):
+                connection.rollback()
+                scan = None
+        if scan is None:
+            # Reread under the writer lock before applying any progress change.
+            wb.begin_immediate_with_retry(connection)
+            scan = wb.require_scan(connection, scan_id)
         timestamp = wb.now()
-        scan = wb.require_scan(connection, scan_id)
+        require_tokenless_scan_owner(connection, scan, getattr(args, "model_thread_id", None))
         if scan["status"] != "running":
             raise SystemExit("Only a running scan can update progress.")
+        if args.model_update and deep_preflight(scan):
+            if scan["handoff_claim_token"] is not None:
+                require_current_continuation(
+                    scan,
+                    args.claim_token,
+                    error_message="Scan updates are owned by another continuation.",
+                )
+            return {"scan": model_progress(wb, connection, scan_id), "deepPreflight": True}
         if scan["mode"] == "deep":
             coordinator = connection.execute(
                 "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
@@ -239,6 +394,8 @@ def update_progress(
             f"UPDATE scan_progress SET {', '.join(updates)}, updated_at = ? WHERE scan_id = ?",
             (*values, timestamp, scan["id"]),
         )
+        if args.model_update:
+            return {"scan": model_progress(wb, connection, scan_id)}
     return wb.scan_context(connection, scan["id"])
 
 

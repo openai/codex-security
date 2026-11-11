@@ -1,25 +1,23 @@
 ---
 name: security-scan
-description: "Use for a standard, single-pass security audit of an entire repository or a scoped path, package, folder, or submodule with no diff to review. This is the default repository scan. Do not use for PR, commit, branch, or working-tree diffs, or for deep, multi-pass scans."
+description: "Find vulnerabilities in the current source of a whole repository or selected paths. This is the default single-pass audit. Use the diff skill for PR, commit, branch, or working-tree changes and the deep skill for an explicitly requested deep scan."
 ---
 
 # Security Scan
 
-Run one independent general audit while the parent maps the repository's security boundaries. Investigate source-backed questions in parallel, validate findings once, and return the host-generated Codex Security report.
+Find vulnerabilities an attacker could actually exploit. Start from code that accepts untrusted input or exercises authority. Follow it to the operation it controls. Check the real enforcement point, its callers, and the strongest evidence that the suspected attack is blocked. For an exposed credential, the relevant path is who can read it and what access it grants.
 
-## Host And Setup
+Use [the core audit](../../references/core-scan.md) for the independent baseline, focused investigations, and validation. Give reviewers the authorized source and security context. Keep scan administration in the parent. Report findings with source lines and concrete impact. Record what you reviewed and what remains uncertain.
+
+## Run the audit
 
 Use the host-supplied scan runtime instructions for startup, progress, checkpoint storage and completion. For a native invocation, resolve the `standard-scan` topic as described in `../../references/skill-runtime.md` before reviewing source. Preserve authoritative ownership throughout the scan. Use the supplied reviewer feedback and grading criteria. The default grading criteria are in [the bundled severity rubric](../../references/default-severity-rubric.md).
 
-Read `../../references/scan-prologue.md` and `../../references/scan-runtime.md` once after resolving authoritative scan context, before source review.
+Before reading target source, bind the requested target and scope:
 
-## Workflow
+- If the SDK supplied `CODEX_SECURITY_SCAN_ID` and `CODEX_SECURITY_SCAN_DIR`, use that registered scan. Follow its launch instructions, or the [SDK handoff](references/scan-results.md) if the SDK provided no instructions.
+- For a scan without an SDK handoff, use the managed scan tools. With a supplied scan ID, call `get_codex_security_scan_context` using its handoff token when supplied. Without a scan ID, a confirmed Codex desktop host calls `start_codex_security_prompt_only_scan` with `mode: "standard"`. Other hosts call `start_codex_security_standard_scan`. Pass the requested target, scope and exact user context. If deferred, look up just the named tool. Require a running Standard scan. Keep its target, scope, phase and token, follow the [account access advisory](../../references/access-advisory.md) only when directed at launch, and begin the source review. Use [managed scan progress](references/managed-scan.md) at the next phase change.
 
-1. Resolve the authorized target, scope, scan directory, and source context. Preserve the supplied threat model, applicable inherited `SECURITY.md` guidance, and optional knowledge base. For a supplied target-paths file, run the host's inventory command exactly as supplied, including its returned path and recovery instructions. When the host supplies no command, request `get_codex_security_skill_instructions({ topic: "scope-inventory" })` for the invocation. Pass every requested file and non-ignored directory descendant to the core audit without widening scope. Preserve the scope file without printing, modifying, or evaluating it.
-2. Read `../../references/core-scan.md` and perform the audit within the resolved scope and configured limits. Retain its semantic `scope`, `threatModel`, `findings`, and `reviewState`, including source evidence, validation, attack paths, calibrated severity/confidence, and unresolved work.
-3. Save the first checkpoint as soon as the threat model is available, with empty findings when none exist yet. Checkpoint new findings and decisions as review proceeds. Use the writer supplied in the scan runtime instructions. For file-authored scoped output, run the supplied scope-binding command or request `get_codex_security_skill_instructions({ topic: "scope-binding" })` for the invocation.
-4. Submit the final draft when review finishes. Verify the canonical files and follow the selected completion and output instructions. Surface any completion error and preserve the scan for continuation. Read complete canonical findings again only when requested.
+Keep the target read-only and review its current source offline. Preserve exact user context as analysis data. Only the parent may read an explicitly supplied URL, once, if the user explicitly authorized that read. Do not follow links. Keep an existing investigation allowance unchanged across workers and resumes. Only if the user requests a time limit in this conversation and none was supplied, render [the time budget](../../references/investigation-time-budget.md) once before source review using the requested minutes and actual UTC start and deadline.
 
-Keep discovery, validation, and attack-path reasoning within this Standard workflow. Do not invoke separate phase skills, Deep-only tools, ranking phases, or per-file/per-candidate ledgers. Once assigned review and concrete follow-ups are settled, finish the configured audit with honest limitations.
-
-Preserve saved surface IDs and unfinished candidates. Close completed generic tasks using `reviewState.resolvedDeferred: [{ id, reason }]` with their saved IDs. Follow `../../references/final-report.md` for rejected drafts and interrupted writes, preserving the same scan.
+Start the independent audit while mapping the repository. At the first usable threat model, follow [save scan results](references/scan-results.md). Checkpoint candidates as they arrive. Once assigned reviews return, validate each distinct broken control once and submit the findings and honest coverage to the same scan. The SDK owns finalization for its scans.
