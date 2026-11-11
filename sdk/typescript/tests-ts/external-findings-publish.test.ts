@@ -95,7 +95,6 @@ import {
 import { createCliTest } from "./support/cli-run.js";
 import { normalizeTrivyFindings } from "../src/trivy-findings.js";
 import { normalizeInspectorFindings } from "../src/inspector-findings.js";
-import {} from "../src/continuum-findings.js";
 import {
   trivyReport,
   trivyRepositoryHeader,
