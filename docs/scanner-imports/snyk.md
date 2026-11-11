@@ -121,7 +121,7 @@ example saves a fresh report there and imports it into the checkout at `./projec
 
 ```sh
 report=$(mktemp ./snyk-issues.XXXXXX) &&
-  codex-security import snyk PROJECT_ID --snyk-org ORG_ID \
+  codex-security import snyk PROJECT_ID --org ORG_ID \
     --source-repository-url https://github.com/example/project \
     --format json > "$report" &&
   codex-security publish findings "$report" --to local --provider snyk \

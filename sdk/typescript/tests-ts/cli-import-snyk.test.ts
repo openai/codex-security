@@ -37,7 +37,10 @@ test.each(["open-source", "code"] as const)(
     const productFlags = code
       ? ["--snyk-product", product, "--snyk-api-origin", apiOrigin]
       : [];
-    const status = await cli.runCli([...command, ...productFlags], {
+    const flags = code
+      ? command
+      : command.map((flag) => (flag === "--snyk-org" ? "--org" : flag));
+    const status = await cli.runCli([...flags, ...productFlags], {
       ...dependencies({ environment }),
       hostedScannerFetch: async (url) => {
         expect(url.origin).toBe(apiOrigin);
