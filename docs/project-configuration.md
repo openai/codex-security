@@ -387,6 +387,17 @@ scan and may incur model charges. Deep preflight shows all six effective setting
 and `deepScanSources`, including when no project file was selected; invalid
 applicable legacy settings now fail before runtime startup.
 
+### Deep Scan sandbox qualification
+
+The CLI dry run and SDK `preflight()` are configuration checks, not sandbox
+qualification. They do not start a Deep Scan worker or execute a command under
+its generated permissions, so they cannot establish that the worker enforces
+filesystem, credential-store, or network restrictions. The documented CLI and
+SDK preflight surfaces do not export that generated policy or run a synthetic
+command under it. Do not use either preflight result as evidence of worker
+isolation. See the [security policy](../SECURITY.md) for the limits of read-only
+worker execution and inherited tools.
+
 With `-c`, the output also includes `projectConfig.path`, per-setting sources,
 selected instruction/validation file paths, and the finding policy. Native sources
 identify which layer supplied a key; profile selection still determines the
