@@ -65,6 +65,11 @@
 - report exit status when the scan helper fails ([#2406](https://github.com/openai/codex-security/pull/2406))
 - import hosted Semgrep findings locally or in Cloud ([#2576](https://github.com/openai/codex-security/pull/2576))
 - reduce setup and tool output in Standard scans ([#2046](https://github.com/openai/codex-security/pull/2046))
+- expose identifiers for saved scan follow-up ([#2577](https://github.com/openai/codex-security/pull/2577))
+- validate scan inputs and verify hook installation ([#2578](https://github.com/openai/codex-security/pull/2578))
+- update the active installation and migrate legacy options ([#2579](https://github.com/openai/codex-security/pull/2579))
+- align scan schemas and structured output ([#2580](https://github.com/openai/codex-security/pull/2580))
+- inspect integration commands before installation ([#2582](https://github.com/openai/codex-security/pull/2582))
 
 </details>
 

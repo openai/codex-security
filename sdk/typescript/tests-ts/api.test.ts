@@ -616,6 +616,13 @@ describe("CodexSecurity orchestration", () => {
         maxTimeHours: "default",
       },
       outputDir: output,
+      stateDirectory: join(
+        root,
+        "ambient",
+        "state",
+        "plugins",
+        "codex-security",
+      ),
       authentication: {
         method: "api_key",
         source: "OPENAI_API_KEY",
@@ -643,6 +650,36 @@ describe("CodexSecurity orchestration", () => {
     expect(prepareRuntime).not.toHaveBeenCalled();
     await expect(stat(output)).rejects.toThrow();
     await client.close();
+  });
+
+  test("checks default storage without creating state or scan directories", async () => {
+    const { root, repository } = await repositoryDirectories();
+    const state = join(root, "private", "state");
+    const { client, prepareRuntime } = localClient(
+      {},
+      { CODEX_SECURITY_STATE_DIR: state },
+    );
+    try {
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        outputDir: null,
+        stateDirectory: state,
+      });
+      expect(existsSync(join(root, "private"))).toBe(false);
+      await mkdir(dirname(state));
+      await writeFile(state, "not a directory");
+      await expect(client.preflight(repository)).rejects.toThrow(
+        /CODEX_SECURITY_STATE_DIR/,
+      );
+      await rm(state);
+      await mkdir(state);
+      await writeFile(join(state, "scans"), "not a directory");
+      await expect(client.preflight(repository)).rejects.toThrow(
+        /Persistent scan output must use real directories/,
+      );
+      expect(prepareRuntime).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+    }
   });
 
   test("reports configured model and reasoning during local-only preflight", async () => {
