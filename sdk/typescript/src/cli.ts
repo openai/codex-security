@@ -5094,9 +5094,20 @@ export async function main(
   const cli = Cli.create("codex-security", cliOptions)
     .command("update", {
       description: "Update the CLI or show the command for this installation.",
-      async run() {
-        await installUpdate(dependencies.environment);
-        return { updated: true };
+      async run({ format, error }) {
+        try {
+          await installUpdate(dependencies.environment);
+        } catch (cause) {
+          return error({
+            code: "UPDATE_FAILED",
+            message: errorMessage(cause),
+            exitCode: 2,
+          });
+        }
+        const name = "@openai/codex-security";
+        if (output.isTTY && useDefaultOutput(format))
+          renderedOutput = `✓ Updated ${name}\n`;
+        return { name };
       },
     })
     .command(scanHistory)
