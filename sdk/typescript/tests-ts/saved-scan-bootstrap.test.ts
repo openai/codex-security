@@ -1199,6 +1199,45 @@ connection.close()
   });
 }
 
+test("latest excludes completed discovery passes from historical scan databases", async () => {
+  const state = await temporaryDirectory();
+  const repository = await temporaryDirectory();
+  const database = new Database(join(state, "workbench.sqlite3"), {
+    create: true,
+  });
+  try {
+    database.exec(`
+      CREATE TABLE scans (id TEXT, target_path TEXT, started_at TEXT, updated_at TEXT, status TEXT);
+      CREATE TABLE scan_progress (scan_id TEXT, updated_at TEXT);
+    `);
+    for (const [id, time] of [
+      ["public-scan", "2026-01-01T00:00:00Z"],
+      ["discovery-pass", "2026-01-02T00:00:00Z"],
+    ] as const) {
+      database
+        .query("INSERT INTO scans VALUES (?, ?, ?, ?, 'complete')")
+        .run(id, repository, time, time);
+      database.query("INSERT INTO scan_progress VALUES (?, ?)").run(id, time);
+    }
+    async function latest() {
+      const workbench = await savedScanWorkbench("latest", {
+        environment: { CODEX_SECURITY_STATE_DIR: state },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: repository,
+      });
+      return workbench(["list-scans"]);
+    }
+    expect(await latest()).toEqual({ scans: [{ scanId: "discovery-pass" }] });
+    database.exec("ALTER TABLE scans ADD COLUMN parent_scan_role TEXT");
+    database.exec(
+      "UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = 'discovery-pass'",
+    );
+    expect(await latest()).toEqual({ scans: [{ scanId: "public-scan" }] });
+  } finally {
+    database.close();
+  }
+});
+
 test("latest orders uncanceled scans by update, start time, and ID", async () => {
   const older = "2026-08-01T03:00:00.000001+02:00";
   const newer = "2026-08-01T01:00:00.000002Z";
