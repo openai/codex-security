@@ -83,6 +83,7 @@
 - validate inputs and make plans and hooks reusable ([#2594](https://github.com/openai/codex-security/pull/2594))
 - resolve saved scans in the current worktree ([#2590](https://github.com/openai/codex-security/pull/2590))
 - resolve document links against selected sources ([#2430](https://github.com/openai/codex-security/pull/2430))
+- resolve command paths and isolate standalone actions ([#2596](https://github.com/openai/codex-security/pull/2596))
 
 </details>
 

@@ -281,36 +281,57 @@ export async function serveIntegration(
   cli: Cli.Cli,
   cliOptions: Cli.create.Options,
   output: Cli.serve.Options,
+  command: string | undefined,
+  literalArgs: readonly string[],
 ): Promise<boolean> {
   const manifest =
     (argv.includes("--llms") || argv.includes("--llms-full")) &&
     !argv.some((arg) =>
       ["--help", "-h", "--version", "--schema"].includes(arg),
     );
-  if (
-    !manifest &&
-    !argv.some((arg) => ["mcp", "skills", "skill"].includes(arg))
-  )
-    return false;
-  const words = parseArgs({
-    args: argv,
-    options: outputOptions,
-    strict: false,
-    allowPositionals: true,
-  }).positionals;
-  // Incur also accepts its binary name before a built-in command.
-  if (words[0] === cliName) {
-    argv = argv.toSpliced(argv.indexOf(cliName), 1);
-    words.shift();
+  const group = command === "skill" ? "skills" : command;
+  const integration = group === "mcp" || group === "skills";
+  if (!integration && !manifest && group !== "completions") return false;
+  if (group === "completions") {
+    const [, shell, ...extra] = [
+      ...parseArgs({
+        args: argv,
+        options: outputOptions,
+        allowPositionals: true,
+      }).positionals,
+      ...literalArgs,
+    ];
+    if (extra.length)
+      throw new Error("Unexpected positional argument for completions.");
+    if (shell !== undefined && !completionShell.safeParse(shell).success)
+      throw new Error(
+        `Unknown shell. Supported: ${completionShell.options.join(", ")}.`,
+      );
+    if (argv.includes("--schema") || argv.includes("--version")) {
+      const section = Cli.create(cliName + " completions", {
+        version: cliOptions.version,
+        update: false,
+        sync: false,
+        args: z.object({ shell: completionShell }),
+        run: () => undefined,
+      });
+      await section.serve(
+        argv.filter((arg) => arg !== group && arg !== shell),
+        output,
+      );
+      return true;
+    }
+    if (!manifest) {
+      await cli.serve([...argv, ...literalArgs], output);
+      return true;
+    }
   }
-  const group = words[0] === "skill" ? "skills" : words[0];
-  if (!manifest && group !== "mcp" && group !== "skills") return false;
   const { tokens, positionals, values } = parseArgs({
     args: argv,
     options,
     allowPositionals: true,
     tokens: true,
-    strict: group === "mcp" || group === "skills",
+    strict: integration,
   });
   const plain = !Object.keys(formatOptions).some((key) =>
     Object.hasOwn(values, key),
@@ -321,6 +342,18 @@ export async function serveIntegration(
     cliOptions,
     manifest ? undefined : { output, plain, full },
   );
+  if (integration) {
+    const section = group === "mcp" ? mcp : skills;
+    const [, verb, ...extra] = positionals;
+    if (literalArgs.length || extra.length)
+      throw new Error(
+        `Unexpected positional argument for ${group}${verb ? " " + verb : ""}.`,
+      );
+    if (verb && !Cli.toCommands.get(section)!.has(verb)) {
+      await cli.serve([group, verb, "--help"], output);
+      return true;
+    }
+  }
   if (manifest) {
     // Put the mode first so a missing format/filter operand cannot consume it
     // and fall through to a command handler.
@@ -336,11 +369,9 @@ export async function serveIntegration(
     );
     return true;
   }
-  if (group !== "mcp" && group !== "skills") return false;
+  if (!integration) return false;
   const section = group === "mcp" ? mcp : skills;
-  const [, verb, ...extra] = positionals;
-  if (extra.length)
-    throw new Error(`Unexpected positional argument for ${group} ${verb}.`);
+  const [, verb] = positionals;
   if (!verb && !values.version) {
     const invalid = tokens.find(
       (token) =>
@@ -361,10 +392,6 @@ export async function serveIntegration(
         commands: children,
       }) + "\n",
     );
-    return true;
-  }
-  if (verb && !Cli.toCommands.get(section)!.has(verb)) {
-    await cli.serve([group, verb, "--help"], output);
     return true;
   }
   // The public flag names a scope directly. Incur reserves --no-* for
