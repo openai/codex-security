@@ -13,25 +13,36 @@ type HttpResult = {
 
 async function main(): Promise<number> {
   let output: string;
+  let mode: "vulnerable" | "repaired";
   try {
     const { values } = parseArgs({
       options: {
         output: { type: "string" },
+        mode: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
     if (values.help) {
-      console.log("Usage: node validate.mjs --output PATH");
+      console.log(
+        "Usage: node validate.mjs --output PATH [--mode vulnerable|repaired]",
+      );
       return 0;
     }
     if (values.output === undefined) throw new Error("--output is required");
+    if (
+      values.mode !== undefined &&
+      values.mode !== "vulnerable" &&
+      values.mode !== "repaired"
+    )
+      throw new Error("--mode must be vulnerable or repaired");
     output = values.output;
+    mode = values.mode ?? "vulnerable";
   } catch (error) {
     console.error((error as Error).message);
     return 2;
   }
 
-  const server = await createServer();
+  const server = await createServer({ enforceOwnership: mode === "repaired" });
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   async function get(invoice: string, token?: string): Promise<HttpResult> {
     const response = await fetch(`${baseUrl}/invoices/${invoice}`, {
@@ -67,7 +78,7 @@ async function main(): Promise<number> {
     await promisify(server.close).call(server);
   }
 
-  const proof = { ...evidence, server_stopped: true };
+  const proof = { mode, ...evidence, server_stopped: true };
   await mkdir(dirname(output), { recursive: true });
   await writeFile(output, `${JSON.stringify(proof, null, 2)}\n`, "utf8");
   console.log(JSON.stringify(proof));

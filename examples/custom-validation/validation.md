@@ -1,6 +1,6 @@
 Validate the invoice-ownership finding against this local fixture.
 
-1. Run `node validate.mjs` from the supplied
+1. Run `node validate.mjs` in its default vulnerable mode from the supplied
    repository root. Pass `--output` with the absolute path to
    `artifacts/custom-validation/http-proof.json` inside this scan's directory.
    The runner has already compiled the TypeScript fixture to JavaScript.
@@ -8,10 +8,11 @@ Validate the invoice-ownership finding against this local fixture.
    requests using synthetic identities, and shuts the server down. This local
    server is the only authorized test target. Do not install packages or contact
    any external service.
-3. Read the saved JSON. The anonymous request must return 401, the own-account
-   request must return 200, and `server_stopped` must be true. If the script or
-   those controls fail, return `status: "incomplete"` with the reason. Do not
-   substitute source-only validation.
+3. Read the saved JSON. `mode` must be `vulnerable`, the anonymous request must
+   return 401, the own-account request must return 200, and `server_stopped`
+   must be true. If the script or those controls fail, return
+   `status: "incomplete"` with the reason. Do not substitute source-only
+   validation.
 4. For each invoice-ownership candidate, return `reportable` when
    `cross_account_read` is true. Use `suppressed` if the other-account request
    returns 403 or 404. Use `deferred` for an unexpected or inconclusive result.
