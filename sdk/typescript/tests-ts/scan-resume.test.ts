@@ -72,6 +72,7 @@ async function interruptedScan(
     config?: JsonObject;
     providerProfile?: JsonObject;
     recipeRepositoryAlias?: boolean;
+    executableSourcePaths?: string[];
   } = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -945,6 +946,33 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     join(f.scanDir, "scan-manifest.json"),
   ]);
 }
+
+test("bulk recovery passes saved executable source paths to SDK startup", async () => {
+  const projectPath = join(await temporaryDirectory(), "codex-security.yaml");
+  await writeFile(projectPath, "version: 1\n");
+  const f = await interruptedScan("deep", true, {
+    executableSourcePaths: [projectPath],
+  });
+  await rm(join(f.root, "results.jsonl"));
+  const deps = resumeDependencies(f, () => fail("Unexpected model launch"));
+  const { runCli, stderr, stdout } = createCliTest(main);
+  const startupPaths: Array<readonly string[] | undefined> = [];
+  await runCli(
+    ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"],
+    {
+      ...deps,
+      createSecurity(config) {
+        const security = deps.createSecurity(config);
+        security.run = async () => {
+          startupPaths.push(config.executableSourcePaths);
+          throw new Error("Stopped before model launch");
+        };
+        return security;
+      },
+    },
+  );
+  expect(startupPaths, stderr.text() + stdout.text()).toEqual([[projectPath]]);
+});
 
 test.each(["completed", "failed"] as const)(
   "bulk recovery retains original correlation and unpriced usage after %s without a ledger",

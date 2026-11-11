@@ -6288,6 +6288,7 @@ export async function main(
                       pluginPath: options.pluginPath,
                       pythonPath: options.python,
                       codexOverrides: recipe.codexOverrides,
+                      executableSourcePaths: recipe.executableSourcePaths,
                     });
                     try {
                       return await security.run(recipe.repository!, {

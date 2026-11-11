@@ -84,6 +84,7 @@ def resolve_deep_scan_setup(
         try:
             destination = path.resolve(strict=True)
         except FileNotFoundError:
+            # The optional user configuration can be absent.
             pass
         except OSError as exc:
             raise SystemExit(

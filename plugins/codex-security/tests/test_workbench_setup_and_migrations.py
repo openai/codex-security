@@ -199,25 +199,33 @@ def create_historical_database(
     "last_preview",
     ["persist scan target executable protection", "persist scan execution sessions"],
 )
-def test_composition_preview_keeps_receipts_when_host_worker_gap_is_added(
+@pytest.mark.parametrize("worker_gap_applied", [False, True])
+def test_composition_preview_keeps_receipts_across_released_migrations(
     last_preview: str,
+    worker_gap_applied: bool,
 ) -> None:
-    connection, migrate = create_historical_database(63)
+    connection, migrate = create_historical_database(64 if worker_gap_applied else 63)
     preview = [
         (63, "persist composition child membership", "membership"),
         (64, "reuse scan severity assessments", "severity"),
         (65, last_preview, "final"),
+        (66, "recover unindexed severity assessments", "unindexed"),
+        (67, "repair stored composition membership", "repair"),
+        (68, "repair archived composition paths", "paths"),
     ]
     with closing(connection):
-        connection.executemany("INSERT INTO schema_migrations VALUES (?, ?, ?)", preview)
+        connection.executemany(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            [(version + int(worker_gap_applied), name, stamp) for version, name, stamp in preview],
+        )
         for _ in range(2):
             migrate(connection)
             rows = connection.execute(
-                "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 64 "
+                "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 67 "
                 "ORDER BY version"
             )
             assert [tuple(row) for row in rows] == [
-                (version + 1, name, timestamp) for version, name, timestamp in preview
+                (version + 4, name, timestamp) for version, name, timestamp in preview
             ]
             assert (
                 connection.execute(
@@ -225,6 +233,11 @@ def test_composition_preview_keeps_receipts_when_host_worker_gap_is_added(
                 ).fetchone()[0]
                 == "retain unverified Deep Scan worker attempts"
             )
+            assert {
+                "log_completed_at",
+                "windows_resume_output_identity",
+                "windows_resume_target_identity",
+            } <= {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
             assert "worker_usage_gap" in {
                 row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
             }

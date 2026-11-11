@@ -43,6 +43,7 @@ const validateProjectConfig = new Ajv({
 
 export interface ProjectConfigSource {
   path?: string;
+  selectedPath?: string;
   resolvedPath?: string;
   directory: string;
   input: ProjectConfigInput;
@@ -143,9 +144,9 @@ export async function readProjectConfig(
     ? selected
     : `${directory || "."}${sep}${selected}`;
   const traversesParent = sep === "/" && requested.split("/").includes("..");
-  let path = traversesParent ? requested : resolve(directory, selected);
+  const selectedPath = resolve(directory, selected);
+  let path = traversesParent ? requested : selectedPath;
   const extension = projectConfigExtension(path);
-  let settingsDirectory = dirname(path);
   let text: string;
   let resolvedPath: string;
   try {
@@ -158,7 +159,6 @@ export async function readProjectConfig(
         );
       path = resolve(parent.toString(), basename(path));
     }
-    settingsDirectory = dirname(path);
     resolvedPath = await realpath(path);
     text = await readFile(resolvedPath, "utf8");
   } catch (error) {
@@ -187,8 +187,9 @@ export async function readProjectConfig(
   requireProjectConfig(value, path);
   return {
     path,
+    ...(selectedPath === path ? {} : { selectedPath }),
     ...(path === resolvedPath ? {} : { resolvedPath }),
-    directory: settingsDirectory,
+    directory: dirname(path),
     input: value,
   };
 }
@@ -445,6 +446,7 @@ export function resolveScanSettings(
         ? {
             executableSourcePaths: [
               ...new Set([
+                ...(project.selectedPath ? [project.selectedPath] : []),
                 project.path,
                 resolve(project.directory, basename(project.path)),
                 ...(project.resolvedPath ? [project.resolvedPath] : []),
