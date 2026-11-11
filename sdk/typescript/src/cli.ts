@@ -302,6 +302,7 @@ import type { ScanResult } from "./result.js";
 import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
+  runCodexCommand,
   cleanupSdkDirectory,
   createIsolatedHome,
   resolvePluginPath,
@@ -1715,6 +1716,9 @@ function signalHandlers(
   dependencies[`${operation}SignalListener`]("SIGTERM", terminate);
 }
 
+// Login and status must not load configuration from the caller's checkout.
+const NEUTRAL_CODEX_CWD = parse(process.execPath).root;
+
 export async function runCodexSkillCommand(
   args: readonly string[],
   output?: SkillCommandOutput,
@@ -1990,7 +1994,7 @@ async function runCodexSkillProcess(
       [...args],
       {
         env: environment,
-        cwd: output?.appServer?.directory ?? parse(process.execPath).root,
+        cwd: output?.appServer?.directory ?? NEUTRAL_CODEX_CWD,
         stdio:
           output === undefined
             ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
@@ -5069,9 +5073,23 @@ export async function main(
         });
       },
     });
+  const withLoginEnvironment = async (
+    run: (
+      environment: NodeJS.ProcessEnv & { CODEX_HOME: string },
+    ) => Promise<number>,
+  ) => {
+    const home = await prepareCodexSecurityCredentialHome(
+      dependencies.environment,
+    );
+    return withCredentialHomeLock(home, () =>
+      run({ ...dependencies.environment, CODEX_HOME: home }),
+    );
+  };
+
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
+    bundledPluginAvailable: z.boolean(),
     scanMcp: z.literal(false),
     cancellationNote: z.string(),
     cliVersion: z.string(),
@@ -7556,103 +7574,76 @@ export async function main(
         }
       },
     })
-    .command("login", {
-      description: "Sign in with ChatGPT or store credentials.",
-      hint:
-        "For remote login, use --device-auth if your workspace allows it.\n" +
-        "If device auth is disabled, sign in over SSH:\n" +
-        "  On your local machine (replace user@remote):\n" +
-        "    ssh -L 1455:localhost:1455 user@remote\n" +
-        "  In that SSH session:\n" +
-        "    codex-security login\n" +
-        "  Open the sign-in URL in your local browser.\n" +
-        "  Keep SSH connected until login finishes.\n" +
-        "Docs: https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
-      destructive: true,
-      args: z.object({
-        action: z
-          .enum(["status"])
-          .optional()
-          .describe("Use status to inspect credentials; omit to sign in."),
-      }),
-      options: z.object({
-        deviceAuth: z
-          .boolean()
-          .default(false)
-          .describe("Use device auth if your workspace allows it."),
-        withApiKey: z
-          .boolean()
-          .default(false)
-          .describe("Read an API key from stdin."),
-        withAccessToken: z
-          .boolean()
-          .default(false)
-          .describe("Read an access token from stdin."),
-      }),
-      examples: [
-        { args: {}, description: "Sign in with ChatGPT." },
-        { args: { action: "status" }, description: "Check authentication." },
-      ],
-      async run({ args, options }) {
-        const credentialHome = await prepareCodexSecurityCredentialHome(
-          dependencies.environment,
-        );
-        const authentication = scanAuthentication(dependencies.environment);
-        exitCode = await withCredentialHomeLock(credentialHome, async () => {
-          if (args.action === undefined) {
+    .command(
+      Cli.create("login", {
+        description: "Sign in with ChatGPT or store credentials.",
+        hint: "Check the effective sign-in with codex-security login status. For a remote machine use --device-auth if your workspace permits it. For SSH, on your local machine run:\n    ssh -L 1455:localhost:1455 user@remote\nThen, in that SSH session:\n    codex-security login\nOpen the sign-in URL locally and keep SSH connected until login finishes.\nhttps://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
+        destructive: true,
+        options: z.object({
+          deviceAuth: z
+            .boolean()
+            .default(false)
+            .describe("Use device auth if your workspace allows it."),
+          withApiKey: z
+            .boolean()
+            .default(false)
+            .describe("Read an API key from stdin."),
+          withAccessToken: z
+            .boolean()
+            .default(false)
+            .describe("Read an access token from stdin."),
+        }),
+        examples: [
+          { options: {}, description: "Sign in using the browser." },
+          {
+            options: { deviceAuth: true },
+            description: "Sign in from a headless machine with device auth.",
+          },
+          {
+            options: { withApiKey: true },
+            description:
+              "Pipe an API key on stdin from your credential source.",
+          },
+        ],
+        async run({ options }) {
+          const authentication = scanAuthentication(dependencies.environment);
+          exitCode = await withLoginEnvironment(async (environment) => {
             await prepareLoginConfig(
-              credentialHome,
+              environment.CODEX_HOME,
               await readCodexAuthConfig(
                 scanCodexHome(dependencies.environment),
                 true,
               ),
             );
-          } else if (authentication.method !== "api_key") {
-            await initialCredentialsAvailable(
-              dependencies.environment,
-              scanCodexHome(dependencies.environment),
-              credentialHome,
+            const status = await dependencies.runCodex(
+              [
+                "login",
+                ...(options.deviceAuth ? ["--device-auth"] : []),
+                ...(options.withApiKey ? ["--with-api-key"] : []),
+                ...(options.withAccessToken ? ["--with-access-token"] : []),
+              ],
+              undefined,
+              environment,
             );
-          }
-          const status = await dependencies.runCodex(
-            [
-              "login",
-              ...(args.action === undefined ? [] : [args.action]),
-              ...(options.deviceAuth ? ["--device-auth"] : []),
-              ...(options.withApiKey ? ["--with-api-key"] : []),
-              ...(options.withAccessToken ? ["--with-access-token"] : []),
-            ],
-            undefined,
-            { ...dependencies.environment, CODEX_HOME: credentialHome },
-          );
-          if (args.action === undefined && status === 0) {
-            await setCodexSecurityCredentialLogout(credentialHome, false);
-          }
-          return status;
-        });
-        if (args.action === "status") {
+            if (status === 0)
+              await setCodexSecurityCredentialLogout(
+                environment.CODEX_HOME,
+                false,
+              );
+            return status;
+          });
           if (
-            authentication.method === "api_key" &&
-            (exitCode === 0 || exitCode === 1)
+            exitCode === 0 &&
+            !options.withApiKey &&
+            authentication.method === "api_key"
           ) {
-            exitCode = 0;
-            errorOutput.write(
-              `Effective scan authentication: API key from ${authentication.source}.\n`,
-            );
-            errorOutput.write(
-              `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
-            );
-          }
-        } else if (exitCode === 0 && !options.withApiKey) {
-          if (authentication.method === "api_key") {
-            const configuredApiKeyVariables = Object.entries(
+            const configuredApiKeyVariables = Object.keys(
               dependencies.environment,
-            ).flatMap(([name, value]) =>
-              value?.trim() &&
-              (name.toUpperCase() === "OPENAI_API_KEY" ||
-                name.toUpperCase() === "CODEX_API_KEY")
-                ? name
-                : [],
+            ).filter(
+              (name) =>
+                ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(
+                  name.toUpperCase(),
+                ) && dependencies.environment[name]?.trim(),
             );
             const loginWarning = options.withAccessToken
               ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
@@ -7667,23 +7658,80 @@ export async function main(
                 `${formatEnvironmentVariableRemovalGuidance(configuredApiKeyVariables)}.\n`,
             );
           }
-        }
-      },
-    })
+        },
+      }).command("status", {
+        description: "Check effective scan authentication.",
+        hint: "Use codex-security login status --json for automation. With stored credentials, the first check can import an existing Codex sign-in.",
+        output: z
+          .object({
+            authenticated: z.boolean(),
+            method: z.enum(["api_key", "stored_credentials"]),
+            source: z.string().optional(),
+          })
+          .optional(),
+        async run({ format }) {
+          const structured = !useDefaultOutput(format);
+          const authentication = scanAuthentication(dependencies.environment);
+          exitCode = await withLoginEnvironment(async (environment) => {
+            if (authentication.method !== "api_key")
+              await initialCredentialsAvailable(
+                dependencies.environment,
+                scanCodexHome(dependencies.environment),
+                environment.CODEX_HOME,
+              );
+            if (!structured)
+              return await dependencies.runCodex(
+                ["login", "status"],
+                undefined,
+                environment,
+              );
+            const native = await runCodexCommand(
+              resolveCodexCommand(environment),
+              ["login", "status"],
+              environment,
+              undefined,
+              undefined,
+              { cwd: NEUTRAL_CODEX_CWD },
+            );
+            for (const diagnostic of [native.stdout, native.stderr]) {
+              if (diagnostic.trim())
+                errorOutput.write(`${diagnosticLines(diagnostic.trimEnd())}\n`);
+            }
+            return native.exitCode ?? 2;
+          });
+          if (
+            authentication.method === "api_key" &&
+            (exitCode === 0 || exitCode === 1)
+          ) {
+            exitCode = 0;
+            errorOutput.write(
+              `Effective scan authentication: API key from ${authentication.source}.\n`,
+            );
+            errorOutput.write(
+              `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
+            );
+          }
+          if (structured)
+            return {
+              authenticated: exitCode === 0,
+              ...(authentication.method === "api_key"
+                ? {
+                    method: authentication.method,
+                    source: authentication.source,
+                  }
+                : { method: "stored_credentials" as const }),
+            };
+        },
+      }),
+    )
     .command("logout", {
-      description: "Remove the stored sign-in.",
+      description: "Remove the stored Codex Security sign-in.",
+      hint: "Check the effective account with codex-security login status. Scans can still use an API key configured in your environment.",
       destructive: true,
       async run() {
-        const credentialHome = await prepareCodexSecurityCredentialHome(
-          dependencies.environment,
-        );
-        const environment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await withCredentialHomeLock(credentialHome, () =>
+        exitCode = await withLoginEnvironment((environment) =>
           logoutCredentialHome(
-            credentialHome,
+            environment.CODEX_HOME,
             scanCodexHome(dependencies.environment),
             (store) =>
               dependencies.runCodex(
@@ -7697,7 +7745,7 @@ export async function main(
     })
     .command("init", {
       description: "Create a starter project configuration.",
-      hint: "Existing files are never overwritten.",
+      hint: "Use the generated file with scan . -c FILE --dry-run. Existing files are never overwritten.",
       destructive: true,
       args: z.object({
         file: z
@@ -7707,21 +7755,30 @@ export async function main(
           .describe("YAML or JSON destination (default: codex-security.yaml)."),
       }),
       output: z.object({ path: z.string() }).optional(),
-      async run({ args }) {
+      async run({ args, format }) {
+        let preview: string | undefined;
         try {
           const directory = dependencies.currentDirectory();
           const path = resolveCliPath(
             directory,
             args.file ?? "codex-security.yaml",
           );
+          preview = `${PREVIEW_LABEL}: ${projectPreviewCommand(directory, path)}`;
           await writeFile(path, projectConfigStarter(path, directory), {
             flag: "wx",
             mode: 0o600,
           });
+          if (useDefaultOutput(format)) {
+            if (output.isTTY)
+              renderedOutput = `Created ${escapeTerminalText(path)}\n${preview}\n`;
+            else errorOutput.write(`${preview}\n`);
+          }
           return { path };
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          if ((error as NodeJS.ErrnoException).code === "EEXIST" && preview)
+            errorOutput.write(`${preview}\n`);
           throw error;
         }
       },
@@ -7817,7 +7874,7 @@ export async function main(
         },
       },
       output: infoOutput,
-      async run({ options }) {
+      async run({ options, format }) {
         const directory = dependencies.currentDirectory();
         const project = await selectedProjectConfig(
           options.config,
@@ -7840,23 +7897,50 @@ export async function main(
                 ),
               )
             : undefined;
+        const model = scanModelConfiguration(codex);
+        const sources = configurationSources(resolved.sources, deep?.sources);
+        const nextStep = projectPreviewCommand(directory, project?.path);
+        const bundledPluginAvailable = Boolean(
+          await bundledPluginRoot().catch(() => undefined),
+        );
+        if (output.isTTY && useDefaultOutput(format)) {
+          const overrides = Object.entries(sources)
+            .filter(([, source]) => source !== "default")
+            .map(([key, source]) => `${key} (${source})`);
+          const { mode, auth, target, maxCostUsd } = resolved.options;
+          renderedOutput =
+            [
+              `${PREVIEW_LABEL}: ${nextStep}`,
+              `Configuration: ${project?.path ?? "defaults"}`,
+              `Scope: ${typeof target === "string" ? target : JSON.stringify(target)}`,
+              `Scan: ${mode} · ${model.model} (${model.reasoningEffort}) · auth ${auth}`,
+              ...(maxCostUsd === undefined
+                ? []
+                : [`Cost limit: $${maxCostUsd}`]),
+              `Bundled plugin: ${BUNDLED_PLUGIN_VERSION} (${bundledPluginAvailable ? "available" : "missing"})`,
+              ...(overrides.length
+                ? [`Overrides: ${overrides.join(", ")}`]
+                : []),
+            ]
+              .map((line) => escapeTerminalText(line))
+              .join("\n") + "\n";
+        }
         return {
           sdkVersion: VERSION,
           bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
+          bundledPluginAvailable,
           scanMcp: false as const,
           cancellationNote:
             "Scans are CLI-only because the MCP transport cannot cancel active commands.",
           cliVersion: VERSION,
           codexVersion: CODEX_EXECUTABLE_VERSION,
           codexSdkVersion: CODEX_SDK_VERSION,
-          ...scanModelConfiguration(codex),
-          nextStep: project
-            ? "Run codex-security scan . -c FILE --dry-run, replacing FILE with the project configuration you selected."
-            : "codex-security scan . --dry-run",
+          ...model,
+          nextStep,
           configuration: {
             ...(project?.path === undefined ? {} : { path: project.path }),
             settings: { ...resolved.options, ...deep?.settings },
-            sources: configurationSources(resolved.sources, deep?.sources),
+            sources,
           },
         };
       },
@@ -7910,7 +7994,8 @@ export async function main(
     const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
-      ["validate", "login", "logout"].includes(command) &&
+      (["validate", "logout"].includes(command) ||
+        (command === "login" && following !== "status")) &&
       !argv.includes("--schema")
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
@@ -8027,6 +8112,13 @@ export async function main(
         return `Missing value for flag: ${option}`;
       }
       index += 1;
+    }
+    if (
+      command === "login" &&
+      positionals.length > 0 &&
+      (following !== "status" || positionals.length !== 1)
+    ) {
+      return "Use login to sign in or login status to inspect authentication.";
     }
     if (
       subcommand === "match" &&
@@ -10812,6 +10904,20 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function diagnosticLines(value: unknown): string {
   return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
+}
+
+const PREVIEW_LABEL =
+  process.platform === "win32" ? "Next (PowerShell)" : "Next";
+
+function projectPreviewCommand(directory: string, path?: string): string {
+  if (path === undefined) return "codex-security scan . --dry-run";
+  const local = relative(directory, path);
+  let file = local.split(/[\\/]/u)[0] === ".." ? path : local;
+  if (file.startsWith("-") || file.startsWith("~")) file = `./${file}`;
+  // Keep terminal controls out of suggested commands and quote shell syntax.
+  if (escapeTerminalText(file) !== file)
+    return "codex-security scan . -c FILE --dry-run (replace FILE with the selected path)";
+  return `codex-security scan . -c ${quoteCliPath(file)} --dry-run`;
 }
 
 function diagnosticValue(value: unknown): string {

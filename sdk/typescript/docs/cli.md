@@ -156,6 +156,8 @@ If Codex Security reports that the refresh token was already used, run
 `codex-security logout`, then `codex-security login`. If your Codex CLI or app
 reports that error, sign out and sign back in there.
 
+Use `codex-security login status --json` in automation. Its stdout reports `authenticated`, the effective authentication `method`, and the environment variable name when an API key takes precedence. Native diagnostics go to stderr. The command keeps the exit status of the human-readable status check.
+
 For other refresh errors, check `codex-security login status`. Retry if the
 sign-in recently changed. Otherwise run `codex-security logout`, then
 `codex-security login`.
