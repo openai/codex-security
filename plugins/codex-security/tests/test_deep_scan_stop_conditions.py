@@ -615,12 +615,12 @@ def test_count_capped_repair_after_deadline_preserves_original_cutoff(
     assert repaired["completedAt"] == selected_at
 
 
-@pytest.mark.parametrize("checkpoint", ["late", "complete", "sparse"])
+@pytest.mark.parametrize("checkpoint", ["late", "complete", "sparse", "sparse-normalized"])
 def test_evidence_repair_preserves_selected_deadline_findings(
     workbench_api, workbench_db, deadline_scan, checkpoint, monkeypatch
 ):
     scan = deadline_scan
-    sparse = checkpoint == "sparse"
+    sparse = checkpoint.startswith("sparse")
     worker_id, output = scan.canceled_discovery_output(attempt=2 if sparse else 1)
     worker_finding = copy.deepcopy(scan.findings[0])
     worker_finding.update(
@@ -629,6 +629,8 @@ def test_evidence_repair_preserves_selected_deadline_findings(
     if sparse:
         del worker_finding["validation"]
         output = output.parent / "attempts" / "attempt-1"
+    if checkpoint == "sparse-normalized":
+        worker_finding["codeEvidence"].append(None)
     surface = {"id": "entry", "label": "Worker review", "disposition": "reported"}
     if sparse:
         receipt = output / "artifacts" / "proof.md"

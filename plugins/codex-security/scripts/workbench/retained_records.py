@@ -643,7 +643,7 @@ def _legacy_identity_key(finding: dict[str, Any], owner: str | None) -> str:
     return _digest([owner, _identity_candidate(finding), content])
 
 
-def selected_deadline_sources(scan_dir, scan_id, preserved, workers, selected, surfaces):
+def selected_deadline_sources(scan_dir, scan_id, preserved, workers, selected, surfaces, binding):
     """Recover exact observation links from the selected deadline's recorded sources."""
 
     def match_key(owner, finding):
@@ -696,13 +696,17 @@ def selected_deadline_sources(scan_dir, scan_id, preserved, workers, selected, s
                     _digest(_coverage_comparison_row(projected, "surfaces"))
                 ):
                     surface_ids.add(surface_id)
-        for index, row in enumerate(draft["findings"]):
+        source_indexes = {}
+        _recover_preserved_worker_source(
+            scan_dir, path, scan_id, binding, owner, worker, draft, [], source_indexes
+        )
+        for row in draft["findings"]:
             if isinstance(row, dict) and (key := selected_keys.get(match_key(owner, row))):
                 # Repeated identical findings do not establish which observation was selected.
                 sources[key] = (
                     None
                     if key in sources
-                    else _DeadlineFindingSource(path, index, attempt, surface_ids)
+                    else _DeadlineFindingSource(path, source_indexes[id(row)], attempt, surface_ids)
                 )
     return {key: source for key, source in sources.items() if source is not None}
 

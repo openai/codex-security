@@ -1357,6 +1357,7 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                     workers,
                     selected["findings"],
                     coverage["surfaces"],
+                    manifest["scan"],
                 )
                 _defer_incomplete_deadline_findings(
                     findings,
