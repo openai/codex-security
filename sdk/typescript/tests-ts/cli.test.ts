@@ -2043,7 +2043,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "does not emit an ok: true envelope for a failed structured history command with full output %p",
+    "reports a structured history failure with full output %p",
     async (fullOutput) => {
       for (const argv of [
         ["scans", "show", "--json"],
@@ -2064,10 +2064,14 @@ describe("CLI", () => {
           },
         );
         expect(result).toBe(2);
-        expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain(
-          "Scan ID prefixes must be at least eight characters.",
-        );
+        const message = "Scan ID prefixes must be at least eight characters.";
+        if (fullOutput)
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { message },
+          });
+        else expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(message);
       }
     },
   );

@@ -191,6 +191,10 @@ function optionRow(row: Row, command: string): Row {
     }
     return `<${VALUE_LABELS[name] ?? (type === "number" ? "count" : name)}>`;
   });
+  if (name === "token-limit")
+    description = "Maximum tokens in the text view (nonnegative integer).";
+  if (name === "token-offset")
+    description = "Start the text view at this token (nonnegative integer).";
   label = label.replace(/^--([\w-]+), (-\w)/u, "$2, --$1");
   if (command === "scan" && !/default:/iu.test(description)) {
     const setting = DEEP_SCAN_SETTINGS.find(

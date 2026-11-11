@@ -274,6 +274,55 @@ describe("CLI diagnostics", () => {
     }
   });
 
+  test.each(
+    [
+      ["info", "--badOption"],
+      ["info", "unexpected"],
+      ["import", "github", "invalid"],
+      ["import", "github-advisories", "invalid"],
+      ["scan", "import", "--csv", "missing.csv", "--dry-run"],
+      ["scans", "show", "missing"],
+    ].map((command) => ({ command })),
+  )("emits one full JSON error for $command", async ({ command }) => {
+    for (const format of [["--json"], ["--format=jsonl"]]) {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const deps = dependencies();
+      deps.runWorkbench = throwing("Missing saved scan.");
+      expect(
+        await runCli(
+          [...command, ...format, "--full-output", "--token-limit=1"],
+          deps,
+        ),
+      ).toBe(2);
+      const failure = JSON.parse(stdout.text());
+      expect(failure.ok).toBe(false);
+      expect(typeof failure.error.code).toBe("string");
+      expect(stderr.text()).toContain(failure.error.message.split("\n")[0]);
+      expect(stderr.text()).not.toContain('"ok":');
+      if (format[0] === "--format=jsonl")
+        expect(stdout.text().trimEnd().split("\n")).toHaveLength(1);
+    }
+  });
+
+  test.each(["--token-limit", "--token-offset"])(
+    "checks %s before executing the command",
+    async (flag) => {
+      for (const operand of ["", "-1", "1.5", "NaN", "9007199254740992"]) {
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const deps = dependencies();
+        deps.currentDirectory = throwing("Unexpected execution.");
+        expect(
+          await runCli(
+            ["info", "--json", "--full-output", `${flag}=${operand}`],
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toContain("nonnegative integer");
+        expect(JSON.parse(stdout.text()).error.message).toContain(flag);
+      }
+    },
+  );
+
   test("does not format a token count after patch fails", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
     const deps = dependencies();
