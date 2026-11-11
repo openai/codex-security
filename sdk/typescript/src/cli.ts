@@ -32,6 +32,7 @@ import {
   appendFile,
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   open,
   readFile,
