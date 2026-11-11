@@ -10495,7 +10495,7 @@ async function patchCommandContext(
   const physicalDirectory = await realpath(directory);
   const physicalRoot = await realpath(repository);
   const gitDirectoryBase =
-    dependencies.environment["GIT_DIR"] === undefined
+    environmentEntry(dependencies.environment, "GIT_DIR") === undefined
       ? physicalDirectory
       : directory;
   // Preserve aliases used by includeIf.gitdir; adding a worktree would canonicalize them.
@@ -10505,8 +10505,8 @@ async function patchCommandContext(
       : process.platform === "win32" && /^[a-z]:/iu.test(gitDirectory)
         ? resolve(gitDirectoryBase, gitDirectory)
         : `${gitDirectoryBase.replaceAll(sep, "/")}/${gitDirectory}`,
-    ...(dependencies.environment["GIT_DIR"] !== undefined &&
-    dependencies.environment["GIT_WORK_TREE"] === undefined
+    ...(environmentEntry(dependencies.environment, "GIT_DIR") !== undefined &&
+    environmentEntry(dependencies.environment, "GIT_WORK_TREE") === undefined
       ? {}
       : { GIT_WORK_TREE: repository }),
   };
@@ -10529,7 +10529,7 @@ async function patchCommandContext(
     environment[name] = helper.executable ?? "";
   }
   const commonReference =
-    dependencies.environment["GIT_COMMON_DIR"] === undefined
+    environmentEntry(dependencies.environment, "GIT_COMMON_DIR") === undefined
       ? undefined
       : await gitPath(["--git-common-dir"]);
   const administrationReferences: PatchGitAdministrationReference[] = [];
@@ -10556,7 +10556,7 @@ async function patchCommandContext(
     ["GIT_INDEX_FILE", ["--git-path", "index"]],
     ["GIT_OBJECT_DIRECTORY", ["--git-path", "objects"]],
   ] as const) {
-    if (dependencies.environment[name] !== undefined)
+    if (environmentEntry(dependencies.environment, name) !== undefined)
       environment[name] = await gitPath(["--path-format=absolute", ...args]);
   }
   if (
@@ -10732,7 +10732,7 @@ async function bindPatchCommandContext(
       "Patch directory now resolves outside the selected repository. Local edits and patches were kept.",
     );
   const inspectChangedDirectory =
-    dependencies.environment["GIT_DIR"] === undefined &&
+    environmentEntry(dependencies.environment, "GIT_DIR") === undefined &&
     currentDirectory !== undefined &&
     currentDirectory !== context.directory;
   const gitDirectory = await dependencies.runRepositoryCommand(
@@ -12996,7 +12996,8 @@ async function runPatchRiskAssessment(
     ...(request.environment ?? dependencies.environment),
     ...Object.fromEntries(
       Object.entries(context.environment).filter(
-        ([name]) => dependencies.environment[name] !== undefined,
+        ([name]) =>
+          environmentEntry(dependencies.environment, name) !== undefined,
       ),
     ),
   };
