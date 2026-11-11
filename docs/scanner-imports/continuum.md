@@ -103,6 +103,51 @@ artifact with its ID (`artifactId`), exact patch text (`patch`), SHA-256
 (`patchSha256`), byte count (`sizeBytes`), and AWS format and repository name
 when supplied.
 
+### Patch and verify one finding
+
+From the checkout you want to fix, set `finding` to the path of a
+single-finding collector capture. To use a local workbench record instead,
+select its evidence by the finding ARN and the source key used at import.
+
+```sh
+out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
+  codex-security findings imported . --format json > "$out/imported.json" &&
+  jq -e --arg arn "$FINDING_ARN" --arg key "$SOURCE_KEY" \
+    '.findings[] | select(.provider == "continuum" and .sourceKey == $key and .sourceFindingId == $arn) | .evidence' \
+    "$out/imported.json" > "$out/finding.json" &&
+  finding="$out/finding.json"
+```
+
+```mermaid
+flowchart LR
+    A[Continuum finding] --> C[Collector capture]
+    B[Linked issue PATCH artifacts] --> C
+    C --> F[One finding file]
+    C --> I[Import to local workbench]
+    I -->|Select stored evidence| F
+    F --> B0[validate on original checkout]
+    F --> P[patch in writable checkout]
+    P -->|Resulting diff| V[verify-fix on edited checkout]
+    F --> V
+```
+
+`validate` assesses the original checkout. When an AWS patch is available,
+`patch` starts from that diff and adapts it to the current code as needed.
+
+```sh
+codex-security validate "$finding"
+codex-security patch "$finding"
+```
+
+Review the resulting diff and run the relevant regression tests. Use the same
+finding file for an independent read-only check of the edited checkout.
+`verify-fix` reports `fixed`, `still_vulnerable`, or `inconclusive` with evidence.
+
+```sh
+git diff
+codex-security verify-fix "$finding"
+```
+
 <a id="publish-to-your-cloud-inbox"></a>
 
 ### Publish to Cloud
