@@ -350,7 +350,13 @@ for (const linked of [false, true]) {
           },
         },
       );
-      if (linked) await expect(result).rejects.toThrow("regular, unlinked");
+      if (linked)
+        await expect(result).rejects.toThrow(
+          // The native Windows sandbox can deny creating the link before copyback.
+          process.platform === "win32"
+            ? /regular, unlinked COMMIT_EDITMSG|EPERM: operation not permitted, link .*COMMIT_EDITMSG' -> '.*COMMIT_EDITMSG\.link'/u
+            : "regular, unlinked COMMIT_EDITMSG",
+        );
       else await expect(result).rejects.toThrow();
       expect(git("rev-parse", "HEAD")).toBe(head);
       const retained = await readFile(message, "utf8");
