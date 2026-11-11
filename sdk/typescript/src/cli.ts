@@ -13610,6 +13610,7 @@ async function snapshotPatchTree(
               : [dirname(options.indexFile)]),
           ],
           environment: {
+            ...options?.environment,
             GIT_LITERAL_PATHSPECS: "0",
             ...(commandRoot === repository
               ? {}
@@ -13622,14 +13623,17 @@ async function snapshotPatchTree(
       ),
     async (run) => {
       await run(["add", "--all", ...sourcePathspecs]);
-      const sparse = await run([
-        "config",
-        "--bool",
-        "--default",
-        "false",
-        "--get",
-        "core.sparseCheckout",
-      ]);
+      const sparse = await run(
+        [
+          "config",
+          "--bool",
+          "--default",
+          "false",
+          "--get",
+          "core.sparseCheckout",
+        ],
+        { environment: { GIT_CONFIG: undefined } },
+      );
       if (sparse.trim() === "true") {
         // A sparse private index must retain absent out-of-cone entries, but
         // also capture tracked or new files the turn materialized outside it.
