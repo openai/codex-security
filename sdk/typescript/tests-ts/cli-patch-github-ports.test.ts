@@ -7,6 +7,7 @@ import {
   publicationRepository,
   resultWithFindings,
   runGitRepositoryCommand,
+  runLocalHostingTransport,
   runWorkflow,
   savedScan,
 } from "./cli-patch-fixtures.js";
@@ -100,7 +101,7 @@ describe("GitHub patch endpoint ports", () => {
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (args.includes("ls-remote"))
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   ["ls-remote", "--heads", "--", remote],
                   cwd,
@@ -109,7 +110,7 @@ describe("GitHub patch endpoint ports", () => {
               if (args[0] === "push") {
                 pushes++;
                 expect(git("remote", "get-url", "--push", "origin")).toBe(push);
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   args.map((arg) => (arg === "origin" ? remote : arg)),
                   cwd,

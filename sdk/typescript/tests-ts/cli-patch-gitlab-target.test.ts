@@ -8,6 +8,7 @@ import {
   publicationRepository,
   resultWithFindings,
   runGitRepositoryCommand,
+  runLocalHostingTransport,
   runWorkflow,
   savedScan,
 } from "./cli-patch-fixtures.js";
@@ -174,7 +175,7 @@ describe("GitLab patch destinations", () => {
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (args.includes("ls-remote"))
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   ["ls-remote", "--heads", "--", remote],
                   cwd,
@@ -182,7 +183,7 @@ describe("GitLab patch destinations", () => {
                 );
               if (args[0] === "push") {
                 pushes++;
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   args.map((arg) => (arg === "origin" ? remote : arg)),
                   cwd,

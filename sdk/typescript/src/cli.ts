@@ -10020,10 +10020,10 @@ async function patchPublicationDestination(
         "Patch publication cannot use a Git remote helper selected by the checkout.",
       );
   }
-  const remote = pushRemotes.find(isNetworkPatchRemote);
-  if (!remote)
+  const remote = pushRemotes[0];
+  if (!remote || !pushRemotes.every(isNetworkPatchRemote))
     throw new CodexSecurityError(
-      "Patch publication requires a network push URL for origin.",
+      "Patch publication requires a network push URL for every origin destination.",
     );
   // A branch-conditional include can change core.sshCommand after the patch
   // branch is created. Reuse the trusted transport selected before the turn.
@@ -10451,6 +10451,17 @@ async function patchTransportEnvironment(
     pinned[`GIT_CONFIG_VALUE_${count++}`] = value;
     pinned["GIT_CONFIG_COUNT"] = String(count);
   };
+  // Git resolves the remote again when the actual transport starts.
+  set("protocol.file.allow", "never");
+  const protocols = environmentEntry(
+    dependencies.environment,
+    "GIT_ALLOW_PROTOCOL",
+  );
+  if (protocols !== undefined)
+    pinned["GIT_ALLOW_PROTOCOL"] = protocols
+      .split(":")
+      .filter((protocol) => protocol !== "file")
+      .join(":");
   // An empty command-scope value clears every inherited server-side push option.
   if (pushing) set("push.pushOption", "");
   if (!remotes.some((remote) => /^https?:\/\//u.test(remote))) return pinned;

@@ -14,6 +14,7 @@ import {
   completePatches,
   runWorkflow,
   runGitRepositoryCommand,
+  runLocalHostingTransport,
   publicationRepository as createPublicationRepository,
 } from "./cli-patch-fixtures.js";
 
@@ -755,14 +756,14 @@ exit 1
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (args.includes("ls-remote"))
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   ["ls-remote", "--heads", "--", remote],
                   cwd,
                   options,
                 );
               if (args[0] === "push")
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   args.map((arg) => (arg === "origin" ? remote : arg)),
                   cwd,
@@ -1574,7 +1575,7 @@ exit 1
                   : `hostname ${transport.endsWith("ipv6-api") ? "::1" : transport === "ssh-host" ? "ssh.github.com" : hostingHost}`;
               }
               if (args.includes("ls-remote"))
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   ["ls-remote", "--heads", "--", remote],
                   cwd,
@@ -1598,7 +1599,7 @@ exit 1
                   "origin",
                   `${git("rev-parse", branch)}:refs/heads/${branch}`,
                 ]);
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   [
                     "push",
@@ -1685,7 +1686,7 @@ exit 1
         },
         { localHosting: false },
       );
-      const localPushes = transport === "local" || localOnly;
+      const localPushes = transport === "local" || localOnly || localFirst;
       if (localPushes) {
         expect(outcome.exitCode, outcome.stderr).toBe(2);
         expect(outcome.stderr).toContain("network push URL");
