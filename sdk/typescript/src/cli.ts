@@ -1454,7 +1454,7 @@ interface SkillRunOptions {
   onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   onBeforeTurn?: (
     signal?: AbortSignal,
-    hostFilterSettings?: PatchGitControls["hostFilterSettings"],
+    gitControls?: PatchGitControls,
   ) => Promise<void>;
   provider?: string;
   providerConfiguration?: JsonObject;
@@ -7658,7 +7658,7 @@ export async function main(
             let patchBase: GitPatchState | Map<string, string> | undefined;
             const preparePatch = async (
               signal?: AbortSignal,
-              hostFilterSettings?: PatchGitControls["hostFilterSettings"],
+              gitControls?: PatchGitControls,
             ) => {
               if (patchBase !== undefined) return;
               publication =
@@ -7669,7 +7669,7 @@ export async function main(
                       dependencies,
                       undefined,
                       signal,
-                      hostFilterSettings,
+                      gitControls,
                     )
                   : undefined;
               patchRiskBase = options.assessPatchRisk
@@ -7889,7 +7889,7 @@ export async function main(
           const identifier = directPatchIdentifier(positionals, imports);
           const preparePatch = async (
             signal?: AbortSignal,
-            hostFilterSettings?: PatchGitControls["hostFilterSettings"],
+            gitControls?: PatchGitControls,
           ) => {
             preparationCompleted = false;
             patchGitBase =
@@ -7920,7 +7920,7 @@ export async function main(
                   gitDependencies,
                   patchGitBase!.context,
                   signal,
-                  hostFilterSettings,
+                  gitControls,
                 )
               : undefined;
             signal?.throwIfAborted();
@@ -9704,10 +9704,10 @@ async function prepareSavedPatchPublication(
   dependencies: CliDependencies,
   worktree: string,
   root: string,
+  parent: string,
 ) {
   const git = (args: string[], options?: { trim?: boolean; input?: string }) =>
     dependencies.runRepositoryCommand("git", args, repository, options);
-  const parent = await git(["rev-parse", "HEAD"]);
   const parentTree = await git(["rev-parse", parent + "^{tree}"]);
   let tree = parentTree;
   // Capture the input to clean filters separately. An operator's filter can
@@ -10023,6 +10023,7 @@ async function withPatchIndex<T>(
 }
 
 interface PatchPublication {
+  parent: string;
   verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   sshCommand?: string;
@@ -11398,14 +11399,17 @@ async function publicationContentDigests(
     const path = patchFilePath(root, pathKey);
     try {
       const metadata = await lstat(path);
-      if (metadata.isDirectory()) {
+      if (metadata.isDirectory() || metadata.isSymbolicLink()) {
         const canonical = await realpath(path, { encoding: "buffer" });
         if (
           isOutsidePath(
             relativePatchPath(canonicalRoot, canonical.toString("latin1")),
           )
         )
-          continue;
+          throw new CodexSecurityError(
+            `Patch publication cannot inventory a symbolic link outside the scanned repository: ${safePatchText(patchPathText(pathKey))}. Remove the link before publishing.`,
+          );
+        if (metadata.isSymbolicLink()) continue;
         const entries = await readdir(canonical, { encoding: "buffer" });
         for (const entry of entries) {
           const name = Buffer.from(entry).toString("latin1");
@@ -11430,7 +11434,7 @@ async function preparePatchPublication(
   dependencies: CliDependencies,
   context?: GitPatchState["context"],
   signal?: AbortSignal,
-  hostFilterSettings?: PatchGitControls["hostFilterSettings"],
+  gitControls?: PatchGitControls,
 ): Promise<PatchPublication> {
   signal?.throwIfAborted();
   if (context !== undefined) {
@@ -11568,6 +11572,11 @@ async function preparePatchPublication(
     // Status may invoke clean/process filters while checking a tracked file.
     { patchSnapshot: [], environment: { GIT_OPTIONAL_LOCKS: "0" } },
   );
+  const parent = await dependencies.runRepositoryCommand(
+    "git",
+    ["rev-parse", "HEAD"],
+    repository,
+  );
   // A fresh index reads worktree edits hidden by assume-unchanged flags.
   const tree = await snapshotPatchTree(repository, dependencies);
   const worktreeChanges = await patchGitRecords(
@@ -11604,6 +11613,13 @@ async function preparePatchPublication(
     if (/[RC]/u.test(entry.slice(0, 2)))
       dirtyFiles.add(localPath(paths[++index]!));
   }
+  const listIgnored = [
+    "ls-files",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "-z",
+  ];
   const ignored = ignoredFiles.size
     ? await patchGitRecords(
         root,
@@ -11621,6 +11637,26 @@ async function preparePatchPublication(
         dependencies,
       )
     : [];
+  // The parent index only sees a gitlink, even when the child has ignored files.
+  if (gitControls?.nestedCheckouts.length) {
+    const canonicalRoot = await realpath(root);
+    for (const checkout of gitControls.nestedCheckouts) {
+      signal?.throwIfAborted();
+      const prefix = patchPathKey(relative(canonicalRoot, checkout));
+      const paths = await patchGitRecords(
+        root,
+        ["-C", checkout, "-c", "core.fsmonitor=false", ...listIgnored],
+        dependencies,
+        {
+          environment: {
+            ...NESTED_PATCH_GIT_ENVIRONMENT,
+            GIT_INDEX_FILE: undefined,
+          },
+        },
+      );
+      for (const path of paths) if (path) ignored.push(`${prefix}/${path}`);
+    }
+  }
   const ignoredDigests = await publicationContentDigests(
     root,
     ignored.filter(Boolean),
@@ -11632,12 +11668,13 @@ async function preparePatchPublication(
     signal,
   );
   return {
+    parent,
     branch,
     directory,
     dirtyFiles,
     ignoredFiles,
     ignoredDigests,
-    hostFilterSettings,
+    hostFilterSettings: gitControls?.hostFilterSettings,
     untrackedRepositoryDigests,
     sshCommand,
     proxyBindings,
@@ -12540,7 +12577,7 @@ async function createPatchPullRequest(
   );
   const previousBranch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
   const previousCommit = await run(["rev-parse", "HEAD"]);
-  if (publication.verified && previousCommit !== publication.verified.parent)
+  if (previousCommit !== publication.parent)
     throw new CodexSecurityError(
       "The patch base changed during verification. Local edits were kept for review.",
     );
@@ -13995,9 +14032,9 @@ async function runFindingPatches(
           get patchGitContext() {
             return gitBase?.context;
           },
-          onBeforeTurn: async (signal, hostFilterSettings) => {
+          onBeforeTurn: async (signal, gitControls) => {
             preparationCompleted = false;
-            await options.onBeforeTurn?.(signal, hostFilterSettings);
+            await options.onBeforeTurn?.(signal, gitControls);
             if (options.publication && !options.publication.verified) {
               const { context, directory, root, tree } = options.publication;
               const bound = await bindPatchCommandContext(
@@ -14011,6 +14048,7 @@ async function runFindingPatches(
                 bound.dependencies,
                 tree,
                 root,
+                options.publication.parent,
               );
             }
             if (gitBase) {
@@ -14830,10 +14868,7 @@ async function runSkill(
                   ? {}
                   : {
                       async onBeforeTurn(signal?: AbortSignal) {
-                        await options.onBeforeTurn?.(
-                          signal,
-                          gitControls?.hostFilterSettings,
-                        );
+                        await options.onBeforeTurn?.(signal, gitControls);
                         if (!signal?.aborted && gitControls) {
                           await gitControls.validate();
                           // Subsequent findings must keep the authority established for the first snapshot.
@@ -16780,7 +16815,7 @@ async function executeScan(
               (arguments_.createPr || patchSelection?.createPullRequest)
             );
           },
-          onBeforeTurn: async (signal, hostFilterSettings) => {
+          onBeforeTurn: async (signal, gitControls) => {
             if (
               publication === undefined &&
               (arguments_.createPr || patchSelection?.createPullRequest)
@@ -16791,7 +16826,7 @@ async function executeScan(
                 dependencies,
                 undefined,
                 signal,
-                hostFilterSettings,
+                gitControls,
               );
           },
         },

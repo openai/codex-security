@@ -8459,6 +8459,18 @@ describe("patch change tracking", () => {
       },
     );
     if (change === "vanished") expect(removed).toBe(true);
+    if (change === "symlink") {
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain(
+        "symbolic link outside the scanned repository",
+      );
+      expect(git("rev-parse", "HEAD")).toBe(before);
+      expect(git("ls-remote", "origin")).toBe("");
+      await expect(readFile(join(directory, "new.ts"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      return;
+    }
     const blocked = [
       "move",
       "copy",

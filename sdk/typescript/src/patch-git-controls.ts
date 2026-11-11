@@ -173,6 +173,7 @@ export async function withPatchGitIndex<T>(
 }
 
 export interface PatchGitControls {
+  readonly nestedCheckouts: readonly string[];
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
@@ -2058,6 +2059,7 @@ export async function capturePatchGitControls(
           .map(({ canonical }) => canonical),
       ]),
     ],
+    nestedCheckouts: [...nestedDirectories.keys()],
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],

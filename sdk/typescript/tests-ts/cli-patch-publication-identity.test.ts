@@ -230,7 +230,41 @@ test.each([
   expect(repositoryGit(remote)("for-each-ref")).toBe("");
 });
 
-function publishSyntheticChange(directory: string) {
+test.each(["HEAD", "refs/heads/main"])(
+  "refuses to publish a private ancestor selected through a hardlinked %s",
+  async (target) => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    git("switch", "-c", "private");
+    await writeFile(
+      join(directory, "private.txt"),
+      "Synthetic private content\n",
+    );
+    git("add", "--", "private.txt");
+    git("commit", "-m", "Private synthetic ancestor");
+    const privateCommit = git("rev-parse", "HEAD");
+    git("switch", "main");
+    await writeFile(join(directory, ".git/info/exclude"), ".ref-alias\n");
+    const alias = join(directory, ".ref-alias");
+    await link(join(directory, ".git", target), alias);
+    const outcome = await publishSyntheticChange(directory, () =>
+      writeFile(
+        alias,
+        target === "HEAD" ? "ref: refs/heads/private\n" : privateCommit + "\n",
+      ),
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(outcome.stderr).toContain("patch base changed");
+    expect(repositoryGit(remote)("for-each-ref")).toBe("");
+    expect(() =>
+      repositoryGit(remote)("cat-file", "-e", privateCommit),
+    ).toThrow();
+  },
+);
+
+function publishSyntheticChange(
+  directory: string,
+  beforeEdit?: () => Promise<void>,
+) {
   return runWorkflow(["patch", "Synthetic issue", "--create-pr", "--json"], {
     currentDirectory: directory,
     onRepositoryCommand: (command, args, cwd, options) => {
@@ -241,6 +275,7 @@ function publishSyntheticChange(directory: string) {
         : "https://github.example.test/example/repository/pull/1";
     },
     onCodex: async (_args, output) => {
+      await beforeEdit?.();
       await writeFile(join(directory, "selected.txt"), "Synthetic change\n");
       output?.stdout.write("Synthetic patch complete.\n");
       return 0;
