@@ -1590,7 +1590,7 @@ interface CliDependencies {
 // Apply coordinator-owned Git bindings after native shell environment filtering.
 const snapshotCredentialName =
   /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK)(?:_FILE)?$/iu;
-const PATCH_GIT_ENVIRONMENT_RUNNER = `
+export const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
 const { readSync, writeSync } = require("node:fs");
 const [headerLength, command, ...args] = process.argv.slice(1);
@@ -9797,14 +9797,20 @@ async function prepareSavedPatchPublication(
       before: SavedPatchTrees,
       after: SavedPatchTrees,
     ) {
-      const changes = paths.length
-        ? await diff(before.tree, after.tree, paths)
-        : new Map<string, string>();
       // A move may be reported under its new name. Include its deleted source
       // only if the full turn contains exactly one removal and one addition
       // of the same mode and object. Never select neighboring directory leaves.
       const previous = new Map<string, string>();
       const turn = await diff(before.tree, after.tree, ["."], previous);
+      // Git emits root-relative byte paths. Use the exact directory-entry names
+      // accepted by finding verification, including descendants of a selected directory.
+      const changes = new Map(
+        [...turn].filter(([path]) =>
+          paths.some(
+            (selected) => path === selected || path.startsWith(selected + "/"),
+          ),
+        ),
+      );
       const filtered = (path: string) =>
         before.filteredInputs?.has(path) || after.filteredInputs?.has(path);
       for (const path of turn.keys()) {
@@ -13085,7 +13091,11 @@ async function runFindingPatches(
           !(base instanceof Map)
         ) {
           const reason = await options.publication.verified.record(
-            verifiedPatchFiles(selected, [patch]),
+            files.map((file) =>
+              relativePatchPath(rootKey, resolve(repositoryKey, file))
+                .split(sep)
+                .join("/"),
+            ),
             base,
             observed,
           );
