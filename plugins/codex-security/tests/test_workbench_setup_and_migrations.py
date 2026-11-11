@@ -3412,37 +3412,77 @@ def test_identity_migration_excludes_all_history_and_caller_git(
 
 
 @pytest.mark.cross_platform
-@pytest.mark.parametrize("clock_reversed", [False, True])
+@pytest.mark.parametrize(
+    "completions,pending,expected",
+    [
+        pytest.param(
+            [("older", 2), ("newer", 3), ("last", 4)],
+            ["older"],
+            ["older", "newer", "last"],
+            id="earlier",
+        ),
+        pytest.param(
+            [("older", 2), ("newer", 3), ("last", 1)],
+            ["older"],
+            ["older", "newer", "last"],
+            id="earlier-with-reversed-recorded-clock",
+        ),
+        pytest.param(
+            [
+                ("first", 10),
+                ("middle", 20),
+                ("last", 30),
+                ("early", 5),
+                ("between", 25),
+                ("late", 40),
+            ],
+            ["early", "between", "late"],
+            ["early", "first", "middle", "between", "last", "late"],
+            id="before-between-after",
+        ),
+        pytest.param(
+            [("first", 20), ("middle", 10), ("last", 30), ("between", 25), ("late", 50)],
+            ["between", "late"],
+            ["first", "middle", "between", "last", "late"],
+            id="interleave-without-reordering-recorded-history",
+        ),
+        pytest.param(
+            [("first", 1), ("second", 2), ("latest", 3)],
+            ["latest"],
+            ["first", "second", "latest"],
+            id="later",
+        ),
+    ],
+)
 def test_identity_migration_merges_partially_sequenced_completion_history(
-    clock_reversed: bool,
+    workbench_api, completions: list[tuple[str, int]], pending: list[str], expected: list[str]
 ) -> None:
     connection, apply_migrations = create_historical_database(68)
     connection.execute(
         "INSERT INTO workspaces(id, created_at, updated_at) VALUES ('workspace', 'created', 'updated')"
     )
-    for scan_id, started, completed in (
-        ("older", "2026-08-01T00:01:00Z", "2026-08-01T00:02:00Z"),
-        ("newer", "2026-08-01T00:00:00Z", "2026-08-01T00:03:00Z"),
-        (
-            "last",
-            "2026-08-01T00:00:00Z",
-            "2026-08-01T00:01:00Z" if clock_reversed else "2026-08-01T00:04:00Z",
-        ),
-    ):
-        connection.execute(
-            "INSERT INTO scans(id, workspace_id, target_path, target_revision, scope, mode, "
-            "scan_dir, status, phase, started_at, completed_at, created_at, updated_at) "
-            "VALUES (?, 'workspace', '/synthetic/repository', 'revision', '.', 'standard', "
-            "?, 'complete', 'reporting', ?, ?, ?, ?)",
-            (scan_id, f"/synthetic/output/{scan_id}", started, completed, started, completed),
+    for scan_id, minute in completions:
+        insert_legacy_scan(
+            connection,
+            "2026-08-01T00:01:00Z" if scan_id == "older" else "2026-08-01T00:00:00Z",
+            id=scan_id,
+            workspace_id="workspace",
+            scan_dir=f"/synthetic/output/{scan_id}",
+            status="complete",
+            completed_at=f"2026-08-01T00:{minute:02}:00Z",
         )
-    connection.execute("UPDATE scans SET completion_sequence = NULL WHERE id = 'older'")
+    connection.executemany(
+        "UPDATE scans SET completion_sequence = NULL WHERE id = ?",
+        [(scan_id,) for scan_id in pending],
+    )
     for _ in range(2):
         apply_migrations(connection)
-        assert [
-            row["id"]
-            for row in connection.execute("SELECT id FROM scans ORDER BY completion_sequence")
-        ] == ["older", "newer", "last"]
+        rows = connection.execute("SELECT * FROM scans ORDER BY completion_sequence").fetchall()
+        assert [row["id"] for row in rows] == expected
+        assert (
+            max(rows, key=workbench_api["scan_history"]._scan_completion_order)["id"]
+            == expected[-1]
+        )
     connection.close()
 
 

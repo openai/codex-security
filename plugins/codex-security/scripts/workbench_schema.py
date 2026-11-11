@@ -366,6 +366,8 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
     if connection.execute(
         "SELECT 1 FROM scans WHERE status = 'complete' AND completion_sequence IS NULL LIMIT 1"
     ).fetchone():
+        # SQL preserves the recorded sequence. Both projections omit it so the merge
+        # compares each pending row with the timestamp of the next recorded completion.
         recorded = connection.execute(
             "SELECT id, started_at, completed_at FROM scans "
             "WHERE status = 'complete' AND completion_sequence IS NOT NULL "
@@ -378,7 +380,6 @@ def repair_repository_identity_migration(connection: sqlite3.Connection) -> bool
         pending = iter(sorted(unsequenced, key=_scan_completion_order))
         candidate = next(pending, None)
         completed = []
-        # Insert historical rows chronologically without reordering recorded completions.
         for scan in recorded:
             while candidate is not None and _scan_completion_order(
                 candidate
