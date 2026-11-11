@@ -50,7 +50,6 @@ const {
   options,
 } = createMultiscanFixtures();
 
-const testPosix = process.platform === "win32" ? test.skip : test;
 afterEach(cleanup);
 
 const testPosix = test.skipIf(process.platform === "win32");
