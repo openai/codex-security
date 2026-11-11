@@ -2113,7 +2113,7 @@ Copy that ID into `findings false-positive` with your reason. Subsequent scans c
 use the explanation while it applies. In `scans show SCAN_ID --json`, each
 displayed occurrence has its saved rationale in `triage.note` after dismissal. The list identifies
 a repository with no saved scan history separately from one with zero open findings.
-From a Git subdirectory with no history of its own, it uses the worktree root.
+From an unregistered Git subdirectory with no scan history of its own, it uses the worktree root.
 
 With an omitted ID or the literal `latest`, `scans show` selects the latest completed scan, while `scans logs`
 selects the latest scan of any status. Both prefer a scan in the current

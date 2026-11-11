@@ -43,6 +43,22 @@ from workbench_target_state import (
 from workbench_validation import timestamp_key
 
 
+def reads_missing_history(args: argparse.Namespace, path: Path) -> bool:
+    """Select an in-memory database only for history reads on a fresh profile."""
+    if args.command not in {"list-scans", "list-repositories", "list-global-findings"} and not (
+        args.command == "get-scan" and not (args.request_id or args.action_token)
+    ):
+        return False
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        # The ordinary connection reports inaccessible storage.
+        pass
+    return False
+
+
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
     name = name.strip()
     if not name:

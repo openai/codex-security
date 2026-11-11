@@ -257,7 +257,7 @@ def connect(
     *,
     deferred: bool = False,
     discovery_roots: tuple[Path, ...] = (),
-    persist_if_missing: bool = True,
+    in_memory: bool = False,
 ) -> sqlite3.Connection:
     """Open the workbench SQLite database and bring its schema up to date.
 
@@ -266,7 +266,7 @@ def connect(
             Retries after lock contention use an immediate transaction.
 
         discovery_roots: Additional local paths for bounded target discovery.
-        persist_if_missing: Use an in-memory database for a fresh profile when false.
+        in_memory: Keep a fresh profile read entirely in memory.
 
     Returns:
         sqlite3.Connection: A caller-owned connection with named rows, foreign
@@ -282,21 +282,15 @@ def connect(
         "are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside "
         "the scanned repository."
     )
-    storage: str | Path = path
     try:
-        if not persist_if_missing:
-            try:
-                path.lstat()
-            except FileNotFoundError:
-                storage = ":memory:"
-        if storage == path:
+        if not in_memory:
             create_private_directory(path.parent)
     except OSError:
         print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
-            connection = sqlite3.connect(storage, timeout=5)
+            connection = sqlite3.connect(":memory:" if in_memory else path, timeout=5)
         except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
@@ -309,7 +303,7 @@ def connect(
                 connection, immediate=not deferred or attempt > 0, discovery_roots=discovery_roots
             )
             connection.execute("PRAGMA journal_mode = WAL")
-            if storage == path:
+            if not in_memory:
                 path.chmod(0o600)
             return connection
         except sqlite3.OperationalError as exc:
@@ -3397,11 +3391,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                     "update-progress",
                 },
                 discovery_roots=command_targets,
-                persist_if_missing=not (
-                    args.command in {"list-scans", "list-repositories", "list-global-findings"}
-                    or args.command == "get-scan"
-                    and not (args.request_id or args.action_token)
-                ),
+                in_memory=scan_history.reads_missing_history(args, database_path()),
             )
         ) as connection,
         scoped_git_discovery(
