@@ -9700,6 +9700,7 @@ interface PatchPublication {
   verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   sshCommand?: string;
+  proxyBindings: Map<string, string | null>;
   context: GitPatchState["context"];
   branch: string;
   directory: string;
@@ -10062,6 +10063,208 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
+async function runPatchTransport(
+  args: string[],
+  remotes: readonly string[],
+  repository: string,
+  dependencies: CliDependencies,
+  proxyBindings: Map<string, string | null>,
+  transportEnvironment: NodeJS.ProcessEnv,
+  options: { maxBuffer?: number } = {},
+) {
+  const environment = await patchTransportEnvironment(
+    remotes,
+    repository,
+    dependencies,
+    transportEnvironment,
+    args[0] === "push",
+  );
+  const run = (overrides: NodeJS.ProcessEnv = {}) =>
+    dependencies.runRepositoryCommand("git", args, repository, {
+      ...options,
+      environment: { ...environment, ...overrides },
+    });
+  if (!remotes.some((remote) => remote.startsWith("git://"))) return run();
+  const override = environmentEntry(
+    dependencies.environment,
+    "GIT_PROXY_COMMAND",
+  );
+  if (override === "") return run({ GIT_PROXY_COMMAND: "" });
+  const entries =
+    override === undefined
+      ? await patchScopedConfig("^core\\.gitproxy$", repository, dependencies)
+      : [];
+  if (override === undefined && entries.length < 3)
+    return run({ GIT_PROXY_COMMAND: "" });
+  const { root, caller, directory } = await patchTransportDirectories(
+    repository,
+    dependencies,
+  );
+  let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
+  const hostPath =
+    environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
+  const pin = async (command: string): Promise<string | null> => {
+    if (!proxyBindings.has(command)) {
+      if (
+        !execPath &&
+        !command.includes("/") &&
+        !command.includes("\\") &&
+        !parse(command).root
+      )
+        execPath = (
+          await dependencies.runRepositoryCommand(
+            "git",
+            ["--exec-path"],
+            repository,
+            { trim: false },
+          )
+        ).replace(/\n$/u, "");
+      const path = [execPath, hostPath].filter(Boolean).join(delimiter);
+      const result = await inspectTrustedExecutable(
+        command,
+        { PATH: path },
+        [root, caller],
+        { gitTransportDirectory: directory },
+      );
+      proxyBindings.set(command, result.executable);
+    }
+    return proxyBindings.get(command)!;
+  };
+  if (override !== undefined) {
+    const executable = await pin(override);
+    if (executable === null)
+      throw new CodexSecurityError(
+        "Patch publication cannot use the selected GIT_PROXY_COMMAND. Select an executable outside the checkout.",
+      );
+    return run({ GIT_PROXY_COMMAND: executable });
+  }
+  const rules: {
+    command: string;
+    suffix: string;
+    executable: string | null;
+  }[] = [];
+  for (let i = 0; i + 2 < entries.length; i += 3) {
+    const rule = entries[i + 2]!.slice("core.gitproxy\n".length);
+    const separator = rule.indexOf(" for ");
+    const command = separator < 0 ? rule : rule.slice(0, separator);
+    const suffix = separator < 0 ? "" : rule.slice(separator);
+    if (command === "" || command === "none") {
+      rules.push({ command, suffix, executable: command });
+    } else {
+      if (
+        !(await operatorPatchConfig(
+          entries[i]!,
+          entries[i + 1]!,
+          repository,
+          dependencies,
+        ))
+      ) {
+        throw new CodexSecurityError(
+          "Patch publication cannot run checkout-selected core.gitProxy. Select the Git proxy through your user Git configuration or GIT_PROXY_COMMAND.",
+        );
+      }
+      rules.push({ command, suffix, executable: await pin(command) });
+    }
+  }
+  if (rules.every(({ command }) => command === "" || command === "none"))
+    return run({ GIT_PROXY_COMMAND: "" });
+  if (rules.every(({ command, executable }) => command === executable))
+    return run();
+  const first = rules[0]!;
+  if (first.suffix === "") {
+    if (first.executable === null)
+      throw new CodexSecurityError(
+        "Patch publication cannot use the selected core.gitProxy. Select an executable outside the checkout.",
+      );
+    return run({
+      GIT_PROXY_COMMAND: first.command === "none" ? "" : first.executable,
+    });
+  }
+
+  // The first matching rule wins, including 'none'. A single override cannot
+  // preserve different routes for multiple push URLs. Prepend bound rules to
+  // Git's configuration and leave matching, ports and host spelling to Git.
+  const temp = await realpath(tmpdir());
+  if (
+    [root, caller].some(
+      (protectedRoot) => !isOutsidePath(relative(protectedRoot, temp)),
+    )
+  ) {
+    throw new CodexSecurityError(
+      "Patch publication needs a temporary directory outside the checkout to bind Git proxy rules.",
+    );
+  }
+  const privateDirectory = await mkdtemp(
+    join(temp, "codex-security-git-proxy-"),
+  );
+  try {
+    const config = join(privateDirectory, "gitconfig");
+    const quote = (value: string) =>
+      '"' +
+      value
+        .replaceAll("\\", "\\\\")
+        .replaceAll('"', '\\"')
+        .replaceAll("\n", "\\n")
+        .replaceAll("\t", "\\t") +
+      '"';
+    const lines = ["[core]"];
+    let wrapperPath: string | undefined;
+    for (const { executable, suffix } of rules) {
+      // An unavailable rule must fail only if Git selects it. The private
+      // nonexistent path cannot be supplied by the checkout after preflight.
+      let program = executable ?? join(privateDirectory, "unavailable-proxy");
+      if (program.includes(" for ")) {
+        // Git interprets this literal separator even within a quoted config
+        // value. Keep a PATH alias for physical paths containing it.
+        const name = "codex-security-git-proxy-" + randomUUID();
+        const literal = "'" + program.replaceAll("'", "'\\''") + "'";
+        await writeFile(
+          join(privateDirectory, name),
+          "#!/bin/sh\nexec " + literal + ' "$@"\n',
+          { mode: 0o700, flag: "wx" },
+        );
+        const trusted = await inspectTrustedExecutable(
+          "git",
+          { PATH: hostPath },
+          [root, caller],
+          { gitTransportDirectory: directory },
+        );
+        wrapperPath = [privateDirectory, trusted.environment["PATH"]]
+          .filter(Boolean)
+          .join(delimiter);
+        program = name;
+      }
+      lines.push("gitProxy = " + quote(program + suffix));
+    }
+    lines.push("gitProxy = none");
+    const system = await dependencies
+      .runRepositoryCommand("git", ["var", "GIT_CONFIG_SYSTEM"], repository, {
+        trim: false,
+      })
+      .catch((error: unknown) => {
+        // Git omits the system path when GIT_CONFIG_NOSYSTEM is active.
+        if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+          return "";
+        throw error;
+      });
+    for (const file of system.replace(/\n$/u, "").split("\n").filter(Boolean)) {
+      const original = isAbsolute(file) ? file : `${directory}${sep}${file}`;
+      lines.push("[include]", "path = " + quote(original));
+    }
+    await writeFile(config, lines.join("\n") + "\n", {
+      mode: 0o600,
+      flag: "wx",
+    });
+    return await run({
+      GIT_CONFIG_NOSYSTEM: "0",
+      GIT_CONFIG_SYSTEM: config,
+      ...(wrapperPath ? { PATH: wrapperPath } : {}),
+    });
+  } finally {
+    await rm(privateDirectory, { recursive: true, force: true });
+  }
+}
+
 // Read the active includes again on the patch branch, including on resume.
 async function patchTransportEnvironment(
   remotes: readonly string[],
@@ -10070,43 +10273,6 @@ async function patchTransportEnvironment(
   environment: NodeJS.ProcessEnv = {},
   pushing = false,
 ): Promise<NodeJS.ProcessEnv> {
-  if (remotes.some((remote) => remote.startsWith("git://"))) {
-    const override = environmentEntry(
-      dependencies.environment,
-      "GIT_PROXY_COMMAND",
-    );
-    if (override !== undefined) {
-      environment = { ...environment, GIT_PROXY_COMMAND: override };
-    } else {
-      const proxies = await patchScopedConfig(
-        "^core\\.gitproxy$",
-        repository,
-        dependencies,
-      );
-      let hasProxyCommand = false;
-      for (let i = 0; i + 2 < proxies.length; i += 3) {
-        const value = proxies[i + 2]!.slice("core.gitproxy\n".length);
-        const [command] = value.split(" for ", 1);
-        if (!command || command === "none") continue;
-        hasProxyCommand = true;
-        if (
-          !(await operatorPatchConfig(
-            proxies[i]!,
-            proxies[i + 1]!,
-            repository,
-            dependencies,
-          ))
-        ) {
-          throw new CodexSecurityError(
-            "Patch publication cannot run checkout-selected core.gitProxy. Select the Git proxy through your user Git configuration or GIT_PROXY_COMMAND.",
-          );
-        }
-      }
-      // Git treats an explicitly empty proxy environment variable as a direct connection.
-      if (!hasProxyCommand)
-        environment = { ...environment, GIT_PROXY_COMMAND: "" };
-    }
-  }
   const pinned = { ...environment };
   let count = Number(
     environment["GIT_CONFIG_COUNT"] ??
@@ -10966,6 +11132,7 @@ async function preparePatchPublication(
     });
   }
   let sshCommand: string | undefined;
+  const proxyBindings = new Map<string, string | null>();
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -10994,8 +11161,7 @@ async function preparePatchPublication(
               ],
               repository,
             );
-            return dependencies.runRepositoryCommand(
-              "git",
+            return runPatchTransport(
               [
                 "ls-remote",
                 "--heads",
@@ -11004,23 +11170,19 @@ async function preparePatchPublication(
                 ...refs,
                 `refs/heads/${branch}/*`,
               ],
+              [remote],
               repository,
+              dependencies,
+              proxyBindings,
               {
-                environment: await patchTransportEnvironment(
-                  [remote],
-                  repository,
-                  dependencies,
-                  {
-                    ...environment,
-                    ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
-                    GIT_CONFIG_PARAMETERS: [
-                      dependencies.environment["GIT_CONFIG_PARAMETERS"],
-                      config,
-                    ]
-                      .filter(Boolean)
-                      .join(" "),
-                  },
-                ),
+                ...environment,
+                ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
+                GIT_CONFIG_PARAMETERS: [
+                  dependencies.environment["GIT_CONFIG_PARAMETERS"],
+                  config,
+                ]
+                  .filter(Boolean)
+                  .join(" "),
               },
             );
           },
@@ -11133,6 +11295,7 @@ async function preparePatchPublication(
     hostFilterSettings,
     untrackedRepositoryDigests,
     sshCommand,
+    proxyBindings,
     tree,
     root,
     context,
@@ -11323,6 +11486,7 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
   approvedSshCommand?: string,
+  proxyBindings = new Map<string, string | null>(),
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
@@ -11435,8 +11599,7 @@ async function publishPatchBranch(
           dependencies,
         );
       await checkPatchReflogs(repository, dependencies);
-      await dependencies.runRepositoryCommand(
-        "git",
+      await runPatchTransport(
         [
           "push",
           "--no-signed",
@@ -11447,18 +11610,13 @@ async function publishPatchBranch(
           "origin",
           `${commit}:refs/heads/${branch}`,
         ],
+        remotes,
         repository,
-        {
-          environment: await patchTransportEnvironment(
-            remotes,
-            repository,
-            dependencies,
-            remotes.some(isSshPatchRemote)
-              ? { GIT_SSH_COMMAND: await getSshCommand() }
-              : {},
-            true,
-          ),
-        },
+        dependencies,
+        proxyBindings,
+        remotes.some(isSshPatchRemote)
+          ? { GIT_SSH_COMMAND: await getSshCommand() }
+          : {},
       );
       await run("git", [
         "config",
@@ -12249,6 +12407,7 @@ async function createPatchPullRequest(
     stderr,
     dependencies,
     publication.sshCommand,
+    publication.proxyBindings,
   );
 }
 

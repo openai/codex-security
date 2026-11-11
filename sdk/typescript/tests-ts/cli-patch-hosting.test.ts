@@ -1,7 +1,15 @@
 import { gitText } from "./support/shell.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath, rmdir, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  rmdir,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { delimiter, dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -25,21 +33,47 @@ describe("patch change tracking", () => {
   const publicationRepository = () => createPublicationRepository(fixtures);
 
   test.each([
-    { resume: false, source: "local", allowed: false },
-    { resume: true, source: "included checkout", allowed: false },
-    { resume: false, source: "operator", allowed: true },
-    { resume: true, source: "environment", allowed: true },
-    { resume: false, source: "none", allowed: true },
-  ])(
-    "native Git transport honors the $source proxy boundary, resume=$resume",
-    async ({ resume, source, allowed }) => {
+    ["local", false],
+    ["included checkout", true],
+    ["operator", false],
+    ["environment", true],
+    ["relative configuration", false],
+    ["relative environment", true],
+    ["missing environment", false],
+    ["none", false],
+  ] as const)(
+    "native Git transport honors the %s proxy boundary",
+    async (source, resume) => {
       const { directory, git } = await publicationRepository();
       const branch = "codex-security/patch-scan-1";
+      const external = await fixtures.create("patch-native-proxy-");
+      const globalConfig = join(external, "operator.gitconfig");
+      const marker = join(external, "invocations");
+      const environment: NodeJS.ProcessEnv = {
+        GIT_CONFIG_GLOBAL: globalConfig,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GITLAB_HOST: "127.0.0.1:1",
+      };
+      const writeProxy = async (program: string, label: string) => {
+        const output = marker.replaceAll("\\", "/").replaceAll("'", "'\\''");
+        await writeFile(
+          program,
+          `#!/bin/sh\nprintf '%s %s %s\\n' ${label} "$1" "$2" >> '${output}'\nexit 1\n`,
+          { mode: 0o755 },
+        );
+      };
+      const externalProxy = join(external, "operator proxy");
+      const otherProxy = join(external, "unmatched proxy");
+      await writeProxy(externalProxy, "operator");
+      await writeProxy(otherProxy, "unmatched");
+      await writeProxy(join(directory, "checkout-proxy"), "checkout");
+      git("add", "checkout-proxy");
+      git("commit", "-m", "Add synthetic checkout proxy");
       git(
         "remote",
         "set-url",
         "origin",
-        "git://gitlab.com/example/repository.git",
+        "git://127.0.0.1:1/example/repository.git",
       );
       if (resume) {
         git("branch", branch);
@@ -49,40 +83,40 @@ describe("patch change tracking", () => {
           git("rev-parse", "HEAD"),
         );
       }
-      const external = await fixtures.create("patch-native-proxy-");
-      const globalConfig = join(external, "operator.gitconfig");
-      const included = join(directory, ".git", "proxy.gitconfig");
-      const environment: NodeJS.ProcessEnv = {
-        GIT_CONFIG_GLOBAL: globalConfig,
-        GIT_CONFIG_NOSYSTEM: "1",
-      };
-      if (source === "included checkout") {
-        git("config", "--file", globalConfig, "include.path", included);
-        git(
-          "config",
-          "--file",
-          included,
-          "core.gitProxy",
-          "checkout-proxy-fixture",
-        );
-      } else if (source === "operator") {
+      const addProxy = (command: string) =>
         git(
           "config",
           "--file",
           globalConfig,
+          "--add",
           "core.gitProxy",
-          "operator-proxy-fixture for gitlab.com",
+          command,
         );
+      if (source === "operator" || source === "none") {
+        // Git matches the first applicable domain, including the explicit port.
+        addProxy(otherProxy + " for 127.0.0.1");
+        addProxy((source === "none" ? "none" : externalProxy) + " for 0.1:1");
+        addProxy(otherProxy);
+      } else if (source === "relative configuration") {
+        addProxy("./checkout-proxy");
+      } else if (source === "included checkout") {
+        const included = join(directory, ".git", "proxy.gitconfig");
+        git("config", "--file", globalConfig, "include.path", included);
+        git("config", "--file", included, "core.gitProxy", "./checkout-proxy");
       } else {
-        git(
-          "config",
-          "core.gitProxy",
-          source === "none" ? "none for gitlab.com" : "checkout-proxy-fixture",
-        );
+        git("config", "core.gitProxy", "./checkout-proxy");
         if (source === "environment")
-          environment["GIT_PROXY_COMMAND"] = "operator-proxy-fixture";
+          environment["GIT_PROXY_COMMAND"] = externalProxy;
+        if (source === "relative environment")
+          environment["GIT_PROXY_COMMAND"] = "./checkout-proxy";
+        if (source === "missing environment")
+          environment["GIT_PROXY_COMMAND"] = join(
+            external,
+            "uninstalled proxy",
+          );
       }
-      let attempted = false;
+
+      const onCodex = mock(() => 0);
       const outcome = await runWorkflow(
         resume
           ? ["patch", "--resume-pr", branch, "--json"]
@@ -90,36 +124,109 @@ describe("patch change tracking", () => {
         {
           currentDirectory: directory,
           environment,
+          onCodex,
           onWorkbench: () =>
             savedScan(resultWithFindings(["high"]), "scan-1", directory),
-          onRepositoryCommand: (tool, args, cwd, options) => {
-            if (tool !== "git") return "";
-            if (args.includes("ls-remote") || args[0] === "push") {
-              attempted = true;
-              expect(options?.environment?.["GIT_PROXY_COMMAND"]).toBe(
-                source === "environment"
-                  ? "operator-proxy-fixture"
-                  : source === "none"
-                    ? ""
-                    : undefined,
-              );
-              throw new Error("Fixture stopped the native Git transport");
-            }
-            return runGitRepositoryCommand(tool, args, cwd, {
-              ...options,
-              environment: { ...environment, ...options?.environment },
-            });
-          },
+          onRepositoryCommand: (tool, args, cwd, options) =>
+            tool === "git"
+              ? runGitRepositoryCommand(tool, args, cwd, {
+                  ...options,
+                  environment: { ...environment, ...options?.environment },
+                })
+              : "",
         },
         { localHosting: false },
       );
       expect(outcome.exitCode, outcome.stderr).toBe(2);
-      expect(outcome.stderr).toContain(
-        allowed ? "Fixture stopped the native Git transport" : "core.gitProxy",
-      );
-      expect(attempted).toBe(allowed);
+      expect(onCodex).not.toHaveBeenCalled();
+      if (source === "operator" || source === "environment") {
+        expect(await readFile(marker, "utf8")).toBe("operator 127.0.0.1 1\n");
+      } else {
+        await expect(readFile(marker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        if (source === "local" || source === "included checkout")
+          expect(outcome.stderr).toContain("checkout-selected core.gitProxy");
+      }
     },
   );
+
+  test("push from a component uses the external proxy selected before its alias is retargeted", async () => {
+    const { directory, git, remote } = await publicationRepository();
+    const external = await fixtures.create("patch-proxy-retarget-");
+    const trusted = join(external, "trusted");
+    const alias = join(external, "selected");
+    const marker = join(external, "invocations");
+    const linkType = process.platform === "win32" ? "junction" : "dir";
+    await mkdir(trusted);
+    await symlink(trusted, alias, linkType);
+    const quote = (path: string) =>
+      "'" + path.replaceAll("\\", "/").replaceAll("'", "'\\''") + "'";
+    // Consume the native protocol's first packet, as a Git daemon would.
+    // Serve the preflight from the bare fixture and stop the push at the proxy.
+    await writeFile(
+      join(trusted, "proxy"),
+      `#!/bin/sh
+header=$(dd bs=1 count=4 2>/dev/null) || exit 1
+request=$(dd bs=1 count=$((0x$header - 4)) 2>/dev/null | tr '\\000' ' ')
+case "$request" in
+  git-upload-pack*) echo preflight >> ${quote(marker)}; exec git upload-pack ${quote(remote)} ;;
+  git-receive-pack*) echo push >> ${quote(marker)} ;;
+esac
+exit 1
+`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(directory, "proxy"),
+      `#!/bin/sh\necho checkout >> ${quote(marker)}\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    git("add", "proxy");
+    git("commit", "-m", "Add alternate checkout proxy");
+    git("push", "origin", "main");
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "git://127.0.0.1:1/example/repository.git",
+    );
+    const environment = {
+      GITLAB_HOST: "127.0.0.1:1",
+      GIT_PROXY_COMMAND: relative(directory, join(alias, "proxy")).replaceAll(
+        "\\",
+        "/",
+      ),
+      GIT_CONFIG_GLOBAL: join(external, "gitconfig"),
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: join(directory, "src"),
+        environment,
+        onCodex: async (_args, output) => {
+          await unlink(alias);
+          await symlink(directory, alias, linkType);
+          await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+          output?.stdout.write("Fixed and verified.");
+          return 0;
+        },
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              })
+            : "",
+      },
+      { localHosting: false },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(await readFile(marker, "utf8").catch(() => ""), outcome.stderr).toBe(
+      "preflight\npush\n",
+    );
+  });
 
   test.each([
     { key: "credential.useHttpPath", source: "local", value: "false" },
