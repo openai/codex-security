@@ -370,8 +370,13 @@ describe("integration command dispatch", () => {
         { command: "npx", args: ["--yes", "--", "@acme/server", "--mcp"] },
       ],
       [
-        [`--command=node "server entry.js" --mcp`],
-        { command: "node", args: ["server entry.js", "--mcp"] },
+        [
+          String.raw`--command=node C:\tools\server.js --label="two words" --mcp`,
+        ],
+        {
+          command: "node",
+          args: [String.raw`C:\tools\server.js`, "--label=two words", "--mcp"],
+        },
       ],
       [["--command=local-server"], { command: "local-server", args: [] }],
       [

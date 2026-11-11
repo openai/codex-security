@@ -1,12 +1,15 @@
 /** Split quoted command words without evaluating shell expansions. */
-export function splitCommand(command: string): string[] | null {
+export function splitCommand(
+  command: string,
+  backslashes: "escape" | "literal" = "escape",
+): string[] | null {
   const words: string[] = [];
   let word = "";
   let started = false;
   let quote: "'" | '"' | null = null;
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
-    if (character === "\\" && quote !== "'") {
+    if (character === "\\" && quote !== "'" && backslashes === "escape") {
       const next = command[++index];
       if (next === undefined) return null;
       if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next))

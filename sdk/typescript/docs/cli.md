@@ -2763,7 +2763,8 @@ an installed executable, use its name or path with `--exec` and repeat
 `--arg=VALUE` for each argument. Each value is stored literally, including
 spaces, empty arguments, and leading dashes. To run an npm package, select
 `--package NAME`. The existing `--command` accepts a command line or HTTP(S)
-URL. A bare executable name is stored directly. Use `--exec` for a path with
+URL. Quotes group command-line words, and backslashes are literal. A bare
+executable name is stored directly. Use `--exec` for a path with
 spaces, including when the executable will be installed on another machine.
 
 ```bash

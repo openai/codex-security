@@ -61,11 +61,9 @@ function mcpServerConfig(
   if (argsAt === -1 || (isPath && existsSync(value)))
     return { command: value, args: [] };
   const words = value.slice(argsAt).trim();
-  // Only quoted legacy command lines need shell-word decoding. Plain Windows
-  // paths keep their backslashes.
-  const tokens = /["']/u.test(words)
-    ? splitCommand(words)
-    : words.split(/\s+/u);
+  // Quotes group launcher words. Keep backslashes literal, including in
+  // unquoted Windows paths that occur alongside a quoted argument.
+  const tokens = splitCommand(words, "literal");
   if (!tokens?.length)
     throw new Error(
       "Invalid --command quoting. Use --exec and --arg for literal values.",
