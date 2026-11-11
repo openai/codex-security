@@ -1408,6 +1408,22 @@ including during recovery. Run post-scan prompts separately. A resumed scan also
 limit and includes prior recorded usage in its cost estimate.
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.
+Bulk checkout, scan, and recovery processes select host tools outside every local
+source and campaign checkout. Inventory uses an external ripgrep executable or
+the copy shipped with the selected Codex installation.
+
+On POSIX, campaign processes and script-based inventory tools search readable
+tool directories. Launchers must be readable so their shebang interpreters can
+be checked. Use an absolute interpreter path for campaign scripts, including
+`#!/usr/bin/env sh`, because workers run in different directories. If a directory
+contains an ineligible executable, its other tools remain available through a
+temporary PATH. Scripts using the system `/bin/sh` or `/usr/bin/env` run from
+their installed location when the packaged dispatcher can start. Keep other
+prefix-sensitive tools, including Python virtual environments, in directories
+where every entry can be used. On Windows, the campaign omits a tool directory
+from the child PATH if its Git, ripgrep, or Node executable link passes through a
+selected source.
+
 CSV scopes are literal paths relative to each checkout, including names such
 as `~/src`.
 Configured diff or working-tree scopes are rejected unless every affected row

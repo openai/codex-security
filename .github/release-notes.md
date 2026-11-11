@@ -92,6 +92,9 @@
 - clarify blocked patch results ([#2609](https://github.com/openai/codex-security/pull/2609))
 - guide Codex through scanner imports and workbench publication ([#2604](https://github.com/openai/codex-security/pull/2604))
 - add ArmorCode findings support ([#2608](https://github.com/openai/codex-security/pull/2608))
+- distinguish configuration errors and policy refusals ([#1291](https://github.com/openai/codex-security/pull/1291))
+- resolve inventory and bulk tools outside selected sources ([#2431](https://github.com/openai/codex-security/pull/2431))
+- preserve literal scan paths ([#2617](https://github.com/openai/codex-security/pull/2617))
 
 </details>
 
