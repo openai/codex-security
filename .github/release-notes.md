@@ -70,6 +70,7 @@
 - update the active installation and migrate legacy options ([#2579](https://github.com/openai/codex-security/pull/2579))
 - align scan schemas and structured output ([#2580](https://github.com/openai/codex-security/pull/2580))
 - inspect integration commands before installation ([#2582](https://github.com/openai/codex-security/pull/2582))
+- make command help and discovery reflect runnable workflows ([#2584](https://github.com/openai/codex-security/pull/2584))
 
 </details>
 
