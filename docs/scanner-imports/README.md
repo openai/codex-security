@@ -5,11 +5,11 @@ workbench or send a supported report to Codex Security Cloud.
 
 ## Choose your input
 
-| Starting point                 | Command                                                                                                                                                               |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Saved vendor report            | `codex-security publish findings FILE --provider PROVIDER --source-key KEY --repository . --to local --dry-run` previews the evidence. Remove `--dry-run` to save it. |
-| Codex Security findings export | `codex-security scan import --csv FILE` or `--json FILE` saves a completed scan in local history. Use `--format json` to select JSON output.                          |
-| Live provider                  | `codex-security import --help` lists the GitHub, Semgrep, Snyk and Sonar collectors. The Sonar collector can also replay its saved capture.                           |
+| Starting point                 | Command                                                                                                                                                                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Saved vendor report            | `codex-security publish findings FILE --provider PROVIDER --source-key KEY --repository . --to local --dry-run` previews the evidence. Remove `--dry-run` to save it.  |
+| Codex Security findings export | `codex-security scan import FILE` saves findings from a .csv or .json file as a completed scan. Use `--input-format` for other filenames and `--json` for JSON output. |
+| Live provider                  | `codex-security import --help` lists the GitHub, Semgrep, Snyk and Sonar collectors. The Sonar collector can also replay its saved capture.                            |
 
 ## Choose your scanner
 

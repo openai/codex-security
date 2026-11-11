@@ -10,7 +10,7 @@ import { isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
-  readScannerJson,
+  scannerJsonReader,
   record,
   requiredText,
   stableId,
@@ -555,14 +555,6 @@ export function normalizeVeracodeFindings(
   );
 }
 
-export async function readVeracodeFindings(
-  path: string,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeVeracodeFindings(
-    await readScannerJson(path),
-    sourceRepositoryUrl,
-    target,
-  );
-}
+export const readVeracodeFindings = scannerJsonReader(
+  normalizeVeracodeFindings,
+);

@@ -11,7 +11,7 @@ import { isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
-  readScannerJson,
+  scannerJsonReader,
   record,
   relativePath,
   requiredText,
@@ -419,14 +419,4 @@ export function normalizeSonarFindings(
   ) as ExternalFindings & { report: typeof context };
 }
 
-export async function readSonarFindings(
-  path: string,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeSonarFindings(
-    await readScannerJson(path),
-    sourceRepositoryUrl,
-    target,
-  );
-}
+export const readSonarFindings = scannerJsonReader(normalizeSonarFindings);

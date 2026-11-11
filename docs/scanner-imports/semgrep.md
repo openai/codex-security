@@ -423,8 +423,8 @@ leaves earlier exports available for replay.
 
 ```sh
 report=$(mktemp ./semgrep-backlog.XXXXXX) &&
-  codex-security import semgrep example/project --semgrep-deployment example \
-    --semgrep-ref refs/heads/topic --semgrep-product sast --format json > "$report" &&
+  codex-security import semgrep example/project --deployment example \
+    --ref refs/heads/topic --semgrep-product sast --format json > "$report" &&
   codex-security publish findings "$report" --to local --repository /path/to/project \
     --provider semgrep --source-key example/project/topic --dry-run --format json
 ```

@@ -104,6 +104,7 @@
     "smol-toml": "1.9.1",
     "string-width": "8.3.0",
     "strip-ansi": "7.2.0",
+    "tokenx": "1.6.0",
     "yaml": "2.9.1",
     "yauzl": "3.4.0",
     "zod": "4.6.7"

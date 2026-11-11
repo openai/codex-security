@@ -738,9 +738,10 @@ describe("scan dependencies CLI", () => {
       expect(initialize).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
-        flag === "--format" ? "Invalid format" : `Invalid value for ${flag}`,
+        flag === "--format"
+          ? 'Invalid format: "dependencies"'
+          : "--token-limit requires a nonnegative integer.",
       );
-      expect(stderr.text()).toContain('"dependencies"');
     },
   );
 });

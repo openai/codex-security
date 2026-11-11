@@ -1026,8 +1026,11 @@ describe("CLI", () => {
         definitions.options?.properties ?? {},
       )) {
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
-        // The CSV input belongs to the internal publication destination.
-        if (command.join(" ") === "publish scan" && flag === "--csv") {
+        // Keep the internal CSV input and the redundant Linear selector out of help.
+        if (
+          (command.join(" ") === "publish scan" && flag === "--csv") ||
+          (command.join(" ") === "publish check" && flag === "--to")
+        ) {
           expect(help.text()).not.toContain(flag);
         } else {
           expect(help.text()).toContain(flag);
@@ -2095,7 +2098,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "does not emit an ok: true envelope for a failed structured history command with full output %p",
+    "reports a structured history failure with full output %p",
     async (fullOutput) => {
       for (const argv of [
         ["scans", "show", "--json"],
@@ -2116,10 +2119,14 @@ describe("CLI", () => {
           },
         );
         expect(result).toBe(2);
-        expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain(
-          "Scan ID prefixes must be at least eight characters.",
-        );
+        const message = "Scan ID prefixes must be at least eight characters.";
+        if (fullOutput)
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { message },
+          });
+        else expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(message);
       }
     },
   );
@@ -3298,7 +3305,7 @@ describe("CLI", () => {
       expect(exportFindings).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
-        "CSV stdout cannot be combined with JSON output",
+        "CSV stdout cannot be combined with --format json",
       );
     }
   });
