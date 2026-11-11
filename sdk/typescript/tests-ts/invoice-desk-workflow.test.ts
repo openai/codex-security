@@ -53,19 +53,19 @@ test("Invoice Desk cancels only duplicate scans of an eligible target revision",
   const job = workflow.jobs.scan;
   expect(job.needs).toBe("target");
   const selected = new Function("needs", `return (${job.if});`);
-  expect(selected({ target: { outputs: { targets: "[]" } } })).toBe(false);
+  expect(selected({ target: { outputs: { sha: "" } } })).toBe(false);
   expect(
     selected({
       target: {
-        outputs: { targets: JSON.stringify([{ pr: 7, sha: sourceSha }]) },
+        outputs: { pr: "7", sha: sourceSha },
       },
     }),
   ).toBe(true);
   expect(job.concurrency["cancel-in-progress"]).toBe(true);
   const group = (pr: number, sha: string) =>
     job.concurrency.group.replace(/\$\{\{(.*?)\}\}/g, (_, expression: string) =>
-      new Function("matrix", "format", `return (${expression});`)(
-        { target: { pr, sha } },
+      new Function("needs", "format", `return (${expression});`)(
+        { target: { outputs: { pr: pr ? String(pr) : "", sha } } },
         (template: string, value: unknown) =>
           template.replace("{0}", String(value)),
       ),

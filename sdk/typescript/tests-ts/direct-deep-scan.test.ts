@@ -54,7 +54,7 @@ export async function prepareCliDeepScanSession(options) {
   await writeFile(
     join(pluginRoot, "mcp", "server.mjs"),
     `
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 const lines = createInterface({input: process.stdin});
@@ -63,6 +63,8 @@ writeFileSync(process.env.SYNTHETIC_RECEIPT, JSON.stringify({
   request, ipc: !!process.send, argv: process.argv.slice(2), key: process.env.CODEX_API_KEY,
   execPath: process.execPath, bun: process.versions.bun,
   awsProfile: process.env.AWS_PROFILE, snapshot: process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+  skill: process.env.CODEX_SECURITY_PLUGIN_ROOT === undefined ? undefined
+    : readFileSync(join(process.env.CODEX_SECURITY_PLUGIN_ROOT, 'skills', 'security-scan', 'SKILL.md'), 'utf8'),
 }));
 if (request.diagnosticsVersion === 1 && process.env.SYNTHETIC_OLD_ENGINE !== '1') {
   process.send({ event: 'discovery_worker_replaced', scanId: request.scanId, reason: 'tool error' });
@@ -93,12 +95,17 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       const scanDir = join(root, name);
       const receipt = join(root, `${name}.json`);
       await mkdir(scanDir);
+      const staged = join(root, `staged plugin ${name}`);
+      const skills = join(staged, "skills", "security-scan");
+      await mkdir(skills, { recursive: true });
+      await writeFile(join(skills, "SKILL.md"), `synthetic skill ${name}`);
       const environment = {
         PATH: process.versions["bun"] ? process.env["PATH"]! : "",
         CODEX_HOME: join(root, "codex-home"),
         SYNTHETIC_RECEIPT: receipt,
         SYNTHETIC_THREAD_ID: `thread-${name}`,
         CODEX_SECURITY_SCAN_DIR: scanDir,
+        CODEX_SECURITY_PLUGIN_ROOT: staged,
         CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH: join(
           scanDir,
           "private-snapshot.toml",
@@ -132,6 +139,7 @@ test("isolates direct engine credentials and runtime snapshots across concurrent
       assert.partialDeepStrictEqual(saved, {
         key: `synthetic-key-${name}`,
         awsProfile: `profile-${name}`,
+        skill: `synthetic skill ${name}`,
         snapshot: environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
         request: {
           scanId: `scan-${name}`,

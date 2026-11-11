@@ -1,3 +1,4 @@
+import { workbenchArgs } from "./workbench-arguments.js";
 import { asRecord } from "./record.js";
 import { promises as fs } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -15,6 +16,7 @@ export interface ScanArtifactContextOptions {
   requireClaim?: boolean;
   /** Selected publication only uses the saved target contract, without reading its checkout. */
   requireCurrentTarget?: boolean;
+  modelThreadId?: string;
   handoffClaimToken?: string;
   pluginRoot?: string;
   pythonCommand?: string;
@@ -34,7 +36,9 @@ export async function createScanArtifactContext(
     );
   }
 
-  const result = await runWorkbench(["get-scan", "--scan-id", scanId]);
+  const result = await runWorkbench(
+    workbenchArgs("get-scan", { scanId, modelThreadId: options.modelThreadId }),
+  );
   const scan = scanRecord(result, scanId);
   const progress = asRecord(scan.progress);
   const status =
@@ -94,6 +98,7 @@ export async function createScanArtifactContext(
     scanId,
     ...defined("scope", optionalString(scan.scope)),
     ...defined("pluginRoot", options.pluginRoot),
+    ...defined("modelThreadId", options.modelThreadId),
     ...defined("pythonCommand", options.pythonCommand),
     ...defined("targetContract", targetContract),
     ...defined("targetRevision", optionalString(scan.targetRevision)),

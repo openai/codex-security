@@ -40,7 +40,7 @@ import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
 import { runWorkbench } from "../src/runtime.js";
 import { readSavedScanLifecycle } from "../src/saved-scan-bootstrap.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import {
@@ -50,6 +50,8 @@ import {
 import { parseJsonLines, readJson, writeJson } from "./support/json.js";
 import { rejecting } from "./support/errors.js";
 import { writeSource } from "./support/shell.js";
+
+const pythonExecutable = useTestPython();
 
 const { severityRubric } = hostedContract.run.params;
 const { cleanup, temporaryDirectory } = createApiTestFixtures("hosted-scan-");
@@ -1318,6 +1320,21 @@ test("wire cleanup failure retains an uncertain terminal result and reports clea
   }
 });
 
+async function hostedHistory(input: HostedScanInput) {
+  return runWorkbench(
+    {
+      python: pythonExecutable()!,
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        SYSTEMROOT: process.env["SYSTEMROOT"],
+        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+      },
+    },
+    ["list-scans", "--repository", input.repository],
+  );
+}
+
 test.each([false, true])(
   "stopping after registration retains scan identity before executor dispatch (timeout=%p)",
   async (timedOut) => {
@@ -1345,23 +1362,12 @@ test.each([false, true])(
     expect(executor.run).not.toHaveBeenCalled();
     expect(result.scanId).toBeString();
     expect(result.execution).toBeUndefined();
-    const history = await runWorkbench(
-      {
-        python: pythonExecutable()!,
-        pluginRoot: PLUGIN_ROOT,
-        environment: {
-          PATH: process.env["PATH"],
-          SYSTEMROOT: process.env["SYSTEMROOT"],
-          CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-        },
-      },
-      ["list-scans", "--repository", input.repository],
-    );
+    const history = await hostedHistory(input);
     expect(history["scans"]).toMatchObject([
       {
         scanId: result.scanId,
         scanDir: result.outputDirectory,
-        progress: { status },
+        progress: { status, phase: "preflight" },
         lifecycle: { status },
       },
     ]);
@@ -1458,6 +1464,13 @@ test("a late cancel preserves a previously committed hosted failure", async () =
     status: "failed",
     execution: { status: "failed", message: "Recorded failure" },
   });
+  const history = await hostedHistory(input);
+  expect(history["scans"]).toMatchObject([
+    {
+      scanId: result.scanId,
+      progress: { status: "failed", phase: "threat_model" },
+    },
+  ]);
 });
 
 test("SDK cancellation retains an unknown executor acceptance receipt", async () => {

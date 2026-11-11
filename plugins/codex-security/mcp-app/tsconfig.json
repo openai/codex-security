@@ -14,7 +14,7 @@
     "strict": true,
     "target": "ES2022",
     "types": ["node"],
-    "lib": ["ES2024", "ESNext.Iterator"],
+    "lib": ["ES2025", "ESNext.Iterator"],
     "allowImportingTsExtensions": true
   },
   "include": ["*.ts", "src", "tests/**/*.ts", "scripts/*.mts"]

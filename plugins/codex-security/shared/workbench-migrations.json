@@ -538,6 +538,27 @@
   },
   {
     "version": 64,
+    "name": "persist scan log completion boundaries",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"
+    ]
+  },
+  {
+    "version": 65,
+    "name": "bind Windows Deep Scan resume output directories",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_output_identity TEXT;"
+    ]
+  },
+  {
+    "version": 66,
+    "name": "bind Windows Deep Scan resume checkouts",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_target_identity TEXT;"
+    ]
+  },
+  {
+    "version": 67,
     "name": "retain deep scan attempts and exact merge inputs",
     "statements": [
       "CREATE TABLE deep_scan_attempts (\n    scan_id TEXT NOT NULL REFERENCES deep_scan_runs(scan_id) ON DELETE CASCADE,\n    worker_id TEXT NOT NULL REFERENCES deep_scan_workers(id) ON DELETE CASCADE,\n    attempt INTEGER NOT NULL,\n    status TEXT NOT NULL,\n    started_at TEXT NOT NULL,\n    completed_at TEXT,\n    end_reason TEXT,\n    error_message TEXT,\n    accepted_result_path TEXT,\n    accepted_result_sha256 TEXT,\n    receipt_json TEXT,\n    PRIMARY KEY (worker_id, attempt)\n);",
@@ -549,28 +570,28 @@
     ]
   },
   {
-    "version": 65,
+    "version": 68,
     "name": "persist selected deep scan finalization input",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;"
     ]
   },
   {
-    "version": 66,
+    "version": 69,
     "name": "bind original deep scan parent usage turn",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN usage_owner_json TEXT;"
     ]
   },
   {
-    "version": 67,
+    "version": 70,
     "name": "bind original deep scan execution settings",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN execution_settings_json TEXT;"
     ]
   },
   {
-    "version": 68,
+    "version": 71,
     "name": "preserve original deep scan discovery context",
     "statements": [
       "ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context TEXT;",

@@ -55,7 +55,10 @@ selected Cloud repository. If the preview matches,
 ## Identity and evidence
 
 The host, repository, alert number and ref identify a finding. The same alert
-on two refs keeps separate evidence. Missing security severity stays `unknown`.
+on two refs keeps separate evidence. The finding URL opens the GitHub alert.
+The file, line and commit come from the selected instance. Severity comes from
+the rule’s security rating. A SARIF level such as `error` leaves a missing
+security rating `unknown`.
 
 A GitHub dismissal applies to the entire alert, even when a selected ref's
 instance is open or fixed. A GitHub connection in Codex can select records.

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -161,8 +162,6 @@ def _start_scan(tmp_path: Path, *, mode: str = "standard", dedicated: bool = Fal
             "scan-parent",
             "--scan-id",
             str(started["scanId"]),
-            "--available-parallelism",
-            "4",
             environment=environment,
         )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
@@ -373,7 +372,7 @@ def _state_graph(
 ) -> None:
     sqlite_home = Path(environment["CODEX_SQLITE_HOME"])
     sqlite_home.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(sqlite_home / "state_5.sqlite") as connection:
+    with closing(sqlite3.connect(sqlite_home / "state_5.sqlite")) as connection, connection:
         connection.execute(
             "CREATE TABLE threads "
             "(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)"
@@ -1352,6 +1351,44 @@ def test_usage_finds_state_database_in_configured_home(
     assert scan_usage._codex_state_database() == database.resolve()
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("spelling", "filename"),
+    [
+        ("leading-relative", " usage.sqlite"),
+        (
+            "trailing-absolute",
+            "usage.sqlite\N{NO-BREAK SPACE}" if sys.platform == "win32" else "usage.sqlite ",
+        ),
+    ]
+    + ([] if sys.platform == "win32" else [("literal-tilde", "~synthetic-usage.sqlite")])
+    + ([("filesystem-bytes", b"usage-\xff?#%.sqlite")] if sys.platform == "linux" else []),
+)
+def test_completion_reads_the_literal_usage_database(
+    tmp_path: Path, spelling: str, filename: str | bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    fixture.write_parent_rollout([_token_event(counted, 18, 2)])
+    original = Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    selected = tmp_path / os.fsdecode(filename)
+    original.rename(selected)
+
+    neighbor = tmp_path / "neighbor"
+    neighbor.mkdir()
+    other_rollout = _rollout(neighbor, "scan-parent", [_token_event(counted, 96, 2)])
+    _state_graph(fixture.environment, {"scan-parent": other_rollout}, [])
+    original.rename(tmp_path / "usage.sqlite")
+    monkeypatch.chdir(tmp_path)
+    fixture.environment["CODEX_STATE_DB"] = (
+        str(selected) if spelling == "trailing-absolute" else selected.name
+    )
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "complete"
+    assert usage["totalTokens"] == 20
+
+
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path)
     usage = _complete_scan(fixture)["scan"]["usage"]
@@ -1444,11 +1481,15 @@ def test_missing_usage_preserves_measured_parent_or_descendant(
 
 @pytest.mark.native_macos
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS system path aliases")
-@pytest.mark.parametrize("temporary_root", [tempfile.gettempdir(), "/tmp"], ids=["var", "tmp"])
+@pytest.mark.parametrize("temporary_root", [None, "/tmp"], ids=["var", "tmp"])
 def test_completion_accepts_macos_system_rollout_alias(
     tmp_path: Path,
-    temporary_root: str,
+    temporary_root: str | None,
 ) -> None:
+    if temporary_root is None:
+        temporary_root = subprocess.check_output(
+            ["getconf", "DARWIN_USER_TEMP_DIR"], text=True
+        ).strip()
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     with tempfile.TemporaryDirectory(dir=temporary_root) as directory:

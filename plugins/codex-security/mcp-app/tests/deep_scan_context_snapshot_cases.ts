@@ -74,7 +74,8 @@ export async function testDeepScanContextSnapshots() {
         async (userContext, index) => {
           const severityRubric = userContext === undefined ? undefined : policy;
           const deepConfig = path.join(fixture.root, `deep-${index}.toml`);
-          const maxTimeHours = 1.5 + index;
+          const maxTimeMinutes = 15.5 + index;
+          const maxTimeHours = maxTimeMinutes / 60;
           await writeFile(deepConfig, `[deep_scan]\nmax_time_hours = 48\n`);
           const command = async (args: string[], input?: string) => {
             const execution = promisify(execFile)(
@@ -100,8 +101,8 @@ export async function testDeepScanContextSnapshots() {
             projectConfigPath,
             JSON.stringify({
               scan: {
+                max_time_minutes: maxTimeMinutes,
                 deep: {
-                  max_time_hours: maxTimeHours,
                   subagents_per_worker: index,
                 },
               },
@@ -246,6 +247,7 @@ export async function testDeepScanContextSnapshots() {
             editedContext,
           ]);
           // Reload through a new store to model a coordinator restart after editing.
+          await writeFile(deepConfig, "[deep_scan]\nmax_time_hours = 23\n");
           store = new WorkbenchDeepScanStore(command);
           run = await store.begin({
             scanId: run.scanId,
@@ -328,7 +330,6 @@ export async function testDeepScanContextSnapshots() {
             );
             assert.match(resumed.invocation.stdin, /record_codex_security_/);
           }
-          await writeFile(deepConfig, "[deep_scan]\nmax_time_hours = 48\n");
           const restarted = await new WorkbenchDeepScanStore(command).begin({
             scanId: run.scanId,
             threadId,

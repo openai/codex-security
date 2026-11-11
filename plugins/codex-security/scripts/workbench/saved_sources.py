@@ -64,23 +64,20 @@ def _source_digests(value: Any, error: str) -> dict[str, str]:
     return value
 
 
-def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
-    """Return the saved source digests and the optional path supplying the threat model.
-
-    Accept both a legacy path-to-digest map and an envelope containing sources.
-    Raise ContractError if the model points outside that envelope's source set.
-    """
-    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
-        sources = _source_digests(
-            value["sources"], "Saved stopped-scan source digests are malformed."
-        )
-        model_source = value.get("threatModelSource")
-        if "threatModelSource" in value and (
-            not isinstance(model_source, str) or model_source not in sources
-        ):
-            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
-        return sources, model_source
-    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
+def _retained_source_state(raw: str | None) -> dict[str, Any]:
+    """Decode stopped-scan sources, preserving the distinction between absent and frozen empty."""
+    if raw is None:
+        return {}
+    state = json.loads(raw)
+    if not isinstance(state, dict) or not isinstance(state.get("sources"), dict):
+        state = {"sources": state}  # Legacy rows store only the path-to-digest map.
+    sources = _source_digests(state["sources"], "Saved stopped-scan source digests are malformed.")
+    model_source = state.get("threatModelSource")
+    if "threatModelSource" in state and (
+        not isinstance(model_source, str) or model_source not in sources
+    ):
+        raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
+    return state
 
 
 def _retained_checkpoint_state(

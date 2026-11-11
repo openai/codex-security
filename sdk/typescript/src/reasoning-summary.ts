@@ -49,7 +49,7 @@ export async function captureOriginalReasoningSummary(options: {
     options.environment,
     undefined,
     options.signal,
-    options.cwd,
+    { cwd: options.cwd },
   );
   // Older native executables and models absent from their catalog provide no
   // recoverable value. Preserve omission instead of choosing another default.

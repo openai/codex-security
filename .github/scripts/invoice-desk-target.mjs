@@ -11,35 +11,33 @@ function eligible(pr, repository, sha) {
   );
 }
 
-export async function resolveScanTargets(context, getPullRequest) {
-  const { eventName, event, repository, sha, target } = context;
-  // After approval, keep the scan bound to its original PR and source commit.
-  if (target) {
-    if (target.pr === 0) return [{ pr: 0, sha }];
-    const pr = await getPullRequest(String(target.pr));
-    return eligible(pr, repository, target.sha)
-      ? [{ pr: pr.number, sha: target.sha }]
-      : [];
+export async function resolveScanTarget(context, getPullRequest) {
+  const { eventName, event, repository, sha } = context;
+  // After approval, recheck the same PR and revision selected by the target job.
+  let target = context.target;
+  if (!target) {
+    if (eventName === "schedule") return { pr: 0, sha };
+    if (eventName !== "workflow_dispatch") return null;
+    const { pr_number: number = "", source_sha: sourceSha = "" } =
+      event.inputs ?? {};
+    if (!number && !sourceSha) return { pr: 0, sha };
+    if (!/^[1-9][0-9]*$/.test(number) || !/^[a-f0-9]{40}$/.test(sourceSha)) {
+      throw new Error(
+        "PR scans require both a positive pr_number and a full source_sha.",
+      );
+    }
+    target = { pr: number, sha: sourceSha };
   }
-  if (eventName === "schedule") return [{ pr: 0, sha }];
-  if (eventName !== "workflow_dispatch") return [];
-  const { pr_number: number = "", source_sha: sourceSha = "" } =
-    event.inputs ?? {};
-  if (!number && !sourceSha) return [{ pr: 0, sha }];
-  if (!/^[1-9][0-9]*$/.test(number) || !/^[a-f0-9]{40}$/.test(sourceSha)) {
-    throw new Error(
-      "PR scans require both a positive pr_number and a full source_sha.",
-    );
-  }
-
-  const pr = await getPullRequest(number);
-  if (!eligible(pr, repository, sourceSha)) return [];
-  return [{ pr: pr.number, sha: sourceSha }];
+  if (target.pr === 0) return { pr: 0, sha };
+  const pr = await getPullRequest(String(target.pr));
+  return eligible(pr, repository, target.sha)
+    ? { pr: pr.number, sha: target.sha }
+    : null;
 }
 
 if (isMain(import.meta.url)) {
   const repository = process.env.GITHUB_REPOSITORY;
-  const targets = await resolveScanTargets(
+  const target = await resolveScanTarget(
     {
       eventName: process.env.GITHUB_EVENT_NAME,
       event: JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, "utf8")),
@@ -62,16 +60,11 @@ if (isMain(import.meta.url)) {
   );
   appendFileSync(
     process.env.GITHUB_OUTPUT,
-    `targets=${JSON.stringify(targets)}\n`,
+    `sha=${target?.sha ?? ""}\npr=${target?.pr || ""}\n`,
   );
-  const message =
-    targets.length === 0
-      ? "Skipped: no eligible PR revision needs a scan."
-      : targets
-          .map(
-            ({ pr, sha }) => `${pr ? `PR #${pr}` : "Main baseline"} at ${sha}`,
-          )
-          .join("\n");
+  const message = target
+    ? `${target.pr ? `PR #${target.pr}` : "Main baseline"} at ${target.sha}`
+    : "Skipped: no eligible PR revision needs a scan.";
   console.log(message);
   if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, message + "\n");
