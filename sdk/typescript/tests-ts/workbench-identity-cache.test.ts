@@ -2,6 +2,9 @@ import { join } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
+import { useTestPython } from "./support/python.js";
+
+const pythonExecutable = useTestPython();
 
 const probe = String.raw`
 import argparse
@@ -928,7 +931,8 @@ with ExitStack() as stack:
             pass
         for case in ("valid", "owner-refused", "parent-refused", "nonempty", "noncanonical"):
             events = []
-            def canonical(path):
+            def canonical(path, *, writable_output):
+                assert writable_output is True
                 events.append(["canonical", connection.in_transaction])
                 if case == "noncanonical" and connection.in_transaction:
                     raise SystemExit("Synthetic changed output")
@@ -952,7 +956,7 @@ with ExitStack() as stack:
                 for name, value in {
                     "require_target": target,
                     "parse_scan_recipe": {"target": {"kind": "repository", "paths": []}, "mode": "standard"},
-                    "scan_target_identity": ("synthetic", None, 7, 8),
+                    "prepare_cli_scan_target": (("synthetic", None, 7, 8), None),
                     "directory_snapshot_regular_file_count": 0,
                 }.items():
                     mocks.enter_context(patch.object(workbench, name, return_value=value))
@@ -1240,7 +1244,8 @@ with ExitStack() as stack:
         stack.enter_context(patch.object(workbench, "require_scannable_target"))
         stack.enter_context(patch.object(workbench, "require_canonical_scan_directory", return_value=scan_dir))
         stack.enter_context(patch.object(workbench, "directory_snapshot_regular_file_count", return_value=0))
-        stack.enter_context(patch.object(workbench, "scan_target_identity", return_value=("synthetic", "snapshot", 7, metadata[paths["requested"]].st_ino)))
+        target_identity = ("synthetic", "snapshot", 7, metadata[paths["requested"]].st_ino)
+        stack.enter_context(patch.object(workbench, "prepare_cli_scan_target", return_value=(target_identity, None)))
         stack.enter_context(patch.object(workbench, "require_uuid", side_effect=lambda value, label: value))
         stack.enter_context(patch.object(workbench, "archive_scan"))
         class LineageAccepted(Exception):
@@ -1552,7 +1557,7 @@ async function run(
   scenario: string,
   ...scenarioArgs: string[]
 ): Promise<Record<string, unknown>> {
-  const python = (Bun.which("python3") ?? Bun.which("python"))!;
+  const python = pythonExecutable()!;
   // Keep the Python fixture off the Windows command line.
   const execution = await runCommand(
     python,
@@ -2006,7 +2011,7 @@ test.each(["migration", "migration-recorded31"])(
     expect(result["currentScopesDistinct"]).toBe(true);
     expect(result["targetCount"]).toBe(12);
     expect(result["migrations"]).toEqual(
-      Array.from({ length: 68 }, (_, index) => index + 1),
+      Array.from({ length: 71 }, (_, index) => index + 1),
     );
   },
 );

@@ -120,7 +120,7 @@ print(json.dumps(result))
 });
 
 test("shares findings only between explicitly identified repository and scope aliases", async () => {
-  const python = (Bun.which("python3") ?? Bun.which("python"))!;
+  const python = await resolvePluginPython();
   const probe = `
 import argparse, json, sqlite3, sys
 from pathlib import Path
@@ -152,7 +152,7 @@ CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence
 """)
 history = Path(sys.argv[1]).parent / "shared" / "workbench-migrations.json"
 for migration in json.loads(history.read_text(encoding="utf-8")):
-    if migration["version"] in (61, 62):
+    if migration["version"] in (61, 62, 64):
         for statement in migration["statements"]:
             connection.execute(statement)
 origin = "https://example.invalid/synthetic/repository"
