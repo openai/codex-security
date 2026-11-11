@@ -13,7 +13,7 @@ test('defaults are stable across events', () => {
   });
   const args = scanArguments(input, {repository:'/checkout'}, '/results');
   assert.equal(args[args.indexOf('--mode') + 1], 'standard');
-  assert.ok(!args.includes('--max-time-hours'));
+  assert.ok(!args.includes('--max-time'));
   assert.ok(!args.includes('--fail-on-severity'));
   assert.ok(!args.includes('--python'));
   assert.ok(!args.includes('--cyber-access-program'));
@@ -58,7 +58,7 @@ test('Deep scans forward an explicit discovery budget and selected repository pa
   assert.equal(input.maxTimeHours, 1.5);
   const args = scanArguments(input, {repository:'/checkout'}, '/results');
   assert.equal(args[args.indexOf('--mode') + 1], 'deep');
-  assert.equal(args[args.indexOf('--max-time-hours') + 1], '1.5');
+  assert.equal(args[args.indexOf('--max-time') + 1], '90');
   assert.deepEqual(args.filter(arg => arg.startsWith('--path=')).map(arg => arg.slice('--path=./'.length)), ['src', 'lib']);
 });
 test('Deep scans leave an unset discovery budget to the CLI', () => {
@@ -66,7 +66,7 @@ test('Deep scans leave an unset discovery budget to the CLI', () => {
   assert.equal(input.maxTimeHours, undefined);
   const args = scanArguments(input, {repository:'/checkout'}, '/results');
   assert.equal(args[args.indexOf('--mode') + 1], 'deep');
-  assert.ok(!args.includes('--max-time-hours'));
+  assert.ok(!args.includes('--max-time'));
 });
 test('Deep scan mode and discovery budgets reject unsupported combinations', () => {
   assert.throws(() => parse({mode:'thorough'}), /mode must be one of: standard, deep/);
