@@ -3,6 +3,7 @@
 import json
 import os
 import runpy
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -155,9 +156,9 @@ def test_no_installed_aws_never_launches_checkout_executable(tmp_path, monkeypat
         main()
 
 
-@pytest.mark.cross_platform
-@pytest.mark.skipif(os.name == "nt", reason="Fixture uses POSIX executable scripts and symlinks")
-def test_aws_and_its_credential_helper_skip_checkout_path_entries(tmp_path):
+@pytest.mark.native_macos
+@pytest.mark.skipif(os.name == "nt", reason="Fixture uses Bash scripts and POSIX symlinks")
+def test_aws_and_its_credential_helper_skip_checkout_launchers_and_startup_hooks(tmp_path):
     checkout = tmp_path / "source"
     repo_bin = checkout / "bin"
     repo_bin.mkdir(parents=True)
@@ -168,7 +169,7 @@ def test_aws_and_its_credential_helper_skip_checkout_path_entries(tmp_path):
         directory.mkdir()
 
     def script(path, body):
-        path.write_text("#!/bin/sh\n" + body)
+        path.write_text("#!/bin/bash\n" + body)
         path.chmod(0o755)
 
     marker = tmp_path / "ran-source-tool"
@@ -178,7 +179,18 @@ def test_aws_and_its_credential_helper_skip_checkout_path_entries(tmp_path):
     alias.symlink_to(repo_bin, target_is_directory=True)
     (linked_bin / "aws").symlink_to(repo_bin / "aws")
     script(trusted_bin / "aws", "exec fixture-credentials\n")
-    script(helper_bin / "fixture-credentials", """printf '{"profile":"%s"}\\n' "$AWS_PROFILE"\n""")
+    credentials = "import json, os\nprint(json.dumps({'profile': os.environ['AWS_PROFILE']}))"
+    script(
+        helper_bin / "fixture-credentials",
+        f"exec {shlex.quote(sys.executable)} -c {shlex.quote(credentials)}\n",
+    )
+    hook_marker = tmp_path / "ran-startup-hook"
+    hook = checkout / "bash-env"
+    hook.write_text(f": > {shlex.quote(str(hook_marker))}\n")
+    python_marker = tmp_path / "ran-sitecustomize"
+    (checkout / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(python_marker)!r}).touch()\n"
+    )
     result = subprocess.run(
         [sys.executable, "-I", *arguments(checkout, "--single-repository")],
         cwd=tmp_path,
@@ -188,11 +200,15 @@ def test_aws_and_its_credential_helper_skip_checkout_path_entries(tmp_path):
                 map(str, (repo_bin, alias, linked_bin, trusted_bin, helper_bin))
             ),
             "AWS_PROFILE": "synthetic",
+            "BASH_ENV": str(hook),
+            "PYTHONPATH": str(checkout),
             "SHIM_MARKER": str(marker),
         },
         capture_output=True,
         text=True,
     )
     assert not marker.exists()
+    assert not hook_marker.exists()
+    assert not python_marker.exists()
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"profile": "synthetic"}

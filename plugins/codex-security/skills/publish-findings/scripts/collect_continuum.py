@@ -11,6 +11,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from collector_paths import in_source, source_root  # noqa: E402
 
+# The installed AWS CLI and its credential helpers can be shell or Python
+# scripts. These settings can execute code before the selected script starts.
+STARTUP_VARIABLES = {
+    "BASHOPTS",
+    "BASH_ENV",
+    "ENV",
+    "FPATH",
+    "PS4",
+    "PYTHONEXECUTABLE",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONPLATLIBDIR",
+    "PYTHONSTARTUP",
+    "PYTHONUSERBASE",
+    "PYTHONWARNINGS",
+    "PYTHON_PRESITE",
+    "SHELLOPTS",
+    "ZDOTDIR",
+    "__PYVENV_LAUNCHER__",
+}
+
 
 def installed_aws(target: Path) -> tuple[Path, dict[str, str], Path | None]:
     source = source_root(target)
@@ -44,7 +65,11 @@ def installed_aws(target: Path) -> tuple[Path, dict[str, str], Path | None]:
 
     # Credential helpers inherit the same lookup boundary, including on Windows
     # where executable searches can also use the current directory.
-    environment = os.environ.copy()
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in STARTUP_VARIABLES and not name.startswith(("BASH_FUNC_", "LD_", "DYLD_"))
+    }
     environment["PATH"] = os.pathsep.join(directories)
     cwd = executable.parent if in_source(Path.cwd(), source) else None
     return executable, environment, cwd
