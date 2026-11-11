@@ -45,6 +45,7 @@ import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
+  extname,
   isAbsolute,
   join,
   parse,
@@ -3444,9 +3445,9 @@ export async function main(
     description: "Publish findings from a completed scan.",
     examples: [
       {
+        args: { scanDir: "../scan-results" },
         options: {
           to: "linear",
-          scan: ["latest"],
           linearTeam: "TEAM_ID",
           dryRun: true,
         },
@@ -3489,7 +3490,7 @@ export async function main(
         .array(optionValue("--scan-dir"))
         .default([])
         .describe(
-          "External completed scan directory; Linear and custom accept one scan.",
+          "Use the positional directory for one scan. Repeat this flag for destinations that accept multiple scans.",
         ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
@@ -4470,7 +4471,7 @@ export async function main(
       examples: [
         {
           args: { scanDir: "../scan-results" },
-          options: { to: "linear", linearTeam: "TEAM_ID" },
+          options: { linearTeam: "TEAM_ID" },
         },
       ],
       hint: "Use publish scan --dry-run to preview a publication offline.",
@@ -4710,7 +4711,7 @@ export async function main(
       usage: [
         {
           args: { project: true },
-          options: { snykOrg: true, sourceRepositoryUrl: true },
+          options: { org: true, sourceRepositoryUrl: true },
           suffix: "[options]",
         },
       ],
@@ -4720,7 +4721,7 @@ export async function main(
         {
           args: { project: "PROJECT_ID" },
           options: {
-            snykOrg: "ORG_ID",
+            org: "ORG_ID",
             sourceRepositoryUrl: "https://github.com/example/project",
           },
         },
@@ -4731,7 +4732,9 @@ export async function main(
         project: z.string().min(1).describe("Snyk project ID."),
       }),
       options: z.object({
-        snykOrg: optionValue("--snyk-org").describe("Snyk organization ID."),
+        org: optionValue("--org").describe(
+          "Snyk organization ID (alias: --snyk-org).",
+        ),
         snykProduct: z
           .enum(["open-source", "code"])
           .default("open-source")
@@ -4771,7 +4774,7 @@ export async function main(
           collectSnykIssues(
             {
               projectId: args.project,
-              organizationId: options.snykOrg,
+              organizationId: options.org,
               product: options.snykProduct,
               apiOrigin: options.snykApiOrigin,
               sourceRepositoryUrl: options.sourceRepositoryUrl,
@@ -4786,7 +4789,7 @@ export async function main(
       usage: [
         {
           args: { project: true },
-          options: { semgrepDeployment: true, semgrepRef: true },
+          options: { deployment: true, ref: true },
           suffix: "[options]",
         },
       ],
@@ -4796,8 +4799,8 @@ export async function main(
         {
           args: { project: "owner/project" },
           options: {
-            semgrepDeployment: "DEPLOYMENT",
-            semgrepRef: "refs/heads/main",
+            deployment: "DEPLOYMENT",
+            ref: "refs/heads/main",
           },
         },
       ],
@@ -4810,11 +4813,11 @@ export async function main(
           .describe("Exact Semgrep project name, typically owner/repository."),
       }),
       options: z.object({
-        semgrepDeployment: optionValue("--semgrep-deployment").describe(
-          "Semgrep deployment slug.",
+        deployment: optionValue("--deployment").describe(
+          "Semgrep deployment slug (alias: --semgrep-deployment).",
         ),
-        semgrepRef: optionValue("--semgrep-ref").describe(
-          "Exact source ref, for example refs/heads/main.",
+        ref: optionValue("--ref").describe(
+          "Exact source ref, for example refs/heads/main (alias: --semgrep-ref).",
         ),
         semgrepProduct: z
           .enum(SEMGREP_PLATFORM_PRODUCTS)
@@ -4852,8 +4855,8 @@ export async function main(
           collectSemgrepPlatformFindings(
             {
               project: args.project,
-              deployment: options.semgrepDeployment,
-              ref: options.semgrepRef,
+              deployment: options.deployment,
+              ref: options.ref,
               product: options.semgrepProduct,
               sourceRepositoryUrl: options.sourceRepositoryUrl,
               signal,
@@ -4874,7 +4877,7 @@ export async function main(
         { options: { sonarProject: "PROJECT_KEY", dryRun: true } },
         { args: { capture: "../reports/sonar.json" } },
       ],
-      hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a live capture for review without importing findings.",
+      hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a private evidence copy for live and saved inputs and prints its path for confirmation.",
       destructive: true,
       args: z.object({
         capture: z
@@ -4916,7 +4919,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Preview destinations and evidence without storing or publishing findings.",
+            "Save a private evidence copy and preview the selected findings and destinations.",
           ),
         yes: z
           .boolean()
@@ -5612,20 +5615,22 @@ export async function main(
           : finishScanCommand(outcome, format, incurError);
       },
     }).command("import", {
-      usage: [{ suffix: "(--csv FILE | --json FILE) [options]" }],
+      usage: [{ suffix: "FILE [options]" }],
       description:
         "Save CSV or JSON findings as a completed scan without security analysis.",
       destructive: true,
+      args: z.object({
+        file: z
+          .string({ error: "Provide a findings file to import." })
+          .min(1)
+          .describe("Findings file to import."),
+      }),
       options: z
         .object({
-          csv: optionValue("--csv")
+          inputFormat: z
+            .enum(["csv", "json"])
             .optional()
-            .describe("Findings CSV in the codex-security export format."),
-          json: optionValue("--json")
-            .optional()
-            .describe(
-              "Findings JSON document or object with a findings array.",
-            ),
+            .describe("Input format (default: inferred from .csv or .json)."),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -5642,28 +5647,33 @@ export async function main(
         })
         .refine(
           (options) =>
-            Number(options.csv !== undefined) +
-              Number(options.json !== undefined) ===
-            1,
-          { message: "Provide exactly one of --csv FILE or --json FILE." },
-        )
-        .refine(
-          (options) =>
             !options.archiveExisting || options.outputDir !== undefined,
           { message: "--archive-existing requires --output-dir." },
-        )
-        .meta({ oneOf: [{ required: ["csv"] }, { required: ["json"] }] }),
+        ),
       examples: [
-        { options: { csv: "findings.csv" } },
-        { options: { json: "findings.json" } },
+        { args: { file: "findings.csv" } },
+        { args: { file: "report" }, options: { inputFormat: "json" } },
       ],
-      hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
+      hint: "Each input row is retained, including duplicates. Use FILE --json for JSON output. Legacy --csv FILE and --json FILE still select the input format.",
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ options, format, error: incurError }) {
+      async run({ args, options, format, error: incurError }) {
         const directory = dependencies.currentDirectory();
+        const inputFormat =
+          options.inputFormat ?? extname(args.file).slice(1).toLowerCase();
+        if (inputFormat !== "csv" && inputFormat !== "json") {
+          exitCode = 2;
+          const message =
+            "Cannot infer input format. Use --input-format csv or --input-format json.";
+          errorOutput.write(`codex-security: ${message}\n`);
+          return incurError({
+            code: "INVALID_INPUT_FORMAT",
+            message,
+            exitCode,
+          });
+        }
         const outcome = await runImport({
-          sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
-          format: options.csv === undefined ? "json" : "csv",
+          sourcePath: resolveCliPath(directory, args.file),
+          format: inputFormat,
           outputDir:
             options.outputDir === undefined
               ? undefined
@@ -6824,6 +6834,7 @@ export async function main(
         "  codex-security export --export-format json --output -\n" +
         "  codex-security export ../scan-results --export-format csv\n" +
         "  codex-security export --artifact threat-model --output -\n\n" +
+        "Implicit filenames: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md.\n" +
         "Use --export-format for artifact format. The global --format option controls\n" +
         "framework output such as --schema; it does not change exported files.",
       destructive: true,
@@ -6858,7 +6869,7 @@ export async function main(
           output: optionValue("--output")
             .optional()
             .describe(
-              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md).",
+              "FILE to replace or '-' for raw stdout. Default filenames are created only if absent.",
             ),
           sourceRoot: optionValue("--source-root")
             .optional()
@@ -6883,6 +6894,34 @@ export async function main(
       async run({ args, options }) {
         rawExportOutput = options.output === "-";
         try {
+          if (rawExportOutput) {
+            const responseFlag = frameworkFlags.filters.length
+              ? "--filter-output"
+              : frameworkFlags.fullOutput
+                ? "--full-output"
+                : frameworkFlags.tokenArguments[0];
+            if (responseFlag) {
+              throw new CodexSecurityError(
+                `${responseFlag} cannot be used with raw artifact stdout. Omit it to pipe the complete artifact.`,
+              );
+            }
+            const markdown =
+              options.artifact === "threat-model" ||
+              options.exportFormat === "md";
+            const csv =
+              options.exportFormat === "csv" ||
+              options.exportFormat === "servicenow-avit";
+            const expectedFormat = markdown ? "md" : csv ? undefined : "json";
+            const incompatible = frameworkFlags.formats.find(
+              (value) => value !== expectedFormat,
+            );
+            if (incompatible !== undefined) {
+              const label = markdown ? "Markdown" : csv ? "CSV" : "JSON";
+              throw new CodexSecurityError(
+                `${label} stdout cannot be combined with --format ${incompatible}. Omit the response format to pipe the complete artifact.`,
+              );
+            }
+          }
           const currentDirectory = dependencies.currentDirectory();
           if (args.scanDir !== undefined && options.scan !== undefined) {
             throw new CodexSecurityError(
@@ -6937,6 +6976,7 @@ export async function main(
               artifact: options.artifact,
               format,
               output: outputPath,
+              noClobber: options.output === undefined,
               sourceRoot,
               avitTemplate: options.avitTemplate,
               pythonPath: options.python,
@@ -8078,6 +8118,13 @@ export async function main(
   const verbIndex = firstNonGlobal(argv, commandIndex + 1);
   let following = argv[verbIndex];
   const scanImport = command === "scan" && following === "import";
+  const importArgs = normalizeImportArguments(
+    argv,
+    verbIndex,
+    command,
+    following,
+  );
+  argv = importArgs.args;
   if (
     command === "scan" &&
     !scanImport &&
@@ -8127,6 +8174,7 @@ export async function main(
     if (mixedAction) return `${actionFlags.join(" and ")} must be used alone.`;
     if (command === undefined && literalArgs.length)
       return "Select a command before --.";
+    if (importArgs.error) return importArgs.error;
     if (frameworkFlags.argumentError) return frameworkFlags.argumentError;
     if (command === undefined) return undefined;
     if (!entry) {
@@ -8190,31 +8238,6 @@ export async function main(
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
     }
-    if (command === "export" && structuredOutput && !inspection) {
-      const hasValue = (flag: string, value: string) =>
-        argv.some(
-          (arg, index) =>
-            arg === `${flag}=${value}` ||
-            (arg === flag && argv[index + 1] === value),
-        );
-      if (hasValue("--output", "-")) {
-        if (
-          ["csv", "servicenow-avit"].some(
-            (format) =>
-              hasValue("--export-format", format) ||
-              hasValue("--exportFormat", format),
-          )
-        ) {
-          return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-        }
-        if (
-          hasValue("--artifact", "threat-model") ||
-          hasValue("--export-format", "md")
-        ) {
-          return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
-        }
-      }
-    }
     if (command === "scan" && !inspection) {
       if (frameworkFlags.filters.length) {
         return "--filter-output is not supported for scan results.";
@@ -8275,15 +8298,9 @@ export async function main(
           return `Invalid boolean value for ${option}: ${diagnosticValue(value.slice(equals + 1))}. Use ${option}, ${option}=true, or ${option}=false.`;
         }
       }
-      if (
-        equals >= 0 ||
-        (!valueOptions.has(canonicalOption) &&
-          !(scanImport && option === "--json"))
-      )
-        continue;
+      if (equals >= 0 || !valueOptions.has(canonicalOption)) continue;
       const next = argv[index + 1];
       if (next === undefined || next.startsWith("--") || next === "-h") {
-        if (scanImport && option === "--json" && inspection) continue;
         return `Missing value for flag: ${option}`;
       }
       index += 1;
@@ -8320,10 +8337,7 @@ export async function main(
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.${hint}`;
     }
   }
-  const frameworkFlags = parseFrameworkArguments(
-    argv,
-    scanImport ? verbIndex + 1 : argv.length,
-  );
+  const frameworkFlags = parseFrameworkArguments(argv);
   const frameworkArgv = frameworkFlags.args;
   const { jsonFormat } = frameworkFlags;
   const policyFullOutput =
@@ -8967,10 +8981,70 @@ function firstNonGlobal(argv: readonly string[], start: number): number {
   return index;
 }
 
-function parseFrameworkArguments(
+/** Translate historical input flags only within their original command. */
+function normalizeImportArguments(
   argv: readonly string[],
-  firstImportOption: number,
-) {
+  verbIndex: number,
+  command: string | undefined,
+  subcommand: string | undefined,
+): { args: readonly string[]; error?: string } {
+  const scanImport = command === "scan" && subcommand === "import";
+  const providerAliases: Record<string, string> =
+    command === "import" && subcommand === "semgrep"
+      ? { "--semgrep-deployment": "--deployment", "--semgrep-ref": "--ref" }
+      : command === "import" && subcommand === "snyk"
+        ? { "--snyk-org": "--org" }
+        : {};
+  if (!scanImport && Object.keys(providerAliases).length === 0)
+    return { args: argv };
+  const args = argv.slice(0, verbIndex + 1);
+  const seen = new Map<string, string>();
+  for (let index = args.length; index < argv.length; index++) {
+    const token = argv[index]!;
+    if (token === "--") {
+      args.push(...argv.slice(index));
+      break;
+    }
+    const equals = token.indexOf("=");
+    const name = equals < 0 ? token : token.slice(0, equals);
+    const flag = name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+    let value = equals < 0 ? argv[index + 1] : token.slice(equals + 1);
+    let canonical = providerAliases[flag] ?? flag;
+    if (scanImport && (flag === "--csv" || flag === "--json")) {
+      if (
+        equals < 0 &&
+        (value === undefined || value.startsWith("--") || value === "-h")
+      ) {
+        if (flag === "--csv")
+          return { args: argv, error: "Missing value for flag: --csv" };
+        args.push(token);
+        continue;
+      }
+      if (!value) return { args: argv, error: `${flag} must not be empty.` };
+      args.push(value.startsWith("-") ? "./" + value : value);
+      if (equals < 0) index++;
+      canonical = "--input-format";
+      value = flag.slice(2);
+      args.push(canonical + "=" + value);
+    } else if (Object.hasOwn(providerAliases, flag)) {
+      args.push(canonical + (equals < 0 ? "" : token.slice(equals)));
+    } else {
+      args.push(token);
+    }
+    if (
+      value !== undefined &&
+      (canonical === "--input-format" ||
+        Object.values(providerAliases).includes(canonical))
+    ) {
+      if (seen.has(canonical) && seen.get(canonical) !== value)
+        return { args: argv, error: `Conflicting values for ${canonical}.` };
+      seen.set(canonical, value);
+    }
+  }
+  return { args };
+}
+
+function parseFrameworkArguments(argv: readonly string[]) {
   const args: string[] = [];
   const formats: string[] = [];
   const filters: (string | undefined)[] = [];
@@ -8980,18 +9054,6 @@ function parseFrameworkArguments(
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]!;
     const next = argv[index + 1];
-    if (
-      index >= firstImportOption &&
-      argument === "--json" &&
-      next !== undefined &&
-      !next.startsWith("--") &&
-      next !== "-h"
-    ) {
-      // Incur accepts the import's JSON input in the equals form.
-      args.push(`--json=${next}`);
-      index++;
-      continue;
-    }
     const equals = argument.indexOf("=");
     const flag = equals < 0 ? argument : argument.slice(0, equals);
     if (!FRAMEWORK_VALUE_OPTIONS.has(flag)) {
@@ -9104,12 +9166,7 @@ function cliValueOptions(
       for (const [name, schema] of Object.entries(
         z.toJSONSchema(command.options, { io: "input" }).properties ?? {},
       )) {
-        // Bare --json is the framework output shortcut, except on scan import.
-        if (
-          name === "json" ||
-          (typeof schema === "object" && schema.type === "boolean")
-        )
-          continue;
+        if (typeof schema === "object" && schema.type === "boolean") continue;
         options.add(
           `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
         );

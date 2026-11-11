@@ -1026,8 +1026,11 @@ describe("CLI", () => {
         definitions.options?.properties ?? {},
       )) {
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
-        // The CSV input belongs to the internal publication destination.
-        if (command.join(" ") === "publish scan" && flag === "--csv") {
+        // Keep the internal CSV input and the redundant Linear selector out of help.
+        if (
+          (command.join(" ") === "publish scan" && flag === "--csv") ||
+          (command.join(" ") === "publish check" && flag === "--to")
+        ) {
           expect(help.text()).not.toContain(flag);
         } else {
           expect(help.text()).toContain(flag);
@@ -3298,7 +3301,7 @@ describe("CLI", () => {
       expect(exportFindings).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
-        "CSV stdout cannot be combined with JSON output",
+        "CSV stdout cannot be combined with --format json",
       );
     }
   });

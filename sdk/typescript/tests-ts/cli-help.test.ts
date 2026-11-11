@@ -236,8 +236,8 @@ describe("CLI help", () => {
 
   test("distinguishes JSON file import from JSON output", async () => {
     const text = await help(["scan", "import", "--help"]);
-    expect(option(text, "--json")).toContain("<file>");
-    expect(option(text, "--csv")).toContain("<file>");
+    expect(option(text, "--json")).toContain("--format json");
+    expect(option(text, "--input-format")).toContain("Input format");
     expect(text.replace(/\s+/gu, " ")).toContain("--format json");
     expect(option(text, "--format")).toContain("json");
   });
@@ -532,7 +532,7 @@ describe("CLI help", () => {
     }
   });
 
-  test("completes scan import and its file options from the command registry", async () => {
+  test("completes scan import and its input format option from the command registry", async () => {
     const previousShell = process.env["COMPLETE"];
     const previousIndex = process.env["_COMPLETE_INDEX"];
     try {
@@ -540,9 +540,9 @@ describe("CLI help", () => {
       process.env["_COMPLETE_INDEX"] = "2";
       expect((await help(["--", "cs", "scan", "im"])).trim()).toBe("import");
       process.env["_COMPLETE_INDEX"] = "3";
-      expect((await help(["--", "cs", "scan", "import", "--cs"])).trim()).toBe(
-        "--csv",
-      );
+      expect(
+        (await help(["--", "cs", "scan", "import", "--input-f"])).trim(),
+      ).toBe("--input-format");
     } finally {
       if (previousShell === undefined) delete process.env["COMPLETE"];
       else process.env["COMPLETE"] = previousShell;
