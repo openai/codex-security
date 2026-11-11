@@ -54,18 +54,18 @@ function mcpServerConfig(
   const value = (command ?? defaultCommand).trim();
   if (!value) throw new Error("--command requires a launcher.");
   if (/^https?:\/\//u.test(value)) return { url: value, type: "http" };
-  // Existing --command callers can pass a path containing spaces, or a
-  // command line such as "/opt/tools/server --mcp". --exec is unambiguous.
+  // Preserve an existing literal path with spaces. Otherwise a path starts
+  // a command line and can be followed by positional arguments or flags.
   const isPath = /^(?:\/|~(?:\/|$)|\.{1,2}\/|[A-Za-z]:[\\/]|\\\\)/u.test(value);
-  const argsAt = isPath ? value.search(/\s+-/u) : 0;
-  if (argsAt === -1) return { command: value, args: [] };
+  const argsAt = isPath ? value.search(/\s/u) : 0;
+  if (argsAt === -1 || (isPath && existsSync(value)))
+    return { command: value, args: [] };
   const words = value.slice(argsAt).trim();
   // Only quoted legacy command lines need shell-word decoding. Plain Windows
   // paths keep their backslashes.
-  const tokens =
-    /["']/u.test(words) && /\s/u.test(words)
-      ? splitCommand(words)
-      : words.split(/\s+/u);
+  const tokens = /["']/u.test(words)
+    ? splitCommand(words)
+    : words.split(/\s+/u);
   if (!tokens?.length)
     throw new Error(
       "Invalid --command quoting. Use --exec and --arg for literal values.",

@@ -343,6 +343,8 @@ describe("integration command dispatch", () => {
     await using temp = await scopedTemporaryDirectory("cli-mcp-launcher-");
     const { home, run } = await isolatedCli(temp.path);
     const executable = String.raw`C:\Program Files\tool's "server".exe`;
+    const existingExecutable = join(temp.path, "server with spaces");
+    await writeFile(existingExecutable, "", { mode: 0o700 });
     const args = ["--mcp", "", "two words", "--json", "one=two"];
     for (const [launcher, expected] of [
       [
@@ -358,6 +360,18 @@ describe("integration command dispatch", () => {
         { command: "node", args: ["server entry.js", "--mcp"] },
       ],
       [["--command=local-server"], { command: "local-server", args: [] }],
+      [
+        [`--command=${existingExecutable}`],
+        { command: existingExecutable, args: [] },
+      ],
+      [
+        ["--command=/usr/bin/node /opt/server.js --mcp"],
+        { command: "/usr/bin/node", args: ["/opt/server.js", "--mcp"] },
+      ],
+      [
+        ['--command=/usr/bin/node "server entry.js"'],
+        { command: "/usr/bin/node", args: ["server entry.js"] },
+      ],
       [
         ["--command=/opt/tools/server --mcp"],
         { command: "/opt/tools/server", args: ["--mcp"] },
