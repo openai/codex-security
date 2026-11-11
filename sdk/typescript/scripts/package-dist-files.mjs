@@ -39,6 +39,7 @@ const distModules = [
   "armorcode-findings",
   "inspector-findings",
   "continuum-findings",
+  "continuum-collector",
   "checkmarx-evidence",
   "checkmarx-findings",
   "checkmarx-one",
