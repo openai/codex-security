@@ -1966,9 +1966,11 @@ export async function runRepositoryCommand(
           messageDirectory,
           runner: PATCH_GIT_ENVIRONMENT_RUNNER,
           credentialPattern: snapshotCredentialName.source,
-          credentialNames: credentialVariables.map((name) =>
-            name.toUpperCase(),
-          ),
+          credentialNames: [
+            ...credentialVariables.map((name) => name.toUpperCase()),
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+          ],
           stripAwsCredentials: sandbox.stripAwsCredentials === true,
         })),
         ...args,

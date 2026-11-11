@@ -37,7 +37,8 @@ for (const outside of [true, false])
       await writeFile(
         join(home, "config.toml"),
         patchSnapshotWindowsConfig() +
-          "[sandbox_workspace_write]\nexclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n",
+          "[sandbox_workspace_write]\nexclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n" +
+          '[shell_environment_policy.set]\nGIT_ASKPASS="unused-git-prompt"\nSSH_ASKPASS="unused-ssh-prompt"\n',
       );
       const environment = patchSnapshotEnvironment(tmp, {
         ...process.env,
@@ -99,6 +100,8 @@ for (const outside of [true, false])
               environment: {
                 ...environment,
                 ...options.environment,
+                GIT_ASKPASS: "unused-host-git-prompt",
+                SSH_ASKPASS: "unused-host-ssh-prompt",
                 HTTPS_PROXY:
                   "http://synthetic:SYNTHETIC_HOOK_PROXY@proxy.invalid",
                 GIT_CONFIG_PARAMETERS:
@@ -137,6 +140,7 @@ for (const outside of [true, false])
               delegate,
               [
                 "set -eu",
+                'test -z "${GIT_ASKPASS+x}${SSH_ASKPASS+x}"',
                 'test "$(git config --get demo.sentinel)" = "benign preserved"',
                 "if git config --get http.extraheader >/dev/null; then exit 15; fi",
                 "if git config --list | grep -Fq SYNTHETIC_HOOK_SECRET; then exit 15; fi",
