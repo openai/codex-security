@@ -103,17 +103,43 @@ export async function withPatchGitIndex<T>(
   const indexed: RunIndexGit = (args, options) =>
     run(args, { ...options, indexFile });
   try {
-    let hasHead = true;
+    let head: string | undefined;
     try {
-      await indexed(["rev-parse", "--verify", "--quiet", "HEAD"]);
+      head = (
+        await indexed(["rev-parse", "--verify", "--quiet", "HEAD"])
+      ).trim();
     } catch (error) {
       const failure = error as { code?: unknown; status?: unknown };
       if ((failure.code ?? failure.status) !== 1) throw error;
       // An unborn symbolic HEAD has no commit; malformed refs still fail.
       await indexed(["symbolic-ref", "--quiet", "HEAD"]);
-      hasHead = false;
     }
-    await indexed(["read-tree", ...(hasHead ? ["HEAD"] : ["--empty"])]);
+    await indexed(["read-tree", head ?? "--empty"]);
+    let removals = "";
+    if (head !== undefined && sourcePathspecs !== undefined) {
+      // A staged rename can replace a HEAD spelling that still resolves on disk.
+      // Index-info paths are root-relative, including when called from a subdirectory.
+      const removed = await run(
+        [
+          "diff",
+          "--cached",
+          "--no-renames",
+          "--no-relative",
+          "--ignore-submodules=none",
+          "--diff-filter=D",
+          "--name-only",
+          "-z",
+          head,
+          ...sourcePathspecs,
+        ],
+        { encoding: "base64" },
+      );
+      const zero = "0".repeat(head.length);
+      for (const path of Buffer.from(removed, "base64")
+        .toString("latin1")
+        .split("\0"))
+        if (path) removals += `0 ${zero}\t${path}\0`;
+    }
     const entries = Buffer.from(
       await run(
         [
@@ -134,7 +160,8 @@ export async function withPatchGitIndex<T>(
       ["-c", "core.ignorestat=false", "update-index", "-z", "--index-info"],
       {
         input: Buffer.from(
-          entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
+          removals +
+            entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
           "latin1",
         ),
       },
