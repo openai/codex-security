@@ -293,6 +293,7 @@ import {
   resolvePluginPath,
   resolvePluginSource,
   resolvePluginPython,
+  resolveScanOutputPath,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -886,10 +887,14 @@ export class CodexSecurity {
     );
     const artifactRoots: string[] = [];
     if (options.outputDir !== undefined) {
-      await workflow.protectArtifacts(options.outputDir);
-      artifactRoots.push(
-        await canonicalConfigPath(expandHome(options.outputDir)),
+      options.outputDir = await resolveScanOutputPath(
+        options.outputDir,
+        (path) => requireOutputOutsideRepositories(local.protectedRoots, path),
       );
+      const canonicalOutput = await canonicalConfigPath(options.outputDir);
+      requireOutputOutsideRepositories(local.protectedRoots, canonicalOutput);
+      await workflow.protectArtifacts(options.outputDir);
+      artifactRoots.push(canonicalOutput);
     }
     const state = await workflow.bind({
       repositoryPath: local.repository,
@@ -900,10 +905,6 @@ export class CodexSecurity {
           ...local.prompts,
           target: options.target ?? "repository",
           mode: options.mode ?? DEFAULT_SCAN_MODE,
-          outputDir:
-            options.outputDir === undefined
-              ? undefined
-              : resolve(expandHome(options.outputDir)),
           workflowId: undefined,
           severityRubric: undefined,
           rubricPath: undefined,
@@ -4050,9 +4051,7 @@ export class CodexSecurity {
             scanId,
             repository: repo,
             previousFindings: previousFindings.filter(
-              (finding) =>
-                finding["scanId"] !== scanId &&
-                finding["targetId"] === targetId,
+              (finding) => finding["scanId"] !== scanId,
             ),
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
@@ -5868,20 +5867,28 @@ export class CodexSecurity {
 
 export async function listRepositoryFindings(
   workbench: (args: readonly string[]) => Promise<JsonObject>,
-  targetId: string,
+  target: string | { repository: string },
   status: "open" | "all" = "open",
 ): Promise<JsonObject[] | undefined> {
   const findings: JsonObject[] = [];
+  const selector =
+    typeof target === "string"
+      ? ["--target-id", target]
+      : ["--repository", target.repository];
   let offset: number | undefined;
   do {
     const page = await workbench([
       "list-global-findings",
-      "--target-id",
-      targetId,
+      ...selector,
       ...(status === "open" ? ["--status", "open"] : []),
       ...(offset === undefined ? [] : ["--offset", String(offset)]),
     ]);
-    if (!Array.isArray(page["findings"])) return undefined;
+    if (
+      page["projectionAvailable"] === false ||
+      !Array.isArray(page["findings"])
+    ) {
+      return undefined;
+    }
     findings.push(...(page["findings"] as JsonObject[]));
     offset =
       typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;
@@ -6549,13 +6556,16 @@ async function prepareScanOutputDir(
   protectedRoots: readonly string[],
   allowExistingOutput = false,
 ): Promise<string | null> {
+  const validateLocation = (path: string) =>
+    requireOutputOutsideRepositories(protectedRoots, path);
   const output = await validateOutputDir(
     options.outputDir,
     allowExistingOutput ||
       options.resumeScanId !== undefined ||
       options.archiveExisting,
+    validateLocation,
   );
-  if (output !== null) requireOutputOutsideRepositories(protectedRoots, output);
+  if (output !== null) validateLocation(output);
   return output;
 }
 

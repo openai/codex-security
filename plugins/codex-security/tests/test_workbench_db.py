@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import runpy
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -998,6 +999,9 @@ def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_au
     state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"
     source.write_bytes(b"vulnerable\r\n")
+    create_workspace(
+        state_dir, str(uuid.uuid4()), "--target-path", str(tmp_path / "missing-target")
+    )
     scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, relative_path=source.name)
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
@@ -1870,9 +1874,10 @@ def test_workspace_keeps_literal_scope_at_length_boundary(tmp_path: Path):
 def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     missing = tmp_path / "missing"
+    workspace_id = str(uuid.uuid4())
     workspace = create_workspace(
         state_dir,
-        str(uuid.uuid4()),
+        workspace_id,
         "--target-path",
         str(missing),
         "--user-context",
@@ -1883,6 +1888,77 @@ def test_workbench_opens_invalid_target_for_correction(tmp_path: Path) -> None:
     assert workspace["setupValidation"]["valid"] is False
     assert "readable local directory" in workspace["setupValidation"]["error"]
     assert workspace["userContext"] == "Focus on authentication and uploaded archives."
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("DROP INDEX scans_by_target")
+    run_workbench(state_dir, "get-workspace", "--workspace-id", workspace_id)
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone() == (None, 1)
+        assert connection.execute("SELECT COUNT(*) FROM security_targets").fetchone() == (0,)
+
+    missing.mkdir()
+    invalid_scope = save_workspace(
+        state_dir, workspace_id, str(missing), "missing-scope", "standard", check=False
+    )
+    assert invalid_scope["returncode"] != 0
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone() == (None, 1)
+
+    saved = save_workspace(state_dir, workspace_id, str(missing), ".", "standard")
+    assert saved["setupValidation"]["valid"] is True
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace_id,),
+        ).fetchone() == (stable_target_id(missing), 0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("corrected", [False, True])
+def test_rejected_workspace_cannot_supply_git_to_later_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bool, legacy: bool, corrected: bool
+) -> None:
+    state = tmp_path / "state"
+    requested, rejected = tmp_path / "requested", tmp_path / "rejected"
+    initialize_git_repository(requested)
+    initialize_git_repository(rejected)
+    create_workspace(state, str(uuid.uuid4()), "--target-path", str(requested))
+    monkeypatch.chdir(rejected)
+    value = "." if relative else str(rejected / "missing")
+    workspace_id = str(uuid.uuid4())
+    workspace = create_workspace(state, workspace_id, "--target-path", value)
+    assert workspace["targetPath"] == value
+    assert workspace["setupValidation"]["valid"] is False
+
+    if legacy:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute("UPDATE workspaces SET rejected_checkout_roots_json = NULL")
+    (rejected / ".git").rename(tmp_path / "removed-git")
+    monkeypatch.chdir(requested)
+    if corrected:
+        saved = save_workspace(state, workspace_id, str(requested), ".", "standard")
+        assert saved["setupValidation"]["valid"] is True
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    trusted = tmp_path / "trusted"
+    trusted.mkdir()
+    host_git = shutil.which("git")
+    assert host_git
+    monkeypatch.setenv("WORKBENCH_HOST_GIT", host_git)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (rejected, trusted))))
+    for directory in (rejected, trusted):
+        shim = directory / "git"
+        shim.write_text('#!/bin/sh\nprintf invoked > "$0.ran"\nexec "$WORKBENCH_HOST_GIT" "$@"\n')
+        shim.chmod(0o700)
+    run_workbench(state, "list-scans", "--repository", str(requested))
+    assert not (rejected / "git.ran").exists()
+    assert (trusted / "git.ran").exists() is not legacy
 
 
 def test_workbench_preserves_long_user_context(tmp_path: Path) -> None:
@@ -1978,15 +2054,26 @@ def test_workbench_replaces_context_only_for_running_owned_scan(tmp_path: Path) 
     assert "Only a running scan" in str(rejected_terminal["stderr"])
 
 
-def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path) -> None:
-    state_dir, target = empty_target_paths(tmp_path)
+@pytest.mark.parametrize("is_git", [False, True])
+def test_workbench_marks_invalid_initial_scope_for_correction(tmp_path: Path, is_git: bool) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    if is_git:
+        initialize_git_repository(target)
+    else:
+        target.mkdir()
     workspace = create_workspace(
         state_dir, str(uuid.uuid4()), "--target-path", str(target), "--scope", "missing"
     )
-    assert workspace["targetMetadata"]["isGit"] is False
+    assert workspace["targetMetadata"]["isGit"] is is_git
     assert workspace["scope"] == "missing"
     assert workspace["setupValidation"]["valid"] is False
     assert "existing directory" in workspace["setupValidation"]["error"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT target_id, target_path_unvalidated FROM workspaces WHERE id = ?",
+            (workspace["id"],),
+        ).fetchone() == (stable_target_id(target), 0)
 
 
 def test_workbench_resolves_structured_diff_target(tmp_path: Path) -> None:

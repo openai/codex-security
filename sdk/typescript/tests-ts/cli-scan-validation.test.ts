@@ -533,6 +533,98 @@ test("empty scan validation preserves configured Python and Git ignore rules", a
   }
 });
 
+test.skipIf(process.platform === "win32")(
+  "empty scan validation excludes Git from a former enclosing checkout",
+  async () => {
+    if (
+      runTestInSubprocess(
+        import.meta.path,
+        "empty scan validation excludes Git from a former enclosing checkout",
+      )
+    )
+      return;
+    const root = await temporaryDirectory("validation-saved-checkout-");
+    const repository = join(root, "current");
+    const outer = join(root, "previous");
+    const saved = join(outer, "component");
+    const python = await resolvePluginPython();
+    const hostGit = Bun.which("git")!;
+    const previous = {
+      PATH: process.env["PATH"],
+      CODEX_SECURITY_GIT: process.env["CODEX_SECURITY_GIT"],
+      CODEX_SECURITY_STATE_DIR: process.env["CODEX_SECURITY_STATE_DIR"],
+    };
+    try {
+      process.env["CODEX_SECURITY_STATE_DIR"] = join(root, "state");
+      process.env["CODEX_SECURITY_GIT"] = hostGit;
+      await mkdir(saved, { recursive: true });
+      await mkdir(repository);
+      for (const checkout of [outer, repository]) {
+        git(checkout, "init", "-q");
+        git(checkout, "commit", "-qm", "scan target", "--allow-empty");
+      }
+      const workbench = {
+        python,
+        pluginRoot: PLUGIN_ROOT,
+        environment: process.env,
+      };
+      await runWorkbench(workbench, [
+        "create-workspace",
+        "--workspace-id",
+        "00000000-0000-4000-8000-000000000001",
+        "--target-path",
+        saved,
+      ]);
+      const scanDir = join(root, "scan");
+      await mkdir(scanDir, { mode: 0o700 });
+      const registered = await runWorkbench(
+        workbench,
+        scanRegistrationArguments(repository, scanDir),
+      );
+      await rm(join(outer, ".git"), { recursive: true });
+      git(saved, "init", "-q");
+      const shim = join(outer, "git");
+      await writeFile(shim, '#!/bin/sh\nprintf invoked > "$0.ran"\nexit 1\n', {
+        mode: 0o700,
+      });
+      const result = fakeResult();
+      result.manifest.scan.id = String(registered["scanId"]);
+      const scan = spyOn(CodexSecurity.prototype, "run").mockImplementation(
+        async () => {
+          // Expose the shim specifically to the post-scan target check.
+          process.env["PATH"] = [outer, previous.PATH].join(delimiter);
+          return result;
+        },
+      );
+      try {
+        for (const binding of [undefined, hostGit, ""]) {
+          process.env["PATH"] = previous.PATH;
+          if (binding === undefined) delete process.env["CODEX_SECURITY_GIT"];
+          else process.env["CODEX_SECURITY_GIT"] = binding;
+          const cli = createCliTest(main);
+          const status = await cli.runCli(
+            ["scan", repository, "--validate", "--python", python, "--json"],
+            undefined,
+          );
+          expect(await Bun.file(shim + ".ran").exists()).toBe(false);
+          expect(status, cli.stderr.text()).toBe(binding === "" ? 2 : 0);
+          expect(JSON.parse(cli.stdout.text()).validation.status).toBe(
+            binding === "" ? "failed" : "complete",
+          );
+        }
+      } finally {
+        scan.mockRestore();
+      }
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test("empty scan validation preserves knowledge-base Git exclusions", async () => {
   if (
     runTestInSubprocess(
