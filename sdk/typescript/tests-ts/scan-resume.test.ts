@@ -1456,9 +1456,9 @@ test.each(["complete", "partial", "unpriced"] as const)(
   },
 );
 
-test.skipIf(process.platform === "win32")(
-  "sealed SDK recovery rejects PATH Python in a saved configuration checkout before probing it",
-  async () => {
+test.skipIf(process.platform === "win32").each([false, true])(
+  "sealed SDK recovery rejects PATH Python in a saved configuration checkout before probing it (paths resupplied: %s)",
+  async (resupplied) => {
     const checkout = await temporaryDirectory();
     gitText(["-C", checkout, "init", "-q"]);
     const source = join(checkout, "settings", "model.toml");
@@ -1481,7 +1481,7 @@ test.skipIf(process.platform === "win32")(
       fail("Unexpected model launch"),
     ).createSecurity({
       pythonPath: "python3",
-      executableSourcePaths: [source],
+      ...(resupplied ? { executableSourcePaths: [source] } : {}),
     });
     try {
       await expect(

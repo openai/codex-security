@@ -1,3 +1,4 @@
+import { executableSourceRoots } from "./deep-config.js";
 import { isRecord } from "./record.js";
 import { compareTimestamps } from "./timestamps.js";
 import { environmentEntry } from "./auth.js";
@@ -25,6 +26,7 @@ interface ScanTarget {
   id: string;
   target_path: string;
   target_id?: string | null;
+  executableSourcePaths?: string[];
 }
 
 /** Read only enough history to protect Python discovery; the workbench still validates the scan. */
@@ -34,7 +36,7 @@ export async function savedScanWorkbench(
     environment: ProcessEnvironment;
     pluginRoot: string;
     configuredPython?: string;
-    protectedRoots?: readonly string[];
+    executableSourcePaths?: readonly string[];
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -82,9 +84,18 @@ export async function savedScanWorkbench(
     options.currentDirectory,
     options.signal,
   );
+  const sourcePaths = new Set([
+    ...(options.executableSourcePaths ?? []),
+    ...targets.flatMap((target) => target.executableSourcePaths ?? []),
+  ]);
+  const sourceRoots = await Promise.all(
+    Array.from(sourcePaths, (path) =>
+      executableSourceRoots(path, options.signal),
+    ),
+  );
   const protectedRoots = [
     ...callerRoots,
-    ...(options.protectedRoots ?? []),
+    ...sourceRoots.flat(),
     ...(
       await Promise.all(
         targets.map(async ({ target_path: target }) => {
@@ -218,54 +229,21 @@ async function readTargets(
     database = openSavedScanDatabase(environment);
     database.exec("PRAGMA busy_timeout = 5000");
     database.exec("PRAGMA query_only = ON");
-    if (typeof requestedId !== "string") {
-      const columns = readRows<{ name: string }>(
-        database,
-        "PRAGMA table_info(finding_workflows)",
-      );
-      const scanId = columns.some((column) => column.name === "scan_id")
-        ? "workflow.scan_id"
-        : "json_extract(workflow.state_json, '$.scanId')";
-      return readRows<ScanTarget>(
-        database,
-        `SELECT scans.id, scans.target_path FROM scans
-        JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
-        requestedId.workflowId,
-      );
-    }
-    if (requestedId === "latest")
-      return await latestTargets(
-        database,
-        currentDirectory,
-        environment,
-        signal,
-      );
-    // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
-    const compact = trimBoundary(
-      requestedId.replaceAll("urn:", "").replaceAll("uuid:", ""),
-      "{",
-      "}",
-    ).replaceAll("-", "");
-    if (/^[0-9a-f]{32}$/i.test(compact)) {
-      const id = compact
-        .toLowerCase()
-        .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
-      return readRows<ScanTarget>(
-        database,
-        "SELECT id, target_path FROM scans WHERE id = ?",
-        id,
-      );
-    }
-    if (requestedId.length < 8)
-      throw new CodexSecurityError(
-        "Scan ID prefixes must be at least eight characters.",
-      );
-    return readRows<ScanTarget>(
+    const targets = await selectTargets(
       database,
-      "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
-      requestedId.length,
-      requestedId.toLowerCase(),
+      requestedId,
+      environment,
+      currentDirectory,
+      signal,
     );
+    const [target] = targets;
+    if (targets.length !== 1 || !target) return targets;
+    return [
+      {
+        ...target,
+        executableSourcePaths: readRecipeSourcePaths(database, target.id),
+      },
+    ];
   } catch (error) {
     signal?.throwIfAborted();
     if (error instanceof CodexSecurityError) throw error;
@@ -276,6 +254,95 @@ async function readTargets(
   } finally {
     database?.close();
   }
+}
+
+function readRecipeSourcePaths(
+  database: RuntimeDatabase,
+  id: string,
+): string[] {
+  // Older workbenches predate saved launch recipes.
+  const columns = readRows<{ name: string }>(
+    database,
+    "PRAGMA table_info(scans)",
+  );
+  if (!columns.some((column) => column.name === "recipe_json")) return [];
+  const [row] = readRows<{ recipe_json: string | null }>(
+    database,
+    "SELECT recipe_json FROM scans WHERE id = ?",
+    id,
+  );
+  if (!row)
+    throw new CodexSecurityError(
+      "Saved scan history changed during lookup. Retry the command.",
+    );
+  if (row.recipe_json === null) return [];
+  const recipe: unknown = JSON.parse(row.recipe_json);
+  if (isRecord(recipe)) {
+    const paths = recipe["executableSourcePaths"];
+    if (paths === undefined) return [];
+    if (
+      Array.isArray(paths) &&
+      paths.every(
+        (path): path is string => typeof path === "string" && isAbsolute(path),
+      )
+    )
+      return paths;
+  }
+  throw new CodexSecurityError(
+    "Invalid executable source paths in saved scan history.",
+  );
+}
+
+async function selectTargets(
+  database: RuntimeDatabase,
+  requestedId: string | { workflowId: string },
+  environment: ProcessEnvironment,
+  currentDirectory: string,
+  signal?: AbortSignal,
+): Promise<ScanTarget[]> {
+  if (typeof requestedId !== "string") {
+    const columns = readRows<{ name: string }>(
+      database,
+      "PRAGMA table_info(finding_workflows)",
+    );
+    const scanId = columns.some((column) => column.name === "scan_id")
+      ? "workflow.scan_id"
+      : "json_extract(workflow.state_json, '$.scanId')";
+    return readRows<ScanTarget>(
+      database,
+      `SELECT scans.id, scans.target_path FROM scans
+      JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
+      requestedId.workflowId,
+    );
+  }
+  if (requestedId === "latest")
+    return await latestTargets(database, currentDirectory, environment, signal);
+  // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
+  const compact = trimBoundary(
+    requestedId.replaceAll("urn:", "").replaceAll("uuid:", ""),
+    "{",
+    "}",
+  ).replaceAll("-", "");
+  if (/^[0-9a-f]{32}$/i.test(compact)) {
+    const id = compact
+      .toLowerCase()
+      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
+    return readRows<ScanTarget>(
+      database,
+      "SELECT id, target_path FROM scans WHERE id = ?",
+      id,
+    );
+  }
+  if (requestedId.length < 8)
+    throw new CodexSecurityError(
+      "Scan ID prefixes must be at least eight characters.",
+    );
+  return readRows<ScanTarget>(
+    database,
+    "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
+    requestedId.length,
+    requestedId.toLowerCase(),
+  );
 }
 
 function readRows<T>(
