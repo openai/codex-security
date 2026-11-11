@@ -82,6 +82,7 @@
 - keep hosted patches uncommitted and report revision changes ([#2583](https://github.com/openai/codex-security/pull/2583))
 - validate inputs and make plans and hooks reusable ([#2594](https://github.com/openai/codex-security/pull/2594))
 - resolve saved scans in the current worktree ([#2590](https://github.com/openai/codex-security/pull/2590))
+- resolve document links against selected sources ([#2430](https://github.com/openai/codex-security/pull/2430))
 
 </details>
 
