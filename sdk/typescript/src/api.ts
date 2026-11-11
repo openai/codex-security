@@ -266,6 +266,7 @@ import {
   credentialHomeUsesFileStorage,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
+  checkScanStorage,
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   copyPluginTree,
@@ -297,6 +298,7 @@ import {
   resolvePluginPath,
   resolvePluginSource,
   resolvePluginPython,
+  resolveScanOutputPath,
   runWorkbench,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
@@ -708,6 +710,7 @@ export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   mode: ScanMode;
   knowledgeBasePaths?: string[];
   outputDir: string | null;
+  stateDirectory?: string;
   archiveDir?: string;
   authentication: ScanAuthentication;
   modelProvider?: string;
@@ -891,10 +894,14 @@ export class CodexSecurity {
     );
     const artifactRoots: string[] = [];
     if (options.outputDir !== undefined) {
-      await workflow.protectArtifacts(options.outputDir);
-      artifactRoots.push(
-        await canonicalConfigPath(expandHome(options.outputDir)),
+      options.outputDir = await resolveScanOutputPath(
+        options.outputDir,
+        (path) => requireOutputOutsideRepositories(local.protectedRoots, path),
       );
+      const canonicalOutput = await canonicalConfigPath(options.outputDir);
+      requireOutputOutsideRepositories(local.protectedRoots, canonicalOutput);
+      await workflow.protectArtifacts(options.outputDir);
+      artifactRoots.push(canonicalOutput);
     }
     const state = await workflow.bind({
       repositoryPath: local.repository,
@@ -905,10 +912,6 @@ export class CodexSecurity {
           ...local.prompts,
           target: options.target ?? "repository",
           mode: options.mode ?? DEFAULT_SCAN_MODE,
-          outputDir:
-            options.outputDir === undefined
-              ? undefined
-              : resolve(expandHome(options.outputDir)),
           workflowId: undefined,
           severityRubric: undefined,
           rubricPath: undefined,
@@ -1716,10 +1719,19 @@ export class CodexSecurity {
     options: ScanOptions = {},
   ): Promise<ScanPreflight> {
     this.#requireOpen();
-    return await this.#preflightInputs(
-      await this.#prepareLocalInputs(repository, options, options.signal),
+    const inputs = await this.#prepareLocalInputs(
+      repository,
       options,
+      options.signal,
     );
+    await checkScanStorage(
+      inputs.stateDirectory,
+      inputs.outputDir === null &&
+        this.#dependencies.prepareOutputDir === undefined
+        ? basename(inputs.repository)
+        : undefined,
+    );
+    return await this.#preflightInputs(inputs, options);
   }
 
   async #preflightInputs(
@@ -1766,6 +1778,7 @@ export class CodexSecurity {
         ? { knowledgeBasePaths: options.knowledgeBasePaths }
         : {}),
       outputDir: inputs.outputDir,
+      stateDirectory: inputs.stateDirectory,
       ...(archiveDir === null ? {} : { archiveDir }),
       authentication: scanAuthentication(
         this.#dependencies.environment,
@@ -6568,13 +6581,16 @@ async function prepareScanOutputDir(
   protectedRoots: readonly string[],
   allowExistingOutput = false,
 ): Promise<string | null> {
+  const validateLocation = (path: string) =>
+    requireOutputOutsideRepositories(protectedRoots, path);
   const output = await validateOutputDir(
     options.outputDir,
     allowExistingOutput ||
       options.resumeScanId !== undefined ||
       options.archiveExisting,
+    validateLocation,
   );
-  if (output !== null) requireOutputOutsideRepositories(protectedRoots, output);
+  if (output !== null) validateLocation(output);
   return output;
 }
 

@@ -576,6 +576,43 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.skipIf(process.platform === "win32")(
+    "Node preflight preserves physical repository and scope paths",
+    async () => {
+      const root = await temporaryDirectory();
+      // Bun's realpath collapses parent traversal before resolving symlinks.
+      const source = new URL(
+        "./fixtures/target-paths-node.ts",
+        import.meta.url,
+      );
+      const built = await Bun.build({
+        entrypoints: [fileURLToPath(source)],
+        target: "node",
+        format: "esm",
+        packages: "external",
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL("../src/api.ts", import.meta.url).href,
+          ),
+        },
+      });
+      expect(built.success).toBe(true);
+      await symlink(
+        fileURLToPath(new URL("../node_modules", import.meta.url)),
+        join(root, "node_modules"),
+        "dir",
+      );
+      const module = join(root, "target-paths.mjs");
+      await writeFile(module, await built.outputs[0]!.text());
+      const exportRoot = await temporaryDirectory();
+      execFileSync(nodeCommand().command, [module, root, exportRoot], {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, HOME: root, USERPROFILE: root },
+      });
+    },
+  );
+
   test("preflights local inputs without initializing runtime or credentials", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -617,6 +654,13 @@ describe("CodexSecurity orchestration", () => {
         maxTimeHours: "default",
       },
       outputDir: output,
+      stateDirectory: join(
+        root,
+        "ambient",
+        "state",
+        "plugins",
+        "codex-security",
+      ),
       authentication: {
         method: "api_key",
         source: "OPENAI_API_KEY",
@@ -644,6 +688,36 @@ describe("CodexSecurity orchestration", () => {
     expect(prepareRuntime).not.toHaveBeenCalled();
     await expect(stat(output)).rejects.toThrow();
     await client.close();
+  });
+
+  test("checks default storage without creating state or scan directories", async () => {
+    const { root, repository } = await repositoryDirectories();
+    const state = join(root, "private", "state");
+    const { client, prepareRuntime } = localClient(
+      {},
+      { CODEX_SECURITY_STATE_DIR: state },
+    );
+    try {
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        outputDir: null,
+        stateDirectory: state,
+      });
+      expect(existsSync(join(root, "private"))).toBe(false);
+      await mkdir(dirname(state));
+      await writeFile(state, "not a directory");
+      await expect(client.preflight(repository)).rejects.toThrow(
+        /CODEX_SECURITY_STATE_DIR/,
+      );
+      await rm(state);
+      await mkdir(state);
+      await writeFile(join(state, "scans"), "not a directory");
+      await expect(client.preflight(repository)).rejects.toThrow(
+        /Persistent scan output must use real directories/,
+      );
+      expect(prepareRuntime).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+    }
   });
 
   test("reports configured model and reasoning during local-only preflight", async () => {

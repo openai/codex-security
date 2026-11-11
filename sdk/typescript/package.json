@@ -92,6 +92,7 @@
     "@octokit/core": "7.0.8",
     "@openai/codex": "0.167.0",
     "@openai/codex-sdk": "0.167.0",
+    "add-mcp": "2.6.1",
     "ajv": "8.20.0",
     "fflate": "0.8.3",
     "incur": "0.7.1",
