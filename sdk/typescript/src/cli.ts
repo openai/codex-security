@@ -65,6 +65,11 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
+import {
+  completeCli,
+  completionShell,
+  serveIntegration,
+} from "./cli-integrations.js";
 import type { ZodType } from "zod";
 import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
@@ -2399,6 +2404,26 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
+  // Build the command tree with no executable arguments for shell callbacks.
+  // Completion words, including literal action flags, belong to the shell.
+  const completion = completionShell.safeParse(process.env["COMPLETE"]);
+  const shellArgv = argv;
+  if (completion.success) argv = [];
+  if (
+    argv.includes("--mcp") &&
+    argv.some((arg) =>
+      [
+        "--help",
+        "-h",
+        "--schema",
+        "--version",
+        "--llms",
+        "--llms-full",
+      ].includes(arg),
+    )
+  ) {
+    argv = argv.filter((arg) => arg !== "--mcp");
+  }
   const remediationOperation =
     argv[0] === "patch"
       ? "patch"
@@ -7589,6 +7614,14 @@ export async function main(
       },
     });
 
+  if (completion.success) {
+    await writeCliOutput(
+      output,
+      completeCli(cli, cliOptions, completion.data, shellArgv),
+    );
+    return 0;
+  }
+
   const commands = Cli.toCommands.get(cli)!;
   const valueOptions = cliValueOptions(commands);
   const commandIndex = argv.findIndex((value, index) => {
@@ -7889,15 +7922,23 @@ export async function main(
     describeCommandInputs(commands);
   }
   try {
-    await cli.serve(frameworkArgv, {
+    const serveOptions: Cli.serve.Options = {
       stdout: frameworkCapture.stream.write,
       exit: (code) => {
         frameworkExit = code;
       },
-    });
+    };
+    if (
+      !(await serveIntegration(frameworkArgv, cli, cliOptions, serveOptions))
+    ) {
+      await cli.serve(frameworkArgv, serveOptions);
+    }
     if (pendingUpdate !== undefined) {
       notice = await Promise.race([pendingUpdate, undefined]);
     }
+  } catch (error) {
+    errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+    return 2;
   } finally {
     updateController.abort();
   }
