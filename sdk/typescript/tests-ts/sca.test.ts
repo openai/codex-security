@@ -2150,6 +2150,67 @@ test("requested cost limit interrupts while retaining completed evidence", async
   expect(saved.model.costUsd).toBeGreaterThan(0.000001);
 });
 
+test("dependency assessments accept a budget for a managed Vertex model", async () => {
+  const model = "openai/gpt-oss-120b-maas";
+  const { client, repository, outputDir } = await fixture({
+    model,
+    codexOverrides: {
+      openai_base_url:
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/synthetic/locations/us-central1/endpoints/openapi",
+    },
+  });
+  await using security = client;
+  const result = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+    maxCostUsd: 1,
+  });
+  expect(result.status).toBe("completed");
+  expect(result.model.costUsd).toBe(
+    estimateScanCost(
+      model,
+      { input_tokens: 1000, output_tokens: 1000 },
+      { provider: "gcp" },
+    )!.estimatedUsd,
+  );
+});
+
+test("dependency assessments enforce regional Bedrock pricing before the next match", async () => {
+  const model = "openai.gpt-5.6-terra";
+  const region = "us-gov-west-1";
+  const { client, repository, outputDir, turns } = await fixture({
+    model,
+    codexOverrides: {
+      model_provider: "amazon-bedrock",
+      model_providers: { "amazon-bedrock": { aws: { region } } },
+    },
+    turns: ["completed", "completed"],
+  });
+  const usage = { input_tokens: 1000, output_tokens: 1000 };
+  const standard = estimateScanCost(model, usage)!.estimatedUsd;
+  const regional = estimateScanCost(model, usage, {
+    provider: "amazon-bedrock",
+    region,
+  })!.estimatedUsd;
+  await using security = client;
+  await expect(
+    security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      maxCostUsd: (standard + regional) / 2,
+    }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  expect(turns).toHaveLength(1);
+  const saved = JSON.parse(
+    await readFile(join(outputDir, "sca-result.json"), "utf8"),
+  ) as ScaResult;
+  expect(saved.model.costUsd).toBe(regional);
+  expect(saved.assessments.map(({ status }) => status)).toEqual([
+    "completed",
+    "cancelled",
+  ]);
+});
+
 test("a response describing another selected match fails only its own assessment", async () => {
   const { client, repository, outputDir, turns } = await fixture({
     turns: ["completed", "mismatched_identity", "completed"],
