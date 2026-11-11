@@ -54,6 +54,18 @@ export function absoluteModelFilePaths(
   });
 }
 
+export async function executableSourceRoots(
+  path: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const directory = dirname(path);
+  return [
+    directory,
+    await canonicalConfigPath(directory),
+    ...(await gitProtectionRoots(path, signal)),
+  ];
+}
+
 export async function requireDeepScanExecutable(
   command: string,
   paths: readonly string[],
@@ -64,12 +76,7 @@ export async function requireDeepScanExecutable(
     return canonicalConfigPath(command);
   });
   for (const path of paths) {
-    const directory = dirname(path);
-    const roots = [
-      directory,
-      await canonicalConfigPath(directory),
-      ...(await gitProtectionRoots(path, signal)),
-    ];
+    const roots = await executableSourceRoots(path, signal);
     if (
       roots.some((root) => isWithin(root, command) || isWithin(root, canonical))
     ) {

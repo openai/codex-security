@@ -34,6 +34,7 @@ export async function savedScanWorkbench(
     environment: ProcessEnvironment;
     pluginRoot: string;
     configuredPython?: string;
+    protectedRoots?: readonly string[];
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -83,6 +84,7 @@ export async function savedScanWorkbench(
   );
   const protectedRoots = [
     ...callerRoots,
+    ...(options.protectedRoots ?? []),
     ...(
       await Promise.all(
         targets.map(async ({ target_path: target }) => {

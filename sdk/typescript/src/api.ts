@@ -136,6 +136,7 @@ import {
 import {
   absoluteModelFilePaths,
   deepScanOptions,
+  executableSourceRoots,
   requireDeepScanExecutable,
   resolveDeepScanConfig,
   writeDeepScanConfig,
@@ -2249,6 +2250,13 @@ export class CodexSecurity {
       pluginRoot,
       currentDirectory: process.cwd(),
       configuredPython: this.config.pythonPath,
+      protectedRoots: (
+        await Promise.all(
+          (this.config.executableSourcePaths ?? []).map((path) =>
+            executableSourceRoots(path, signal),
+          ),
+        )
+      ).flat(),
       signal,
     });
     const context = await saved(
