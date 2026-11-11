@@ -1,4 +1,5 @@
-import { lstat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { CodexSecurityError } from "./errors.js";
 import type {
@@ -76,7 +77,7 @@ function detectionLine(detection: NativeRecord, path: string): number | null {
   return call ? positive(Number(call[0])) : null;
 }
 
-/** Check repository claims, and that each finding's file is in the selected checkout. */
+/** Check repository claims, and that each finding's file is the scanned version in the selected checkout. */
 export async function crowdstrikeCheckout(
   input: ExternalFindings,
   declared: string | undefined,
@@ -92,7 +93,7 @@ export async function crowdstrikeCheckout(
     input.report["repositoryUrl"],
     ...references.map(({ url }) => url),
   ];
-  const paths = new Set<string>();
+  const files = new Map<string, Set<unknown>>();
   for (const { evidence } of input.findings) {
     validateExternalEvidence(evidence, "local");
     const data = evidence.source_data;
@@ -101,13 +102,14 @@ export async function crowdstrikeCheckout(
         "CrowdStrike findings must retain their native detection.",
       );
     claims.push(data["repository_url"], evidence.details?.repository?.url);
+    const { file_sha256 } = record(data["detection"], "CrowdStrike detection");
     for (const { path } of evidence.locations ?? []) {
       const file = repositoryFilePath(path);
       if (!file)
         throw new CodexSecurityError(
           "CrowdStrike finding locations must be checkout-relative files.",
         );
-      paths.add(file);
+      files.set(file, (files.get(file) ?? new Set()).add(file_sha256));
     }
   }
   const urls = claims
@@ -120,11 +122,21 @@ export async function crowdstrikeCheckout(
       "CrowdStrike findings name a different repository than --source-repository-url.",
     );
   // Paths are relative to where FCS ran, so a missing file means a different root or checkout.
-  for (const file of paths)
-    if (!(await lstat(join(repository, ...file.split("/"))).catch(() => null)))
+  // FCS follows file symlinks and records each file's SHA-256; another version gives stale lines.
+  for (const [file, hashes] of files) {
+    const path = join(repository, ...file.split("/"));
+    if (!(await stat(path).catch(() => null))?.isFile())
       throw new CodexSecurityError(
         `${JSON.stringify(file)} is not in ${JSON.stringify(repository)}. Select the checkout that FCS scanned, and run the FCS CLI from its root.`,
       );
+    const hash = createHash("sha256")
+      .update(await readFile(path))
+      .digest("hex");
+    if ([...hashes].some((expected) => expected !== hash))
+      throw new CodexSecurityError(
+        `${JSON.stringify(file)} changed after the FCS scan. Select a checkout of the scanned commit, or scan again.`,
+      );
+  }
   const url = urls[0];
   if (url === undefined) return undefined;
   const { hostname } = new URL(url);

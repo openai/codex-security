@@ -14,13 +14,16 @@ import {
   updateStoredFinding,
 } from "./external-findings-local-helpers.js";
 import { createCliTest } from "./support/cli-run.js";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const repositoryUrl = "https://github.com/example/repo";
+// The checkout fixture writes empty files, as FCS scanned them.
+const emptyFile = createHash("sha256").update("").digest("hex");
 const detection = {
   file: "infra/net/main.tf",
-  file_sha256: "0".repeat(64),
+  file_sha256: emptyFile,
   line: 7,
   resource_type: "aws_security_group",
   resource_name: "example",
@@ -54,7 +57,7 @@ const secret = {
   detections: [
     {
       file: "infra/provider.tf",
-      file_sha256: "1".repeat(64),
+      file_sha256: emptyFile,
       line: 3,
       resource_type: null,
       resource_name: null,
@@ -338,7 +341,20 @@ test("imports check the checkout files and repository claims, even for empty sel
   await expect(fixture.prepareNormalized(preview)).rejects.toThrow(
     /is not in/u,
   );
+  await writeFile(join(fixture.repository, "infra", "net", "main.tf"), "\n");
+  await expect(fixture.prepare()).rejects.toThrow(
+    /"infra\/net\/main\.tf" changed after the FCS scan/u,
+  );
+  await expect(fixture.prepareNormalized(preview)).rejects.toThrow(
+    /changed after the FCS scan/u,
+  );
   await writeFile(join(fixture.repository, "infra", "net", "main.tf"), "");
+  // FCS follows a file symlink and records the hash of its target.
+  const target = join(fixture.root, "shared.tf");
+  await writeFile(target, "");
+  await rm(join(fixture.repository, "infra", "net", "main.tf"));
+  await symlink(target, join(fixture.repository, "infra", "net", "main.tf"));
+  await fixture.prepare();
   const otherUrl = "https://github.com/example/other";
   const wrongReport = structuredClone(preview);
   wrongReport.report!["repositoryUrl"] = otherUrl;

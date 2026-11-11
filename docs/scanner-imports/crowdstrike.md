@@ -25,7 +25,7 @@ codex-security publish findings /private/path/fcs-report/TIMESTAMP-scan-results.
   --source-key example/project/main --dry-run --format json
 ```
 
-Every detection's file must exist in `--repository`. If one does not, the import stops and names the file. Select the directory that FCS scanned, or scan again from its root.
+Every detection's file must exist in `--repository` with the content that FCS scanned, which the report records as `file_sha256`. If a file is missing or changed, the import stops and names it, because the reported lines might no longer be correct. Select the directory and commit that FCS scanned, or scan again from its root. Different line endings also count as a change, for example in a Windows checkout of a report from a Linux CI runner.
 
 Add `--source-repository-url https://github.com/example/project` to record the repository. With it, findings get typed `iac` or `secret` details. If `--repository` is a Git checkout, the URL must match one of its fetch remotes. Without it, each finding keeps its title, severity, location and the native FCS rule and detection in `evidence.source_data`.
 
