@@ -85,7 +85,7 @@ type RunIndexGit = (
 export async function withPatchGitIndex<T>(
   run: RunIndexGit,
   inspect: (run: RunIndexGit) => Promise<T>,
-  files?: readonly string[],
+  files?: readonly string[] | { readonly treeKeys: readonly string[] },
   sourcePathspecs?: readonly string[],
 ): Promise<T> {
   const directory = await mkdtemp(
@@ -140,7 +140,10 @@ export async function withPatchGitIndex<T>(
           "--stage",
           "--full-name",
           "-z",
-          ...(sourcePathspecs ?? (files === undefined ? [] : ["--", ...files])),
+          ...(sourcePathspecs ??
+            (files === undefined || "treeKeys" in files
+              ? []
+              : ["--", ...files])),
         ],
         {
           encoding: "base64",
@@ -148,12 +151,30 @@ export async function withPatchGitIndex<T>(
       ),
       "base64",
     ).toString("latin1");
+    // ls-files accepts only text argv pathspecs. Filter whole-index records
+    // by their original bytes when a requested path cannot round-trip as text.
+    const selectedEntries =
+      files && "treeKeys" in files
+        ? entries
+            .split("\0")
+            .filter((entry) => {
+              const path = entry.slice(entry.indexOf("\t") + 1);
+              return files.treeKeys.some(
+                (key) => path === key || path.startsWith(key + "/"),
+              );
+            })
+            .map((entry) => entry + "\0")
+            .join("")
+        : entries;
     await indexed(
       ["-c", "core.ignorestat=false", "update-index", "-z", "--index-info"],
       {
         input: Buffer.from(
           removals +
-            entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
+            selectedEntries.replaceAll(
+              /(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu,
+              "$1$2 0\t",
+            ),
           "latin1",
         ),
       },
@@ -1063,34 +1084,43 @@ export async function capturePatchGitControls(
   };
   const captureReferences = async (checkout: string): Promise<void> => {
     filterCheckouts.add(checkout);
-    const origins = await runConfigFields(checkout, [
+    const records = await runConfigFields(checkout, [
       "config",
       "--null",
+      "--show-scope",
       "--show-origin",
       "--includes",
       "--list",
-      "--name-only",
     ]);
-    let includes = false;
+    // Bind an active origin to the include edges from the same native Git read.
+    const settings: {
+      scope: string;
+      origin: string;
+      key: string;
+      value: string;
+    }[] = [];
+    for (let index = 0; index + 2 < records.length; index += 3) {
+      const entry = records[index + 2]!;
+      const split = entry.indexOf("\n");
+      settings.push({
+        scope: records[index]!,
+        origin: records[index + 1]!,
+        key: split < 0 ? entry : entry.slice(0, split),
+        value: split < 0 ? "" : entry.slice(split + 1),
+      });
+    }
     const activeConfigurations = new Set<string>();
-    if (
-      origins.some(
-        (entry, index) => index % 2 === 1 && /^hook\..+\.event$/u.test(entry),
-      )
-    )
+    if (settings.some(({ key }) => /^hook\..+\.event$/u.test(key)))
       await readConfiguredHooks(publicationHooks, (args) =>
         runControl(root, checkout, args, {
           environment: configurationEnvironment,
         }),
       );
-    for (let index = 0; index + 1 < origins.length; index += 2) {
-      const origin = origins[index]!;
+    for (const { origin } of settings) {
       if (origin.startsWith("file:")) {
         const path = relativeFile(checkout, configPath(origin.slice(5)));
         activeConfigurations.add(path);
       }
-      if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
-        includes = true;
     }
     const captureHooks = async (configured?: string): Promise<void> => {
       let entry: string;
@@ -1230,39 +1260,23 @@ export async function capturePatchGitControls(
           );
       }
     };
-    if (includes) {
-      const paths = await runConfigFields(checkout, [
-        "config",
-        "--null",
-        "--show-scope",
-        "--show-origin",
-        "--includes",
-        "--get-regexp",
-        "^(include|includeif\\..*)\\.path$",
-      ]);
-      for (let index = 0; index + 2 < paths.length; index += 3) {
-        const scope = paths[index]!;
-        const origin = paths[index + 1]!;
-        const value = paths[index + 2]!;
-        const separator = value.indexOf("\n");
-        const key = value.slice(0, separator);
-        const relativeTo = origin.startsWith("file:")
-          ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
-          : checkout;
-        await captureInclude(
-          relativeTo,
-          value.slice(separator + 1),
-          key.startsWith("includeif."),
-          await userSelectedConfig(scope, origin, checkout),
-        );
-      }
+    for (const { scope, origin, key, value } of settings) {
+      if (!/^(include|includeif\..*)\.path$/u.test(key)) continue;
+      const relativeTo = origin.startsWith("file:")
+        ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
+        : checkout;
+      await captureInclude(
+        relativeTo,
+        value,
+        key.startsWith("includeif."),
+        await userSelectedConfig(scope, origin, checkout),
+      );
     }
     for (const path of activeConfigurations) await rememberConfiguration(path);
     if (
       automaticPublication &&
-      origins.some(
-        (key, index) =>
-          index % 2 === 1 && /^filter\..+\.(clean|smudge|process)$/u.test(key),
+      settings.some(({ key }) =>
+        /^filter\..+\.(clean|smudge|process)$/u.test(key),
       )
     ) {
       for (const key of await activeCheckoutFilters(checkout)) {

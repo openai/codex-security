@@ -1141,6 +1141,50 @@ describe("patch change tracking", () => {
     },
   );
 
+  test("captures materialized out-of-cone edits without deleting absent sparse files", async () => {
+    const root = await fixtures.create("patch-sparse-changes-");
+    const nested = join(root, "nested");
+    await mkdir(join(nested, "included"), { recursive: true });
+    await mkdir(join(nested, "outside"));
+    const git = repositoryGit(root),
+      inner = repositoryGit(nested);
+    for (const command of [git, inner]) {
+      command("init", "--initial-branch=main");
+      command("config", "user.name", "Synthetic User");
+      command("config", "user.email", "test@example.test");
+    }
+    for (const path of ["included/app", "outside/edited", "outside/absent"])
+      await writeFile(join(nested, path), "original\n");
+    inner("add", ".");
+    inner("commit", "-m", "Nested baseline");
+    git("add", "nested");
+    git("commit", "-m", "Registered child");
+    inner("sparse-checkout", "set", "--cone", "included");
+    const nestedTrees: string[] = [];
+    const run = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: root,
+      onRepositoryCommand: async (tool, args, cwd, options) => {
+        const result = await runGitRepositoryCommand(tool, args, cwd, options);
+        if (args.includes("write-tree") && args.includes(nested))
+          nestedTrees.push(result.trim());
+        return result;
+      },
+      onCodex: async (_args, output) => {
+        await mkdir(join(nested, "outside"), { recursive: true });
+        await writeFile(join(nested, "outside/edited"), "modified\n");
+        output!.stdout.write("Fixed child file.");
+        return 0;
+      },
+    });
+    expect(run.exitCode, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout).files).toEqual(["nested/outside/edited"]);
+    expect(nestedTrees.length).toBeGreaterThanOrEqual(2);
+    for (const tree of nestedTrees)
+      expect(inner("ls-tree", tree, "outside/absent")).toContain(
+        "outside/absent",
+      );
+  });
+
   test.each(["root", "package"])(
     "reports sparse nested changes from %s when the recorded commit is unavailable",
     async (scope) => {

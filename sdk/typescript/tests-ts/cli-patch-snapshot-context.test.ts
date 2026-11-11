@@ -1002,7 +1002,7 @@ test("snapshot binding frames retain raw stdin and unset semantics while native 
     script,
     `const fs=require("node:fs");
 if(process.argv.includes("bedrock")){fs.writeSync(1, JSON.stringify(Object.keys(process.env).filter(key=>/^AWS_/i.test(key))));process.exit(0);}
-fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,credentialKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN","GH_TOKEN","gitlab_token","GITHUB_TOKEN","GLAB_TOKEN","SSH_AUTH_SOCK"].filter(key=>key in process.env)})+"\\n");
+fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,credentialKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN","GH_TOKEN","gitlab_token","GITHUB_TOKEN","GLAB_TOKEN","SSH_AUTH_SOCK","OPENAI_IDENTITY_TOKEN_FILE","OPENAI_FEDERATION_RULE_ID"].filter(key=>key in process.env)})+"\\n");
 fs.writeSync(1, fs.readFileSync(0));
 if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.\\n");process.exitCode=17;}
 `,
@@ -1040,6 +1040,8 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
         GLAB_TOKEN: "synthetic-host-gitlab",
         SSH_AUTH_SOCK: "synthetic-agent",
         CODEX_API_KEY: "synthetic-model-key",
+        OPENAI_FEDERATION_RULE_ID: "synthetic-rule",
+        OPENAI_IDENTITY_TOKEN_FILE: join(root, "synthetic-identity-token"),
         SYNTHETIC_PROVIDER_TOKEN: "synthetic-provider-key",
       },
     ),

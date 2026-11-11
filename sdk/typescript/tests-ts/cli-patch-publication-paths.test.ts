@@ -27,6 +27,60 @@ const runCommand: typeof runGitRepositoryCommand = (
       ? "[]"
       : "https://github.example.test/example/repository/pull/1";
 
+test.skipIf(process.platform === "win32")(
+  "publishes both supplied-issue edits when a raw path has a Unicode alias",
+  async () => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    const name = Buffer.from([0x72, 0xff]);
+    const raw = Buffer.concat([Buffer.from(directory + "/"), name]);
+    const alias = join(directory, "r\ufffd");
+    await writeFile(raw, "raw before\n");
+    await writeFile(alias, "alias before\n");
+    git("add", "--all");
+    git("commit", "-m", "Synthetic byte-path baseline");
+    const result = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onRepositoryCommand: runCommand,
+        onCodex: async (_args, output) => {
+          await writeFile(raw, "raw after\n");
+          await writeFile(alias, "alias after\n");
+          output!.stdout.write("Fixed both files.");
+          return 0;
+        },
+      },
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const tip = repositoryGit(remote)("for-each-ref", "--format=%(objectname)");
+    const entries = Buffer.from(
+      await runGitRepositoryCommand("git", ["ls-tree", "-z", tip], remote, {
+        encoding: "base64",
+      }),
+      "base64",
+    )
+      .toString("latin1")
+      .split("\0");
+    for (const [path, expected] of [
+      [name, "raw after"],
+      [Buffer.from("r\ufffd"), "alias after"],
+    ] as const) {
+      const entry = entries.find((record) =>
+        record.endsWith("\t" + path.toString("latin1")),
+      );
+      expect(entry).toBeDefined();
+      expect(
+        repositoryGit(remote)(
+          "cat-file",
+          "blob",
+          entry!.split("\t")[0]!.split(" ")[2]!,
+        ),
+      ).toBe(expected);
+    }
+    expect(git("status", "--porcelain")).toBe("");
+  },
+);
+
 test.skipIf(process.platform !== "linux").each([false, true])(
   "checks ignored content at a raw publication path (copied: %p)",
   async (copied) => {
