@@ -2719,7 +2719,7 @@ describe("CodexSecurity orchestration", () => {
         : afterRename
           ? "insert_running_scan"
           : "directory_snapshot_regular_file_count";
-      const framedArgument = "--fixture-message=å‡ºåŠ›\0literal\nsecond line";
+      const framedArgument = "--fixture-message=出力\0literal\nsecond line";
       const entrypoint = join(pluginRoot, "scripts", "workbench_db.py");
       const controlledScript = guardCreated
         ? join(pluginRoot, "scripts", "registration_fixture.py")
@@ -2839,7 +2839,7 @@ if __name__ == "__main__":
               ...options,
               mode: deep ? "deep" : "standard",
               mock: mode === "mock",
-              scanPrompt: "Review cafÃ© boundaries.\nPreserve the second line.",
+              scanPrompt: "Review café boundaries.\nPreserve the second line.",
             })
       ).catch((error: unknown) => error);
       let closing: Promise<void> | undefined;
@@ -16181,7 +16181,7 @@ if __name__ == "__main__":
       "fail-scan",
       "--scan-id",
       "scan_example_001",
-      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488â€“$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
+      `--message=Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
       "--cost-json",
       expect.any(String),
     ]);
@@ -16364,7 +16364,7 @@ if __name__ == "__main__":
           if (missingWorker) expect(recovered.cost).toBeNull();
           else expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
-            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488â€“$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
+            `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
           ]);
           expect(commands.some((args) => args[0] === "fail-scan")).toBe(false);
           expect(
@@ -16680,7 +16680,7 @@ if __name__ == "__main__":
   test.each([
     ["plain", ""],
     ["NUL", "\0literal"],
-    ["Unicode", "\0high\ud800.low\udfff.pairðŸ˜€"],
+    ["Unicode", "\0high\ud800.low\udfff.pair😀"],
     ["long", `${"detail ".repeat(20_000)}final cause`],
   ])(
     "preserves original failures in saved scan history (%s)",
