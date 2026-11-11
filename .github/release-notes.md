@@ -80,6 +80,7 @@
 - update the Codex CLI and SDK to 0.167.1 ([#2600](https://github.com/openai/codex-security/pull/2600))
 - honor scan budgets across batch attempts and follow-ups ([#2592](https://github.com/openai/codex-security/pull/2592))
 - keep hosted patches uncommitted and report revision changes ([#2583](https://github.com/openai/codex-security/pull/2583))
+- validate inputs and make plans and hooks reusable ([#2594](https://github.com/openai/codex-security/pull/2594))
 
 </details>
 

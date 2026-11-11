@@ -403,11 +403,11 @@ Add context with `--knowledge-base`:
 codex-security policy . --knowledge-base architecture.md
 ```
 
-| Invocation                   | Result                                                   |
-| ---------------------------- | -------------------------------------------------------- |
-| `policy . --headless --json` | Generate without prompts; return paths and review notes. |
-| `policy . --format md`       | Generate and write the draft to stdout.                  |
-| `policy . --dry-run --json`  | Check local inputs without calling Codex.                |
+| Invocation                  | Result                                                   |
+| --------------------------- | -------------------------------------------------------- |
+| `policy . --json`           | Generate without prompts; return paths and review notes. |
+| `policy . --format md`      | Generate and write the draft to stdout.                  |
+| `policy . --dry-run --json` | Check local inputs without calling Codex.                |
 
 `--headless` leaves unanswered questions in the review notes. By default, files
 go in the Codex Security state directory. To choose a location, use an empty
@@ -852,6 +852,13 @@ codex-security scan-components . \
   --output-dir /path/outside/project/results
 ```
 
+`--plan-only` with `--component` or `--components-file` validates local paths
+without signing in. The CLI prints a command to scan the saved plan into a fresh
+`results` directory inside the plan directory. Running that command starts scans.
+Run it from the original working directory to reuse relative paths. The command
+includes the selected project configuration and scan flags. Reapply any inline
+`--codex` overrides yourself, since these can contain credentials.
+
 Plans use literal repository-relative paths, so `~/src` selects a directory
 named `~` inside the repository rather than expanding the home directory.
 Existing absolute paths inside the repository are also accepted.
@@ -914,6 +921,7 @@ opted in. The SDK accepts `rubricPath` or a `severityRubric` snapshot with
 `markdown`, a positive integer `revision`, and the SHA-256 of the exact UTF-8
 Markdown. A supplied snapshot takes precedence over a file.
 
+A dry run reads and validates an explicit rubric before reporting a successful preflight.
 The scan saves the rubric text in its local launch recipe. Retrying a Standard
 scan with the same `--workflow-id`, resuming a Deep scan, or rerunning a scan
 with a saved rubric reuses that copy even if the remote default or file changes.
@@ -1363,7 +1371,8 @@ the campaign a joint source review across repositories. For that workflow, use
 
 Run `gh auth login`, then `codex-security bulk-scan` for interactive GitHub
 selection. It lists repositories pushed in the last 90 days, excluding forks
-and archives, asks for output, and saves the selection as `repositories.csv`.
+and archives, asks where to save results, and saves the selection as `repositories.csv`.
+Pass `--output-dir DIR` to set the initial answer in the wizard.
 Private checkouts use your GitHub CLI login.
 
 For CI, provide CSV with `id`, `repository`, and a full commit `revision`.
@@ -2491,10 +2500,9 @@ codex-security install-hook /path/to/repository
 
 To migrate an existing generated hook, verify it is a regular file used only by
 this repository and contains only the generated commands. Rerun `install-hook`
-with `--fail-on-severity` set to its original threshold. It recognizes the legacy
-`npx` hook and supported earlier templates with matching absolute Node and CLI
-paths. If it refuses to overwrite the verified hook, back it up, remove it and
-reinstall with the same threshold. Restore the backup if installation fails.
+with the desired `--fail-on-severity` level to change the threshold. The installer
+recognizes the legacy `npx` hook and earlier generated templates with matching
+absolute Node and CLI paths. It refuses to replace a hand-edited hook.
 On POSIX, reinstalling a recognized hook restores its owner execute bit if Git
 could not execute it. The installer checks that the resulting hook is executable.
 The installer uses host Git for the selected repository and respects
@@ -2529,8 +2537,9 @@ For `validate`, `patch`, and `verify-fix`, an explicit local file URL such as
 `file:///home/reviewer/finding.md` (Windows: `file:///C:/reviews/finding.md`)
 requires the file to exist. A missing file stops the command before the model
 runs. Use `pathToFileURL(absolutePath).href` in Node to encode spaces and
-special characters correctly. Existing plain paths and inline finding text
-keep their original behavior.
+special characters correctly. Absolute paths and paths starting with `~/`, `./`, or `../`
+also require an existing file. Use `text:/path is exposed` to pass path-shaped
+prose verbatim, or `text:text:example` for a finding that starts with `text:`.
 
 Context inputs are optional and can be combined:
 
