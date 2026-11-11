@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { classificationRunsSchema } from "./severity-review.js";
+import { DEFAULT_REVIEW_RUNS, reviewRunsOption } from "./severity-review.js";
 import { severityRubricSchema } from "./severity-rubric.js";
 import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
@@ -69,6 +69,7 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
+import type { ZodType } from "zod";
 import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
@@ -116,7 +117,8 @@ import {
 } from "./api.js";
 import {
   accountStatus,
-  CODEX_AUTH_CONFIG_KEYS,
+  nativeLogoutArgs,
+  prepareLoginConfig,
   NO_CREDENTIALS_MESSAGE,
   configuredCodexHome,
   environmentEntry,
@@ -141,7 +143,10 @@ import {
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
-import { listLocalExternalFindings } from "./external-findings-local.js";
+import {
+  listLocalExternalFindings,
+  type StoredExternalFinding,
+} from "./external-findings-local.js";
 import type { collectSonarIssues } from "./sonar-collector.js";
 import { prepareSonarImport } from "./sonar-import.js";
 import {
@@ -193,6 +198,7 @@ import {
   type BulkScanPrompt,
 } from "./bulk-scan-discovery.js";
 import {
+  CODEX_AUTH_CONFIG_KEYS,
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
@@ -205,6 +211,7 @@ import {
   resolveCommandAuthConfig,
   resolveCodexProfile,
   mergedCodexConfig,
+  readCodexAuthConfig,
   readCodexFileProfile,
   scanPricingContext,
   scanModel,
@@ -307,6 +314,7 @@ import {
   withCredentialHomeLock,
   requirePrivateSnapshotProfileHome,
   requirePrivateSnapshotProfileFile,
+  writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
@@ -362,6 +370,10 @@ import {
 import { ScanDashboard } from "./scan-dashboard.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
 import {
+  TerminalErrorListener,
+  type TerminalStream,
+} from "./terminal-stream.js";
+import {
   ACCOUNT_LIMITS_UNAVAILABLE,
   formatAccountLimits,
   formatUsageFreshness,
@@ -406,6 +418,7 @@ import {
   CODEX_EXECUTABLE_VERSION,
   CODEX_SDK_VERSION,
   formatUpdateNotice,
+  invokedWithNpx,
   updateNoticeEnabled,
   type UpdateNotice,
   VERSION,
@@ -437,6 +450,7 @@ import {
   meetsSeverity,
   type FailureSeverity,
   type ResolvedScanSettings,
+  type ScanPromptSettings,
 } from "./scan-settings.js";
 
 const PROGRESS_REFRESH_MILLISECONDS = 1_000;
@@ -456,13 +470,12 @@ const SHOW_CURSOR = "\u001B[?25h";
 const CHILD_TERMINATION_GRACE_MS = 1_000;
 const DUPLICATE_SIGNAL_WINDOW_MS = 500;
 
-type Writable = Pick<NodeJS.WriteStream, "write"> & {
-  on?(event: "error", listener: (error: Error) => void): unknown;
-  off?(event: "error", listener: (error: Error) => void): unknown;
+interface Writable extends TerminalStream {
+  write: NodeJS.WriteStream["write"];
   readonly isTTY?: boolean;
   readonly fd?: number;
   readonly columns?: number;
-};
+}
 type SignalName = "SIGINT" | "SIGTERM";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
@@ -482,22 +495,26 @@ const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
     .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
 });
 type SkillConfiguration = z.infer<typeof SKILL_CONFIG_OPTIONS>;
-const CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.';
-const PLUGIN_PATH_DESCRIPTION =
-  "Codex Security plugin directory or ZIP (default: bundled plugin).";
-const PYTHON_PATH_DESCRIPTION =
-  "Python interpreter (default: PYTHON or automatic discovery).";
-const RUNTIME_OPTION_SCHEMAS = {
-  pluginPath: optionValue("--plugin-path")
-    .optional()
-    .describe(PLUGIN_PATH_DESCRIPTION),
-  python: optionValue("--python").optional().describe(PYTHON_PATH_DESCRIPTION),
-  codex: z
-    .array(optionValue("--codex"))
-    .default([])
-    .describe(CODEX_OVERRIDE_DESCRIPTION),
-};
+const RUNTIME_OPTION_SCHEMAS = runtimeOptions(optionValue);
+
+function runtimeOptions(value: typeof optionValue) {
+  return {
+    pluginPath: value("--plugin-path")
+      .optional()
+      .describe(
+        "Codex Security plugin directory or ZIP (default: bundled plugin).",
+      ),
+    python: value("--python")
+      .optional()
+      .describe("Python interpreter (default: PYTHON or automatic discovery)."),
+    codex: z
+      .array(value("--codex"))
+      .default([])
+      .describe(
+        'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.',
+      ),
+  };
+}
 const SKILL_AUTH_OPTION = z
   .enum(SCAN_AUTH_MODES)
   .default("auto")
@@ -727,6 +744,62 @@ function publicationIssueUrl(value: string | undefined): string | undefined {
   }
 
   return value;
+}
+
+function renderImportedFindings(
+  repository: string,
+  findings: readonly StoredExternalFinding[],
+  width: number,
+): string {
+  const lines = [
+    `${formatItemCount(findings.length, "imported finding")} in ${diagnosticValue(repository)}`,
+  ];
+  for (const { provider, sourceKey, sourceFindingId, evidence } of findings) {
+    lines.push("", `[${evidence.severity}] ${diagnosticValue(evidence.title)}`);
+    if (evidence.title === evidence.details?.rule?.id) {
+      const message = evidence.description?.trim().split(/[\r\n]/u, 1)[0];
+      if (message && message !== evidence.title)
+        lines.push(
+          fitProgressLine(`  Message: ${diagnosticValue(message)}`, width),
+        );
+    }
+    const scanner = evidence.details?.scanner_origin?.trim();
+    if (scanner && scanner.toLowerCase() !== provider.toLowerCase())
+      lines.push(`  Scanner: ${diagnosticValue(scanner)}`);
+    lines.push(
+      `  Source: ${diagnosticValue(provider)} (${diagnosticValue(sourceKey)})  Finding ID: ${diagnosticValue(sourceFindingId)}`,
+    );
+
+    const pkg = evidence.packages?.[0];
+    if (pkg) {
+      const parts = [`  Package: ${diagnosticValue(pkg.name)}`];
+      if (pkg.installed_version)
+        parts.push(`Installed: ${diagnosticValue(pkg.installed_version)}`);
+      if (pkg.vulnerable_version_range)
+        parts.push(
+          `Affected: ${diagnosticValue(pkg.vulnerable_version_range)}`,
+        );
+      if (pkg.fixed_versions?.length)
+        parts.push(`Fixed: ${diagnosticValue(pkg.fixed_versions.join(", "))}`);
+      lines.push(parts.join("  "));
+    }
+    const location = evidence.locations?.[0];
+    if (location)
+      lines.push(
+        `  Location: ${diagnosticValue(location.path)}${location.line == null ? "" : `:${location.line}`}`,
+      );
+    if (evidence.url)
+      lines.push(`  Reference: ${diagnosticValue(evidence.url)}`);
+    const fileUrl = evidence.details?.file_url;
+    if (fileUrl && fileUrl !== evidence.url)
+      lines.push(`  File: ${diagnosticValue(fileUrl)}`);
+  }
+  if (findings.length)
+    lines.push(
+      "",
+      "Scanner evidence is unassessed. Use --format json for all fields and saved scanner data.",
+    );
+  return `${lines.join("\n")}\n`;
 }
 
 function renderExternalPublicationSummary(
@@ -1170,7 +1243,6 @@ interface ScanArguments extends ResolvedScanSettings {
   dryRun: boolean;
   parentScanId?: string;
   expectedPluginVersion?: string;
-  includeFailureResults?: boolean;
 }
 
 interface ScanOutcome {
@@ -1313,6 +1385,7 @@ interface SelectedFindings {
 }
 
 interface PatchRiskRequest {
+  verified?: SavedPatchPublication;
   state?: GitPatchState;
   readonly scope?: string;
   readonly auth?: ScanAuthMode;
@@ -2073,10 +2146,7 @@ async function runCodexSkillProcess(
           credentialConfig["model_providers"] = {
             [provider]: providerConfiguration,
           };
-        await writeCodexConfig(
-          join(codexHome, "config.toml"),
-          credentialConfig,
-        );
+        await writeCredentialHomeConfig(codexHome, credentialConfig);
         credentialsAvailable = await initialCredentialsAvailable(
           selected,
           configuredCodexHome(selected),
@@ -2192,9 +2262,7 @@ async function runCodexSkillProcess(
         cwd: output?.appServer?.directory ?? parse(process.execPath).root,
         stdio:
           output === undefined
-            ? input === undefined
-              ? "inherit"
-              : ["pipe", "inherit", "inherit"]
+            ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
             : [
                 output.appServer !== undefined || input !== undefined
                   ? "pipe"
@@ -2256,67 +2324,71 @@ async function runCodexSkillProcess(
     process.on("SIGTERM", onTerminate);
     try {
       let diagnostic = "";
-      invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-        diagnostic += chunk;
-      });
-      const captured =
+      let forwarded: Promise<void> | undefined;
+      if (output === undefined && invocation.stderr) {
+        forwarded = forwardSignInHints(invocation.stderr, processEnvironment);
+      } else {
+        invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+          diagnostic += chunk;
+        });
+      }
+      const captured = Promise.race([
         output === undefined || invocation.stdout === null
-          ? Promise.resolve(undefined)
-          : Promise.race([
-              readSkillCommandOutput(
-                invocation.stdout,
-                output.appServer === undefined
-                  ? undefined
-                  : {
-                      ...output.appServer,
-                      apiKey,
-                      modelProvider,
-                      onThreadStarted: releaseCredentialHome,
-                      input: invocation.stdin!,
-                      sandbox: output.appServer.sandbox,
-                      permissions: output.appServer.permissions,
-                      externalSandbox: output.appServer.externalSandbox,
-                      onEvent: output.appServer.onEvent,
-                      onBeforeTurn(signal) {
-                        pendingPreparation = Promise.resolve(
-                          output.appServer!.onBeforeTurn?.(signal),
-                        );
-                        return pendingPreparation;
-                      },
-                      signal: preparation.signal,
-                      onPermissions: (profile, configuration) =>
-                        output.appServer!.onPermissions?.({
-                          profile,
-                          directory: output.appServer!.directory,
-                          environment,
-                          stripAwsCredentials:
-                            authentication?.method === "aws_credentials",
-                          ...(authentication?.method === "api_key"
-                            ? { providerKeyVariable: authentication.source }
-                            : {}),
-                          snapshotStoragePaths:
-                            output.appServer!.snapshotStoragePaths,
-                          configuration: Object.fromEntries(
-                            [
-                              ...new Set([
-                                "model_provider",
-                                "model_providers",
-                                "sandbox_workspace_write",
-                                ...Object.keys(output.codexOverrides ?? {}),
-                              ]),
-                            ].flatMap((key) =>
-                              configuration[key] == null
-                                ? []
-                                : [[key, configuration[key]]],
-                            ),
-                          ),
-                        }),
+          ? forwarded?.then(() => undefined)
+          : readSkillCommandOutput(
+              invocation.stdout,
+              output.appServer === undefined
+                ? undefined
+                : {
+                    ...output.appServer,
+                    apiKey,
+                    modelProvider,
+                    onThreadStarted: releaseCredentialHome,
+                    input: invocation.stdin!,
+                    sandbox: output.appServer.sandbox,
+                    permissions: output.appServer.permissions,
+                    externalSandbox: output.appServer.externalSandbox,
+                    onEvent: output.appServer.onEvent,
+                    onBeforeTurn(signal) {
+                      pendingPreparation = Promise.resolve(
+                        output.appServer!.onBeforeTurn?.(signal),
+                      );
+                      return pendingPreparation;
                     },
-              ),
-              new Promise<undefined>((resolve) => {
-                forceCaptureCompletion = () => resolve(undefined);
-              }),
-            ]);
+                    signal: preparation.signal,
+                    onPermissions: (profile, configuration) =>
+                      output.appServer!.onPermissions?.({
+                        profile,
+                        directory: output.appServer!.directory,
+                        environment,
+                        stripAwsCredentials:
+                          authentication?.method === "aws_credentials",
+                        ...(authentication?.method === "api_key"
+                          ? { providerKeyVariable: authentication.source }
+                          : {}),
+                        snapshotStoragePaths:
+                          output.appServer!.snapshotStoragePaths,
+                        configuration: Object.fromEntries(
+                          [
+                            ...new Set([
+                              "model_provider",
+                              "model_providers",
+                              "sandbox_workspace_write",
+                              ...Object.keys(output.codexOverrides ?? {}),
+                            ]),
+                          ].flatMap((key) =>
+                            configuration[key] == null
+                              ? []
+                              : [[key, configuration[key]]],
+                          ),
+                        ),
+                      }),
+                  },
+            ),
+        new Promise<undefined>((resolve) => {
+          forceCaptureCompletion = () => resolve(undefined);
+        }),
+      ]);
       invocationStatus = new Promise<number>((resolve, reject) => {
         const complete = (
           code: number | null,
@@ -2390,6 +2462,12 @@ async function runCodexSkillProcess(
       invocation.stderr?.destroy();
       requestTermination("SIGTERM");
       await invocationStatus?.catch(() => undefined);
+      // The sign-in diagnostic stream is closed; a second diagnostic cannot be delivered.
+      if (
+        output === undefined &&
+        (error as NodeJS.ErrnoException)?.code === "EPIPE"
+      )
+        return 1;
       throw error;
     } finally {
       await pendingPreparation?.catch(() => undefined);
@@ -2403,6 +2481,37 @@ async function runCodexSkillProcess(
   } finally {
     await releaseCredentialHome?.();
   }
+}
+
+/** Forward native prompts immediately, including commands split across stderr writes. */
+async function forwardSignInHints(
+  stderr: Readable,
+  environment: NodeJS.ProcessEnv,
+): Promise<void> {
+  const cli = invokedWithNpx(environment)
+    ? "npx @openai/codex-security"
+    : "codex-security";
+  const hints = ["`codex login", "| codex login"];
+  const rewrite = (text: string) =>
+    text.replace(/(`|\| )codex login(?=[\s`]|$)/gu, `$1${cli} login`);
+  let pending = "";
+  for await (const chunk of stderr.setEncoding(
+    "utf8",
+  ) as AsyncIterable<string>) {
+    let text = pending + chunk;
+    pending = "";
+    // Hold only a partial command at the end of this chunk.
+    const start = Math.max(text.lastIndexOf("`"), text.lastIndexOf("|"));
+    if (start >= 0) {
+      const tail = text.slice(start);
+      if (hints.some((hint) => hint.startsWith(tail))) {
+        pending = tail;
+        text = text.slice(0, start);
+      }
+    }
+    if (text) await writeCliOutput(process.stderr, rewrite(text));
+  }
+  if (pending) await writeCliOutput(process.stderr, rewrite(pending));
 }
 
 /**
@@ -2585,11 +2694,30 @@ function handleDisconnectedResize(error: NodeJS.ErrnoException): void {
   }
 }
 
+/** Run the standalone CLI, which owns the process and its stdio. */
+export async function runCli(): Promise<number> {
+  let signInInterrupted = false;
+  const exitCode = await main(
+    process.argv.slice(2),
+    process.stdout,
+    process.stderr,
+    DEFAULT_DEPENDENCIES,
+    () => {
+      signInInterrupted = true;
+    },
+  );
+  // Managed output and child cleanup are complete. An interrupted prompt may
+  // still have a write pending on stderr if its reader stopped draining.
+  if (signInInterrupted) process.exit(exitCode);
+  return exitCode;
+}
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
+  onInterruptedSignIn?: () => void,
 ): Promise<number> {
   const parentDependencies = dependencies;
   let patchSandbox: PatchSnapshotSandbox | undefined;
@@ -2775,12 +2903,11 @@ export async function main(
             runs: { type: "string" },
           },
         });
-        classificationRuns = classificationRunsSchema.parse(
-          values.runs === undefined ? 3 : Number(values.runs),
-        );
+        if (values.runs !== undefined)
+          classificationRuns = reviewRunsOption.parse(Number(values.runs));
       } catch {
         errorOutput.write(
-          "codex-security: Use --records with only --runs (an integer from 1 to 10; default: 3).\n",
+          `codex-security: Use --records with only --runs (an integer from 1 to 10; default: ${DEFAULT_REVIEW_RUNS}).\n`,
         );
         return 2;
       }
@@ -2882,6 +3009,8 @@ export async function main(
     }
     return incurError({ code, message: outcome.error, exitCode });
   };
+  const useDefaultOutput = (format: string) =>
+    format === "toon" && !argv.some((argument) => OUTPUT_OPTION.test(argument));
   const finishScanCommand: typeof finishScan = (
     outcome,
     format,
@@ -2890,14 +3019,23 @@ export async function main(
   ) => {
     if (
       (outcome.error === undefined || outcome.patchReviewCanceled) &&
-      format === "toon" &&
-      !argv.some((argument) => OUTPUT_OPTION.test(argument))
+      useDefaultOutput(format)
     ) {
       exitCode = outcome.exitCode;
       return;
     }
     return finishScan(outcome, format, incurError, code);
   };
+  const runScan = (format: string, args: ScanArguments) =>
+    withTerminalErrorsHandled(errorOutput, () =>
+      executeScan(
+        args,
+        errorOutput,
+        dependencies,
+        format !== "json" && format !== "jsonl",
+        includeFailureResults(format),
+      ),
+    );
   const runImport = (options: ImportScanOptions) =>
     withTerminalErrorsHandled(errorOutput, () =>
       runScanImport(options, errorOutput, dependencies),
@@ -3031,6 +3169,8 @@ export async function main(
         options.signal,
       );
     }, selection);
+  const useInteractiveHistory = (format: string) =>
+    useDefaultOutput(format) && output.isTTY === true;
   const presentHistory = (
     result: JsonObject | undefined,
     command: HistoryCommand,
@@ -3041,12 +3181,7 @@ export async function main(
       showLinkedFindings?: boolean;
     } = {},
   ): JsonObject | undefined => {
-    if (
-      result === undefined ||
-      format !== "toon" ||
-      output.isTTY !== true ||
-      argv.some((argument) => OUTPUT_OPTION.test(argument))
-    ) {
+    if (result === undefined || !useInteractiveHistory(format)) {
       return result;
     }
     renderedOutput = renderScanHistory(result, command, {
@@ -3062,18 +3197,23 @@ export async function main(
     return result;
   };
   const showHistoryNavigation = async (
-    scan: JsonObject,
+    scan: ScanLogSource,
     format: string,
     selection?: string,
   ): Promise<void> => {
-    if (
-      format !== "toon" ||
-      argv.some((argument) => OUTPUT_OPTION.test(argument))
-    )
-      return;
+    if (!useDefaultOutput(format)) return;
     await withTerminalErrorsHandled(errorOutput, async () => {
       try {
-        printScanReference(scan, errorOutput, selection);
+        printScanReference(
+          scan,
+          errorOutput,
+          Boolean(
+            scan.continuationThreadId ||
+            scan.threadIds?.length ||
+            scan.executionThreadIds?.length,
+          ),
+          selection,
+        );
       } catch {
         // Optional navigation must not prevent reading saved results or logs.
       }
@@ -3084,7 +3224,6 @@ export async function main(
   }).command("false-positive", {
     description: "Mark a finding as a false positive for future scans.",
     destructive: true,
-    mcp: false,
     args: z.object({
       occurrenceId: z
         .string()
@@ -3117,7 +3256,6 @@ export async function main(
   });
   findingFeedback.command("list", {
     description: "List open findings for a repository across its scans.",
-    mcp: false,
     args: z.object({
       repository: z
         .string()
@@ -3184,7 +3322,6 @@ export async function main(
   });
   findingFeedback.command("imported", {
     description: "List imported vendor evidence for a local repository.",
-    mcp: false,
     args: z.object({
       repository: z
         .string()
@@ -3209,6 +3346,12 @@ export async function main(
             signal: controller.signal,
           },
         );
+        if (useInteractiveHistory(format))
+          renderedOutput = renderImportedFindings(
+            repository,
+            findings,
+            output.columns || 96,
+          );
         return { repository, findings };
       } catch (error) {
         if (controller.signal.aborted) {
@@ -3237,7 +3380,6 @@ export async function main(
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -3284,7 +3426,6 @@ export async function main(
     .command("show", {
       description: "Show the results and saved configuration for a scan.",
       hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -3312,10 +3453,7 @@ export async function main(
           try {
             scanId = (await latestScans())?.[0]?.scanId;
           } catch (error) {
-            if (
-              format === "toon" &&
-              !argv.some((argument) => OUTPUT_OPTION.test(argument))
-            ) {
+            if (useDefaultOutput(format)) {
               errorOutput.write(
                 "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
               );
@@ -3328,7 +3466,7 @@ export async function main(
           await history(["get-scan", "--scan-id", scanId], async (value) => {
             const { scan, recipe, parentScanId } = value;
             await showHistoryNavigation(
-              scan as JsonObject,
+              scan as ScanLogSource,
               format,
               args.scanId === undefined ? "latest completed scan" : undefined,
             );
@@ -3347,7 +3485,6 @@ export async function main(
     .command("logs", {
       description: "Show saved activity for a scan and its workers.",
       hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -3417,7 +3554,6 @@ export async function main(
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
-      mcp: false,
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
       }),
@@ -3451,14 +3587,8 @@ export async function main(
             );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
-            saved["recipe"],
+            saved,
             "resume",
-            {
-              scanPrompt:
-                typeof saved["userContext"] === "string"
-                  ? saved["userContext"]
-                  : undefined,
-            },
             dependencies.currentDirectory(),
             dependencies.environment,
           );
@@ -3474,8 +3604,6 @@ export async function main(
               (saved["recipe"] as JsonObject)["scanInputs"],
             );
           }
-          // Resume uses the installed engine with the saved recipe and checkpoints.
-          scanArguments.expectedPluginVersion = undefined;
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
         } catch (error) {
@@ -3488,13 +3616,7 @@ export async function main(
             "SCAN_RESUME_UNAVAILABLE",
           );
         }
-        scanArguments.includeFailureResults = includeFailureResults(format);
-        const outcome = await runScan(
-          scanArguments,
-          errorOutput,
-          dependencies,
-          format !== "json" && format !== "jsonl",
-        );
+        const outcome = await runScan(format, scanArguments);
         return finishScanCommand(outcome, format, incurError);
       },
     })
@@ -3503,7 +3625,6 @@ export async function main(
         "Start a new scan using saved settings and current checkout/context files.",
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -3559,11 +3680,11 @@ export async function main(
         if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
-          const { recipe, scanId: resolvedScanId } =
-            await dependencies.runWorkbench(
-              workbenchArgs("get-scan-recipe", { scanId }),
-            );
-          const parentScanId = resolvedScanId as string;
+          const saved = await dependencies.runWorkbench(
+            workbenchArgs("get-scan-recipe", { scanId }),
+          );
+          const recipe = saved["recipe"];
+          const parentScanId = saved["scanId"] as string;
           if (
             isJsonObject(recipe) &&
             recipe["import"] !== undefined &&
@@ -3605,33 +3726,15 @@ export async function main(
             );
           }
           scanArguments = await prepareScanArgumentsFromRecipe(
-            recipe,
+            saved,
             "rerun",
-            {
-              scanPromptFile:
-                options.scanPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.scanPromptFile,
-                    ),
-              validationPromptFile:
-                options.validationPromptFile === undefined
-                  ? undefined
-                  : resolveCliPath(
-                      dependencies.currentDirectory(),
-                      options.validationPromptFile,
-                    ),
-            },
             dependencies.currentDirectory(),
             dependencies.environment,
+            options,
           );
           scanArguments.verbose = options.verbose;
           scanArguments.showCost = options.showCost;
           scanArguments.parentScanId = parentScanId;
-          scanArguments.rerunInputIdentity = isJsonObject(recipe)
-            ? (recipe["scanInputs"] ?? null)
-            : null;
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
@@ -3642,20 +3745,13 @@ export async function main(
             "SCAN_REPLAY_UNAVAILABLE",
           );
         }
-        scanArguments.includeFailureResults = includeFailureResults(format);
-        const outcome = await runScan(
-          scanArguments,
-          errorOutput,
-          dependencies,
-          format !== "json" && format !== "jsonl",
-        );
+        const outcome = await runScan(format, scanArguments);
         return finishScanCommand(outcome, format, incurError);
       },
     })
     .command("match", {
       description: "Match findings by root cause across saved scans.",
       destructive: true,
-      mcp: false,
       args: z.object({
         beforeId: z
           .string()
@@ -3702,7 +3798,6 @@ export async function main(
     .command("compare", {
       description: "Match and compare findings between scans.",
       destructive: true,
-      mcp: false,
       args: z.object({
         beforeId: z
           .string()
@@ -3761,7 +3856,6 @@ export async function main(
       "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
       "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
     destructive: true,
-    mcp: false,
     args: z.object({
       scanDir: z
         .string()
@@ -4351,12 +4445,7 @@ export async function main(
               );
             }
           }
-          if (
-            format === "toon" &&
-            !formatExplicit &&
-            !options.dryRun &&
-            !argv.some((argument) => OUTPUT_OPTION.test(argument))
-          ) {
+          if (!formatExplicit && !options.dryRun && useDefaultOutput(format)) {
             renderedOutput = renderPublicationSummary(
               result,
               output.isTTY === true &&
@@ -4386,7 +4475,6 @@ export async function main(
         "Preview and import a saved scanner report locally or to Cloud.",
       hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
       destructive: true,
-      mcp: false,
       args: z.object({
         file: z
           .string()
@@ -4457,10 +4545,7 @@ export async function main(
           const controller = new AbortController();
           const removeSignals = listenForAbort(dependencies, controller);
           const structured = formatExplicit && format !== "toon";
-          const humanSummary =
-            format === "toon" &&
-            !formatExplicit &&
-            !argv.some((argument) => OUTPUT_OPTION.test(argument));
+          const humanSummary = !formatExplicit && useDefaultOutput(format);
           const showExclusions = (excluded: ExternalFindings["excluded"]) => {
             const sample = excluded.slice(0, 5);
             for (const item of sample)
@@ -4739,7 +4824,6 @@ export async function main(
     .command("check", {
       description:
         "Check saved scan history and Linear access without creating issues.",
-      mcp: false,
       args: z.object({
         scanDir: z.string().describe("Completed scan directory."),
       }),
@@ -4774,7 +4858,6 @@ export async function main(
     description: "Read GitHub code scanning alerts without changing GitHub.",
     hint: "Save complete --format json output for publish findings --provider github. This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
-    mcp: false,
     args: z.object({
       repository: z
         .string()
@@ -4901,7 +4984,6 @@ export async function main(
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
       destructive: false,
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -4970,7 +5052,6 @@ export async function main(
         "Read Snyk Open Source or Code issues for one monitored project.",
       hint: "Requires SNYK_TOKEN. Save the complete --format json output. Use publish findings --provider snyk with --to local or --to cloud.",
       destructive: false,
-      mcp: false,
       args: z.object({
         project: z.string().min(1).describe("Snyk project ID."),
       }),
@@ -5029,9 +5110,8 @@ export async function main(
     .command("semgrep", {
       description:
         "Read a full Semgrep Platform project and ref through the Web API.",
-      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Use --to local for a selected Guardian MCP capture.",
+      hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Selected Guardian MCP captures also support both destinations.",
       destructive: false,
-      mcp: false,
       args: z.object({
         project: z
           .string()
@@ -5097,7 +5177,6 @@ export async function main(
         "Collect Sonar security findings or replay a saved capture into the local workbench.",
       hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a live capture for review without importing findings.",
       destructive: true,
-      mcp: false,
       args: z.object({
         capture: z
           .string()
@@ -5148,10 +5227,7 @@ export async function main(
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options, format, formatExplicit, error: incurError }) {
         return await withTerminalErrorsHandled(errorOutput, async () => {
-          const humanSummary =
-            format === "toon" &&
-            !formatExplicit &&
-            !argv.some((arg) => OUTPUT_OPTION.test(arg));
+          const humanSummary = !formatExplicit && useDefaultOutput(format);
           const controller = new AbortController();
           const removeSignals = listenForAbort(dependencies, controller);
           const note = (line: string) =>
@@ -5350,7 +5426,7 @@ export async function main(
     version: VERSION,
     mcp: {
       command: "npx --yes @openai/codex-security --mcp",
-      tools: { discovery: "direct" },
+      tools: { discovery: "direct", include: ["info"] },
       instructions:
         "Use info for read-only SDK metadata. Scans and other state-changing commands are CLI-only because the MCP transport cannot cancel active commands.",
     },
@@ -5359,7 +5435,6 @@ export async function main(
     .command("policy", {
       description: "Draft SECURITY.md for review.",
       destructive: true,
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -5438,12 +5513,8 @@ export async function main(
           if (argumentError !== undefined) return fail(argumentError, 2);
           const directory = dependencies.currentDirectory();
           const codexOverrides = await parseScanCodexOverrides(
-            options.codex,
-            options.model,
-            options.effort,
-            options.provider,
-            undefined,
-            scanCodexHome(dependencies.environment),
+            options,
+            dependencies.environment,
           );
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
@@ -5545,7 +5616,6 @@ export async function main(
         "Use ./import to scan a repository named import.\n" +
         "Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
-      mcp: false,
       alias: { config: "c" },
       args: z.object({
         repository: z
@@ -5747,12 +5817,9 @@ export async function main(
               maxCostUsd: options.maxCost,
               maxTimeMinutes: options.maxTime,
               codexOverrides: await parseScanCodexOverrides(
-                options.codex,
-                options.model,
-                options.effort,
-                options.provider,
+                options,
+                dependencies.environment,
                 project?.input.codex,
-                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -5768,36 +5835,30 @@ export async function main(
               "--validate cannot be combined with a scan cost limit because standalone validation is not cost-tracked.",
             );
           }
-          outcome = await runScan(
-            {
-              ...settings,
-              rubricPath:
-                options.rubric === undefined
-                  ? undefined
-                  : resolveCliPath(directory, options.rubric),
-              codexOverrides: config.codexOverrides,
-              projectConfig: provenance,
-              workflowId: options.workflowId,
-              safetyIdentifier: options.safetyIdentifier,
-              verbose: options.verbose,
-              repository: args.repository,
-              archiveExisting: options.archiveExisting,
-              pluginPath: options.pluginPath,
-              pythonPath: options.python,
-              patch: options.patch,
-              validate: options.validate,
-              patchSeverity: options.patchSeverity,
-              createPr: options.createPr,
-              showCost: options.showCost,
-              headless: options.headless,
-              dryRun: options.dryRun,
-              mock: options.mock,
-              includeFailureResults: includeFailureResults(format),
-            },
-            errorOutput,
-            dependencies,
-            format !== "json" && format !== "jsonl",
-          );
+          outcome = await runScan(format, {
+            ...settings,
+            rubricPath:
+              options.rubric === undefined
+                ? undefined
+                : resolveCliPath(directory, options.rubric),
+            codexOverrides: config.codexOverrides,
+            projectConfig: provenance,
+            workflowId: options.workflowId,
+            safetyIdentifier: options.safetyIdentifier,
+            verbose: options.verbose,
+            repository: args.repository,
+            archiveExisting: options.archiveExisting,
+            pluginPath: options.pluginPath,
+            pythonPath: options.python,
+            patch: options.patch,
+            validate: options.validate,
+            patchSeverity: options.patchSeverity,
+            createPr: options.createPr,
+            showCost: options.showCost,
+            headless: options.headless,
+            dryRun: options.dryRun,
+            mock: options.mock,
+          });
         } catch (error) {
           const message = errorMessage(error);
           errorOutput.write(`${diagnosticLines(message)}\n`);
@@ -5814,7 +5875,6 @@ export async function main(
         "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
       hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
-      mcp: false,
       args: z.object({
         repository: z
           .string()
@@ -5905,7 +5965,6 @@ export async function main(
     .command("suggest-owners", {
       description: "Suggest finding owners from CODEOWNERS and Git history.",
       destructive: false,
-      mcp: false,
       args: z.object({
         findings: z
           .string()
@@ -5973,13 +6032,10 @@ export async function main(
       description: "Assess severity for saved findings or canonical records.",
       hint: "For saved findings, use --rubric for your own policy or set CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 for the Statsig default. For host-provided reviews, use --records.",
       destructive: true,
-      mcp: false,
       options: z.object({
-        runs: classificationRunsSchema
-          .default(3)
-          .describe(
-            "Number of independent classification runs (1–10; default: 3).",
-          ),
+        runs: reviewRunsOption.describe(
+          `Number of independent classification runs (1–10; default: ${DEFAULT_REVIEW_RUNS}).`,
+        ),
         records: z
           .boolean()
           .default(false)
@@ -6098,7 +6154,6 @@ export async function main(
       description: "Identify duplicate findings in a saved scan.",
       hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       destructive: true,
-      mcp: false,
       options: z.object({
         concurrency: positiveInteger
           .default(DEFAULT_DEDUPE_CONCURRENCY)
@@ -6279,7 +6334,6 @@ export async function main(
     .command("scan-components", {
       description: "Scan project components and combine results.",
       destructive: true,
-      mcp: false,
       alias: { config: "c" },
       args: z.object({
         repository: z
@@ -6383,12 +6437,9 @@ export async function main(
               knowledgeBasePaths: options.knowledgeBase,
               maxCostUsd: options.maxCost,
               codexOverrides: await parseScanCodexOverrides(
-                options.codex,
-                options.model,
-                options.effort,
-                options.provider,
+                options,
+                dependencies.environment,
                 project?.input.codex,
-                scanCodexHome(dependencies.environment),
               ),
             },
             directory,
@@ -6475,9 +6526,10 @@ export async function main(
             onScanEvent:
               dashboard === null
                 ? (event) => {
-                    const componentName =
+                    const componentName = diagnosticValue(
                       componentNames.get(event.componentId) ??
-                      event.componentId;
+                        event.componentId,
+                    );
                     const line = componentScanEventLine(
                       componentName,
                       event,
@@ -6502,7 +6554,7 @@ export async function main(
               if (dashboard !== null) dashboard.updateComponent(component);
               else
                 errorOutput.write(
-                  `codex-security: ${component.name} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
+                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
             },
             onComplete: (result) => {
@@ -6539,7 +6591,6 @@ export async function main(
     .command("bulk-scan", {
       description: "Discover and scan multiple repositories.",
       destructive: true,
-      mcp: false,
       alias: { config: "c" },
       args: z.object({
         input: z
@@ -6599,16 +6650,7 @@ export async function main(
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
-        pluginPath: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(PLUGIN_PATH_DESCRIPTION),
-        python: z.string().min(1).optional().describe(PYTHON_PATH_DESCRIPTION),
-        codex: z
-          .array(z.string().min(1))
-          .default([])
-          .describe(CODEX_OVERRIDE_DESCRIPTION),
+        ...runtimeOptions(() => z.string().min(1)),
       }),
       examples: [
         {
@@ -6712,12 +6754,9 @@ export async function main(
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
                 await parseScanCodexOverrides(
-                  options.codex,
-                  options.model,
-                  options.effort,
-                  options.provider,
+                  options,
+                  dependencies.environment,
                   project?.input.codex,
-                  scanCodexHome(dependencies.environment),
                 ),
               ),
               pluginPath: options.pluginPath,
@@ -6784,14 +6823,8 @@ export async function main(
                       return undefined;
                     }
                     const recipe = await prepareScanArgumentsFromRecipe(
-                      saved["recipe"],
+                      saved,
                       "resume",
-                      {
-                        scanPrompt:
-                          typeof saved["userContext"] === "string"
-                            ? saved["userContext"]
-                            : undefined,
-                      },
                       currentDirectory,
                       dependencies.environment,
                     );
@@ -6857,7 +6890,6 @@ export async function main(
         "Use --export-format for artifact format. The global --format option controls\n" +
         "framework output such as --schema; it does not change exported files.",
       destructive: true,
-      mcp: false,
       args: z.object({
         scanDir: z
           .string()
@@ -7003,7 +7035,6 @@ export async function main(
       description:
         "Assess candidate security findings using source evidence only.",
       destructive: false,
-      mcp: false,
       args: z.object({
         "findings...": z
           .string()
@@ -7078,7 +7109,6 @@ export async function main(
       description:
         "Verify existing security fixes without changing the repository.",
       destructive: false,
-      mcp: false,
       args: z.object({
         "findings...": z
           .string()
@@ -7310,7 +7340,6 @@ export async function main(
     .command("patch", {
       description: "Patch one or more security issues.",
       destructive: true,
-      mcp: false,
       args: z.object({
         "issues...": z
           .string()
@@ -7485,6 +7514,9 @@ export async function main(
                 get automaticPublication() {
                   return options.createPr && publication === undefined;
                 },
+                get publication() {
+                  return publication;
+                },
                 onBeforeTurn: preparePatch,
                 verificationMode: options.verificationMode,
               },
@@ -7563,6 +7595,7 @@ export async function main(
                     directory: selected.repository,
                     base: baseline.tree,
                     state: baseline,
+                    verified: publication?.verified,
                     files: verifiedFiles.map((file) =>
                       relative(
                         baseline.root,
@@ -7893,7 +7926,6 @@ export async function main(
         "  Keep SSH connected until login finishes.\n" +
         "Docs: https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
       destructive: true,
-      mcp: false,
       args: z.object({
         action: z
           .enum(["status"])
@@ -7923,34 +7955,38 @@ export async function main(
           dependencies.environment,
         );
         const authentication = scanAuthentication(dependencies.environment);
-        if (args.action === "status" && authentication.method !== "api_key") {
-          const ambientHome = scanCodexHome(dependencies.environment);
-          await withCredentialHomeLock(credentialHome, () =>
-            initialCredentialsAvailable(
-              dependencies.environment,
-              ambientHome,
+        exitCode = await withCredentialHomeLock(credentialHome, async () => {
+          if (args.action === undefined) {
+            await prepareLoginConfig(
               credentialHome,
-            ),
+              await readCodexAuthConfig(
+                scanCodexHome(dependencies.environment),
+                true,
+              ),
+            );
+          } else if (authentication.method !== "api_key") {
+            await initialCredentialsAvailable(
+              dependencies.environment,
+              scanCodexHome(dependencies.environment),
+              credentialHome,
+            );
+          }
+          const status = await dependencies.runCodex(
+            [
+              "login",
+              ...(args.action === undefined ? [] : [args.action]),
+              ...(options.deviceAuth ? ["--device-auth"] : []),
+              ...(options.withApiKey ? ["--with-api-key"] : []),
+              ...(options.withAccessToken ? ["--with-access-token"] : []),
+            ],
+            undefined,
+            { ...dependencies.environment, CODEX_HOME: credentialHome },
           );
-        }
-        const authenticationEnvironment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await dependencies.runCodex(
-          [
-            "login",
-            ...(args.action === undefined ? [] : [args.action]),
-            ...(options.deviceAuth ? ["--device-auth"] : []),
-            ...(options.withApiKey ? ["--with-api-key"] : []),
-            ...(options.withAccessToken ? ["--with-access-token"] : []),
-          ],
-          undefined,
-          authenticationEnvironment,
-        );
-        if (args.action === undefined && exitCode === 0) {
-          await setCodexSecurityCredentialLogout(credentialHome, false);
-        }
+          if (args.action === undefined && status === 0) {
+            await setCodexSecurityCredentialLogout(credentialHome, false);
+          }
+          return status;
+        });
         if (args.action === "status") {
           if (
             authentication.method === "api_key" &&
@@ -7994,21 +8030,24 @@ export async function main(
     .command("logout", {
       description: "Remove the stored sign-in.",
       destructive: true,
-      mcp: false,
       async run() {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           dependencies.environment,
         );
-        const runLogout = () =>
-          dependencies.runCodex(["logout"], undefined, {
-            ...dependencies.environment,
-            CODEX_HOME: credentialHome,
-          });
+        const environment = {
+          ...dependencies.environment,
+          CODEX_HOME: credentialHome,
+        };
         exitCode = await withCredentialHomeLock(credentialHome, () =>
           logoutCredentialHome(
             credentialHome,
             scanCodexHome(dependencies.environment),
-            runLogout,
+            (store) =>
+              dependencies.runCodex(
+                nativeLogoutArgs(store),
+                undefined,
+                environment,
+              ),
           ),
         );
       },
@@ -8017,7 +8056,6 @@ export async function main(
       description: "Create a starter project configuration.",
       hint: "Existing files are never overwritten.",
       destructive: true,
-      mcp: false,
       args: z.object({
         file: z
           .string()
@@ -8048,7 +8086,6 @@ export async function main(
     .command("feedback", {
       description: "Send feedback to OpenAI and return a feedback ID.",
       destructive: true,
-      mcp: false,
       args: z.object({
         scanId: z
           .string()
@@ -8182,70 +8219,24 @@ export async function main(
 
   const commands = Cli.toCommands.get(cli)!;
   const valueOptions = cliValueOptions(commands);
-  function isScanImportCommand(argv: readonly string[]): boolean {
-    const commandIndex = cliCommandIndex(argv);
-    return argv[commandIndex] === "scan" && argv[commandIndex + 1] === "import";
+  const commandIndex = argv.findIndex((value, index) => {
+    if (value.startsWith("-")) return false;
+    return index === 0 || !valueOptions.has(argv[index - 1]!);
+  });
+  const command = argv[commandIndex];
+  const following = argv[commandIndex + 1];
+  const scanImport = command === "scan" && following === "import";
+  if (
+    (command === "scans" || command === "findings") &&
+    !argv.includes("--help") &&
+    !argv.includes("-h") &&
+    (following === undefined || following.startsWith("-"))
+  ) {
+    argv = argv.toSpliced(commandIndex + 1, 0, "list");
   }
 
-  function normalizeScanImportArguments(
-    argv: readonly string[],
-  ): readonly string[] {
-    if (!isScanImportCommand(argv)) return argv;
-    const normalized: string[] = [];
-    const subcommandIndex = cliCommandIndex(argv) + 1;
-    for (let index = 0; index < argv.length; index += 1) {
-      const argument = argv[index]!;
-      const next = argv[index + 1];
-      // Incur reserves bare --json for output, but parses --json=FILE normally.
-      if (
-        index > subcommandIndex &&
-        argument === "--json" &&
-        next !== undefined &&
-        !next.startsWith("--") &&
-        next !== "-h"
-      ) {
-        normalized.push(`--json=${next}`);
-        index += 1;
-      } else {
-        normalized.push(argument);
-      }
-    }
-    return normalized;
-  }
-
-  function cliCommandIndex(argv: readonly string[]): number {
-    return argv.findIndex((value, index) => {
-      if (value.startsWith("-")) return false;
-      return index === 0 || !valueOptions.has(argv[index - 1]!);
-    });
-  }
-
-  function defaultListCommand(argv: readonly string[]): readonly string[] {
-    const commandIndex = cliCommandIndex(argv);
-    if (
-      commandIndex < 0 ||
-      !["scans", "findings"].includes(argv[commandIndex]!) ||
-      argv.includes("--help") ||
-      argv.includes("-h")
-    ) {
-      return argv;
-    }
-    const following = argv[commandIndex + 1];
-    if (following !== undefined && !following.startsWith("-")) return argv;
-    return [
-      ...argv.slice(0, commandIndex + 1),
-      "list",
-      ...argv.slice(commandIndex + 1),
-    ];
-  }
-
-  function validateCliArguments(
-    argv: readonly string[],
-    positionals: string[],
-  ): string | undefined {
+  function validateCliArguments(): string | undefined {
     if (argv.includes("--help") || argv.includes("-h")) return undefined;
-    const commandIndex = cliCommandIndex(argv);
-    const command = argv[commandIndex];
     if (command === undefined || !commands.has(command)) return undefined;
     const structuredOutput = argv.some(
       (value, index) =>
@@ -8309,7 +8300,6 @@ export async function main(
         return "Markdown output is not supported for scan results.";
       }
     }
-    const scanImport = isScanImportCommand(argv);
     const nestedCommand =
       scanImport ||
       command === "scans" ||
@@ -8402,20 +8392,38 @@ export async function main(
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
     }
   }
-  argv = normalizeScanImportArguments(defaultListCommand(argv));
-  const frameworkArgv = argv.flatMap((argument) => {
+  const firstImportOption = scanImport ? commandIndex + 2 : argv.length;
+  const frameworkArgv: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    const next = argv[index + 1];
     const separator = argument.indexOf("=");
     if (
-      separator < 0 ||
-      !FRAMEWORK_VALUE_OPTIONS.has(argument.slice(0, separator))
-    )
-      return [argument];
-    return [argument.slice(0, separator), argument.slice(separator + 1)];
-  });
+      index >= firstImportOption &&
+      argument === "--json" &&
+      next !== undefined &&
+      !next.startsWith("--") &&
+      next !== "-h"
+    ) {
+      // Incur reserves bare --json for output, but parses --json=FILE normally.
+      frameworkArgv.push(`--json=${next}`);
+      index++;
+    } else if (
+      separator >= 0 &&
+      FRAMEWORK_VALUE_OPTIONS.has(argument.slice(0, separator))
+    ) {
+      frameworkArgv.push(
+        argument.slice(0, separator),
+        argument.slice(separator + 1),
+      );
+    } else {
+      frameworkArgv.push(argument);
+    }
+  }
   const frameworkFlags = frameworkOutputFlags(frameworkArgv);
   const policyFullOutput =
-    argv[cliCommandIndex(argv)] === "policy" && argv.includes("--full-output");
-  const argumentError = validateCliArguments(argv, positionals);
+    command === "policy" && argv.includes("--full-output");
+  const argumentError = validateCliArguments();
   if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
     return 2;
@@ -8444,7 +8452,7 @@ export async function main(
 
   // Incur cannot mount a command with both a handler and subcommands.
   // Select the nested import route while preserving scan [repository].
-  if (isScanImportCommand(argv)) {
+  if (scanImport) {
     cli.command(
       Cli.create("scan", {
         description: "Run or import a saved scan.",
@@ -8452,7 +8460,6 @@ export async function main(
         description:
           "Save CSV or JSON findings as a completed scan without security analysis.",
         destructive: true,
-        mcp: false,
         options: z
           .object({
             csv: optionValue("--csv")
@@ -8515,11 +8522,7 @@ export async function main(
               exitCode,
             });
           }
-          if (
-            !options.dryRun &&
-            format === "toon" &&
-            !argv.some((argument) => OUTPUT_OPTION.test(argument))
-          ) {
+          if (!options.dryRun && useDefaultOutput(format)) {
             return;
           }
           return outcome.data;
@@ -8542,6 +8545,11 @@ export async function main(
   } finally {
     updateController.abort();
   }
+  if (
+    (command === "login" || command === "logout") &&
+    (exitCode === 130 || exitCode === 143)
+  )
+    onInterruptedSignIn?.();
   let frameworkOutput = frameworkCapture.text();
   if (filteredScanFailure !== undefined) {
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
@@ -8722,18 +8730,14 @@ async function runScanImport(
 }
 
 async function prepareScanArgumentsFromRecipe(
-  recipe: JsonValue | undefined,
+  { recipe, userContext }: JsonObject,
   operation: "resume" | "rerun",
-  {
-    scanPrompt,
-    scanPromptFile,
-    validationPromptFile,
-  }: Pick<
-    ScanArguments,
-    "scanPrompt" | "scanPromptFile" | "validationPromptFile"
-  >,
   directory: string,
   environment: CliDependencies["environment"],
+  {
+    scanPromptFile,
+    validationPromptFile,
+  }: Pick<ScanPromptSettings, "scanPromptFile" | "validationPromptFile"> = {},
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -8818,36 +8822,29 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe has an invalid Git head.",
     );
   }
-  const threshold = ScanSettingsSchema.shape.failureSeverity.safeParse(
-    recipe["failOnSeverity"],
+  const fields = ScanSettingsSchema.shape;
+  const readSetting = <T>(key: string, schema: ZodType<T>, label: string) => {
+    const result = schema.safeParse(recipe[key]);
+    if (!result.success)
+      throw new CodexSecurityError(
+        `The saved scan recipe contains an invalid ${label}.`,
+      );
+    return result.data;
+  };
+  const failureSeverity = readSetting(
+    "failOnSeverity",
+    fields.failureSeverity,
+    "severity policy",
   );
-  if (!threshold.success) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid severity policy.",
-    );
-  }
-  const maxCostUsd = recipe["maxCostUsd"];
-  if (
-    maxCostUsd !== undefined &&
-    (typeof maxCostUsd !== "number" ||
-      !Number.isFinite(maxCostUsd) ||
-      maxCostUsd <= 0)
-  ) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid cost limit.",
-    );
-  }
+  const maxCostUsd = readSetting("maxCostUsd", fields.maxCostUsd, "cost limit");
+  const maxTimeMinutes = readSetting(
+    "maxTimeMinutes",
+    fields.maxTimeMinutes,
+    "investigation time limit",
+  );
   const deepScan = DeepScanSettingsSchema.optional().safeParse(
     recipe["deepScan"],
   );
-  const maxTimeMinutes = ScanSettingsSchema.shape.maxTimeMinutes.safeParse(
-    recipe["maxTimeMinutes"],
-  );
-  if (!maxTimeMinutes.success) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid investigation time limit.",
-    );
-  }
   if (!deepScan.success) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid deep scan settings.",
@@ -8861,27 +8858,17 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe is missing resolved deep scan settings.",
     );
   }
-  const ownerSuggestions = ScanSettingsSchema.shape.ownerSuggestions.safeParse(
-    recipe["ownerSuggestions"],
+  const ownerSuggestions = readSetting(
+    "ownerSuggestions",
+    fields.ownerSuggestions,
+    "owner suggestions setting",
   );
-  if (!ownerSuggestions.success)
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid owner suggestions setting.",
-    );
-  const auth = z.enum(SCAN_AUTH_MODES).optional().safeParse(recipe["auth"]);
-  const cyberAccessProgram =
-    ScanSettingsSchema.shape.cyberAccessProgram.safeParse(
-      recipe["cyberAccessProgram"],
-    );
-  if (!cyberAccessProgram.success) {
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid Cyber access program.",
-    );
-  }
-  if (!auth.success)
-    throw new CodexSecurityError(
-      "The saved scan recipe contains an invalid authentication choice.",
-    );
+  const cyberAccessProgram = readSetting(
+    "cyberAccessProgram",
+    fields.cyberAccessProgram,
+    "Cyber access program",
+  );
+  const auth = readSetting("auth", fields.auth, "authentication choice");
   if (
     mode !== "deep" &&
     deepScan.data !== undefined &&
@@ -8905,6 +8892,10 @@ async function prepareScanArgumentsFromRecipe(
       "The saved scan recipe contains invalid launch settings.",
     );
   }
+  const scanPrompt =
+    operation === "resume" && typeof userContext === "string"
+      ? userContext
+      : undefined;
   const prompts = await resolveScanPrompts(
     { scanPrompt, scanPromptFile, validationPromptFile },
     repository,
@@ -8922,9 +8913,9 @@ async function prepareScanArgumentsFromRecipe(
   );
   return {
     repository,
-    auth: auth.data ?? DEFAULT_SCAN_AUTH,
-    cyberAccessProgram: cyberAccessProgram.data,
-    ownerSuggestions: ownerSuggestions.data,
+    auth: auth ?? DEFAULT_SCAN_AUTH,
+    cyberAccessProgram,
+    ownerSuggestions,
     ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
@@ -8951,13 +8942,17 @@ async function prepareScanArgumentsFromRecipe(
     codexOverrides: Object.hasOwn(replayConfig, "approval_policy")
       ? replayConfig
       : { ...replayConfig, approval_policy: "never" },
-    failureSeverity: threshold.data,
+    failureSeverity,
     maxCostUsd,
-    maxTimeMinutes: maxTimeMinutes.data,
+    maxTimeMinutes,
     dryRun: false,
     ...(recipe["mock"] === true ? { mock: true } : {}),
+    ...(operation === "rerun"
+      ? { rerunInputIdentity: recipe["scanInputs"] ?? null }
+      : {}),
+    // Resumes use the installed engine with the saved checkpoints.
     expectedPluginVersion:
-      typeof recipe["pluginVersion"] === "string"
+      operation === "rerun" && typeof recipe["pluginVersion"] === "string"
         ? recipe["pluginVersion"]
         : undefined,
   };
@@ -9385,7 +9380,178 @@ function directPatchDigest(
   ).slice(0, 12)}`;
 }
 
+type SavedPatchPublication = Awaited<
+  ReturnType<typeof prepareSavedPatchPublication>
+>;
+
+async function prepareSavedPatchPublication(
+  repository: string,
+  dependencies: CliDependencies,
+  worktree: string,
+) {
+  const git = (args: string[], options?: { trim?: boolean; input?: string }) =>
+    dependencies.runRepositoryCommand("git", args, repository, options);
+  const parent = await git(["rev-parse", "HEAD"]);
+  const parentTree = await git(["rev-parse", parent + "^{tree}"]);
+  let tree = parentTree;
+
+  // Git quotes arbitrary path bytes the same way in a raw diff and --index-info.
+  const diff = async (
+    from: string,
+    to?: string,
+    paths: readonly string[] = [],
+    previous?: Map<string, string>,
+  ) => {
+    const output = await git(
+      [
+        "-c",
+        "core.quotePath=true",
+        "--literal-pathspecs",
+        "diff",
+        "--no-relative",
+        "--no-renames",
+        "--ignore-submodules=none",
+        "--raw",
+        "--no-abbrev",
+        ...(to === undefined
+          ? ["--cached", "--ita-visible-in-index", from]
+          : [from, to]),
+        "--",
+        ...paths,
+      ],
+      { trim: false },
+    );
+    return new Map(
+      output
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          const [metadata, path] = line.split("\t");
+          const [oldMode, mode, oldOid, oid] = metadata!.split(" ");
+          previous?.set(path!, `${oldMode!.slice(1)} ${oldOid}`);
+          return [path!, `${mode} ${oid}`];
+        }),
+    );
+  };
+  const dirty = new Set([
+    ...(await diff(parent, worktree)).keys(),
+    ...(await diff(parent)).keys(),
+  ]);
+  const ignoredOutput = await git(
+    [
+      "-c",
+      "core.quotePath=true",
+      "ls-files",
+      "--full-name",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "--",
+      ".",
+    ],
+    { trim: false },
+  );
+  const ignored = new Set(ignoredOutput.split("\n"));
+
+  return {
+    parent,
+    get tree() {
+      return tree;
+    },
+    async record(paths: string[], before: string, after: string) {
+      const changes = paths.length
+        ? await diff(before, after, paths)
+        : new Map<string, string>();
+      if (!changes.size)
+        return "The reported patch files contain no changes from this finding.";
+      // A move may be reported under its new name. Include its deleted source
+      // only if the full turn contains exactly one removal and one addition
+      // of the same mode and object. Never select neighboring directory leaves.
+      const previous = new Map<string, string>();
+      const turn = await diff(before, after, ["."], previous);
+      const additions = new Map<string, string | null>();
+      const deletions = new Map<string, string | null>();
+      for (const [path, entry] of turn) {
+        const old = previous.get(path)!;
+        if (old.startsWith("000000 "))
+          additions.set(entry, additions.has(entry) ? null : path);
+        if (entry.startsWith("000000 "))
+          deletions.set(old, deletions.has(old) ? null : path);
+      }
+      for (const [entry, to] of additions) {
+        const from = deletions.get(entry);
+        if (from && to && changes.has(to)) changes.set(from, turn.get(from)!);
+      }
+      const changed = [...changes.keys()];
+      if (changed.some((path) => ignored.has(path)))
+        return `Cannot publish files with uncommitted changes before patching: ${changed.filter((path) => ignored.has(path)).join(", ")}. The files were ignored and untracked before patching. Local edits were kept for review.`;
+      if (changed.some((path) => dirty.has(path)))
+        return `Cannot publish files with uncommitted changes before patching: ${changed.filter((path) => dirty.has(path)).join(", ")}. The selected files contain pre-existing changes. Local edits were kept for review.`;
+      const prior = await diff(tree, before);
+      if (changed.some((path) => prior.has(path)))
+        return "The selected files contain earlier unverified changes. Local edits were kept for review.";
+      // Remove leaves before adding their replacements when a file changes into a directory.
+      const records = [...changes]
+        .map(([path, entry]) => `${entry}\t${path}\n`)
+        .sort();
+      const next = await withPatchIndex(
+        repository,
+        dependencies,
+        async (run) => {
+          await run(["read-tree", tree]);
+          await run(["update-index", "--index-info"], records.join(""));
+          return run(["write-tree"]);
+        },
+      );
+      const applied = await diff(tree, next);
+      if (
+        applied.size !== changes.size ||
+        changed.some((path) => applied.get(path) !== changes.get(path))
+      )
+        return "The selected changes also replace an unreported path. Local edits were kept for review.";
+      tree = next;
+      return undefined;
+    },
+    async verifyWorktree(currentTree: string) {
+      const verified = await diff(parent, tree);
+      const later = await diff(tree, currentTree);
+      if ([...verified.keys()].some((path) => later.has(path)))
+        throw new CodexSecurityError(
+          "The working tree differs from the verified changes. Local edits were kept for review.",
+        );
+    },
+  };
+}
+
+async function withPatchIndex<T>(
+  repository: string,
+  dependencies: CliDependencies,
+  operation: (
+    git: (args: string[], input?: string) => Promise<string>,
+  ) => Promise<T>,
+): Promise<T> {
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-tree-"),
+  );
+  try {
+    const objects = await patchObjectDirectory(repository, dependencies);
+    return await operation((args, input) =>
+      dependencies.runRepositoryCommand("git", args, repository, {
+        environment: {
+          GIT_INDEX_FILE: join(root, "index"),
+          GIT_LITERAL_PATHSPECS: "0",
+        },
+        input,
+        patchSnapshot: [root, objects],
+      }),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 interface PatchPublication {
+  verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   sshCommand?: string;
   context: GitPatchState["context"];
@@ -11004,6 +11170,7 @@ async function checkPatchReflogs(
 async function publishPatchBranch(
   repository: string,
   branch: string,
+  commit: string,
   body: string,
   stderr: Writable,
   dependencies: CliDependencies,
@@ -11030,11 +11197,6 @@ async function publishPatchBranch(
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
     let url = existing?.url;
     if (existing) {
-      const commit = await run("git", [
-        "rev-parse",
-        "--verify",
-        `refs/heads/${branch}`,
-      ]);
       if (
         existing.head !== commit ||
         !["open", "opened"].includes(existing.state.toLowerCase())
@@ -11133,10 +11295,9 @@ async function publishPatchBranch(
           skipSubmoduleCheck
             ? "--recurse-submodules=no"
             : "--recurse-submodules=check",
-          "--set-upstream",
           `--force-with-lease=refs/heads/${branch}:`,
           "origin",
-          branch,
+          `${commit}:refs/heads/${branch}`,
         ],
         repository,
         {
@@ -11150,6 +11311,18 @@ async function publishPatchBranch(
           ),
         },
       );
+      await run("git", [
+        "config",
+        "--local",
+        `branch.${branch}.remote`,
+        "origin",
+      ]);
+      await run("git", [
+        "config",
+        "--local",
+        `branch.${branch}.merge`,
+        `refs/heads/${branch}`,
+      ]);
       url = await run(
         command,
         gitlab
@@ -11273,7 +11446,14 @@ async function resumePatchPullRequest(
     PATCH_PR_BODY,
     patchPullRequestBodyKey(branch),
   ]);
-  return publishPatchBranch(repository, branch, body, stderr, dependencies);
+  return publishPatchBranch(
+    repository,
+    branch,
+    commit,
+    body,
+    stderr,
+    dependencies,
+  );
 }
 
 async function verifiedPatchFiles(
@@ -11411,7 +11591,31 @@ async function createPatchPullRequest(
     canonicalPatchPath(directory, patchPathKey(file)),
   );
   const sources = patchChangeSources(changes, root, directory, files);
-  const selectedFiles = sources.files;
+  const selectedFiles = publication.verified
+    ? (
+        await patchGitRecords(
+          root,
+          [
+            "diff",
+            "--name-only",
+            "--no-relative",
+            "--no-renames",
+            "--ignore-submodules=none",
+            "-z",
+            publication.verified.parent,
+            publication.verified.tree,
+          ],
+          dependencies,
+        )
+      )
+        .filter(Boolean)
+        .map((file) =>
+          relativePatchPath(
+            patchPathKey(directory),
+            resolve(patchPathKey(root), file),
+          ),
+        )
+    : sources.files;
   if (ignoredFiles.size > 0) {
     const included = await patchGitRecords(
       root,
@@ -11674,6 +11878,10 @@ async function createPatchPullRequest(
   );
   const previousBranch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
   const previousCommit = await run(["rev-parse", "HEAD"]);
+  if (publication.verified && previousCommit !== publication.verified.parent)
+    throw new CodexSecurityError(
+      "The patch base changed during verification. Local edits were kept for review.",
+    );
   const treePath = (file: string) =>
     relativePatchPath(
       patchPathKey(root),
@@ -11711,10 +11919,13 @@ async function createPatchPullRequest(
   }
   for (const file of sources.deleted) expectedTree.delete(treePath(file));
   const matchesCapturedTree = async () =>
-    isDeepStrictEqual(
-      expectedTree,
-      await patchTreeEntries(repository, root, "HEAD", dependencies),
-    );
+    (await run(["rev-parse", "HEAD^@"])) === previousCommit &&
+    (publication.verified
+      ? (await run(["rev-parse", "HEAD^{tree}"])) === publication.verified.tree
+      : isDeepStrictEqual(
+          expectedTree,
+          await patchTreeEntries(repository, root, "HEAD", dependencies),
+        ));
   const indexPath = await run([
     "rev-parse",
     "--path-format=absolute",
@@ -11748,6 +11959,22 @@ async function createPatchPullRequest(
         })
       : Promise.resolve("");
   const syncIndex = async () => {
+    if (publication.verified) {
+      try {
+        await run([
+          "read-tree",
+          "-i",
+          "-m",
+          previousCommit,
+          publication.verified.tree,
+        ]);
+      } catch (error) {
+        stderr.write(
+          `Could not update local staging to match the verified commit: ${diagnosticValue(error)}\n`,
+        );
+      }
+      return;
+    }
     await runFiles([
       "--literal-pathspecs",
       "reset",
@@ -11760,23 +11987,32 @@ async function createPatchPullRequest(
     await removeSources(runFiles);
   };
   let committed = false;
+  let commit: string;
   try {
     await checkPatchReflogs(repository, dependencies);
     await run(["switch", "-c", branch]);
+    if (publication.verified)
+      await publication.verified.verifyWorktree(
+        await snapshotPatchTree(repository, dependencies),
+      );
     await withPatchGitIndex(
       indexCommand(false),
       async (stage) => {
-        // Reuse captured blobs and modes without running clean filters again.
-        await stage([
-          "--literal-pathspecs",
-          "reset",
-          "-q",
-          "--no-refresh",
-          head,
-          "--",
-          ...pathspec,
-        ]);
-        await removeSources(stage);
+        if (publication.verified) {
+          await stage(["read-tree", publication.verified.tree]);
+        } else {
+          // Reuse captured blobs and modes without running clean filters again.
+          await stage([
+            "--literal-pathspecs",
+            "reset",
+            "-q",
+            "--no-refresh",
+            head,
+            "--",
+            ...pathspec,
+          ]);
+          await removeSources(stage);
+        }
         // --git-path with absolute output follows the leaf symlink. Resolve
         // only the worktree's Git directory before inspecting the literal leaf.
         const directoryOutput = await stage(
@@ -11809,7 +12045,7 @@ async function createPatchPullRequest(
       pathspec,
     );
     await syncIndex();
-    const commit = await run(["rev-parse", "HEAD"]);
+    commit = await run(["rev-parse", "HEAD"]);
     await run(["config", "--local", patchPullRequestBodyKey(branch), body]);
     await run(["config", "--local", patchCommitKey(branch), commit]);
   } catch (error) {
@@ -11858,6 +12094,7 @@ async function createPatchPullRequest(
   return publishPatchBranch(
     repository,
     branch,
+    commit,
     body,
     stderr,
     dependencies,
@@ -12665,7 +12902,9 @@ async function assessPatchRisk(
       request.repository,
       options,
     );
-  const root = await mkdtemp(join(tmpdir(), "codex-security-patch-risk-"));
+  const root = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-risk-"),
+  );
   const patchPath = join(root, "patch.diff");
   try {
     await writeFile(patchPath, "", { encoding: "utf8", mode: 0o600 });
@@ -12752,7 +12991,16 @@ async function assessPatchRisk(
           entries.set(fullPath, entry);
         }
       };
-      await visit("", snapshot.tree, true);
+      const verified = request.verified;
+      await visit(
+        "",
+        verified
+          ? side === 0
+            ? verified.parent
+            : verified.tree
+          : snapshot.tree,
+        !verified,
+      );
       return writeTree(entries);
     };
     const base =
@@ -12784,11 +13032,12 @@ async function assessPatchRisk(
         "--literal-pathspecs",
         "diff",
         "--no-relative",
+        "--ignore-submodules=none",
         "--no-textconv",
         "--no-ext-diff",
       ];
       const sources =
-        request.files === undefined
+        request.verified || request.files === undefined
           ? undefined
           : patchChangeSources(
               await patchGitRecords(
@@ -13007,7 +13256,9 @@ async function runFindingPatches(
   configuration: SkillConfiguration,
   stderr: Writable,
   dependencies: CliDependencies,
-  options: Omit<SkillRunOptions, "directory" | "findings"> = {},
+  options: Omit<SkillRunOptions, "directory" | "findings"> & {
+    readonly publication?: PatchPublication;
+  } = {},
   interactive = true,
   dirtyFiles?: () => Set<string> | undefined,
 ): Promise<{
@@ -13050,6 +13301,7 @@ async function runFindingPatches(
     let status: number;
     let changedFiles: string[];
     let changedKeys: string[];
+    let observed: GitPatchState | undefined;
     let base: GitPatchState | Map<string, string> | undefined;
     let repositoryKey = patchPathKey(selected.repository);
     let rootKey = repositoryKey;
@@ -13099,6 +13351,20 @@ async function runFindingPatches(
               base instanceof Map
                 ? await realpath(selected.repository)
                 : base.context.directory;
+            if (options.publication && !options.publication.verified) {
+              const { context, directory, root, tree } = options.publication;
+              const bound = await bindPatchCommandContext(
+                directory,
+                root,
+                context,
+                dependencies,
+              );
+              options.publication.verified = await prepareSavedPatchPublication(
+                directory,
+                bound.dependencies,
+                tree,
+              );
+            }
             if (!(base instanceof Map) && base.root !== selected.repository) {
               const [repositoryPath, rootPath] = await Promise.all([
                 realpath(selected.repository, { encoding: "buffer" }),
@@ -13130,6 +13396,7 @@ async function runFindingPatches(
               dependencies,
               dirtyFiles?.(),
             );
+      observed = "state" in changes ? changes.state : undefined;
       changedFiles = changes.files;
       changedKeys = changes.keys;
     } catch (error) {
@@ -13230,11 +13497,10 @@ async function runFindingPatches(
     let validationError: unknown;
     try {
       if (patch.status === "verified") {
-        const files = (
-          await verifiedPatchFiles(selected, [patch], {
-            directory: patchDirectory,
-          })
-        ).map((file) =>
+        const selectedFiles = await verifiedPatchFiles(selected, [patch], {
+          directory: patchDirectory,
+        });
+        const files = selectedFiles.map((file) =>
           canonicalPatchPath(selected.repository, patchPathKey(file)),
         );
         const root =
@@ -13258,6 +13524,45 @@ async function runFindingPatches(
             "Patch verification did not identify any changed files.",
             changedFiles,
           );
+        else if (
+          options.publication?.verified &&
+          observed &&
+          base &&
+          !(base instanceof Map)
+        ) {
+          const reason = await options.publication.verified.record(
+            selectedFiles,
+            base.tree,
+            observed.tree,
+          );
+          if (reason) {
+            const nested = [...observed.gitlinks.keys()].find(
+              (directory) =>
+                changes.some(
+                  (changed) =>
+                    !isOutsidePath(
+                      relativePatchPath(
+                        resolve(rootKey, directory),
+                        resolve(repositoryKey, changed),
+                      ),
+                    ),
+                ) &&
+                files.some((file) => {
+                  const path = relativePatchPath(
+                    resolve(rootKey, directory),
+                    resolve(repositoryKey, file),
+                  );
+                  return path !== "" && !isOutsidePath(path);
+                }),
+            );
+            patch = failed(
+              nested
+                ? `Cannot publish a file inside submodule ${patchPathText(nested)} from the parent repository.`
+                : reason,
+              changedFiles,
+            );
+          }
+        }
       }
     } catch (error) {
       validationError = error;
@@ -14537,40 +14842,20 @@ async function chooseInteractiveAuthentication(
   );
 }
 
-async function runScan(
-  arguments_: ScanArguments,
-  errorOutput: Writable,
-  dependencies: CliDependencies,
-  interactive = true,
-): Promise<ScanOutcome> {
-  return await withTerminalErrorsHandled(errorOutput, () =>
-    executeScan(arguments_, errorOutput, dependencies, interactive),
-  );
-}
-
 async function withTerminalErrorsHandled<T>(
   errorOutput: Writable,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const observeTerminalErrors =
+  const listener =
     typeof errorOutput.on === "function" &&
-    typeof errorOutput.off === "function";
-  const ignoreTerminalError = (): void => {};
-  if (observeTerminalErrors) {
-    errorOutput.on?.("error", ignoreTerminalError);
-  }
+    typeof errorOutput.off === "function"
+      ? new TerminalErrorListener(errorOutput)
+      : undefined;
+  listener?.start();
   try {
     return await operation();
   } finally {
-    if (observeTerminalErrors) {
-      try {
-        errorOutput.write("", () => {
-          queueMicrotask(() => errorOutput.off?.("error", ignoreTerminalError));
-        });
-      } catch {
-        errorOutput.off?.("error", ignoreTerminalError);
-      }
-    }
+    listener?.stop();
   }
 }
 
@@ -14578,7 +14863,8 @@ async function executeScan(
   arguments_: ScanArguments,
   errorOutput: Writable,
   dependencies: CliDependencies,
-  interactive = true,
+  interactive: boolean,
+  retainFailureResults: boolean,
 ): Promise<ScanOutcome> {
   let registeredScan:
     Parameters<NonNullable<ScanOptions["onScanRegistered"]>>[0] | undefined;
@@ -14696,6 +14982,7 @@ async function executeScan(
   let patchDaybreakFeatures: JsonObject = {};
   let selectedAuthentication: ScanAuthentication | null = null;
   let repository = "";
+  let runningMockScan = false;
   let failed = false;
   let failure: unknown;
   try {
@@ -15339,7 +15626,9 @@ async function executeScan(
     if (arguments_.dryRun) {
       preflight = await security.preflight(repository, options);
     } else {
+      runningMockScan = arguments_.mock === true;
       result = await security.run(repository, options);
+      runningMockScan = false;
       scanDir = result.scanDir;
       repository = resolve(dependencies.currentDirectory(), repository);
       if (arguments_.validate) {
@@ -15477,10 +15766,7 @@ async function executeScan(
   }
 
   let failureData: Record<string, unknown> | undefined;
-  if (
-    arguments_.includeFailureResults &&
-    (failed || requestedSignal !== null)
-  ) {
+  if (retainFailureResults && (failed || requestedSignal !== null)) {
     if (result !== null) {
       failureData = result.toJSON();
       if (validation !== undefined)
@@ -15540,7 +15826,9 @@ async function executeScan(
   if (failed) {
     const costLimitFailure =
       failure instanceof ScanCostLimitExceededError ? failure : undefined;
-    const classification = classifyScanFailure(failure);
+    const classification = runningMockScan
+      ? "local"
+      : classifyScanFailure(failure);
     const message =
       failure instanceof OutputInsideProtectedRootError
         ? errorMessage(protectedRootErrorMessage(failure))
@@ -15776,6 +16064,9 @@ async function executeScan(
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
+          get publication() {
+            return publication;
+          },
           get automaticPublication() {
             return (
               publication === undefined &&
@@ -16101,7 +16392,7 @@ async function readDeepScanStop(
     | undefined;
   if (state?.terminalReason === "saturated") {
     return {
-      reason: `The last ${state.noNewStreak} review rounds found no new issues. More issues may remain.`,
+      reason: `The last ${state.noNewStreak} review round${state.noNewStreak === 1 ? "" : "s"} found no new issues. More issues may remain.`,
     };
   }
   if (state?.terminalReason !== "capped") return undefined;
@@ -16112,7 +16403,7 @@ async function readDeepScanStop(
     state.dispatchedCount >= maxDiscoveryRuns
   ) {
     return {
-      reason: `Reached the limit of ${maxDiscoveryRuns} review rounds. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
+      reason: `Reached the limit of ${maxDiscoveryRuns} review round${maxDiscoveryRuns === 1 ? "" : "s"}. ${state.noNewStreak === 0 ? "The latest review still found new issues." : "More issues may remain."}`,
       nextStep: `To scan further, rerun with --max-discovery-runs greater than ${maxDiscoveryRuns}.`,
     };
   }
@@ -16138,6 +16429,7 @@ async function readDeepScanStop(
 function printScanReference(
   scan: JsonObject,
   output: Writable,
+  showLogs: boolean,
   selection?: string,
 ): void {
   const scanId = scan["scanId"];
@@ -16162,7 +16454,7 @@ function printScanReference(
     `\n${detail.join(" · ")}\n` +
       (selection === undefined ? "" : `Selected ${selection}.\n`) +
       `Inspect: codex-security scans show ${argument}\n` +
-      `Logs:    codex-security scans logs ${argument}\n`,
+      (showLogs ? `Logs:    codex-security scans logs ${argument}\n` : ""),
   );
 }
 
@@ -16174,7 +16466,7 @@ function printFailedScanReference(
 ): void {
   if (scan === undefined) return;
   try {
-    printScanReference(scan, output);
+    printScanReference(scan, output, !arguments_.mock);
     if (phase !== null)
       output.write(`Last observed phase: ${diagnosticValue(phase)}\n`);
     output.write(
@@ -16286,6 +16578,7 @@ function printScanSummary(
       startedAt: result.manifest.scan.startedAt,
     },
     errorOutput,
+    result.manifest.scan.scope.runtimeStatus !== "mock",
   );
   if (deepScanStop?.nextStep !== undefined) {
     errorOutput.write(`\n  ${deepScanStop.nextStep}\n`);
@@ -16351,6 +16644,7 @@ function componentScanEventLine(
 function protectedRootErrorMessage(
   error: OutputInsideProtectedRootError,
 ): string {
+  if (error.pathKind === "state") return error.message;
   const description =
     error.pathKind === "output"
       ? "Scan output directory"
@@ -16499,13 +16793,15 @@ function resolveCliScope(
 }
 
 async function parseScanCodexOverrides(
-  values: readonly string[],
-  model: string | undefined,
-  effort: ModelCliOptions["effort"],
-  provider: "openai" | "amazon-bedrock" | ExternalModelProvider | undefined,
-  defaults: JsonObject | undefined,
-  profileHome: string,
+  options: ModelCliOptions & {
+    codex: readonly string[];
+    provider: z.infer<typeof PROVIDER_OPTION>;
+  },
+  environment: NodeJS.ProcessEnv,
+  defaults?: JsonObject,
 ): Promise<JsonObject> {
+  const { codex: values, model, effort, provider } = options;
+  const profileHome = scanCodexHome(environment);
   if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
     return parseCodexOverrides(values, model, effort, provider, defaults);
   }
@@ -16660,9 +16956,7 @@ export class Progress {
   #timerMessage: string | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
-  #observingStreamErrors = false;
-  #streamErrorGeneration = 0;
-  readonly #onStreamError = (): void => {};
+  readonly #terminalErrors: TerminalErrorListener;
 
   public constructor(
     stream: Writable = process.stderr,
@@ -16673,6 +16967,7 @@ export class Progress {
     interactive = true,
   ) {
     this.#stream = stream;
+    this.#terminalErrors = new TerminalErrorListener(stream);
     this.#dependencies = dependencies;
     this.#startedAt = dependencies.now();
     this.#interactive = interactive;
@@ -16690,12 +16985,12 @@ export class Progress {
   }
 
   public stage(message: string): void {
-    this.#observeStreamErrors();
+    this.#terminalErrors.start();
     this.#stream.write(`${this.#line(message)}\n`);
   }
 
   public startTimer(message: string): void {
-    this.#observeStreamErrors();
+    this.#terminalErrors.start();
     if (!this.interactive) {
       this.stage(message);
       return;
@@ -16727,25 +17022,7 @@ export class Progress {
         this.#cursorHidden = false;
       }
     } finally {
-      if (this.#observingStreamErrors) {
-        const generation = this.#streamErrorGeneration;
-        try {
-          this.#stream.write("", () => {
-            queueMicrotask(() => {
-              if (
-                generation === this.#streamErrorGeneration &&
-                this.#observingStreamErrors
-              ) {
-                this.#stream.off?.("error", this.#onStreamError);
-                this.#observingStreamErrors = false;
-              }
-            });
-          });
-        } catch {
-          this.#stream.off?.("error", this.#onStreamError);
-          this.#observingStreamErrors = false;
-        }
-      }
+      this.#terminalErrors.stop();
     }
   }
 
@@ -16766,14 +17043,6 @@ export class Progress {
   #line(message: string): string {
     const elapsedSeconds = this.elapsedSeconds;
     return `[${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}] ${message}`;
-  }
-
-  #observeStreamErrors(): void {
-    this.#streamErrorGeneration += 1;
-    if (!this.#observingStreamErrors && this.#stream.on !== undefined) {
-      this.#stream.on("error", this.#onStreamError);
-      this.#observingStreamErrors = true;
-    }
   }
 
   #renderTimer(message: string): void {
@@ -16820,7 +17089,7 @@ const interruptedExitCode = (signal: AbortSignal): number | undefined =>
       : undefined;
 
 if (invokedAsMain()) {
-  void main().then(
+  void runCli().then(
     (exitCode) => {
       process.exitCode = exitCode;
     },

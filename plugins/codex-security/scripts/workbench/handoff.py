@@ -19,6 +19,32 @@ def require_handoff_claim_token(value: str) -> str:
     return f"{RECOVERY_HANDOFF_TOKEN_PREFIX}{normalized}" if recovery_token else normalized
 
 
+def require_tokenless_scan_owner(
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    model_thread_id: str | None,
+) -> None:
+    """Check model callers against a recorded owner. Trusted local callers omit model_thread_id."""
+    if model_thread_id is None or scan["handoff_claim_token"] is not None:
+        return
+    if scan["handoff_status"] == "pending":
+        raise SystemExit(
+            "This Codex Security scan handoff has not been delivered. "
+            "Claim the pending Codex Security scan handoff before continuing."
+        )
+    owner = scan["continuation_thread_id"] or scan["deep_scan_owner_thread_id"]
+    if owner is None:
+        owner = connection.execute(
+            "SELECT thread_id FROM workspaces WHERE id = ?", (scan["workspace_id"],)
+        ).fetchone()[0]
+    if owner is None:
+        completed_import = scan["launch_kind"] == "import" and scan["status"] == "complete"
+        if not completed_import:
+            raise SystemExit("This scan is awaiting its owning Codex thread.")
+    elif owner != model_thread_id:
+        raise SystemExit("This scan requires its owning Codex thread.")
+
+
 def require_current_continuation(
     scan: sqlite3.Row,
     claim_token: str | None,

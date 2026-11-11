@@ -96,7 +96,9 @@ export async function withPatchGitIndex<T>(
   files?: readonly string[],
   sourcePathspecs?: readonly string[],
 ): Promise<T> {
-  const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
+  const directory = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-tree-"),
+  );
   const indexFile = join(directory, "index");
   const indexed: RunIndexGit = (args, options) =>
     run(args, { ...options, indexFile });
