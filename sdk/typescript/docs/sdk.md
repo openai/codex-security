@@ -313,7 +313,7 @@ const plan = await security.preflight("/path/to/repository", {
 console.log(plan);
 ```
 
-`preflight()` checks local inputs without starting Codex or using the network.
+`preflight()` checks local inputs without starting Codex or using the network. The returned `stateDirectory` identifies the checked storage root, including when the final scan directory will be allocated automatically.
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
 

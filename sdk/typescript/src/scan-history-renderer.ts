@@ -1,5 +1,6 @@
 import { basename, join, relative } from "node:path";
 import stringWidth from "string-width";
+import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -20,6 +21,7 @@ export type HistoryRendererOptions = {
   status?: "open" | "closed";
   query?: string;
   severity?: string;
+  missingRepositoryHistory?: boolean;
 };
 
 const STALE_SCAN_MILLISECONDS = 24 * 60 * 60 * 1_000;
@@ -263,7 +265,7 @@ export function renderScanHistory(
         ? findings.length > 0
           ? `${offset + 1}-${offset + findings.length} of ${total}`
           : `0 of ${total}`
-        : `${findings.length} finding${findings.length === 1 ? "" : "s"}`;
+        : `${findings.length} ${options.status === undefined ? "" : options.status + " "}finding${findings.length === 1 ? "" : "s"}`;
     lines.push(`  ${strong(scope)}  ${accent("·")}  ${range}`);
     wrap(
       [
@@ -278,9 +280,11 @@ export function renderScanHistory(
     if (findings.length === 0) {
       lines.push(
         "",
-        offset > 0
-          ? `  No findings at offset ${offset}. Rerun with --offset 0 to start over.`
-          : `  No ${options.status ?? "saved"} findings match this view.`,
+        options.missingRepositoryHistory
+          ? `  No saved scan for ${clean(repository)}`
+          : offset > 0
+            ? `  No findings at offset ${offset}. Rerun with --offset 0 to start over.`
+            : `  No ${options.status ?? "saved"} findings match this view.`,
       );
     }
     for (const entry of findings) {
@@ -723,6 +727,26 @@ export function renderScanHistory(
           wrap([scanRepository], 4);
         } else {
           lines.push(line);
+        }
+      }
+      const updatedAt = scan["updatedAt"];
+      if (
+        status === "running" &&
+        typeof updatedAt === "string" &&
+        (options.now ?? Date.now()) - Date.parse(updatedAt) >=
+          STALE_SCAN_MILLISECONDS
+      ) {
+        lines.push(`    ${dim(`Last activity: ${clean(updatedAt)}`)}`);
+        if (
+          scan["mode"] === "deep" &&
+          scan["recipeAvailable"] === true &&
+          scan["handoffStatus"] === "delivered" &&
+          scan["continuationThreadId"]
+        ) {
+          const id = quoteCliPath(clean(scan["scanId"]));
+          lines.push(
+            `    If interrupted${cliShellLabel(id)}: codex-security scans resume ${id}`,
+          );
         }
       }
     }
