@@ -117,6 +117,7 @@ import type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
+import { acquireScanExecutionLock } from "./scan-execution-lock.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
   deepScanParentToolOverrides,
@@ -2236,6 +2237,8 @@ export class CodexSecurity {
     let latestMeasurement: Readonly<ScanUsageMeasurement> | null = null;
     let notifiedLimit: number | undefined;
     let scanDir = "";
+    let releaseScanExecution: (() => void) | undefined;
+    let standardScan = false;
     let targetPathsFile: string | null = null;
     let stagedPluginRoot: string | undefined;
     let stagedPluginDirectory: string | undefined;
@@ -2414,6 +2417,10 @@ export class CodexSecurity {
         ),
       };
       const hosted = this.#dependencies.hostedScan !== undefined;
+      standardScan =
+        mode === "standard" &&
+        !hosted &&
+        (normalized.kind === "repository" || normalized.kind === "paths");
       for (const root of [
         (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
         ...(knowledgeBase?.protectedRoots ?? []),
@@ -2462,6 +2469,12 @@ export class CodexSecurity {
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
+      if (standardScan) {
+        releaseScanExecution = await acquireScanExecutionLock(
+          stateDirectory,
+          scanDir,
+        );
+      }
       if (!options.archiveExisting && options.resumeScanId === undefined) {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
@@ -3460,7 +3473,9 @@ export class CodexSecurity {
       }
       if (options.resumeScanId !== undefined) {
         prompt +=
-          "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan.";
+          mode === "deep"
+            ? "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan."
+            : "\nResume this same Standard scan in its original session and output directory. Read the saved scan-manifest.json, findings.json, and scan.reviewState checkpoints when present. Preserve completed analysis, validation decisions, evidence, and stable finding/surface IDs. Continue unfinished validation and deferred work; do not restart completed analysis or recreate the scan directory. If the review is finished, complete this same scan using its saved results.";
       }
       if (
         falsePositiveExamples.length > 0 &&
@@ -3641,11 +3656,15 @@ export class CodexSecurity {
           timePolicy,
           scanTimeBudget(
             options.maxTimeMinutes,
-            (this.#dependencies.now ?? Date.now)(),
+            options.resumeScanId !== undefined &&
+              typeof registration["startedAt"] === "string"
+              ? Date.parse(registration["startedAt"])
+              : (this.#dependencies.now ?? Date.now)(),
           ),
         )}`;
       }
       tracker.beginParentTurn(resumeThreadId !== undefined);
+      scanTurnStatus = "in_progress";
       const events = directDeepScan
         ? (this.#dependencies.runDeepScan ?? runDeepScan)({
             onDiagnostic: this.#onDeepScanDiagnostic,
@@ -3662,7 +3681,6 @@ export class CodexSecurity {
             signal,
           })
         : (await thread.runStreamed(prompt, turnOptions)).events;
-      scanTurnStatus = "in_progress";
       checkOpen();
 
       let result = await runScanEvents({
@@ -4256,9 +4274,39 @@ export class CodexSecurity {
           );
         }
       }
-      // A failed attachment must not turn a resumable coordinator into a terminal failure.
+      if (
+        activeScan !== null &&
+        standardScan &&
+        !signal.aborted &&
+        options.validationPrompt === undefined &&
+        scanTurnStatus !== null &&
+        terminalTurnStatus !== "completed" &&
+        failure instanceof CodexConnectionError
+      ) {
+        // Keep the existing running scan only when its saved session and inputs can resume.
+        const saved = await workbench(
+          { ...activeScan.options, signal: undefined },
+          workbenchArgs("get-cli-scan-resume", {
+            scanId: activeScan.id,
+            allowUnavailable: true,
+          }),
+        ).catch(() => null);
+        if (saved?.["scanId"] === activeScan.id) {
+          failure = new ScanInterruptedError(
+            `${errorMessage(failure)}\nResume when connected: codex-security scans resume ${activeScan.id}`,
+            scanDir,
+            { cause: failure },
+          );
+          activeScan = null;
+          runPostScan = null;
+        }
+      }
       // Deep Scan orchestration persists its own terminal failures and cancellations.
-      if (activeScan !== null && options.resumeScanId === undefined) {
+      // Standard scans have no coordinator, so fatal errors and cancellation still stop them.
+      if (
+        activeScan !== null &&
+        (options.resumeScanId === undefined || standardScan)
+      ) {
         if (
           options.validationPrompt !== undefined &&
           customValidation.status !== "complete"
@@ -4340,6 +4388,7 @@ export class CodexSecurity {
         warnCleanupFailed(options, error);
       }
       observeSettledScan(options, activeScan);
+      releaseScanExecution?.();
     }
   }
 
@@ -5639,7 +5688,7 @@ export class CodexSecurity {
   ): Promise<LocalScanInputs> {
     if (
       options.resumeScanId !== undefined &&
-      (options.mode !== "deep" ||
+      ((options.mode !== "deep" && options.mode !== "standard") ||
         !options.outputDir ||
         options.archiveExisting ||
         options.parentScanId !== undefined ||
@@ -5647,7 +5696,7 @@ export class CodexSecurity {
         options.mock)
     ) {
       throw new CodexSecurityError(
-        "Resume requires the original Deep Scan output directory without archive, rerun, or workflow options.",
+        "Resume requires the original Standard or Deep Scan output directory without archive, rerun, or workflow options.",
       );
     }
     if (
@@ -6093,6 +6142,10 @@ export async function runScanEvents(
       );
     }
     if (status !== "completed") {
+      if (lastStreamError !== null) {
+        const error = codexTurnError(lastStreamError);
+        if (error instanceof CodexConnectionError) throw error;
+      }
       throw new IncompleteScanError(
         lastStreamError ??
           "Codex Security event stream ended before the turn completed.",
@@ -6200,6 +6253,15 @@ export async function runScanEvents(
   }
 }
 
+class CodexConnectionError extends CodexSecurityError {}
+
+function codexTurnError(error: unknown): CodexSecurityError {
+  const classification = classifyConnectionFailure(error);
+  return classification === "network_error" || classification === "timeout"
+    ? new CodexConnectionError(errorMessage(error), { cause: error })
+    : new CodexSecurityError(errorMessage(error), { cause: error });
+}
+
 async function readCodexTurn(options: {
   thread: Pick<CodexThreadLike, "id">;
   events: AsyncGenerator<ScanEvent>;
@@ -6217,12 +6279,22 @@ async function readCodexTurn(options: {
       join(await bundledPluginRoot(), "scripts", "codex_session.mjs"),
     ).href
   );
+  async function* transportEvents() {
+    try {
+      yield* options.events;
+    } catch (error) {
+      const failure = codexTurnError(error);
+      if (failure instanceof CodexConnectionError) throw failure;
+      throw error;
+    }
+  }
   return readCodexSessionTurn({
     ...options,
+    events: transportEvents(),
     onEvent: async (event: ScanEvent) => {
       await options.onEvent?.(event);
       if (event.type === "turn.failed") {
-        throw new CodexSecurityError(turnFailureMessage(event["error"]));
+        throw codexTurnError(turnFailureMessage(event["error"]));
       }
       if (event.type === "error" && typeof event["message"] === "string") {
         const message = event["message"];
@@ -6234,7 +6306,7 @@ async function readCodexTurn(options: {
           throw new CodexSecurityError(message);
         }
         const reconnect = reconnectAttempt(message);
-        if (reconnect === null) throw new CodexSecurityError(message);
+        if (reconnect === null) throw codexTurnError(message);
         options.onReconnect?.(message, reconnect);
       }
     },
