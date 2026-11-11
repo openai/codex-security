@@ -256,11 +256,27 @@ export function cloudReviewDigest(
 
 export interface PreparedExternalPublication {
   preview: ExternalPublicationPreview;
-  /** Persist acknowledged repository receipts before retiring their resumable request. */
-  publish(
-    beforeRetire?: (result: ExternalPublicationResult) => Promise<void>,
-  ): Promise<ExternalPublicationResult>;
+  publish(): Promise<ExternalPublicationResult>;
 }
+
+/** @internal Persist only the acknowledgements made by the selected Cloud destination. */
+type RecordPublicationReceipts = (
+  scope: Pick<
+    ExternalPublicationPreview,
+    "accountId" | "cloudApiUrl" | "destination" | "requests" | "findings"
+  >,
+  receipts: FindingImportReceipt[],
+  privateJobId?: string,
+) => Promise<void>;
+
+/** @internal Keep a stored submission scoped to the finding versions that were approved. */
+export interface WorkbenchPublication {
+  checkout: string;
+  findings: readonly { id: string; version: number }[];
+  record: RecordPublicationReceipts;
+}
+
+type BeforeRetire = (result: ExternalPublicationResult) => Promise<void>;
 
 // Limit read concurrency to avoid one network round trip per finding in series.
 // Wait for the entire batch on failure so callers never outlive their read tasks.
@@ -497,6 +513,16 @@ function validatePublicationReceipt(
   return receipt;
 }
 
+function acknowledgedReceipts({ receipts = [], requests }: SavedSubmission) {
+  if (receipts.length > requests.length)
+    throw new CodexSecurityError(
+      "Saved publication has more receipts than requests.",
+    );
+  return receipts.map((receipt, index) =>
+    validatePublicationReceipt(receipt, requests[index]!),
+  );
+}
+
 async function withImportLock<T>(
   state: string,
   key: string,
@@ -666,6 +692,7 @@ export async function prepareExternalPublication(
     { ...settings, provider },
     dependencies,
     readerSources,
+    undefined,
     settings.sourceRepositoryUrl,
     fileRepositories,
   );
@@ -677,6 +704,16 @@ export async function prepareNormalizedExternalPublication(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
+  return prepareNormalizedPublication(input, options, dependencies);
+}
+
+/** @internal The workbench persists acknowledgements before a repository checkpoint is retired. */
+export async function prepareNormalizedPublication(
+  input: ExternalFindings,
+  options: NormalizedExternalPublicationOptions,
+  dependencies: ExternalPublicationDependencies,
+  workbench?: WorkbenchPublication,
+): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
   requireCloudReader(settings);
   return preparePublicationInput(
@@ -684,6 +721,7 @@ export async function prepareNormalizedExternalPublication(
     settings,
     dependencies,
     snapshotSourceRepositories(dependencies.sourceRepositories),
+    workbench,
   );
 }
 
@@ -975,9 +1013,57 @@ async function preparePublicationInput(
   options: NormalizedExternalPublicationOptions,
   dependencies: ExternalPublicationDependencies,
   readerSources: readonly ExternalSourceRepository[],
+  workbench?: WorkbenchPublication,
   declaredUrl?: string,
   fileRepositories?: () => readonly ExternalSourceRepository[],
 ): Promise<PreparedExternalPublication> {
+  const record = workbench?.record;
+  function withReceipts(
+    scope: ExternalPublicationPreview,
+    prepared: {
+      preview: ExternalPublicationPreview;
+      publish(beforeRetire?: BeforeRetire): Promise<ExternalPublicationResult>;
+    },
+  ): PreparedExternalPublication {
+    return {
+      preview: prepared.preview,
+      async publish() {
+        if (!record) return prepared.publish();
+        let recorded = false;
+        const persist = async (result: ExternalPublicationResult) => {
+          if (recorded) return;
+          recorded = true;
+          const job = result.privateJob;
+          const privateJobId =
+            job?.status === "completed" &&
+            !result.counts.error &&
+            !result.unacknowledged
+              ? job.id
+              : undefined;
+          if (!privateJobId && !result.receipts.length) return;
+          try {
+            await record(scope, result.receipts, privateJobId);
+          } catch (error) {
+            throw new ExternalPublicationError(
+              `Cloud returned receipts, but the workbench could not record them: ${errorMessage(error)}`,
+              result,
+              error,
+            );
+          }
+        };
+        let result: ExternalPublicationResult;
+        try {
+          result = await prepared.publish(persist);
+        } catch (error) {
+          if (error instanceof ExternalPublicationError)
+            await persist(error.result);
+          throw error;
+        }
+        await persist(result);
+        return result;
+      },
+    };
+  }
   const { inspectorProjectMap } = options;
   const progress = (event: ExternalPublicationProgress): void =>
     notify(() => dependencies.onProgress?.(event));
@@ -1157,6 +1243,7 @@ async function preparePublicationInput(
       destination.repo_connector_id,
       source,
       publicationIdentity(parsed, options.provider),
+      ...(workbench ? [workbench.checkout, workbench.findings] : []),
     ]),
   );
   const pendingPath = join(state, key + ".pending.json");
@@ -1277,6 +1364,18 @@ async function preparePublicationInput(
       const current = await readPending();
       if (current && sameSubmission(current, saved)) {
         await confirmReset();
+        if (record && current.receipts?.length) {
+          await record(
+            {
+              cloudApiUrl,
+              accountId: credentials.account_id,
+              destination,
+              requests: current.requests,
+              findings: [],
+            },
+            acknowledgedReceipts(current),
+          );
+        }
         await removePending();
       }
     });
@@ -1624,7 +1723,7 @@ async function preparePublicationInput(
       requests: [],
       privateImport,
     };
-    return {
+    return withReceipts(preview, {
       preview: structuredClone(preview),
       publish: () =>
         underPublishLock(async () => {
@@ -1741,7 +1840,7 @@ async function preparePublicationInput(
             throw new ExternalPublicationError(result.error, result, error);
           }
         }),
-    };
+    });
   }
 
   // The original selection and request bytes govern a retry even if discovery changes.
@@ -1881,7 +1980,7 @@ async function preparePublicationInput(
     resumed: saved !== undefined,
     requests,
   };
-  return {
+  return withReceipts(preview, {
     preview: cloneImportPreview(preview),
     async publish(beforeRetire) {
       progress({ phase: "waiting", completed: 0 });
@@ -1934,18 +2033,10 @@ async function preparePublicationInput(
       ) {
         // The expected file is gone or another publisher owns the lock. Use only
         // the acknowledgements this caller saw when it prepared the request.
-        const known = submission.receipts ?? [];
-        if (known.length > submission.requests.length)
-          throw new CodexSecurityError(
-            "Saved publication has more receipts than requests.",
-          );
-        const acknowledged = known.map((receipt, index) =>
-          validatePublicationReceipt(receipt, submission.requests[index]!),
-        );
         return new ExternalPublicationError(
           message,
           {
-            ...result(acknowledged, 0),
+            ...result(acknowledgedReceipts(submission), 0),
             status: "interrupted",
             error: message,
             ...(savedSubmission === undefined ? {} : { savedSubmission }),
@@ -2127,5 +2218,5 @@ async function preparePublicationInput(
         );
       });
     },
-  };
+  });
 }

@@ -934,6 +934,96 @@ test.each(["complete", "conflict"])(
   },
 );
 
+test("a reset retains the saved request until SQLite records its accepted receipt", async () => {
+  const cloud = await fixture();
+  await using local = await storedPublicationFixture(cloud);
+  const imported = await local.store("wiz", {
+    read: 1,
+    findings: [localFinding("scope")],
+    excluded: [],
+  });
+  const selection = {
+    repository: local.repository,
+    importId: imported.importId!,
+  };
+  const [group] = (await local.prepare(selection)).groups;
+  using database = new Database(
+    join(local.stateDirectory, "workbench.sqlite3"),
+  );
+  database.exec(
+    "CREATE TRIGGER reject_links BEFORE INSERT ON external_finding_publications BEGIN SELECT RAISE(ABORT,'cannot record'); END",
+  );
+  await expect(group!.publish(group!.reviewId)).rejects.toThrow(
+    "cannot record",
+  );
+  expect(cloud.posts).toHaveLength(1);
+  const [receiptId] = cloud.receipts.keys();
+  cloud.state.marker = "generation-2";
+  cloud.reports.clear();
+  await expect(local.prepare(selection)).rejects.toThrow("cannot record");
+  database.exec("DROP TRIGGER reject_links");
+  await expect(local.prepare(selection)).rejects.toThrow("reset");
+  const links = await listLocalFindingPublications(
+    { repository: local.repository },
+    local.deps,
+  );
+  expect(links).toHaveLength(1);
+  expect(links[0]?.receiptId).toBe(receiptId);
+  const [fresh] = (await local.prepare(selection)).groups;
+  await expect(fresh!.publish(group!.reviewId)).rejects.toThrow("changed");
+  expect(cloud.posts).toHaveLength(1);
+});
+
+test("identical evidence at a later local version cannot inherit an earlier receipt", async () => {
+  const cloud = await fixture();
+  await using local = await storedPublicationFixture(cloud);
+  const row = localFinding("pinned");
+  const store = (finding: typeof row) =>
+    local.store("wiz", { read: 1, findings: [finding], excluded: [] });
+  const first = await store(row);
+  const selection = (importId: string) => ({
+    repository: local.repository,
+    importId,
+  });
+  const [original] = (await local.prepare(selection(first.importId!))).groups;
+  using database = new Database(
+    join(local.stateDirectory, "workbench.sqlite3"),
+  );
+  database.exec(
+    "CREATE TRIGGER reject_links BEFORE INSERT ON external_finding_publications BEGIN SELECT RAISE(ABORT,'cannot record'); END",
+  );
+  await expect(original!.publish(original!.reviewId)).rejects.toThrow(
+    "cannot record",
+  );
+  database.exec("DROP TRIGGER reject_links");
+
+  const direct = await prepareNormalizedExternalPublication(
+    { read: 1, findings: [row], excluded: [] },
+    { repository: options.repository, provider: "wiz", sourceKey: "selected" },
+    local.deps,
+  );
+  expect(direct.preview.resumed).toBe(false);
+
+  await store({
+    ...row,
+    evidence: { ...row.evidence, title: "Changed title" },
+  });
+  const restored = await store(row);
+  expect(restored.findings[0]!.version).toBe(3);
+  cloud.state.marker = "generation-2";
+  cloud.reports.clear();
+  const [current] = (await local.prepare(selection(restored.importId!))).groups;
+  expect(current!.preview.resumed).toBe(false);
+  await expect(current!.publish(original!.reviewId)).rejects.toThrow("changed");
+  expect(
+    await listLocalFindingPublications(
+      { repository: local.repository },
+      local.deps,
+    ),
+  ).toEqual([]);
+  expect(cloud.posts).toHaveLength(1);
+});
+
 test("stored findings recover a private inbox upload and retain its job receipt", async () => {
   const { f, inbox, deps, uploads, jobs } = await privateUploadFixture(
     [],

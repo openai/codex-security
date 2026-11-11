@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import cloudSchema from "../schemas/external-findings.schema.json" with { type: "json" };
-import { CodexSecurityError, errorMessage } from "./errors.js";
+import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
   distinctSourceRepositories,
@@ -13,8 +13,8 @@ import {
 } from "./external-findings-local.js";
 import {
   cloudReviewDigest,
-  ExternalPublicationError,
-  prepareNormalizedExternalPublication,
+  prepareNormalizedPublication,
+  type WorkbenchPublication,
   type ExternalPublicationDependencies,
   type ExternalPublicationPreview,
   type ExternalPublicationResult,
@@ -111,69 +111,57 @@ function cloudSelection(
 }
 
 function receiptRecorder(
-  preview: ExternalPublicationPreview,
   rows: StoredExternalFinding[],
   dependencies: Dependencies,
-) {
-  // Keep only the identifiers needed for receipts. The caller can edit its public preview.
+): WorkbenchPublication["record"] {
+  const repository = rows[0]!.repository;
   const pins = new Map(
     rows.map(({ id, version, sourceFindingId }) => [
       sourceFindingId,
       { id, version },
     ]),
   );
-  const ready = preview.findings.map((f) => pins.get(f.source_finding_id)!);
-  const batches = preview.requests.map(
-    ({ items }) =>
-      new Map(
-        items.map((item) => [
+  return async (
+    { accountId, cloudApiUrl, destination, requests, findings },
+    receipts,
+    privateJobId,
+  ) => {
+    const entries: LocalFindingReceipt[] = [];
+    if (privateJobId) {
+      for (const finding of findings)
+        entries.push({
+          ...pins.get(finding.source_finding_id)!,
+          receiptId: privateJobId,
+          outcome: "private_job",
+        });
+    }
+    for (const [index, receipt] of receipts.entries()) {
+      const batch = new Map(
+        requests[index]!.items.map((item) => [
           item.client_id,
           pins.get(item.source_finding_id)!,
         ]),
-      ),
-  );
-  const destination = {
-    repository: rows[0]!.repository,
-    cloudApiUrl: preview.cloudApiUrl,
-    accountId: preview.accountId,
-    destinationId: preview.destination.id,
-  };
-  return async (result: ExternalPublicationResult) => {
-    const entries: LocalFindingReceipt[] = [];
-    const job = result.privateJob;
-    // The private inbox provides job totals, with no per-item outcomes.
-    if (
-      job?.status === "completed" &&
-      !result.counts.error &&
-      !result.unacknowledged
-    ) {
-      for (const pin of ready)
-        entries.push({ ...pin, receiptId: job.id, outcome: "private_job" });
-    }
-    for (const [index, receipt] of result.receipts.entries()) {
-      for (const item of receipt.results) {
+      );
+      for (const item of receipt.results)
         if (item.outcome !== "error")
           entries.push({
-            ...batches[index]!.get(item.client_id)!,
+            ...batch.get(item.client_id)!,
             receiptId: receipt.id,
             outcome: item.outcome,
             cloudFindingId: item.canonical_finding_id ?? undefined,
           });
-      }
     }
-    if (!entries.length) return;
-    try {
+    if (entries.length)
       await recordExternalFindingPublications(
-        { ...destination, entries },
+        {
+          repository,
+          accountId,
+          cloudApiUrl,
+          destinationId: destination.id,
+          entries,
+        },
         dependencies,
       );
-    } catch (error) {
-      throw new ExternalPublicationError(
-        `Cloud returned receipts, but the workbench could not record them: ${errorMessage(error)}`,
-        result,
-        error,
-      );
-    }
   };
 }
 
@@ -181,6 +169,7 @@ function prepareSource(
   rows: StoredExternalFinding[],
   options: { repository: string; provider: Provider; sourceKey: string },
   dependencies: Dependencies,
+  workbench: WorkbenchPublication,
   metadata?: Metadata,
 ) {
   const references = [...(dependencies.sourceRepositories ?? [])];
@@ -196,7 +185,7 @@ function prepareSource(
     }
   }
   const sourceRepositories = distinctSourceRepositories(references);
-  return prepareNormalizedExternalPublication(
+  return prepareNormalizedPublication(
     cloudSelection(
       rows,
       sourceRepositories,
@@ -205,6 +194,7 @@ function prepareSource(
     ),
     { ...options, ...(inspectorProjectMap.size && { inspectorProjectMap }) },
     { ...dependencies, sourceRepositories },
+    workbench,
   );
 }
 
@@ -228,12 +218,18 @@ export async function prepareStoredFindingsPublication(
       for (const row of rows) excluded.push({ ...reference(row), reason });
       continue;
     }
+    const findings = rows.map(({ id, version }) => ({ id, version }));
     let prepared: PreparedExternalPublication;
     try {
       prepared = await prepareSource(
         rows,
         { ...options, provider, sourceKey },
         dependencies,
+        {
+          checkout: repository,
+          findings,
+          record: receiptRecorder(rows, dependencies),
+        },
         importId === undefined ? undefined : stored,
       );
     } catch (error) {
@@ -256,9 +252,7 @@ export async function prepareStoredFindingsPublication(
       throw new CodexSecurityError(
         "The Cloud account or repository changed during publication preparation.",
       );
-    const findings = rows.map(({ id, version }) => ({ id, version }));
     const reviewId = cloudReviewDigest(preview, repository, findings);
-    const record = receiptRecorder(preview, rows, dependencies);
     groups.push({
       selection:
         importId === undefined
@@ -271,22 +265,7 @@ export async function prepareStoredFindingsPublication(
           throw new CodexSecurityError(
             "The stored findings publication has changed. Review the new preview before publishing.",
           );
-        let recordingStarted = false;
-        async function recordOnce(result: ExternalPublicationResult) {
-          if (recordingStarted) return;
-          recordingStarted = true;
-          await record(result);
-        }
-        let result: ExternalPublicationResult;
-        try {
-          result = await prepared.publish(recordOnce);
-        } catch (error) {
-          if (error instanceof ExternalPublicationError)
-            await recordOnce(error.result);
-          throw error;
-        }
-        await recordOnce(result);
-        return result;
+        return prepared.publish();
       },
     });
   }
