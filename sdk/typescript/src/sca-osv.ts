@@ -633,17 +633,23 @@ async function repositoryFiles(
     }
     for (const entry of await readdir(directory, {
       withFileTypes: true,
-      encoding: "latin1",
+      encoding: "buffer",
     })) {
-      const bytes = Buffer.from(entry.name, "latin1");
+      const bytes = Buffer.from(
+        entry instanceof Uint8Array ? entry : entry.name,
+      );
+      const metadata =
+        entry instanceof Uint8Array
+          ? await lstat(Buffer.concat([Buffer.from(directory + sep), bytes]))
+          : entry;
       let name: string;
       try {
         name = utf8.decode(bytes);
       } catch {
         if (
-          entry.isDirectory() ||
-          primaryScaFormat(entry.name) !== null ||
-          additionalScaFormat(entry.name) !== null
+          metadata.isDirectory() ||
+          primaryScaFormat(bytes.toString("latin1")) !== null ||
+          additionalScaFormat(bytes.toString("latin1")) !== null
         ) {
           const prefix = slash(relative(repository, directory));
           const pathBytes = Buffer.concat([
@@ -658,7 +664,7 @@ async function repositoryFiles(
       }
       if (name === ".git" || name === "node_modules") continue;
       const path = join(directory, name);
-      if (entry.isDirectory()) {
+      if (metadata.isDirectory()) {
         if (installedDependencyDirectory(name, basename(directory))) continue;
         pending.push(path);
       } else files.push(relative(repository, path));
