@@ -36,6 +36,8 @@ codex-security info -c codex-security.yaml --json
 codex-security scan . -c codex-security.yaml --dry-run --json
 ```
 
+The init command prints a preview command using the file it created. On Windows the displayed command uses PowerShell syntax. It includes an editor schema hint when the package is installed in the project. With a global installation the starter contains an empty mapping, which you can replace with your settings. The CLI always validates the file with its bundled schema.
+
 Check that the preview shows your intended repository and scope. To start the
 scan with those settings, keep the same file selection:
 

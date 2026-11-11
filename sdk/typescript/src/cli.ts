@@ -304,6 +304,7 @@ import type { ScanResult } from "./result.js";
 import { importScan, type ImportScanOptions } from "./import-scan.js";
 import {
   bundledPluginRoot,
+  runCodexCommand,
   cleanupSdkDirectory,
   createIsolatedHome,
   resolvePluginPath,
@@ -1721,6 +1722,9 @@ function signalHandlers(
   dependencies[`${operation}SignalListener`]("SIGTERM", terminate);
 }
 
+// Login and status must not load configuration from the caller's checkout.
+const NEUTRAL_CODEX_CWD = parse(process.execPath).root;
+
 export async function runCodexSkillCommand(
   args: readonly string[],
   output?: SkillCommandOutput,
@@ -1996,7 +2000,7 @@ async function runCodexSkillProcess(
       [...args],
       {
         env: environment,
-        cwd: output?.appServer?.directory ?? parse(process.execPath).root,
+        cwd: output?.appServer?.directory ?? NEUTRAL_CODEX_CWD,
         stdio:
           output === undefined
             ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
@@ -2781,6 +2785,7 @@ export async function main(
   const findingFeedback = Cli.create("findings", {
     description: "Review saved findings (default: list).",
   }).command("false-positive", {
+    usage: [{ suffix: "OCCURRENCE_ID --reason TEXT" }],
     description: "Mark a finding as a false positive for future scans.",
     examples: [
       {
@@ -2824,6 +2829,8 @@ export async function main(
   });
   findingFeedback.command("list", {
     description: "List open findings for a repository across its scans.",
+    examples: [{ args: { repository: "." } }],
+    hint: "Use findings false-positive to record a triage decision for an occurrence.",
     args: z.object({
       repository: z
         .string()
@@ -2901,6 +2908,8 @@ export async function main(
   });
   findingFeedback.command("imported", {
     description: "List imported vendor evidence for a local repository.",
+    examples: [{ args: { repository: "." } }],
+    hint: "Use publish findings FILE --to local to save a vendor report. See publish findings --help for its required selectors.",
     args: z.object({
       repository: z
         .string()
@@ -2960,6 +2969,8 @@ export async function main(
   })
     .command("list", {
       description: "List saved scans for a repository or scan root.",
+      examples: [{ args: { repository: "." } }],
+      hint: "Use scans show SCAN_ID for results or scans logs SCAN_ID for activity.",
       args: z.object({
         repository: z
           .string()
@@ -3136,6 +3147,7 @@ export async function main(
     })
     .command("resume", {
       description: "Resume an interrupted Deep Scan in its original session.",
+      examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       args: z.object({
         scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
@@ -3206,6 +3218,7 @@ export async function main(
     .command("rerun", {
       description:
         "Start a new scan using saved settings and current checkout/context files.",
+      examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
       args: z.object({
@@ -3334,6 +3347,12 @@ export async function main(
     })
     .command("match", {
       description: "Match findings by root cause across saved scans.",
+      usage: [
+        { suffix: "BEFORE AFTER [options]" },
+        { suffix: "--all [options]" },
+      ],
+      examples: [{ options: { all: true } }],
+      hint: "Use scans compare for a pair. Match all completed scans with --all; --force recomputes saved matches.",
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3379,7 +3398,11 @@ export async function main(
       },
     })
     .command("compare", {
-      description: "Match and compare findings between scans.",
+      description:
+        "Compare findings from two scans. Uncached matches can use the model and save matching decisions.",
+      examples: [
+        { args: {}, description: "Compare the latest two completed scans." },
+      ],
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3432,12 +3455,25 @@ export async function main(
   const publication = Cli.create("publish", {
     description: "Publish Codex Security findings.",
   }).command("scan", {
-    description:
-      "Publish findings from a completed scan, or a CSV for internal publication.",
-    hint:
-      "Examples:\n" +
-      "  codex-security publish scan --to linear --scan latest --linear-team TEAM_ID --dry-run\n" +
-      "  codex-security publish scan --to custom --scan latest --findings-url http://localhost:3000",
+    description: "Publish findings from a completed scan.",
+    examples: [
+      {
+        options: {
+          to: "linear",
+          scan: ["latest"],
+          linearTeam: "TEAM_ID",
+          dryRun: true,
+        },
+      },
+      {
+        options: {
+          to: "custom",
+          scan: ["latest"],
+          findingsUrl: "http://localhost:3000",
+        },
+      },
+    ],
+    hint: "Use --dry-run to preview the selected findings before publishing.",
     destructive: true,
     args: z.object({
       scanDir: z
@@ -4070,7 +4106,31 @@ export async function main(
     .command("findings", {
       description:
         "Preview and import a saved scanner report locally or to Cloud.",
-      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.\nExample: codex-security publish findings selected-wiz.json --to local --repository ./project --provider wiz --source-key TENANT_ID/vulnerability-finding --dry-run --format json",
+      usage: [
+        {
+          args: { file: true },
+          options: {
+            to: true,
+            repository: true,
+            provider: true,
+            sourceKey: true,
+          },
+          suffix: "[options]",
+        },
+      ],
+      examples: [
+        {
+          args: { file: "selected-wiz.json" },
+          options: {
+            to: "local",
+            repository: "./project",
+            provider: "wiz",
+            sourceKey: "tenant/vulnerability-finding",
+            dryRun: true,
+          },
+        },
+      ],
+      hint: "Choose your scanner with --provider. Reuse --source-key for later imports from the same source. See the scanner import guide for supported formats, repository setup, and export examples: https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md. Gzip files are supported. Use --to local to save unassessed findings without a Cloud login. Use --full-output with --format json or --format jsonl.",
       destructive: true,
       args: z.object({
         file: z
@@ -4421,6 +4481,13 @@ export async function main(
     .command("check", {
       description:
         "Check saved scan history and Linear access without creating issues.",
+      examples: [
+        {
+          args: { scanDir: "../scan-results" },
+          options: { to: "linear", linearTeam: "TEAM_ID" },
+        },
+      ],
+      hint: "Use publish scan --dry-run to preview a publication offline.",
       args: z.object({
         scanDir: z.string().describe("Completed scan directory."),
       }),
@@ -4457,9 +4524,9 @@ export async function main(
       },
     });
   const imports = Cli.create("import", {
-    description:
-      "Import Sonar security issues or read hosted Semgrep, Snyk, and GitHub findings.",
+    description: "Collect findings from GitHub, Semgrep, Snyk or Sonar.",
   }).command("github", {
+    examples: [{ args: { repository: "owner/repo" } }],
     description: "Read GitHub code scanning alerts without changing GitHub.",
     hint: "Save complete --format json output for publish findings --provider github. This command reads code-scanning alerts; Dependabot and secret-scanning alerts are not supported. To save CSV or JSON findings as a local scan, use codex-security scan import --help.",
     destructive: false,
@@ -4586,6 +4653,7 @@ export async function main(
   }
   imports
     .command("github-advisories", {
+      examples: [{ args: { repository: "owner/repo" } }],
       description: "Read GitHub security advisories without changing GitHub.",
       hint: "Defaults to published repository advisories. Use --github-advisory-source global with explicit --github-advisory IDs to select public database entries. Advisories do not establish an installed dependency or applicability to the selected repository.",
       destructive: false,
@@ -4653,8 +4721,24 @@ export async function main(
         ),
     })
     .command("snyk", {
+      usage: [
+        {
+          args: { project: true },
+          options: { snykOrg: true, sourceRepositoryUrl: true },
+          suffix: "[options]",
+        },
+      ],
       description:
         "Read Snyk Open Source or Code issues for one monitored project.",
+      examples: [
+        {
+          args: { project: "PROJECT_ID" },
+          options: {
+            snykOrg: "ORG_ID",
+            sourceRepositoryUrl: "https://github.com/example/project",
+          },
+        },
+      ],
       hint: "Requires SNYK_TOKEN. Save the complete --format json output. Use publish findings --provider snyk with --to local or --to cloud.",
       destructive: false,
       args: z.object({
@@ -4713,8 +4797,24 @@ export async function main(
       },
     })
     .command("semgrep", {
+      usage: [
+        {
+          args: { project: true },
+          options: { semgrepDeployment: true, semgrepRef: true },
+          suffix: "[options]",
+        },
+      ],
       description:
         "Read a full Semgrep Platform project and ref through the Web API.",
+      examples: [
+        {
+          args: { project: "owner/project" },
+          options: {
+            semgrepDeployment: "DEPLOYMENT",
+            semgrepRef: "refs/heads/main",
+          },
+        },
+      ],
       hint: "Requires SEMGREP_APP_TOKEN with Web API access. Import the saved --format json output with publish findings --provider semgrep and --to local or --to cloud. Selected Guardian MCP captures also support both destinations.",
       destructive: false,
       args: z.object({
@@ -4778,8 +4878,16 @@ export async function main(
       },
     })
     .command("sonar", {
+      usage: [
+        { suffix: "[--sonar-project KEY] [options]" },
+        { suffix: "CAPTURE [options]" },
+      ],
       description:
         "Collect Sonar security findings or replay a saved capture into the local workbench.",
+      examples: [
+        { options: { sonarProject: "PROJECT_KEY", dryRun: true } },
+        { args: { capture: "../reports/sonar.json" } },
+      ],
       hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a live capture for review without importing findings.",
       destructive: true,
       args: z.object({
@@ -5011,9 +5119,23 @@ export async function main(
         });
       },
     });
+  const withLoginEnvironment = async (
+    run: (
+      environment: NodeJS.ProcessEnv & { CODEX_HOME: string },
+    ) => Promise<number>,
+  ) => {
+    const home = await prepareCodexSecurityCredentialHome(
+      dependencies.environment,
+    );
+    return withCredentialHomeLock(home, () =>
+      run({ ...dependencies.environment, CODEX_HOME: home }),
+    );
+  };
+
   const infoOutput = z.object({
     sdkVersion: z.string(),
     bundledPluginVersion: z.string(),
+    bundledPluginAvailable: z.boolean(),
     scanMcp: z.literal(false),
     cancellationNote: z.string(),
     cliVersion: z.string(),
@@ -5058,6 +5180,7 @@ export async function main(
     },
   };
   const cli = Cli.create("codex-security", cliOptions)
+    .command(scanHistory)
     .command("policy", {
       description: "Draft SECURITY.md for review.",
       destructive: true,
@@ -5226,21 +5349,27 @@ export async function main(
           return fail(message, 2);
         }
       },
-    })
-    .command("scan", {
+    });
+  function createScanCommands() {
+    return Cli.create("scan", {
       description: "Scan a repository, selected paths, or Git changes.",
-      hint:
-        "Examples:\n" +
-        "  codex-security scan .\n" +
-        "  codex-security scan . --path src --path tests\n" +
-        "  codex-security scan . --working-tree\n" +
-        "  codex-security scan . --diff origin/main\n" +
-        "  codex-security scan . --mode deep\n\n" +
-        "Import existing findings without security analysis:\n" +
-        "  codex-security scan import --csv findings.csv\n" +
-        "  codex-security scan import --json findings.json\n" +
-        "Use ./import to scan a repository named import.\n" +
-        "Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
+      usage: [
+        {
+          suffix:
+            "[repository] [--path PATH | --diff REF | --working-tree] [options]",
+        },
+        { suffix: "--host" },
+        { suffix: "import (--csv FILE | --json FILE) [options]" },
+      ],
+      examples: [
+        { args: { repository: "." }, options: { dryRun: true } },
+        { args: { repository: "." } },
+        { args: { repository: "." }, options: { path: ["src", "tests"] } },
+        { args: { repository: "." }, options: { workingTree: true } },
+        { args: { repository: "." }, options: { diff: "origin/main" } },
+        { args: { repository: "." }, options: { mode: "deep" } },
+      ],
+      hint: "Import existing findings without security analysis with scan import --help. Use ./import to scan a repository named import. Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
       alias: { config: "c" },
       args: z.object({
@@ -5274,7 +5403,7 @@ export async function main(
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
-              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+              "Stable hashed end-user ID for model requests (1–64 characters). Requires a compatible Codex runtime.",
             ),
           path: z
             .array(optionValue("--path"))
@@ -5495,10 +5624,89 @@ export async function main(
           ? finishScan(outcome, format, incurError)
           : finishScanCommand(outcome, format, incurError);
       },
-    })
+    }).command("import", {
+      usage: [{ suffix: "(--csv FILE | --json FILE) [options]" }],
+      description:
+        "Save CSV or JSON findings as a completed scan without security analysis.",
+      destructive: true,
+      options: z
+        .object({
+          csv: optionValue("--csv")
+            .optional()
+            .describe("Findings CSV in the codex-security export format."),
+          json: optionValue("--json")
+            .optional()
+            .describe(
+              "Findings JSON document or object with a findings array.",
+            ),
+          outputDir: optionValue("--output-dir")
+            .optional()
+            .describe(
+              "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+            ),
+          archiveExisting: z
+            .boolean()
+            .default(false)
+            .describe("Archive existing results; requires --output-dir."),
+          dryRun: z
+            .boolean()
+            .default(false)
+            .describe("Validate the input without saving a scan."),
+        })
+        .refine(
+          (options) =>
+            Number(options.csv !== undefined) +
+              Number(options.json !== undefined) ===
+            1,
+          { message: "Provide exactly one of --csv FILE or --json FILE." },
+        )
+        .refine(
+          (options) =>
+            !options.archiveExisting || options.outputDir !== undefined,
+          { message: "--archive-existing requires --output-dir." },
+        )
+        .meta({ oneOf: [{ required: ["csv"] }, { required: ["json"] }] }),
+      examples: [
+        { options: { csv: "findings.csv" } },
+        { options: { json: "findings.json" } },
+      ],
+      hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ options, format, error: incurError }) {
+        const directory = dependencies.currentDirectory();
+        const outcome = await runImport({
+          sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
+          format: options.csv === undefined ? "json" : "csv",
+          outputDir:
+            options.outputDir === undefined
+              ? undefined
+              : resolveCliPath(directory, options.outputDir),
+          archiveExisting: options.archiveExisting,
+          dryRun: options.dryRun,
+        });
+        exitCode = outcome.exitCode;
+        if (outcome.error !== undefined) {
+          return incurError({
+            code: "SCAN_IMPORT_FAILED",
+            message: outcome.error,
+            exitCode,
+          });
+        }
+        if (!options.dryRun && useDefaultOutput(format)) {
+          return;
+        }
+        return outcome.data;
+      },
+    });
+  }
+  cli
+    .command(createScanCommands())
     .command("install-hook", {
       description:
         "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
+      examples: [
+        { args: { repository: "." }, options: { failOnSeverity: "high" } },
+      ],
       hint: "Require a passing scan in CI to enforce a scan before merging.",
       destructive: true,
       args: z.object({
@@ -5616,10 +5824,10 @@ export async function main(
         }
       },
     })
-    .command(scanHistory)
     .command(findingFeedback)
     .command(publication)
     .command("suggest-owners", {
+      examples: [{ args: { findings: "findings.json" } }],
       description: "Suggest finding owners from CODEOWNERS and Git history.",
       destructive: false,
       args: z.object({
@@ -5687,7 +5895,12 @@ export async function main(
     })
     .command("classify-severity", {
       description: "Assess severity for saved findings or canonical records.",
-      hint: "For saved findings, use --rubric for your own policy or set CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC=1 for the Statsig default. For host-provided reviews, use --records.",
+      usage: [
+        { suffix: "(--scan ID | --scan-dir DIR) [options]" },
+        { suffix: "--records [--runs COUNT]" },
+      ],
+      examples: [{ options: { scan: "latest" } }],
+      hint: `Use the built-in severity rubric or select --rubric FILE. Each uncached finding receives ${DEFAULT_REVIEW_RUNS} model reviews by default. Use --reprocess to replace saved assessments. --records accepts host-provided reviews over JSON-RPC.`,
       destructive: true,
       options: z.object({
         runs: reviewRunsOption.describe(
@@ -5808,8 +6021,14 @@ export async function main(
       },
     })
     .command("dedupe", {
-      description: "Identify duplicate findings in a saved scan.",
-      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
+      description: "Find duplicates against the saved findings corpus.",
+      usage: [
+        { suffix: "--scan ID [--workflow-id ID] [options]" },
+        { suffix: "--workflow-id ID [options]" },
+        { suffix: "--records" },
+      ],
+      examples: [{ options: { scan: "latest" } }],
+      hint: "Service-backed deduplication can save duplicate groups to the selected findings service. Use --records alone for host-provided reviews over JSON-RPC.",
       destructive: true,
       options: z.object({
         concurrency: positiveInteger
@@ -5990,7 +6209,32 @@ export async function main(
     })
     .command(imports)
     .command("scan-components", {
-      description: "Scan project components and combine results.",
+      description:
+        "Scan project components independently and combine their results.",
+      usage: [
+        {
+          suffix:
+            "[repository] (--component PATH | --components-file FILE | --auto) --output-dir DIR [options]",
+        },
+      ],
+      examples: [
+        {
+          args: { repository: "." },
+          options: {
+            component: ["services/api"],
+            outputDir: "../component-results",
+          },
+        },
+        {
+          args: { repository: "." },
+          options: {
+            auto: true,
+            planOnly: true,
+            outputDir: "../component-plan",
+          },
+        },
+      ],
+      hint: "Supply --output-dir or configure output.directory. Automatic planning can call a model even with --plan-only. A per-component --max-cost does not cover planning.",
       destructive: true,
       alias: { config: "c" },
       args: z.object({
@@ -6313,17 +6557,22 @@ export async function main(
         ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
+      usage: [
+        { suffix: "[options]" },
+        { suffix: "repositories.csv --output-dir DIR [options]" },
+        { suffix: "repositories.csv --recover --output-dir DIR [options]" },
+      ],
       examples: [
         {
-          args: {},
-          options: { model: "gpt-5.6-terra", effort: "high" },
+          args: { input: "repositories.csv" },
+          options: { outputDir: "../campaign", workers: 4, maxAttempts: 3 },
+        },
+        {
+          args: { input: "repositories.csv" },
+          options: { recover: true, outputDir: "../campaign" },
         },
       ],
-      hint:
-        "CSV example:\n" +
-        "  codex-security bulk-scan repositories.csv " +
-        "--output-dir /path/outside/repositories/results " +
-        "--workers 4 --max-attempts 3",
+      hint: "Omit the CSV to select repositories interactively. A configured output.directory can supply the results directory; --max-cost applies per repository attempt.",
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options }) {
         const controller = new AbortController();
@@ -6692,6 +6941,8 @@ export async function main(
       },
     })
     .command("validate", {
+      usage: [{ suffix: "<findings...> [options]" }, { suffix: "--records" }],
+      examples: [{ args: { "findings...": "findings.json" } }],
       hint: "Use --records alone for host-provided reviews over JSON-RPC.",
       description:
         "Assess candidate security findings using source evidence only.",
@@ -6769,6 +7020,12 @@ export async function main(
       },
     })
     .command("verify-fix", {
+      usage: [
+        { suffix: "FINDING... [options]" },
+        { suffix: "--scan ID [--severity LEVEL] [options]" },
+        { suffix: "(--linear-issue ID | --linear-project PROJECT) [options]" },
+        { suffix: "--host" },
+      ],
       description:
         "Verify existing security fixes without changing the repository.",
       destructive: false,
@@ -7013,6 +7270,13 @@ export async function main(
       },
     })
     .command("patch", {
+      usage: [
+        { suffix: "ISSUE... [options]" },
+        { suffix: "--scan ID [--severity LEVEL] [options]" },
+        { suffix: "(--linear-issue ID | --linear-project PROJECT) [options]" },
+        { suffix: "--resume-pr BRANCH" },
+        { suffix: "--host" },
+      ],
       description: "Patch one or more security issues.",
       destructive: true,
       args: z.object({
@@ -7364,103 +7628,76 @@ export async function main(
         }
       },
     })
-    .command("login", {
-      description: "Sign in with ChatGPT or store credentials.",
-      hint:
-        "For remote login, use --device-auth if your workspace allows it.\n" +
-        "If device auth is disabled, sign in over SSH:\n" +
-        "  On your local machine (replace user@remote):\n" +
-        "    ssh -L 1455:localhost:1455 user@remote\n" +
-        "  In that SSH session:\n" +
-        "    codex-security login\n" +
-        "  Open the sign-in URL in your local browser.\n" +
-        "  Keep SSH connected until login finishes.\n" +
-        "Docs: https://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
-      destructive: true,
-      args: z.object({
-        action: z
-          .enum(["status"])
-          .optional()
-          .describe("Use status to inspect credentials; omit to sign in."),
-      }),
-      options: z.object({
-        deviceAuth: z
-          .boolean()
-          .default(false)
-          .describe("Use device auth if your workspace allows it."),
-        withApiKey: z
-          .boolean()
-          .default(false)
-          .describe("Read an API key from stdin."),
-        withAccessToken: z
-          .boolean()
-          .default(false)
-          .describe("Read an access token from stdin."),
-      }),
-      examples: [
-        { args: {}, description: "Sign in with ChatGPT." },
-        { args: { action: "status" }, description: "Check authentication." },
-      ],
-      async run({ args, options }) {
-        const credentialHome = await prepareCodexSecurityCredentialHome(
-          dependencies.environment,
-        );
-        const authentication = scanAuthentication(dependencies.environment);
-        exitCode = await withCredentialHomeLock(credentialHome, async () => {
-          if (args.action === undefined) {
+    .command(
+      Cli.create("login", {
+        description: "Sign in with ChatGPT or store credentials.",
+        hint: "Check the effective sign-in with codex-security login status. For a remote machine use --device-auth if your workspace permits it. For SSH, on your local machine run:\n    ssh -L 1455:localhost:1455 user@remote\nThen, in that SSH session:\n    codex-security login\nOpen the sign-in URL locally and keep SSH connected until login finishes.\nhttps://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
+        destructive: true,
+        options: z.object({
+          deviceAuth: z
+            .boolean()
+            .default(false)
+            .describe("Use device auth if your workspace allows it."),
+          withApiKey: z
+            .boolean()
+            .default(false)
+            .describe("Read an API key from stdin."),
+          withAccessToken: z
+            .boolean()
+            .default(false)
+            .describe("Read an access token from stdin."),
+        }),
+        examples: [
+          { options: {}, description: "Sign in using the browser." },
+          {
+            options: { deviceAuth: true },
+            description: "Sign in from a headless machine with device auth.",
+          },
+          {
+            options: { withApiKey: true },
+            description:
+              "Pipe an API key on stdin from your credential source.",
+          },
+        ],
+        async run({ options }) {
+          const authentication = scanAuthentication(dependencies.environment);
+          exitCode = await withLoginEnvironment(async (environment) => {
             await prepareLoginConfig(
-              credentialHome,
+              environment.CODEX_HOME,
               await readCodexAuthConfig(
                 scanCodexHome(dependencies.environment),
                 true,
               ),
             );
-          } else if (authentication.method !== "api_key") {
-            await initialCredentialsAvailable(
-              dependencies.environment,
-              scanCodexHome(dependencies.environment),
-              credentialHome,
+            const status = await dependencies.runCodex(
+              [
+                "login",
+                ...(options.deviceAuth ? ["--device-auth"] : []),
+                ...(options.withApiKey ? ["--with-api-key"] : []),
+                ...(options.withAccessToken ? ["--with-access-token"] : []),
+              ],
+              undefined,
+              environment,
             );
-          }
-          const status = await dependencies.runCodex(
-            [
-              "login",
-              ...(args.action === undefined ? [] : [args.action]),
-              ...(options.deviceAuth ? ["--device-auth"] : []),
-              ...(options.withApiKey ? ["--with-api-key"] : []),
-              ...(options.withAccessToken ? ["--with-access-token"] : []),
-            ],
-            undefined,
-            { ...dependencies.environment, CODEX_HOME: credentialHome },
-          );
-          if (args.action === undefined && status === 0) {
-            await setCodexSecurityCredentialLogout(credentialHome, false);
-          }
-          return status;
-        });
-        if (args.action === "status") {
+            if (status === 0)
+              await setCodexSecurityCredentialLogout(
+                environment.CODEX_HOME,
+                false,
+              );
+            return status;
+          });
           if (
-            authentication.method === "api_key" &&
-            (exitCode === 0 || exitCode === 1)
+            exitCode === 0 &&
+            !options.withApiKey &&
+            authentication.method === "api_key"
           ) {
-            exitCode = 0;
-            errorOutput.write(
-              `Effective scan authentication: API key from ${authentication.source}.\n`,
-            );
-            errorOutput.write(
-              `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
-            );
-          }
-        } else if (exitCode === 0 && !options.withApiKey) {
-          if (authentication.method === "api_key") {
-            const configuredApiKeyVariables = Object.entries(
+            const configuredApiKeyVariables = Object.keys(
               dependencies.environment,
-            ).flatMap(([name, value]) =>
-              value?.trim() &&
-              (name.toUpperCase() === "OPENAI_API_KEY" ||
-                name.toUpperCase() === "CODEX_API_KEY")
-                ? name
-                : [],
+            ).filter(
+              (name) =>
+                ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(
+                  name.toUpperCase(),
+                ) && dependencies.environment[name]?.trim(),
             );
             const loginWarning = options.withAccessToken
               ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
@@ -7475,23 +7712,80 @@ export async function main(
                 `${formatEnvironmentVariableRemovalGuidance(configuredApiKeyVariables)}.\n`,
             );
           }
-        }
-      },
-    })
+        },
+      }).command("status", {
+        description: "Check effective scan authentication.",
+        hint: "Use codex-security login status --json for automation. With stored credentials, the first check can import an existing Codex sign-in.",
+        output: z
+          .object({
+            authenticated: z.boolean(),
+            method: z.enum(["api_key", "stored_credentials"]),
+            source: z.string().optional(),
+          })
+          .optional(),
+        async run({ format }) {
+          const structured = !useDefaultOutput(format);
+          const authentication = scanAuthentication(dependencies.environment);
+          exitCode = await withLoginEnvironment(async (environment) => {
+            if (authentication.method !== "api_key")
+              await initialCredentialsAvailable(
+                dependencies.environment,
+                scanCodexHome(dependencies.environment),
+                environment.CODEX_HOME,
+              );
+            if (!structured)
+              return await dependencies.runCodex(
+                ["login", "status"],
+                undefined,
+                environment,
+              );
+            const native = await runCodexCommand(
+              resolveCodexCommand(environment),
+              ["login", "status"],
+              environment,
+              undefined,
+              undefined,
+              { cwd: NEUTRAL_CODEX_CWD },
+            );
+            for (const diagnostic of [native.stdout, native.stderr]) {
+              if (diagnostic.trim())
+                errorOutput.write(`${diagnosticLines(diagnostic.trimEnd())}\n`);
+            }
+            return native.exitCode ?? 2;
+          });
+          if (
+            authentication.method === "api_key" &&
+            (exitCode === 0 || exitCode === 1)
+          ) {
+            exitCode = 0;
+            errorOutput.write(
+              `Effective scan authentication: API key from ${authentication.source}.\n`,
+            );
+            errorOutput.write(
+              `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
+            );
+          }
+          if (structured)
+            return {
+              authenticated: exitCode === 0,
+              ...(authentication.method === "api_key"
+                ? {
+                    method: authentication.method,
+                    source: authentication.source,
+                  }
+                : { method: "stored_credentials" as const }),
+            };
+        },
+      }),
+    )
     .command("logout", {
-      description: "Remove the stored sign-in.",
+      description: "Remove the stored Codex Security sign-in.",
+      hint: "Check the effective account with codex-security login status. Scans can still use an API key configured in your environment.",
       destructive: true,
       async run() {
-        const credentialHome = await prepareCodexSecurityCredentialHome(
-          dependencies.environment,
-        );
-        const environment = {
-          ...dependencies.environment,
-          CODEX_HOME: credentialHome,
-        };
-        exitCode = await withCredentialHomeLock(credentialHome, () =>
+        exitCode = await withLoginEnvironment((environment) =>
           logoutCredentialHome(
-            credentialHome,
+            environment.CODEX_HOME,
             scanCodexHome(dependencies.environment),
             (store) =>
               dependencies.runCodex(
@@ -7505,7 +7799,7 @@ export async function main(
     })
     .command("init", {
       description: "Create a starter project configuration.",
-      hint: "Existing files are never overwritten.",
+      hint: "Use the generated file with scan . -c FILE --dry-run. Existing files are never overwritten.",
       destructive: true,
       args: z.object({
         file: z
@@ -7515,26 +7809,37 @@ export async function main(
           .describe("YAML or JSON destination (default: codex-security.yaml)."),
       }),
       output: z.object({ path: z.string() }).optional(),
-      async run({ args }) {
+      async run({ args, format }) {
+        let preview: string | undefined;
         try {
           const directory = dependencies.currentDirectory();
           const path = resolveCliPath(
             directory,
             args.file ?? "codex-security.yaml",
           );
+          preview = `${PREVIEW_LABEL}: ${projectPreviewCommand(directory, path)}`;
           await writeFile(path, projectConfigStarter(path, directory), {
             flag: "wx",
             mode: 0o600,
           });
+          if (useDefaultOutput(format)) {
+            if (output.isTTY)
+              renderedOutput = `Created ${escapeTerminalText(path)}\n${preview}\n`;
+            else errorOutput.write(`${preview}\n`);
+          }
           return { path };
         } catch (error) {
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+          if ((error as NodeJS.ErrnoException).code === "EEXIST" && preview)
+            errorOutput.write(`${preview}\n`);
           throw error;
         }
       },
     })
     .command("feedback", {
+      usage: [{ suffix: "[scan-id] --reason TEXT [--include-logs]" }],
+      examples: [{ options: { reason: "unexpected-result" } }],
       description: "Send feedback to OpenAI and return a feedback ID.",
       destructive: true,
       args: z.object({
@@ -7623,7 +7928,7 @@ export async function main(
         },
       },
       output: infoOutput,
-      async run({ options }) {
+      async run({ options, format }) {
         const directory = dependencies.currentDirectory();
         const project = await selectedProjectConfig(
           options.config,
@@ -7646,23 +7951,50 @@ export async function main(
                 ),
               )
             : undefined;
+        const model = scanModelConfiguration(codex);
+        const sources = configurationSources(resolved.sources, deep?.sources);
+        const nextStep = projectPreviewCommand(directory, project?.path);
+        const bundledPluginAvailable = Boolean(
+          await bundledPluginRoot().catch(() => undefined),
+        );
+        if (output.isTTY && useDefaultOutput(format)) {
+          const overrides = Object.entries(sources)
+            .filter(([, source]) => source !== "default")
+            .map(([key, source]) => `${key} (${source})`);
+          const { mode, auth, target, maxCostUsd } = resolved.options;
+          renderedOutput =
+            [
+              `${PREVIEW_LABEL}: ${nextStep}`,
+              `Configuration: ${project?.path ?? "defaults"}`,
+              `Scope: ${typeof target === "string" ? target : JSON.stringify(target)}`,
+              `Scan: ${mode} · ${model.model} (${model.reasoningEffort}) · auth ${auth}`,
+              ...(maxCostUsd === undefined
+                ? []
+                : [`Cost limit: $${maxCostUsd}`]),
+              `Bundled plugin: ${BUNDLED_PLUGIN_VERSION} (${bundledPluginAvailable ? "available" : "missing"})`,
+              ...(overrides.length
+                ? [`Overrides: ${overrides.join(", ")}`]
+                : []),
+            ]
+              .map((line) => escapeTerminalText(line))
+              .join("\n") + "\n";
+        }
         return {
           sdkVersion: VERSION,
           bundledPluginVersion: BUNDLED_PLUGIN_VERSION,
+          bundledPluginAvailable,
           scanMcp: false as const,
           cancellationNote:
             "Scans are CLI-only because the MCP transport cannot cancel active commands.",
           cliVersion: VERSION,
           codexVersion: CODEX_EXECUTABLE_VERSION,
           codexSdkVersion: CODEX_SDK_VERSION,
-          ...scanModelConfiguration(codex),
-          nextStep: project
-            ? "Run codex-security scan . -c FILE --dry-run, replacing FILE with the project configuration you selected."
-            : "codex-security scan . --dry-run",
+          ...model,
+          nextStep,
           configuration: {
             ...(project?.path === undefined ? {} : { path: project.path }),
             settings: { ...resolved.options, ...deep?.settings },
-            sources: configurationSources(resolved.sources, deep?.sources),
+            sources,
           },
         };
       },
@@ -7677,14 +8009,28 @@ export async function main(
   }
 
   const commands = Cli.toCommands.get(cli)!;
+  prepareCliExamples(commands);
   const valueOptions = cliValueOptions(commands);
-  const commandIndex = argv.findIndex((value, index) => {
-    if (value.startsWith("-")) return false;
-    return index === 0 || !valueOptions.has(argv[index - 1]!);
-  });
+  const isPositional = (value: string, index: number) =>
+    !value.startsWith("-") &&
+    (index === 0 || !valueOptions.has(argv[index - 1]!));
+  const commandIndex = argv.findIndex(isPositional);
   const command = argv[commandIndex];
   const following = argv[commandIndex + 1];
   const scanImport = command === "scan" && following === "import";
+  if (
+    command === "scan" &&
+    !scanImport &&
+    argv.some(
+      (value, index) => index > commandIndex && isPositional(value, index),
+    )
+  ) {
+    // A repository such as "imports" or "./import" is a positional even when
+    // shared options precede it. Bypass Incur's subcommand typo suggestions.
+    const scan = commands.get(command);
+    if (scan && "_group" in scan && scan.root) commands.set(command, scan.root);
+  }
+
   if (
     (command === "scans" || command === "findings") &&
     !argv.includes("--help") &&
@@ -7702,7 +8048,8 @@ export async function main(
     const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
-      ["validate", "login", "logout"].includes(command) &&
+      (["validate", "logout"].includes(command) ||
+        (command === "login" && following !== "status")) &&
       !argv.includes("--schema")
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
@@ -7814,9 +8161,18 @@ export async function main(
         continue;
       const next = argv[index + 1];
       if (next === undefined || next.startsWith("--") || next === "-h") {
+        if (scanImport && option === "--json" && argv.includes("--schema"))
+          continue;
         return `Missing value for flag: ${option}`;
       }
       index += 1;
+    }
+    if (
+      command === "login" &&
+      positionals.length > 0 &&
+      (following !== "status" || positionals.length !== 1)
+    ) {
+      return "Use login to sign in or login status to inspect authentication.";
     }
     if (
       subcommand === "match" &&
@@ -7881,6 +8237,7 @@ export async function main(
     errorOutput.isTTY === true &&
     argv.length > 0 &&
     argv[0] !== "completions" &&
+    !process.env["COMPLETE"] &&
     !argv.some((argument) =>
       [...inspectionFlags, "--dry-run", "--update"].includes(argument),
     ) &&
@@ -7889,87 +8246,6 @@ export async function main(
           .checkForUpdate(updateController.signal)
           .catch(() => undefined)
       : undefined;
-
-  // Incur cannot mount a command with both a handler and subcommands.
-  // Select the nested import route while preserving scan [repository].
-  if (scanImport) {
-    cli.command(
-      Cli.create("scan", {
-        description: "Run or import a saved scan.",
-      }).command("import", {
-        description:
-          "Save CSV or JSON findings as a completed scan without security analysis.",
-        destructive: true,
-        options: z
-          .object({
-            csv: optionValue("--csv")
-              .optional()
-              .describe("Findings CSV in the codex-security export format."),
-            json: optionValue("--json")
-              .optional()
-              .describe(
-                "Findings JSON document or object with a findings array.",
-              ),
-            outputDir: optionValue("--output-dir")
-              .optional()
-              .describe(
-                "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-              ),
-            archiveExisting: z
-              .boolean()
-              .default(false)
-              .describe("Archive existing results; requires --output-dir."),
-            dryRun: z
-              .boolean()
-              .default(false)
-              .describe("Validate the input without saving a scan."),
-          })
-          .refine(
-            (options) =>
-              Number(options.csv !== undefined) +
-                Number(options.json !== undefined) ===
-              1,
-            { message: "Provide exactly one of --csv FILE or --json FILE." },
-          )
-          .refine(
-            (options) =>
-              !options.archiveExisting || options.outputDir !== undefined,
-            { message: "--archive-existing requires --output-dir." },
-          ),
-        examples: [
-          { options: { csv: "findings.csv" } },
-          { options: { json: "findings.json" } },
-        ],
-        hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
-        output: z.record(z.string(), z.unknown()).optional(),
-        async run({ options, format, error: incurError }) {
-          const directory = dependencies.currentDirectory();
-          const outcome = await runImport({
-            sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
-            format: options.csv === undefined ? "json" : "csv",
-            outputDir:
-              options.outputDir === undefined
-                ? undefined
-                : resolveCliPath(directory, options.outputDir),
-            archiveExisting: options.archiveExisting,
-            dryRun: options.dryRun,
-          });
-          exitCode = outcome.exitCode;
-          if (outcome.error !== undefined) {
-            return incurError({
-              code: "SCAN_IMPORT_FAILED",
-              message: outcome.error,
-              exitCode,
-            });
-          }
-          if (!options.dryRun && useDefaultOutput(format)) {
-            return;
-          }
-          return outcome.data;
-        },
-      }),
-    );
-  }
 
   let notice: UpdateNotice | undefined;
   if (argv.includes("--schema") || argv.includes("--llms-full")) {
@@ -8002,6 +8278,21 @@ export async function main(
   )
     onInterruptedSignIn?.();
   let frameworkOutput = frameworkCapture.text();
+  if (
+    command !== undefined &&
+    (argv.includes("--help") || argv.includes("-h")) &&
+    frameworkOutput.includes("\nUsage: codex-security <command>\n")
+  ) {
+    // Incur returns the root menu for unresolved application help paths.
+    const parent = commands.get(command);
+    const group = parent && "_group" in parent ? command : undefined;
+    const path = group && following ? `${group} ${following}` : command;
+    errorOutput.write(
+      `codex-security: Unknown command ${diagnosticValue(path)}. Use codex-security${group ? ` ${group}` : ""} --help.\n`,
+    );
+    return 2;
+  }
+
   if (filteredScanFailure !== undefined) {
     // Success-field filters do not apply to diagnostics. Reuse Incur's format
     // and token controls without running the saved scan a second time.
@@ -8558,19 +8849,51 @@ function parseFrameworkArguments(
   };
 }
 
+/** Incur prints example keys verbatim and treats every option as a single value.
+ * Give its shared help, manifest and skill renderers the actual shell tokens.
+ */
+function prepareCliExamples(
+  commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+): void {
+  for (const entry of commands.values()) {
+    if ("_group" in entry) prepareCliExamples(entry.commands);
+    const command = "_group" in entry ? entry.root : entry;
+    if (!command || !("examples" in command)) continue;
+    for (const example of command.examples ?? []) {
+      const tokens = Object.values(example.args ?? {}).map((value) =>
+        quoteCliPath(String(value)),
+      );
+      for (const [key, value] of Object.entries(example.options ?? {})) {
+        const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+        for (const item of Array.isArray(value) ? value : [value]) {
+          tokens.push(item === false ? `${flag}=false` : flag);
+          if (typeof item !== "boolean")
+            tokens.push(quoteCliPath(String(item)));
+        }
+      }
+      example.args = tokens;
+      delete example.options;
+    }
+  }
+}
+
 function cliValueOptions(
   commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+  options = new Set(FRAMEWORK_VALUE_OPTIONS),
 ): Set<string> {
-  const options = new Set(FRAMEWORK_VALUE_OPTIONS);
-  for (const command of commands.values()) {
-    if ("_group" in command) {
-      for (const option of cliValueOptions(command.commands))
-        options.add(option);
-    } else if ("options" in command && command.options) {
+  for (const entry of commands.values()) {
+    if ("_group" in entry) cliValueOptions(entry.commands, options);
+    const command = "_group" in entry ? entry.root : entry;
+    if (command && "options" in command && command.options) {
       for (const [name, schema] of Object.entries(
         z.toJSONSchema(command.options, { io: "input" }).properties ?? {},
       )) {
-        if (typeof schema === "object" && schema.type === "boolean") continue;
+        // Bare --json is the framework output shortcut, except on scan import.
+        if (
+          name === "json" ||
+          (typeof schema === "object" && schema.type === "boolean")
+        )
+          continue;
         options.add(
           `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
         );
@@ -10635,6 +10958,20 @@ type VerboseDiagnosticValue = string | number | boolean | null | undefined;
 
 function diagnosticLines(value: unknown): string {
   return errorMessage(value).split("\n").map(diagnosticValue).join("\n");
+}
+
+const PREVIEW_LABEL =
+  process.platform === "win32" ? "Next (PowerShell)" : "Next";
+
+function projectPreviewCommand(directory: string, path?: string): string {
+  if (path === undefined) return "codex-security scan . --dry-run";
+  const local = relative(directory, path);
+  let file = local.split(/[\\/]/u)[0] === ".." ? path : local;
+  if (file.startsWith("-") || file.startsWith("~")) file = `./${file}`;
+  // Keep terminal controls out of suggested commands and quote shell syntax.
+  if (escapeTerminalText(file) !== file)
+    return "codex-security scan . -c FILE --dry-run (replace FILE with the selected path)";
+  return `codex-security scan . -c ${quoteCliPath(file)} --dry-run`;
 }
 
 function diagnosticValue(value: unknown): string {
