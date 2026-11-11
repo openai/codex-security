@@ -87,6 +87,7 @@
 - update install-action to v2.90.1 ([#2599](https://github.com/openai/codex-security/pull/2599))
 - simplify finding imports and protect export files ([#2595](https://github.com/openai/codex-security/pull/2595))
 - preserve JSON errors and token windows ([#2593](https://github.com/openai/codex-security/pull/2593))
+- keep scans running while Codex waits for the network ([#2411](https://github.com/openai/codex-security/pull/2411))
 
 </details>
 
