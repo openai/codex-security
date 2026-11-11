@@ -85,8 +85,11 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
             encoding: "utf8",
             stdio: ["ignore", "pipe", "pipe"],
           }).trim();
+        // This operator-installed filter deliberately maps local bytes to a different blob.
         git([
           "config",
+          "--file",
+          emptyConfig,
           "filter.synthetic.clean",
           `node ${JSON.stringify(clean.replaceAll("\\", "/"))}`,
         ]);
