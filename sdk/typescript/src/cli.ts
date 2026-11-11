@@ -30,10 +30,8 @@ import {
   writeSync,
 } from "node:fs";
 import {
-  access,
   chmod,
   lstat,
-  mkdir,
   mkdtemp,
   open,
   readFile,
@@ -228,6 +226,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { batchScanBudget } from "./batch-cost.js";
 import {
   formatScanCost,
   formatScanCostTokens,
@@ -388,6 +387,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
+import { installManagedHook } from "./cli-hook.js";
 import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
@@ -406,7 +406,6 @@ import {
   gitMarkerRoot,
   normalizeRepository,
   trustedGitCommand,
-  UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -486,10 +485,15 @@ const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const MODEL_OPTIONS = modelOptions();
 type ModelCliOptions = z.infer<typeof MODEL_OPTIONS>;
-const MATCHING_MODEL_OPTIONS = modelOptions(
+const MATCHING_OPTIONS = modelOptions(
   "Model for finding matching (default: Codex's configured model).",
   "Matching reasoning effort (default: medium).",
-);
+).extend({
+  force: z
+    .boolean()
+    .default(false)
+    .describe("Recompute saved finding matches."),
+});
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
@@ -2661,12 +2665,16 @@ export async function main(
   const latestScans = async (
     count = 1,
     status: "complete" | "any" = "complete",
-    pythonPath?: string,
-    protectedRoot?: PluginPythonOptions["protectedRoot"],
+    options: {
+      pythonPath?: string;
+      protectedRoot?: PluginPythonOptions["protectedRoot"];
+      preferWorktree?: boolean;
+    } = {},
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
       workbenchArgs("list-scans", {
         repository: dependencies.currentDirectory(),
+        preferWorktree: options.preferWorktree,
         status: status === "complete" ? "complete" : undefined,
         limit: String(count),
       }),
@@ -2681,11 +2689,31 @@ export async function main(
         }
         return value;
       },
-      pythonPath,
-      protectedRoot,
+      options.pythonPath,
+      options.protectedRoot,
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
+  type WorktreeScan = SavedScan & {
+    targetPath: string;
+    inCurrentWorktree: boolean;
+  };
+  const preferredScan = async (repository: string, status?: "complete") => {
+    const result = await dependencies.runWorkbench(
+      workbenchArgs("list-scans", {
+        repository,
+        preferWorktree: true,
+        status,
+        limit: 1,
+      }),
+    );
+    return (result["scans"] as WorktreeScan[])[0];
+  };
+  const historyId = z.string().min(1).optional();
+  const resolveHistoryId = async (id: string, status: "complete" | "any") =>
+    id === "latest"
+      ? (await latestScans(1, status, { preferWorktree: true }))?.[0]?.scanId
+      : id;
   type MatchingCliOptions = ModelCliOptions & { force?: boolean };
   const runMatching = async (
     operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
@@ -3034,11 +3062,9 @@ export async function main(
       description: "Show the results and saved configuration for a scan.",
       hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Scan ID or unique prefix (default: latest completed)."),
+        scanId: historyId.describe(
+          "Scan ID, unique prefix, or latest (default: latest completed).",
+        ),
       }),
       options: z.object({
         showLinkedFindings: z
@@ -3054,19 +3080,17 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format, options }) {
-        let scanId = args.scanId;
-        if (scanId === undefined) {
-          try {
-            scanId = (await latestScans())?.[0]?.scanId;
-          } catch (error) {
-            if (useDefaultOutput(format)) {
-              errorOutput.write(
-                "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
-              );
-            }
-            throw error;
+      async run({ args: { scanId: requestedId = "latest" }, format, options }) {
+        let scanId;
+        try {
+          scanId = await resolveHistoryId(requestedId, "complete");
+        } catch (error) {
+          if (useDefaultOutput(format)) {
+            errorOutput.write(
+              "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
+            );
           }
+          throw error;
         }
         if (scanId === undefined) return;
         return presentHistory(
@@ -3075,7 +3099,7 @@ export async function main(
             await showHistoryNavigation(
               scan as ScanLogSource,
               format,
-              args.scanId === undefined ? "latest completed scan" : undefined,
+              requestedId === "latest" ? "latest completed scan" : undefined,
             );
             return {
               ...(scan as JsonObject),
@@ -3093,13 +3117,9 @@ export async function main(
       description: "Show saved activity for a scan and its workers.",
       hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Scan identifier or unique prefix (default: latest, any status).",
-          ),
+        scanId: historyId.describe(
+          "Scan ID, unique prefix, or latest (default: latest, any status).",
+        ),
       }),
       examples: [
         { args: {}, description: "Show activity from the latest scan." },
@@ -3109,9 +3129,8 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format }) {
-        const scanId =
-          args.scanId ?? (await latestScans(1, "any"))?.[0]?.scanId;
+      async run({ args: { scanId: requestedId = "latest" }, format }) {
+        const scanId = await resolveHistoryId(requestedId, "any");
         if (scanId === undefined) return;
         const result = await history(
           ["get-scan", "--scan-id", scanId],
@@ -3120,7 +3139,7 @@ export async function main(
             await showHistoryNavigation(
               scan,
               format,
-              args.scanId === undefined
+              requestedId === "latest"
                 ? "latest scan, including failed and active runs"
                 : undefined,
             );
@@ -3230,7 +3249,7 @@ export async function main(
     })
     .command("rerun", {
       description:
-        "Start a new scan using saved settings and current checkout/context files.",
+        "Start a new scan using saved settings and the current files at its saved checkout.",
       examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
@@ -3239,7 +3258,9 @@ export async function main(
           .string()
           .min(1)
           .optional()
-          .describe("Saved scan identifier (default: latest completed scan)."),
+          .describe(
+            "Saved scan identifier (default: latest completed in this worktree).",
+          ),
       }),
       options: z.object({
         showCost: SHOW_COST_OPTION,
@@ -3272,23 +3293,25 @@ export async function main(
           exitCode = 2;
           throw error;
         }
-        let scanId: string | undefined;
-        try {
-          scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
-        } catch (error) {
-          const message = errorMessage(error);
-          if (exitCode === 0)
-            errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishScanCommand(
-            { exitCode: 2, error: message },
-            format,
-            incurError,
-            "SCAN_REPLAY_UNAVAILABLE",
-          );
-        }
-        if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
+          let scanId = args.scanId;
+          let localScan: WorktreeScan | undefined;
+          if (scanId === undefined) {
+            localScan = await preferredScan(
+              dependencies.currentDirectory(),
+              "complete",
+            );
+            if (!localScan)
+              throw new CodexSecurityError(
+                "No completed scans found for the current repository.",
+              );
+            scanId = localScan.scanId;
+            if (!localScan.inCurrentWorktree)
+              throw new CodexSecurityError(
+                `No completed scan in this worktree. Scan ${scanId} used ${localScan.targetPath} (revision ${localScan["targetRevision"] ?? "unknown"}). To rerun there, use codex-security scans rerun ${scanId}.`,
+              );
+          }
           const saved = await dependencies.runWorkbench(
             workbenchArgs("get-scan-recipe", { scanId }),
           );
@@ -3335,12 +3358,12 @@ export async function main(
             );
           }
           const replay =
-            args.scanId === undefined && isJsonObject(recipe)
+            localScan && isJsonObject(recipe)
               ? {
                   ...saved,
                   recipe: {
                     ...recipe,
-                    repository: dependencies.currentDirectory(),
+                    repository: localScan.targetPath,
                   },
                 }
               : saved;
@@ -3369,13 +3392,11 @@ export async function main(
       },
     })
     .command("match", {
-      description: "Match findings by root cause across saved scans.",
-      usage: [
-        { suffix: "BEFORE AFTER [options]" },
-        { suffix: "--all [options]" },
-      ],
+      description:
+        "Match findings across completed scans. Uncached matches can use the model and save decisions.",
+      usage: [{ suffix: "--all [options]" }],
       examples: [{ options: { all: true } }],
-      hint: "Use scans compare for a pair. Match all completed scans with --all; --force recomputes saved matches.",
+      hint: "For a pair, use scans compare BEFORE AFTER. The older scans match BEFORE AFTER spelling also works.",
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3394,15 +3415,16 @@ export async function main(
           .boolean()
           .default(false)
           .describe("Match all completed scans of the current repository."),
-        force: z
-          .boolean()
-          .default(false)
-          .describe("Recompute an existing semantic finding comparison."),
-        ...MATCHING_MODEL_OPTIONS.shape,
+        ...MATCHING_OPTIONS.shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         if (options.all) {
+          if (args.beforeId !== undefined || args.afterId !== undefined) {
+            throw new CodexSecurityError(
+              "scans match --all does not accept scan identifiers.",
+            );
+          }
           return presentHistory(
             await runMatching(
               (matchingOptions) =>
@@ -3413,8 +3435,13 @@ export async function main(
             format,
           );
         }
+        if (args.beforeId === undefined || args.afterId === undefined) {
+          throw new CodexSecurityError(
+            "scans match requires two scan identifiers or --all.",
+          );
+        }
         return presentHistory(
-          await matchScanPair(args.beforeId!, args.afterId!, options),
+          await matchScanPair(args.beforeId, args.afterId, options),
           "compare",
           format,
         );
@@ -3424,6 +3451,11 @@ export async function main(
       description:
         "Compare findings from two scans. Uncached matches can use the model and save matching decisions.",
       examples: [
+        {
+          args: { beforeId: "BEFORE", afterId: "AFTER" },
+          description:
+            "Compare two scans, using the model and saving decisions on a cache miss.",
+        },
         { args: {}, description: "Compare the latest two completed scans." },
       ],
       destructive: true,
@@ -3439,7 +3471,7 @@ export async function main(
           .optional()
           .describe("Later saved scan identifier (default: latest completed)."),
       }),
-      options: MATCHING_MODEL_OPTIONS,
+      options: MATCHING_OPTIONS,
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         let { beforeId, afterId } = args;
@@ -5258,7 +5290,7 @@ export async function main(
         "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.\n" +
         "Your existing policy stays unchanged until you replace it.\n\n" +
         "Save a draft without answering questions:\n" +
-        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
+        "  codex-security policy . --output-dir ../policy-draft --json",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
         .optional(),
@@ -5497,7 +5529,9 @@ export async function main(
           patch: z
             .boolean()
             .default(false)
-            .describe("Patch and verify confirmed findings after the scan."),
+            .describe(
+              "Patch and verify findings after a scan without a cost limit.",
+            ),
           validate: z
             .boolean()
             .default(false)
@@ -5726,7 +5760,7 @@ export async function main(
     .command(createScanCommands())
     .command("install-hook", {
       description:
-        "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
+        "Install a pre-commit hook that scans staged and unstaged working-tree changes and blocks on errors or findings at the selected severity.",
       examples: [
         { args: { repository: "." }, options: { failOnSeverity: "high" } },
       ],
@@ -5771,7 +5805,7 @@ export async function main(
               { cwd, requestedPaths: [resolve(requested)] },
             ),
           );
-          const hook = execFileSync(
+          const hooksDirectory = execFileSync(
             git.executable,
             [
               "-C",
@@ -5779,63 +5813,18 @@ export async function main(
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
-              "hooks/pre-commit",
+              "hooks",
             ],
             { encoding: "utf8", env: git.environment },
-          ).trim();
+          ).replace(/\r?\n$/u, "");
+          const hook = join(hooksDirectory, "pre-commit");
           const command = [
             realpathSync(process.execPath),
             realpathSync(fileURLToPath(import.meta.url)),
           ]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const invocation = `exec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const contents = `#!/bin/sh\nset -eu\nunset ${[...UNSUPPORTED_GIT_ENVIRONMENT].join(" ")}\n${invocation}`;
-          const previousScopedContents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
-          const previousContents = `#!/bin/sh\nset -eu\n${invocation}`;
-          const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const existing = await readFile(hook, "utf8").catch(() => null);
-          if (
-            existing !== null &&
-            existing !== contents &&
-            existing !== previousScopedContents &&
-            existing !== previousContents &&
-            existing !== legacyContents
-          ) {
-            throw new Error(`A pre-commit hook already exists at ${hook}.`);
-          }
-          if (existing === null) {
-            await mkdir(dirname(hook), { recursive: true });
-            await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing !== contents) {
-            await writeFile(hook, contents, { flag: "w" });
-          }
-          if (process.platform !== "win32") {
-            try {
-              await access(hook, constants.X_OK);
-            } catch {
-              const file = await open(
-                hook,
-                constants.O_RDONLY |
-                  constants.O_NOFOLLOW |
-                  constants.O_NONBLOCK,
-              );
-              try {
-                const metadata = await file.stat();
-                if (
-                  !metadata.isFile() ||
-                  (await file.readFile("utf8")) !== contents
-                )
-                  throw new Error(
-                    `Cannot make an unrecognized pre-commit hook executable: ${hook}`,
-                  );
-                await file.chmod((metadata.mode & 0o777) | 0o100);
-              } finally {
-                await file.close();
-              }
-              await access(hook, constants.X_OK);
-            }
-          }
+          await installManagedHook(hook, command, options.failOnSeverity);
           return {
             hook,
             failOnSeverity: options.failOnSeverity,
@@ -6290,7 +6279,9 @@ export async function main(
           planOnly: z
             .boolean()
             .default(false)
-            .describe("Save components.json without starting scans."),
+            .describe(
+              "Save components.json and print a command to run it. Explicit plans work offline.",
+            ),
           headless: z
             .boolean()
             .default(false)
@@ -6320,6 +6311,9 @@ export async function main(
           provider: PROVIDER_OPTION,
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop each component scan if estimated USD cost exceeds AMOUNT.",
+          ),
+          maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching and owner suggestions.",
           ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
@@ -6417,6 +6411,7 @@ export async function main(
               ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
+              maxTotalCostUsd: options.maxTotalCost,
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
@@ -6437,6 +6432,7 @@ export async function main(
             outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
             planOnly: options.planOnly,
+            maxTotalCostUsd: options.maxTotalCost,
             workers: options.workers,
             config,
             scanOptions: {
@@ -6447,6 +6443,10 @@ export async function main(
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
             onPlan: (components) => {
+              if (dashboard === null && options.maxTotalCost !== undefined)
+                errorOutput.write(
+                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
+                );
               for (const component of components)
                 componentNames.set(component.id, component.name);
               dashboard?.setComponents(components);
@@ -6461,7 +6461,9 @@ export async function main(
                     const line = componentScanEventLine(
                       componentName,
                       event,
-                      options.showCost || settings.maxCostUsd !== undefined,
+                      options.showCost ||
+                        settings.maxCostUsd !== undefined ||
+                        options.maxTotalCost !== undefined,
                       settings.auth,
                     );
                     if (line !== null) errorOutput.write(line);
@@ -6480,16 +6482,22 @@ export async function main(
             signal: controller.signal,
             onProgress: (component) => {
               if (dashboard !== null) dashboard.updateComponent(component);
-              else
+              else {
+                const budget =
+                  component.status === "started" &&
+                  component.maxCostUsd !== undefined
+                    ? ` (${formatUsd(component.maxCostUsd)} per component)`
+                    : "";
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
+                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${budget}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
+              }
             },
             onComplete: (result) => {
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(
@@ -6497,6 +6505,53 @@ export async function main(
                 );
             },
           });
+          if (options.planOnly) {
+            const {
+              auto,
+              component,
+              componentsFile,
+              planOnly,
+              outputDir,
+              config,
+              codex,
+              ...scanOptions
+            } = options;
+            const supplied = new Set(argv.map((arg) => arg.split("=", 1)[0]));
+            const overrides = Object.fromEntries(
+              Object.entries(scanOptions).filter(([key]) => {
+                const flag = cliOptionFlag(key);
+                return (
+                  supplied.has(flag) ||
+                  supplied.has(`--${key}`) ||
+                  supplied.has(`--no-${flag.slice(2)}`)
+                );
+              }),
+            );
+            const nextCommand = [
+              "codex-security",
+              "scan-components",
+              quoteCliPath(repository),
+              ...cliOptionTokens({
+                componentsFile: result.planPath,
+                outputDir: join(dirname(result.planPath), "results"),
+                config: project?.path,
+                ...overrides,
+              }),
+            ].join(" ");
+            const nextCommandNote =
+              codex.length > 0
+                ? "Reapply your --codex overrides when running this command."
+                : undefined;
+            errorOutput.write(
+              `Run this plan: ${diagnosticValue(nextCommand)}\n`,
+            );
+            if (nextCommandNote) errorOutput.write(`${nextCommandNote}\n`);
+            return {
+              ...result,
+              nextCommand,
+              ...(nextCommandNote && { nextCommandNote }),
+            };
+          }
           exitCode =
             interruptedExitCode(controller.signal) ??
             (result.failed || result.deduplication?.status === "failed"
@@ -6542,7 +6597,7 @@ export async function main(
           .min(1, "--output-dir must not be empty.")
           .optional()
           .describe(
-            "Resumable results directory; required with a repository CSV.",
+            "Results directory. Required with a CSV and used as the initial directory in the wizard.",
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))
@@ -6577,6 +6632,9 @@ export async function main(
           .describe("Maximum scan attempts per repository."),
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+        ),
+        maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching and owner suggestions.",
         ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
@@ -6627,11 +6685,6 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            if (options.outputDir !== undefined) {
-              throw new Error(
-                "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
-              );
-            }
             const wizard = await runBulkScanWizard(
               dependencies.bulkScan ??
                 createBulkScanDiscoveryDependencies({
@@ -6668,6 +6721,10 @@ export async function main(
                     ).options,
                   ]),
                 );
+          if (options.maxTotalCost !== undefined)
+            errorOutput.write(
+              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
+            );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -6675,6 +6732,7 @@ export async function main(
             workers: options.workers,
             mode: settings.mode,
             maxAttempts: options.maxAttempts,
+            maxTotalCostUsd: options.maxTotalCost,
             ...(settings.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: settings.maxCostUsd }),
@@ -6716,6 +6774,7 @@ export async function main(
                         signal: controller.signal,
                       });
                       return {
+                        alreadyCompleted: true,
                         manifest: contract.manifest,
                         findings: contract.findings,
                         cost:
@@ -6769,6 +6828,10 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        ...batchScanBudget(
+                          prompts.maxTotalCostShareUsd,
+                          recipe,
+                        ),
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         telemetryContext: prompts.telemetryContext,
                         onTelemetry: prompts.onTelemetry,
@@ -6787,10 +6850,21 @@ export async function main(
                 }
               : {}),
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error, warning }) => {
+            onProgress: ({
+              repository,
+              status,
+              attempt,
+              maxCostUsd,
+              error,
+              warning,
+            }) => {
               const detail = error ?? warning;
+              const budget =
+                maxCostUsd === undefined
+                  ? ""
+                  : `, ${formatUsd(maxCostUsd)} per repository attempt`;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt}${budget})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
           });
@@ -6902,12 +6976,10 @@ export async function main(
           if (scanDir === undefined) {
             let scanId = options.scan;
             if (!scanId || scanId === "latest") {
-              const scans = await latestScans(
-                1,
-                "complete",
-                options.python,
+              const scans = await latestScans(1, "complete", {
+                pythonPath: options.python,
                 protectedRoot,
-              );
+              });
               scanId = scans?.[0]?.scanId;
             }
             if (scanId === undefined) return;
@@ -6975,7 +7047,7 @@ export async function main(
           .string()
           .min(1, "A finding must not be empty.")
           .describe(
-            "Finding text, an existing path, or an explicit local file URL (file:///path/to/findings).",
+            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -7011,11 +7083,21 @@ export async function main(
           if (options.records)
             throw new CodexSecurityError("Use validate --records alone.");
           if (options.knowledgeBase.length > 0) {
-            knowledgeBase = await prepareKnowledgeBase(
-              options.knowledgeBase.map((path) =>
-                resolveCliPath(dependencies.currentDirectory(), path),
-              ),
+            const directory = dependencies.currentDirectory();
+            const checkout = await gitMarkerRoot(
+              directory,
+              undefined,
+              "nearest",
             );
+            const paths = options.knowledgeBase.map((path) =>
+              resolveCliPath(directory, path),
+            );
+            const snapshot = await readKnowledgeBaseSnapshot(
+              paths,
+              undefined,
+              checkout ? [checkout] : [],
+            );
+            knowledgeBase = await prepareKnowledgeBase(snapshot);
           }
           exitCode = await runSkill(
             "validation",
@@ -7058,7 +7140,7 @@ export async function main(
           .min(1, "A finding must not be empty.")
           .optional()
           .describe(
-            "Finding text, a file path or local file URL, or a saved finding identifier.",
+            "Finding text, a local file path or URL, or a saved finding identifier. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -7308,7 +7390,7 @@ export async function main(
           .min(1, "An issue must not be empty.")
           .optional()
           .describe(
-            "Issue text, a file path or local file URL, or a saved finding identifier.",
+            "Issue text, a local file path or URL, or a saved finding identifier. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -7749,6 +7831,12 @@ export async function main(
         async run({ format }) {
           const structured = !useDefaultOutput(format);
           const authentication = scanAuthentication(dependencies.environment);
+          if (authentication.method === "api_key") {
+            errorOutput.write(
+              `API key configured via ${authentication.source} (offline check).\n`,
+            );
+            errorOutput.write("Stored sign-in status:\n");
+          }
           exitCode = await withLoginEnvironment(async (environment) => {
             if (authentication.method !== "api_key")
               await initialCredentialsAvailable(
@@ -7781,9 +7869,6 @@ export async function main(
             (exitCode === 0 || exitCode === 1)
           ) {
             exitCode = 0;
-            errorOutput.write(
-              `Effective scan authentication: API key from ${authentication.source}.\n`,
-            );
             errorOutput.write(
               `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
             );
@@ -8196,19 +8281,6 @@ export async function main(
       (following !== "status" || positionals.length !== 1)
     ) {
       return "Use login to sign in or login status to inspect authentication.";
-    }
-    if (
-      subcommand === "match" &&
-      !argv.some((value) =>
-        ["--schema", "--llms", "--llms-full"].includes(value),
-      )
-    ) {
-      if (argv.includes("--all") && positionals.length > 0) {
-        return "scans match --all does not accept scan identifiers.";
-      }
-      if (!argv.includes("--all") && positionals.length !== 2) {
-        return "scans match requires two scan identifiers or --all.";
-      }
     }
     if (
       command !== "validate" &&
@@ -8872,6 +8944,28 @@ function parseFrameworkArguments(
   };
 }
 
+function cliOptionFlag(key: string): string {
+  return `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+}
+
+function cliOptionTokens(options: Record<string, unknown>): string[] {
+  const tokens: string[] = [];
+  for (const [key, value] of Object.entries(options)) {
+    if (value === undefined) continue;
+    const flag = cliOptionFlag(key);
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (typeof item === "boolean") {
+        tokens.push(item ? flag : `${flag}=false`);
+      } else if (String(item).startsWith("-")) {
+        tokens.push(quoteCliPath(`${flag}=${item}`));
+      } else {
+        tokens.push(flag, quoteCliPath(String(item)));
+      }
+    }
+  }
+  return tokens;
+}
+
 /** Incur prints example keys verbatim and treats every option as a single value.
  * Give its shared help, manifest and skill renderers the actual shell tokens.
  */
@@ -8886,15 +8980,7 @@ function prepareCliExamples(
       const tokens = Object.values(example.args ?? {}).map((value) =>
         quoteCliPath(String(value)),
       );
-      for (const [key, value] of Object.entries(example.options ?? {})) {
-        const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
-        for (const item of Array.isArray(value) ? value : [value]) {
-          tokens.push(item === false ? `${flag}=false` : flag);
-          if (typeof item !== "boolean")
-            tokens.push(quoteCliPath(String(item)));
-        }
-      }
-      example.args = tokens;
+      example.args = [...tokens, ...cliOptionTokens(example.options ?? {})];
       delete example.options;
     }
   }
@@ -10219,6 +10305,15 @@ async function runSkill(
         "Finding or issue inputs must not be empty.",
       );
     }
+    if (input.startsWith("text:")) {
+      const literal = input.slice("text:".length);
+      if (!literal.trim())
+        throw new CodexSecurityError(
+          "Finding or issue inputs must not be empty.",
+        );
+      contents.push(literal);
+      continue;
+    }
     let contentsOrLiteral = input;
     const explicitFile = /^file:\/\//iu.test(input)
       ? new URL(input)
@@ -10251,7 +10346,14 @@ async function runSkill(
       );
       const metadata = await lstat(path, { bigint: true }).catch(
         (error: unknown) => {
-          if (explicitFile) throw error;
+          if (
+            explicitFile ||
+            isAbsolute(expandHome(input)) ||
+            input.startsWith("./") ||
+            input.startsWith("../") ||
+            (process.platform === "win32" && /^\.{1,2}\\/u.test(input))
+          )
+            throw error;
           if (
             typeof error === "object" &&
             error !== null &&
@@ -11106,6 +11208,10 @@ async function executeScan(
   let usageFreshness: string | null = null;
   let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
+  if (maxCostUsd !== undefined && arguments_.patch)
+    throw new CodexSecurityError(
+      "--patch cannot be combined with a scan cost limit. Run the bounded scan first, then use `codex-security patch --scan SCAN_ID` separately.",
+    );
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
@@ -11813,6 +11919,7 @@ async function executeScan(
       options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
         options.knowledgeBasePaths,
         preparationAbortController.signal,
+        resolve(directory, expandHome(repository)),
       );
     }
     if (arguments_.rerunInputIdentity !== undefined) {
@@ -12214,6 +12321,7 @@ async function executeScan(
   try {
     if (
       !arguments_.mock &&
+      maxCostUsd === undefined &&
       actionableFindings.length > 0 &&
       arguments_.patchSeverity === undefined &&
       progress?.interactive === true &&

@@ -1,5 +1,6 @@
 const distModules = [
   "api",
+  "batch-cost",
   "scan-executor",
   "host-protocol",
   "hosted-remediation",
@@ -14,6 +15,7 @@ const distModules = [
   "cli-argument",
   "cli-daybreak",
   "cli-help",
+  "cli-hook",
   "cli-integrations",
   "cli-mcp",
   "cli-scan-logs-json",
@@ -79,6 +81,7 @@ const distModules = [
   "config",
   "config-path",
   "contract",
+  "command-words",
   "cost",
   "cost-model",
   "bedrock-pricing",

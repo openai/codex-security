@@ -621,7 +621,14 @@ describe("CLI workbench", () => {
     const latest = captureCli(main, "stdout");
     expect(await latest.run(["scans", "logs", "--json"], deps)).toBe(0);
     expect(calls).toEqual([
-      ["list-scans", "--repository", "/current/repository", "--limit", "1"],
+      [
+        "list-scans",
+        "--repository",
+        "/current/repository",
+        "--prefer-worktree",
+        "--limit",
+        "1",
+      ],
       ["get-scan", "--scan-id", "scan-1"],
     ]);
     expect(latest.text()).toContain("SYNTHETIC_KEY");
@@ -1078,7 +1085,7 @@ describe("CLI workbench", () => {
 
     expect(
       await stdout.run(
-        ["scans", "match", "--all", "--force", "--json"],
+        ["scans", "match", "--all=true", "--force", "--json"],
         dependencies({
           onWorkbench: (args, input): JsonObject => {
             calls.push(args);
@@ -1411,7 +1418,12 @@ describe("CLI workbench", () => {
       expect(
         await runCapturedCli(
           main,
-          ["scans", "match", "before", "after", ...(force ? ["--force"] : [])],
+          [
+            "scans",
+            ...(force
+              ? ["compare", "before", "after", "--force"]
+              : ["match", "before", "after", "--all=false"]),
+          ],
           dependencies({
             onWorkbench: (args, input): JsonObject => {
               calls.push(args);
@@ -1458,7 +1470,8 @@ describe("CLI workbench", () => {
       ["scans", "match", "before"],
       ["scans", "match", "--all", "before"],
       ["scans", "match", "before", "after", "--all"],
-      ["scans", "compare", "before", "after", "--force"],
+      ["scans", "match", "before", "after", "--all=true"],
+      ["scans", "match", "--all=false"],
     ]) {
       const onWorkbench = mock<() => {}>().mockReturnValue({});
       expect(
@@ -1503,6 +1516,31 @@ describe("CLI workbench", () => {
     },
   );
 
+  test("requires an explicit ID before rerunning another worktree's recipe", async () => {
+    const cli = createCliTest(main);
+    const onWorkbench = mock((args: readonly string[]): JsonObject => {
+      expect(args[0]).toBe("list-scans");
+      return {
+        scans: [
+          {
+            scanId: "sibling-id",
+            targetPath: "/sibling",
+            targetRevision: "abc123",
+            inCurrentWorktree: false,
+          },
+        ],
+      };
+    });
+    expect(
+      await cli.runCli(["scans", "rerun"], dependencies({ onWorkbench })),
+    ).toBe(2);
+    expect(onWorkbench).toHaveBeenCalledTimes(1);
+    expect(cli.stderr.text()).toContain("/sibling (revision abc123)");
+    expect(cli.stderr.text()).toContain(
+      "codex-security scans rerun sibling-id",
+    );
+  });
+
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
     let rerunRepository: string | undefined;
@@ -1513,14 +1551,23 @@ describe("CLI workbench", () => {
         main,
         ["scans", "rerun"],
         dependencies({
+          currentDirectory: "/current/repository/src",
           onTurn: (repository, options) => {
             rerunRepository = repository;
             parentScanId = options.parentScanId;
             maxTimeMinutes = options.maxTimeMinutes;
           },
           onWorkbench: (args): JsonObject =>
-            args[0] === "list-scans"
-              ? { scans: [{ scanId: "latest-scan" }] }
+            args.includes("--prefer-worktree")
+              ? {
+                  scans: [
+                    {
+                      scanId: "latest-scan",
+                      targetPath: "/current/repository",
+                      inCurrentWorktree: true,
+                    },
+                  ],
+                }
               : {
                   scanId: "latest-scan",
                   recipe: {
@@ -1690,9 +1737,12 @@ describe("CLI workbench", () => {
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     const onTurn = mock<(repository: string, options: ScanOptions) => void>();
-    const knowledgeRoot = await temporaryDirectory("rerun-knowledge-");
+    const root = await temporaryDirectory("rerun-recipe-");
     try {
-      const knowledgeBasePath = join(knowledgeRoot, "security.md");
+      const repository = join(root, "repository");
+      await mkdir(join(repository, "src"), { recursive: true });
+      await mkdir(join(repository, "packages", "core"), { recursive: true });
+      const knowledgeBasePath = join(root, "security.md");
       await writeFile(knowledgeBasePath, "Synthetic architecture context.\n");
       const savedConfig = {
         approval_policy: "on-request",
@@ -1711,7 +1761,7 @@ describe("CLI workbench", () => {
             onWorkbench: () => ({
               scanId: "scan-original",
               recipe: {
-                repository: "/original/repository",
+                repository,
                 target: { kind: "paths", paths: ["src", "packages/core"] },
                 mode: "deep",
                 pluginVersion: "1.2.3",
@@ -1731,7 +1781,7 @@ describe("CLI workbench", () => {
         ),
       ).toBe(0);
       expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
-      expect(onTurn.mock.lastCall?.[0]).toBe("/original/repository");
+      expect(onTurn.mock.lastCall?.[0]).toBe(repository);
       expect(onTurn.mock.lastCall?.[1]).toMatchObject({
         target: ["src", "packages/core"],
         mode: "deep",
@@ -1746,7 +1796,7 @@ describe("CLI workbench", () => {
         maxTimeHours: 1.5,
       });
     } finally {
-      await rm(knowledgeRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
     }
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =

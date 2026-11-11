@@ -988,6 +988,17 @@ function unavailableGitMarkerPath(
   );
 }
 
+/** Bound repository-supplied document links to the selected checkout or directory. */
+export async function documentSourceRoot(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (
+    (await gitMarkerRoot(repository, signal, "nearest")) ??
+    (await realpath(repository))
+  );
+}
+
 export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
