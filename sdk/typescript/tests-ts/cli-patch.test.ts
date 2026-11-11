@@ -210,6 +210,22 @@ describe("scan and patch workflow", () => {
                     : kind.includes("relative object directory")
                       ? { GIT_OBJECT_DIRECTORY: "../metadata/objects" }
                       : {};
+      // Native Windows accepts these spellings even when the SDK receives a plain env object.
+      const caseInsensitiveSetting =
+        process.platform === "win32" &&
+        [
+          "removed component with relative index",
+          "removed component with relative common directory",
+          "removed component with relative object directory",
+        ].includes(kind);
+      const componentEnvironment = caseInsensitiveSetting
+        ? Object.fromEntries(
+            Object.entries(gitEnvironment).map(([name, value]) => [
+              name.toLowerCase(),
+              value,
+            ]),
+          )
+        : gitEnvironment;
       const askpass = join(directory, "fixture-askpass.sh");
       const sshAskpass = join(directory, "fixture-ssh-askpass.exe");
       const askpassEnvironment =
@@ -332,7 +348,7 @@ describe("scan and patch workflow", () => {
             currentDirectory: subdirectory,
             environment: {
               ...process.env,
-              ...gitEnvironment,
+              ...componentEnvironment,
               ...providerEnvironment,
               ...askpassEnvironment,
             },
@@ -452,6 +468,12 @@ describe("scan and patch workflow", () => {
                   )
                 )
                   postPatchGitWrites.push([...args]);
+                if (args[0] === "push" && caseInsensitiveSetting) {
+                  const [setting] = Object.keys(gitEnvironment);
+                  const selected = options?.environment?.[setting!];
+                  expect(selected).toBeDefined();
+                  expect(isAbsolute(selected!)).toBe(true);
+                }
                 if (args[0] === "push" && askpassEnvironment.GIT_ASKPASS) {
                   expect(options?.environment?.["GIT_ASKPASS"]).toBe(
                     kind === "removed component with external askpass"
@@ -479,7 +501,7 @@ describe("scan and patch workflow", () => {
                 return runGitRepositoryCommand(command, args, directory, {
                   ...options,
                   environment: {
-                    ...gitEnvironment,
+                    ...componentEnvironment,
                     ...options?.environment,
                     // Local Git transport forwards relative paths to its receiver.
                     ...(kind.includes("relative symlink Git environment") &&
