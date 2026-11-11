@@ -26,6 +26,7 @@ from workbench_test_support import (
     finish_deep_scan,
     get_deep_scan,
     get_scan,
+    load_script,
     mark_deep_coordinator_succeeded,
     read_fixture_deep_scan,
     read_review_state,
@@ -490,7 +491,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
-        assert schema_version == (68,)
+        assert schema_version == (load_script("workbench_schema").MIGRATIONS[-1][0],)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
