@@ -157,13 +157,15 @@ test("detections that differ only by line remain separate findings", async () =>
   ]);
 });
 
+const revision = "0123456789abcdef0123456789abcdef01234567";
+const scanned = "git::https://github.com/example/repo.git//infra";
 // FCS writes git:: files, module sources and call sites from the scan root after a slash.
-test("git:: reports keep module lines", async () => {
+test("git:: reports keep module lines and record the scanned repository", async () => {
   await using fixture = await checkout();
   const call = "called by /main.tf at line 8.";
   await fixture.writeJson({
     ...report,
-    path: "git::https://github.com/example/repo.git",
+    path: `${scanned}?ref=${revision}`,
     rule_detections: [
       {
         ...misconfiguration,
@@ -190,15 +192,96 @@ test("git:: reports keep module lines", async () => {
       },
     ],
   });
-  const { findings, excluded } = await readCrowdStrikeFindings(
-    fixture.file,
-    repositoryUrl,
-  );
-  expect(excluded).toEqual([]);
-  expect(findings.map(({ evidence }) => evidence.locations)).toEqual([
+  const result = await readCrowdStrikeFindings(fixture.file);
+  expect(result.excluded).toEqual([]);
+  expect(result.findings.map(({ evidence }) => evidence.locations)).toEqual([
     [{ path: "modules/example/main.tf", line: 12 }],
     [{ path: "main.tf", line: 8 }],
   ]);
+  const repository = "https://github.com/example/repo.git";
+  expect(result.report).toMatchObject({ git_scan: scanned });
+  expect(result.report).not.toHaveProperty("repositoryUrl");
+  expect(result.findings[0]!.evidence).toMatchObject({
+    details: { kind: "iac", repository: { url: repository } },
+    source_data: { repository_url: repository, git_scan: scanned },
+  });
+});
+
+test.each([
+  "git::ssh://git@github.com/example/repo.git",
+  "git::http://github.com/example/repo.git",
+])("a %s report imports without a scanned repository", async (path) => {
+  await using fixture = await checkout();
+  await fixture.writeJson({
+    ...report,
+    path,
+    rule_detections: [
+      {
+        ...misconfiguration,
+        detections: [{ ...detection, file: "/infra/net/main.tf" }],
+      },
+    ],
+  });
+  const { findings, report: read } = await readCrowdStrikeFindings(
+    fixture.file,
+  );
+  expect(findings[0]!.evidence.locations).toEqual([
+    { path: "infra/net/main.tf", line: 7 },
+  ]);
+  expect(findings[0]!.evidence.details).toBeUndefined();
+  expect(read).not.toHaveProperty("repositoryUrl");
+});
+
+test("a git:: report's repository must agree with a declared URL", async () => {
+  await using fixture = await checkout();
+  const scan = (repository: string) =>
+    fixture.writeJson({
+      ...report,
+      path: `git::https://github.com/example/${repository}.git`,
+      rule_detections: [
+        {
+          ...misconfiguration,
+          detections: [{ ...detection, file: "/infra/net/main.tf" }],
+        },
+      ],
+    });
+  await scan("repo");
+  await fixture.prepare();
+  await scan("upstream");
+  await expect(fixture.prepare()).rejects.toThrow(/different repository/u);
+  await fixture.writeJson({
+    ...report,
+    path: "git::https://github.com/example/upstream.git",
+    rule_detections: [],
+  });
+  await expect(fixture.prepare()).rejects.toThrow(/different repository/u);
+  await scan("upstream");
+  // Without a declared URL, the scanned repository is recorded but does not bind the checkout.
+  const { preview } = await fixture.prepare({ sourceRepositoryUrl: undefined });
+  expect(preview.excluded).toEqual([]);
+  expect(preview.findings[0]!.evidence.details?.repository?.url).toBe(
+    "https://github.com/example/upstream.git",
+  );
+  await expect(fixture.prepareNormalized(preview)).rejects.toThrow(
+    /different repository/u,
+  );
+  const replay = (input: typeof preview) =>
+    prepareNormalizedLocalImport(
+      input,
+      {
+        provider: "crowdstrike",
+        sourceKey: source.sourceKey,
+        repository: fixture.repository,
+      },
+      { environment: fixture.environment },
+    );
+  await replay(preview);
+  const relabeled = structuredClone(preview);
+  relabeled.findings[0]!.evidence.source_data!["git_scan"] =
+    "git::https://github.com/example/repo.git";
+  await expect(replay(relabeled)).rejects.toThrow(/different repository/u);
+  await writeFile(join(fixture.repository, "infra", "net", "main.tf"), "\n");
+  await expect(replay(preview)).rejects.toThrow(/changed after the FCS scan/u);
 });
 
 test("registry module detections use the call line that FCS reports for the module", async () => {

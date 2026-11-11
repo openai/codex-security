@@ -35,6 +35,8 @@ git -C "$checkout" checkout --quiet --detach "$commit"
 
 To scan another branch, replace `HEAD` with `refs/heads/BRANCH`. Paths start at the repository root. If the URL ends with a subdirectory, such as `.git//infra?ref=...`, paths start at that subdirectory. Use `"$checkout/infra"` as `--repository`. If the checkout is at a different commit, the import stops at the first file that changed.
 
+A report of a `git::https://` URL names its repository. The import records that URL, without the subdirectory or `?ref=`, as the findings' repository. If you also pass `--source-repository-url`, both must name the same repository, or the import stops.
+
 ## Preview, save and read back
 
 The project does not need to be a Git checkout.
@@ -47,7 +49,7 @@ codex-security publish findings "$report" --provider crowdstrike --to local \
 
 Every detection's file must exist in `--repository` with the content that FCS scanned, which the report records as `file_sha256`. If a file is missing or changed, the import stops and names it, because the reported lines might no longer be correct. Select the directory and commit that FCS scanned, or scan again from its root. Different line endings also count as a change, for example in a Windows checkout of a report from a Linux CI runner.
 
-Add `--source-repository-url https://github.com/example/project` to record the repository. With it, findings get typed `iac` or `secret` details. If `--repository` is a Git checkout, the URL must match one of its fetch remotes. Without the URL, each finding has a title, severity, description and location, and `evidence.source_data` keeps the native FCS rule and detection.
+Add `--source-repository-url https://github.com/example/project` to record the repository of a local scan. With a repository URL, findings get typed `iac` or `secret` details. If you pass the URL and `--repository` is a Git checkout, the URL must match one of its fetch remotes. Without a URL, each finding has a title, severity, description and location, and `evidence.source_data` keeps the native FCS rule and detection.
 
 Remove `--dry-run` and confirm to save. Run `codex-security findings imported /path/to/project --format json` to read back the findings and their initial `not_assessed` Codex assessment. To check a finding against the code, see [Work with imported findings](README.md#work-with-imported-findings).
 
@@ -85,7 +87,7 @@ This shortened report has one detection. The reader keeps its file and line as t
 - With a repository URL, `details.kind` is `secret` for the Secret Management rule category and `iac` for all others. `details.configuration.actual` is the FCS `reason`, and `details.configuration.expected` is its `recommendation`. FCS names the attribute that holds a secret, not its value.
 - A detection in a local Terraform module points to the module file. FCS also reports a copy at the module call, and both are imported.
 - A detection in a registry or Git module names the calling file. Its location is the call line from `module_remediation`, or no line if FCS does not state one.
-- `evidence.source_data` keeps the FCS version, the native rule without its detection list, and the one detection.
+- `evidence.source_data` keeps the FCS version, the native rule without its detection list, and the one detection. For a `git::` scan, it also keeps the scanned URL without `?ref=`.
 
 ## Repeat an import
 

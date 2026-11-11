@@ -22,7 +22,10 @@ import {
   stableId,
   text,
 } from "./scanner-import.js";
-import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+import {
+  declaredScannerRepositoryUrl,
+  validScannerRepositoryUrl,
+} from "./scanner-repository-url.js";
 
 export const crowdstrikeReportFormat = "crowdstrike-fcs-iac/v1";
 
@@ -43,13 +46,32 @@ function positive(value: unknown): number | null {
     : null;
 }
 
-// FCS writes paths relative to its working directory. A remote git:: scan
-// writes them relative to the clone root with a leading slash.
-function detectionPath(detection: NativeRecord, remote: boolean) {
+// A git:: scan path without its ?ref= query.
+function gitScan(path: unknown): string | undefined {
+  const value = text(path);
+  return value?.startsWith("git::") ? value.split("?", 1)[0] : undefined;
+}
+
+// The repository of an HTTPS git:: scan, without its //subdirectory. Checkouts
+// fetch over HTTPS or SSH, which do not match an http:// URL.
+function gitScanRepository(scan: string): string | undefined {
+  const source = scan.slice("git::".length);
+  const scheme = /^https:\/\//iu.exec(source)?.[0];
+  if (!scheme) return undefined;
+  const subdirectory = source.indexOf("//", scheme.length);
+  const url = subdirectory === -1 ? source : source.slice(0, subdirectory);
+  return validScannerRepositoryUrl(url, "local") ? url : undefined;
+}
+
+// FCS writes paths relative to its working directory. A git:: scan writes them
+// from the scan root after a slash.
+function detectionPath(detection: NativeRecord, scan: string | undefined) {
   const raw = text(detection["file"]);
-  const path = repositoryFilePath(remote ? raw?.replace(/^\//u, "") : raw);
+  const path = repositoryFilePath(
+    scan === undefined ? raw : raw?.replace(/^\//u, ""),
+  );
   if (!path)
-    throw new Error(
+    throw new CodexSecurityError(
       "CrowdStrike detection file must be checkout-relative. Run the FCS CLI from the checkout root.",
     );
   return path;
@@ -91,11 +113,15 @@ export async function crowdstrikeCheckout(
     throw new CodexSecurityError(
       "CrowdStrike imports require a report from the crowdstrike reader.",
     );
-  const claims: unknown[] = [
+  // Only a declared URL binds the checkout to its fetch remotes. A git:: report's
+  // own repository is recorded and must agree with it.
+  const declarations: unknown[] = [
     declared,
     input.report["repositoryUrl"],
     ...references.map(({ url }) => url),
   ];
+  const reportScan = gitScan(input.report["git_scan"]);
+  const claims = [...declarations, reportScan && gitScanRepository(reportScan)];
   const files = new Map<string, Set<unknown>>();
   for (const { evidence } of input.findings) {
     validateExternalEvidence(evidence, "local");
@@ -104,7 +130,12 @@ export async function crowdstrikeCheckout(
       throw new CodexSecurityError(
         "CrowdStrike findings must retain their native detection.",
       );
-    claims.push(data["repository_url"], evidence.details?.repository?.url);
+    const scan = gitScan(data["git_scan"]);
+    claims.push(
+      data["repository_url"],
+      evidence.details?.repository?.url,
+      scan && gitScanRepository(scan),
+    );
     const { file_sha256 } = record(data["detection"], "CrowdStrike detection");
     for (const { path } of evidence.locations ?? []) {
       const file = repositoryFilePath(path);
@@ -141,7 +172,8 @@ export async function crowdstrikeCheckout(
       );
   }
   const url = urls[0];
-  if (url === undefined) return undefined;
+  if (url === undefined || declarations.every((claim) => claim == null))
+    return undefined;
   const { hostname } = new URL(url);
   return {
     url,
@@ -158,7 +190,14 @@ export async function readCrowdStrikeFindings(
   path: string,
   sourceRepositoryUrl?: string,
 ): Promise<ExternalFindings> {
-  const repositoryUrl =
+  const document = record(await readScannerJson(path), "CrowdStrike report");
+  if (!Array.isArray(document["rule_detections"]))
+    throw new CodexSecurityError(
+      "Expected an FCS CLI 4.x IaC JSON report with rule_detections.",
+    );
+  const version = text(document["fcs_version"]);
+  const scan = gitScan(document["path"]);
+  const declared =
     sourceRepositoryUrl === undefined
       ? undefined
       : declaredScannerRepositoryUrl(
@@ -166,13 +205,8 @@ export async function readCrowdStrikeFindings(
           "CrowdStrike",
           "local",
         );
-  const document = record(await readScannerJson(path), "CrowdStrike report");
-  if (!Array.isArray(document["rule_detections"]))
-    throw new CodexSecurityError(
-      "Expected an FCS CLI 4.x IaC JSON report with rule_detections.",
-    );
-  const version = text(document["fcs_version"]);
-  const remote = text(document["path"])?.startsWith("git::") ?? false;
+  // A git:: report names the repository that FCS cloned.
+  const repositoryUrl = declared ?? (scan && gitScanRepository(scan));
   const entries: Entry[] = array(
     document["rule_detections"],
     "CrowdStrike rule_detections",
@@ -192,7 +226,7 @@ export async function readCrowdStrikeFindings(
         rule["rule_category"] === "Secret Management" ? "secret" : "iac";
       const reason = text(detection["reason"]);
       const recommendation = text(detection["recommendation"]);
-      const file = detectionPath(detection, remote);
+      const file = detectionPath(detection, scan);
       return validateExternalEvidence(
         {
           title: requiredText(rule["rule_name"], "CrowdStrike rule_name"),
@@ -229,6 +263,7 @@ export async function readCrowdStrikeFindings(
             format: crowdstrikeReportFormat,
             fcs_version: version,
             ...(repositoryUrl && { repository_url: repositoryUrl }),
+            ...(scan !== undefined && { git_scan: scan }),
             rule,
             detection,
           }),
@@ -239,7 +274,7 @@ export async function readCrowdStrikeFindings(
     ({ rule, detection }) =>
       stableId("crowdstrike", [
         requiredText(rule["rule_uuid"], "CrowdStrike rule_uuid"),
-        detectionPath(detection, remote),
+        detectionPath(detection, scan),
         positive(detection["line"]),
         detection["resource_type"] ?? null,
         detection["resource_name"] ?? null,
@@ -250,7 +285,8 @@ export async function readCrowdStrikeFindings(
     {
       report: {
         format: crowdstrikeReportFormat,
-        ...(repositoryUrl && { repositoryUrl }),
+        ...(declared && { repositoryUrl: declared }),
+        ...(scan !== undefined && { git_scan: scan }),
         fcs_version: version,
         scan_uuid: text(document["scan_uuid"]),
       },
