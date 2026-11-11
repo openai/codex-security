@@ -249,19 +249,16 @@ describe("trusted executable resolution", () => {
         );
       }
       const candidate = `${lexical}/linked/../python`;
+      const runtimePath = join(root, "runtime.mjs");
       const build = spawnSync(
         process.execPath,
         [
           "build",
           fileURLToPath(new URL("../src/runtime.ts", import.meta.url)),
-          fileURLToPath(
-            new URL("../src/trusted-executable.ts", import.meta.url),
-          ),
           "--target=node",
           "--format=esm",
-          "--entry-naming=[name].mjs",
-          "--outdir",
-          root,
+          "--outfile",
+          runtimePath,
         ],
         { encoding: "utf8" },
       );
@@ -302,7 +299,7 @@ describe("trusted executable resolution", () => {
       await chmod(trusted + "/python", 0o600);
       assert.equal(await resolveTrustedExecutable(candidates[0], { PATH: "" }, repository), null);
     `,
-          pathToFileURL(join(root, "trusted-executable.mjs")).href,
+          new URL("../src/trusted-executable.ts", import.meta.url).href,
           JSON.stringify([
             [
               candidate,
@@ -314,7 +311,7 @@ describe("trusted executable resolution", () => {
             join(lexical, "python"),
             marker,
           ]),
-          pathToFileURL(join(root, "runtime.mjs")).href,
+          pathToFileURL(runtimePath).href,
         ],
         { encoding: "utf8" },
       );

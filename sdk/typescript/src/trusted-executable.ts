@@ -1,1 +1,1 @@
-export * from "#plugin-shared/checkout/trusted-executable";
+export * from "./shared/checkout/trusted-executable.js";

@@ -3113,9 +3113,8 @@ def _record_owner_results(
             output = (error.stdout or b"").decode("utf-8", errors="replace")
             warnings.append("Optional owner verification timed out")
         by_occurrence = {finding["occurrenceId"]: finding for finding in findings}
-        for line in output.splitlines(keepends=True):
-            if not line.endswith("\n"):
-                raise ValueError("Incomplete owner result")
+        *records, tail = output.split("\n")
+        for line in records:
             item = json.loads(line)
             finding = by_occurrence.pop(item["occurrenceId"])
             if item["findingId"] != finding["findingId"]:
@@ -3136,6 +3135,8 @@ def _record_owner_results(
                 hint = extensions["ownerSuggestion"] = {}
             hint["revision"] = revision
             hint["suggestions"] = item["suggestions"]
+        if tail:
+            raise ValueError("Incomplete owner result")
         if by_occurrence and result is not None and result.returncode == 0:
             warnings.append(f"Owner verifier omitted results for {len(by_occurrence)} findings")
     except Exception as error:

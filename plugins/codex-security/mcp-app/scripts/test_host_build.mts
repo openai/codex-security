@@ -62,7 +62,12 @@ test("builds and loads the host runtime from standalone plugin source", async (t
   const git = (...args: string[]) =>
     execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
   git("init", "-q");
-  await writeFile(join(repo, "CODEOWNERS"), "/owned.ts @reviewer\n");
+  await mkdir(join(repo, "nested"));
+  await writeFile(
+    join(repo, "nested", "owned.ts"),
+    "export const nested = true;\n",
+  );
+  await writeFile(join(repo, "CODEOWNERS"), "owned.ts @reviewer\n");
   await writeFile(join(repo, "owned.ts"), "export const owned = true;\n");
   await writeFile(join(repo, "other.ts"), "export const other = true;\n");
   git("add", ".");
@@ -82,7 +87,7 @@ test("builds and loads the host runtime from standalone plugin source", async (t
     occurrenceId: String(index),
     title: "Fixture",
     summary: "",
-    locations: [{ path: index === 0 ? "owned.ts" : "other.ts" }],
+    locations: [{ path: index === 0 ? "./owned.ts" : "other.ts" }],
   }));
   // Exercise invocation through a directory alias, as with macOS temporary paths.
   let verifierDirectory = mcp;
@@ -115,6 +120,30 @@ test("builds and loads the host runtime from standalone plugin source", async (t
           entry.suggestions[0].evidence[0].kind === "history",
       ),
   );
+
+  const nested = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        join(verifierDirectory, "scan-owners.mjs"),
+        join(repo, "nested"),
+        git("rev-parse", "HEAD"),
+      ],
+      {
+        input: JSON.stringify([
+          { ...inputs[0], locations: [{ path: "./owned.ts", startLine: 1 }] },
+        ]),
+        encoding: "utf8",
+      },
+    ),
+  );
+  assert.equal(nested.suggestions[0].owner.handle, "reviewer");
+  assert.equal(
+    nested.suggestions[0].evidence[0].matchedPath,
+    "nested/./owned.ts",
+  );
+  assert.equal(nested.suggestions[1].owner.email, "reviewer@example.test");
+  assert.equal(nested.suggestions[1].evidence[0].kind, "blame");
 
   const emptyPathEnvironment = {
     ...Object.fromEntries(

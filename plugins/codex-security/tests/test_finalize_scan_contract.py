@@ -125,6 +125,42 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
             self.assertEqual(finding_file.read_bytes(), sealed)
             helper.assert_called_once()
 
+    def test_seal_keeps_unicode_line_separator_inside_owner_record(self) -> None:
+        target = self.manifest["scan"]["target"]
+        target.update(kind="git_revision", revision="a" * 40)
+        target.pop("snapshotDigest")
+        second = copy.deepcopy(self.findings["findings"][0])
+        second["ruleId"] += ".second"
+        self.findings["findings"].append(second)
+        self.write_scan()
+        names = ["First\u2028Author", "Second Author"]
+
+        def verify(command, *, input, **kwargs):
+            output = []
+            for row, name in zip(json.loads(input), names, strict=True):
+                record = {key: row[key] for key in ("findingId", "occurrenceId")}
+                owner = {"name": name, "email": "author@example.test"}
+                record.update(status="identified", suggestions=[{"owner": owner}])
+                output.append(json.dumps(record, ensure_ascii=False) + "\n")
+            return subprocess.CompletedProcess(command, 0, "".join(output), "")
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
+            mock.patch.object(FINALIZER.subprocess, "run", side_effect=verify),
+        ):
+            prepared = FINALIZER._prepare_scan_finalization(
+                self.scan_dir, owner_repository=self.scan_dir
+            )
+            FINALIZER._write_prepared_scan_finalization(prepared)
+        sealed = self.read_json("findings.json")["findings"]
+        self.assertCountEqual(
+            [
+                row["extensions"]["ownerSuggestion"]["suggestions"][0]["owner"]["name"]
+                for row in sealed
+            ],
+            names,
+        )
+
     def test_timeout_retains_only_completed_occurrences(self) -> None:
         rows = [
             {"findingId": "a", "occurrenceId": "one"},

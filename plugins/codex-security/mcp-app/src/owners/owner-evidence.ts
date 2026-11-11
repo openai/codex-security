@@ -49,6 +49,15 @@ export async function findingsAtScanRevision(
   }));
 }
 
+// Drafts may spell a tracked path with a dot component. Keep its original
+// spelling in citations, but use Git's spelling for tree and history lookups.
+function gitTreePath(path: string): string {
+  return path
+    .split("/")
+    .filter((part) => part !== ".")
+    .join("/");
+}
+
 /** Read committed objects, so dirty files and source symlinks are never followed. */
 export async function ownerRepository(
   repository: string,
@@ -246,8 +255,9 @@ export async function collectOwnerEvidence(
       );
     } else {
       for (const path of new Set(finding.locations.map(({ path }) => path))) {
-        if (!hasFile(path)) continue;
-        const rule = codeownersForPath(codeowners.rules, path);
+        const trackedPath = gitTreePath(path);
+        if (!hasFile(trackedPath)) continue;
+        const rule = codeownersForPath(codeowners.rules, trackedPath);
         if (rule === undefined) continue;
         if (rule.owners.length === 0) continue;
         const citation = addOwnerEvidence(context, {
@@ -302,7 +312,8 @@ export async function collectGitOwnerEvidence(
   const add = (item: Omit<OwnerEvidence, "id">) =>
     addOwnerEvidence(context, item);
   for (const path of new Set(finding.locations.map(({ path }) => path))) {
-    if (!hasFile(path)) {
+    const trackedPath = gitTreePath(path);
+    if (!hasFile(trackedPath)) {
       context.limitations.push(`Not a regular file at HEAD: ${path}`);
       continue;
     }
@@ -313,7 +324,7 @@ export async function collectGitOwnerEvidence(
       (location) => location.startLine !== undefined,
     );
     if (policy === "scan" && !lineLocations.length) {
-      const history = await repository.recentFileHistory(path);
+      const history = await repository.recentFileHistory(trackedPath);
       for (let i = 0; i + 3 < history.length; i += 4) {
         const [commit, name, email, timestamp] = history.slice(i, i + 4) as [
           string,
@@ -333,7 +344,7 @@ export async function collectGitOwnerEvidence(
       }
       continue;
     }
-    const source = await git("cat-file", "blob", `${revision}:${path}`);
+    const source = await git("cat-file", "blob", `${revision}:${trackedPath}`);
     if (!source || source.includes("\0")) {
       context.limitations.push(`Source is empty or binary: ${path}`);
       continue;
@@ -380,7 +391,7 @@ export async function collectGitOwnerEvidence(
         `${start},${end}`,
         revision,
         "--",
-        path,
+        trackedPath,
       );
       let commit = "",
         name = "",
@@ -435,7 +446,7 @@ export async function collectGitOwnerEvidence(
         "-z",
         revision,
         "--",
-        path,
+        trackedPath,
       )
     ).split("\0");
     for (let index = 0; index + 4 < history.length; index += 5) {
