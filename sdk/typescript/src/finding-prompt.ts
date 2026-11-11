@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,7 +17,9 @@ export async function prepareFindingPrompt(
   if (characterCount(prompt) <= MAX_CODEX_INPUT_CHARACTERS)
     return { prompt, async [Symbol.asyncDispose]() {} };
 
-  const directory = await mkdtemp(join(tmpdir(), "codex-security-finding-"));
+  const directory = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-finding-"),
+  );
   const cleanup = async () => {
     // Cleanup must not replace a completed result or the original failure.
     await rm(directory, { recursive: true, force: true }).catch(() => {});

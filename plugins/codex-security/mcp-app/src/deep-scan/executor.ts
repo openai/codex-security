@@ -1,8 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
-  accessSync,
   type BigIntStats,
-  constants as fsConstants,
+  createReadStream,
   existsSync,
   promises as fs,
   readdirSync,
@@ -33,7 +32,12 @@ import {
   preflightProviderDefinitions,
   profileConfigOverrides,
 } from "../../../scripts/codex_profile.mjs";
-import { executablePathForSpawn } from "../executable-path.js";
+import { DEEP_SCAN_SETTINGS } from "../deep-scan-settings.js";
+import {
+  configuredExecutableValue,
+  executablePathForSpawn,
+  isExecutableFile,
+} from "../executable-path.js";
 import { writePrivateFile } from "./artifacts.js";
 import { workerTokenUsage } from "./usage-receipt.js";
 import {
@@ -88,6 +92,7 @@ export interface CodexSdkWorkerArtifactContext {
 interface BoundCodexExecutable {
   readonly path: string;
   readonly identity: BigIntStats;
+  readonly sha256?: string;
 }
 
 interface CodexSdkWorkerRuntimeSettings {
@@ -104,7 +109,10 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
   private runtimeModelConfig?: Promise<NonNullable<CodexOptions["config"]>>;
   private runtimeSettings?: Promise<CodexSdkWorkerRuntimeSettings>;
   // Each live coordinator keeps the executable selected for its first worker.
-  private codexExecutable?: Promise<BoundCodexExecutable>;
+  private codexExecutable?: {
+    signal: AbortSignal;
+    promise: Promise<BoundCodexExecutable>;
+  };
   private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
   private pluginVersion?: Promise<string | undefined>;
 
@@ -136,6 +144,49 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     return turn.finalResponse;
   }
 
+  private async getCodexExecutable(
+    environment: NodeJS.ProcessEnv,
+    cwd: string,
+    signal: AbortSignal,
+  ): Promise<BoundCodexExecutable> {
+    while (true) {
+      signal.throwIfAborted();
+      let binding = this.codexExecutable;
+      if (!binding) {
+        binding = {
+          signal,
+          promise: bindCodexExecutable(environment, cwd, signal).catch(
+            (error) => {
+              // An unsuccessful snapshot has not pinned an executable yet.
+              if (this.codexExecutable === binding)
+                this.codexExecutable = undefined;
+              throw error;
+            },
+          ),
+        };
+        this.codexExecutable = binding;
+      }
+      const aborted = Promise.withResolvers<never>();
+      const onAbort = () => aborted.reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      try {
+        const executable = await Promise.race([
+          binding.promise,
+          aborted.promise,
+        ]);
+        signal.throwIfAborted();
+        return executable;
+      } catch (error) {
+        signal.throwIfAborted();
+        // Another worker's cancellation does not cancel this caller's first lookup.
+        if (!binding.signal.aborted) throw error;
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
+  }
+
   private async runTurn(
     request:
       | CodexWorkerRequest
@@ -158,6 +209,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ? undefined
         : resolve(dirname(discovery.promptPath), `limits-${randomUUID()}.toml`);
     try {
+      request.signal.throwIfAborted();
       const parentSandbox = this.modelSettings.parentSandbox;
       if (!parentSandbox) {
         throw new DeepScanNonRetryableError(
@@ -165,15 +217,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         );
       }
       const workerProfile = workerPermissionProfile(
-        request.workerUsageDirectory
-          ? {
-              ...parentSandbox,
-              literalFilesystemDenies: [
-                ...(parentSandbox.literalFilesystemDenies ?? []),
-                request.workerUsageDirectory,
-              ],
-            }
-          : parentSandbox,
+        parentSandbox,
+        request.workerUsageDirectory,
       );
       const resolved = this.modelSettings.codexOptions;
       const originalCwd = process.cwd();
@@ -202,6 +247,8 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         }
         childEnv[name] = value;
       }
+      if (parentSandbox.pluginReadRoot !== undefined)
+        childEnv.CODEX_SECURITY_PLUGIN_ROOT = parentSandbox.pluginReadRoot;
       if (deepConfigFile !== undefined) {
         const config = this.modelSettings.deepScanConfig!;
         // The saved run owns these limits, including after a coordinator restart.
@@ -209,16 +256,11 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         await writePrivateFile(
           deepConfigFile,
           stringifyToml({
-            deep_scan: {
-              workers: config.workers,
-              subagents: config.subagents,
-              stop_after_no_new: config.stopAfterNoNew,
-              stop_after_consecutive_errors: config.stopAfterConsecutiveErrors,
-              max_discovery_runs: config.maxDiscoveryRuns,
-              ...(config.maxTimeHours === undefined
-                ? {}
-                : { max_time_hours: config.maxTimeHours }),
-            },
+            deep_scan: Object.fromEntries(
+              DEEP_SCAN_SETTINGS.filter(
+                ([name]) => config[name] !== undefined,
+              ).map(([name, key]) => [key, config[name]]),
+            ),
           }),
         );
         for (const name of Object.keys(childEnv)) {
@@ -375,17 +417,14 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "CODEX_API_KEY",
         process.platform,
       )?.trim();
-      const executable = await (this.codexExecutable ??= bindCodexExecutable(
+      const executable = await this.getCodexExecutable(
         resolved?.codexPathOverride === undefined
           ? childEnv
           : { ...childEnv, CODEX_CLI_PATH: resolved.codexPathOverride },
         originalCwd,
-      ).catch((error) => {
-        // A failed first lookup has not pinned an executable yet; allow startup retries.
-        this.codexExecutable = undefined;
-        throw error;
-      }));
-      await verifyBoundCodexExecutable(executable);
+        request.signal,
+      );
+      await verifyBoundCodexExecutable(executable, request.signal);
       if (resolved?.baseUrl)
         configOverrides.push(
           ...profileConfigOverrides({ openai_base_url: resolved.baseUrl }),
@@ -498,7 +537,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
 
       try {
         // Detect updates during preflight before starting a fresh or resumed worker.
-        await verifyBoundCodexExecutable(executable);
+        await verifyBoundCodexExecutable(executable, controller.signal);
         const { events } = await thread.runStreamed(input, {
           signal: controller.signal,
           ...(request.kind === "compare" && { outputSchema: request.schema }),
@@ -574,6 +613,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         request.signal.removeEventListener("abort", forwardAbort);
       }
     } catch (error) {
+      // Pin checks throw the caller's reason directly; keep SDK worker errors intact.
+      if (request.signal.aborted && error === request.signal.reason)
+        throw error;
       throw classifyCodexWorkerError(error);
     } finally {
       if (includePathsFile !== undefined)
@@ -656,12 +698,36 @@ function workerSubagentConfig(subagents: number, inheritedFeatures: unknown) {
   };
 }
 
-function workerPermissionProfile(sandbox: DeepWorkerParentSandbox) {
+function workerPermissionProfile(
+  sandbox: DeepWorkerParentSandbox,
+  workerUsageDirectory?: string,
+) {
+  const literalDenies = sandbox.literalFilesystemDenies ?? [];
   const filesystem = new Map<string, string | Record<string, string>>([
     [":root", "read"],
-    ...sandbox.filesystemDenies.map((key): [string, string] => [key, "deny"]),
   ]);
-  for (const literal of sandbox.literalFilesystemDenies ?? []) {
+  if (sandbox.pluginReadRoot !== undefined)
+    filesystem.set(sandbox.pluginReadRoot, { ".": "read" });
+  if (sandbox.sourceReadRoot !== undefined)
+    filesystem.set(sandbox.sourceReadRoot, { ".": "read" });
+  for (const path of [...sandbox.filesystemDenies, ...literalDenies])
+    filesystem.set(path, "deny");
+  const pointDenies = literalDenies.filter((path) => /[*?[\]]/u.test(path));
+  // Bubblewrap cannot mount a second mask inside a directory it already hid.
+  if (
+    workerUsageDirectory &&
+    (process.platform !== "linux" ||
+      !literalDenies.some(
+        (path) =>
+          workerUsageDirectory === path ||
+          workerUsageDirectory.startsWith(
+            path.endsWith(sep) ? path : `${path}${sep}`,
+          ),
+      ))
+  ) {
+    pointDenies.push(workerUsageDirectory);
+  }
+  for (const literal of pointDenies) {
     if (sandbox.filesystemDenies.includes(literal)) {
       const root = parse(literal).root;
       const scope = filesystem.get(root);
@@ -888,34 +954,101 @@ function restoredWorkerRuntime(
 async function bindCodexExecutable(
   env: NodeJS.ProcessEnv,
   originalCwd: string,
+  signal?: AbortSignal,
 ): Promise<BoundCodexExecutable> {
+  signal?.throwIfAborted();
   const path = resolveCodexPath(
     env,
     process.platform,
     process.arch,
     originalCwd,
   );
-  return { path, identity: await codexExecutableIdentity(path) };
+  const identity = await codexExecutableIdentity(path);
+  signal?.throwIfAborted();
+  if (process.platform !== "win32") return { path, identity };
+  const sha256 = await codexExecutableDigest(path, signal);
+  const after = await codexExecutableIdentity(path);
+  signal?.throwIfAborted();
+  if (
+    !sameCodexExecutableFile(after, identity) ||
+    after.ctimeNs !== identity.ctimeNs
+  )
+    throw codexExecutableChangedError(path);
+  return { path, identity, sha256 };
 }
 
 async function verifyBoundCodexExecutable(
   executable: BoundCodexExecutable,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   let identity: BigIntStats;
   try {
     identity = await codexExecutableIdentity(executable.path);
+    signal?.throwIfAborted();
   } catch (error) {
+    signal?.throwIfAborted();
     throw codexExecutableChangedError(executable.path, error);
   }
-  if (
-    identity.dev !== executable.identity.dev ||
-    identity.ino !== executable.identity.ino ||
-    identity.size !== executable.identity.size ||
-    identity.mtimeNs !== executable.identity.mtimeNs ||
-    identity.ctimeNs !== executable.identity.ctimeNs
-  ) {
+  if (!sameCodexExecutableFile(identity, executable.identity)) {
     throw codexExecutableChangedError(executable.path);
   }
+  if (identity.ctimeNs !== executable.identity.ctimeNs) {
+    if (process.platform === "win32" && executable.sha256 !== undefined) {
+      // Windows can advance change time on first execution without changing bytes.
+      try {
+        while (true) {
+          signal?.throwIfAborted();
+          const sha256 = await codexExecutableDigest(executable.path, signal);
+          const after = await codexExecutableIdentity(executable.path);
+          signal?.throwIfAborted();
+          if (
+            !sameCodexExecutableFile(after, executable.identity) ||
+            sha256 !== executable.sha256
+          )
+            break;
+          if (after.ctimeNs === identity.ctimeNs) return;
+          // Confirm a stable content snapshot if change time advanced during the read.
+          identity = after;
+        }
+      } catch (error) {
+        signal?.throwIfAborted();
+        throw codexExecutableChangedError(executable.path, error);
+      }
+    }
+    throw codexExecutableChangedError(executable.path);
+  }
+}
+
+async function codexExecutableDigest(
+  path: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  signal?.throwIfAborted();
+  const digest = createHash("sha256");
+  try {
+    for await (const bytes of createReadStream(path, { signal })) {
+      signal?.throwIfAborted();
+      digest.update(bytes);
+    }
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw error;
+  }
+  signal?.throwIfAborted();
+  return digest.digest("hex");
+}
+
+function sameCodexExecutableFile(
+  actual: BigIntStats,
+  expected: BigIntStats,
+): boolean {
+  return (
+    actual.dev === expected.dev &&
+    actual.ino === expected.ino &&
+    actual.size === expected.size &&
+    actual.mtimeNs === expected.mtimeNs
+  );
 }
 
 async function codexExecutableIdentity(path: string): Promise<BigIntStats> {
@@ -1166,11 +1299,12 @@ export function resolveCodexPath(
   originalCwd: string = process.cwd(),
 ): string {
   const searchPath = searchPathForPlatform(env, platform);
-  const configured = environmentVariable(
-    env,
-    "CODEX_CLI_PATH",
+  const configured = configuredExecutableValue(
+    environmentVariable(env, "CODEX_CLI_PATH", platform),
     platform,
-  )?.trim();
+    (value) =>
+      isExecutableFile(absoluteCodexPath(value, platform, originalCwd)),
+  );
   if (configured && (platform !== "win32" || !isWindowsAppsPath(configured))) {
     if (isBareCommandName(configured)) {
       const executableName =
@@ -1367,16 +1501,6 @@ function resolveWindowsCachedBinary(
     return undefined;
   }
   return selected?.path;
-}
-
-function isExecutableFile(value: string): boolean {
-  try {
-    if (!statSync(value).isFile()) return false;
-    accessSync(value, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function absoluteCodexPath(

@@ -58,7 +58,8 @@ async function testDeepScanStdioLifecycle() {
   const targetPath = path.join(fixtureRoot, "target");
   const failedTargetPath = path.join(fixtureRoot, "failed-target");
   const expiredTargetPath = path.join(fixtureRoot, "expired-target");
-  const stateDir = path.join(fixtureRoot, "state");
+  const stateDir = path.join(fixtureRoot, "state]");
+  const scanRoot = path.join(await realpath(fixtureRoot), "scans ");
   const codexHome = path.join(fixtureRoot, "codex [home]");
   const installedPluginRoot = path.join(codexHome, "plugins", "installed");
   const runtimeConfigPath = path.join(fixtureRoot, "active-config.toml");
@@ -126,6 +127,10 @@ async function testDeepScanStdioLifecycle() {
         entries: [
           ...parentSandbox.permissionProfile.file_system.entries,
           { path: { type: "path", path: codexHome }, access: "deny" },
+          {
+            path: { type: "path", path: path.join(stateDir, "codex-home") },
+            access: "deny",
+          },
         ],
       },
     },
@@ -196,7 +201,7 @@ service_tier = "ultrafast"
     CODEX_HOME: codexHome,
     CODEX_SECURITY_CONFIG_PATH: runtimeConfigPath,
     CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
-    CODEX_SECURITY_SCAN_ROOT: path.join(fixtureRoot, "scans"),
+    CODEX_SECURITY_SCAN_ROOT: scanRoot,
     CODEX_SECURITY_STATE_DIR: stateDir,
     PYTHON: pythonWrapperPath,
     CODEX_SECURITY_PYTHON_COMMAND: pythonWrapperPath,
@@ -303,7 +308,17 @@ service_tier = "ultrafast"
       true,
     );
     const coverage = await readFixtureCoverage(expiredState.scanDir, stateDir);
-    assert.match(coverage.deferred[0].reason, /discovery time limit elapsed/);
+    const limitation = coverage.deferred[0].reason;
+    assert.match(limitation, /discovery time limit elapsed/);
+    const manifest = await readJson(
+      path.join(expiredState.scanDir, "scan-manifest.json"),
+    );
+    assert.ok(manifest.scan.scope.limitations?.includes(limitation));
+    const report = await readFile(
+      path.join(expiredState.scanDir, "report.md"),
+      "utf8",
+    );
+    assert.ok(report.includes(limitation));
     assert.deepEqual(await readLogLines(startLogPath), []);
 
     const targetRequest = {
@@ -337,6 +352,7 @@ service_tier = "ultrafast"
     assert.match(startedWorker.stdin, /record_codex_security_scan_draft/);
     const startedState = await getDeepScan({ environment, scanId, threadId });
     assert.equal(startedState.config.maxTimeHours, 0.5);
+    assert.ok(startedState.scanDir.startsWith(scanRoot + path.sep));
     await rm(projectConfigPath);
     const startedArtifactRoot = startedState.workers.find(
       (worker: PersistedDeepScanWorker) => worker.kind === "discovery",
@@ -804,6 +820,7 @@ service_tier = "ultrafast"
     );
     const resumedScan = started.structuredContent.workspace.results;
     const resumedScanId = resumedScan.scanId;
+    assert.ok(resumedScan.scanDir.startsWith(scanRoot + path.sep));
     await chmod(resumedScan.scanDir, 0o755);
     let handoffClaimToken = randomUUID();
     for (const [id, name, arguments_] of [
@@ -1749,12 +1766,32 @@ function assertReadOnlyWorkerInvocation(
   const overrides = args.filter((arg) =>
     arg.startsWith("permissions.codex_security_deep_scan_worker="),
   );
+  const credentialHome = path.join(stateDirectory, "codex-home");
+  const workerUsageDirectory = path.join(
+    credentialHome,
+    "worker-usage",
+    scanId,
+  );
+  const filesystem = {
+    ":root": "read",
+    [deniedHome]: { ".": "deny" },
+    [credentialHome]: { ".": "deny" },
+    ...(process.platform === "linux"
+      ? {}
+      : { [workerUsageDirectory]: { ".": "deny" } }),
+  };
   assert.deepEqual(
-    overrides.map((value) => parseToml(value)),
+    overrides.map((value) => JSON.parse(JSON.stringify(parseToml(value)))),
     [
-      parseToml(
-        `permissions.codex_security_deep_scan_worker={extends=":read-only",filesystem={":root"="read",${JSON.stringify(deniedHome)}={"."="deny"},${JSON.stringify(path.join(stateDirectory, "codex-home", "worker-usage", scanId))}={"."="deny"}},network={enabled=false}}`,
-      ),
+      {
+        permissions: {
+          codex_security_deep_scan_worker: {
+            extends: ":read-only",
+            filesystem,
+            network: { enabled: false },
+          },
+        },
+      },
     ],
   );
 }

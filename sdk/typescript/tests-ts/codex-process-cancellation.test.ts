@@ -125,8 +125,7 @@ for (const mode of [
         },
         undefined,
         controller.signal,
-        undefined,
-        mode.startsWith("archive-"),
+        { registrationHandshake: mode.startsWith("archive-") },
       );
     } finally {
       observer.mockRestore();

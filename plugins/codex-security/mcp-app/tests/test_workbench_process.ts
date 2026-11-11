@@ -23,10 +23,20 @@ interface WorkbenchModule {
   ): Promise<Record<string, unknown>>;
 }
 
-const { executeWorkbench, runWorkbench } = await loadWorkbenchProcess();
+const { executeWorkbench, runWorkbench, workbenchTimeout } =
+  await loadWorkbenchProcess();
 const { workbenchArgs } = await importSource(
   path.join(import.meta.dirname, "../src/workbench-arguments.ts"),
 );
+await test("token-bearing context reads share the get-scan timeout", () => {
+  assert.equal(workbenchTimeout(["mark-handoff-delivered"]), 30_000);
+  assert.equal(workbenchTimeout(["get-scan"]), 300_000);
+  assert.equal(
+    workbenchTimeout(["mark-handoff-delivered", "--return-context"]),
+    300_000,
+  );
+});
+
 async function userSitePython(): Promise<string> {
   // A caller's virtualenv may intentionally disable user-site imports.
   const { stdout } = await promisify(execFile)(fixturePython, [

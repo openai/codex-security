@@ -66,10 +66,12 @@ alerts for the same GHSA keep separate histories. Repeat imports update the
 alerts you include and keep the ones you omit.
 
 Each finding records the matched package, ecosystem, manifest path, affected
-version range, advisory IDs and first patched version when available. The
-native alert retains GitHub's state and timestamps. The reader requires
+version range, advisory IDs and first patched version when available. The URL
+opens the repository alert. Severity comes from the matched package vulnerability,
+which can differ from the advisory’s overall severity. The native alert retains
+GitHub’s state and timestamps. The reader requires
 repository-relative manifest paths and rejects conflicting alert identities,
-packages or ranges.
+packages or ranges. For `pip`, it matches [Python distribution names](https://packaging.python.org/en/latest/specifications/name-normalization/) across the three records and retains GitHub’s reported spellings.
 
 Use the saved alert and checkout to check the installed version and trace
 whether the vulnerable code is used. An alert alone supplies no affected line

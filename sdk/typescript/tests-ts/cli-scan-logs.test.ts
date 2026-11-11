@@ -15,9 +15,11 @@ import { runWorkbench } from "../src/runtime.js";
 import { VERSION } from "../src/version.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { throwing } from "./support/errors.js";
 import { createCliTest } from "./support/cli-run.js";
+
+const pythonExecutable = useTestPython();
 
 async function fixture(desktop = false, archived = false, continuation = true) {
   const state = await realpath(await mkdtemp(join(tmpdir(), "saved-logs-")));

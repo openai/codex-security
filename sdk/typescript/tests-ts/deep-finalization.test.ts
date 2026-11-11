@@ -1338,7 +1338,15 @@ for (const {
           preload,
           `import zlib from "node:zlib";\n${decoderEnabled ? "" : "delete zlib.createZstdDecompress;\n"}`,
         );
-        if (runTestInSubprocess(fileURLToPath(import.meta.url), name, preload))
+        if (
+          runTestInSubprocess(
+            fileURLToPath(import.meta.url),
+            name,
+            {},
+            undefined,
+            preload,
+          )
+        )
           return;
         expect(typeof zlib.createZstdDecompress === "function").toBe(
           decoderEnabled,

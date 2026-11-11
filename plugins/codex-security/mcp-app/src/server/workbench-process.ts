@@ -1,6 +1,8 @@
 export const WORKBENCH_PYTHON = `
 import json, sys
 from pathlib import Path
+sys.stdout.reconfigure(encoding="utf-8", errors=sys.stdout.errors)
+sys.stderr.reconfigure(encoding="utf-8", errors=sys.stderr.errors)
 script = Path(sys.argv[1]).resolve()
 options = dict.fromkeys(sys.argv[2:], True)
 sys.path.insert(0, str(script.parent))

@@ -11,7 +11,11 @@ import {
   resolveCodexCommand,
   type StartCodex,
 } from "./runtime.js";
-import { readSavedScanLogs, type ScanLogSource } from "./scan-logs.js";
+import {
+  readSavedScanLogs,
+  savedScanLogBoundaries,
+  type ScanLogSource,
+} from "./scan-logs.js";
 import {
   BUNDLED_PLUGIN_VERSION,
   CODEX_EXECUTABLE_VERSION,
@@ -141,13 +145,14 @@ export async function sendFeedback(
             params: {
               classification: "bug",
               reason: options.reason,
-              // Codex also collects this thread's descendants. Shared owners
-              // belong only in the explicit attachment, not in that subtree.
+              // Codex collects the whole thread and its descendants. Use the
+              // scoped attachment for shared owners and completed scan turns.
               threadId:
                 !includeLogs ||
-                scan?.executionThreadIds?.includes(
+                (scan?.executionThreadIds?.includes(
                   scan.continuationThreadId ?? "",
-                )
+                ) &&
+                  savedScanLogBoundaries(scan).logCompletedAt === null)
                   ? scan?.continuationThreadId
                   : undefined,
               includeLogs,

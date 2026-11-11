@@ -4,8 +4,10 @@ import { execFileSync } from "node:child_process";
 import { cp, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "workbench-compressed-usage-",
