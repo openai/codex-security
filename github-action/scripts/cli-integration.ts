@@ -225,8 +225,10 @@ try {
   assert.deepEqual(pathPreflight.target.paths, ['--help']);
 
   // Existing glob, tilde, and colon filenames are literal repository scopes.
-  const literalFiles = ['src/[slug]/page.tsx', 'src/star*file.ts', 'src/question?file.ts', '~/example.ts', 'module:handler.ts'];
-  const decoys = ['src/s/page.tsx', 'src/l/page.tsx', 'src/starOtherfile.ts', 'src/questionXfile.ts'];
+  const literalFiles = ['src/[slug]/page.tsx', 'src/star*file.ts', 'src/question?file.ts', '~/example.ts', 'module:handler.ts',
+    ' leading.ts', 'trailing.ts ', 'back\\slash.ts', '\ttab.ts\t', '  '];
+  const decoys = ['src/s/page.tsx', 'src/l/page.tsx', 'src/starOtherfile.ts', 'src/questionXfile.ts',
+    'leading.ts', 'trailing.ts', 'back/slash.ts', 'tab.ts'];
   for (const path of [...literalFiles, ...decoys]) {
     await mkdir(dirname(join(repository, path)), {recursive:true});
     await writeFile(join(repository, path), 'export const synthetic = 1;\n');

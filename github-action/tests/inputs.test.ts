@@ -97,7 +97,8 @@ test('path lists accept literal filenames but reject unsafe locations and option
   assert.deepEqual(parse({paths:'src/my folder\nlib'}).paths, ['src/my folder','lib']);
   assert.deepEqual(parse({paths:'src/[slug]/page.tsx\nsrc/star*file.ts\nsrc/question?file.ts'}).paths,
     ['src/[slug]/page.tsx', 'src/star*file.ts', 'src/question?file.ts']);
-  for (const paths of ['/etc','../other','src/../../other','a\\b','C:/other','x\u0000'])
+  assert.deepEqual(parse({paths:'a\\b\r\n\tlab\t\r\n  \n'}).paths, ['a\\b', '\tlab\t', '  ']);
+  for (const paths of ['/etc','../other','src/../../other','C:/other','x\u0000','x\u001b'])
     assert.throws(() => parse({paths}));
 });
 test('CLI path arguments use normalized, deduplicated repository-relative paths', () => {
