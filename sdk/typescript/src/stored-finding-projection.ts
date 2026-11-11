@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import { normalizeBlackDuckFindings } from "./blackduck-findings.js";
-import { normalizeContinuumFindings } from "./continuum-findings.js";
+import {
+  continuumIssueFormat,
+  normalizeContinuumFindings,
+} from "./continuum-findings.js";
 import { normalizeEndorFindings } from "./endor-findings.js";
 import {
   validateExternalEvidence,
@@ -72,6 +75,17 @@ function* nativeReaders(
     yield (target) =>
       normalizeContinuumFindings({ items: [data["finding"]] }, url, target);
   }
+  if (row.provider === "continuum" && data["format"] === continuumIssueFormat)
+    yield (target) =>
+      normalizeContinuumFindings(
+        {
+          format: continuumIssueFormat,
+          environmentId: data["environmentId"],
+          issues: [{ issue: data["issue"], findings: data["findings"] }],
+        },
+        url,
+        target,
+      );
   if (
     row.provider === "blackduck" &&
     typeof data["projectVersionUrl"] === "string"

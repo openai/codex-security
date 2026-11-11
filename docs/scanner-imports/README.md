@@ -14,7 +14,7 @@ the local workbench in a later session using their stored IDs and versions.
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Saved vendor report            | `codex-security publish findings FILE --provider PROVIDER --source-key KEY --repository . --to local --dry-run` previews the evidence. Remove `--dry-run` to save it.  |
 | Codex Security findings export | `codex-security scan import FILE` saves findings from a .csv or .json file as a completed scan. Use `--input-format` for other filenames and `--json` for JSON output. |
-| Live provider                  | `codex-security import --help` lists the GitHub, Semgrep, Snyk and Sonar collectors. The Sonar collector can also replay its saved capture.                            |
+| Live provider                  | `codex-security import --help` lists the Continuum, GitHub, Semgrep, Snyk and Sonar collectors. The Sonar collector can also replay its saved capture.                 |
 
 ## Choose your scanner
 
@@ -26,7 +26,7 @@ The guides cover local and Cloud imports unless a row limits its scope.
 | ----------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | `inspector`  | Inspector2 `ListFindings` JSON for one Code Security repository                 |
 | [ArmorCode](armorcode.md)                                   | `armorcode`  | Findings API JSON for one repository (local verified, Cloud unverified)         |
-| [AWS Continuum](continuum.md)                               | `continuum`  | Code finding details and available patches, or summaries for one repository     |
+| [AWS Continuum](continuum.md)                               | `continuum`  | Code issues with linked locations, or finding and patch exports for one repository   |
 | [Black Duck SCA](blackduck.md)                              | `blackduck`  | BOM-6 vulnerable components for one project version                             |
 | [Checkmarx SAST](checkmarx.md)                              | `checkmarx`  | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |
 | [Endor Labs](endor.md)                                      | `endor`      | Native Finding JSON, or self-contained `endorctl` SARIF with finding UUIDs      |

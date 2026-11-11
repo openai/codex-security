@@ -46,3 +46,38 @@ export function continuumDetail() {
     },
   };
 }
+
+export function continuumIssueExport() {
+  const first = continuumDetail();
+  const second = {
+    ...continuumSummary("two"),
+    filePath: "src/second.ts",
+    lineNumber: 20,
+    endLine: 24,
+  };
+  return {
+    format: "aws-continuum-code-issues/v1",
+    environmentId: first.environmentId,
+    issues: [
+      {
+        issue: {
+          issueId: "issue1",
+          issueArn: first.findingArn.replace(
+            "/code-findings/one",
+            "/code-issues/issue1",
+          ),
+          findingIds: [first.findingId, second.findingId],
+          name: "Example issue",
+          synopsis: "Example synopsis",
+          severityReasoning: "Example severity reasoning",
+          summary: "Example remediation summary",
+          status: "COMPLETED",
+          severity: "HIGH",
+          statusUpdatedAt: first.statusUpdatedAt,
+          updatedAt: "2026-01-02T00:03:00Z",
+        },
+        findings: [second, first],
+      },
+    ],
+  };
+}

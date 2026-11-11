@@ -137,6 +137,11 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import {
+  collectContinuumIssues,
+  continuumEnvironmentId,
+  continuumIssueExport,
+} from "./continuum-collector.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
   readLocalExternalFindings,
@@ -1488,6 +1493,7 @@ interface CliDependencies {
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
+  collectContinuumIssues?: typeof collectContinuumIssues;
   collectSonarIssues?: typeof collectSonarIssues;
   prepareLocalExternalImport?: typeof prepareLocalExternalImport;
   readLocalExternalFindings?: typeof readLocalExternalFindings;
@@ -4511,7 +4517,8 @@ export async function main(
       },
     });
   const imports = Cli.create("import", {
-    description: "Collect findings from GitHub, Semgrep, Snyk or Sonar.",
+    description:
+      "Collect findings from Continuum, GitHub, Semgrep, Snyk or Sonar.",
   }).command("github", {
     examples: [{ args: { repository: "owner/repo" } }],
     description: "Read GitHub code scanning alerts without changing GitHub.",
@@ -4597,7 +4604,7 @@ export async function main(
     },
   });
   async function collectHostedFindings<T>(
-    provider: "GitHub advisory" | "Semgrep" | "Snyk",
+    provider: "Continuum" | "GitHub advisory" | "Semgrep" | "Snyk",
     fail: (error: { code: string; message: string; exitCode: number }) => never,
     run: (signal: AbortSignal) => Promise<T>,
   ) {
@@ -4613,9 +4620,9 @@ export async function main(
         ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
         : message;
       const terminalDiagnostic =
-        provider === "Semgrep" || provider === "Snyk"
-          ? escapeTerminalText(diagnostic)
-          : diagnostic;
+        provider === "GitHub advisory"
+          ? diagnostic
+          : escapeTerminalText(diagnostic);
       errorOutput.write(`codex-security: ${terminalDiagnostic}\n`);
       if (argv.includes("--full-output")) {
         structuredError = true;
@@ -4643,6 +4650,40 @@ export async function main(
       format === "md" || (format === "toon" && output.isTTY === true);
   }
   imports
+    .command("continuum", {
+      examples: [{ args: { environmentId: "abc123" } }],
+      description:
+        "Read all AWS Continuum issues and linked findings in one environment.",
+      hint: "Requires AWS CLI v2.38.5 or later and Continuum read permissions. Save the complete --format json output for publish findings --provider continuum.",
+      destructive: false,
+      args: z.object({ environmentId: continuumEnvironmentId }),
+      options: z.object({
+        awsProfile: optionValue("--aws-profile")
+          .optional()
+          .describe(
+            "AWS CLI profile (default: use the AWS CLI's configured credentials).",
+          ),
+        awsRegion: optionValue("--aws-region")
+          .optional()
+          .describe(
+            "AWS Region (default: use the AWS CLI's configured Region).",
+          ),
+      }),
+      output: continuumIssueExport.optional(),
+      run: ({ args, options, error, format }) => {
+        setTerminalOutputFormat(format);
+        return collectHostedFindings("Continuum", error, (signal) =>
+          (dependencies.collectContinuumIssues ?? collectContinuumIssues)({
+            environmentId: args.environmentId,
+            profile: options.awsProfile,
+            region: options.awsRegion,
+            cwd: dependencies.currentDirectory(),
+            environment: dependencies.environment,
+            signal,
+          }),
+        );
+      },
+    })
     .command("github-advisories", {
       examples: [{ args: { repository: "owner/repo" } }],
       description: "Read GitHub security advisories without changing GitHub.",

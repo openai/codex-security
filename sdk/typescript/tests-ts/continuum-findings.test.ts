@@ -12,12 +12,151 @@ import {
 } from "./external-findings-local-helpers.js";
 import {
   continuumDetail,
+  continuumIssueExport,
   continuumRepository,
   continuumSummary,
 } from "./support/continuum-import-fixtures.js";
 
 const normalize = (input: unknown) =>
   normalizeContinuumFindings(input, continuumRepository);
+
+test("imports a Continuum issue by ARN with locations from every linked finding", () => {
+  const report = continuumIssueExport();
+  const { issue } = report.issues[0]!;
+  expect(normalize(report)).toMatchObject({
+    read: 1,
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: issue.issueArn,
+        evidence: {
+          title: issue.name,
+          severity: "high",
+          description: "Example synopsis\n\nExample severity reasoning",
+          locations: [
+            { path: "src/example.ts", line: 3 },
+            { path: "src/other.ts", line: 12 },
+            { path: "src/second.ts", line: 20 },
+          ],
+          source_updated_at: Date.parse(issue.updatedAt) / 1000,
+          details: {
+            source_status: "COMPLETED",
+            remediation_instructions: issue.summary,
+            code: { end_line: 5 },
+          },
+          source_data: {
+            issue,
+            findings: [
+              { findingId: "one" },
+              {
+                findingId: "two",
+                filePath: "src/second.ts",
+                lineNumber: 20,
+                endLine: 24,
+              },
+            ],
+          },
+        },
+      },
+    ],
+  });
+});
+
+test("excludes a Continuum issue with missing, duplicate, or foreign linked findings", () => {
+  const report = continuumIssueExport();
+  const row = report.issues[0]!;
+  const [second, first] = row.findings;
+  for (const findings of [
+    [first],
+    [first, first],
+    [first, continuumSummary("two", "foreign")],
+    [first, second, continuumSummary("three")],
+  ]) {
+    expect(
+      normalize({ ...report, issues: [{ ...row, findings }] }),
+    ).toMatchObject({
+      findings: [],
+      excluded: [{ source_finding_id: row.issue.issueArn }],
+    });
+  }
+});
+
+test("an issue with linked dependency evidence retains its package and line range", () => {
+  const report = continuumIssueExport();
+  const row = report.issues[0]!;
+  const dependency = {
+    ...row.findings[0]!,
+    cveId: "CVE-2099-0001",
+    affectedPackages: [
+      { name: "example", packageManager: "npm", version: "1.0.0" },
+    ],
+  };
+  row.issue.findingIds = [dependency.findingId];
+  row.findings = [dependency];
+  expect(normalize(report)).toMatchObject({
+    excluded: [],
+    findings: [
+      {
+        evidence: {
+          advisory_ids: ["CVE-2099-0001"],
+          packages: [{ name: "example", installed_version: "1.0.0" }],
+          locations: [{ path: "src/second.ts", line: 20 }],
+          details: { kind: "advisory", code: { end_line: 24 } },
+        },
+      },
+    ],
+  });
+});
+
+test("local issue import keeps all ranges and reprojects them for Cloud publication", async () => {
+  const report = continuumIssueExport();
+  const row = report.issues[0]!;
+  const detailed = {
+    ...continuumDetail(),
+    vulnerabilities: [
+      {
+        locations: Array.from({ length: 102 }, (_, index) => ({
+          filePath: `src/example${index}.ts`,
+          startLine: index + 10,
+          endLine: index + 11,
+        })),
+      },
+    ],
+  };
+  row.findings = [row.findings[0]!, detailed];
+  await using fixture = await localReportFixture(
+    "issues.json",
+    {
+      provider: "continuum",
+      sourceKey: "continuum/example/project",
+      sourceRepositoryUrl: continuumRepository,
+    },
+    { remote: continuumRepository },
+  );
+  await fixture.writeJson(report);
+  const stored = await createAndReplayFinding(fixture);
+  expect(stored.evidence.locations).toHaveLength(104);
+  const cloud = projectStoredFinding(stored, []);
+  expect(cloud).toEqual(normalize(report));
+  expect(cloud.findings[0]?.evidence.locations).toHaveLength(100);
+  expect(cloud.findings[0]?.evidence.source_data).toEqual(
+    stored.evidence.source_data,
+  );
+
+  const normalized = normalize(report);
+  normalized.findings[0]!.evidence.details!.repository!.url =
+    "https://github.com/example/other";
+  await expect(fixture.prepareNormalized(normalized)).rejects.toThrow(
+    /repository/i,
+  );
+
+  const legacy = continuumDetail();
+  await fixture.writeJson(legacy);
+  expect((await (await fixture.prepare()).import()).counts.created).toBe(1);
+  expect(
+    new Set((await fixture.read()).map((finding) => finding.sourceFindingId)),
+  ).toEqual(new Set([stored.sourceFindingId, legacy.findingArn]));
+});
 
 test("a Continuum list and a detailed finding share the AWS occurrence ARN", () => {
   const first = continuumSummary();

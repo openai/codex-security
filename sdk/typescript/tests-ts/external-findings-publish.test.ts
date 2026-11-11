@@ -121,6 +121,7 @@ import {
 } from "./support/inspector-import-fixtures.js";
 import {
   continuumDetail,
+  continuumIssueExport,
   continuumRepository,
 } from "./support/continuum-import-fixtures.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
@@ -3649,6 +3650,41 @@ test("Continuum Cloud publication checks repository and provider and replays an 
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+});
+
+test("Continuum Cloud publication preserves issue identity and linked source ranges", async () => {
+  const report = continuumIssueExport();
+  const { issue } = report.issues[0]!;
+  const f = await fixture(report, continuumRepository);
+  const selected = {
+    ...options,
+    provider: "continuum" as const,
+    sourceKey: "continuum/example/project",
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  expect(prepared.preview.requests[0]?.items).toMatchObject([
+    {
+      source_finding_id: issue.issueArn,
+      evidence: {
+        locations: [
+          { path: "src/example.ts", line: 3 },
+          { path: "src/other.ts", line: 12 },
+          { path: "src/second.ts", line: 20 },
+        ],
+        details: { code: { end_line: 5 } },
+        source_data: {
+          issue,
+          findings: [
+            { findingId: "one" },
+            { findingId: "two", lineNumber: 20, endLine: 24 },
+          ],
+        },
+      },
+    },
+  ]);
+  expect((await prepared.publish()).verified).toBe(1);
+  expect(f.reports.has(issue.issueArn)).toBe(true);
 });
 
 test("Inspector publication checks its source and reuses the finding ARN", async () => {
