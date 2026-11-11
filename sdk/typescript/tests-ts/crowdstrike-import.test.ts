@@ -157,24 +157,47 @@ test("detections that differ only by line remain separate findings", async () =>
   ]);
 });
 
-test("a remote git scan reports paths from the clone root", async () => {
+// FCS writes git:: files, module sources and call sites from the scan root after a slash.
+test("git:: reports keep module lines", async () => {
   await using fixture = await checkout();
+  const call = "called by /main.tf at line 8.";
   await fixture.writeJson({
     ...report,
     path: "git::https://github.com/example/repo.git",
     rule_detections: [
       {
         ...misconfiguration,
-        detections: [{ ...detection, file: "/infra/net/main.tf" }],
+        detections: [
+          {
+            ...detection,
+            file: "/modules/example/main.tf",
+            line: 12,
+            module_path: "example",
+            module_source: "/modules/example",
+            is_from_module: true,
+            module_remediation: `This finding originates in module "/modules/example", ${call}`,
+          },
+          {
+            ...detection,
+            file: "/main.tf",
+            line: 1,
+            module_path: "registry",
+            module_source: "example/sg/aws",
+            is_from_module: true,
+            module_remediation: `This finding originates in module "example/sg/aws", ${call}`,
+          },
+        ],
       },
     ],
   });
-  const { findings } = await readCrowdStrikeFindings(
+  const { findings, excluded } = await readCrowdStrikeFindings(
     fixture.file,
     repositoryUrl,
   );
-  expect(findings[0]!.evidence.locations).toEqual([
-    { path: "infra/net/main.tf", line: 7 },
+  expect(excluded).toEqual([]);
+  expect(findings.map(({ evidence }) => evidence.locations)).toEqual([
+    [{ path: "modules/example/main.tf", line: 12 }],
+    [{ path: "main.tf", line: 8 }],
   ]);
 });
 

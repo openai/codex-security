@@ -57,18 +57,21 @@ function detectionPath(detection: NativeRecord, remote: boolean) {
 
 // A detection in a registry or Git module names the calling file, but its line
 // is inside the module. FCS states the call line only in module_remediation.
-function detectionLine(detection: NativeRecord, path: string): number | null {
+// FCS writes the file, module source and calling file in one form, so compare them as written.
+function detectionLine(detection: NativeRecord): number | null {
   const line = positive(detection["line"]);
+  const file = text(detection["file"]);
   const source = text(detection["module_source"]);
   if (
     detection["is_from_module"] !== true ||
+    !file ||
     !source ||
-    path.startsWith(`${source}/`)
+    file.startsWith(`${source}/`)
   )
     return line;
   // Search for this file's exact phrase; the remediation text comes from the report.
   const remediation = text(detection["module_remediation"]) ?? "";
-  const marker = `called by ${path} at line `;
+  const marker = `called by ${file} at line `;
   const start = remediation.indexOf(marker);
   const call =
     start === -1
@@ -195,7 +198,7 @@ export async function readCrowdStrikeFindings(
           title: requiredText(rule["rule_name"], "CrowdStrike rule_name"),
           severity: scannerSeverity(text(rule["severity"])?.toLowerCase()),
           description: joined(text(rule["description"]), reason),
-          locations: [{ path: file, line: detectionLine(detection, file) }],
+          locations: [{ path: file, line: detectionLine(detection) }],
           source_scan_id: text(document["scan_uuid"]),
           // Typed IaC and secret details must name their source repository.
           details: repositoryUrl && {
