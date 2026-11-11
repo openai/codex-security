@@ -158,7 +158,11 @@ import {
   resolvePatchReviewPublisher,
 } from "./patch-publication.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
-import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
+import {
+  savedCheckoutBoundaries,
+  savedDiscoveryRoots,
+  savedScanWorkbench,
+} from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
@@ -224,6 +228,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { batchScanBudget } from "./batch-cost.js";
 import {
   formatScanCost,
   formatScanCostTokens,
@@ -315,12 +320,12 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
-  canonicalConfigPath,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   logoutCredentialHome,
   executablePathForSpawn,
   environmentWithGit,
+  isPythonPathCandidate,
   expandHome,
   resolveInputPath,
   resolveParentTraversal,
@@ -330,7 +335,6 @@ import {
   pluginMetadata,
   runWorkbench,
   workbenchEnvironment,
-  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginPythonOptions,
@@ -1647,10 +1651,12 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   ) => {
     const checkingTarget =
       args[0] === "get-scan" && args.includes("--check-target");
+    const configuredGit = environmentEntry(process.env, "CODEX_SECURITY_GIT");
     let environment: NodeJS.ProcessEnv =
       !checkingTarget || protectedRoot === undefined
         ? {
             ...exportEnvironment(),
+            CODEX_SECURITY_GIT: configuredGit,
             CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
           }
         : workbenchEnvironment(process.env);
@@ -1665,18 +1671,42 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
           (await gitMarkerRoot(root, signal, "outermost")) ?? root,
       ),
     );
+    const configuredPython =
+      pythonPath ?? environmentEntry(environment, "PYTHON");
+    const boundaries =
+      configuredPython && isPythonPathCandidate(configuredPython)
+        ? undefined
+        : await savedCheckoutBoundaries(environment);
     const python = await resolvePluginPython({
       configuredPath: pythonPath,
       environment,
       signal,
       protectedRoot: protectedRoot === undefined ? undefined : protectedRoots,
+      discoveryProtectedRoots: boundaries
+        ? await savedDiscoveryRoots(
+            boundaries,
+            [...boundaries.byTarget.keys()],
+            signal,
+          )
+        : undefined,
+      allowPathLookup: boundaries?.complete,
     });
-    if (checkingTarget && protectedRoot !== undefined) {
-      const git = await inspectTrustedExecutable("git", environment, [
-        ...protectedRoots,
-        ...gitProtectedRoots,
-      ]);
-      environment = environmentWithGit(git.environment, git);
+    if (
+      checkingTarget &&
+      gitProtectedRoots.length > 0 &&
+      (configuredGit === undefined || isAbsolute(configuredGit))
+    ) {
+      const git = await inspectTrustedExecutable(
+        configuredGit ?? "git",
+        environment,
+        [...protectedRoots, ...gitProtectedRoots],
+      );
+      // Filter knowledge-base tools, then let the workbench choose ambient Git
+      // after it also knows the boundaries recorded in the history database.
+      environment =
+        configuredGit !== undefined || git.executable === null
+          ? environmentWithGit(git.environment, git)
+          : git.environment;
     }
     const workspace =
       pluginPath === undefined
@@ -2605,7 +2635,7 @@ export async function main(
       runScanImport(options, errorOutput, dependencies),
     );
   const history = async (
-    args: readonly string[],
+    args: readonly string[] | (() => Promise<JsonObject>),
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
@@ -2613,13 +2643,15 @@ export async function main(
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(
-          args,
-          undefined,
-          undefined,
-          pythonPath,
-          protectedRoot,
-        ),
+        await (typeof args === "function"
+          ? args()
+          : dependencies.runWorkbench(
+              args,
+              undefined,
+              undefined,
+              pythonPath,
+              protectedRoot,
+            )),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -2854,56 +2886,38 @@ export async function main(
         canonicalPath === undefined
           ? (storedPath ?? requestedPath)
           : requestedPath;
-      return await history(
-        ["list-repositories", "--status", "scanned"],
-        async (value): Promise<JsonObject> => {
-          const repositories = value["repositories"] as JsonObject[];
-          let target =
-            repositories.find(
-              (entry) => entry["targetPath"] === requestedRepository,
-            ) ??
-            repositories.find((entry) => entry["targetPath"] === storedPath);
-          if (target === undefined && storedPath !== undefined) {
-            const canonical =
-              canonicalPath ??
-              (await canonicalConfigPath(storedPath, {
-                verifyIdentity: true,
-              }).catch(() => undefined));
-            const saved = repositories.find(
-              (entry) => entry["targetPath"] === canonical,
-            );
-            if (
-              saved !== undefined &&
-              (canonicalPath === undefined ||
-                (await sameFile(canonicalPath, requestedRepository)))
-            ) {
-              target = saved;
-            }
-          }
-          if (target === undefined) {
-            for (const entry of repositories) {
-              const storedPath = entry["targetPath"] as string;
-              if (await sameFile(storedPath, requestedRepository)) {
-                target = entry;
-                break;
-              }
-            }
-          }
-          const findings =
-            target === undefined
-              ? []
-              : await listRepositoryFindings(
-                  dependencies.runWorkbench,
-                  target["targetId"] as string,
-                );
-          return presentHistory(
-            { repository: requestedRepository, findings: findings ?? [] },
-            "findings",
-            format,
-            { missingRepositoryHistory: target === undefined },
+      return await history(async () => {
+        const findings = await listRepositoryFindings(
+          dependencies.runWorkbench,
+          {
+            repository: requestedRepository,
+          },
+        );
+        if (findings === undefined) {
+          throw new CodexSecurityError(
+            "Repository findings are unavailable for the requested checkout.",
           );
-        },
-      );
+        }
+        let missingRepositoryHistory = false;
+        if (findings.length === 0 && useInteractiveHistory(format)) {
+          const saved = await dependencies.runWorkbench(
+            workbenchArgs("list-scans", {
+              repository: requestedRepository,
+              limit: "1",
+            }),
+          );
+          missingRepositoryHistory =
+            (saved["scans"] as SavedScan[]).length === 0;
+        }
+        return presentHistory(
+          { repository: requestedRepository, findings },
+          "findings",
+          format,
+          {
+            missingRepositoryHistory,
+          },
+        );
+      });
     },
   });
   findingFeedback.command("imported", {
@@ -3321,8 +3335,18 @@ export async function main(
               "SCAN_IMPORT_FAILED",
             );
           }
+          const replay =
+            args.scanId === undefined && isJsonObject(recipe)
+              ? {
+                  ...saved,
+                  recipe: {
+                    ...recipe,
+                    repository: dependencies.currentDirectory(),
+                  },
+                }
+              : saved;
           scanArguments = await prepareScanArgumentsFromRecipe(
-            saved,
+            replay,
             "rerun",
             dependencies.currentDirectory(),
             dependencies.environment,
@@ -5474,7 +5498,9 @@ export async function main(
           patch: z
             .boolean()
             .default(false)
-            .describe("Patch and verify confirmed findings after the scan."),
+            .describe(
+              "Patch and verify findings after a scan without a cost limit.",
+            ),
           validate: z
             .boolean()
             .default(false)
@@ -6298,6 +6324,9 @@ export async function main(
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop each component scan if estimated USD cost exceeds AMOUNT.",
           ),
+          maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching and owner suggestions.",
+          ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
         })
@@ -6394,6 +6423,7 @@ export async function main(
               ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
+              maxTotalCostUsd: options.maxTotalCost,
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
@@ -6414,6 +6444,7 @@ export async function main(
             outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
             planOnly: options.planOnly,
+            maxTotalCostUsd: options.maxTotalCost,
             workers: options.workers,
             config,
             scanOptions: {
@@ -6424,6 +6455,10 @@ export async function main(
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
             onPlan: (components) => {
+              if (dashboard === null && options.maxTotalCost !== undefined)
+                errorOutput.write(
+                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
+                );
               for (const component of components)
                 componentNames.set(component.id, component.name);
               dashboard?.setComponents(components);
@@ -6438,7 +6473,9 @@ export async function main(
                     const line = componentScanEventLine(
                       componentName,
                       event,
-                      options.showCost || settings.maxCostUsd !== undefined,
+                      options.showCost ||
+                        settings.maxCostUsd !== undefined ||
+                        options.maxTotalCost !== undefined,
                       settings.auth,
                     );
                     if (line !== null) errorOutput.write(line);
@@ -6457,16 +6494,22 @@ export async function main(
             signal: controller.signal,
             onProgress: (component) => {
               if (dashboard !== null) dashboard.updateComponent(component);
-              else
+              else {
+                const budget =
+                  component.status === "started" &&
+                  component.maxCostUsd !== undefined
+                    ? ` (${formatUsd(component.maxCostUsd)} per component)`
+                    : "";
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
+                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${budget}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
+              }
             },
             onComplete: (result) => {
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(
@@ -6554,6 +6597,9 @@ export async function main(
           .describe("Maximum scan attempts per repository."),
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+        ),
+        maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching and owner suggestions.",
         ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
@@ -6645,6 +6691,10 @@ export async function main(
                     ).options,
                   ]),
                 );
+          if (options.maxTotalCost !== undefined)
+            errorOutput.write(
+              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
+            );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -6652,6 +6702,7 @@ export async function main(
             workers: options.workers,
             mode: settings.mode,
             maxAttempts: options.maxAttempts,
+            maxTotalCostUsd: options.maxTotalCost,
             ...(settings.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: settings.maxCostUsd }),
@@ -6693,6 +6744,7 @@ export async function main(
                         signal: controller.signal,
                       });
                       return {
+                        alreadyCompleted: true,
                         manifest: contract.manifest,
                         findings: contract.findings,
                         cost:
@@ -6746,6 +6798,10 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        ...batchScanBudget(
+                          prompts.maxTotalCostShareUsd,
+                          recipe,
+                        ),
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         telemetryContext: prompts.telemetryContext,
                         onTelemetry: prompts.onTelemetry,
@@ -6764,10 +6820,21 @@ export async function main(
                 }
               : {}),
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error, warning }) => {
+            onProgress: ({
+              repository,
+              status,
+              attempt,
+              maxCostUsd,
+              error,
+              warning,
+            }) => {
               const detail = error ?? warning;
+              const budget =
+                maxCostUsd === undefined
+                  ? ""
+                  : `, ${formatUsd(maxCostUsd)} per repository attempt`;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt}${budget})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
           });
@@ -7726,6 +7793,12 @@ export async function main(
         async run({ format }) {
           const structured = !useDefaultOutput(format);
           const authentication = scanAuthentication(dependencies.environment);
+          if (authentication.method === "api_key") {
+            errorOutput.write(
+              `API key configured via ${authentication.source} (offline check).\n`,
+            );
+            errorOutput.write("Stored sign-in status:\n");
+          }
           exitCode = await withLoginEnvironment(async (environment) => {
             if (authentication.method !== "api_key")
               await initialCredentialsAvailable(
@@ -7758,9 +7831,6 @@ export async function main(
             (exitCode === 0 || exitCode === 1)
           ) {
             exitCode = 0;
-            errorOutput.write(
-              `Effective scan authentication: API key from ${authentication.source}.\n`,
-            );
             errorOutput.write(
               `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
             );
@@ -11083,6 +11153,10 @@ async function executeScan(
   let usageFreshness: string | null = null;
   let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
+  if (maxCostUsd !== undefined && arguments_.patch)
+    throw new CodexSecurityError(
+      "--patch cannot be combined with a scan cost limit. Run the bounded scan first, then use `codex-security patch --scan SCAN_ID` separately.",
+    );
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
@@ -12191,6 +12265,7 @@ async function executeScan(
   try {
     if (
       !arguments_.mock &&
+      maxCostUsd === undefined &&
       actionableFindings.length > 0 &&
       arguments_.patchSeverity === undefined &&
       progress?.interactive === true &&
@@ -12716,7 +12791,7 @@ function printScanSummary(
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
   const findingSummary = repositoryFindings?.length
-    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    ? `${confirmedCount} confirmed in latest repository scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
     : severitySummary;
   const findingColor =
     findingCount === 0

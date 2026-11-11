@@ -60,6 +60,7 @@ import {
 import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
+  listRepositoryFindings,
 } from "../src/api.js";
 import {
   OperationTelemetry,
@@ -14298,9 +14299,39 @@ if __name__ == "__main__":
     },
   );
 
+  test("discards partial findings when a repository projection becomes unavailable", async () => {
+    const pages: JsonObject[] = [
+      { findings: [{ findingId: "first-page" }], nextOffset: 1 },
+      { findings: [], projectionAvailable: false, nextOffset: null },
+    ];
+    const commands: Array<readonly string[]> = [];
+    expect(
+      await listRepositoryFindings(async (args) => {
+        commands.push(args);
+        return pages[commands.length - 1]!;
+      }, "target_sha256_example"),
+    ).toBeUndefined();
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toEqual([...commands[0]!, "--offset", "1"]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [], projectionAvailable: true }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [] }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+  });
+
   test.each([
     ["semantic matching fails", "matcher", "matcher unavailable"],
     ["the repository index fails", "index", "index unavailable"],
+    ["the repository projection is unavailable", "projection", undefined],
+    ["a batch cost limit skips unmetered matching", "batch-budget", undefined],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
       "cost-limited matching needs additional context",
@@ -14340,7 +14371,9 @@ if __name__ == "__main__":
             [nativeHeader]: " synthetic-required-header ",
           }
         : {};
-      const limited = failure === "budget" || failure === "budget-context";
+      const boundedBatch = failure === "batch-budget";
+      const limited =
+        boundedBatch || failure === "budget" || failure === "budget-context";
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const current = {
         findingId: "csf_852f90d6e1177502ff113d4a",
@@ -14514,7 +14547,10 @@ if __name__ == "__main__":
         },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
-          environment: gatewayEnvironment,
+          environment: {
+            ...gatewayEnvironment,
+            CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          },
           prepareRuntime: runtimePreparer(codexHome, () => ({
             environment: {
               SYNTHETIC_MATCH_HEADER: "synthetic-comparison-header",
@@ -14556,6 +14592,9 @@ if __name__ == "__main__":
             if (args[0] === "list-global-findings") {
               expect(progressSignal?.aborted).toBe(true);
               if (failure === "index") throw new Error("index unavailable");
+              if (failure === "projection") {
+                return { findings: [], projectionAvailable: false };
+              }
               if (
                 failure === "dismissed" ||
                 failure === "managed" ||
@@ -14758,6 +14797,7 @@ if __name__ == "__main__":
       try {
         const result = await client.run(repository, {
           ownerSuggestions: ownerSpy !== undefined,
+          skipFindingMatching: boundedBatch,
           ...(limited ? { maxCostUsd: 1 } : {}),
           cyberAccessProgram: "daybreak_blue",
           onProgress() {},
@@ -14770,7 +14810,7 @@ if __name__ == "__main__":
         expect(
           result.repositoryFindings?.map(({ findingId }) => findingId),
         ).toEqual(
-          failure === "budget"
+          failure === "budget" || boundedBatch
             ? ["another-open-finding"]
             : failure === "dismissed" ||
                 failure === "managed" ||
@@ -14778,16 +14818,21 @@ if __name__ == "__main__":
               ? []
               : undefined,
         );
-        expect(modelCalled).toBe(failure !== "index");
-        expect(observedSingleTurn).toBe(
-          failure === "index" ? undefined : limited,
-        );
+        const expectsModel =
+          !boundedBatch && failure !== "index" && failure !== "projection";
+        expect(modelCalled).toBe(expectsModel);
+        expect(observedSingleTurn).toBe(expectsModel ? limited : undefined);
         expect(matchingTurns).toBe(
-          failure === "index" || failure === "matcher" || failure === "managed"
+          !expectsModel || failure === "matcher" || failure === "managed"
             ? 0
             : 1,
         );
-        if (failure === "budget-context") {
+        if (failure === "projection") {
+          expect(
+            result.findings.findings.map(({ findingId }) => findingId),
+          ).toContain(current.findingId);
+        } else if (failure === "budget-context") {
+          expect(matchingTurns).toBe(1);
           expect(matched).toBe(false);
         }
         expect(commands.some(([command]) => command === "complete-scan")).toBe(
