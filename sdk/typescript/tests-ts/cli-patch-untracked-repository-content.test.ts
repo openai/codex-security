@@ -75,7 +75,10 @@ for (const kind of [
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
         }
-        const blocked = copied && kind !== "directory link";
+        const copiedPrivateContent = copied && kind !== "directory link";
+        const blocked = copiedPrivateContent || kind === "scrubbed";
+        const assessed =
+          kind === "scrubbed" || (kind === "untracked" && !copied);
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
           kind.startsWith("ignored") ? "" : "?? nested/",
         );
@@ -92,7 +95,7 @@ for (const kind of [
             "patch",
             "--scan",
             "scan-1",
-            ...(kind === "scrubbed" ? ["--assess-patch-risk"] : []),
+            ...(assessed ? ["--assess-patch-risk"] : []),
             "--create-pr",
             "--json",
           ],
@@ -115,10 +118,11 @@ for (const kind of [
                 output!.appServer!.prompt.includes("immutable patch artifact")
               ) {
                 assessments++;
-                await writeFile(
-                  join(directory, "selected.txt"),
-                  "Synthetic scrubbed working copy\n",
-                );
+                if (kind === "scrubbed")
+                  await writeFile(
+                    join(directory, "selected.txt"),
+                    "Synthetic scrubbed working copy\n",
+                  );
                 output!.stdout.write(patchRiskAssessment().report);
                 return 0;
               }
@@ -150,7 +154,11 @@ for (const kind of [
           blocked ? { pushes: 0, creations: 0 } : { pushes: 1, creations: 1 },
         );
         if (blocked) {
-          expect(outcome.stderr).toContain("pre-existing");
+          expect(outcome.stderr).toContain(
+            copiedPrivateContent
+              ? "pre-existing"
+              : "working tree differs from the verified changes",
+          );
           expect(git("rev-parse", "HEAD")).toBe(head);
           expect(await readFile(join(directory, ".git", "index"))).toEqual(
             index!,
@@ -170,7 +178,7 @@ for (const kind of [
           configuration,
         );
         expect(await readFile(source, "utf8")).toBe(content);
-        expect(assessments).toBe(kind === "scrubbed" ? 1 : 0);
+        expect(assessments).toBe(assessed ? 1 : 0);
         expect(await readFile(join(directory, "selected.txt"), "utf8")).toBe(
           kind === "scrubbed"
             ? "Synthetic scrubbed working copy\n"
