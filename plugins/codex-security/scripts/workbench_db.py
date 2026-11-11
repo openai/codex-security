@@ -82,7 +82,6 @@ from workbench_constants import (
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
-from workbench_scan_history import resolve_scan_id
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
@@ -255,7 +254,10 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 
 def connect(
-    *, deferred: bool = False, discovery_roots: tuple[Path, ...] = ()
+    *,
+    deferred: bool = False,
+    discovery_roots: tuple[Path, ...] = (),
+    persist_if_missing: bool = True,
 ) -> sqlite3.Connection:
     """Open the workbench SQLite database and bring its schema up to date.
 
@@ -264,6 +266,7 @@ def connect(
             Retries after lock contention use an immediate transaction.
 
         discovery_roots: Additional local paths for bounded target discovery.
+        persist_if_missing: Use an in-memory database for a fresh profile when false.
 
     Returns:
         sqlite3.Connection: A caller-owned connection with named rows, foreign
@@ -279,14 +282,21 @@ def connect(
         "are writable, or set CODEX_SECURITY_STATE_DIR to a writable directory outside "
         "the scanned repository."
     )
+    storage: str | Path = path
     try:
-        create_private_directory(path.parent)
+        if not persist_if_missing:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                storage = ":memory:"
+        if storage == path:
+            create_private_directory(path.parent)
     except OSError:
         print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
-            connection = sqlite3.connect(path, timeout=5)
+            connection = sqlite3.connect(storage, timeout=5)
         except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
@@ -299,7 +309,8 @@ def connect(
                 connection, immediate=not deferred or attempt > 0, discovery_roots=discovery_roots
             )
             connection.execute("PRAGMA journal_mode = WAL")
-            path.chmod(0o600)
+            if storage == path:
+                path.chmod(0o600)
             return connection
         except sqlite3.OperationalError as exc:
             connection.close()
@@ -514,6 +525,29 @@ def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     if row is None:
         raise SystemExit("Codex Security scan not found.")
     return row
+
+
+def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
+    """Return a canonical UUID or resolve a unique scan ID prefix of at least eight characters.
+
+    Raise SystemExit for a prefix that is too short, ambiguous, or absent from the database.
+    """
+    try:
+        return str(uuid.UUID(scan_id))
+    except ValueError:
+        if len(scan_id) < 8:
+            raise SystemExit("Scan ID prefixes must be at least eight characters.") from None
+        matches = connection.execute(
+            "SELECT id FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
+            (len(scan_id), scan_id.lower()),
+        ).fetchall()
+        if not matches:
+            raise SystemExit("Codex Security scan not found.") from None
+        if len(matches) > 1:
+            raise SystemExit(
+                f'Scan ID prefix "{scan_id}" matches multiple scans; use a longer prefix.'
+            ) from None
+        return matches[0]["id"]
 
 
 def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3346,9 +3380,6 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             raise SystemExit(73) from None
         print(json.dumps(result, allow_nan=False, sort_keys=True))
         return
-    if (empty := scan_history.empty_history(args, database_path())) is not None:
-        print(json.dumps(empty))
-        return
     command_targets = tuple(
         Path(value).expanduser()
         for field in ("target_path", "repository")
@@ -3366,6 +3397,11 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                     "update-progress",
                 },
                 discovery_roots=command_targets,
+                persist_if_missing=not (
+                    args.command in {"list-scans", "list-repositories", "list-global-findings"}
+                    or args.command == "get-scan"
+                    and not (args.request_id or args.action_token)
+                ),
             )
         ) as connection,
         scoped_git_discovery(

@@ -7,7 +7,6 @@ import json
 import os
 import sqlite3
 import sys
-import uuid
 from collections.abc import Iterable, Iterator
 from fractions import Fraction
 from functools import cache
@@ -42,63 +41,6 @@ from workbench_target_state import (
     scan_repository_generation,
 )
 from workbench_validation import timestamp_key
-
-
-def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
-    """Return a canonical UUID or resolve a unique scan ID prefix of at least eight characters.
-
-    Raise SystemExit for a prefix that is too short, ambiguous, or absent from the database.
-    """
-    require_scan_id_length(scan_id)
-    try:
-        return str(uuid.UUID(scan_id))
-    except ValueError:
-        matches = connection.execute(
-            "SELECT id FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
-            (len(scan_id), scan_id.lower()),
-        ).fetchall()
-        if not matches:
-            raise SystemExit("Codex Security scan not found.") from None
-        if len(matches) > 1:
-            raise SystemExit(
-                f'Scan ID prefix "{scan_id}" matches multiple scans; use a longer prefix.'
-            ) from None
-        return matches[0]["id"]
-
-
-def require_scan_id_length(scan_id: str) -> None:
-    if len(scan_id) < 8:
-        raise SystemExit("Scan ID prefixes must be at least eight characters.")
-
-
-def empty_history(args: argparse.Namespace, path: Path) -> dict[str, Any] | None:
-    """Answer history reads without creating the first persistent database."""
-    collections = {
-        "list-scans": "scans",
-        "list-repositories": "repositories",
-        "list-global-findings": "findings",
-    }
-    if args.command not in collections and not (
-        args.command == "get-scan" and not (args.request_id or args.action_token)
-    ):
-        return None
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        if args.command == "get-scan":
-            require_scan_id_length(args.scan_id)
-            raise SystemExit("Codex Security scan not found.") from None
-        empty = {collections[args.command]: []}
-        if args.limit is not None or args.offset:
-            limit = args.limit or FINDINGS_PAGE_MAX
-            if args.command == "list-global-findings":
-                limit = min(limit, FINDINGS_PAGE_MAX)
-            empty.update(limit=limit, offset=args.offset, nextOffset=None)
-        return empty
-    except OSError:
-        # Let the normal connection path report inaccessible history.
-        pass
-    return None
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -512,7 +454,7 @@ def list_scans(
         )
         clauses.append(clause)
         values.extend(scope_values)
-        if args.prefer_worktree:
+        if getattr(args, "prefer_worktree", False):
 
             @cache
             def in_worktree(target_path: str) -> bool:

@@ -895,17 +895,26 @@ def test_scan_history_resolves_unique_prefixes_and_rejects_ambiguity(tmp_path: P
 
 def test_reading_empty_history_leaves_state_uninitialized(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
+    initialized = tmp_path / "initialized"
+    run_workbench(initialized, "database-info")
     for command, key in (
         ("list-scans", "scans"),
         ("list-repositories", "repositories"),
         ("list-global-findings", "findings"),
     ):
-        assert run_workbench(state_dir, command, "--limit", "2", "--offset", "1") == {
+        args = (command, "--limit", "2", "--offset", "1")
+        empty = run_workbench(state_dir, *args)
+        assert empty == run_workbench(initialized, *args)
+        assert empty == {
             key: [],
             "nextOffset": None,
             "limit": 2,
             "offset": 1,
+            **({"projectionAvailable": True} if command == "list-global-findings" else {}),
         }
+    for target in (str(tmp_path), str(tmp_path / "missing" / "..")):
+        args = ("list-global-findings", "--repository", target)
+        assert run_workbench(state_dir, *args) == run_workbench(initialized, *args)
     for scan_id, message in (("short", "eight characters"), (str(uuid.uuid4()), "scan not found")):
         missing = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
         assert missing["returncode"] != 0 and message in missing["stderr"]

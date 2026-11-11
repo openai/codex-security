@@ -21,7 +21,6 @@ def query_args(**values):
     return Namespace(
         **{
             "repository": None,
-            "prefer_worktree": False,
             "scan_root": None,
             "target_id": None,
             "mode": None,
