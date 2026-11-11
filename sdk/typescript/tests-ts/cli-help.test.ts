@@ -314,17 +314,19 @@ describe("CLI help", () => {
     expect(JSON.parse(await help([group, ...flags, verb]))).toEqual(expected);
   });
 
-  test.each([
-    ["bogus", "--llms-full"],
-    ["scans", "--json", "bogus", "--llms"],
-    ["mcp", "bogus", "--llms-full"],
-    ["info", "extra", "--help"],
-    ["info", "extra", "--schema"],
-    ["info", "extra", "--llms"],
-    ["completions", "zsh", "extra"],
-    ["completions", "zsh", "--", "--version"],
-    ["skills", "list", "--", "--no-global"],
-  ].map((args) => ({ args })))(
+  test.each(
+    [
+      ["bogus", "--llms-full"],
+      ["scans", "--json", "bogus", "--llms"],
+      ["mcp", "bogus", "--llms-full"],
+      ["info", "extra", "--help"],
+      ["info", "extra", "--schema"],
+      ["info", "extra", "--llms"],
+      ["completions", "zsh", "extra"],
+      ["completions", "zsh", "--", "--version"],
+      ["skills", "list", "--", "--no-global"],
+    ].map((args) => ({ args })),
+  )(
     "rejects unknown discovery paths or surplus words (%j)",
     async ({ args }) => {
       const stdout = capture();
@@ -363,13 +365,15 @@ describe("CLI help", () => {
     expect(schema.args.properties.shell.enum).toContain("zsh");
   });
 
-  test.each([
-    ["scan", ".", "--dry-run", "--update"],
-    ["scans", "list", "--mcp"],
-    ["policy", "--full-output", "--mcp"],
-    ["--mcp", "--update"],
-    ["scan", ".", "--dry-run", "--incur-update-check"],
-  ].map((args) => ({ args })))("rejects mixed or private actions (%j)", async ({ args }) => {
+  test.each(
+    [
+      ["scan", ".", "--dry-run", "--update"],
+      ["scans", "list", "--mcp"],
+      ["policy", "--full-output", "--mcp"],
+      ["--mcp", "--update"],
+      ["scan", ".", "--dry-run", "--incur-update-check"],
+    ].map((args) => ({ args })),
+  )("rejects mixed or private actions (%j)", async ({ args }) => {
     const stdout = capture();
     const stderr = capture();
     expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
