@@ -336,6 +336,11 @@ def collect_scan_usage(
                 started_at=started_at,
                 completed_at=stopped_at,
                 completed_turn_id=completed_turn_id if session.thread_id == thread_id else None,
+                resume_owner=(
+                    scan["mode"] == "standard"
+                    and scan["recipe_json"] is not None
+                    and session.thread_id == scan["continuation_thread_id"]
+                ),
                 is_scan_owner=(
                     scan["mode"] == "deep"
                     and session.thread_id == scan["deep_scan_owner_thread_id"]
@@ -926,6 +931,7 @@ def _read_rollout_usage(
     completed_at: datetime | None,
     completed_turn_id: str | None = None,
     is_scan_owner: bool = False,
+    resume_owner: bool = False,
 ) -> RolloutUsage:
     result = RolloutUsage(_empty_token_usage(), set(), None, {})
     total = result.tokens
@@ -947,6 +953,7 @@ def _read_rollout_usage(
     started_turns: set[str] = set()
     open_turns: set[str] = set()
     closed_turns: set[str] = set()
+    failed_turns: set[str] = set()
     measured_turns: set[str] = set()
 
     def past_scan_end(timestamp: datetime, turn_id: object) -> bool:
@@ -1077,6 +1084,8 @@ def _read_rollout_usage(
                     if timestamp >= started_at:
                         if terminal_turn_id in started_turns:
                             closed_turns.add(terminal_turn_id)
+                            if payload.get("type") == "task_complete" and payload.get("error"):
+                                failed_turns.add(terminal_turn_id)
                         if payload.get("type") == "turn_aborted":
                             # Later successful work does not recover interrupted request usage.
                             warnings.add("turn_interrupted")
@@ -1143,6 +1152,23 @@ def _read_rollout_usage(
                     warnings.add("token_record_incomplete")
                 result.tokens_updated_at = max(result.tokens_updated_at or timestamp, timestamp)
                 _add_token_usage(response_usage, usage)
+                if (
+                    resume_owner
+                    and receipt_turn_id == current_turn_id
+                    and current_turn_id in started_turns
+                ):
+                    earlier_open = open_turns - {current_turn_id}
+                    if earlier_open or failed_turns:
+                        # A new owner turn supersedes the crashed turn. Reconcile its
+                        # receipts (and any failed reconnects) against native thread
+                        # totals before retiring their missing end or usage markers.
+                        cumulative = _usage_counts(payload.get("thread_token_usage"))
+                        if cumulative is not None and all(
+                            cumulative[key] == total[key] + response_usage[key]
+                            for key in TOKEN_FIELDS.values()
+                        ):
+                            open_turns.difference_update(earlier_open)
+                            closed_turns.difference_update(failed_turns - {current_turn_id})
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue

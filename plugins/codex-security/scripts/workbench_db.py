@@ -84,6 +84,7 @@ from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
+    bind_scan_thread,
     insert_running_scan,
     loaded_plugin_version,
     prepare_cli_scan_target,
@@ -1793,6 +1794,11 @@ def register_cli_scan(
         "contract": scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
         **({"phase": scan["phase"]} if mode == "standard" else {}),
+        **(
+            {"canSaveTimeBudgetStart": True}
+            if "maxTimeMinutes" in recipe and mode in {"standard", "diff"}
+            else {}
+        ),
         "scanDir": str(scan_dir),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
@@ -1803,11 +1809,7 @@ def register_cli_scan(
 
 def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
-    with connection:
-        connection.execute(
-            "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
-            (args.thread_id, now(), scan["id"]),
-        )
+    bind_scan_thread(connection, scan["id"], args.thread_id, args.time_budget_started_at, now())
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
 

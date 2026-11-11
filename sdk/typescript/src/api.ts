@@ -175,6 +175,7 @@ import {
 } from "./custom-validation-prompt.js";
 import {
   AuthenticationRequiredError,
+  CodexConnectionError,
   CodexSecurityError,
   ConfigurationError,
   InvalidTargetError,
@@ -2964,6 +2965,7 @@ export class CodexSecurity {
       // The registered recipe now owns the private snapshot, including after completion.
       savedProviderProfile = undefined;
       const registeredScanId = registration["scanId"];
+      let timeBudgetStartedAt: string | undefined;
       const resumeThreadId =
         options.resumeScanId === undefined
           ? undefined
@@ -2983,6 +2985,10 @@ export class CodexSecurity {
             "The workbench returned mismatched scan resume context.",
           );
         }
+        const originalStart =
+          savedRecipe["timeBudgetStartedAt"] ?? registration["startedAt"];
+        if (typeof originalStart === "string")
+          timeBudgetStartedAt = originalStart;
         const savedSession = await findScanSession(
           runtime.codexHome,
           resumeThreadId,
@@ -3652,16 +3658,14 @@ export class CodexSecurity {
           runtime.plugin.pluginRoot,
         );
         checkOpen();
-        prompt += `\n\n${renderScanTimeBudgetPolicy(
-          timePolicy,
-          scanTimeBudget(
-            options.maxTimeMinutes,
-            options.resumeScanId !== undefined &&
-              typeof registration["startedAt"] === "string"
-              ? Date.parse(registration["startedAt"])
-              : (this.#dependencies.now ?? Date.now)(),
-          ),
-        )}`;
+        const timing = scanTimeBudget(
+          options.maxTimeMinutes,
+          timeBudgetStartedAt === undefined
+            ? (this.#dependencies.now ?? Date.now)()
+            : Date.parse(timeBudgetStartedAt),
+        );
+        timeBudgetStartedAt = timing.startedAt;
+        prompt += `\n\n${renderScanTimeBudgetPolicy(timePolicy, timing)}`;
       }
       tracker.beginParentTurn(resumeThreadId !== undefined);
       scanTurnStatus = "in_progress";
@@ -3729,7 +3733,13 @@ export class CodexSecurity {
           try {
             await workbench(
               workbenchOptions,
-              workbenchArgs("set-scan-thread", { scanId, threadId }),
+              workbenchArgs("set-scan-thread", {
+                scanId,
+                threadId,
+                ...(registration["canSaveTimeBudgetStart"] === true && {
+                  timeBudgetStartedAt,
+                }),
+              }),
             );
           } catch (error) {
             notifyObserver(
@@ -6252,8 +6262,6 @@ export async function runScanEvents(
     throw error;
   }
 }
-
-class CodexConnectionError extends CodexSecurityError {}
 
 function codexTurnError(error: unknown): CodexSecurityError {
   const classification = classifyConnectionFailure(error);

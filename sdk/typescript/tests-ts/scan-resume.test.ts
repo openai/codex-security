@@ -886,46 +886,62 @@ test("a new default Standard scan remains resumable after a network failure", as
   const f = await interruptedScan("standard");
   const scanDir = join(f.root, "new-scan");
   let scanId = "";
-  const deps = resumeDependencies(f, ({ env }) => ({
-    startThread: () => ({
-      id: f.threadId,
-      async runStreamed() {
-        scanId = env!["CODEX_SECURITY_SCAN_ID"]!;
-        await writeFile(
-          f.sessionPath,
-          JSON.stringify({
-            type: "session_meta",
-            payload: { id: f.threadId, cwd: scanDir },
-          }) + "\n",
-        );
-        async function* disconnected() {
-          yield { type: "thread.started" as const, thread_id: f.threadId };
+  let initialPrompt = "";
+  const outcomes: string[] = [];
+  const deps = resumeDependencies(
+    f,
+    ({ env }) => ({
+      startThread: () => ({
+        id: f.threadId,
+        async runStreamed(prompt) {
+          initialPrompt = prompt;
+          scanId = env!["CODEX_SECURITY_SCAN_ID"]!;
           await writeFile(
-            join(scanDir, "checkpoint.json"),
-            '{"validated":"saved"}\n',
+            f.sessionPath,
+            JSON.stringify({
+              type: "session_meta",
+              payload: { id: f.threadId, cwd: scanDir },
+            }) + "\n",
           );
-          yield {
-            type: "error" as const,
-            message:
-              "Reconnecting... waiting for network (Connection failed: error sending request)",
-          };
-        }
-        return { events: disconnected() };
-      },
+          async function* disconnected() {
+            yield { type: "thread.started" as const, thread_id: f.threadId };
+            await writeFile(
+              join(scanDir, "checkpoint.json"),
+              '{"validated":"saved"}\n',
+            );
+            yield {
+              type: "error" as const,
+              message:
+                "Reconnecting... waiting for network (Connection failed: error sending request)",
+            };
+          }
+          return { events: disconnected() };
+        },
+      }),
     }),
-  }));
+    {},
+    (options) => new OperationTelemetry(options),
+  );
   await using client = deps.createSecurity({});
   await expect(
     client.run(f.repository, {
+      maxTimeMinutes: 5,
+      onTelemetry: (event) => {
+        if (event.outcome) outcomes.push(event.outcome);
+      },
       outputDir: scanDir,
       target: ["source.py"],
       ownerSuggestions: false,
     }),
   ).rejects.toThrow("codex-security scans resume");
+  expect(outcomes).toEqual(["failed"]);
   expect(scanId).not.toBe(f.scanId);
-  expect(
-    await f.command(["get-cli-scan-resume", "--scan-id", scanId]),
-  ).toMatchObject({
+  const saved = await f.command(["get-cli-scan-resume", "--scan-id", scanId]);
+  const start = (saved["recipe"] as { timeBudgetStartedAt: string })
+    .timeBudgetStartedAt;
+  expect(typeof start).toBe("string");
+  expect(initialPrompt).toContain(start);
+  expect(saved).toMatchObject({
     scanId,
     scanDir,
     threadId: f.threadId,

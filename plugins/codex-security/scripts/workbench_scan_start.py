@@ -501,5 +501,31 @@ def insert_running_scan(
     return scan_id
 
 
+def bind_scan_thread(
+    connection: sqlite3.Connection,
+    scan_id: str,
+    thread_id: str,
+    time_budget_started_at: str | None,
+    timestamp: str,
+) -> None:
+    """Bind the owning session and its advisory clock in the same transaction."""
+    with connection:
+        connection.execute(
+            """
+            UPDATE scans SET continuation_thread_id = ?, updated_at = ?,
+                recipe_json = CASE WHEN ? IS NULL THEN recipe_json
+                    ELSE json_insert(recipe_json, '$.timeBudgetStartedAt', ?) END
+            WHERE id = ?
+            """,
+            (
+                thread_id,
+                timestamp,
+                time_budget_started_at,
+                time_budget_started_at,
+                scan_id,
+            ),
+        )
+
+
 if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
