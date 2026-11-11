@@ -635,13 +635,11 @@ test('disabled summary leaves requested artifact upload and scan outcome intact'
   assert.equal(result.outputs['report-status'], 'ready');
 });
 
-for (const {label, requested, decoys} of [
-  {label: 'edge spaces', requested: [' leading.txt', '  ', 'trailing.txt '], decoys: ['leading.txt', 'trailing.txt']},
-  {label: 'backslash', requested: ['slash\\name.txt'], decoys: ['slash/name.txt']},
-]) test('Action path input selects the exact Linux filename: ' + label, async t => {
+test('Action path input preserves leading and trailing filename spaces', async t => {
   const app = await harness(t);
   app.setInput('dry-run', 'true');
-  await mkdir(join(app.repository, 'slash'));
+  const requested = [' leading.txt', '  ', 'trailing.txt '];
+  const decoys = ['leading.txt', 'trailing.txt'];
   for (const filename of [...requested, ...decoys])
     await writeFile(join(app.repository, filename), filename);
   app.git('add', '.'); app.git('commit', '-qm', 'Literal filename fixtures');
@@ -651,6 +649,15 @@ for (const {label, requested, decoys} of [
   assert.equal(result.exitCode, 0, result.logs);
   assert.deepEqual(result.args.filter(arg => arg.startsWith('--path=')),
     requested.map(path => '--path=./' + path));
+});
+
+for (const path of ['slash\\name.txt', '\tname.txt\t']) test('Action rejects an unsupported scan path before setup: ' + JSON.stringify(path), async t => {
+  const app = await harness(t);
+  app.setInput('paths', path);
+  const result = await app.run();
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.setups, 0);
+  assert.match(result.logs, /backslashes or control characters/u);
 });
 
 test('scope conflict fails without runtime setup', async (t) => {

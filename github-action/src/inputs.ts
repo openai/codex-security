@@ -21,8 +21,8 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
     return n;
   };
   const safeRelative = (name: string, value: string) => {
-    if (value.startsWith('/') || /^[A-Za-z]:/.test(value) || value.split('/').includes('..') || /[\x00-\x08\x0a-\x1f\x7f]/.test(value))
-      throw new Error(`${name} must contain literal repository-relative paths, without '..'.`);
+    if (value.startsWith('/') || /^[A-Za-z]:/.test(value) || value.includes('\\') || value.split('/').includes('..') || /[\x00-\x1f\x7f]/.test(value))
+      throw new Error(`${name} must contain literal repository-relative paths without '..', backslashes or control characters.`);
     return value;
   };
   // Match the CLI's scope spelling before constructing arguments or checking reports.

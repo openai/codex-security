@@ -53752,8 +53752,8 @@ function parseInputs(read, workspace) {
     return n;
   };
   const safeRelative = (name, value) => {
-    if (value.startsWith("/") || /^[A-Za-z]:/.test(value) || value.split("/").includes("..") || /[\x00-\x08\x0a-\x1f\x7f]/.test(value))
-      throw new Error(`${name} must contain literal repository-relative paths, without '..'.`);
+    if (value.startsWith("/") || /^[A-Za-z]:/.test(value) || value.includes("\\") || value.split("/").includes("..") || /[\x00-\x1f\x7f]/.test(value))
+      throw new Error(`${name} must contain literal repository-relative paths without '..', backslashes or control characters.`);
     return value;
   };
   const paths = [...new Set(read("paths").split(/\r?\n/).filter(Boolean).map((v) => safeRelative("paths", v).split("/").filter((part) => part && part !== ".").join("/") || "."))];
