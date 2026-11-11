@@ -513,7 +513,7 @@ async function readableGitParent(
 
 export async function capturePatchGitControls(
   directory: string,
-  run: RunGit,
+  runGit: RunGit,
   usesWorktreeMarker: boolean,
   usesCommonDirectoryMarker = true,
   selectedGitDirectory?: string,
@@ -528,6 +528,17 @@ export async function capturePatchGitControls(
   },
   automaticPublication = false,
 ): Promise<PatchGitControls | undefined> {
+  // Control discovery runs before the snapshot sandbox. Missing promisor objects
+  // must fail locally, including on Git versions without GIT_NO_LAZY_FETCH.
+  const run: RunGit = (root, checkout, args, options) =>
+    runGit(root, checkout, args, {
+      ...options,
+      environment: {
+        ...options?.environment,
+        GIT_NO_LAZY_FETCH: "1",
+        GIT_ALLOW_PROTOCOL: "",
+      },
+    });
   const runBytes = async (
     root: string,
     checkout: string,
