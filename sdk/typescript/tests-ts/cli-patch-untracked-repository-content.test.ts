@@ -21,6 +21,7 @@ for (const kind of [
   "metadata",
   "ignored metadata",
   "committed",
+  "initialized submodule",
   "raw",
   "scrubbed",
   "directory link",
@@ -81,16 +82,43 @@ for (const kind of [
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
         }
+        if (kind === "initialized submodule") {
+          const childRemote = await fixtures.create(
+            "publication-child-origin-",
+          );
+          git("clone", "--bare", nested, childRemote);
+          nestedGit("remote", "add", "origin", childRemote);
+          nestedGit("fetch", "origin");
+          git("config", "-f", ".gitmodules", "submodule.nested.path", "nested");
+          git(
+            "config",
+            "-f",
+            ".gitmodules",
+            "submodule.nested.url",
+            childRemote,
+          );
+          git("add", ".gitmodules", "nested");
+          git("commit", "-m", "Synthetic registered submodule");
+          git("submodule", "init");
+          git("submodule", "absorbgitdirs", "--", "nested");
+          expect(
+            git("ls-files", "--others", "--ignored", "--exclude-standard"),
+          ).toBe("");
+        }
         const copiedPrivateContent = copied && kind !== "directory link";
         const blocked = copiedPrivateContent || kind === "scrubbed";
         const assessed =
           kind === "scrubbed" || (kind === "untracked" && !copied);
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
-          kind.startsWith("ignored") ? "" : "?? nested/",
+          kind.startsWith("ignored") || kind === "initialized submodule"
+            ? ""
+            : "?? nested/",
         );
         const head = git("rev-parse", "HEAD");
         const nestedHead = nestedGit("rev-parse", "HEAD");
-        const configuration = await readFile(join(nested, ".git", "config"));
+        const nestedStorage = nestedGit("rev-parse", "--absolute-git-dir");
+        const configuration = await readFile(join(nestedStorage, "config"));
+        const originalGitlink = git("ls-tree", "HEAD", "nested");
         let index: Buffer<ArrayBuffer> | undefined;
         let nestedIndex: Buffer<ArrayBuffer> | undefined;
         let pushes = 0;
@@ -133,7 +161,7 @@ for (const kind of [
                 return 0;
               }
               index = await readFile(join(directory, ".git", "index"));
-              nestedIndex = await readFile(join(nested, ".git", "index"));
+              nestedIndex = await readFile(join(nestedStorage, "index"));
               await writeFile(
                 join(directory, "selected.txt"),
                 copied ? await readFile(source) : "New independent content\n",
@@ -186,13 +214,13 @@ for (const kind of [
           expect(git("show", "HEAD:selected.txt")).toBe(
             copied ? content.trim() : "New independent content",
           );
-          expect(git("ls-tree", "HEAD", "nested")).toBe("");
+          expect(git("ls-tree", "HEAD", "nested")).toBe(originalGitlink);
         }
         expect(nestedGit("rev-parse", "HEAD")).toBe(nestedHead);
-        expect(await readFile(join(nested, ".git", "index"))).toEqual(
+        expect(await readFile(join(nestedStorage, "index"))).toEqual(
           nestedIndex!,
         );
-        expect(await readFile(join(nested, ".git", "config"))).toEqual(
+        expect(await readFile(join(nestedStorage, "config"))).toEqual(
           configuration,
         );
         expect(await readFile(source, "utf8")).toBe(content);
