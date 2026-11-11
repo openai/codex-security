@@ -100,6 +100,76 @@ async function createCredentialHome() {
 }
 
 describe("CLI authentication", () => {
+  test("login status JSON uses an isolated home and returns the effective authentication source", async () => {
+    const { stdout, runCli } = createCliTest(main, { stderr: true });
+    const environment = {
+      HOME: stateDirectory,
+      USERPROFILE: stateDirectory,
+      CODEX_API_KEY: "synthetic-fixture-key",
+    };
+    expect(
+      await runCli(
+        ["login", "status", "--json"],
+        dependencies({ environment }),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({
+      authenticated: true,
+      method: "api_key",
+      source: "CODEX_API_KEY",
+    });
+  });
+
+  test("structured login status ignores checkout-specific native configuration", async () => {
+    const home = await createCredentialHome();
+    expect(spawnSync("git", ["init", "--quiet", skillDirectory]).status).toBe(
+      0,
+    );
+    await mkdir(join(skillDirectory, ".codex"));
+    await writeFile(
+      join(skillDirectory, ".codex", "config.toml"),
+      "broken = [",
+    );
+    await writeFile(
+      join(home, "config.toml"),
+      `cli_auth_credentials_store = "file"\n[projects.${JSON.stringify(skillDirectory)}]\ntrust_level = "trusted"\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(home, "auth.json"),
+      JSON.stringify({ OPENAI_API_KEY: "synthetic-key" }),
+      { mode: 0o600 },
+    );
+
+    const status = spawnSync(
+      process.execPath,
+      [join(import.meta.dir, "../src/cli.ts"), "login", "status", "--json"],
+      {
+        cwd: skillDirectory,
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"],
+          HOME: stateDirectory,
+          USERPROFILE: stateDirectory,
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        },
+      },
+    );
+    expect(status.status, status.stderr).toBe(0);
+    expect(JSON.parse(status.stdout)).toEqual({
+      authenticated: true,
+      method: "stored_credentials",
+    });
+  });
+
+  test("an unknown login action does not start a sign-in", async () => {
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    const deps = dependencies();
+    deps.runCodex = throwing("must not start a sign-in");
+    expect(await runCli(["login", "stats"], deps)).toBe(2);
+    expect(stderr.text()).toContain("login status");
+  });
+
   test("delegates login and logout without overriding managed credential storage", async () => {
     const cases = [
       ["login"],

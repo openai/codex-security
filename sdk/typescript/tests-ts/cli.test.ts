@@ -1025,7 +1025,12 @@ describe("CLI", () => {
         definitions.options?.properties ?? {},
       )) {
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
-        expect(help.text()).toContain(flag);
+        // The CSV input belongs to the internal publication destination.
+        if (command.join(" ") === "publish scan" && flag === "--csv") {
+          expect(help.text()).not.toContain(flag);
+        } else {
+          expect(help.text()).toContain(flag);
+        }
         expect(typeof option.description).toBe("string");
         expect(option.description?.trim().length).toBeGreaterThan(0);
       }
@@ -1168,7 +1173,13 @@ describe("CLI", () => {
         { mode: 0o700 },
       );
     }
-    for (const selected of [component, join(alias, "component")]) {
+    const selections = [component, join(alias, "component")];
+    if (process.platform !== "win32") {
+      const componentLink = join(caller, "component-link");
+      await symlink(component, componentLink);
+      selections.push(componentLink + "/..");
+    }
+    for (const selected of selections) {
       const { stdout, stderr, runCli } = createCliTest(main);
       const status = await runCli(
         ["install-hook", selected, "--json"],
@@ -1594,6 +1605,50 @@ describe("CLI", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test.skipIf(process.platform === "win32").each(["present", "missing"])(
+    "reads the physical bulk scan CSV through a symlink parent with the lexical CSV %s",
+    async (lexicalCsv) => {
+      const root = await temporaryDirectory("codex-security-cli-csv-link-");
+      const currentDirectory = join(root, "entry");
+      const physical = join(root, "physical");
+      const output = join(root, "results");
+      try {
+        await mkdir(currentDirectory);
+        await mkdir(join(physical, "child"), { recursive: true });
+        await multiscanInventory(physical);
+        if (lexicalCsv === "present")
+          await multiscanInventory(currentDirectory);
+        await symlink(join(physical, "child"), join(currentDirectory, "link"));
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "bulk-scan",
+              "link/../repositories.csv",
+              "--output-dir",
+              output,
+              "--json",
+            ],
+            dependencies({ currentDirectory }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          total: 1,
+          completed: 1,
+          failed: 0,
+        });
+        expect(
+          parseJsonLines(await readFile(join(output, "results.jsonl"), "utf8")),
+        ).toMatchObject([
+          { repository: join(physical, "repository"), status: "completed" },
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("expands home-relative bulk scan paths", async () => {
     const root = await temporaryDirectory("codex-security-cli-home-");
@@ -2885,12 +2940,15 @@ describe("CLI", () => {
   ] as const)(
     "shows the resolved directory name in the scan title for %p",
     async (repository, name) => {
+      await using temp = await scopedTemporaryDirectory("scan-title-");
+      const currentDirectory = join(temp.path, "workspace", "repository");
+      await mkdir(join(currentDirectory, "child"), { recursive: true });
       const { stderr, runCli } = createCliTest(main, { stderr: true });
       expect(
         await runCli(
           ["scan", ...(repository === undefined ? [] : [repository])],
           dependencies({
-            currentDirectory: resolve("/workspace/repository"),
+            currentDirectory,
             environment: { NO_COLOR: "1" },
           }),
         ),
@@ -3203,7 +3261,6 @@ describe("CLI", () => {
     for (const [command, ...args] of [
       ["validate", "finding", "--json"],
       ["login", "--format", "json"],
-      ["login", "status", "--format=jsonl"],
       ["logout", "--format", "jsonl"],
       ["logout", "--format=json"],
     ] as const) {
