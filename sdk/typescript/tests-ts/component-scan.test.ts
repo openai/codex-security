@@ -491,11 +491,15 @@ test.each([
   "divides a $%i budget across concurrent components",
   async (total, expected) => {
     const paths = await fixture();
+    const config = join(paths.root, "settings.yaml");
+    await writeFile(config, "scan:\n  owner_suggestions: true\n");
     const matchFindings = mock(rejecting("unexpected unmetered model call"));
     const { code, stderr, stdout } = await cli(
       paths,
       [
         ...components.flatMap(({ paths }) => ["--component", paths[0]!]),
+        "--config",
+        config,
         "--workers",
         "3",
         "--max-cost",
@@ -507,6 +511,7 @@ test.each([
         createSecurity: client(async (repository, options) => {
           expect(options.maxCostUsd).toBe(expected);
           expect(options.skipFindingMatching).toBe(true);
+          expect(options.ownerSuggestions).toBe(false);
           return completed(repository, options);
         }),
         matchFindings,
@@ -554,6 +559,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     scanOptions: {
       auth: "chatgpt",
       scanPrompt: "Check access controls",
+      ownerSuggestions: true,
       maxCostUsd: 3,
     },
     onProgress: throwing("optional observer"),
@@ -568,6 +574,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
           mode: "standard",
           auth: "chatgpt",
           scanPrompt: "Check access controls",
+          ownerSuggestions: true,
           maxCostUsd: 3,
         });
         if (scope(repository, options) === "apps/api")

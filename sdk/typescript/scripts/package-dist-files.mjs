@@ -80,6 +80,7 @@ const distModules = [
   "config",
   "config-path",
   "contract",
+  "command-words",
   "cost",
   "cost-model",
   "bedrock-pricing",

@@ -8,7 +8,11 @@ export function batchScanBudget(
     ScanSettings,
     "maxCostUsd" | "postScanPrompt" | "postScanPromptFile"
   >,
-): { maxCostUsd?: number; skipFindingMatching?: true } {
+): {
+  maxCostUsd?: number;
+  skipFindingMatching?: true;
+  ownerSuggestions?: false;
+} {
   if (share === undefined) return { maxCostUsd: settings.maxCostUsd };
   if (
     settings.postScanPrompt !== undefined ||
@@ -20,6 +24,7 @@ export function batchScanBudget(
   return {
     maxCostUsd: Math.min(share, settings.maxCostUsd ?? share),
     skipFindingMatching: true,
+    ownerSuggestions: false,
   };
 }
 

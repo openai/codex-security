@@ -50,6 +50,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -79,6 +80,7 @@ import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
   resolveArtifactFormat,
+  artifactSourceProtectionRoots,
   resolveArtifactExportOutput,
   resolveSavedArtifactDirectory,
   runArtifactExport,
@@ -134,7 +136,7 @@ import {
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
-  listLocalExternalFindings,
+  readLocalExternalFindings,
   type StoredExternalFinding,
 } from "./external-findings-local.js";
 import type { collectSonarIssues } from "./sonar-collector.js";
@@ -154,7 +156,11 @@ import {
   resolvePatchReviewPublisher,
 } from "./patch-publication.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
-import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
+import {
+  savedCheckoutBoundaries,
+  savedDiscoveryRoots,
+  savedScanWorkbench,
+} from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
@@ -317,14 +323,16 @@ import {
   logoutCredentialHome,
   executablePathForSpawn,
   environmentWithGit,
+  isPythonPathCandidate,
   expandHome,
+  resolveInputPath,
+  resolveParentTraversal,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   resolvePluginPython,
   pluginMetadata,
   runWorkbench,
   workbenchEnvironment,
-  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginPythonOptions,
@@ -393,6 +401,7 @@ import {
 import {
   abortable,
   DiffTarget,
+  resolveRepositoryPath,
   enclosingGitWorktreeRoots,
   gitMarkerRoot,
   normalizeRepository,
@@ -1465,7 +1474,7 @@ interface CliDependencies {
   externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
   collectSonarIssues?: typeof collectSonarIssues;
   prepareLocalExternalImport?: typeof prepareLocalExternalImport;
-  listLocalExternalFindings?: typeof listLocalExternalFindings;
+  readLocalExternalFindings?: typeof readLocalExternalFindings;
   checkScanPublication?: typeof checkScanPublication;
   publishScan?: typeof publishScan;
   deduplicateScan?: typeof deduplicateScanInternal;
@@ -1640,10 +1649,12 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   ) => {
     const checkingTarget =
       args[0] === "get-scan" && args.includes("--check-target");
+    const configuredGit = environmentEntry(process.env, "CODEX_SECURITY_GIT");
     let environment: NodeJS.ProcessEnv =
       !checkingTarget || protectedRoot === undefined
         ? {
             ...exportEnvironment(),
+            CODEX_SECURITY_GIT: configuredGit,
             CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
           }
         : workbenchEnvironment(process.env);
@@ -1658,18 +1669,42 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
           (await gitMarkerRoot(root, signal, "outermost")) ?? root,
       ),
     );
+    const configuredPython =
+      pythonPath ?? environmentEntry(environment, "PYTHON");
+    const boundaries =
+      configuredPython && isPythonPathCandidate(configuredPython)
+        ? undefined
+        : await savedCheckoutBoundaries(environment);
     const python = await resolvePluginPython({
       configuredPath: pythonPath,
       environment,
       signal,
       protectedRoot: protectedRoot === undefined ? undefined : protectedRoots,
+      discoveryProtectedRoots: boundaries
+        ? await savedDiscoveryRoots(
+            boundaries,
+            [...boundaries.byTarget.keys()],
+            signal,
+          )
+        : undefined,
+      allowPathLookup: boundaries?.complete,
     });
-    if (checkingTarget && protectedRoot !== undefined) {
-      const git = await inspectTrustedExecutable("git", environment, [
-        ...protectedRoots,
-        ...gitProtectedRoots,
-      ]);
-      environment = environmentWithGit(git.environment, git);
+    if (
+      checkingTarget &&
+      gitProtectedRoots.length > 0 &&
+      (configuredGit === undefined || isAbsolute(configuredGit))
+    ) {
+      const git = await inspectTrustedExecutable(
+        configuredGit ?? "git",
+        environment,
+        [...protectedRoots, ...gitProtectedRoots],
+      );
+      // Filter knowledge-base tools, then let the workbench choose ambient Git
+      // after it also knows the boundaries recorded in the history database.
+      environment =
+        configuredGit !== undefined || git.executable === null
+          ? environmentWithGit(git.environment, git)
+          : git.environment;
     }
     const workspace =
       pluginPath === undefined
@@ -2598,7 +2633,7 @@ export async function main(
       runScanImport(options, errorOutput, dependencies),
     );
   const history = async (
-    args: readonly string[],
+    args: readonly string[] | (() => Promise<JsonObject>),
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
@@ -2606,13 +2641,15 @@ export async function main(
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(
-          args,
-          undefined,
-          undefined,
-          pythonPath,
-          protectedRoot,
-        ),
+        await (typeof args === "function"
+          ? args()
+          : dependencies.runWorkbench(
+              args,
+              undefined,
+              undefined,
+              pythonPath,
+              protectedRoot,
+            )),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -2832,57 +2869,53 @@ export async function main(
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format }) {
-      const requestedRepository = resolveCliPath(
-        dependencies.currentDirectory(),
+      const requestedPath = resolveInputPath(
         args.repository ?? ".",
+        dependencies.currentDirectory(),
       );
-      const repository = await realpath(requestedRepository).catch(
-        () => requestedRepository,
+      const storedPath = await resolveParentTraversal(requestedPath).catch(
+        () => undefined,
       );
-      return await history(
-        ["list-repositories", "--status", "scanned"],
-        async (value): Promise<JsonObject> => {
-          const repositories = value["repositories"] as JsonObject[];
-          let target = repositories.find(
-            (entry) => entry["targetPath"] === requestedRepository,
+      const canonicalPath =
+        storedPath === undefined
+          ? undefined
+          : await realpath(storedPath).catch(() => undefined);
+      const requestedRepository =
+        canonicalPath === undefined
+          ? (storedPath ?? requestedPath)
+          : requestedPath;
+      return await history(async () => {
+        const findings = await listRepositoryFindings(
+          dependencies.runWorkbench,
+          {
+            repository: requestedRepository,
+          },
+        );
+        if (findings === undefined) {
+          throw new CodexSecurityError(
+            "Repository findings are unavailable for the requested checkout.",
           );
-          const canonicalTarget = repositories.find(
-            (entry) => entry["targetPath"] === repository,
+        }
+        let missingRepositoryHistory = false;
+        if (findings.length === 0 && useInteractiveHistory(format)) {
+          const saved = await dependencies.runWorkbench(
+            workbenchArgs("list-scans", {
+              repository: requestedRepository,
+              limit: "1",
+            }),
           );
-          if (
-            target === undefined &&
-            canonicalTarget !== undefined &&
-            (await sameFile(
-              canonicalTarget["targetPath"] as string,
-              requestedRepository,
-            ))
-          ) {
-            target = canonicalTarget;
-          }
-          if (target === undefined) {
-            for (const entry of repositories) {
-              const storedPath = entry["targetPath"] as string;
-              if (await sameFile(storedPath, requestedRepository)) {
-                target = entry;
-                break;
-              }
-            }
-          }
-          const findings =
-            target === undefined
-              ? []
-              : await listRepositoryFindings(
-                  dependencies.runWorkbench,
-                  target["targetId"] as string,
-                );
-          return presentHistory(
-            { repository: requestedRepository, findings: findings ?? [] },
-            "findings",
-            format,
-            { missingRepositoryHistory: target === undefined },
-          );
-        },
-      );
+          missingRepositoryHistory =
+            (saved["scans"] as SavedScan[]).length === 0;
+        }
+        return presentHistory(
+          { repository: requestedRepository, findings },
+          "findings",
+          format,
+          {
+            missingRepositoryHistory,
+          },
+        );
+      });
     },
   });
   findingFeedback.command("imported", {
@@ -2900,12 +2933,13 @@ export async function main(
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       try {
-        const repository = resolveCliPath(
-          dependencies.currentDirectory(),
+        const repository = resolveInputPath(
           args.repository ?? ".",
+          dependencies.currentDirectory(),
         );
-        const findings = await (
-          dependencies.listLocalExternalFindings ?? listLocalExternalFindings
+        controller.signal.throwIfAborted();
+        const result = await (
+          dependencies.readLocalExternalFindings ?? readLocalExternalFindings
         )(
           { repository },
           {
@@ -2915,11 +2949,11 @@ export async function main(
         );
         if (useInteractiveHistory(format))
           renderedOutput = renderImportedFindings(
-            repository,
-            findings,
+            result.repository,
+            result.findings,
             output.columns || 96,
           );
-        return { repository, findings };
+        return result;
       } catch (error) {
         if (controller.signal.aborted) {
           exitCode = controller.signal.reason === "SIGINT" ? 130 : 143;
@@ -2971,11 +3005,14 @@ export async function main(
               ? await canonicalizeModelSafePath(
                   resolveCliPath(directory, options.scanRoot),
                 )
-              : resolveCliPath(directory, options.scanRoot);
+              : await resolveParentTraversal(
+                  resolveInputPath(options.scanRoot, directory),
+                  { allowMissing: true },
+                );
         const repository =
           scanRoot !== undefined && args.repository === undefined
             ? undefined
-            : resolveCliPath(directory, args.repository ?? directory);
+            : resolveInputPath(args.repository ?? directory, directory);
         return presentHistory(
           await history(
             workbenchArgs("list-scans", {
@@ -3296,8 +3333,18 @@ export async function main(
               "SCAN_IMPORT_FAILED",
             );
           }
+          const replay =
+            args.scanId === undefined && isJsonObject(recipe)
+              ? {
+                  ...saved,
+                  recipe: {
+                    ...recipe,
+                    repository: dependencies.currentDirectory(),
+                  },
+                }
+              : saved;
           scanArguments = await prepareScanArgumentsFromRecipe(
-            saved,
+            replay,
             "rerun",
             dependencies.currentDirectory(),
             dependencies.environment,
@@ -3603,29 +3650,33 @@ export async function main(
             options.csv === undefined
               ? undefined
               : resolveCliPath(currentDirectory, options.csv);
-          const directories = [
-            ...new Set(
-              [
-                ...(args.scanDir === undefined ? [] : [args.scanDir]),
-                ...options.scanDir,
-              ].map((directory) => resolveCliPath(currentDirectory, directory)),
-            ),
+          const directoryInputs = [
+            ...(args.scanDir === undefined ? [] : [args.scanDir]),
+            ...options.scanDir,
           ];
-          if (directories.length > 1 && options.to !== "cloud") {
-            throw new CodexSecurityError(
-              "Multiple scan directories are only supported with --to cloud.",
-            );
-          }
-          if (options.scan.length > 0 && directories.length > 0) {
+          const uniqueDirectories = (paths: string[]) => {
+            const directories = [...new Set(paths)];
+            if (directories.length > 1 && options.to !== "cloud") {
+              throw new CodexSecurityError(
+                "Multiple scan directories are only supported with --to cloud.",
+              );
+            }
+            return directories;
+          };
+          // Reject conflicting selectors before reading their path components.
+          uniqueDirectories(
+            directoryInputs.map((value) =>
+              resolveCliPath(currentDirectory, value),
+            ),
+          );
+          if (options.scan.length > 0 && directoryInputs.length > 0) {
             throw new CodexSecurityError(
               "Use --scan or scan directory inputs, not both.",
             );
           }
           if (
             csvPath !== undefined &&
-            (args.scanDir !== undefined ||
-              options.scan.length > 0 ||
-              options.scanDir.length > 0)
+            (directoryInputs.length > 0 || options.scan.length > 0)
           ) {
             throw new CodexSecurityError(
               "Use --csv or scan directory and ID inputs, not both.",
@@ -3697,6 +3748,16 @@ export async function main(
             runWorkbench: (args, input) =>
               dependencies.runWorkbench(args, input, controller.signal),
           };
+          const directories = uniqueDirectories(
+            await Promise.all(
+              directoryInputs.map((value) =>
+                resolveParentTraversal(
+                  resolveInputPath(value, currentDirectory),
+                  { allowMissing: true },
+                ),
+              ),
+            ),
+          );
           const selectedScans: { scanDir: string; scanId?: string }[] =
             directories.map((scanDir) => ({ scanDir }));
           for (const requestedId of new Set(options.scan)) {
@@ -4250,10 +4311,10 @@ export async function main(
               inspectorProjectMap = new Map([[inspectorProjectArn, url]]);
             }
             const directory = dependencies.currentDirectory();
-            const report = resolveCliPath(directory, args.file);
+            const report = resolveInputPath(args.file, directory);
             const repository =
               options.to === "local"
-                ? resolveCliPath(directory, options.repository)
+                ? resolveInputPath(options.repository, directory)
                 : options.repository;
             const publicationOptions = {
               ...readerOptions,
@@ -4280,7 +4341,7 @@ export async function main(
                     `  ${diagnosticValue(finding.source_finding_id)} [${finding.evidence.severity}] ${diagnosticValue(finding.evidence.title)}\n`,
                   );
                 writeDiagnostic(
-                  `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
+                  `Evidence file: ${diagnosticValue(report)}\nImported evidence remains not assessed by Codex.\nUse --dry-run --format json to inspect all normalized findings and complete evidence before storing them.\n`,
                 );
               };
               const disposition = externalImportDisposition(preview);
@@ -4332,7 +4393,7 @@ export async function main(
                 );
               showExclusions(preview.excluded);
               writeDiagnostic(
-                `Evidence file: ${diagnosticValue(resolveCliPath(dependencies.currentDirectory(), args.file))}\nImported evidence remains not assessed by Codex.\n`,
+                `Evidence file: ${diagnosticValue(report)}\nImported evidence remains not assessed by Codex.\n`,
               );
               const severities = new Map<string, number>();
               for (const finding of preview.findings)
@@ -4459,12 +4520,20 @@ export async function main(
           const controller = new AbortController();
           const removeSignals = listenForAbort(dependencies, controller);
           try {
+            const input = resolveInputPath(
+              args.scanDir,
+              dependencies.currentDirectory(),
+            );
+            const destination = publicationDestination(
+              options,
+              dependencies.environment,
+            );
+            const directory = await resolveParentTraversal(input, {
+              allowMissing: true,
+            });
             const result = await (
               dependencies.checkScanPublication ?? checkScanPublication
-            )(resolveCliPath(dependencies.currentDirectory(), args.scanDir), {
-              ...publicationDestination(options, dependencies.environment),
-              signal: controller.signal,
-            });
+            )(directory, { ...destination, signal: controller.signal });
             controller.signal.throwIfAborted();
             return { ...result };
           } catch (error) {
@@ -5221,7 +5290,7 @@ export async function main(
           const outcome = await withTerminalErrorsHandled(errorOutput, () =>
             runPolicyCommand(
               {
-                repository: resolveCliPath(directory, args.repository ?? "."),
+                repository: resolveInputPath(args.repository ?? ".", directory),
                 config: {
                   pluginPath: options.pluginPath,
                   pythonPath: options.python,
@@ -5685,8 +5754,13 @@ export async function main(
       async run({ args, options }) {
         try {
           const cwd = dependencies.currentDirectory();
-          const repository = resolveCliPath(cwd, args.repository ?? ".");
           const environment = dependencies.environment;
+          const requested = resolveInputPath(
+            args.repository ?? ".",
+            cwd,
+            environment,
+          );
+          const repository = await resolveParentTraversal(requested);
           const git = await trustedGitCommand(
             repository,
             true,
@@ -5695,7 +5769,7 @@ export async function main(
               repository,
               environment,
               undefined,
-              cwd,
+              { cwd, requestedPaths: [resolve(requested)] },
             ),
           );
           const hooksDirectory = execFileSync(
@@ -5758,9 +5832,9 @@ export async function main(
         const removeSignals = listenForAbort(dependencies, controller);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(
-            directory,
+          const repository = resolveInputPath(
             options.sourceRoot ?? ".",
+            directory,
           );
           const findings = await parseImportedFindings(
             await readRegularInputFile(
@@ -6206,7 +6280,7 @@ export async function main(
             "Stop each component scan if estimated USD cost exceeds AMOUNT.",
           ),
           maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching.",
+            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching and owner suggestions.",
           ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
@@ -6237,7 +6311,10 @@ export async function main(
         signalHandlers(dependencies, "add", onInterrupt, onTerminate);
         try {
           const directory = dependencies.currentDirectory();
-          const repository = resolveCliPath(directory, args.repository ?? ".");
+          const repository = resolveInputPath(
+            args.repository ?? ".",
+            directory,
+          );
           const project = await selectedProjectConfig(
             options.config,
             dependencies,
@@ -6335,7 +6412,7 @@ export async function main(
             onPlan: (components) => {
               if (dashboard === null && options.maxTotalCost !== undefined)
                 errorOutput.write(
-                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching is skipped.\n`,
+                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
                 );
               for (const component of components)
                 componentNames.set(component.id, component.name);
@@ -6524,7 +6601,7 @@ export async function main(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
         maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching.",
+          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching and owner suggestions.",
         ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
@@ -6595,7 +6672,7 @@ export async function main(
                 "--output-dir is required with a repository CSV.",
               );
             }
-            inputPath = resolveCliPath(currentDirectory, args.input);
+            inputPath = resolveInputPath(args.input, currentDirectory);
             outputDir = settings.outputDir;
           }
           const scanOptionsByMode =
@@ -6613,7 +6690,7 @@ export async function main(
                 );
           if (options.maxTotalCost !== undefined)
             errorOutput.write(
-              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching is skipped.\n`,
+              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
             );
           const result = await runMultiscan({
             inputPath,
@@ -6857,11 +6934,11 @@ export async function main(
           const sourceRoot =
             options.sourceRoot === undefined
               ? undefined
-              : resolveCliPath(currentDirectory, options.sourceRoot);
-          const protectedRoot =
-            sourceRoot === undefined
-              ? undefined
-              : [currentDirectory, sourceRoot];
+              : resolveInputPath(options.sourceRoot, currentDirectory);
+          const protectedRoot = await artifactSourceProtectionRoots(
+            sourceRoot,
+            currentDirectory,
+          );
           let scanDir = args.scanDir;
           if (scanDir === undefined) {
             let scanId = options.scan;
@@ -6895,7 +6972,7 @@ export async function main(
               : resolveCliPath(currentDirectory, destination);
           const prepared = await resolveArtifactExportOutput(
             {
-              scanDir: resolveCliPath(currentDirectory, scanDir),
+              scanDir: resolveInputPath(scanDir, currentDirectory),
               artifact: options.artifact,
               format,
               output: outputPath,
@@ -7713,6 +7790,12 @@ export async function main(
         async run({ format }) {
           const structured = !useDefaultOutput(format);
           const authentication = scanAuthentication(dependencies.environment);
+          if (authentication.method === "api_key") {
+            errorOutput.write(
+              `API key configured via ${authentication.source} (offline check).\n`,
+            );
+            errorOutput.write("Stored sign-in status:\n");
+          }
           exitCode = await withLoginEnvironment(async (environment) => {
             if (authentication.method !== "api_key")
               await initialCredentialsAvailable(
@@ -7745,9 +7828,6 @@ export async function main(
             (exitCode === 0 || exitCode === 1)
           ) {
             exitCode = 0;
-            errorOutput.write(
-              `Effective scan authentication: API key from ${authentication.source}.\n`,
-            );
             errorOutput.write(
               `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
             );
@@ -8711,7 +8791,7 @@ async function prepareScanArgumentsFromRecipe(
             ? DiffTarget.workingTree({ base: reference ?? "HEAD" })
             : "repository",
     knowledgeBasePaths: knowledgeBasePaths.map((path) =>
-      resolveCliPath(directory, path),
+      resolveInputPath(path, directory),
     ),
     ...prompts,
     safetyIdentifier,
@@ -11205,16 +11285,19 @@ async function executeScan(
     deepScanOptions(arguments_);
     const directory = dependencies.currentDirectory();
     repository = arguments_.repository ?? directory;
-    if (arguments_.validate) {
+    const repositoryPath = arguments_.validate
+      ? resolveInputPath(repository, directory)
+      : resolveRepositoryPath(repository, directory);
+    if (arguments_.validate || repositoryPath.split(sep).includes("..")) {
       repository = await normalizeRepository(
-        resolve(directory, expandHome(repository)),
+        repositoryPath,
         preparationAbortController.signal,
       );
     }
     const target = arguments_.target;
     const prompts = await resolveScanPrompts(
       arguments_,
-      resolve(directory, repository),
+      resolveRepositoryPath(repository, directory),
       directory,
     );
     const config: CodexSecurityConfig = {
@@ -11846,7 +11929,10 @@ async function executeScan(
       result = await security.run(repository, options);
       runningMockScan = false;
       scanDir = result.scanDir;
-      repository = resolve(dependencies.currentDirectory(), repository);
+      repository = resolveRepositoryPath(
+        repository,
+        dependencies.currentDirectory(),
+      );
       if (arguments_.validate) {
         const scanId = result.manifest.scan.id;
         const checkTarget = async () => {
@@ -12732,7 +12818,7 @@ function printScanSummary(
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
   const findingSummary = repositoryFindings?.length
-    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    ? `${confirmedCount} confirmed in latest repository scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
     : severitySummary;
   const findingColor =
     findingCount === 0
