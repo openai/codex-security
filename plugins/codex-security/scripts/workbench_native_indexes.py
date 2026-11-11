@@ -38,7 +38,7 @@ def list_global_findings(
     repository = getattr(args, "repository", None)
     requested = None
     if repository is not None:
-        repository = str(Path(repository).expanduser().absolute())
+        repository = identities.history_path(str(Path(repository).expanduser().absolute()))
         requested = identities.for_path(repository)
         scan_scope = identities.scope_for_path(repository)
     else:

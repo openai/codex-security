@@ -677,7 +677,7 @@ For normalized evidence, use `prepareNormalizedLocalImport(findings, options)`
 or `prepareNormalizedExternalPublication(findings, options)` and review the
 preview in the same way. Cloud file imports use `ExternalPublicationOptions`,
 and normalized Cloud imports use `NormalizedExternalPublicationOptions`. Keep
-Cloud receipts and saved requests when retrying an interrupted submission.
+Cloud receipts and saved requests when retrying an interrupted submission. Use the SDK build that created a pending submission to finish it before upgrading.
 
 Use `listLocalExternalFindings({ repository })` to read saved scanner evidence.
 It starts unassessed. Reimporting the same repository, provider, source key

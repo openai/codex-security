@@ -3,6 +3,7 @@ import { parseJsonLines } from "./support/json.js";
 import { writeFileSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -1025,8 +1026,11 @@ describe("CLI", () => {
         definitions.options?.properties ?? {},
       )) {
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
-        // The CSV input belongs to the internal publication destination.
-        if (command.join(" ") === "publish scan" && flag === "--csv") {
+        // Keep the internal CSV input and the redundant Linear selector out of help.
+        if (
+          (command.join(" ") === "publish scan" && flag === "--csv") ||
+          (command.join(" ") === "publish check" && flag === "--to")
+        ) {
           expect(help.text()).not.toContain(flag);
         } else {
           expect(help.text()).toContain(flag);
@@ -1287,14 +1291,15 @@ describe("CLI", () => {
         hook,
         "#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity medium\n",
       );
-      const migratedHook = captureCli(main, "stdout");
+      const migratedHook = createCliTest(main);
       expect(
-        await migratedHook.run(
+        await migratedHook.runCli(
           ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
           deps,
         ),
+        migratedHook.stderr.text(),
       ).toBe(0);
-      const migrated = JSON.parse(migratedHook.text()) as {
+      const migrated = JSON.parse(migratedHook.stdout.text()) as {
         hook: string;
         failOnSeverity: string;
       };
@@ -1307,19 +1312,18 @@ describe("CLI", () => {
       ]) {
         await writeFile(hook, trustedHook.replace(/^unset .*\n/m, unset));
         expect(
-          await migratedHook.run(
+          await migratedHook.runCli(
             ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
             deps,
           ),
+          migratedHook.stderr.text(),
         ).toBe(0);
         expect(await readFile(hook, "utf8")).toBe(trustedHook);
       }
 
-      const existingHook = captureCli(main, "stderr");
-      expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
-      expect(existingHook.text()).toContain("A pre-commit hook already exists");
-      expect(await readFile(hook, "utf8")).toContain(
-        "--fail-on-severity medium",
+      expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(0);
+      expect(await readFile(hook, "utf8")).toBe(
+        trustedHook.replace("severity medium", "severity high"),
       );
 
       const customHook = "#!/bin/sh\nexit 0\n";
@@ -1335,7 +1339,20 @@ describe("CLI", () => {
         "A pre-commit hook already exists",
       );
       expect(await readFile(hook, "utf8")).toBe(customHook);
-      await writeFile(hook, trustedHook);
+      const other = join(root, "other-hook");
+      await writeFile(other, trustedHook);
+      await rm(hook);
+      await link(other, hook);
+      expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
+      expect(await readFile(other, "utf8")).toBe(trustedHook);
+      await rm(hook);
+      if (process.platform !== "win32") {
+        await symlink(other, hook);
+        expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
+        expect(await readFile(other, "utf8")).toBe(trustedHook);
+        await rm(hook);
+      }
+      await writeFile(hook, trustedHook, { mode: 0o755 });
 
       const binaries = join(root, "test-binaries");
       await mkdir(binaries);
@@ -1863,6 +1880,7 @@ describe("CLI", () => {
         "--knowledge-base",
         "/shared/threat-models",
       ],
+      ["bulk-scan", "--output-dir", "results"],
       ["bulk-scan", "--provider", "openrouter"],
       ["bulk-scan", "--provider=openrouter", "--model", "openai/gpt-5.4"],
       ["bulk-scan", "--provider", "fireworks"],
@@ -1894,19 +1912,6 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("--output-dir is required");
     expect(stdout.text()).toBe("");
-  });
-
-  test("rejects an output directory without a repository CSV", async () => {
-    const stderr = captureCli(main, "stderr");
-    expect(
-      await stderr.run(
-        ["bulk-scan", "--output-dir", "results"],
-        dependencies(),
-      ),
-    ).toBe(2);
-    expect(stderr.text()).toContain(
-      "--output-dir can only be used with a repository CSV",
-    );
   });
 
   test("exposes only typed, read-only SDK metadata over MCP", async () => {
@@ -2082,6 +2087,7 @@ describe("CLI", () => {
         "list-scans",
         "--repository",
         "/current/repository",
+        "--prefer-worktree",
         "--status",
         "complete",
         "--limit",
@@ -3295,7 +3301,7 @@ describe("CLI", () => {
       expect(exportFindings).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
-        "CSV stdout cannot be combined with JSON output",
+        "CSV stdout cannot be combined with --format json",
       );
     }
   });
@@ -3790,10 +3796,6 @@ describe("CLI", () => {
       [
         ["bulk-scan", "--knowledge-base="],
         "--knowledge-base must not be empty",
-      ],
-      [
-        ["bulk-scan", "--output-dir", "results", "--", "repositories.csv"],
-        "Unknown flag: --",
       ],
       [["scan", ".", "--model="], "--model must not be empty"],
       [

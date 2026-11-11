@@ -13,7 +13,7 @@ const COMMAND_GROUPS: readonly Group[] = [
   ["Automate", ["bulk-scan", "scan-components", "install-hook"]],
   [
     "Configure and troubleshoot",
-    ["login", "logout", "init", "info", "feedback"],
+    ["login", "logout", "init", "info", "feedback", "update"],
   ],
 ];
 
@@ -106,7 +106,6 @@ const OUTPUT_FLAGS = ["format", "json", "filter-output", "full-output"];
 
 const OUTPUT_GROUPS: readonly Group[] = [
   ["Help and version", ["help", "version"]],
-  ["Maintenance", ["update"]],
   ["Output", OUTPUT_FLAGS],
 ];
 
@@ -213,6 +212,7 @@ function globalRows(rows: Row[], command: string): Row[] {
     command,
   );
   const visible = rows.filter(({ label }) => {
+    if (label === "--update") return false;
     if (scan && label.startsWith("--filter-output")) return false;
     return !(
       plainOutput &&
@@ -226,7 +226,7 @@ function globalRows(rows: Row[], command: string): Row[] {
   ) {
     formats.label = formats.label.replace("|md", "");
   }
-  if (formats && command !== "scan import") {
+  if (formats) {
     visible.push({
       label: "--json",
       description: "Shorthand for --format json.",
@@ -329,7 +329,11 @@ export function formatCliHelp(text: string, columns = 80): string {
       );
     } else if (title === "Options:") {
       const options = parseRows(lines)
-        .filter((row) => command !== "publish scan" || rowName(row) !== "csv")
+        .filter(
+          (row) =>
+            !(command === "publish scan" && rowName(row) === "csv") &&
+            !(command === "publish check" && rowName(row) === "to"),
+        )
         .map((row) => optionRow(row, command));
       const rows = options.filter(
         (row) => !row.description.startsWith("[deprecated]"),

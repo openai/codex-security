@@ -1971,19 +1971,58 @@ test.each(["auto", "explicit", "file"])(
         : selection === "file"
           ? ["--components-file", planFile]
           : selected.flatMap(({ paths }) => ["--component", paths[0]!]);
-    const result = await cli(paths, [...args, "--plan-only"], {
-      planComponents: async () => ({ components: selected }),
-      createSecurity: throwing("unexpected scan"),
-    });
-    expect(result.code).toBe(0);
+    const result = await cli(
+      paths,
+      [
+        ...args,
+        "--plan-only",
+        ...(selection === "auto"
+          ? []
+          : [
+              "--auth",
+              "api-key",
+              "--workers=2",
+              "--max-total-cost=3",
+              "--max-cost",
+              "1.5",
+              "--codex",
+              'model_providers.example.http_headers.Example="synthetic-header"',
+            ]),
+      ],
+      {
+        environment: {},
+        planComponents: async () => ({ components: selected }),
+        createSecurity: throwing("unexpected scan"),
+      },
+    );
+    expect(result.code, result.stderr).toBe(0);
     expect(await json(join(paths.outputDir, "components.json"))).toEqual({
       components:
         selection === "explicit"
           ? selected.map(({ paths }) => ({ name: paths[0], paths }))
           : selected,
     });
-    expect(JSON.parse(result.stdout).planPath).toBe(
-      join(paths.outputDir, "components.json"),
+    const plan = JSON.parse(result.stdout);
+    expect(plan.planPath).toBe(join(paths.outputDir, "components.json"));
+    expect(plan.nextCommand).toContain("codex-security scan-components");
+    expect(plan.nextCommand).toContain("--components-file");
+    expect(plan.nextCommand).toContain(join(paths.outputDir, "results"));
+    if (selection !== "auto") {
+      expect(plan.nextCommand).toContain("--auth api-key");
+      expect(plan.nextCommand).toContain("--workers 2");
+      expect(plan.nextCommand).toContain("--max-cost 1.5");
+      expect(plan.nextCommand).toContain("--max-total-cost 3");
+      expect(plan.nextCommandNote).toContain("--codex");
+      expect(result.stdout + result.stderr).not.toContain("synthetic-header");
+    }
+    const occupied = await cli(paths, [
+      "--components-file",
+      plan.planPath,
+      "--plan-only",
+    ]);
+    expect(occupied.code).toBe(2);
+    expect(occupied.stderr).toContain(
+      "Choose a new or empty directory with --output-dir",
     );
   },
 );

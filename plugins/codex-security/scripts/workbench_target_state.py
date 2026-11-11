@@ -713,6 +713,27 @@ class RepositoryIdentityCache:
             else RepositoryScanScope(target_id=target_id)
         )
 
+    def history_path(self, target_path: str) -> str:
+        """Use the worktree root when a subdirectory has no saved history of its own."""
+        requested = self.for_path(target_path)
+        if (
+            not requested.ownership_matches
+            or requested.target_id
+            or requested.repository is None
+            or requested.repository.relative_path == "."
+        ):
+            return target_path
+        if (
+            self.supports_generation
+            and self.connection.execute(
+                "SELECT 1 FROM scans WHERE repository_generation = ? LIMIT 1",
+                (requested.live_identity,),
+            ).fetchone()
+        ):
+            return target_path
+        worktree = _repository_worktree(Path(target_path))
+        return str(worktree[0]) if worktree is not None else target_path
+
     def scope_for_path(self, target_path: str) -> RepositoryScanScope:
         return self._scope_for_state(self.for_path(target_path))
 
