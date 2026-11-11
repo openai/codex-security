@@ -725,9 +725,9 @@ the original review IDs. Report a terminal partial result with its exclusions
 and errors. If the approved ID was lost or the preview changed, show the new
 preview for review.
 `listLocalFindingPublications({ repository, id })` returns receipts for a
-stored version, including completed private inbox job IDs. Custom provider
-names and Tenable can be used locally. Cloud eligibility follows its provider
-contract and the selected destination.
+stored version, including completed private inbox job IDs. Stored Tenable
+findings can be published to a supported Cloud destination using their
+native Code Repository evidence. Custom provider names support local import.
 
 For a saved scanner report, call `prepareLocalExternalImport` for a checkout
 or `prepareExternalPublication` for a connected Cloud repository. Review the
