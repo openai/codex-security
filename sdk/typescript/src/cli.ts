@@ -10996,7 +10996,6 @@ async function publicationContentDigests(
         const entries = await readdir(canonical, { encoding: "buffer" });
         for (const entry of entries) {
           const name = Buffer.from(entry).toString("latin1");
-          if (name === ".svn") continue;
           pending.push(`${pathKey.replace(/\/$/u, "")}/${name}`);
         }
       } else if (metadata.isFile()) {

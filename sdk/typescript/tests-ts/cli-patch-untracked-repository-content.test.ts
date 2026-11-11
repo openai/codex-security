@@ -19,6 +19,7 @@ for (const kind of [
   "untracked",
   "ignored",
   "metadata",
+  "Subversion working copy",
   "ignored metadata",
   "committed",
   "initialized submodule",
@@ -50,6 +51,11 @@ for (const kind of [
         nestedGit("commit", "-m", "Synthetic nested baseline");
         let content = "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
         let source: string | Buffer = join(nested, "local.txt");
+        if (kind === "Subversion working copy") {
+          await mkdir(join(nested, ".svn"));
+          source = join(nested, ".svn", "wc.db");
+          content = "SQLite format 3\0SYNTHETIC_PRIVATE_WORKING_COPY_DATA\n";
+        }
         if (kind.endsWith("metadata")) {
           nestedGit(
             "config",
