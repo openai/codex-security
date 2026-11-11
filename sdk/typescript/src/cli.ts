@@ -9621,10 +9621,10 @@ async function prepareSavedPatchPublication(
   dependencies: CliDependencies,
   worktree: string,
   root: string,
+  parent: string,
 ) {
   const git = (args: string[], options?: { trim?: boolean; input?: string }) =>
     dependencies.runRepositoryCommand("git", args, repository, options);
-  const parent = await git(["rev-parse", "HEAD"]);
   const parentTree = await git(["rev-parse", parent + "^{tree}"]);
   let tree = parentTree;
   // Capture the input to clean filters separately. An operator's filter can
@@ -9940,6 +9940,7 @@ interface PatchPublication {
   verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   branch: string;
+  parent: string;
   sshCommand?: string;
   proxyBindings: Map<string, string | null>;
   // Opaque Git path keys, using Latin-1 to preserve filename bytes.
@@ -10823,6 +10824,11 @@ async function preparePatchPublication(
     // Status may invoke clean/process filters while checking a tracked file.
     { patchSnapshot: [], environment: { GIT_OPTIONAL_LOCKS: "0" } },
   );
+  const parent = await dependencies.runRepositoryCommand(
+    "git",
+    ["rev-parse", "HEAD"],
+    repository,
+  );
   // A fresh index reads worktree edits hidden by assume-unchanged flags.
   const tree = await snapshotPatchTree(repository, dependencies);
   const worktreeChanges = await patchGitRecords(
@@ -10869,6 +10875,7 @@ async function preparePatchPublication(
   );
   return {
     branch,
+    parent,
     dirtyFiles,
     ignoredFiles,
     ignoredDigests,
@@ -11715,7 +11722,7 @@ async function createPatchPullRequest(
   );
   const previousBranch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
   const previousCommit = await run(["rev-parse", "HEAD"]);
-  if (publication.verified && previousCommit !== publication.verified.parent)
+  if (previousCommit !== publication.parent)
     throw new CodexSecurityError(
       "The patch base changed during verification. Local edits were kept for review.",
     );
@@ -12943,6 +12950,7 @@ async function runFindingPatches(
                 dependencies,
                 options.publication.tree,
                 options.publication.root,
+                options.publication.parent,
               );
             }
             base = await snapshotPatchState(
