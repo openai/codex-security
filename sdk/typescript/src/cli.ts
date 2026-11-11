@@ -30,10 +30,8 @@ import {
   writeSync,
 } from "node:fs";
 import {
-  access,
   chmod,
   lstat,
-  mkdir,
   mkdtemp,
   open,
   readFile,
@@ -47,6 +45,7 @@ import { tmpdir } from "node:os";
 import {
   basename,
   dirname,
+  extname,
   isAbsolute,
   join,
   parse,
@@ -75,6 +74,7 @@ import type { ZodType } from "zod";
 import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
+import { formatJsonTokenView, type TokenView } from "./cli-token-view.js";
 import { formatCoverageScope } from "./coverage-presentation.js";
 import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
@@ -228,6 +228,7 @@ import {
   type JsonValue,
 } from "./config.js";
 import { formatUsd, type ScanCost } from "./cost.js";
+import { batchScanBudget } from "./batch-cost.js";
 import {
   formatScanCost,
   formatScanCostTokens,
@@ -388,6 +389,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
+import { installManagedHook } from "./cli-hook.js";
 import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
@@ -406,7 +408,6 @@ import {
   gitMarkerRoot,
   normalizeRepository,
   trustedGitCommand,
-  UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -467,6 +468,14 @@ const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
 ]);
+const INSPECTION_FLAGS = [
+  "-h",
+  "--help",
+  "--schema",
+  "--version",
+  "--llms",
+  "--llms-full",
+];
 const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
@@ -486,10 +495,15 @@ const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const MODEL_OPTIONS = modelOptions();
 type ModelCliOptions = z.infer<typeof MODEL_OPTIONS>;
-const MATCHING_MODEL_OPTIONS = modelOptions(
+const MATCHING_OPTIONS = modelOptions(
   "Model for finding matching (default: Codex's configured model).",
   "Matching reasoning effort (default: medium).",
-);
+).extend({
+  force: z
+    .boolean()
+    .default(false)
+    .describe("Recompute saved finding matches."),
+});
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
@@ -2448,101 +2462,24 @@ export async function main(
   const completion = completionShell.safeParse(process.env["COMPLETE"]);
   const shellArgv = argv;
   if (completion.success) argv = [];
-  if (
-    argv.includes("--mcp") &&
-    argv.some((arg) =>
-      [
-        "--help",
-        "-h",
-        "--schema",
-        "--version",
-        "--llms",
-        "--llms-full",
-      ].includes(arg),
-    )
-  ) {
-    argv = argv.filter((arg) => arg !== "--mcp");
-  }
-  const remediationOperation =
-    argv[0] === "patch"
-      ? "patch"
-      : argv[0] === "verify-fix"
-        ? "verify"
-        : undefined;
-  const recordsCommand =
-    argv[0] === "dedupe" ||
-    argv[0] === "validate" ||
-    argv[0] === "classify-severity"
-      ? argv[0]
-      : undefined;
-  const hostedCommand =
-    argv[0] === "scan" || remediationOperation !== undefined;
-  if (
-    ((recordsCommand !== undefined && argv.includes("--records")) ||
-      (hostedCommand &&
-        argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
-    !argv.includes("--help") &&
-    !argv.includes("-h") &&
-    !argv.includes("--schema")
-  ) {
-    let classificationRuns: number | undefined;
-    if (argv[0] === "classify-severity") {
-      try {
-        const { values } = parseArgs({
-          args: argv.slice(1),
-          options: {
-            records: { type: "boolean" },
-            runs: { type: "string" },
-          },
-        });
-        if (values.runs !== undefined)
-          classificationRuns = reviewRunsOption.parse(Number(values.runs));
-      } catch {
-        errorOutput.write(
-          `codex-security: Use --records with only --runs (an integer from 1 to 10; default: ${DEFAULT_REVIEW_RUNS}).\n`,
-        );
-        return 2;
-      }
-    } else if (argv.length !== 2 || (hostedCommand && argv[1] !== "--host")) {
-      errorOutput.write(
-        hostedCommand
-          ? `codex-security: --host must be used alone with ${argv[0]}.\n`
-          : `codex-security: --records must be used alone with ${argv[0]}.\n`,
-      );
-      return 2;
-    }
-    const controller = new AbortController();
-    const removeSignals = listenForAbort(dependencies, controller);
-    let exitCode: number;
-    try {
-      const input = dependencies.recordsInput ?? process.stdin;
-      const code =
-        recordsCommand !== undefined
-          ? await runHostRecordsProtocol(recordsCommand, input, output, {
-              signal: controller.signal,
-              classificationRuns,
-            })
-          : remediationOperation !== undefined
-            ? await runHostedRemediationProtocol(
-                input,
-                output,
-                controller.signal,
-                remediationOperation,
-              )
-            : await runHostedScanProtocol(input, output, controller.signal);
-      exitCode =
-        controller.signal.reason === "SIGINT"
-          ? 130
-          : controller.signal.reason === "SIGTERM"
-            ? 143
-            : code;
-    } finally {
-      removeSignals();
-    }
-    // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
-    if (output === process.stdout) process.exit(exitCode);
-    return exitCode;
-  }
+  const separator = argv.indexOf("--");
+  const literalArgs = separator < 0 ? [] : argv.slice(separator + 1);
+  if (separator >= 0) argv = argv.slice(0, separator);
+  const inspection = argv.some((arg) => INSPECTION_FLAGS.includes(arg));
+  const actionFlags = argv.filter(
+    (arg) => arg === "--mcp" || arg === "--update",
+  );
+  const actionOptions = argv.filter((arg) => arg !== actionFlags[0]);
+  const mixedAction =
+    actionFlags.length > 0 &&
+    (actionFlags.length !== 1 ||
+      literalArgs.length > 0 ||
+      firstNonGlobal(actionOptions, 0) < actionOptions.length ||
+      (actionFlags[0] === "--mcp" && !inspection && actionOptions.length > 0));
+  if (!mixedAction && actionFlags[0] === "--update")
+    argv = ["update", ...actionOptions];
+  if (!mixedAction && actionFlags[0] === "--mcp" && inspection)
+    argv = actionOptions;
   const positionals: string[] = [];
   let exitCode = 0;
   let frameworkExit: number | undefined;
@@ -2561,8 +2498,7 @@ export async function main(
         message: string;
       }
     | undefined;
-  let filteredScanFailure:
-    { format: string; data: Record<string, unknown> } | undefined;
+  let unfilteredFailure: Record<string, unknown> | undefined;
   const includeFailureResults = (
     format: string,
   ): format is "json" | "jsonl" | "toon" | "yaml" =>
@@ -2592,8 +2528,7 @@ export async function main(
       const message = errorMessage(outcome.error);
       if (!argv.includes("--full-output")) {
         const data = { status: "failed", code, message };
-        if (frameworkFlags.filters.length)
-          filteredScanFailure = { format, data };
+        if (frameworkFlags.filters.length) unfilteredFailure = data;
         return data;
       }
       // Incur would wrap returned data in an ok: true envelope.
@@ -2661,12 +2596,16 @@ export async function main(
   const latestScans = async (
     count = 1,
     status: "complete" | "any" = "complete",
-    pythonPath?: string,
-    protectedRoot?: PluginPythonOptions["protectedRoot"],
+    options: {
+      pythonPath?: string;
+      protectedRoot?: PluginPythonOptions["protectedRoot"];
+      preferWorktree?: boolean;
+    } = {},
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
       workbenchArgs("list-scans", {
         repository: dependencies.currentDirectory(),
+        preferWorktree: options.preferWorktree,
         status: status === "complete" ? "complete" : undefined,
         limit: String(count),
       }),
@@ -2681,11 +2620,31 @@ export async function main(
         }
         return value;
       },
-      pythonPath,
-      protectedRoot,
+      options.pythonPath,
+      options.protectedRoot,
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
+  type WorktreeScan = SavedScan & {
+    targetPath: string;
+    inCurrentWorktree: boolean;
+  };
+  const preferredScan = async (repository: string, status?: "complete") => {
+    const result = await dependencies.runWorkbench(
+      workbenchArgs("list-scans", {
+        repository,
+        preferWorktree: true,
+        status,
+        limit: 1,
+      }),
+    );
+    return (result["scans"] as WorktreeScan[])[0];
+  };
+  const historyId = z.string().min(1).optional();
+  const resolveHistoryId = async (id: string, status: "complete" | "any") =>
+    id === "latest"
+      ? (await latestScans(1, status, { preferWorktree: true }))?.[0]?.scanId
+      : id;
   type MatchingCliOptions = ModelCliOptions & { force?: boolean };
   const runMatching = async (
     operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
@@ -3034,11 +2993,9 @@ export async function main(
       description: "Show the results and saved configuration for a scan.",
       hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Scan ID or unique prefix (default: latest completed)."),
+        scanId: historyId.describe(
+          "Scan ID, unique prefix, or latest (default: latest completed).",
+        ),
       }),
       options: z.object({
         showLinkedFindings: z
@@ -3054,19 +3011,17 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format, options }) {
-        let scanId = args.scanId;
-        if (scanId === undefined) {
-          try {
-            scanId = (await latestScans())?.[0]?.scanId;
-          } catch (error) {
-            if (useDefaultOutput(format)) {
-              errorOutput.write(
-                "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
-              );
-            }
-            throw error;
+      async run({ args: { scanId: requestedId = "latest" }, format, options }) {
+        let scanId;
+        try {
+          scanId = await resolveHistoryId(requestedId, "complete");
+        } catch (error) {
+          if (useDefaultOutput(format)) {
+            errorOutput.write(
+              "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
+            );
           }
+          throw error;
         }
         if (scanId === undefined) return;
         return presentHistory(
@@ -3075,7 +3030,7 @@ export async function main(
             await showHistoryNavigation(
               scan as ScanLogSource,
               format,
-              args.scanId === undefined ? "latest completed scan" : undefined,
+              requestedId === "latest" ? "latest completed scan" : undefined,
             );
             return {
               ...(scan as JsonObject),
@@ -3093,13 +3048,9 @@ export async function main(
       description: "Show saved activity for a scan and its workers.",
       hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Scan identifier or unique prefix (default: latest, any status).",
-          ),
+        scanId: historyId.describe(
+          "Scan ID, unique prefix, or latest (default: latest, any status).",
+        ),
       }),
       examples: [
         { args: {}, description: "Show activity from the latest scan." },
@@ -3109,9 +3060,8 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format }) {
-        const scanId =
-          args.scanId ?? (await latestScans(1, "any"))?.[0]?.scanId;
+      async run({ args: { scanId: requestedId = "latest" }, format }) {
+        const scanId = await resolveHistoryId(requestedId, "any");
         if (scanId === undefined) return;
         const result = await history(
           ["get-scan", "--scan-id", scanId],
@@ -3120,7 +3070,7 @@ export async function main(
             await showHistoryNavigation(
               scan,
               format,
-              args.scanId === undefined
+              requestedId === "latest"
                 ? "latest scan, including failed and active runs"
                 : undefined,
             );
@@ -3230,7 +3180,7 @@ export async function main(
     })
     .command("rerun", {
       description:
-        "Start a new scan using saved settings and current checkout/context files.",
+        "Start a new scan using saved settings and the current files at its saved checkout.",
       examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
@@ -3239,7 +3189,9 @@ export async function main(
           .string()
           .min(1)
           .optional()
-          .describe("Saved scan identifier (default: latest completed scan)."),
+          .describe(
+            "Saved scan identifier (default: latest completed in this worktree).",
+          ),
       }),
       options: z.object({
         showCost: SHOW_COST_OPTION,
@@ -3272,23 +3224,25 @@ export async function main(
           exitCode = 2;
           throw error;
         }
-        let scanId: string | undefined;
-        try {
-          scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
-        } catch (error) {
-          const message = errorMessage(error);
-          if (exitCode === 0)
-            errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishScanCommand(
-            { exitCode: 2, error: message },
-            format,
-            incurError,
-            "SCAN_REPLAY_UNAVAILABLE",
-          );
-        }
-        if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
+          let scanId = args.scanId;
+          let localScan: WorktreeScan | undefined;
+          if (scanId === undefined) {
+            localScan = await preferredScan(
+              dependencies.currentDirectory(),
+              "complete",
+            );
+            if (!localScan)
+              throw new CodexSecurityError(
+                "No completed scans found for the current repository.",
+              );
+            scanId = localScan.scanId;
+            if (!localScan.inCurrentWorktree)
+              throw new CodexSecurityError(
+                `No completed scan in this worktree. Scan ${scanId} used ${localScan.targetPath} (revision ${localScan["targetRevision"] ?? "unknown"}). To rerun there, use codex-security scans rerun ${scanId}.`,
+              );
+          }
           const saved = await dependencies.runWorkbench(
             workbenchArgs("get-scan-recipe", { scanId }),
           );
@@ -3335,12 +3289,12 @@ export async function main(
             );
           }
           const replay =
-            args.scanId === undefined && isJsonObject(recipe)
+            localScan && isJsonObject(recipe)
               ? {
                   ...saved,
                   recipe: {
                     ...recipe,
-                    repository: dependencies.currentDirectory(),
+                    repository: localScan.targetPath,
                   },
                 }
               : saved;
@@ -3369,13 +3323,11 @@ export async function main(
       },
     })
     .command("match", {
-      description: "Match findings by root cause across saved scans.",
-      usage: [
-        { suffix: "BEFORE AFTER [options]" },
-        { suffix: "--all [options]" },
-      ],
+      description:
+        "Match findings across completed scans. Uncached matches can use the model and save decisions.",
+      usage: [{ suffix: "--all [options]" }],
       examples: [{ options: { all: true } }],
-      hint: "Use scans compare for a pair. Match all completed scans with --all; --force recomputes saved matches.",
+      hint: "For a pair, use scans compare BEFORE AFTER. The older scans match BEFORE AFTER spelling also works.",
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3394,15 +3346,16 @@ export async function main(
           .boolean()
           .default(false)
           .describe("Match all completed scans of the current repository."),
-        force: z
-          .boolean()
-          .default(false)
-          .describe("Recompute an existing semantic finding comparison."),
-        ...MATCHING_MODEL_OPTIONS.shape,
+        ...MATCHING_OPTIONS.shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         if (options.all) {
+          if (args.beforeId !== undefined || args.afterId !== undefined) {
+            throw new CodexSecurityError(
+              "scans match --all does not accept scan identifiers.",
+            );
+          }
           return presentHistory(
             await runMatching(
               (matchingOptions) =>
@@ -3413,8 +3366,13 @@ export async function main(
             format,
           );
         }
+        if (args.beforeId === undefined || args.afterId === undefined) {
+          throw new CodexSecurityError(
+            "scans match requires two scan identifiers or --all.",
+          );
+        }
         return presentHistory(
-          await matchScanPair(args.beforeId!, args.afterId!, options),
+          await matchScanPair(args.beforeId, args.afterId, options),
           "compare",
           format,
         );
@@ -3424,6 +3382,11 @@ export async function main(
       description:
         "Compare findings from two scans. Uncached matches can use the model and save matching decisions.",
       examples: [
+        {
+          args: { beforeId: "BEFORE", afterId: "AFTER" },
+          description:
+            "Compare two scans, using the model and saving decisions on a cache miss.",
+        },
         { args: {}, description: "Compare the latest two completed scans." },
       ],
       destructive: true,
@@ -3439,7 +3402,7 @@ export async function main(
           .optional()
           .describe("Later saved scan identifier (default: latest completed)."),
       }),
-      options: MATCHING_MODEL_OPTIONS,
+      options: MATCHING_OPTIONS,
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         let { beforeId, afterId } = args;
@@ -3481,9 +3444,9 @@ export async function main(
     description: "Publish findings from a completed scan.",
     examples: [
       {
+        args: { scanDir: "../scan-results" },
         options: {
           to: "linear",
-          scan: ["latest"],
           linearTeam: "TEAM_ID",
           dryRun: true,
         },
@@ -3526,7 +3489,7 @@ export async function main(
         .array(optionValue("--scan-dir"))
         .default([])
         .describe(
-          "External completed scan directory; Linear and custom accept one scan.",
+          "Use the positional directory for one scan. Repeat this flag for destinations that accept multiple scans.",
         ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
@@ -4493,7 +4456,7 @@ export async function main(
               (!argv.includes("--full-output") || selection !== undefined) &&
               frameworkFlags.filters.length
             )
-              filteredScanFailure = { format, data: failure };
+              unfilteredFailure = failure;
             return structured ? failure : undefined;
           } finally {
             removeSignals();
@@ -4507,7 +4470,7 @@ export async function main(
       examples: [
         {
           args: { scanDir: "../scan-results" },
-          options: { to: "linear", linearTeam: "TEAM_ID" },
+          options: { linearTeam: "TEAM_ID" },
         },
       ],
       hint: "Use publish scan --dry-run to preview a publication offline.",
@@ -4592,7 +4555,7 @@ export async function main(
         }),
       )
       .optional(),
-    async run({ args, options }) {
+    async run({ args, options, error: fail }) {
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       try {
@@ -4622,7 +4585,11 @@ export async function main(
           exitCode = 2;
           errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
         }
-        throw error;
+        return fail({
+          code: "GITHUB_IMPORT_FAILED",
+          message: errorMessage(error),
+          exitCode,
+        });
       } finally {
         removeSignals();
       }
@@ -4747,7 +4714,7 @@ export async function main(
       usage: [
         {
           args: { project: true },
-          options: { snykOrg: true, sourceRepositoryUrl: true },
+          options: { org: true, sourceRepositoryUrl: true },
           suffix: "[options]",
         },
       ],
@@ -4757,7 +4724,7 @@ export async function main(
         {
           args: { project: "PROJECT_ID" },
           options: {
-            snykOrg: "ORG_ID",
+            org: "ORG_ID",
             sourceRepositoryUrl: "https://github.com/example/project",
           },
         },
@@ -4768,7 +4735,9 @@ export async function main(
         project: z.string().min(1).describe("Snyk project ID."),
       }),
       options: z.object({
-        snykOrg: optionValue("--snyk-org").describe("Snyk organization ID."),
+        org: optionValue("--org").describe(
+          "Snyk organization ID (alias: --snyk-org).",
+        ),
         snykProduct: z
           .enum(["open-source", "code"])
           .default("open-source")
@@ -4808,7 +4777,7 @@ export async function main(
           collectSnykIssues(
             {
               projectId: args.project,
-              organizationId: options.snykOrg,
+              organizationId: options.org,
               product: options.snykProduct,
               apiOrigin: options.snykApiOrigin,
               sourceRepositoryUrl: options.sourceRepositoryUrl,
@@ -4823,7 +4792,7 @@ export async function main(
       usage: [
         {
           args: { project: true },
-          options: { semgrepDeployment: true, semgrepRef: true },
+          options: { deployment: true, ref: true },
           suffix: "[options]",
         },
       ],
@@ -4833,8 +4802,8 @@ export async function main(
         {
           args: { project: "owner/project" },
           options: {
-            semgrepDeployment: "DEPLOYMENT",
-            semgrepRef: "refs/heads/main",
+            deployment: "DEPLOYMENT",
+            ref: "refs/heads/main",
           },
         },
       ],
@@ -4847,11 +4816,11 @@ export async function main(
           .describe("Exact Semgrep project name, typically owner/repository."),
       }),
       options: z.object({
-        semgrepDeployment: optionValue("--semgrep-deployment").describe(
-          "Semgrep deployment slug.",
+        deployment: optionValue("--deployment").describe(
+          "Semgrep deployment slug (alias: --semgrep-deployment).",
         ),
-        semgrepRef: optionValue("--semgrep-ref").describe(
-          "Exact source ref, for example refs/heads/main.",
+        ref: optionValue("--ref").describe(
+          "Exact source ref, for example refs/heads/main (alias: --semgrep-ref).",
         ),
         semgrepProduct: z
           .enum(SEMGREP_PLATFORM_PRODUCTS)
@@ -4889,8 +4858,8 @@ export async function main(
           collectSemgrepPlatformFindings(
             {
               project: args.project,
-              deployment: options.semgrepDeployment,
-              ref: options.semgrepRef,
+              deployment: options.deployment,
+              ref: options.ref,
               product: options.semgrepProduct,
               sourceRepositoryUrl: options.sourceRepositoryUrl,
               signal,
@@ -4911,7 +4880,7 @@ export async function main(
         { options: { sonarProject: "PROJECT_KEY", dryRun: true } },
         { args: { capture: "../reports/sonar.json" } },
       ],
-      hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a live capture for review without importing findings.",
+      hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a private evidence copy for live and saved inputs and prints its path for confirmation.",
       destructive: true,
       args: z.object({
         capture: z
@@ -4953,7 +4922,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Preview destinations and evidence without storing or publishing findings.",
+            "Save a private evidence copy and preview the selected findings and destinations.",
           ),
         yes: z
           .boolean()
@@ -5170,29 +5139,9 @@ export async function main(
     configuration: z.record(z.string(), z.unknown()),
   });
 
-  const inspectionFlags = [
-    "-h",
-    "--help",
-    "--version",
-    "--schema",
-    "--llms",
-    "--llms-full",
-  ];
-  if (
-    argv.includes("--update") &&
-    argv.some((arg) => inspectionFlags.includes(arg))
-  )
-    argv = argv.filter((arg) => arg !== "--update");
   const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
-    // The SDK owns update notices and uses the same installation resolver for
-    // the explicit update action. Avoid Incur's second, global npm updater.
-    update: argv.includes("--update")
-      ? {
-          package: "@openai/codex-security",
-          install: () => installUpdate(dependencies.environment),
-        }
-      : false,
+    update: false,
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
@@ -5203,6 +5152,25 @@ export async function main(
     },
   };
   const cli = Cli.create("codex-security", cliOptions)
+    .command("update", {
+      description: "Update the CLI or show the command for this installation.",
+      destructive: true,
+      async run({ format, error }) {
+        try {
+          await installUpdate(dependencies.environment);
+        } catch (cause) {
+          return error({
+            code: "UPDATE_FAILED",
+            message: errorMessage(cause),
+            exitCode: 2,
+          });
+        }
+        const name = "@openai/codex-security";
+        if (output.isTTY && useDefaultOutput(format))
+          renderedOutput = `✓ Updated ${name}\n`;
+        return { name };
+      },
+    })
     .command(scanHistory)
     .command("policy", {
       description: "Draft SECURITY.md for review.",
@@ -5258,7 +5226,7 @@ export async function main(
         "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.\n" +
         "Your existing policy stays unchanged until you replace it.\n\n" +
         "Save a draft without answering questions:\n" +
-        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
+        "  codex-security policy . --output-dir ../policy-draft --json",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
         .optional(),
@@ -5497,7 +5465,9 @@ export async function main(
           patch: z
             .boolean()
             .default(false)
-            .describe("Patch and verify confirmed findings after the scan."),
+            .describe(
+              "Patch and verify findings after a scan without a cost limit.",
+            ),
           validate: z
             .boolean()
             .default(false)
@@ -5648,20 +5618,22 @@ export async function main(
           : finishScanCommand(outcome, format, incurError);
       },
     }).command("import", {
-      usage: [{ suffix: "(--csv FILE | --json FILE) [options]" }],
+      usage: [{ suffix: "FILE [options]" }],
       description:
         "Save CSV or JSON findings as a completed scan without security analysis.",
       destructive: true,
+      args: z.object({
+        file: z
+          .string({ error: "Provide a findings file to import." })
+          .min(1)
+          .describe("Findings file to import."),
+      }),
       options: z
         .object({
-          csv: optionValue("--csv")
+          inputFormat: z
+            .enum(["csv", "json"])
             .optional()
-            .describe("Findings CSV in the codex-security export format."),
-          json: optionValue("--json")
-            .optional()
-            .describe(
-              "Findings JSON document or object with a findings array.",
-            ),
+            .describe("Input format (default: inferred from .csv or .json)."),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
@@ -5678,28 +5650,33 @@ export async function main(
         })
         .refine(
           (options) =>
-            Number(options.csv !== undefined) +
-              Number(options.json !== undefined) ===
-            1,
-          { message: "Provide exactly one of --csv FILE or --json FILE." },
-        )
-        .refine(
-          (options) =>
             !options.archiveExisting || options.outputDir !== undefined,
           { message: "--archive-existing requires --output-dir." },
-        )
-        .meta({ oneOf: [{ required: ["csv"] }, { required: ["json"] }] }),
+        ),
       examples: [
-        { options: { csv: "findings.csv" } },
-        { options: { json: "findings.json" } },
+        { args: { file: "findings.csv" } },
+        { args: { file: "report" }, options: { inputFormat: "json" } },
       ],
-      hint: "Each input row is retained, including duplicates. --json selects the input file; use --format json for JSON output.",
+      hint: "Each input row is retained, including duplicates. Use FILE --json for JSON output. Legacy --csv FILE and --json FILE still select the input format.",
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ options, format, error: incurError }) {
+      async run({ args, options, format, error: incurError }) {
         const directory = dependencies.currentDirectory();
+        const inputFormat =
+          options.inputFormat ?? extname(args.file).slice(1).toLowerCase();
+        if (inputFormat !== "csv" && inputFormat !== "json") {
+          exitCode = 2;
+          const message =
+            "Cannot infer input format. Use --input-format csv or --input-format json.";
+          errorOutput.write(`codex-security: ${message}\n`);
+          return incurError({
+            code: "INVALID_INPUT_FORMAT",
+            message,
+            exitCode,
+          });
+        }
         const outcome = await runImport({
-          sourcePath: resolveCliPath(directory, options.csv ?? options.json!),
-          format: options.csv === undefined ? "json" : "csv",
+          sourcePath: resolveCliPath(directory, args.file),
+          format: inputFormat,
           outputDir:
             options.outputDir === undefined
               ? undefined
@@ -5726,7 +5703,7 @@ export async function main(
     .command(createScanCommands())
     .command("install-hook", {
       description:
-        "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
+        "Install a pre-commit hook that scans staged and unstaged working-tree changes and blocks on errors or findings at the selected severity.",
       examples: [
         { args: { repository: "." }, options: { failOnSeverity: "high" } },
       ],
@@ -5771,7 +5748,7 @@ export async function main(
               { cwd, requestedPaths: [resolve(requested)] },
             ),
           );
-          const hook = execFileSync(
+          const hooksDirectory = execFileSync(
             git.executable,
             [
               "-C",
@@ -5779,63 +5756,18 @@ export async function main(
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
-              "hooks/pre-commit",
+              "hooks",
             ],
             { encoding: "utf8", env: git.environment },
-          ).trim();
+          ).replace(/\r?\n$/u, "");
+          const hook = join(hooksDirectory, "pre-commit");
           const command = [
             realpathSync(process.execPath),
             realpathSync(fileURLToPath(import.meta.url)),
           ]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const invocation = `exec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const contents = `#!/bin/sh\nset -eu\nunset ${[...UNSUPPORTED_GIT_ENVIRONMENT].join(" ")}\n${invocation}`;
-          const previousScopedContents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
-          const previousContents = `#!/bin/sh\nset -eu\n${invocation}`;
-          const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const existing = await readFile(hook, "utf8").catch(() => null);
-          if (
-            existing !== null &&
-            existing !== contents &&
-            existing !== previousScopedContents &&
-            existing !== previousContents &&
-            existing !== legacyContents
-          ) {
-            throw new Error(`A pre-commit hook already exists at ${hook}.`);
-          }
-          if (existing === null) {
-            await mkdir(dirname(hook), { recursive: true });
-            await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing !== contents) {
-            await writeFile(hook, contents, { flag: "w" });
-          }
-          if (process.platform !== "win32") {
-            try {
-              await access(hook, constants.X_OK);
-            } catch {
-              const file = await open(
-                hook,
-                constants.O_RDONLY |
-                  constants.O_NOFOLLOW |
-                  constants.O_NONBLOCK,
-              );
-              try {
-                const metadata = await file.stat();
-                if (
-                  !metadata.isFile() ||
-                  (await file.readFile("utf8")) !== contents
-                )
-                  throw new Error(
-                    `Cannot make an unrecognized pre-commit hook executable: ${hook}`,
-                  );
-                await file.chmod((metadata.mode & 0o777) | 0o100);
-              } finally {
-                await file.close();
-              }
-              await access(hook, constants.X_OK);
-            }
-          }
+          await installManagedHook(hook, command, options.failOnSeverity);
           return {
             hook,
             failOnSeverity: options.failOnSeverity,
@@ -6290,7 +6222,9 @@ export async function main(
           planOnly: z
             .boolean()
             .default(false)
-            .describe("Save components.json without starting scans."),
+            .describe(
+              "Save components.json and print a command to run it. Explicit plans work offline.",
+            ),
           headless: z
             .boolean()
             .default(false)
@@ -6320,6 +6254,9 @@ export async function main(
           provider: PROVIDER_OPTION,
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
             "Stop each component scan if estimated USD cost exceeds AMOUNT.",
+          ),
+          maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+            "Divide estimated USD among explicit components for this invocation. Skips model-based finding matching and owner suggestions.",
           ),
           showCost: SHOW_COST_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
@@ -6417,6 +6354,7 @@ export async function main(
               ),
               mode: settings.mode,
               maxCostUsd: settings.maxCostUsd,
+              maxTotalCostUsd: options.maxTotalCost,
               showCost: options.showCost,
               clock: dependencies,
               color: dependencies.environment["NO_COLOR"] === undefined,
@@ -6437,6 +6375,7 @@ export async function main(
             outputDir: settings.outputDir,
             ...(options.auto ? { auto: true } : { components }),
             planOnly: options.planOnly,
+            maxTotalCostUsd: options.maxTotalCost,
             workers: options.workers,
             config,
             scanOptions: {
@@ -6447,6 +6386,10 @@ export async function main(
             planComponents: dependencies.planComponents,
             matchFindings: dependencies.matchFindings,
             onPlan: (components) => {
+              if (dashboard === null && options.maxTotalCost !== undefined)
+                errorOutput.write(
+                  `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
+                );
               for (const component of components)
                 componentNames.set(component.id, component.name);
               dashboard?.setComponents(components);
@@ -6461,7 +6404,9 @@ export async function main(
                     const line = componentScanEventLine(
                       componentName,
                       event,
-                      options.showCost || settings.maxCostUsd !== undefined,
+                      options.showCost ||
+                        settings.maxCostUsd !== undefined ||
+                        options.maxTotalCost !== undefined,
                       settings.auth,
                     );
                     if (line !== null) errorOutput.write(line);
@@ -6480,16 +6425,22 @@ export async function main(
             signal: controller.signal,
             onProgress: (component) => {
               if (dashboard !== null) dashboard.updateComponent(component);
-              else
+              else {
+                const budget =
+                  component.status === "started" &&
+                  component.maxCostUsd !== undefined
+                    ? ` (${formatUsd(component.maxCostUsd)} per component)`
+                    : "";
                 errorOutput.write(
-                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
+                  `codex-security: ${diagnosticValue(component.name)} ${component.status}${budget}${component.error === undefined ? "" : `: ${diagnosticValue(component.error)}`}\n`,
                 );
+              }
             },
             onComplete: (result) => {
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(
@@ -6497,6 +6448,53 @@ export async function main(
                 );
             },
           });
+          if (options.planOnly) {
+            const {
+              auto,
+              component,
+              componentsFile,
+              planOnly,
+              outputDir,
+              config,
+              codex,
+              ...scanOptions
+            } = options;
+            const supplied = new Set(argv.map((arg) => arg.split("=", 1)[0]));
+            const overrides = Object.fromEntries(
+              Object.entries(scanOptions).filter(([key]) => {
+                const flag = cliOptionFlag(key);
+                return (
+                  supplied.has(flag) ||
+                  supplied.has(`--${key}`) ||
+                  supplied.has(`--no-${flag.slice(2)}`)
+                );
+              }),
+            );
+            const nextCommand = [
+              "codex-security",
+              "scan-components",
+              quoteCliPath(repository),
+              ...cliOptionTokens({
+                componentsFile: result.planPath,
+                outputDir: join(dirname(result.planPath), "results"),
+                config: project?.path,
+                ...overrides,
+              }),
+            ].join(" ");
+            const nextCommandNote =
+              codex.length > 0
+                ? "Reapply your --codex overrides when running this command."
+                : undefined;
+            errorOutput.write(
+              `Run this plan: ${diagnosticValue(nextCommand)}\n`,
+            );
+            if (nextCommandNote) errorOutput.write(`${nextCommandNote}\n`);
+            return {
+              ...result,
+              nextCommand,
+              ...(nextCommandNote && { nextCommandNote }),
+            };
+          }
           exitCode =
             interruptedExitCode(controller.signal) ??
             (result.failed || result.deduplication?.status === "failed"
@@ -6542,7 +6540,7 @@ export async function main(
           .min(1, "--output-dir must not be empty.")
           .optional()
           .describe(
-            "Resumable results directory; required with a repository CSV.",
+            "Results directory. Required with a CSV and used as the initial directory in the wizard.",
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))
@@ -6577,6 +6575,9 @@ export async function main(
           .describe("Maximum scan attempts per repository."),
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
+        ),
+        maxTotalCost: ScanSettingsSchema.shape.maxCostUsd.describe(
+          "Divide estimated USD among pending repository attempts, including retries, for this invocation. Skips model-based finding matching and owner suggestions.",
         ),
         ...runtimeOptions(() => z.string().min(1)),
       }),
@@ -6627,11 +6628,6 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            if (options.outputDir !== undefined) {
-              throw new Error(
-                "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
-              );
-            }
             const wizard = await runBulkScanWizard(
               dependencies.bulkScan ??
                 createBulkScanDiscoveryDependencies({
@@ -6668,6 +6664,10 @@ export async function main(
                     ).options,
                   ]),
                 );
+          if (options.maxTotalCost !== undefined)
+            errorOutput.write(
+              `codex-security: ${formatUsd(options.maxTotalCost)} total limit for this invocation. Model-based finding matching and owner suggestions are skipped.\n`,
+            );
           const result = await runMultiscan({
             inputPath,
             outputDir,
@@ -6675,6 +6675,7 @@ export async function main(
             workers: options.workers,
             mode: settings.mode,
             maxAttempts: options.maxAttempts,
+            maxTotalCostUsd: options.maxTotalCost,
             ...(settings.maxCostUsd === undefined
               ? {}
               : { maxCostUsd: settings.maxCostUsd }),
@@ -6716,6 +6717,7 @@ export async function main(
                         signal: controller.signal,
                       });
                       return {
+                        alreadyCompleted: true,
                         manifest: contract.manifest,
                         findings: contract.findings,
                         cost:
@@ -6769,6 +6771,10 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        ...batchScanBudget(
+                          prompts.maxTotalCostShareUsd,
+                          recipe,
+                        ),
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         telemetryContext: prompts.telemetryContext,
                         onTelemetry: prompts.onTelemetry,
@@ -6787,10 +6793,21 @@ export async function main(
                 }
               : {}),
             signal: controller.signal,
-            onProgress: ({ repository, status, attempt, error, warning }) => {
+            onProgress: ({
+              repository,
+              status,
+              attempt,
+              maxCostUsd,
+              error,
+              warning,
+            }) => {
               const detail = error ?? warning;
+              const budget =
+                maxCostUsd === undefined
+                  ? ""
+                  : `, ${formatUsd(maxCostUsd)} per repository attempt`;
               errorOutput.write(
-                `codex-security: ${repository} ${status} (attempt ${attempt})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
+                `codex-security: ${repository} ${status} (attempt ${attempt}${budget})${detail === undefined ? "" : `: ${diagnosticValue(detail)}`}\n`,
               );
             },
           });
@@ -6820,6 +6837,7 @@ export async function main(
         "  codex-security export --export-format json --output -\n" +
         "  codex-security export ../scan-results --export-format csv\n" +
         "  codex-security export --artifact threat-model --output -\n\n" +
+        "Implicit filenames: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md.\n" +
         "Use --export-format for artifact format. The global --format option controls\n" +
         "framework output such as --schema; it does not change exported files.",
       destructive: true,
@@ -6854,7 +6872,7 @@ export async function main(
           output: optionValue("--output")
             .optional()
             .describe(
-              "FILE or '-' for stdout (default: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md).",
+              "FILE to replace or '-' for raw stdout. Default filenames are created only if absent.",
             ),
           sourceRoot: optionValue("--source-root")
             .optional()
@@ -6879,6 +6897,34 @@ export async function main(
       async run({ args, options }) {
         rawExportOutput = options.output === "-";
         try {
+          if (rawExportOutput) {
+            const responseFlag = frameworkFlags.filters.length
+              ? "--filter-output"
+              : frameworkFlags.fullOutput
+                ? "--full-output"
+                : frameworkFlags.tokenArguments[0];
+            if (responseFlag) {
+              throw new CodexSecurityError(
+                `${responseFlag} cannot be used with raw artifact stdout. Omit it to pipe the complete artifact.`,
+              );
+            }
+            const markdown =
+              options.artifact === "threat-model" ||
+              options.exportFormat === "md";
+            const csv =
+              options.exportFormat === "csv" ||
+              options.exportFormat === "servicenow-avit";
+            const expectedFormat = markdown ? "md" : csv ? undefined : "json";
+            const incompatible = frameworkFlags.formats.find(
+              (value) => value !== expectedFormat,
+            );
+            if (incompatible !== undefined) {
+              const label = markdown ? "Markdown" : csv ? "CSV" : "JSON";
+              throw new CodexSecurityError(
+                `${label} stdout cannot be combined with --format ${incompatible}. Omit the response format to pipe the complete artifact.`,
+              );
+            }
+          }
           const currentDirectory = dependencies.currentDirectory();
           if (args.scanDir !== undefined && options.scan !== undefined) {
             throw new CodexSecurityError(
@@ -6902,12 +6948,10 @@ export async function main(
           if (scanDir === undefined) {
             let scanId = options.scan;
             if (!scanId || scanId === "latest") {
-              const scans = await latestScans(
-                1,
-                "complete",
-                options.python,
+              const scans = await latestScans(1, "complete", {
+                pythonPath: options.python,
                 protectedRoot,
-              );
+              });
               scanId = scans?.[0]?.scanId;
             }
             if (scanId === undefined) return;
@@ -6935,6 +6979,7 @@ export async function main(
               artifact: options.artifact,
               format,
               output: outputPath,
+              noClobber: options.output === undefined,
               sourceRoot,
               avitTemplate: options.avitTemplate,
               pythonPath: options.python,
@@ -6975,7 +7020,7 @@ export async function main(
           .string()
           .min(1, "A finding must not be empty.")
           .describe(
-            "Finding text, an existing path, or an explicit local file URL (file:///path/to/findings).",
+            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -7011,11 +7056,21 @@ export async function main(
           if (options.records)
             throw new CodexSecurityError("Use validate --records alone.");
           if (options.knowledgeBase.length > 0) {
-            knowledgeBase = await prepareKnowledgeBase(
-              options.knowledgeBase.map((path) =>
-                resolveCliPath(dependencies.currentDirectory(), path),
-              ),
+            const directory = dependencies.currentDirectory();
+            const checkout = await gitMarkerRoot(
+              directory,
+              undefined,
+              "nearest",
             );
+            const paths = options.knowledgeBase.map((path) =>
+              resolveCliPath(directory, path),
+            );
+            const snapshot = await readKnowledgeBaseSnapshot(
+              paths,
+              undefined,
+              checkout ? [checkout] : [],
+            );
+            knowledgeBase = await prepareKnowledgeBase(snapshot);
           }
           exitCode = await runSkill(
             "validation",
@@ -7058,7 +7113,7 @@ export async function main(
           .min(1, "A finding must not be empty.")
           .optional()
           .describe(
-            "Finding text, a file path or local file URL, or a saved finding identifier.",
+            "Finding text, a local file path or URL, or a saved finding identifier. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -7099,7 +7154,7 @@ export async function main(
         const structured = format === "json" || format === "jsonl";
         const reportDiagnostic = async (chunk: string): Promise<void> => {
           if (structured) {
-            if (!batchedVerification || frameworkFlags.tokenArguments.length)
+            if (!batchedVerification || frameworkFlags.tokenView)
               deferredVerificationDiagnostic = chunk;
           } else {
             await writeCliOutput(errorOutput, chunk).catch(() => {});
@@ -7308,7 +7363,7 @@ export async function main(
           .min(1, "An issue must not be empty.")
           .optional()
           .describe(
-            "Issue text, a file path or local file URL, or a saved finding identifier.",
+            "Issue text, a local file path or URL, or a saved finding identifier. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -8038,74 +8093,155 @@ export async function main(
   prepareCliExamples(commands);
   const valueOptions = cliValueOptions(commands);
   const isPositional = (value: string, index: number) =>
-    !value.startsWith("-") &&
+    (value === "-" || !value.startsWith("-")) &&
     (index === 0 || !valueOptions.has(argv[index - 1]!));
-  const commandIndex = argv.findIndex(isPositional);
+  // A leading terminator still permits a positional command name.
+  let commandIndex = argv.findIndex(isPositional);
+  if (
+    commandIndex < 0 &&
+    !actionFlags.length &&
+    literalArgs[0] &&
+    !literalArgs[0].startsWith("-") &&
+    firstNonGlobal(argv, 0) === argv.length
+  ) {
+    commandIndex = argv.length;
+    const name = literalArgs.shift()!;
+    const group = commands.get(name);
+    const verb = literalArgs[0];
+    argv = [...argv, name];
+    if (group && "_group" in group && verb && group.commands.has(verb))
+      argv = [...argv, literalArgs.shift()!];
+  }
+  if (argv[commandIndex] === "codex-security") {
+    argv = argv.toSpliced(commandIndex, 1);
+    commandIndex = argv.findIndex(isPositional);
+  }
   const command = argv[commandIndex];
-  const following = argv[commandIndex + 1];
+  const entry = command === undefined ? undefined : commands.get(command);
+  const verbIndex = firstNonGlobal(argv, commandIndex + 1);
+  let following = argv[verbIndex];
   const scanImport = command === "scan" && following === "import";
+  const importArgs = normalizeImportArguments(
+    argv,
+    verbIndex,
+    command,
+    following,
+  );
+  argv = importArgs.args;
   if (
     command === "scan" &&
     !scanImport &&
-    argv.some(
-      (value, index) => index > commandIndex && isPositional(value, index),
-    )
+    (literalArgs.length ||
+      argv.some(
+        (value, index) => index > commandIndex && isPositional(value, index),
+      ))
   ) {
     // A repository such as "imports" or "./import" is a positional even when
     // shared options precede it. Bypass Incur's subcommand typo suggestions.
-    const scan = commands.get(command);
-    if (scan && "_group" in scan && scan.root) commands.set(command, scan.root);
+    if (entry && "_group" in entry && entry.root)
+      commands.set(command, entry.root);
   }
-
   if (
     (command === "scans" || command === "findings") &&
     !argv.includes("--help") &&
     !argv.includes("-h") &&
+    !argv.some((arg) => arg === "--llms" || arg === "--llms-full") &&
     (following === undefined || following.startsWith("-"))
   ) {
-    argv = argv.toSpliced(commandIndex + 1, 0, "list");
+    argv = argv.toSpliced(verbIndex, 0, "list");
+    following = "list";
   }
-
+  const nested =
+    entry &&
+    "_group" in entry &&
+    following !== undefined &&
+    entry.commands.has(following);
+  const subcommand = nested ? following : undefined;
+  const selected =
+    entry && "_group" in entry
+      ? subcommand
+        ? entry.commands.get(subcommand)
+        : entry.root
+      : entry;
+  const protocolFlag =
+    ["scan", "patch", "verify-fix"].includes(command ?? "") && !scanImport
+      ? "--host"
+      : ["validate", "classify-severity", "dedupe"].includes(command ?? "")
+        ? "--records"
+        : undefined;
+  let protocol = false;
+  let classificationRuns: number | undefined;
   function validateCliArguments(): string | undefined {
-    if (argv.includes("--help") || argv.includes("-h")) return undefined;
-    if (frameworkFlags.malformedFilter)
-      return "--filter-output requires matching brackets for array slices.";
-    if (command === undefined || !commands.has(command)) return undefined;
+    if (argv.includes("--incur-update-check"))
+      return "Unknown flag: --incur-update-check";
+    if (mixedAction) return `${actionFlags.join(" and ")} must be used alone.`;
+    if (command === undefined && literalArgs.length)
+      return "Select a command before --.";
+    if (importArgs.error) return importArgs.error;
+    if (frameworkFlags.argumentError) return frameworkFlags.argumentError;
+    if (command === undefined) return frameworkFlags.tokenError;
+    if (!entry) {
+      if (["skills", "skill", "mcp", "completions"].includes(command))
+        return frameworkFlags.tokenError;
+      if (inspection)
+        return `Unknown command ${diagnosticValue(command)}. Use codex-security --help.`;
+      return frameworkFlags.tokenError;
+    }
+    if (
+      "_group" in entry &&
+      !entry.root &&
+      following &&
+      !following.startsWith("-") &&
+      !subcommand
+    )
+      // Discovery otherwise widens an unknown path to its parent. Execution
+      // already reports unknown verbs with Incur's spelling suggestions.
+      return inspection
+        ? `Unknown command ${diagnosticValue(command + " " + following)}. Use codex-security ${command} --help.`
+        : undefined;
+    if (protocolFlag && !inspection) {
+      const negative = "--no-" + protocolFlag.slice(2);
+      const flags = argv.filter(
+        (arg) =>
+          arg === protocolFlag ||
+          arg.startsWith(protocolFlag + "=") ||
+          arg === negative,
+      );
+      const last = flags.at(-1);
+      protocol = last === protocolFlag || last === protocolFlag + "=true";
+      if (protocol) {
+        const rest = argv.filter(
+          (arg, index) => index !== commandIndex && !flags.includes(arg),
+        );
+        if (
+          command === "classify-severity" &&
+          commandIndex === 0 &&
+          !literalArgs.length
+        ) {
+          try {
+            const { values } = parseArgs({
+              args: rest,
+              options: { runs: { type: "string" } },
+            });
+            if (values.runs !== undefined)
+              classificationRuns = reviewRunsOption.parse(Number(values.runs));
+          } catch {
+            return `Use --records with only --runs (an integer from 1 to 10; default: ${DEFAULT_REVIEW_RUNS}).`;
+          }
+        } else if (rest.length || literalArgs.length || commandIndex !== 0)
+          return `${protocolFlag} must be used alone with ${command}.`;
+      }
+    }
     const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
       (["validate", "logout"].includes(command) ||
         (command === "login" && following !== "status")) &&
-      !argv.includes("--schema")
+      !inspection
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
     }
-    if (command === "export" && structuredOutput) {
-      const hasValue = (flag: string, value: string) =>
-        argv.some(
-          (arg, index) =>
-            arg === `${flag}=${value}` ||
-            (arg === flag && argv[index + 1] === value),
-        );
-      if (hasValue("--output", "-")) {
-        if (
-          ["csv", "servicenow-avit"].some(
-            (format) =>
-              hasValue("--export-format", format) ||
-              hasValue("--exportFormat", format),
-          )
-        ) {
-          return "CSV stdout cannot be combined with JSON output; write CSV to a file or omit --json.";
-        }
-        if (
-          hasValue("--artifact", "threat-model") ||
-          hasValue("--export-format", "md")
-        ) {
-          return "Markdown stdout cannot be combined with JSON output; write Markdown to a file or omit --json.";
-        }
-      }
-    }
-    if (command === "scan" && !argv.includes("--schema")) {
+    if (command === "scan" && !inspection) {
       if (frameworkFlags.filters.length) {
         return "--filter-output is not supported for scan results.";
       }
@@ -8113,13 +8249,6 @@ export async function main(
         return "Markdown output is not supported for scan results.";
       }
     }
-    const nestedCommand =
-      scanImport ||
-      command === "scans" ||
-      command === "findings" ||
-      command === "publish" ||
-      command === "import";
-    const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
     if (
       frameworkFlags.rawStructuredOutput &&
       !(command === "scans" && subcommand === "logs")
@@ -8139,21 +8268,14 @@ export async function main(
           return "--filter-output must select an info metadata field.";
       }
     }
-    const entry = commands.get(command)!;
-    const selected =
-      "_group" in entry
-        ? subcommand === undefined
-          ? entry.root
-          : entry.commands.get(subcommand)
-        : entry;
     let lastPositionalIndex = -1;
     for (
-      let index = commandIndex + (nestedCommand ? 2 : 1);
+      let index = nested ? verbIndex + 1 : commandIndex + 1;
       index < argv.length;
       index += 1
     ) {
       const value = argv[index]!;
-      if (!value.startsWith("-")) {
+      if (value === "-" || !value.startsWith("-")) {
         positionals.push(value);
         lastPositionalIndex = index;
         continue;
@@ -8179,50 +8301,37 @@ export async function main(
           return `Invalid boolean value for ${option}: ${diagnosticValue(value.slice(equals + 1))}. Use ${option}, ${option}=true, or ${option}=false.`;
         }
       }
-      if (
-        equals >= 0 ||
-        (!valueOptions.has(canonicalOption) &&
-          !(scanImport && option === "--json"))
-      )
-        continue;
+      if (equals >= 0 || !valueOptions.has(canonicalOption)) continue;
       const next = argv[index + 1];
       if (next === undefined || next.startsWith("--") || next === "-h") {
-        if (scanImport && option === "--json" && argv.includes("--schema"))
-          continue;
         return `Missing value for flag: ${option}`;
       }
       index += 1;
     }
-    if (
-      command === "login" &&
-      positionals.length > 0 &&
-      (following !== "status" || positionals.length !== 1)
-    ) {
+    const beforeDelimiter = positionals.length;
+    positionals.push(...literalArgs);
+    if (command === "login" && !subcommand && positionals.length)
       return "Use login to sign in or login status to inspect authentication.";
-    }
-    if (
-      subcommand === "match" &&
-      !argv.some((value) =>
-        ["--schema", "--llms", "--llms-full"].includes(value),
-      )
-    ) {
-      if (argv.includes("--all") && positionals.length > 0) {
-        return "scans match --all does not accept scan identifiers.";
+    // Incur's global flag extractor doesn't recognize --. Supply literal
+    // arguments to the positional schema as inputs so its normal validation
+    // still applies and no layer can reinterpret a value as a framework flag.
+    if (literalArgs.length && selected && "args" in selected && selected.args) {
+      const shape: Record<string, z.ZodType> = {};
+      for (const [index, key] of Object.keys(selected.args.shape).entries()) {
+        const literal = literalArgs[index - beforeDelimiter];
+        if (literal !== undefined)
+          shape[key] = selected.args.shape[key].prefault(literal);
       }
-      if (!argv.includes("--all") && positionals.length !== 2) {
-        return "scans match requires two scan identifiers or --all.";
-      }
+      selected.args = selected.args.extend(shape);
     }
     if (
       command !== "validate" &&
       command !== "verify-fix" &&
       command !== "patch" &&
       positionals.length >
-        (scanImport || command === "logout" || command === "info"
-          ? 0
-          : subcommand === "compare" || subcommand === "match"
-            ? 2
-            : 1)
+        (selected && "args" in selected && selected.args
+          ? Object.keys(selected.args.shape).length
+          : 0)
     ) {
       const previous = argv[lastPositionalIndex - 1]?.split("=", 1)[0];
       const hint = previous?.startsWith("-")
@@ -8230,42 +8339,95 @@ export async function main(
         : "";
       return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.${hint}`;
     }
+    return frameworkFlags.tokenError;
   }
-  const frameworkFlags = parseFrameworkArguments(
-    argv,
-    scanImport ? commandIndex + 2 : argv.length,
-  );
+  const frameworkFlags = parseFrameworkArguments(argv);
   const frameworkArgv = frameworkFlags.args;
   const { jsonFormat } = frameworkFlags;
-  const policyFullOutput = command === "policy" && frameworkFlags.fullOutput;
-  const scanErrorFormat =
-    command === "scan" && !scanImport && frameworkFlags.fullOutput
-      ? jsonFormat
-      : undefined;
-  const argumentFailure = (message: string) =>
+  const policyFullOutput =
+    command === "policy" &&
+    frameworkFlags.fullOutput &&
+    !mixedAction &&
+    !argv.includes("--incur-update-check");
+  const envelopeFormat = frameworkFlags.fullOutput ? jsonFormat : undefined;
+  const commandPath = subcommand
+    ? `${command} ${subcommand}`
+    : (command ?? "codex-security");
+  const argumentFailure = (
+    message: string,
+    code = commandPath === "scan"
+      ? "SCAN_FAILED"
+      : command === "policy"
+        ? "POLICY_FAILED"
+        : "INVALID_ARGUMENTS",
+  ) =>
     Formatter.format(
-      {
-        ok: false,
-        error: { code: "SCAN_FAILED", message },
-        meta: { command: "scan" },
-      },
-      scanErrorFormat,
+      { ok: false, error: { code, message }, meta: { command: commandPath } },
+      envelopeFormat,
     ) + "\n";
-  const argumentError = validateCliArguments();
-  if (argumentError !== undefined && !policyFullOutput) {
-    errorOutput.write(`codex-security: ${argumentError}\n`);
-    if (scanErrorFormat)
-      await writeCliOutput(output, argumentFailure(argumentError));
+  const reportError = async (message: string, code?: string) => {
+    errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
+    if (envelopeFormat)
+      await writeCliOutput(output, argumentFailure(message, code));
     return 2;
+  };
+  const argumentError = validateCliArguments();
+  if (argumentError !== undefined && (!policyFullOutput || envelopeFormat))
+    return reportError(argumentError);
+  if (protocol) {
+    const recordsCommand =
+      command === "dedupe" ||
+      command === "validate" ||
+      command === "classify-severity"
+        ? command
+        : undefined;
+    const remediationOperation =
+      command === "patch"
+        ? "patch"
+        : command === "verify-fix"
+          ? "verify"
+          : undefined;
+    const controller = new AbortController();
+    const removeSignals = listenForAbort(dependencies, controller);
+    let exitCode: number;
+    try {
+      const input = dependencies.recordsInput ?? process.stdin;
+      const code =
+        recordsCommand !== undefined
+          ? await runHostRecordsProtocol(recordsCommand, input, output, {
+              signal: controller.signal,
+              classificationRuns,
+            })
+          : remediationOperation !== undefined
+            ? await runHostedRemediationProtocol(
+                input,
+                output,
+                controller.signal,
+                remediationOperation,
+              )
+            : await runHostedScanProtocol(input, output, controller.signal);
+      exitCode =
+        controller.signal.reason === "SIGINT"
+          ? 130
+          : controller.signal.reason === "SIGTERM"
+            ? 143
+            : code;
+    } finally {
+      removeSignals();
+    }
+    // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
+    if (output === process.stdout) process.exit(exitCode);
+    return exitCode;
   }
   const updateController = new AbortController();
   const pendingUpdate =
     errorOutput.isTTY === true &&
     argv.length > 0 &&
-    argv[0] !== "completions" &&
+    command !== "completions" &&
+    command !== "update" &&
     !process.env["COMPLETE"] &&
     !argv.some((argument) =>
-      [...inspectionFlags, "--dry-run", "--update"].includes(argument),
+      [...INSPECTION_FLAGS, "--dry-run", "--mcp"].includes(argument),
     ) &&
     updateNoticeEnabled(dependencies.environment)
       ? dependencies
@@ -8285,7 +8447,14 @@ export async function main(
       },
     };
     if (
-      !(await serveIntegration(frameworkArgv, cli, cliOptions, serveOptions))
+      !(await serveIntegration(
+        frameworkArgv,
+        cli,
+        cliOptions,
+        serveOptions,
+        command,
+        literalArgs,
+      ))
     ) {
       await cli.serve(frameworkArgv, serveOptions);
     }
@@ -8293,8 +8462,7 @@ export async function main(
       notice = await Promise.race([pendingUpdate, undefined]);
     }
   } catch (error) {
-    errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
-    return 2;
+    return reportError(errorMessage(error), "COMMAND_FAILED");
   } finally {
     updateController.abort();
   }
@@ -8313,33 +8481,12 @@ export async function main(
     const parent = commands.get(command);
     const group = parent && "_group" in parent ? command : undefined;
     const path = group && following ? `${group} ${following}` : command;
-    errorOutput.write(
-      `codex-security: Unknown command ${diagnosticValue(path)}. Use codex-security${group ? ` ${group}` : ""} --help.\n`,
+    return reportError(
+      `Unknown command ${diagnosticValue(path)}. Use codex-security${group ? ` ${group}` : ""} --help.`,
+      "COMMAND_NOT_FOUND",
     );
-    return 2;
   }
 
-  if (filteredScanFailure !== undefined) {
-    // Success-field filters do not apply to diagnostics. Reuse Incur's format
-    // and token controls without running the saved scan a second time.
-    const failureOutput = captureOutput();
-    const failureArguments = [
-      "render",
-      "--format",
-      filteredScanFailure.format,
-      ...frameworkFlags.tokenArguments,
-    ];
-    if (failedResultOutput) failureArguments.push("--full-output");
-    const failure = filteredScanFailure.data;
-    await Cli.create("codex-security-scan-error")
-      .command("render", { run: () => failure })
-      .serve(failureArguments, {
-        stdout: failureOutput.stream.write,
-        exit: () => undefined,
-      });
-    if (failedResultOutput) frameworkOutput = failureOutput.text();
-    else renderedOutput = failureOutput.text();
-  }
   if (escapeFrameworkOutput)
     frameworkOutput = escapeTerminalText(frameworkOutput, true);
   const writeUpdateNotice = () => {
@@ -8350,10 +8497,17 @@ export async function main(
   };
   if (deferredVerificationDiagnostic === undefined) writeUpdateNotice();
   if (frameworkExit !== undefined) {
-    if (policyFullOutput || structuredError) {
+    // A canceled command can deliberately finish without a result.
+    if (
+      !structuredError &&
+      !policyFullOutput &&
+      (exitCode === 130 || exitCode === 143)
+    )
+      return exitCode;
+    if (!envelopeFormat && (policyFullOutput || structuredError)) {
       if (exitCode === 0) exitCode = 2;
     } else {
-      if (exitCode !== 0) return exitCode;
+      if (exitCode !== 0 && !envelopeFormat) return exitCode;
       const envelope = jsonFormat
         ? parseJson(() => frameworkOutput)
         : undefined;
@@ -8361,7 +8515,7 @@ export async function main(
       const error =
         record?.["ok"] === false ? asRecord(record["error"]) : record;
       const validationError = error?.["code"] === "VALIDATION_ERROR";
-      const structuredFailure = Boolean(scanErrorFormat || validationError);
+      const structuredFailure = Boolean(envelopeFormat || validationError);
       let message =
         structuredFailure && typeof error?.["message"] === "string"
           ? error["message"]
@@ -8394,28 +8548,22 @@ export async function main(
         error["message"] = message;
         frameworkOutput = Formatter.format(envelope, jsonFormat) + "\n";
       }
-      errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
+      // Handlers that set an exit code have already reported the execution error.
+      if (exitCode === 0)
+        errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
       if (!structuredFailure) return 2;
-      exitCode = 2;
-      // Errors in built-in flags precede Incur's format selection. Its other
-      // parse errors already carry the requested envelope or token view.
-      if (
-        scanErrorFormat &&
-        record?.["ok"] !== false &&
-        !(
-          typeof envelope === "number" &&
-          frameworkFlags.tokenArguments.includes("--token-count")
-        )
-      ) {
+      if (exitCode === 0) exitCode = 2;
+      // Incur parses its built-in flags before selecting a format.
+      if (envelopeFormat && record?.["ok"] !== false)
         frameworkOutput = argumentFailure(message);
-      }
     }
   }
   if (rawExportOutput) return exitCode;
   if (
     frameworkOutput.length === 0 &&
+    !(jsonFormat && frameworkFlags.tokenView?.count && exitCode === 0) &&
     streamedLogs === undefined &&
-    filteredScanFailure === undefined &&
+    unfilteredFailure === undefined &&
     deferredVerificationDiagnostic === undefined
   )
     return exitCode;
@@ -8450,21 +8598,11 @@ export async function main(
       }
     } else if (failedResultOutput !== undefined) {
       const envelope: JsonValue = JSON.parse(frameworkOutput);
-      // Token-count output is a number, not a full-output envelope.
       if (isJsonObject(envelope) && envelope["ok"] === true) {
-        // Re-rendered failures carry the unfiltered page, but the command's
-        // original metadata describes the actual invocation.
-        const meta =
-          filteredScanFailure && isJsonObject(envelope["meta"])
-            ? {
-                ...JSON.parse(frameworkCapture.text()).meta,
-                nextOffset: envelope["meta"]["nextOffset"],
-              }
-            : envelope["meta"];
         frameworkOutput = `${JSON.stringify(
           {
             ...envelope,
-            meta,
+            ...(unfilteredFailure && { data: unfilteredFailure }),
             ok: false,
             error: {
               code: failedResultOutput.code ?? "SCAN_FAILED",
@@ -8476,12 +8614,33 @@ export async function main(
         )}\n`;
       }
     }
-    await writeCliOutput(
-      output,
-      logOutput ??
-        renderedOutput ??
-        formatCliHelp(frameworkOutput, output.columns),
-    );
+    const help = formatCliHelp(frameworkOutput, output.columns);
+    let response = renderedOutput ?? help ?? frameworkOutput;
+    // Incur writes menus and completion scripts directly as plain text.
+    if (
+      jsonFormat &&
+      !inspection &&
+      exitCode === 0 &&
+      (help !== undefined || command === "completions")
+    ) {
+      response =
+        Formatter.format(
+          frameworkFlags.fullOutput
+            ? { ok: true, data: response, meta: { command: commandPath } }
+            : response,
+          jsonFormat,
+        ) + "\n";
+    }
+    if (jsonFormat && unfilteredFailure && !failedResultOutput)
+      response = Formatter.format(unfilteredFailure, jsonFormat) + "\n";
+    if (jsonFormat && frameworkFlags.tokenView && !inspection)
+      response = formatJsonTokenView(
+        response,
+        jsonFormat,
+        frameworkFlags.fullOutput,
+        frameworkFlags.tokenView,
+      );
+    await writeCliOutput(output, logOutput ?? response);
     return exitCode;
   } catch (error) {
     errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -8490,7 +8649,7 @@ export async function main(
     if (deferredVerificationDiagnostic !== undefined) {
       // Token output can omit the diagnostic. Otherwise a buffered stderr
       // write is optional once the complete structured failure is on stdout.
-      if (frameworkFlags.tokenArguments.length) {
+      if (frameworkFlags.tokenView) {
         await writeCliOutput(errorOutput, deferredVerificationDiagnostic).catch(
           () => {},
         );
@@ -8798,48 +8957,127 @@ function isJsonFormat(format: string | undefined): format is "json" | "jsonl" {
   return format === "json" || format === "jsonl";
 }
 
-function parseFrameworkArguments(
+/** Skip recognized global options and their operands while locating a command. */
+function firstNonGlobal(argv: readonly string[], start: number): number {
+  let index = start;
+  while (index < argv.length) {
+    const value = argv[index]!;
+    const [flag] = value.split("=", 1);
+    if (FRAMEWORK_VALUE_OPTIONS.has(flag!)) {
+      if (
+        !value.includes("=") &&
+        (argv[index + 1] === undefined || argv[index + 1]!.startsWith("-"))
+      )
+        break;
+      index += value.includes("=") ? 1 : 2;
+    } else if (
+      INSPECTION_FLAGS.includes(value) ||
+      ["--json", "--full-output", "--token-count"].includes(value)
+    ) {
+      index++;
+    } else break;
+  }
+  return index;
+}
+
+/** Translate historical input flags only within their original command. */
+function normalizeImportArguments(
   argv: readonly string[],
-  firstImportOption: number,
-) {
+  verbIndex: number,
+  command: string | undefined,
+  subcommand: string | undefined,
+): { args: readonly string[]; error?: string } {
+  const scanImport = command === "scan" && subcommand === "import";
+  const providerAliases: Record<string, string> =
+    command === "import" && subcommand === "semgrep"
+      ? { "--semgrep-deployment": "--deployment", "--semgrep-ref": "--ref" }
+      : command === "import" && subcommand === "snyk"
+        ? { "--snyk-org": "--org" }
+        : {};
+  if (!scanImport && Object.keys(providerAliases).length === 0)
+    return { args: argv };
+  const args = argv.slice(0, verbIndex + 1);
+  const seen = new Map<string, string>();
+  for (let index = args.length; index < argv.length; index++) {
+    const token = argv[index]!;
+    const equals = token.indexOf("=");
+    const name = equals < 0 ? token : token.slice(0, equals);
+    const flag = name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+    let value = equals < 0 ? argv[index + 1] : token.slice(equals + 1);
+    let canonical = providerAliases[flag] ?? flag;
+    if (scanImport && (flag === "--csv" || flag === "--json")) {
+      if (
+        equals < 0 &&
+        (value === undefined || value.startsWith("--") || value === "-h")
+      ) {
+        if (flag === "--csv")
+          return { args: argv, error: "Missing value for flag: --csv" };
+        args.push(token);
+        continue;
+      }
+      if (!value) return { args: argv, error: `${flag} must not be empty.` };
+      args.push(value.startsWith("-") ? "./" + value : value);
+      if (equals < 0) index++;
+      canonical = "--input-format";
+      value = flag.slice(2);
+      args.push(canonical + "=" + value);
+    } else if (Object.hasOwn(providerAliases, flag)) {
+      args.push(canonical + (equals < 0 ? "" : token.slice(equals)));
+    } else {
+      args.push(token);
+    }
+    if (
+      value !== undefined &&
+      (canonical === "--input-format" ||
+        Object.values(providerAliases).includes(canonical))
+    ) {
+      if (seen.has(canonical) && seen.get(canonical) !== value)
+        return { args: argv, error: `Conflicting values for ${canonical}.` };
+      seen.set(canonical, value);
+    }
+  }
+  return { args };
+}
+
+function parseFrameworkArguments(argv: readonly string[]) {
   const args: string[] = [];
   const formats: string[] = [];
   const filters: (string | undefined)[] = [];
   const tokenArguments: string[] = [];
+  let tokenView: TokenView | undefined;
+  let tokenError: string | undefined;
   let fullOutput = false;
-  let malformedFilter = false;
+  let argumentError: string | undefined;
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]!;
     const next = argv[index + 1];
-    if (
-      index >= firstImportOption &&
-      argument === "--json" &&
-      next !== undefined &&
-      !next.startsWith("--") &&
-      next !== "-h"
-    ) {
-      // Incur accepts the import's JSON input in the equals form.
-      args.push(`--json=${next}`);
-      index++;
-      continue;
-    }
     const equals = argument.indexOf("=");
     const flag = equals < 0 ? argument : argument.slice(0, equals);
     if (!FRAMEWORK_VALUE_OPTIONS.has(flag)) {
+      if (argument === "--token-count") {
+        (tokenView ??= {}).count = true;
+        tokenArguments.push(argument);
+        continue;
+      }
       args.push(argument);
       if (argument === "--json") formats.push("json");
       if (argument === "--full-output") fullOutput = true;
-      if (argument === "--token-count") tokenArguments.push(argument);
       continue;
     }
     // Leave a following flag available when the option is missing its operand.
     const operand =
       equals >= 0
         ? argument.slice(equals + 1)
-        : next?.startsWith("--")
+        : /^-(?:-|[a-z])/iu.test(next ?? "")
           ? undefined
           : next;
     if (equals < 0 && operand !== undefined) index++;
+    if (
+      operand === undefined ||
+      (!operand && (flag === "--filter-output" || flag === "--format"))
+    ) {
+      argumentError ??= `Missing value for flag: ${flag}`;
+    }
     if (flag === "--filter-output") {
       filters.push(operand);
       // Incur cannot advance past an unterminated array slice.
@@ -8847,32 +9085,71 @@ function parseFrameworkArguments(
         operand !== undefined &&
         !/^(?:[^\[\]]|\[[^\[\]]*\])*$/u.test(operand)
       ) {
-        malformedFilter = true;
+        argumentError ??=
+          "--filter-output requires matching brackets for array slices.";
         continue;
       }
+    }
+    if (flag === "--token-limit" || flag === "--token-offset") {
+      if (
+        operand === undefined ||
+        !/^\d+$/u.test(operand) ||
+        !Number.isSafeInteger(Number(operand))
+      ) {
+        tokenError ??= `${flag} requires a nonnegative integer.`;
+      } else {
+        (tokenView ??= {})[flag === "--token-limit" ? "limit" : "offset"] =
+          Number(operand);
+        tokenArguments.push(flag, operand);
+      }
+      continue;
     }
     args.push(flag);
     if (operand !== undefined) args.push(operand);
     if (flag === "--format" && operand) formats.push(operand);
-    if (
-      (flag === "--token-limit" || flag === "--token-offset") &&
-      operand !== undefined
-    )
-      tokenArguments.push(flag, operand);
   }
-  const format = formats.at(-1);
+  // Invalid format operands still go to Incur. Preserve a valid request for
+  // JSON diagnostics if parsing a later operand fails.
+  const format = formats.findLast((value) =>
+    ["json", "jsonl", "toon", "yaml", "md"].includes(value),
+  );
   const jsonFormat = isJsonFormat(format) ? format : undefined;
+  if (!jsonFormat) args.push(...tokenArguments);
   return {
     args,
     formats,
     jsonFormat,
     fullOutput,
-    malformedFilter,
+    argumentError,
     filters,
     tokenArguments,
+    tokenView,
+    tokenError,
     rawStructuredOutput:
       !fullOutput && (jsonFormat !== undefined || format === "yaml"),
   };
+}
+
+function cliOptionFlag(key: string): string {
+  return `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+}
+
+function cliOptionTokens(options: Record<string, unknown>): string[] {
+  const tokens: string[] = [];
+  for (const [key, value] of Object.entries(options)) {
+    if (value === undefined) continue;
+    const flag = cliOptionFlag(key);
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (typeof item === "boolean") {
+        tokens.push(item ? flag : `${flag}=false`);
+      } else if (String(item).startsWith("-")) {
+        tokens.push(quoteCliPath(`${flag}=${item}`));
+      } else {
+        tokens.push(flag, quoteCliPath(String(item)));
+      }
+    }
+  }
+  return tokens;
 }
 
 /** Incur prints example keys verbatim and treats every option as a single value.
@@ -8889,15 +9166,7 @@ function prepareCliExamples(
       const tokens = Object.values(example.args ?? {}).map((value) =>
         quoteCliPath(String(value)),
       );
-      for (const [key, value] of Object.entries(example.options ?? {})) {
-        const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
-        for (const item of Array.isArray(value) ? value : [value]) {
-          tokens.push(item === false ? `${flag}=false` : flag);
-          if (typeof item !== "boolean")
-            tokens.push(quoteCliPath(String(item)));
-        }
-      }
-      example.args = tokens;
+      example.args = [...tokens, ...cliOptionTokens(example.options ?? {})];
       delete example.options;
     }
   }
@@ -8914,12 +9183,7 @@ function cliValueOptions(
       for (const [name, schema] of Object.entries(
         z.toJSONSchema(command.options, { io: "input" }).properties ?? {},
       )) {
-        // Bare --json is the framework output shortcut, except on scan import.
-        if (
-          name === "json" ||
-          (typeof schema === "object" && schema.type === "boolean")
-        )
-          continue;
+        if (typeof schema === "object" && schema.type === "boolean") continue;
         options.add(
           `--${name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`,
         );
@@ -10222,6 +10486,15 @@ async function runSkill(
         "Finding or issue inputs must not be empty.",
       );
     }
+    if (input.startsWith("text:")) {
+      const literal = input.slice("text:".length);
+      if (!literal.trim())
+        throw new CodexSecurityError(
+          "Finding or issue inputs must not be empty.",
+        );
+      contents.push(literal);
+      continue;
+    }
     let contentsOrLiteral = input;
     const explicitFile = /^file:\/\//iu.test(input)
       ? new URL(input)
@@ -10254,7 +10527,14 @@ async function runSkill(
       );
       const metadata = await lstat(path, { bigint: true }).catch(
         (error: unknown) => {
-          if (explicitFile) throw error;
+          if (
+            explicitFile ||
+            isAbsolute(expandHome(input)) ||
+            input.startsWith("./") ||
+            input.startsWith("../") ||
+            (process.platform === "win32" && /^\.{1,2}\\/u.test(input))
+          )
+            throw error;
           if (
             typeof error === "object" &&
             error !== null &&
@@ -11109,6 +11389,10 @@ async function executeScan(
   let usageFreshness: string | null = null;
   let accountLimits: string | null = null;
   let maxCostUsd = arguments_.maxCostUsd;
+  if (maxCostUsd !== undefined && arguments_.patch)
+    throw new CodexSecurityError(
+      "--patch cannot be combined with a scan cost limit. Run the bounded scan first, then use `codex-security patch --scan SCAN_ID` separately.",
+    );
   const showCost = arguments_.showCost === true || maxCostUsd !== undefined;
   let phase: string | null = null;
   const targetWarnings: string[] = [];
@@ -11816,6 +12100,7 @@ async function executeScan(
       options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
         options.knowledgeBasePaths,
         preparationAbortController.signal,
+        resolve(directory, expandHome(repository)),
       );
     }
     if (arguments_.rerunInputIdentity !== undefined) {
@@ -12217,6 +12502,7 @@ async function executeScan(
   try {
     if (
       !arguments_.mock &&
+      maxCostUsd === undefined &&
       actionableFindings.length > 0 &&
       arguments_.patchSeverity === undefined &&
       progress?.interactive === true &&

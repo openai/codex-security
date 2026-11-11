@@ -80,7 +80,7 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
-from workbench_finding_index import index_findings
+from workbench_finding_index import index_findings, legacy_finding_matches
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
@@ -254,7 +254,10 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 
 def connect(
-    *, deferred: bool = False, discovery_roots: tuple[Path, ...] = ()
+    *,
+    deferred: bool = False,
+    discovery_roots: tuple[Path, ...] = (),
+    in_memory: bool = False,
 ) -> sqlite3.Connection:
     """Open the workbench SQLite database and bring its schema up to date.
 
@@ -263,6 +266,7 @@ def connect(
             Retries after lock contention use an immediate transaction.
 
         discovery_roots: Additional local paths for bounded target discovery.
+        in_memory: Keep a fresh profile read entirely in memory.
 
     Returns:
         sqlite3.Connection: A caller-owned connection with named rows, foreign
@@ -279,13 +283,14 @@ def connect(
         "the scanned repository."
     )
     try:
-        create_private_directory(path.parent)
+        if not in_memory:
+            create_private_directory(path.parent)
     except OSError:
         print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
-            connection = sqlite3.connect(path, timeout=5)
+            connection = sqlite3.connect(":memory:" if in_memory else path, timeout=5)
         except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
@@ -298,7 +303,8 @@ def connect(
                 connection, immediate=not deferred or attempt > 0, discovery_roots=discovery_roots
             )
             connection.execute("PRAGMA journal_mode = WAL")
-            path.chmod(0o600)
+            if not in_memory:
+                path.chmod(0o600)
             return connection
         except sqlite3.OperationalError as exc:
             connection.close()
@@ -3026,19 +3032,6 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
             )
 
 
-def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
-    if not isinstance(finding, dict):
-        return False
-    return (
-        finding.get("findingId") == row["finding_id"]
-        and finding.get("title") == row["title"]
-        and finding.get("summary") == row["summary"]
-        and finding.get("remediation") == row["remediation"]
-        and finding["severity"]["level"] == row["severity"]
-        and finding["confidence"]["level"] == row["confidence"]
-    )
-
-
 def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -3389,6 +3382,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                     "update-progress",
                 },
                 discovery_roots=command_targets,
+                in_memory=scan_history.reads_missing_history(args, database_path()),
             )
         ) as connection,
         scoped_git_discovery(

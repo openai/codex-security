@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { main } from "../src/cli.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 async function help(args: readonly string[], columns?: number) {
   const stdout = capture(true);
@@ -80,6 +83,8 @@ describe("CLI help", () => {
     expect(sectionFor("findings")).toBe(sectionFor("scans"));
     expect(sectionFor("login")).toBeGreaterThan(sectionFor("scan"));
     expect(sectionFor("init")).toBe(sectionFor("login"));
+    expect(sectionFor("update")).toBe(sectionFor("login"));
+    expect(text).not.toContain("--update");
     expect(sectionFor("completions")).toBeGreaterThan(sectionFor("scan"));
     expect(text).toContain("Aliases: cs");
     for (const command of [
@@ -95,6 +100,14 @@ describe("CLI help", () => {
     );
     expect(text).toContain("<command> --help");
   });
+
+  test.each(["bulk-scan", "scan-components"])(
+    "labels %s cost limits in USD",
+    async (command) => {
+      const text = await help([command, "--help"]);
+      expect(option(text, "--max-total-cost")).toContain("<usd>");
+    },
+  );
 
   test("shows semantic values, repeatable inputs, choices, and scan defaults", async () => {
     const text = await help(["scan", "--help"]);
@@ -224,8 +237,8 @@ describe("CLI help", () => {
 
   test("distinguishes JSON file import from JSON output", async () => {
     const text = await help(["scan", "import", "--help"]);
-    expect(option(text, "--json")).toContain("<file>");
-    expect(option(text, "--csv")).toContain("<file>");
+    expect(option(text, "--json")).toContain("--format json");
+    expect(option(text, "--input-format")).toContain("Input format");
     expect(text.replace(/\s+/gu, " ")).toContain("--format json");
     expect(option(text, "--format")).toContain("json");
   });
@@ -298,6 +311,206 @@ describe("CLI help", () => {
     },
   );
 
+  test.each([
+    ["scans", "show"],
+    ["findings", "false-positive"],
+    ["scan", "import"],
+    ["login", "status"],
+    ["publish", "findings"],
+  ])("resolves %s %s around global options", async (group, verb) => {
+    const flags = ["--format", "json", "--schema"];
+    const expected = JSON.parse(await help([group, verb, ...flags]));
+    expect(JSON.parse(await help([group, ...flags, verb]))).toEqual(expected);
+  });
+
+  test.each(
+    [
+      ["bogus", "--llms-full"],
+      ["scans", "--json", "bogus", "--llms"],
+      ["mcp", "bogus", "--llms-full"],
+      ["info", "extra", "--help"],
+      ["info", "extra", "--schema"],
+      ["info", "extra", "--llms"],
+      ["completions", "zsh", "extra"],
+      ["completions", "zsh", "--", "--version"],
+      ["skills", "list", "--", "--no-global"],
+    ].map((args) => ({ args })),
+  )(
+    "rejects unknown discovery paths or surplus words (%j)",
+    async ({ args }) => {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(args, stdout.stream, stderr.stream, dependencies()),
+      ).toBe(2);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toMatch(
+        /Unknown command|not a command|Unexpected positional/,
+      );
+    },
+  );
+
+  test.each([
+    ["scans", "shwo", "show"],
+    ["mcp", "doctr", "doctor"],
+    ["skills", "lsit", "list"],
+  ])("preserves suggested verbs for %s %s", async (group, typo, verb) => {
+    const stderr = capture();
+    expect(
+      await main(
+        [group, typo],
+        capture().stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(`Did you mean '${verb}'?`);
+  });
+
+  test.each([
+    { command: [], expected: "Usage: codex-security" },
+    ...["skills", "mcp", "import", "publish", "completions"].map((name) => ({
+      command: [name],
+      expected: `Usage: codex-security ${name}`,
+    })),
+    { command: ["completions", "zsh"], expected: "#compdef" },
+  ])(
+    "formats the text from $command before applying JSON token controls",
+    async ({ command, expected }) => {
+      async function run(...flags: string[]) {
+        const { runCli, stdout, stderr } = createCliTest(main);
+        expect(await runCli([...command, ...flags], dependencies())).toBe(0);
+        expect(stderr.text()).toBe("");
+        return stdout.text();
+      }
+      const plain = await run();
+      expect(plain).toContain(expected);
+      expect(JSON.parse(await run("--json"))).toBe(plain);
+      const flags = ["--format=jsonl", "--full-output"];
+      expect(JSON.parse(await run(...flags))).toMatchObject({
+        ok: true,
+        data: plain,
+      });
+      expect(JSON.parse(await run(...flags, "--token-count"))).toBeGreaterThan(
+        0,
+      );
+      expect(JSON.parse(await run(...flags, "--token-limit=1"))).toMatchObject({
+        ok: true,
+        meta: { nextOffset: 1 },
+      });
+    },
+  );
+
+  test("uses the completion shell schema without generating a script", async () => {
+    const schema = JSON.parse(
+      await help(["completions", "--json", "--schema"]),
+    );
+    expect(schema.args.properties.shell.enum).toContain("zsh");
+  });
+
+  test.each(
+    [
+      ["scan", ".", "--dry-run", "--update"],
+      ["scans", "list", "--mcp"],
+      ["policy", "--full-output", "--mcp"],
+      ["--mcp", "--update"],
+      ["scan", ".", "--dry-run", "--incur-update-check"],
+    ].map((args) => ({ args })),
+  )("rejects mixed or private actions (%j)", async ({ args }) => {
+    const stdout = capture();
+    const stderr = capture();
+    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
+      2,
+    );
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toMatch(/must be used alone|Unknown flag/);
+  });
+
+  test.each(["--filter-output", "--format", "--token-limit", "--token-offset"])(
+    "%s cannot turn a following switch into a value and dispatch a write",
+    async (flag) => {
+      await using temp = await scopedTemporaryDirectory("cli-missing-global-");
+      const deps = dependencies({ currentDirectory: temp.path });
+      for (const next of [
+        "-h",
+        "--help",
+        "--version",
+        "--schema",
+        "--llms",
+        "--llms-full",
+        "--mcp",
+        "--update",
+        "--incur-update-check",
+        "--json",
+        "--full-output",
+        "-c",
+      ]) {
+        const stderr = capture();
+        expect(
+          await main(
+            [flag, next, "init", "new.yaml"],
+            capture().stream,
+            stderr.stream,
+            deps,
+          ),
+        ).toBe(2);
+        expect(stderr.text()).toMatch(
+          /Missing value|must be used alone|Unknown flag/,
+        );
+      }
+      expect(await readdir(temp.path)).toEqual([]);
+    },
+  );
+
+  test("the equals form keeps a dash-leading filter value literal", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-explicit-filter-");
+    expect(
+      await main(
+        ["--filter-output=-h", "init", "new.yaml"],
+        capture().stream,
+        capture().stream,
+        dependencies({ currentDirectory: temp.path }),
+      ),
+    ).toBe(0);
+    expect(await readdir(temp.path)).toEqual(["new.yaml"]);
+  });
+
+  test("passes option-shaped filenames after -- through positional validation", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-literal-args-");
+    const deps = dependencies({ currentDirectory: temp.path });
+    const stdout = capture();
+    const stderr = capture();
+    expect(
+      await main(
+        ["init", "--", "--version.yaml"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect(
+      await main(
+        ["--", "init", "--mcp.json"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(0);
+    expect((await readdir(temp.path)).sort()).toEqual([
+      "--mcp.json",
+      "--version.yaml",
+    ]);
+    expect(
+      await main(
+        ["init", "--", "--version"],
+        stdout.stream,
+        stderr.stream,
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(".yaml");
+  });
+
   test("links both file import routes and keeps the vendor preview copyable", async () => {
     const menu = (await help(["import", "--help"])).replace(/\s+/gu, " ");
     expect(menu).toContain("publish findings --help");
@@ -354,7 +567,7 @@ describe("CLI help", () => {
     }
   });
 
-  test("completes scan import and its file options from the command registry", async () => {
+  test("completes scan import and its input format option from the command registry", async () => {
     const previousShell = process.env["COMPLETE"];
     const previousIndex = process.env["_COMPLETE_INDEX"];
     try {
@@ -362,9 +575,9 @@ describe("CLI help", () => {
       process.env["_COMPLETE_INDEX"] = "2";
       expect((await help(["--", "cs", "scan", "im"])).trim()).toBe("import");
       process.env["_COMPLETE_INDEX"] = "3";
-      expect((await help(["--", "cs", "scan", "import", "--cs"])).trim()).toBe(
-        "--csv",
-      );
+      expect(
+        (await help(["--", "cs", "scan", "import", "--input-f"])).trim(),
+      ).toBe("--input-format");
     } finally {
       if (previousShell === undefined) delete process.env["COMPLETE"];
       else process.env["COMPLETE"] = previousShell;

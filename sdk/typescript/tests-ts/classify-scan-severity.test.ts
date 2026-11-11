@@ -5,6 +5,8 @@ import {
   chmod,
   mkdir,
   readFile,
+  realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -188,6 +190,39 @@ test("classifies and reads a saved scan with an embedded NUL in its ID without P
   ).toEqual(classification);
 });
 
+test("saved scan artifacts cannot redirect knowledge-base reads", async () => {
+  const { scanDirectory, root, environment, rubricPath } = await fixture();
+  const alias = join(scanDirectory, "documents");
+  await symlink(root, alias, "junction");
+  await expect(
+    classifyScanDirectorySeverity(scanDirectory, {
+      environment,
+      findingIds: [],
+      rubricPath,
+      knowledgeBasePaths: [join(alias, "policy.md")],
+    }),
+  ).rejects.toThrow(/symbolic link|directory link/i);
+});
+
+test("classifying a saved scan ID checks document links in its source directory", async () => {
+  const { environment, repository, root, scanId } = await savedFixture();
+  await symlink(root, join(repository, "documents"), "junction");
+  const classify = (directory: string) =>
+    classifyScanSeverityInternal(scanId, {
+      environment,
+      findingIds: [],
+      rubricPath: join(directory, "documents", "policy.md"),
+    });
+  await expect(classify(repository)).rejects.toThrow(
+    /symbolic link|directory link/i,
+  );
+  const moved = join(root, "moved");
+  await rename(repository, moved);
+  await expect(classify(moved)).rejects.toThrow("canonical path");
+  await mkdir(repository);
+  await expect(classify(moved)).rejects.toThrow("canonical path");
+});
+
 test("severity helpers skip Node executables in the caller's enclosing checkout", async () => {
   const { root, environment, scanDirectory } = await fixture();
   const repository = join(root, "repository");
@@ -306,6 +341,7 @@ test.each(["id", "prefix", "latest", "missing target"])(
       {
         environment,
         expectedScanId: f.scanId,
+        rubricPath: await realpath(f.rubricPath),
         codex: recordingClassifier().codex,
       },
       {

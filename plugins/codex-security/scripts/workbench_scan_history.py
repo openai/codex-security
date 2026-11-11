@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
 from fractions import Fraction
+from functools import cache
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -40,6 +41,22 @@ from workbench_target_state import (
     scan_repository_generation,
 )
 from workbench_validation import timestamp_key
+
+
+def reads_missing_history(args: argparse.Namespace, path: Path) -> bool:
+    """Select an in-memory database only for history reads on a fresh profile."""
+    if args.command not in {"list-scans", "list-repositories", "list-global-findings"} and not (
+        args.command == "get-scan" and not (args.request_id or args.action_token)
+    ):
+        return False
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        # The ordinary connection reports inaccessible storage.
+        pass
+    return False
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -443,14 +460,27 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
+    worktree_order = ""
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().absolute()
         identities = RepositoryIdentityCache(connection)
+        repository = Path(identities.history_path(str(repository)))
         clause, scope_values = identities.scope_for_path(str(repository)).sql(
             supports_generation=identities.supports_generation
         )
         clauses.append(clause)
         values.extend(scope_values)
+        if getattr(args, "prefer_worktree", False):
+
+            @cache
+            def in_worktree(target_path: str) -> bool:
+                try:
+                    return repository.samefile(target_path)
+                except OSError:
+                    return False
+
+            connection.create_function("in_worktree", 1, in_worktree)
+            worktree_order = "in_worktree(scans.target_path) DESC,"
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -497,7 +527,7 @@ def list_scans(
         f"""
         {SCAN_SUMMARY_QUERY}
         {where}
-        ORDER BY
+        ORDER BY {worktree_order}
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
             MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
             julianday(upper(scans.started_at)) DESC,
@@ -506,7 +536,11 @@ def list_scans(
         """,
         values,
     ).fetchall()
-    result = {"scans": [scan_summary(row) for row in rows[:limit]]}
+    scans = [scan_summary(row) for row in rows[:limit]]
+    if worktree_order:
+        for scan in scans:
+            scan["inCurrentWorktree"] = in_worktree(scan["targetPath"])
+    result = {"scans": scans}
     if limit is not None:
         result.update(
             {
@@ -775,7 +809,7 @@ def compare_scans(
                 f"'codex-security scans compare {after['id']} {before['id']}'."
             )
         raise SystemExit(
-            "No saved matches for these scans. Run 'codex-security scans match BEFORE AFTER' first."
+            "No saved matches for these scans. Run 'codex-security scans compare BEFORE AFTER' first."
         )
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)

@@ -781,10 +781,30 @@ describe("one-shot scan events", () => {
     });
   });
 
+  test("continues while Codex waits for the network to reconnect", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const onReconnect = mock();
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... waiting for network (error sending request for url (https://api.example.test/v1/responses))",
+      };
+      yield { type: "error", message: "Reconnecting... waiting for network" };
+      yield* completedEvents();
+    }
+    await runEvents(scanDir, events(), { onReconnect });
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
   test("keeps non-reconnect stream errors terminal", async () => {
     const scanDir = join(await temporaryDirectory(), "partial-scan");
     await mkdir(scanDir, { mode: 0o700 });
-    for (const message of ["stream disconnected", "Reconnecting... 6/5"]) {
+    for (const message of [
+      "stream disconnected",
+      "Reconnecting... 6/5",
+      "Reconnecting... waiting for networking",
+    ]) {
       async function* failedEvents(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
         yield { type: "turn.started" };

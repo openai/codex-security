@@ -969,6 +969,7 @@ describe("CLI authentication", () => {
   });
 
   test("never prompts during automation, explicit selection, or unavailable credentials", async () => {
+    const repository = "/original/repository";
     for (const scenario of [
       { argv: ["scan", "--json"], terminal: true, stored: true, key: true },
       {
@@ -1042,16 +1043,26 @@ describe("CLI authentication", () => {
       let prompts = 0;
       const hasStoredChatGPTSignIn = mock(resolving(scenario.stored));
       const deps = dependencies({
+        currentDirectory: repository,
         environment: scenario.key
           ? { OPENAI_API_KEY: "synthetic-private-key" }
           : {},
         onTurn,
         onWorkbench: (args): JsonObject =>
           args[0] === "list-scans"
-            ? { scans: [{ scanId: "scan-original" }] }
+            ? {
+                scans: [
+                  {
+                    scanId: "scan-original",
+                    targetPath: repository,
+                    inCurrentWorktree: true,
+                  },
+                ],
+              }
             : {
+                scanId: "scan-original",
                 recipe: {
-                  repository: "/original/repository",
+                  repository,
                   target: { kind: "repository", paths: [] },
                   mode: "standard",
                   ...(scenario.recipeAuth === undefined
