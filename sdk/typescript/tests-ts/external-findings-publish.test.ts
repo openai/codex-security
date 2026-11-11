@@ -2937,7 +2937,8 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   const result = JSON.parse(replay.stdout.text());
   expect(result.local.counts.unchanged).toBe(1);
   expect(result.cloud.verified).toBe(1);
-  expect(f.posts).toEqual([f.posts[0], f.posts[0]]);
+  expect(f.posts).toHaveLength(2);
+  expect(f.posts[1]).toBe(f.posts[0]);
   expect(f.reports.size).toBe(1);
   const receipts = await listLocalFindingPublications(
     { repository: checkout },
