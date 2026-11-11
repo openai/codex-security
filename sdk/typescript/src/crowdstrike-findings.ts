@@ -46,7 +46,8 @@ function positive(value: unknown): number | null {
     : null;
 }
 
-// A git:: scan path without its ?ref= query.
+// A git:: scan path without its ?ref= query. When the scanned URL has a user
+// name, FCS writes each detection path after this prefix.
 function gitScan(path: unknown): string | undefined {
   const value = text(path);
   return value?.startsWith("git::") ? value.split("?", 1)[0] : undefined;
@@ -64,12 +65,16 @@ function gitScanRepository(scan: string): string | undefined {
 }
 
 // FCS writes paths relative to its working directory. A git:: scan writes them
-// from the scan root after a slash.
+// from the scan root, after a slash or after the scan path.
 function detectionPath(detection: NativeRecord, scan: string | undefined) {
   const raw = text(detection["file"]);
-  const path = repositoryFilePath(
-    scan === undefined ? raw : raw?.replace(/^\//u, ""),
-  );
+  const relative =
+    scan === undefined || !raw
+      ? raw
+      : raw.startsWith(`${scan}/`)
+        ? raw.slice(scan.length + 1)
+        : raw.replace(/^\//u, "");
+  const path = repositoryFilePath(relative);
   if (!path)
     throw new CodexSecurityError(
       "CrowdStrike detection file must be checkout-relative. Run the FCS CLI from the checkout root.",

@@ -159,53 +159,67 @@ test("detections that differ only by line remain separate findings", async () =>
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const scanned = "git::https://github.com/example/repo.git//infra";
-// FCS writes git:: files, module sources and call sites from the scan root after a slash.
-test("git:: reports keep module lines and record the scanned repository", async () => {
-  await using fixture = await checkout();
-  const call = "called by /main.tf at line 8.";
-  await fixture.writeJson({
-    ...report,
-    path: `${scanned}?ref=${revision}`,
-    rule_detections: [
-      {
-        ...misconfiguration,
-        detections: [
-          {
-            ...detection,
-            file: "/modules/example/main.tf",
-            line: 12,
-            module_path: "example",
-            module_source: "/modules/example",
-            is_from_module: true,
-            module_remediation: `This finding originates in module "/modules/example", ${call}`,
-          },
-          {
-            ...detection,
-            file: "/main.tf",
-            line: 1,
-            module_path: "registry",
-            module_source: "example/sg/aws",
-            is_from_module: true,
-            module_remediation: `This finding originates in module "example/sg/aws", ${call}`,
-          },
-        ],
-      },
-    ],
-  });
-  const result = await readCrowdStrikeFindings(fixture.file);
-  expect(result.excluded).toEqual([]);
-  expect(result.findings.map(({ evidence }) => evidence.locations)).toEqual([
-    [{ path: "modules/example/main.tf", line: 12 }],
-    [{ path: "main.tf", line: 8 }],
-  ]);
-  const repository = "https://github.com/example/repo.git";
-  expect(result.report).toMatchObject({ git_scan: scanned });
-  expect(result.report).not.toHaveProperty("repositoryUrl");
-  expect(result.findings[0]!.evidence).toMatchObject({
-    details: { kind: "iac", repository: { url: repository } },
-    source_data: { repository_url: repository, git_scan: scanned },
-  });
-});
+// FCS writes git:: files, module sources and call sites from the scan root after
+// a slash. For a URL with a user name, it writes them after the scanned path,
+// and only `flags.path` keeps the user name and token.
+test.each([
+  ["a slash", `${scanned}?ref=${revision}`, ""],
+  [
+    "the scanned path",
+    `git::https://example:synthetic-token@github.com/example/repo.git//infra?ref=${revision}`,
+    scanned,
+  ],
+])(
+  "git:: reports after %s keep module lines and record the scanned repository",
+  async (_, given, root) => {
+    await using fixture = await checkout();
+    const call = `called by ${root}/main.tf at line 8.`;
+    await fixture.writeJson({
+      ...report,
+      path: `${scanned}?ref=${revision}`,
+      flags: { path: given },
+      rule_detections: [
+        {
+          ...misconfiguration,
+          detections: [
+            {
+              ...detection,
+              file: `${root}/modules/example/main.tf`,
+              line: 12,
+              module_path: "example",
+              module_source: `${root}/modules/example`,
+              is_from_module: true,
+              module_remediation: `This finding originates in module "${root}/modules/example", ${call}`,
+            },
+            {
+              ...detection,
+              file: `${root}/main.tf`,
+              line: 1,
+              module_path: "registry",
+              module_source: "example/sg/aws",
+              is_from_module: true,
+              module_remediation: `This finding originates in module "example/sg/aws", ${call}`,
+            },
+          ],
+        },
+      ],
+    });
+    const result = await readCrowdStrikeFindings(fixture.file);
+    expect(result.excluded).toEqual([]);
+    expect(result.findings.map(({ evidence }) => evidence.locations)).toEqual([
+      [{ path: "modules/example/main.tf", line: 12 }],
+      [{ path: "main.tf", line: 8 }],
+    ]);
+    const repository = "https://github.com/example/repo.git";
+    expect(result.report).toMatchObject({ git_scan: scanned });
+    expect(result.report).not.toHaveProperty("repositoryUrl");
+    expect(result.findings[0]!.evidence).toMatchObject({
+      details: { kind: "iac", repository: { url: repository } },
+      source_data: { repository_url: repository, git_scan: scanned },
+    });
+    expect(JSON.stringify(result)).not.toContain("synthetic-token");
+  },
+);
 
 test.each([
   "git::ssh://git@github.com/example/repo.git",
