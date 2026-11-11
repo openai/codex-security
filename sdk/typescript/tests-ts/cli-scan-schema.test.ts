@@ -65,6 +65,12 @@ describe("scan output schema", () => {
             ok: { const: true },
           },
         },
+        {
+          properties: {
+            mode: { type: "string" },
+            manifest: { type: "object" },
+          },
+        },
       ],
     });
     const validate = new Ajv2020({ strict: false }).compile(schema);
@@ -273,6 +279,7 @@ test.each(retainedThreatModels)(
         {},
         {},
         {},
+        { properties: { mode: { type: "string" } } },
       ],
     });
     const original = fakeResult(["high"]);

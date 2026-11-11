@@ -2,6 +2,7 @@ import { resolving } from "./support/promises.js";
 import { parseJsonLines } from "./support/json.js";
 import { writeFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -237,9 +238,19 @@ describe("CLI", () => {
       expect(failure).toMatchObject({
         status: "failed",
         code: "SCAN_FAILED",
-        cta: { description: "Skills are out of date:" },
       });
+      expect(failure).not.toHaveProperty("cta");
       expect(validate(failure), JSON.stringify(validate.errors)).toBe(true);
+      const full = captureCli(main, "stdout");
+      expect(
+        await full.run(["scan", ".", "--json", "--full-output"], deps),
+      ).toBe(2);
+      const envelope = JSON.parse(full.text());
+      expect(envelope.ok).toBe(false);
+      expect(envelope.meta.cta.description).toContain(
+        "Skills are out of date:",
+      );
+      expect(validate(envelope), JSON.stringify(validate.errors)).toBe(true);
     } finally {
       if (previousDataHome === undefined) delete process.env["XDG_DATA_HOME"];
       else process.env["XDG_DATA_HOME"] = previousDataHome;
@@ -1244,6 +1255,38 @@ describe("CLI", () => {
     });
   });
 
+  test("rejects malformed boolean options before running the command", async () => {
+    const onRun = mock(() => {});
+    const deps = dependencies({ onRun });
+    for (const args of [
+      ["scan", ".", "--working-tree=1", "--dry-run"],
+      ["scan", ".", "--workingTree=treu", "--dry-run"],
+      ["scan", "--mock", "--dry-run=1"],
+      ["scan", "--working-tree=1", "--schema"],
+      ["scan", "import", "--csv", "unread.csv", "--dry-run=TRUE"],
+      ["publish", "findings", "unread.sarif", "--yes=maybe"],
+    ]) {
+      const stderr = captureCli(main, "stderr");
+      expect(await stderr.run(args, deps)).toBe(2);
+      expect(stderr.text()).toContain("Invalid boolean value for");
+    }
+    const typo = captureCli(main, "stderr");
+    expect(
+      await typo.run(["scan", ".", "--max-cots", "1", "--dry-run"], deps),
+    ).toBe(2);
+    expect(typo.text()).toContain("--max-cots");
+    expect(onRun).not.toHaveBeenCalled();
+    const out = captureCli(main, "stdout");
+    expect(
+      await out.run(
+        ["scan", ".", "--dry-run=true", "--working-tree=false", "--json"],
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(out.text()).dryRun).toBe(true);
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
     const root = await realpath(
       await temporaryDirectory("codex-security-cli-pre-commit-"),
@@ -1277,6 +1320,10 @@ describe("CLI", () => {
         };
         expect(normalize(result.hook)).toBe(hook);
         expect(result.failOnSeverity).toBe("medium");
+        if (process.platform !== "win32") {
+          expect((await stat(hook)).mode & 0o100).toBe(0o100);
+          if (attempt === 0) await chmod(hook, 0o600);
+        }
       }
       expect(await readFile(hook, "utf8")).toContain(
         "--working-tree --fail-on-severity medium",
@@ -1923,7 +1970,7 @@ describe("CLI", () => {
     });
   }, 30_000);
 
-  test("presents interactive scan history and hides abandoned running scans", async () => {
+  test("keeps inactive running scans visible with their last activity in interactive history", async () => {
     const stdout = captureCli(main, "stdout", true);
     const scan = {
       mode: "standard",
@@ -1946,6 +1993,22 @@ describe("CLI", () => {
           {
             ...scan,
             scanId: "abandoned-scan",
+            mode: "deep",
+            continuationThreadId: "thread-for-deep",
+            handoffStatus: "delivered",
+            recipeAvailable: true,
+            progress: { status: "running" },
+            findingCount: 0,
+            startedAt: "2026-07-20T12:00:00Z",
+            updatedAt: "2026-07-20T12:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "recipe-less-scan",
+            mode: "deep",
+            continuationThreadId: "retained-thread",
+            handoffStatus: "delivered",
+            recipeAvailable: false,
             progress: { status: "running" },
             findingCount: 0,
             startedAt: "2026-07-20T12:00:00Z",
@@ -1989,7 +2052,13 @@ describe("CLI", () => {
     expect(text).not.toContain("latest: 0 findings");
     expect(text).toContain("active-scan");
     expect(text).toContain("completed-scan");
-    expect(text).not.toContain("abandoned-scan");
+    expect(text).toContain("abandoned-scan");
+    expect(text).toContain("Last activity: 2026-07-20T12:00:00Z");
+    expect(text).toContain("codex-security scans resume abandoned-scan");
+    expect(text).not.toContain("scans resume active-scan");
+    expect(text).toContain("recipe-less-scan");
+    expect(text).not.toContain("scans resume recipe-less-scan");
+    expect(text).toContain("5 scans");
     expect(text).not.toContain("juice-shop-remediated");
     expect(text).not.toContain("/private/tmp");
     expect(text).not.toContain("target-internal-id");
@@ -2279,6 +2348,25 @@ describe("CLI", () => {
       nextStep: "codex-security scan . --dry-run",
     });
     expect(stderr.text()).toBe("");
+  });
+
+  test("projects nested info settings and other top-level metadata", async () => {
+    const { stdout, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "info",
+          "--json",
+          "--filter-output",
+          "model,configuration.settings.mode",
+        ],
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({
+      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
+      configuration: { settings: { mode: "standard" } },
+    });
   });
 
   test("rejects scan-only filters before running the info command", async () => {
@@ -6246,7 +6334,7 @@ describe("CLI", () => {
       );
       expect(stderr.text()).toContain(
         process.platform === "win32"
-          ? `Re-run with --output-dir "${suggestion}".`
+          ? `Re-run (PowerShell) with --output-dir '${suggestion.replaceAll("'", "''")}'.`
           : `Re-run with --output-dir '${suggestion.replaceAll("'", `'"'"'`)}'.`,
       );
     } finally {

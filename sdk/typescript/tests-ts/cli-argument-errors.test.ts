@@ -277,7 +277,7 @@ test("early token errors do not compare the renderer with installed CLI skills",
   try {
     // Capture the real complete registry hash; execution stays behind the fixture.
     await main(
-      ["scan", "--dry-run", "--json"],
+      ["scan", "--dry-run", "--json", "--full-output"],
       capture().stream,
       capture().stream,
       dependencies({
