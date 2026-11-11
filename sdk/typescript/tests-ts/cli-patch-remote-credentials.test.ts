@@ -15,7 +15,12 @@ import {
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
-test.each(["initial", "resume", "changed before push"] as const)(
+test.each([
+  "initial",
+  "resume",
+  "changed before push",
+  "changed with inherited git -c",
+] as const)(
   "refuses a local receiver alongside a hosted push destination (%s)",
   async (stage) => {
     const { directory, git } = await publicationRepository(fixtures);
@@ -30,8 +35,8 @@ test.each(["initial", "resume", "changed before push"] as const)(
     git("remote", "set-url", "origin", hosted);
     const local =
       process.platform === "win32" ? receiver : pathToFileURL(receiver).href;
-    if (stage !== "changed before push")
-      git("config", "--add", "remote.origin.pushurl", local);
+    const changed = stage.startsWith("changed");
+    if (!changed) git("config", "--add", "remote.origin.pushurl", local);
     git("config", "--add", "remote.origin.pushurl", hosted);
     const branch = "codex-security/patch-scan-1";
     if (stage !== "initial") {
@@ -43,30 +48,46 @@ test.each(["initial", "resume", "changed before push"] as const)(
       );
     }
     const model = mock(async () => 0);
+    const environment: NodeJS.ProcessEnv = {
+      GITLAB_HOST: "127.0.0.1:1",
+      ...(stage === "changed with inherited git -c"
+        ? {
+            GIT_CONFIG_PARAMETERS:
+              "'protocol.file.allow'='always' 'test.preserved'='yes'",
+          }
+        : { GIT_ALLOW_PROTOCOL: "git:file" }),
+    };
     const outcome = await runWorkflow(
       stage !== "initial"
         ? ["patch", "--resume-pr", branch, "--json"]
         : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
       {
         currentDirectory: directory,
-        environment: {
-          GITLAB_HOST: "127.0.0.1:1",
-          GIT_ALLOW_PROTOCOL: "git:file",
-        },
+        environment,
         onWorkbench: () =>
           savedScan(resultWithFindings(["high"]), "scan-1", directory),
         onCodex: model,
         onRepositoryCommand: (command, args, cwd, options) => {
           if (command !== "git") return "";
-          if (stage === "changed before push" && args.includes("push"))
+          if (changed && args.includes("push"))
             git("config", "--replace-all", "remote.origin.pushurl", local);
-          return runGitRepositoryCommand(command, args, cwd, {
+          const bound = {
             ...options,
-            environment: {
-              GIT_ALLOW_PROTOCOL: "git:file",
-              ...options?.environment,
-            },
-          });
+            environment: { ...environment, ...options?.environment },
+          };
+          if (
+            stage === "changed with inherited git -c" &&
+            args.includes("push")
+          )
+            expect(
+              runGitRepositoryCommand(
+                command,
+                ["config", "--get", "test.preserved"],
+                cwd,
+                bound,
+              ),
+            ).toBe("yes");
+          return runGitRepositoryCommand(command, args, cwd, bound);
         },
       },
       { localHosting: false },
@@ -77,9 +98,7 @@ test.each(["initial", "resume", "changed before push"] as const)(
     expect(git("--git-dir", receiver, "for-each-ref")).toBe("");
     expect(outcome.exitCode).toBe(2);
     expect(outcome.stderr).toContain(
-      stage === "changed before push"
-        ? "transport 'file' not allowed"
-        : "network push URL",
+      changed ? "transport 'file' not allowed" : "network push URL",
     );
     expect(model).not.toHaveBeenCalled();
   },

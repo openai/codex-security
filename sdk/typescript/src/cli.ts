@@ -10250,8 +10250,15 @@ async function runPatchTransport(
     transportEnvironment,
     args[0] === "push",
   );
+  // An outer git -c takes precedence over GIT_CONFIG_COUNT. Override it in this invocation.
+  const transportArgs = environmentEntry(
+    dependencies.environment,
+    "GIT_CONFIG_PARAMETERS",
+  )
+    ? ["-c", "protocol.file.allow=never", ...args]
+    : args;
   const run = (overrides: NodeJS.ProcessEnv = {}) =>
-    dependencies.runRepositoryCommand("git", args, repository, {
+    dependencies.runRepositoryCommand("git", transportArgs, repository, {
       ...options,
       patchTransport: true,
       environment: { ...environment, ...overrides },
