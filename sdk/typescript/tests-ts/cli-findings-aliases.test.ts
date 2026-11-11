@@ -12,7 +12,7 @@ import { expect, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { dependencies, capture } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
 import {
   scopedTemporaryDirectory,
@@ -24,6 +24,9 @@ import {
 } from "./support/workbench-command.js";
 import { git } from "./git-fixture.js";
 import { runCommand } from "./support/shell.js";
+
+const pythonExecutable = useTestPython();
+const ambientPython = useTestPython(false);
 
 const savedAliasFindings = String.raw`
 import sqlite3, sys
@@ -217,7 +220,7 @@ test.skipIf(process.platform === "win32")(
     }
     git(repository, "worktree", "add", "--quiet", "--detach", linked);
     const state = join(temp.path, "state");
-    const workbench = workbenchCommand(pythonExecutable(false)!, state);
+    const workbench = workbenchCommand(ambientPython()!, state);
     const scanDir = join(temp.path, "scan");
     await mkdir(scanDir, { mode: 0o700 });
     const scan = await workbench(

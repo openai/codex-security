@@ -15,7 +15,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
-from workbench.handoff import require_current_continuation
+from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench.storage import (
     archived_deep_path,
     create_private_directory,
@@ -396,7 +396,7 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
 
 
 def independent_review_progress(
-    connection: sqlite3.Connection, scan_id: str
+    connection: sqlite3.Connection, scan_id: str, *, parent_running: bool
 ) -> dict[str, int | str] | None:
     """Return completed and allowed review counts and the consolidation state, or None for a missing run."""
     run = connection.execute(
@@ -418,11 +418,12 @@ def independent_review_progress(
         """,
         (scan_id,),
     ).fetchone()
+    consolidating = run["phase"] in {"reducing", "terminal"} or (active == 0 and buffered > 0)
     return {
         "active": int(active),
         "completed": int(run["completion_sequence"]),
         "maximum": int(run["max_discovery_runs"]),
-        "consolidating": run["phase"] in {"reducing", "terminal"} or (active == 0 and buffered > 0),
+        "consolidating": parent_running and consolidating,
         "updatedAt": str(run["updated_at"]),
     }
 
@@ -465,8 +466,7 @@ def effective_deep_scan_config(
     """Use persisted workspace settings when available, otherwise resolve the current launch configuration."""
     if workspace is not None and workspace["deep_scan_config_json"] is not None:
         return json.loads(workspace["deep_scan_config_json"])
-    available_parallelism = args.available_parallelism or os.cpu_count() or 1
-    return resolve_deep_scan_setup(available_parallelism, args.deep_scan_project_json)
+    return resolve_deep_scan_setup(project_json=args.deep_scan_project_json)
 
 
 def ensure_deep_scan_run(
@@ -525,7 +525,7 @@ def existing_deep_scan_for_target(
         SELECT scans.*
         FROM scans
         JOIN workspaces ON workspaces.id = scans.workspace_id
-        WHERE workspaces.thread_id = ?
+        WHERE (workspaces.thread_id = ? OR workspaces.thread_id IS NULL)
             AND COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = ?
             AND scans.target_path = ?
             AND scans.scope = ?
@@ -577,6 +577,7 @@ def terminal_deep_scan_for_target_snapshot(
             AND scans.target_inode = ?
             AND scans.handoff_status = 'delivered'
             AND scans.handoff_claim_token IS NULL
+            AND scans.continuation_thread_id IS NULL
             AND workspaces.active_scan_id = scans.id
             AND deep_scan_runs.status = 'succeeded'
             AND deep_scan_runs.phase = 'terminal'
@@ -612,11 +613,15 @@ def begin_deep_scan_for_scan(
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = dependencies().require_scan(connection, scan_id)
     require_scan_checkout_owner(connection, candidate)
+    model_thread_id = getattr(args, "model_thread_id", None)
+    require_tokenless_scan_owner(connection, candidate, model_thread_id)
     workspace = dependencies().require_workspace(connection, candidate["workspace_id"])
     if (
         candidate["mode"] == "deep"
         and candidate["status"] == "running"
-        and candidate["recipe_json"] is not None
+        and (
+            candidate["recipe_json"] is not None or candidate["continuation_thread_id"] == thread_id
+        )
         and candidate["handoff_status"] == "delivered"
         and candidate["deep_scan_owner_thread_id"] is None
         and workspace["thread_id"] is None
@@ -628,18 +633,33 @@ def begin_deep_scan_for_scan(
         )
         timestamp = dependencies().now()
         with connection:
-            claimed_workspace = connection.execute(
-                "UPDATE workspaces SET thread_id = ?, updated_at = ? "
-                "WHERE id = ? AND thread_id IS NULL",
-                (thread_id, timestamp, workspace["id"]),
-            )
+            # Legacy scans can share a workspace. Only registered scans claim the workspace.
+            if candidate["recipe_json"] is not None:
+                claimed_workspace = connection.execute(
+                    "UPDATE workspaces SET thread_id = ?, updated_at = ? "
+                    "WHERE id = ? AND thread_id IS NULL",
+                    (thread_id, timestamp, workspace["id"]),
+                )
+                if claimed_workspace.rowcount != 1:
+                    raise SystemExit(
+                        "A scan can only be orchestrated from its owning Codex thread."
+                    )
             claimed_scan = connection.execute(
                 "UPDATE scans SET deep_scan_owner_thread_id = ?, updated_at = ? "
                 "WHERE id = ? AND deep_scan_owner_thread_id IS NULL "
-                "AND handoff_status = 'delivered' AND handoff_claim_token IS ?",
-                (thread_id, timestamp, scan_id, candidate["handoff_claim_token"]),
+                "AND handoff_status = 'delivered' AND handoff_claim_token IS ? "
+                "AND (continuation_thread_id = ? OR (recipe_json IS NOT NULL AND "
+                "(handoff_claim_token IS NOT NULL OR (? IS NULL AND continuation_thread_id IS NULL))))",
+                (
+                    thread_id,
+                    timestamp,
+                    scan_id,
+                    candidate["handoff_claim_token"],
+                    thread_id,
+                    model_thread_id,
+                ),
             )
-            if claimed_workspace.rowcount != 1 or claimed_scan.rowcount != 1:
+            if claimed_scan.rowcount != 1:
                 raise SystemExit("A scan can only be orchestrated from its owning Codex thread.")
     scan, _ = require_owned_scan(connection, scan_id, thread_id)
     require_current_continuation(
@@ -725,7 +745,8 @@ def begin_deep_scan_for_target(
                 AND (deep_scan_runs.pending_target_project_path IS NULL
                     OR deep_scan_runs.pending_target_project_path = ?)
                 AND scans.recipe_json IS NULL
-                AND scans.handoff_claim_token IS NULL AND deep_scan_runs.status = 'succeeded'
+                AND scans.handoff_claim_token IS NULL AND scans.continuation_thread_id IS NULL
+                AND deep_scan_runs.status = 'succeeded'
                 AND deep_scan_runs.discovery_user_context_json = ?
             LIMIT 1
             """,
@@ -787,11 +808,8 @@ def begin_deep_scan_for_target(
         workflow_version = optional_text(args.workflow_version, maximum=256)
         if workflow_version is None:
             raise SystemExit("workflow-version is required.")
-        root = dependencies().resolve_scan_root(args.scan_root)
-        target_root = (root / dependencies().safe_segment(target.name)).resolve()
-        if target_root == target or target in target_root.parents:
-            raise SystemExit("The scan artifact directory must be outside the selected target.")
-        create_private_directory(target_root)
+        target_root = dependencies().scan_target_root(args.scan_root, target)
+        create_private_directory(target_root, scan_output=True)
         model = optional_text(args.model, maximum=200)
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
@@ -1701,20 +1719,9 @@ def fail_deep_scan_locked(
             (args.deep_status, message, manifest_path, timestamp, timestamp, scan_id),
         )
         cancel_active_workers(connection, scan_id, timestamp)
-        parent_update = connection.execute(
-            """
-            UPDATE scans
-            SET status = 'failed', failure_message = ?, completed_at = ?, updated_at = ?
-            WHERE id = ? AND status = 'running'
-            """,
-            (message, timestamp, timestamp, scan_id),
-        )
-        if parent_update.rowcount != 1:
+        if not saved_results.mark_running_scan_failed(connection, scan_id, message, timestamp):
             raise SystemExit("Deep Scan failure could not be persisted to its parent scan.")
-        connection.execute(
-            "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
-            (timestamp, scan_id),
-        )
+        saved_results.touch_scan_progress(connection, scan_id, timestamp)
         connection.commit()
     except BaseException:
         connection.rollback()

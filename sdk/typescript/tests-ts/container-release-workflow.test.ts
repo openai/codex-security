@@ -307,9 +307,10 @@ test("keeps historical native payloads tied to the release checkout", () => {
     );
     const steps = workflow(`native-${platform}`).jobs["primitives"]!.steps!;
     expect(steps[0]?.with?.["ref"]).toBe("${{ inputs.ref || github.sha }}");
-    expect(steps.at(-1)?.with?.["name"]).toContain(
-      "${{ inputs.ref || github.sha }}",
-    );
+    expect(
+      steps.find((step) => step.uses?.startsWith("actions/upload-artifact@"))
+        ?.with?.["name"],
+    ).toContain("${{ inputs.ref || github.sha }}");
   }
   expect(
     native.jobs["bundle"]!.steps!.find(

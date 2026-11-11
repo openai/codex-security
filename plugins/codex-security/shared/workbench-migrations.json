@@ -520,6 +520,25 @@
   },
   {
     "version": 64,
+    "name": "persist scan log completion boundaries",
+    "statements": ["ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"]
+  },
+  {
+    "version": 65,
+    "name": "bind Windows Deep Scan resume output directories",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_output_identity TEXT;"
+    ]
+  },
+  {
+    "version": 66,
+    "name": "bind Windows Deep Scan resume checkouts",
+    "statements": [
+      "ALTER TABLE scans ADD COLUMN windows_resume_target_identity TEXT;"
+    ]
+  },
+  {
+    "version": 67,
     "name": "persist repository identities",
     "statements": [
       "ALTER TABLE security_targets\n        ADD COLUMN repository_identity TEXT;",
@@ -534,26 +553,26 @@
     ]
   },
   {
-    "version": 65,
+    "version": 68,
     "name": "stabilize Linux repository generations",
     "statements": []
   },
   {
-    "version": 66,
+    "version": 69,
     "name": "distinguish unvalidated workspace targets",
     "statements": [
       "ALTER TABLE workspaces\n        ADD COLUMN target_path_unvalidated INTEGER NOT NULL DEFAULT 0\n        CHECK (target_path_unvalidated IN (0, 1));"
     ]
   },
   {
-    "version": 67,
+    "version": 70,
     "name": "retain checkout roots for Git discovery",
     "statements": [
       "ALTER TABLE security_targets ADD COLUMN git_checkout_root TEXT;"
     ]
   },
   {
-    "version": 68,
+    "version": 71,
     "name": "retain rejected workspace checkout boundaries",
     "statements": [
       "ALTER TABLE workspaces ADD COLUMN rejected_checkout_roots_json TEXT;"

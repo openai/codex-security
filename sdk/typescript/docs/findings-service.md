@@ -365,6 +365,8 @@ results, and these callbacks add no network destination or separate files.
 ## Compatible endpoint contract
 
 The HTTP client appends these paths to the configured base URL, preserving any base path.
+It follows redirects within that origin (scheme, host, and port). If the service
+moves to another origin, set `--findings-url` to its new base URL.
 
 | Method | Path                                    | Response                                                                 |
 | ------ | --------------------------------------- | ------------------------------------------------------------------------ |

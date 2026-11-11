@@ -189,6 +189,47 @@ test("every released schema upgrades to the same current schema and remains idem
   }
 });
 
+test("log completion migration leaves legacy terminal boundaries unknown", (t) => {
+  const database = memory(t, 49);
+  insertScan(database);
+  database.exec(
+    "UPDATE scans SET status = 'complete', completed_at = 'artifact-time', updated_at = 'later-edit'",
+  );
+
+  applyMigrations(database);
+
+  assert.deepEqual(
+    {
+      ...database
+        .prepare("SELECT completed_at, updated_at, log_completed_at FROM scans")
+        .get(),
+    },
+    {
+      completed_at: "artifact-time",
+      updated_at: "later-edit",
+      log_completed_at: null,
+    },
+  );
+});
+
+for (const version of [48, 50, 63]) {
+  test(`preserves terminal logs from preview migration ${version}`, (t) => {
+    const database = memory(t, version - 1);
+    const boundary = migrations.find((item) => item.version === 64)!;
+    applyMigrations(database, [{ ...boundary, version }]);
+    insertScan(database);
+    database.exec("UPDATE scans SET log_completed_at = 'saved-boundary'");
+    applyMigrations(database);
+    applyMigrations(database);
+    assertMigrationNames(database, version, 63, 64);
+    assert.equal(
+      database.prepare("SELECT log_completed_at FROM scans").get()
+        ?.log_completed_at,
+      "saved-boundary",
+    );
+  });
+}
+
 for (const previewVersion of [58, 59]) {
   test(`preserves the saved rubric from preview migration ${previewVersion}`, (t) => {
     const database = memory(t, previewVersion - 1);
@@ -1321,17 +1362,18 @@ function storedRows(database: DatabaseSync) {
       "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
     )
     .all()
-    .map(({ name }) => [
-      name,
-      database
-        .prepare(`SELECT * FROM "${name}"`)
-        .all()
-        .map((row) => {
+    .map(({ name }) => {
+      const rows = database.prepare(`SELECT * FROM "${name}"`);
+      rows.setReadBigInts(true);
+      return [
+        name,
+        rows.all().map((row) => {
           // Independently run initializers use different migration application times.
           if (name === "schema_migrations") delete row.applied_at;
           return row;
         }),
-    ]);
+      ];
+    });
 }
 
 test("Node initialization leaves repository migration semantics to the Python consumer", async (t) => {
@@ -1515,11 +1557,11 @@ test("Node repository migration-label collisions roll back without changing stor
   for (const [name, setup] of [
     [
       "identity destination",
-      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(64,'persist repository identities','original')",
+      "UPDATE schema_migrations SET name='persist repository identities' WHERE version=31; INSERT INTO schema_migrations VALUES(67,'persist repository identities','original')",
     ],
     [
       "generation destination",
-      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(65,'occupied destination','retained')",
+      "UPDATE schema_migrations SET name='stabilize Linux repository generations' WHERE version=44; INSERT INTO schema_migrations VALUES(68,'occupied destination','retained')",
     ],
     [
       "identity collision after generation relocation",
@@ -1658,6 +1700,9 @@ with sqlite3.connect(sys.argv[2]) as connection:
               "launch_package_version",
               "launch_plugin_version",
               "launch_kind",
+              "log_completed_at",
+              "windows_resume_output_identity",
+              "windows_resume_target_identity",
             ]) {
               assert.equal(row[column], null);
               delete row[column];
@@ -1719,13 +1764,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   assertMigrationNames(initialized, 53);
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=64")
+      .prepare("SELECT name FROM schema_migrations WHERE version=67")
       .get()?.name,
     "persist repository identities",
   );
   assert.equal(
     initialized
-      .prepare("SELECT name FROM schema_migrations WHERE version=65")
+      .prepare("SELECT name FROM schema_migrations WHERE version=68")
       .get(),
     undefined,
   );

@@ -13,7 +13,12 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
-from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
+from workbench_constants import (
+    FINDING_SUMMARY_BYTES,
+    FINDING_TITLE_BYTES,
+    FINDINGS_PAGE_MAX,
+    PRIMARY_FINDING_LOCATION_SQL,
+)
 from workbench_target_state import (
     RepositoryIdentityCache,
     RepositoryScanScope,
@@ -251,15 +256,7 @@ def _indexed_findings(
             triage.updated_at AS decision_updated_at,
             occurrences.title,
             occurrences.summary,
-            (
-                SELECT locations.relative_path
-                FROM finding_locations AS locations
-                WHERE locations.occurrence_id = occurrences.id
-                ORDER BY
-                    CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
-                    locations.sort_order
-                LIMIT 1
-            ) AS location_path
+            (SELECT relative_path {PRIMARY_FINDING_LOCATION_SQL}) AS location_path
         FROM finding_occurrences AS occurrences
         JOIN scans ON scans.id = occurrences.scan_id
         JOIN security_targets AS targets ON targets.id = scans.target_id

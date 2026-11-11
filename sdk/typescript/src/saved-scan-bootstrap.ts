@@ -3,9 +3,7 @@ import type { JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { access } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { isAbsolute, join, resolve } from "node:path";
-import { sqliteFilename } from "./windows-path.js";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -20,6 +18,8 @@ import {
   sameFile,
   workbenchEnvironment,
   type ProcessEnvironment,
+  sqliteDatabaseOpener,
+  type RuntimeDatabase,
 } from "./runtime.js";
 
 interface ScanTarget {
@@ -44,15 +44,6 @@ interface SavedBoundaries {
 export interface SavedToolDiscovery {
   protectedRoots: readonly string[];
   allowPathLookup: boolean;
-}
-
-interface BootstrapDatabase {
-  exec(sql: string): unknown;
-  prepare(sql: string): {
-    all(...parameters: (string | number)[]): unknown[];
-    finalize?(): void;
-  };
-  close(): void;
 }
 
 /** Read saved checkout boundaries before starting tools. The workbench validates the scan. */
@@ -337,48 +328,23 @@ export function readSavedScanLifecycle(
 
 function readSnapshot<T>(
   path: string,
-  select: (database: BootstrapDatabase) => T,
+  select: (database: RuntimeDatabase) => T,
   timeout: 0 | 5000 = 5000,
 ): T {
-  const require = createRequire(import.meta.url);
-  const bun = process.versions["bun"] !== undefined;
-  const Database = (
-    bun ? require("bun:sqlite").Database : require("node:sqlite").DatabaseSync
-  ) as new (
-    path: string,
-    options: {
-      readonly?: boolean;
-      readOnly?: boolean;
-      readwrite?: boolean;
-      create?: boolean;
-    },
-  ) => BootstrapDatabase;
-  let database: BootstrapDatabase | undefined;
+  const database = sqliteDatabaseOpener("read-existing")(path);
   try {
-    database = new Database(
-      sqliteFilename(path),
-      // Apple's SQLite cannot initialize absent WAL sidecars through a read-only handle.
-      // Open only an existing file there; query_only still prevents SQL data/schema writes.
-      bun
-        ? {
-            readonly: process.platform !== "darwin",
-            readwrite: process.platform === "darwin",
-            create: false,
-          }
-        : { readOnly: true },
-    );
     database.exec(`PRAGMA busy_timeout = ${timeout}`);
     database.exec("PRAGMA query_only = ON");
     // Select scans and their saved boundaries from the same snapshot.
     database.exec("BEGIN");
     return select(database);
   } finally {
-    database?.close();
+    database.close();
   }
 }
 
 function exactTargets(
-  database: BootstrapDatabase,
+  database: RuntimeDatabase,
   requestedId: string | { workflowId: string },
 ): ScanTarget[] {
   if (typeof requestedId !== "string") {
@@ -420,7 +386,7 @@ function exactTargets(
   );
 }
 
-function tableColumns(database: BootstrapDatabase, table: string): Set<string> {
+function tableColumns(database: RuntimeDatabase, table: string): Set<string> {
   return new Set(
     readRows<{ name: string }>(database, `PRAGMA table_info(${table})`).map(
       (row) => row.name,
@@ -429,7 +395,7 @@ function tableColumns(database: BootstrapDatabase, table: string): Set<string> {
 }
 
 /** Read registered boundaries without assuming an unversioned scan was outside Git. */
-function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
+function savedCheckouts(database: RuntimeDatabase): SavedBoundaries {
   const scan = tableColumns(database, "scans");
   const registry = tableColumns(database, "security_targets");
   const workspace = tableColumns(database, "workspaces");
@@ -476,7 +442,7 @@ function savedCheckouts(database: BootstrapDatabase): SavedBoundaries {
 }
 
 function readRows<T>(
-  database: BootstrapDatabase,
+  database: RuntimeDatabase,
   sql: string,
   ...parameters: (string | number)[]
 ): T[] {
@@ -490,7 +456,7 @@ function readRows<T>(
   }
 }
 
-function completedScans(database: BootstrapDatabase): ScanTarget[] {
+function completedScans(database: RuntimeDatabase): ScanTarget[] {
   const columns = tableColumns(database, "scans");
   return readRows<
     ScanTarget & {
