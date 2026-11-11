@@ -295,14 +295,7 @@ describe("CLI diagnostics", () => {
       deps.currentDirectory = fail;
       expect(
         await runCli(
-          [
-            ...command,
-            "--filter-output",
-            "--help",
-            "--format",
-            "md",
-            "--full-output",
-          ],
+          [...command, "--format", "json", "--format", "md", "--full-output"],
           deps,
         ),
       ).toBe(2);

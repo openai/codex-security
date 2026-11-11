@@ -466,6 +466,14 @@ const FRAMEWORK_VALUE_OPTIONS = new Set([
   "--token-limit",
   "--token-offset",
 ]);
+const INSPECTION_FLAGS = [
+  "-h",
+  "--help",
+  "--schema",
+  "--version",
+  "--llms",
+  "--llms-full",
+];
 const OUTPUT_OPTION =
   /^--(?:format|filter-output|full-output|token-count|token-limit|token-offset)(?:=|$)/u;
 const HIDE_CURSOR = "\u001B[?25l";
@@ -2452,101 +2460,24 @@ export async function main(
   const completion = completionShell.safeParse(process.env["COMPLETE"]);
   const shellArgv = argv;
   if (completion.success) argv = [];
-  if (
-    argv.includes("--mcp") &&
-    argv.some((arg) =>
-      [
-        "--help",
-        "-h",
-        "--schema",
-        "--version",
-        "--llms",
-        "--llms-full",
-      ].includes(arg),
-    )
-  ) {
-    argv = argv.filter((arg) => arg !== "--mcp");
-  }
-  const remediationOperation =
-    argv[0] === "patch"
-      ? "patch"
-      : argv[0] === "verify-fix"
-        ? "verify"
-        : undefined;
-  const recordsCommand =
-    argv[0] === "dedupe" ||
-    argv[0] === "validate" ||
-    argv[0] === "classify-severity"
-      ? argv[0]
-      : undefined;
-  const hostedCommand =
-    argv[0] === "scan" || remediationOperation !== undefined;
-  if (
-    ((recordsCommand !== undefined && argv.includes("--records")) ||
-      (hostedCommand &&
-        argv.some((arg) => arg === "--host" || arg.startsWith("--host=")))) &&
-    !argv.includes("--help") &&
-    !argv.includes("-h") &&
-    !argv.includes("--schema")
-  ) {
-    let classificationRuns: number | undefined;
-    if (argv[0] === "classify-severity") {
-      try {
-        const { values } = parseArgs({
-          args: argv.slice(1),
-          options: {
-            records: { type: "boolean" },
-            runs: { type: "string" },
-          },
-        });
-        if (values.runs !== undefined)
-          classificationRuns = reviewRunsOption.parse(Number(values.runs));
-      } catch {
-        errorOutput.write(
-          `codex-security: Use --records with only --runs (an integer from 1 to 10; default: ${DEFAULT_REVIEW_RUNS}).\n`,
-        );
-        return 2;
-      }
-    } else if (argv.length !== 2 || (hostedCommand && argv[1] !== "--host")) {
-      errorOutput.write(
-        hostedCommand
-          ? `codex-security: --host must be used alone with ${argv[0]}.\n`
-          : `codex-security: --records must be used alone with ${argv[0]}.\n`,
-      );
-      return 2;
-    }
-    const controller = new AbortController();
-    const removeSignals = listenForAbort(dependencies, controller);
-    let exitCode: number;
-    try {
-      const input = dependencies.recordsInput ?? process.stdin;
-      const code =
-        recordsCommand !== undefined
-          ? await runHostRecordsProtocol(recordsCommand, input, output, {
-              signal: controller.signal,
-              classificationRuns,
-            })
-          : remediationOperation !== undefined
-            ? await runHostedRemediationProtocol(
-                input,
-                output,
-                controller.signal,
-                remediationOperation,
-              )
-            : await runHostedScanProtocol(input, output, controller.signal);
-      exitCode =
-        controller.signal.reason === "SIGINT"
-          ? 130
-          : controller.signal.reason === "SIGTERM"
-            ? 143
-            : code;
-    } finally {
-      removeSignals();
-    }
-    // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
-    if (output === process.stdout) process.exit(exitCode);
-    return exitCode;
-  }
+  const separator = argv.indexOf("--");
+  const literalArgs = separator < 0 ? [] : argv.slice(separator + 1);
+  if (separator >= 0) argv = argv.slice(0, separator);
+  const inspection = argv.some((arg) => INSPECTION_FLAGS.includes(arg));
+  const actionFlags = argv.filter(
+    (arg) => arg === "--mcp" || arg === "--update",
+  );
+  const actionOptions = argv.filter((arg) => arg !== actionFlags[0]);
+  const mixedAction =
+    actionFlags.length > 0 &&
+    (actionFlags.length !== 1 ||
+      literalArgs.length > 0 ||
+      firstNonGlobal(actionOptions, 0) < actionOptions.length ||
+      (actionFlags[0] === "--mcp" && !inspection && actionOptions.length > 0));
+  if (!mixedAction && actionFlags[0] === "--update")
+    argv = ["update", ...actionOptions];
+  if (!mixedAction && actionFlags[0] === "--mcp" && inspection)
+    argv = actionOptions;
   const positionals: string[] = [];
   let exitCode = 0;
   let frameworkExit: number | undefined;
@@ -5202,29 +5133,9 @@ export async function main(
     configuration: z.record(z.string(), z.unknown()),
   });
 
-  const inspectionFlags = [
-    "-h",
-    "--help",
-    "--version",
-    "--schema",
-    "--llms",
-    "--llms-full",
-  ];
-  if (
-    argv.includes("--update") &&
-    argv.some((arg) => inspectionFlags.includes(arg))
-  )
-    argv = argv.filter((arg) => arg !== "--update");
   const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
-    // The SDK owns update notices and uses the same installation resolver for
-    // the explicit update action. Avoid Incur's second, global npm updater.
-    update: argv.includes("--update")
-      ? {
-          package: "@openai/codex-security",
-          install: () => installUpdate(dependencies.environment),
-        }
-      : false,
+    update: false,
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
@@ -5235,6 +5146,25 @@ export async function main(
     },
   };
   const cli = Cli.create("codex-security", cliOptions)
+    .command("update", {
+      description: "Update the CLI or show the command for this installation.",
+      destructive: true,
+      async run({ format, error }) {
+        try {
+          await installUpdate(dependencies.environment);
+        } catch (cause) {
+          return error({
+            code: "UPDATE_FAILED",
+            message: errorMessage(cause),
+            exitCode: 2,
+          });
+        }
+        const name = "@openai/codex-security";
+        if (output.isTTY && useDefaultOutput(format))
+          renderedOutput = `✓ Updated ${name}\n`;
+        return { name };
+      },
+    })
     .command(scanHistory)
     .command("policy", {
       description: "Draft SECURITY.md for review.",
@@ -8120,49 +8050,147 @@ export async function main(
   prepareCliExamples(commands);
   const valueOptions = cliValueOptions(commands);
   const isPositional = (value: string, index: number) =>
-    !value.startsWith("-") &&
+    (value === "-" || !value.startsWith("-")) &&
     (index === 0 || !valueOptions.has(argv[index - 1]!));
-  const commandIndex = argv.findIndex(isPositional);
+  // A leading terminator still permits a positional command name.
+  let commandIndex = argv.findIndex(isPositional);
+  if (
+    commandIndex < 0 &&
+    !actionFlags.length &&
+    literalArgs[0] &&
+    !literalArgs[0].startsWith("-") &&
+    firstNonGlobal(argv, 0) === argv.length
+  ) {
+    commandIndex = argv.length;
+    const name = literalArgs.shift()!;
+    const group = commands.get(name);
+    const verb = literalArgs[0];
+    argv = [...argv, name];
+    if (group && "_group" in group && verb && group.commands.has(verb))
+      argv = [...argv, literalArgs.shift()!];
+  }
+  if (argv[commandIndex] === "codex-security") {
+    argv = argv.toSpliced(commandIndex, 1);
+    commandIndex = argv.findIndex(isPositional);
+  }
   const command = argv[commandIndex];
-  const following = argv[commandIndex + 1];
+  const entry = command === undefined ? undefined : commands.get(command);
+  const verbIndex = firstNonGlobal(argv, commandIndex + 1);
+  let following = argv[verbIndex];
   const scanImport = command === "scan" && following === "import";
   if (
     command === "scan" &&
     !scanImport &&
-    argv.some(
-      (value, index) => index > commandIndex && isPositional(value, index),
-    )
+    (literalArgs.length ||
+      argv.some(
+        (value, index) => index > commandIndex && isPositional(value, index),
+      ))
   ) {
     // A repository such as "imports" or "./import" is a positional even when
     // shared options precede it. Bypass Incur's subcommand typo suggestions.
-    const scan = commands.get(command);
-    if (scan && "_group" in scan && scan.root) commands.set(command, scan.root);
+    if (entry && "_group" in entry && entry.root)
+      commands.set(command, entry.root);
   }
-
   if (
     (command === "scans" || command === "findings") &&
     !argv.includes("--help") &&
     !argv.includes("-h") &&
+    !argv.some((arg) => arg === "--llms" || arg === "--llms-full") &&
     (following === undefined || following.startsWith("-"))
   ) {
-    argv = argv.toSpliced(commandIndex + 1, 0, "list");
+    argv = argv.toSpliced(verbIndex, 0, "list");
+    following = "list";
   }
-
+  const nested =
+    entry &&
+    "_group" in entry &&
+    following !== undefined &&
+    entry.commands.has(following);
+  const subcommand = nested ? following : undefined;
+  const selected =
+    entry && "_group" in entry
+      ? subcommand
+        ? entry.commands.get(subcommand)
+        : entry.root
+      : entry;
+  const protocolFlag =
+    ["scan", "patch", "verify-fix"].includes(command ?? "") && !scanImport
+      ? "--host"
+      : ["validate", "classify-severity", "dedupe"].includes(command ?? "")
+        ? "--records"
+        : undefined;
+  let protocol = false;
+  let classificationRuns: number | undefined;
   function validateCliArguments(): string | undefined {
-    if (argv.includes("--help") || argv.includes("-h")) return undefined;
-    if (frameworkFlags.malformedFilter)
-      return "--filter-output requires matching brackets for array slices.";
-    if (command === undefined || !commands.has(command)) return undefined;
+    if (argv.includes("--incur-update-check"))
+      return "Unknown flag: --incur-update-check";
+    if (mixedAction) return `${actionFlags.join(" and ")} must be used alone.`;
+    if (command === undefined && literalArgs.length)
+      return "Select a command before --.";
+    if (frameworkFlags.argumentError) return frameworkFlags.argumentError;
+    if (command === undefined) return undefined;
+    if (!entry) {
+      if (["skills", "skill", "mcp", "completions"].includes(command))
+        return undefined;
+      if (inspection)
+        return `Unknown command ${diagnosticValue(command)}. Use codex-security --help.`;
+      return undefined;
+    }
+    if (
+      "_group" in entry &&
+      !entry.root &&
+      following &&
+      !following.startsWith("-") &&
+      !subcommand
+    )
+      // Discovery otherwise widens an unknown path to its parent. Execution
+      // already reports unknown verbs with Incur's spelling suggestions.
+      return inspection
+        ? `Unknown command ${diagnosticValue(command + " " + following)}. Use codex-security ${command} --help.`
+        : undefined;
+    if (protocolFlag && !inspection) {
+      const negative = "--no-" + protocolFlag.slice(2);
+      const flags = argv.filter(
+        (arg) =>
+          arg === protocolFlag ||
+          arg.startsWith(protocolFlag + "=") ||
+          arg === negative,
+      );
+      const last = flags.at(-1);
+      protocol = last === protocolFlag || last === protocolFlag + "=true";
+      if (protocol) {
+        const rest = argv.filter(
+          (arg, index) => index !== commandIndex && !flags.includes(arg),
+        );
+        if (
+          command === "classify-severity" &&
+          commandIndex === 0 &&
+          !literalArgs.length
+        ) {
+          try {
+            const { values } = parseArgs({
+              args: rest,
+              options: { runs: { type: "string" } },
+            });
+            if (values.runs !== undefined)
+              classificationRuns = reviewRunsOption.parse(Number(values.runs));
+          } catch {
+            return `Use --records with only --runs (an integer from 1 to 10; default: ${DEFAULT_REVIEW_RUNS}).`;
+          }
+        } else if (rest.length || literalArgs.length || commandIndex !== 0)
+          return `${protocolFlag} must be used alone with ${command}.`;
+      }
+    }
     const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
       (["validate", "logout"].includes(command) ||
         (command === "login" && following !== "status")) &&
-      !argv.includes("--schema")
+      !inspection
     ) {
       return `${command} does not support noninteractive JSON output; run it without --json, --format json, or --format jsonl.`;
     }
-    if (command === "export" && structuredOutput) {
+    if (command === "export" && structuredOutput && !inspection) {
       const hasValue = (flag: string, value: string) =>
         argv.some(
           (arg, index) =>
@@ -8187,7 +8215,7 @@ export async function main(
         }
       }
     }
-    if (command === "scan" && !argv.includes("--schema")) {
+    if (command === "scan" && !inspection) {
       if (frameworkFlags.filters.length) {
         return "--filter-output is not supported for scan results.";
       }
@@ -8195,13 +8223,6 @@ export async function main(
         return "Markdown output is not supported for scan results.";
       }
     }
-    const nestedCommand =
-      scanImport ||
-      command === "scans" ||
-      command === "findings" ||
-      command === "publish" ||
-      command === "import";
-    const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
     if (
       frameworkFlags.rawStructuredOutput &&
       !(command === "scans" && subcommand === "logs")
@@ -8221,21 +8242,14 @@ export async function main(
           return "--filter-output must select an info metadata field.";
       }
     }
-    const entry = commands.get(command)!;
-    const selected =
-      "_group" in entry
-        ? subcommand === undefined
-          ? entry.root
-          : entry.commands.get(subcommand)
-        : entry;
     let lastPositionalIndex = -1;
     for (
-      let index = commandIndex + (nestedCommand ? 2 : 1);
+      let index = nested ? verbIndex + 1 : commandIndex + 1;
       index < argv.length;
       index += 1
     ) {
       const value = argv[index]!;
-      if (!value.startsWith("-")) {
+      if (value === "-" || !value.startsWith("-")) {
         positionals.push(value);
         lastPositionalIndex = index;
         continue;
@@ -8269,29 +8283,35 @@ export async function main(
         continue;
       const next = argv[index + 1];
       if (next === undefined || next.startsWith("--") || next === "-h") {
-        if (scanImport && option === "--json" && argv.includes("--schema"))
-          continue;
+        if (scanImport && option === "--json" && inspection) continue;
         return `Missing value for flag: ${option}`;
       }
       index += 1;
     }
-    if (
-      command === "login" &&
-      positionals.length > 0 &&
-      (following !== "status" || positionals.length !== 1)
-    ) {
+    const beforeDelimiter = positionals.length;
+    positionals.push(...literalArgs);
+    if (command === "login" && !subcommand && positionals.length)
       return "Use login to sign in or login status to inspect authentication.";
+    // Incur's global flag extractor doesn't recognize --. Supply literal
+    // arguments to the positional schema as inputs so its normal validation
+    // still applies and no layer can reinterpret a value as a framework flag.
+    if (literalArgs.length && selected && "args" in selected && selected.args) {
+      const shape: Record<string, z.ZodType> = {};
+      for (const [index, key] of Object.keys(selected.args.shape).entries()) {
+        const literal = literalArgs[index - beforeDelimiter];
+        if (literal !== undefined)
+          shape[key] = selected.args.shape[key].prefault(literal);
+      }
+      selected.args = selected.args.extend(shape);
     }
     if (
       command !== "validate" &&
       command !== "verify-fix" &&
       command !== "patch" &&
       positionals.length >
-        (scanImport || command === "logout" || command === "info"
-          ? 0
-          : subcommand === "compare" || subcommand === "match"
-            ? 2
-            : 1)
+        (selected && "args" in selected && selected.args
+          ? Object.keys(selected.args.shape).length
+          : 0)
     ) {
       const previous = argv[lastPositionalIndex - 1]?.split("=", 1)[0];
       const hint = previous?.startsWith("-")
@@ -8302,11 +8322,15 @@ export async function main(
   }
   const frameworkFlags = parseFrameworkArguments(
     argv,
-    scanImport ? commandIndex + 2 : argv.length,
+    scanImport ? verbIndex + 1 : argv.length,
   );
   const frameworkArgv = frameworkFlags.args;
   const { jsonFormat } = frameworkFlags;
-  const policyFullOutput = command === "policy" && frameworkFlags.fullOutput;
+  const policyFullOutput =
+    command === "policy" &&
+    frameworkFlags.fullOutput &&
+    !mixedAction &&
+    !argv.includes("--incur-update-check");
   const scanErrorFormat =
     command === "scan" && !scanImport && frameworkFlags.fullOutput
       ? jsonFormat
@@ -8327,14 +8351,60 @@ export async function main(
       await writeCliOutput(output, argumentFailure(argumentError));
     return 2;
   }
+  if (protocol) {
+    const recordsCommand =
+      command === "dedupe" ||
+      command === "validate" ||
+      command === "classify-severity"
+        ? command
+        : undefined;
+    const remediationOperation =
+      command === "patch"
+        ? "patch"
+        : command === "verify-fix"
+          ? "verify"
+          : undefined;
+    const controller = new AbortController();
+    const removeSignals = listenForAbort(dependencies, controller);
+    let exitCode: number;
+    try {
+      const input = dependencies.recordsInput ?? process.stdin;
+      const code =
+        recordsCommand !== undefined
+          ? await runHostRecordsProtocol(recordsCommand, input, output, {
+              signal: controller.signal,
+              classificationRuns,
+            })
+          : remediationOperation !== undefined
+            ? await runHostedRemediationProtocol(
+                input,
+                output,
+                controller.signal,
+                remediationOperation,
+              )
+            : await runHostedScanProtocol(input, output, controller.signal);
+      exitCode =
+        controller.signal.reason === "SIGINT"
+          ? 130
+          : controller.signal.reason === "SIGTERM"
+            ? 143
+            : code;
+    } finally {
+      removeSignals();
+    }
+    // Protocol writes have flushed or been canceled. Node's stdout ignores destroy().
+    if (output === process.stdout) process.exit(exitCode);
+    return exitCode;
+  }
   const updateController = new AbortController();
   const pendingUpdate =
     errorOutput.isTTY === true &&
     argv.length > 0 &&
-    argv[0] !== "completions" &&
+    command !== "completions" &&
+    command !== "update" &&
     !process.env["COMPLETE"] &&
     !argv.some((argument) =>
-      [...inspectionFlags, "--dry-run", "--update"].includes(argument),
+      [...INSPECTION_FLAGS, "--dry-run", "--mcp"].includes(argument),
     ) &&
     updateNoticeEnabled(dependencies.environment)
       ? dependencies
@@ -8354,7 +8424,14 @@ export async function main(
       },
     };
     if (
-      !(await serveIntegration(frameworkArgv, cli, cliOptions, serveOptions))
+      !(await serveIntegration(
+        frameworkArgv,
+        cli,
+        cliOptions,
+        serveOptions,
+        command,
+        literalArgs,
+      ))
     ) {
       await cli.serve(frameworkArgv, serveOptions);
     }
@@ -8867,6 +8944,29 @@ function isJsonFormat(format: string | undefined): format is "json" | "jsonl" {
   return format === "json" || format === "jsonl";
 }
 
+/** Skip recognized global options and their operands while locating a command. */
+function firstNonGlobal(argv: readonly string[], start: number): number {
+  let index = start;
+  while (index < argv.length) {
+    const value = argv[index]!;
+    const [flag] = value.split("=", 1);
+    if (FRAMEWORK_VALUE_OPTIONS.has(flag!)) {
+      if (
+        !value.includes("=") &&
+        (argv[index + 1] === undefined || argv[index + 1]!.startsWith("-"))
+      )
+        break;
+      index += value.includes("=") ? 1 : 2;
+    } else if (
+      INSPECTION_FLAGS.includes(value) ||
+      ["--json", "--full-output", "--token-count"].includes(value)
+    ) {
+      index++;
+    } else break;
+  }
+  return index;
+}
+
 function parseFrameworkArguments(
   argv: readonly string[],
   firstImportOption: number,
@@ -8876,7 +8976,7 @@ function parseFrameworkArguments(
   const filters: (string | undefined)[] = [];
   const tokenArguments: string[] = [];
   let fullOutput = false;
-  let malformedFilter = false;
+  let argumentError: string | undefined;
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]!;
     const next = argv[index + 1];
@@ -8905,10 +9005,16 @@ function parseFrameworkArguments(
     const operand =
       equals >= 0
         ? argument.slice(equals + 1)
-        : next?.startsWith("--")
+        : /^-(?:-|[a-z])/iu.test(next ?? "")
           ? undefined
           : next;
     if (equals < 0 && operand !== undefined) index++;
+    if (
+      operand === undefined ||
+      (!operand && (flag === "--filter-output" || flag === "--format"))
+    ) {
+      argumentError ??= `Missing value for flag: ${flag}`;
+    }
     if (flag === "--filter-output") {
       filters.push(operand);
       // Incur cannot advance past an unterminated array slice.
@@ -8916,7 +9022,8 @@ function parseFrameworkArguments(
         operand !== undefined &&
         !/^(?:[^\[\]]|\[[^\[\]]*\])*$/u.test(operand)
       ) {
-        malformedFilter = true;
+        argumentError ??=
+          "--filter-output requires matching brackets for array slices.";
         continue;
       }
     }
@@ -8936,7 +9043,7 @@ function parseFrameworkArguments(
     formats,
     jsonFormat,
     fullOutput,
-    malformedFilter,
+    argumentError,
     filters,
     tokenArguments,
     rawStructuredOutput:

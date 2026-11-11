@@ -790,7 +790,7 @@ test.each(["valid", "tampered"] as const)(
         : { ...severityRubric, markdown: severityRubric.markdown.trimEnd() };
     const input = new PassThrough();
     const output = capture();
-    const run = main(["scan", "--host"], output.stream, capture().stream, {
+    const run = main(["scan", "--host=true"], output.stream, capture().stream, {
       ...dependencies(),
       recordsInput: input,
     });
@@ -842,7 +842,6 @@ test.each([
 );
 
 test.each([
-  { args: ["scan", "--host=true"] },
   { args: ["scan", "--host", "--path", "service-a"] },
   { args: ["scan", ".", "--host"] },
 ])("host mode rejects unsupported combinations %p", async ({ args }) => {
@@ -853,6 +852,19 @@ test.each([
   );
   expect(stdout.text()).toBe("");
   expect(stderr.text()).toContain("--host must be used alone");
+});
+
+test("--host=false leaves a scan preview in CLI mode", async () => {
+  const stdout = capture();
+  expect(
+    await main(
+      ["scan", ".", "--host=false", "--dry-run", "--json"],
+      stdout.stream,
+      capture().stream,
+      dependencies(),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text()).dryRun).toBe(true);
 });
 
 test.each([false, true])(
