@@ -456,6 +456,31 @@ JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
 """
 
 
+def is_unbound_standard_handoff(
+    connection: sqlite3.Connection, scan: sqlite3.Row, context_claim: str | None
+) -> bool:
+    """A Standard handoff can be inspected before its checkout and findings are bound."""
+    return (
+        scan["mode"] == "standard"
+        and scan["status"] == "running"
+        and scan["canceled_at"] is None
+        and (
+            scan["phase"] == "preflight"
+            or (
+                scan["phase"] == "threat_model"
+                and context_claim is not None
+                and context_claim == scan["handoff_claim_token"]
+            )
+        )
+        and scan["handoff_status"] == "delivered"
+        and None in (scan["target_device"], scan["target_inode"])
+        and connection.execute(
+            "SELECT 1 FROM finding_occurrences WHERE scan_id = ? LIMIT 1", (scan["id"],)
+        ).fetchone()
+        is None
+    )
+
+
 def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     return connection.execute(
         """
