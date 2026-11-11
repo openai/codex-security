@@ -3246,7 +3246,7 @@ describe("CLI", () => {
       expect(exportFindings).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
-        "CSV stdout cannot be combined with JSON output",
+        "CSV stdout cannot be combined with --format json",
       );
     }
   });
