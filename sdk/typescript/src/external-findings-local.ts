@@ -1,6 +1,5 @@
 import { resolve } from "node:path";
 import {
-  semgrepLegacyRepositoryWitnesses,
   semgrepPlatformFindingBinding,
   semgrepPlatformReportScope,
   semgrepPlatformRepositoryReference,
@@ -773,7 +772,12 @@ export async function prepareLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const parsedSources = distinctSourceRepositories(parsedInput);
-  const current = snapshotNormalizedFindings(input, checkStoredNumber);
+  const current = snapshotNormalizedFindings(
+    input,
+    checkStoredNumber,
+    "local",
+    options.provider,
+  );
   if (
     options.provider !== "tenable" &&
     (current.report?.["format"] === tenableReportFormat ||
@@ -785,17 +789,6 @@ export async function prepareLocalImport(
       "Retained Tenable evidence requires the tenable provider.",
     );
   checkTrivyReportProvider(options.provider, current.report);
-  // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
-  if (!("snykRestContext" in current) && "snykRestContext" in input)
-    current.snykRestContext = structuredClone(input.snykRestContext);
-  if (options.provider === "snyk" || current.snykRestContext !== undefined) {
-    for (const key of [
-      "sourceRepositoryUrl",
-      "sourceRepositoryPlatform",
-    ] as const)
-      if (key in input && !(key in current))
-        Object.assign(current, { [key]: structuredClone(input[key]) });
-  }
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
@@ -975,11 +968,6 @@ export async function prepareLocalImport(
   if (semgrepPlatformRepositoryUrl)
     addSemgrepSource(semgrepPlatformRepositoryUrl);
   const known = new Set<string>(parsedSources.map(({ url }) => url));
-  const legacyWitnesses = semgrepLegacyRepositoryWitnesses(
-    current.findings,
-    options.provider,
-    readerSources,
-  );
   const hasPlatformEvidence =
     options.provider === "semgrep" &&
     (semgrepReportScope !== undefined ||
@@ -997,7 +985,6 @@ export async function prepareLocalImport(
       finding,
       options.provider,
       readerSources,
-      legacyWitnesses,
       semgrepReportScope,
       [retained, ...native, ...sarif],
     );

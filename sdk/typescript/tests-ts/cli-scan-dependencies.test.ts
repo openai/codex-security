@@ -701,17 +701,25 @@ describe("scan dependencies CLI", () => {
     expect(dependencyScan).not.toHaveBeenCalled();
   });
 
-  test("does not promote a dependencies argument after the existing unsupported delimiter", async () => {
+  test("keeps a dependencies argument after -- on the source scan route", async () => {
+    const sourceScan = mock();
     const dependencyScan = mock(async () => dependencyResult());
     const { stderr, runCli } = createCliTest(main);
 
     expect(
       await runCli(
         ["scan", "--json", "--", "dependencies"],
-        dependencies({ onScanDependencies: dependencyScan }),
+        dependencies({
+          onTurn: sourceScan,
+          onScanDependencies: dependencyScan,
+        }),
       ),
-    ).toBe(2);
-    expect(stderr.text()).not.toBe("");
+      stderr.text(),
+    ).toBe(0);
+    expect(sourceScan).toHaveBeenCalledWith(
+      "dependencies",
+      expect.objectContaining({ mode: "standard" }),
+    );
     expect(dependencyScan).not.toHaveBeenCalled();
   });
 

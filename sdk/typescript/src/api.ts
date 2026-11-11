@@ -413,6 +413,8 @@ const scanLifecycleSchema = z.object({
 export type ScanLifecycle = Readonly<z.infer<typeof scanLifecycleSchema>>;
 
 export interface ScanOptions extends ScanSettings {
+  /** @internal A bounded batch omits unmetered model calls after the scan. */
+  skipFindingMatching?: boolean;
   /** Explicit policy for the initial scan and its workers. */
   severityRubric?: SeverityRubricSnapshot;
   /** Markdown policy file to capture when starting a new scan. */
@@ -1445,16 +1447,18 @@ export class CodexSecurity {
     try {
       throwIfAborted(signal);
       const finding = standaloneFindingForPrompt(options.finding);
-      const snapshot = options.knowledgeBasePaths?.length
-        ? (options.knowledgeBaseSnapshot ??
-          (await readKnowledgeBaseSnapshot(options.knowledgeBasePaths, signal)))
-        : undefined;
+      let repository = options.repositoryPath;
+      let snapshot: KnowledgeBaseSnapshot | undefined;
       let protectedRoots: string[] | undefined;
-      if (snapshot !== undefined) {
-        const repository = await normalizeRepository(
-          resolveRepositoryPath(options.repositoryPath),
-          signal,
-        );
+      if (options.knowledgeBasePaths?.length) {
+        repository = await normalizeRepository(repository, signal);
+        snapshot =
+          options.knowledgeBaseSnapshot ??
+          (await readKnowledgeBaseSnapshot(
+            options.knowledgeBasePaths,
+            signal,
+            repository,
+          ));
         protectedRoots = [
           (await enclosingGitWorktreeRoot(repository, signal)) ?? repository,
           ...(await knowledgeBaseProtectedRoots(snapshot, signal)),
@@ -1463,7 +1467,7 @@ export class CodexSecurity {
       // Cached validation may already own this output. Regeneration below still
       // requires an empty directory through prepareOutputDir.
       const inputs = await this.#prepareLocalInputs(
-        options.repositoryPath,
+        repository,
         options,
         signal,
         protectedRoots,
@@ -2159,10 +2163,24 @@ export class CodexSecurity {
       await realpath(tmpdir()),
       "temporary",
     );
+    if (
+      this.#dependencies.hostedScan === undefined &&
+      options.rubricPath !== undefined &&
+      options.severityRubric === undefined &&
+      inputs.retryRecipe === undefined &&
+      options.resumeScanId === undefined
+    ) {
+      await readSeverityRubricFile(
+        resolve(expandHome(options.rubricPath)),
+        inputs.protectedRoot,
+      );
+    }
     if (options.knowledgeBasePaths?.length) {
       const knowledgeBase = await prepareKnowledgeBase(
         options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
         options.signal,
+        undefined,
+        inputs.repository,
       );
       await knowledgeBase.cleanup();
     }
@@ -2369,6 +2387,7 @@ export class CodexSecurity {
           options.knowledgeBasePaths,
           signal,
           outputDir,
+          inputs.repository,
         );
       }
       notifyObserver(options, "onOutputDirReady")(outputDir);
@@ -2777,6 +2796,7 @@ export class CodexSecurity {
             (await readKnowledgeBaseSnapshot(
               options.knowledgeBasePaths,
               signal,
+              repo,
             )),
         };
         knowledgeBase = await prepareKnowledgeBase(
@@ -4464,19 +4484,15 @@ export class CodexSecurity {
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
           workbench(workbenchOptions, args, input);
-        const previousFindings = await listRepositoryFindings(
-          runWorkbench,
-          targetId,
-          "all",
-        );
+        const previousFindings = options.skipFindingMatching
+          ? undefined
+          : await listRepositoryFindings(runWorkbench, targetId, "all");
         if (previousFindings !== undefined) {
           await matchCompletedScan({
             scanId,
             repository: repo,
             previousFindings: previousFindings.filter(
-              (finding) =>
-                finding["scanId"] !== scanId &&
-                finding["targetId"] === targetId,
+              (finding) => finding["scanId"] !== scanId,
             ),
             falsePositives: falsePositiveExamples as Record<string, unknown>[],
             findings: result.findings.findings,
@@ -4493,6 +4509,8 @@ export class CodexSecurity {
               ),
             ...inferenceOptions,
           });
+        }
+        if (previousFindings !== undefined || options.skipFindingMatching) {
           result.repositoryFindings = (await listRepositoryFindings(
             runWorkbench,
             targetId,
@@ -5870,6 +5888,8 @@ export class CodexSecurity {
         const knowledgeBase = await prepareKnowledgeBase(
           options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,
           signal,
+          undefined,
+          local.repository,
         );
         await knowledgeBase.cleanup();
       }
@@ -6320,20 +6340,28 @@ export class CodexSecurity {
 
 export async function listRepositoryFindings(
   workbench: (args: readonly string[]) => Promise<JsonObject>,
-  targetId: string,
+  target: string | { repository: string },
   status: "open" | "all" = "open",
 ): Promise<JsonObject[] | undefined> {
   const findings: JsonObject[] = [];
+  const selector =
+    typeof target === "string"
+      ? ["--target-id", target]
+      : ["--repository", target.repository];
   let offset: number | undefined;
   do {
     const page = await workbench([
       "list-global-findings",
-      "--target-id",
-      targetId,
+      ...selector,
       ...(status === "open" ? ["--status", "open"] : []),
       ...(offset === undefined ? [] : ["--offset", String(offset)]),
     ]);
-    if (!Array.isArray(page["findings"])) return undefined;
+    if (
+      page["projectionAvailable"] === false ||
+      !Array.isArray(page["findings"])
+    ) {
+      return undefined;
+    }
     findings.push(...(page["findings"] as JsonObject[]));
     offset =
       typeof page["nextOffset"] === "number" ? page["nextOffset"] : undefined;
