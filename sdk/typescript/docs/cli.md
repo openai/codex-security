@@ -157,6 +157,8 @@ If Codex Security reports that the refresh token was already used, run
 `codex-security logout`, then `codex-security login`. If your Codex CLI or app
 reports that error, sign out and sign back in there.
 
+Use `codex-security login status --json` in automation. Its stdout reports `authenticated`, the effective authentication `method`, and the environment variable name when an API key takes precedence. Native diagnostics go to stderr. The command keeps the exit status of the human-readable status check.
+
 For other refresh errors, check `codex-security login status`. Retry if the
 sign-in recently changed. Otherwise run `codex-security logout`, then
 `codex-security login`.
@@ -1400,6 +1402,12 @@ filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` select
 require a new output directory. Version 1 manifests also require a new directory
 because their original knowledge inputs and direct overrides cannot be verified.
 Worker and retry counts can change when resuming.
+
+On POSIX, local repository paths retain `..` components in the campaign manifest
+so distinct symlink traversals remain distinct sources. Older campaigns may have
+recorded a normalized absolute path instead. Use that recorded path to resume the
+previously selected source; it can differ from the physical target selected by
+the original traversal. Use a new output directory to scan the corrected target.
 
 ### Recovering failed or interrupted bulk scans
 
