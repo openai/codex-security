@@ -1,7 +1,9 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { retryWindowsRename } from "./retry-windows-rename.js";
 import { renderScaReport } from "./sca-report.js";
 import type { OsvScanResult } from "./sca-osv.js";
 import type { ScaResult } from "./sca-types.js";
@@ -45,8 +47,13 @@ export async function saveDependencyScan(result: ScaResult): Promise<void> {
     ["report.md", renderScaReport(result)],
   ] as const) {
     const path = join(result.outputDir, name);
-    await writeFile(`${path}.tmp`, content, { mode: 0o600 });
-    await rename(`${path}.tmp`, path);
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
+    try {
+      await retryWindowsRename(() => rename(temporary, path));
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }
 
