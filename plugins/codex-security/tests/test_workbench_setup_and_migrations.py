@@ -28,9 +28,11 @@ from workbench_test_support import (
     create_workspace,
     empty_target_paths,
     empty_target_scan,
+    fail_scan,
     get_scan,
     initialize_git_repository,
     load_script,
+    mark_deep_coordinator_succeeded,
     run_workbench,
     save_workspace,
     scan_command,
@@ -108,6 +110,9 @@ EXPECTED_MIGRATIONS = [
     (61, "record scan launch attribution"),
     (62, "project scan lifecycle snapshots"),
     (63, "retain unverified Deep Scan worker attempts"),
+    (64, "persist scan log completion boundaries"),
+    (65, "bind Windows Deep Scan resume output directories"),
+    (66, "bind Windows Deep Scan resume checkouts"),
 ]
 
 
@@ -194,25 +199,33 @@ def create_historical_database(
     "last_preview",
     ["persist scan target executable protection", "persist scan execution sessions"],
 )
-def test_composition_preview_keeps_receipts_when_host_worker_gap_is_added(
+@pytest.mark.parametrize("worker_gap_applied", [False, True])
+def test_composition_preview_keeps_receipts_across_released_migrations(
     last_preview: str,
+    worker_gap_applied: bool,
 ) -> None:
-    connection, migrate = create_historical_database(63)
+    connection, migrate = create_historical_database(64 if worker_gap_applied else 63)
     preview = [
         (63, "persist composition child membership", "membership"),
         (64, "reuse scan severity assessments", "severity"),
         (65, last_preview, "final"),
+        (66, "recover unindexed severity assessments", "unindexed"),
+        (67, "repair stored composition membership", "repair"),
+        (68, "repair archived composition paths", "paths"),
     ]
     with closing(connection):
-        connection.executemany("INSERT INTO schema_migrations VALUES (?, ?, ?)", preview)
+        connection.executemany(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            [(version + int(worker_gap_applied), name, stamp) for version, name, stamp in preview],
+        )
         for _ in range(2):
             migrate(connection)
             rows = connection.execute(
-                "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 64 "
+                "SELECT version, name, applied_at FROM schema_migrations WHERE version >= 67 "
                 "ORDER BY version"
             )
             assert [tuple(row) for row in rows] == [
-                (version + 1, name, timestamp) for version, name, timestamp in preview
+                (version + 4, name, timestamp) for version, name, timestamp in preview
             ]
             assert (
                 connection.execute(
@@ -220,6 +233,11 @@ def test_composition_preview_keeps_receipts_when_host_worker_gap_is_added(
                 ).fetchone()[0]
                 == "retain unverified Deep Scan worker attempts"
             )
+            assert {
+                "log_completed_at",
+                "windows_resume_output_identity",
+                "windows_resume_target_identity",
+            } <= {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
             assert "worker_usage_gap" in {
                 row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
             }
@@ -393,8 +411,23 @@ def assert_new_scan_model_is_independent(state_dir: Path, target: Path, scan_roo
         ).fetchone() == (None, None, "gpt-5.6-sol", "high")
 
 
-def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(tmp_path: Path) -> None:
-    source = tmp_path / "source.sqlite3"
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        b"source.sqlite3",
+        pytest.param(
+            b"source-\xff?#%.sqlite3",
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="requires Linux filename bytes"
+            ),
+            id="linux-filename-bytes",
+        ),
+    ],
+)
+def test_sqlite_snapshot_includes_uncheckpointed_wal_rows(
+    tmp_path: Path, source_name: bytes
+) -> None:
+    source = tmp_path / os.fsdecode(source_name)
     snapshot = tmp_path / "snapshot.sqlite3"
     with sqlite3.connect(source) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
@@ -804,14 +837,31 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     assert "revision recorded by the parent repository" in str(failed["stderr"])
 
 
-def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("target_name", "outside_name"),
+    [
+        pytest.param(":(top,glob)**", "outside.py", id="top-glob", marks=pytest.mark.native_macos),
+        pytest.param(
+            "selected[ab]", "selecteda", id="bracket-glob", marks=pytest.mark.cross_platform
+        ),
+    ],
+)
+def test_nested_target_name_is_a_literal_git_pathspec(
+    tmp_path: Path, target_name: str, outside_name: str
+) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
-    target = repository / ":(top,glob)**"
-    target.mkdir()
+    target = repository / target_name
+    try:
+        target.mkdir()
+    except OSError as error:
+        if target_name == ":(top,glob)**" and error.errno == errno.EINVAL:
+            pytest.skip("The filesystem cannot create a directory with Git top/glob magic.")
+        raise
+    outside = repository / outside_name
     (target / "source.py").write_text("selected = True\n")
-    (repository / "outside.py").write_text("outside = 1\n")
+    outside.write_text("outside = 1\n")
     subprocess.run(["git", "add", "."], cwd=repository, check=True)
     subprocess.run(["git", "commit", "-qm", "Add selected target"], cwd=repository, check=True)
     revision = subprocess.check_output(
@@ -819,7 +869,8 @@ def test_nested_target_name_is_a_literal_git_pathspec(tmp_path: Path) -> None:
     ).strip()
     workspace_id = str(create_saved_git_workspace(state_dir, target)["id"])
     scan_id, scan_dir = start_workspace_scan(state_dir, workspace_id, tmp_path / "scans")
-    (repository / "outside.py").write_text("outside = 2\n")
+    outside.write_text("outside = 2\n")
+    assert get_scan(state_dir, scan_id, "--check-target")["scan"]["scanId"] == scan_id
     write_completed_contract(
         scan_dir,
         scan_id,
@@ -1179,6 +1230,66 @@ def test_scan_model_migration_preserves_existing_scans(complete: bool) -> None:
         "pluginVersion": None,
         "mock": None,
     }
+
+
+@pytest.mark.parametrize("preview_version", [48, 50, 63])
+def test_log_boundary_preview_preserves_saved_boundary_and_repairs_history(preview_version):
+    name = "persist scan log completion boundaries"
+    connection, apply_migrations = create_historical_database(
+        preview_version,
+        ((preview_version, name, "ALTER TABLE scans ADD COLUMN log_completed_at TEXT;"),),
+    )
+    insert_historical_row(connection, "workspaces", "created", id="workspace")
+    insert_legacy_scan(
+        connection, "created", id="preview", workspace_id="workspace", log_completed_at="boundary"
+    )
+
+    apply_migrations(connection)
+    apply_migrations(connection)
+
+    assert (
+        connection.execute("SELECT log_completed_at FROM scans WHERE id = 'preview'").fetchone()[0]
+        == "boundary"
+    )
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version IN (63,64) ORDER BY version"
+        )
+    ] == [(63, "retain unverified Deep Scan worker attempts"), (64, name)]
+    assert "worker_usage_gap" in {
+        row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
+    }
+
+
+def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
+    connection, apply_migrations = create_historical_database(64)
+    insert_historical_row(connection, "workspaces", "created", id="legacy-workspace")
+    for case in ("running", "complete", "failed", "canceled"):
+        insert_legacy_scan(
+            connection,
+            "later-edit",
+            id=case,
+            scan_dir=f"/legacy/{case}",
+            status="failed" if case == "canceled" else case,
+            completed_at=None if case == "running" else "artifact-time",
+            canceled_at="cancel-time" if case == "canceled" else None,
+        )
+    connection.commit()
+    before = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+
+    apply_migrations(connection)
+
+    after = [dict(row) for row in connection.execute("SELECT * FROM scans ORDER BY id")]
+    assert after == [
+        {
+            **row,
+            "log_completed_at": None,
+            "windows_resume_output_identity": None,
+            "windows_resume_target_identity": None,
+        }
+        for row in before
+    ]
 
 
 @pytest.mark.parametrize(
@@ -2060,6 +2171,84 @@ def test_workbench_applies_shadowed_delivered_claim_cleanup_once(tmp_path: Path)
         assert connection.execute(
             "SELECT handoff_claimed_at, handoff_claim_token FROM scans WHERE id = ?", (scan_id,)
         ).fetchone() == ("2026-07-01T00:00:00Z", "current-claim")
+
+
+def test_legacy_delivered_scan_waits_for_its_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    state_dir, target = empty_target_paths(tmp_path)
+    workspace = create_saved_workspace(state_dir, target, mode="deep")
+    previous_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
+    fail_scan(state_dir, previous_id, "Earlier scan failed")
+    scan_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
+    begin = ("--thread-id", "fixture-thread", "--workflow-version", "fixture")
+
+    assert get_scan(state_dir, scan_id)["scan"]["scanId"] == scan_id
+    for command, args in (
+        ("get-scan", ("--context-claim-token", "")),
+        ("update-progress", ("--phase", "threat_model")),
+        ("begin-deep-scan", begin),
+    ):
+        result = scan_command(
+            state_dir, command, scan_id, "--model-thread-id", "fixture-thread", *args, check=False
+        )
+        assert result["returncode"] != 0
+        assert "awaiting its owning Codex thread" in result["stderr"]
+
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "fixture-thread")
+    other = scan_command(
+        state_dir,
+        "begin-deep-scan",
+        scan_id,
+        "--thread-id",
+        "other",
+        "--model-thread-id",
+        "other",
+        check=False,
+    )
+    assert "requires its owning Codex thread" in other["stderr"]
+    updated = update_progress(
+        state_dir, scan_id, "--model-thread-id", "fixture-thread", "--phase", "threat_model"
+    )
+    assert updated["scan"]["progress"]["phase"] == "threat_model"
+    begun = scan_command(
+        state_dir, "begin-deep-scan", scan_id, "--model-thread-id", "fixture-thread", *begin
+    )
+    assert begun["deepScan"]["scanId"] == scan_id
+    rejoined = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--target-path",
+        str(target),
+        "--model-thread-id",
+        "fixture-thread",
+        *begin,
+    )
+    assert rejoined["startDisposition"] == "joined"
+    assert rejoined["deepScan"]["scanId"] == scan_id
+    read_context = ("--model-thread-id", "fixture-thread", "--context-claim-token", "")
+    assert get_scan(state_dir, scan_id, *read_context)["scan"]["scanId"] == scan_id
+    previous = get_scan(state_dir, previous_id, *read_context, check=False)
+    assert "awaiting its owning Codex thread" in previous["stderr"]
+
+    mark_deep_coordinator_succeeded(state_dir, scan_id, Path(begun["deepScan"]["scanDir"]))
+    replacement = run_workbench(
+        state_dir,
+        "begin-deep-scan",
+        "--target-path",
+        str(target),
+        "--thread-id",
+        "other",
+        "--model-thread-id",
+        "other",
+        "--user-context",
+        begun["deepScan"]["userContext"],
+        "--workflow-version",
+        "fixture",
+    )
+    assert replacement["startDisposition"] == "created"
+    assert replacement["deepScan"]["scanId"] != scan_id
 
 
 @pytest.mark.parametrize(

@@ -3,22 +3,14 @@ import { homedir } from "node:os";
 import { extname, isAbsolute, resolve } from "node:path";
 import Ajv, { type ValidateFunction } from "ajv";
 import { parseDocument } from "yaml";
+import { DEEP_SCAN_SETTINGS, hoursConflict } from "../deep-scan-settings.js";
 import schema from "./project-config.schema.json";
 
 let validate: ValidateFunction | undefined;
-const fields = {
-  workers: "workers",
-  subagents_per_worker: "subagents",
-  stop_after_no_new: "stopAfterNoNew",
-  stop_after_consecutive_errors: "stopAfterConsecutiveErrors",
-  max_discovery_runs: "maxDiscoveryRuns",
-  max_time_hours: "maxTimeHours",
-} as const;
-
 export interface DeepScanProjectConfig {
   path: string;
   selectedPath?: string;
-  settings: Partial<Record<(typeof fields)[keyof typeof fields], number>>;
+  settings: Partial<Record<(typeof DEEP_SCAN_SETTINGS)[number][0], number>>;
 }
 
 /** Keep POSIX symlink traversal before a subsequent "..". */
@@ -26,7 +18,11 @@ export function selectedProjectConfigPath(
   file: string,
   target: string,
 ): string {
-  const selected = file.replace(/^~(?=$|[/\\])/, () => homedir());
+  const spelling =
+    process.platform !== "win32" && file.startsWith("~\\")
+      ? file.replaceAll("\\", "/")
+      : file;
+  const selected = spelling.replace(/^~(?=$|[/\\])/, () => homedir());
   if (process.platform === "win32") return resolve(target, selected);
   return isAbsolute(selected) ? selected : `${target}/${selected}`;
 }
@@ -70,7 +66,7 @@ export async function readDeepScanProjectConfig(
     scan?: {
       mode?: string;
       max_time_minutes?: number;
-      deep?: Record<keyof typeof fields, number>;
+      deep?: Record<(typeof DEEP_SCAN_SETTINGS)[number][2], number>;
     };
     [key: string]: unknown;
   };
@@ -91,8 +87,8 @@ export async function readDeepScanProjectConfig(
     );
   }
   const settings: DeepScanProjectConfig["settings"] = {};
-  for (const [field, name] of Object.entries(fields)) {
-    const value = input.scan?.deep?.[field as keyof typeof fields];
+  for (const [name, , field] of DEEP_SCAN_SETTINGS) {
+    const value = input.scan?.deep?.[field];
     if (value !== undefined) settings[name] = value;
   }
   const minutes = input.scan?.max_time_minutes;
@@ -102,11 +98,7 @@ export async function readDeepScanProjectConfig(
         "Deep Scan scan.max_time_minutes must be no greater than 5760 minutes.",
       );
     const hours = minutes / 60;
-    if (
-      settings.maxTimeHours !== undefined &&
-      Math.abs(settings.maxTimeHours - hours) >
-        Number.EPSILON * Math.max(settings.maxTimeHours, hours)
-    ) {
+    if (hoursConflict(hours, settings.maxTimeHours)) {
       throw new Error(
         "Conflicting scan.max_time_minutes and scan.deep.max_time_hours settings.",
       );

@@ -54,13 +54,12 @@ def resolve_deep_scan_config(available_parallelism: int) -> dict[str, int | floa
 
 
 def resolve_deep_scan_setup(
-    available_parallelism: int, project_json: str | None = None
+    available_parallelism: int = 1, project_json: str | None = None
 ) -> dict[str, Any]:
     """Resolve project overrides, per-user TOML settings, and bundled defaults in that order.
 
     Args:
-        available_parallelism (int): Positive parallelism reported by the caller.
-            The configured worker count is independent of this value.
+        available_parallelism (int): Legacy caller argument. Any positive value selects the same settings.
         project_json (str | None): Serialized project configuration with path and settings keys.
 
     Returns:
@@ -85,6 +84,7 @@ def resolve_deep_scan_setup(
         try:
             destination = path.resolve(strict=True)
         except FileNotFoundError:
+            # The optional user configuration can be absent.
             pass
         except OSError as exc:
             raise SystemExit(

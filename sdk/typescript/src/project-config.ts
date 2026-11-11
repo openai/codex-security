@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import { readFile, realpath } from "node:fs/promises";
 import {
   basename,
@@ -24,7 +25,7 @@ import {
   type ProjectConfigInput,
   type ProjectScope,
 } from "./project-config-schema.js";
-import { expandHome } from "./runtime.js";
+import { expandHomeForLookup } from "./runtime.js";
 import {
   DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
@@ -42,6 +43,7 @@ const validateProjectConfig = new Ajv({
 
 export interface ProjectConfigSource {
   path?: string;
+  selectedPath?: string;
   resolvedPath?: string;
   directory: string;
   input: ProjectConfigInput;
@@ -137,28 +139,27 @@ export async function readProjectConfig(
   file: string,
   directory = process.cwd(),
 ): Promise<ProjectConfigSource> {
-  const expanded = expandHome(file);
-  const path = resolve(directory, expanded);
-  const selected =
-    process.platform === "win32" || isAbsolute(expanded)
-      ? expanded
-      : `${directory}/${expanded}`;
+  const selected = expandHomeForLookup(file);
+  const requested = isAbsolute(selected)
+    ? selected
+    : `${directory || "."}${sep}${selected}`;
+  const traversesParent = sep === "/" && requested.split("/").includes("..");
+  const selectedPath = resolve(directory, selected);
+  let path = traversesParent ? requested : selectedPath;
   const extension = projectConfigExtension(path);
-  let settingsDirectory = dirname(path);
   let text: string;
   let resolvedPath: string;
   try {
-    let source = process.platform === "win32" ? path : selected;
-    const selectedParent = dirname(source);
-    if (
-      process.platform !== "win32" &&
-      selectedParent.split("/").includes("..")
-    ) {
-      // Resolve parent traversal before joining the file or any relative settings.
-      settingsDirectory = await realpath(selectedParent);
-      source = resolve(settingsDirectory, basename(source));
+    // Resolve the parent through the filesystem while retaining the selected filename.
+    if (traversesParent) {
+      const parent = await realpath(dirname(path), { encoding: "buffer" });
+      if (!isUtf8(parent))
+        throw new Error(
+          "The resolved configuration directory is not a valid UTF-8 path.",
+        );
+      path = resolve(parent.toString(), basename(path));
     }
-    resolvedPath = await realpath(source);
+    resolvedPath = await realpath(path);
     text = await readFile(resolvedPath, "utf8");
   } catch (error) {
     throw new ConfigurationError(
@@ -186,8 +187,9 @@ export async function readProjectConfig(
   requireProjectConfig(value, path);
   return {
     path,
+    ...(selectedPath === path ? {} : { selectedPath }),
     ...(path === resolvedPath ? {} : { resolvedPath }),
-    directory: settingsDirectory,
+    directory: dirname(path),
     input: value,
   };
 }
@@ -444,6 +446,7 @@ export function resolveScanSettings(
         ? {
             executableSourcePaths: [
               ...new Set([
+                ...(project.selectedPath ? [project.selectedPath] : []),
                 project.path,
                 resolve(project.directory, basename(project.path)),
                 ...(project.resolvedPath ? [project.resolvedPath] : []),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import {
@@ -464,6 +464,70 @@ describe("project configuration input contract", () => {
 });
 
 describe("project configuration resolution", () => {
+  test.skipIf(process.platform === "win32")(
+    "follows a directory link before a parent component in the selected file",
+    async () => {
+      const root = await temporaryDirectory();
+      const selected = join(root, "selected");
+      const child = join(selected, "child");
+      await mkdir(child, { recursive: true });
+      await symlink(child, join(root, "link"));
+      for (const [directory, minutes] of [
+        [root, 2],
+        [selected, 7],
+      ] as const) {
+        await writeFile(
+          join(directory, "scan.json"),
+          JSON.stringify({
+            scan: { max_time_minutes: minutes },
+            output: { directory: "reports" },
+          }),
+        );
+      }
+      for (const [file, directory] of [
+        ["link/../scan.json", root],
+        [`${root}/link/../scan.json`, root],
+        ["scan.json", `${root}/link/..`],
+        [`${relative(process.cwd(), root)}/link/../scan.json`, ""],
+      ] as const) {
+        const project = await readProjectConfig(file, directory);
+        expect(project.path).toBe(join(selected, "scan.json"));
+        expect(resolveScanSettings(project, {}, root).options).toMatchObject({
+          maxTimeMinutes: 7,
+          outputDir: join(selected, "reports"),
+        });
+      }
+      await expect(
+        readProjectConfig("missing/../scan.json", root),
+      ).rejects.toMatchObject({
+        cause: { code: "ENOENT" },
+      });
+      const alias = join(root, "alias.json");
+      await symlink(join(selected, "scan.json"), alias);
+      expect((await readProjectConfig(alias)).directory).toBe(root);
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "does not select a replacement-character directory for a non-UTF-8 parent",
+    async () => {
+      const root = await temporaryDirectory();
+      const parent = Buffer.concat([
+        Buffer.from(`${root}/`),
+        Buffer.from([0xff]),
+      ]);
+      const child = Buffer.concat([parent, Buffer.from("/child")]);
+      await mkdir(child, { recursive: true });
+      await symlink(child, join(root, "link"));
+      await writeFile(Buffer.concat([parent, Buffer.from("/scan.json")]), "{}");
+      await mkdir(join(root, "\uFFFD"));
+      await writeFile(join(root, "\uFFFD", "scan.json"), "{}");
+      await expect(
+        readProjectConfig("link/../scan.json", root),
+      ).rejects.toThrow("valid UTF-8 path");
+    },
+  );
+
   test("resolves paths according to their layer and replaces lists", async () => {
     const root = await temporaryDirectory();
     const project = {
