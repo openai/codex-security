@@ -156,7 +156,7 @@ If Codex Security reports that the refresh token was already used, run
 `codex-security logout`, then `codex-security login`. If your Codex CLI or app
 reports that error, sign out and sign back in there.
 
-Use `codex-security login status --json` in automation. Its stdout reports `authenticated`, the effective authentication `method`, and the environment variable name when an API key takes precedence. Native diagnostics go to stderr. The command keeps the exit status of the human-readable status check.
+Use `codex-security login status --json` in automation. Its stdout reports `authenticated`, the effective authentication `method`, and the environment variable name when an API key takes precedence. When an API key takes precedence, stderr names the variable that configures it. This offline status check also labels the separate stored sign-in diagnostic. The command keeps the exit status of the human-readable status check.
 
 For other refresh errors, check `codex-security login status`. Retry if the
 sign-in recently changed. Otherwise run `codex-security logout`, then
@@ -2777,23 +2777,39 @@ only read-only `info` because the transport cannot cancel scans. For the plugin'
 scan, triage, patch, and verification workflows, see the
 [agent workflow guide](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md).
 
-Use `skills add --no-global` to write generated guidance to the current project.
-`--depth 0` creates a single skill; the default depth of 1 groups guidance by
-top-level command. `skills list` checks installation status at depth 1 by
-default. To inspect a different grouping, pass the installation depth, for
-example `skills list --depth 0 --json`. Installation status uses the paths
-recorded by the most recent `skills add` for this user, including project installs.
-For both installers, `--help`, `--schema`, and `--version` can be inspected
-before writing any configuration.
+Both installers default to `--scope user`. Use `--scope project` for the current
+directory. Existing scripts can continue using `--no-global` for project scope.
+Inspect either command with `--help`, `--schema`, or `--version` before installing.
 
-`mcp add` registers in the user profile by default. `mcp add --no-global`
-selects project-capable clients. Registration uses the client adapters installed
-with the SDK. Selecting a user-only client in project scope fails before the
-CLI writes configuration. For example, use
-`mcp add --no-global --agent cursor` to target Cursor. The built-in Amp
-registration supports only user settings. `mcp doctor` checks the current CLI's
-server startup and tool catalog. To verify a registered launcher, connect from
-the client where it was registered.
+`skills add --depth 0` creates a single skill. The default depth of 1 groups
+guidance by top-level command. To check the installed files, use the same
+depth with `skills list`, for example `skills list --depth 0 --json`. Each
+entry includes its canonical `SKILL.md` locations in the current project and
+user profile.
+
+`mcp add` registers detected compatible clients. If it finds none in the
+selected scope, choose a client with `--agent NAME` (repeatable), or register
+every compatible client with `--all`. For example, `mcp add --scope project
+--agent cursor` writes Cursor's project configuration. In user scope, Codex
+detection and registration use `CODEX_HOME` when set. Amp supports user
+registration only.
+
+The default launcher runs `npx --yes @openai/codex-security --mcp`. To register
+an installed executable, use its name or path with `--exec` and repeat
+`--arg=VALUE` for each argument. Each value is stored literally, including
+spaces, empty arguments, and leading dashes. To run an npm package, select
+`--package NAME`. The existing `--command` accepts a command line or HTTP(S)
+URL. Quotes group command-line words, and backslashes are literal. A bare
+executable name is stored directly. Use `--exec` for a path with
+spaces, including when the executable will be installed on another machine.
+
+```bash
+codex-security mcp add --agent cursor --exec "/opt/My Tools/server" --arg=--mcp
+codex-security mcp add --agent cursor --package @openai/codex-security --arg=--mcp
+```
+
+`mcp doctor` checks the current CLI's server startup and tool catalog. To
+verify a registered launcher, connect from the client where it was registered.
 
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).
