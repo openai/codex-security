@@ -71,15 +71,20 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         if main_reader:
             connection.execute(next(sql for version, _, sql in migrations if version == 47))
         connection.execute(
+            "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) "
+            "VALUES ('saved-target', 'target', 'Target', ?, ?)",
+            (timestamp, timestamp),
+        )
+        connection.execute(
             "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
             ("workspace", timestamp, timestamp),
         )
         for status in ("running", "failed"):
             connection.execute(
-                "INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, "
+                "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, scope, "
                 "mode, scan_dir, status, phase, started_at, created_at, updated_at, "
                 "failure_message, retained_source_digests_json) "
-                "VALUES (?, 'workspace', 'target', 'revision', '.', 'deep', ?, ?, "
+                "VALUES (?, 'workspace', 'saved-target', 'target', 'revision', '.', 'deep', ?, ?, "
                 "'discovery', ?, ?, ?, ?, ?)",
                 (
                     status,

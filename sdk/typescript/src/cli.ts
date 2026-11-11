@@ -158,7 +158,11 @@ import {
   resolvePatchReviewPublisher,
 } from "./patch-publication.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
-import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
+import {
+  savedCheckoutBoundaries,
+  savedDiscoveryRoots,
+  savedScanWorkbench,
+} from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
@@ -315,12 +319,12 @@ import {
   canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
-  canonicalConfigPath,
   codexSecurityHasStoredFileCredentials,
   codexSecurityStateDirectory,
   logoutCredentialHome,
   executablePathForSpawn,
   environmentWithGit,
+  isPythonPathCandidate,
   expandHome,
   resolveInputPath,
   resolveParentTraversal,
@@ -330,7 +334,6 @@ import {
   pluginMetadata,
   runWorkbench,
   workbenchEnvironment,
-  sameFile,
   setCodexSecurityCredentialLogout,
   type CodexCommand,
   type PluginPythonOptions,
@@ -1647,10 +1650,12 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
   ) => {
     const checkingTarget =
       args[0] === "get-scan" && args.includes("--check-target");
+    const configuredGit = environmentEntry(process.env, "CODEX_SECURITY_GIT");
     let environment: NodeJS.ProcessEnv =
       !checkingTarget || protectedRoot === undefined
         ? {
             ...exportEnvironment(),
+            CODEX_SECURITY_GIT: configuredGit,
             CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
           }
         : workbenchEnvironment(process.env);
@@ -1665,18 +1670,42 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
           (await gitMarkerRoot(root, signal, "outermost")) ?? root,
       ),
     );
+    const configuredPython =
+      pythonPath ?? environmentEntry(environment, "PYTHON");
+    const boundaries =
+      configuredPython && isPythonPathCandidate(configuredPython)
+        ? undefined
+        : await savedCheckoutBoundaries(environment);
     const python = await resolvePluginPython({
       configuredPath: pythonPath,
       environment,
       signal,
       protectedRoot: protectedRoot === undefined ? undefined : protectedRoots,
+      discoveryProtectedRoots: boundaries
+        ? await savedDiscoveryRoots(
+            boundaries,
+            [...boundaries.byTarget.keys()],
+            signal,
+          )
+        : undefined,
+      allowPathLookup: boundaries?.complete,
     });
-    if (checkingTarget && protectedRoot !== undefined) {
-      const git = await inspectTrustedExecutable("git", environment, [
-        ...protectedRoots,
-        ...gitProtectedRoots,
-      ]);
-      environment = environmentWithGit(git.environment, git);
+    if (
+      checkingTarget &&
+      gitProtectedRoots.length > 0 &&
+      (configuredGit === undefined || isAbsolute(configuredGit))
+    ) {
+      const git = await inspectTrustedExecutable(
+        configuredGit ?? "git",
+        environment,
+        [...protectedRoots, ...gitProtectedRoots],
+      );
+      // Filter knowledge-base tools, then let the workbench choose ambient Git
+      // after it also knows the boundaries recorded in the history database.
+      environment =
+        configuredGit !== undefined || git.executable === null
+          ? environmentWithGit(git.environment, git)
+          : git.environment;
     }
     const workspace =
       pluginPath === undefined
@@ -2605,7 +2634,7 @@ export async function main(
       runScanImport(options, errorOutput, dependencies),
     );
   const history = async (
-    args: readonly string[],
+    args: readonly string[] | (() => Promise<JsonObject>),
     select: (value: JsonObject) => JsonObject | Promise<JsonObject> = (value) =>
       value,
     pythonPath?: string,
@@ -2613,13 +2642,15 @@ export async function main(
   ): Promise<JsonObject> => {
     try {
       return await select(
-        await dependencies.runWorkbench(
-          args,
-          undefined,
-          undefined,
-          pythonPath,
-          protectedRoot,
-        ),
+        await (typeof args === "function"
+          ? args()
+          : dependencies.runWorkbench(
+              args,
+              undefined,
+              undefined,
+              pythonPath,
+              protectedRoot,
+            )),
       );
     } catch (error) {
       errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
@@ -2854,56 +2885,38 @@ export async function main(
         canonicalPath === undefined
           ? (storedPath ?? requestedPath)
           : requestedPath;
-      return await history(
-        ["list-repositories", "--status", "scanned"],
-        async (value): Promise<JsonObject> => {
-          const repositories = value["repositories"] as JsonObject[];
-          let target =
-            repositories.find(
-              (entry) => entry["targetPath"] === requestedRepository,
-            ) ??
-            repositories.find((entry) => entry["targetPath"] === storedPath);
-          if (target === undefined && storedPath !== undefined) {
-            const canonical =
-              canonicalPath ??
-              (await canonicalConfigPath(storedPath, {
-                verifyIdentity: true,
-              }).catch(() => undefined));
-            const saved = repositories.find(
-              (entry) => entry["targetPath"] === canonical,
-            );
-            if (
-              saved !== undefined &&
-              (canonicalPath === undefined ||
-                (await sameFile(canonicalPath, requestedRepository)))
-            ) {
-              target = saved;
-            }
-          }
-          if (target === undefined) {
-            for (const entry of repositories) {
-              const storedPath = entry["targetPath"] as string;
-              if (await sameFile(storedPath, requestedRepository)) {
-                target = entry;
-                break;
-              }
-            }
-          }
-          const findings =
-            target === undefined
-              ? []
-              : await listRepositoryFindings(
-                  dependencies.runWorkbench,
-                  target["targetId"] as string,
-                );
-          return presentHistory(
-            { repository: requestedRepository, findings: findings ?? [] },
-            "findings",
-            format,
-            { missingRepositoryHistory: target === undefined },
+      return await history(async () => {
+        const findings = await listRepositoryFindings(
+          dependencies.runWorkbench,
+          {
+            repository: requestedRepository,
+          },
+        );
+        if (findings === undefined) {
+          throw new CodexSecurityError(
+            "Repository findings are unavailable for the requested checkout.",
           );
-        },
-      );
+        }
+        let missingRepositoryHistory = false;
+        if (findings.length === 0 && useInteractiveHistory(format)) {
+          const saved = await dependencies.runWorkbench(
+            workbenchArgs("list-scans", {
+              repository: requestedRepository,
+              limit: "1",
+            }),
+          );
+          missingRepositoryHistory =
+            (saved["scans"] as SavedScan[]).length === 0;
+        }
+        return presentHistory(
+          { repository: requestedRepository, findings },
+          "findings",
+          format,
+          {
+            missingRepositoryHistory,
+          },
+        );
+      });
     },
   });
   findingFeedback.command("imported", {
@@ -3321,8 +3334,18 @@ export async function main(
               "SCAN_IMPORT_FAILED",
             );
           }
+          const replay =
+            args.scanId === undefined && isJsonObject(recipe)
+              ? {
+                  ...saved,
+                  recipe: {
+                    ...recipe,
+                    repository: dependencies.currentDirectory(),
+                  },
+                }
+              : saved;
           scanArguments = await prepareScanArgumentsFromRecipe(
-            saved,
+            replay,
             "rerun",
             dependencies.currentDirectory(),
             dependencies.environment,
@@ -12716,7 +12739,7 @@ function printScanSummary(
     repositoryFindings?.filter((finding) => finding.confirmedInLatestScan)
       .length ?? 0;
   const findingSummary = repositoryFindings?.length
-    ? `${confirmedCount} confirmed this scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
+    ? `${confirmedCount} confirmed in latest repository scan; ${findingCount - confirmedCount} previously found; ${severitySummary}`
     : severitySummary;
   const findingColor =
     findingCount === 0
