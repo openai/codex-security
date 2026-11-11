@@ -403,11 +403,11 @@ Add context with `--knowledge-base`:
 codex-security policy . --knowledge-base architecture.md
 ```
 
-| Invocation                   | Result                                                   |
-| ---------------------------- | -------------------------------------------------------- |
-| `policy . --json` | Generate without prompts; return paths and review notes. |
-| `policy . --format md`       | Generate and write the draft to stdout.                  |
-| `policy . --dry-run --json`  | Check local inputs without calling Codex.                |
+| Invocation                  | Result                                                   |
+| --------------------------- | -------------------------------------------------------- |
+| `policy . --json`           | Generate without prompts; return paths and review notes. |
+| `policy . --format md`      | Generate and write the draft to stdout.                  |
+| `policy . --dry-run --json` | Check local inputs without calling Codex.                |
 
 `--headless` leaves unanswered questions in the review notes. By default, files
 go in the Codex Security state directory. To choose a location, use an empty
