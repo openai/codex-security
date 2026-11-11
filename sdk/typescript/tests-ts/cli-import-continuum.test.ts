@@ -89,8 +89,11 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
       ...report,
       sourceRepositoryUrl,
       issues: [
-        { issue, findings: [first!, shared!], evidenceArtifacts: [artifact] },
-        { issue: secondIssue, findings: [shared!], evidenceArtifacts: [] },
+        {
+          issue: { ...issue, artifacts: [artifact] },
+          findings: [first!, shared!],
+        },
+        { issue: { ...secondIssue, artifacts: [] }, findings: [shared!] },
       ],
     },
   };
@@ -159,8 +162,11 @@ test.each([false, true])(
     expect(normalized).toMatchObject({ read: 2, excluded: [] });
     expect(normalized.findings[0]?.evidence).toMatchObject({
       details: { scanner_verdict: "EXPLOITABLE" },
-      source_data: { evidence_artifacts: report.issues[0]!.evidenceArtifacts },
+      source_data: { evidence_artifacts: report.issues[0]!.issue.artifacts },
     });
+    expect(
+      normalized.findings[0]?.evidence.source_data?.["issue"],
+    ).not.toHaveProperty("artifacts");
     expect(
       normalized.findings[1]?.evidence.details?.scanner_verdict ?? null,
     ).toBeNull();

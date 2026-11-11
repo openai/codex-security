@@ -29,9 +29,8 @@ export const continuumIssueExport = z.object({
   sourceRepositoryUrl: z.string(),
   issues: z.array(
     z.object({
-      issue: nativeRecord,
+      issue: z.looseObject({ artifacts: z.array(nativeRecord) }),
       findings: z.array(nativeRecord),
-      evidenceArtifacts: z.array(nativeRecord).optional(),
     }),
   ),
 });
@@ -246,7 +245,10 @@ export async function collectContinuumIssues(
         evidenceArtifacts.push(artifact);
       }
     }
-    issues.push({ issue, findings, evidenceArtifacts });
+    issues.push({
+      issue: { ...issue, artifacts: evidenceArtifacts },
+      findings,
+    });
   }
   signal?.throwIfAborted();
   return {

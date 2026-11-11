@@ -75,7 +75,12 @@ function* nativeReaders(
     yield (target) =>
       normalizeContinuumFindings({ items: [data["finding"]] }, url, target);
   }
-  if (row.provider === "continuum" && data["format"] === continuumIssueFormat)
+  const issue = data["issue"];
+  if (
+    row.provider === "continuum" &&
+    data["format"] === continuumIssueFormat &&
+    isRecord(issue)
+  )
     yield (target) =>
       normalizeContinuumFindings(
         {
@@ -83,9 +88,8 @@ function* nativeReaders(
           environmentId: data["environmentId"],
           issues: [
             {
-              issue: data["issue"],
+              issue: { ...issue, artifacts: data["evidence_artifacts"] },
               findings: data["findings"],
-              evidenceArtifacts: data["evidence_artifacts"],
             },
           ],
         },

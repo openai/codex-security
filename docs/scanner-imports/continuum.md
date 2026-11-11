@@ -96,11 +96,12 @@ finding's snippet and end line. When the issue summary is empty, the first
 linked mitigation in issue order supplies remediation instructions. Validation
 is stored alongside each contributing finding in `evidence.source_data.findings`.
 
-Publication stores the structured signals from each `EVIDENCE` attachment in
-`evidence.source_data.evidence_artifacts`. The original export also retains
-unstructured evidence attachments. The observation's `details.scanner_verdict`
-uses the AWS exploitability verdict for signals whose subject is the issue.
-Conflicting issue-level verdicts appear as `MIXED`.
+The export keeps the original AWS `EVIDENCE` responses in
+`issues[].issue.artifacts`. Publication reads that array and stores the
+structured signals in `evidence.source_data.evidence_artifacts`. The
+observation's `details.scanner_verdict` uses the AWS exploitability verdict for
+signals whose subject is the issue. Conflicting issue-level verdicts appear as
+`MIXED`.
 
 In Cloud, up to 100 locations are navigable. If the full linked evidence exceeds
 the Cloud record size limit, publication tries to keep each linked finding's

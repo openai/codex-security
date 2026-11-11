@@ -444,10 +444,10 @@ function normalizeContinuumIssues(
     rows,
     (value) => {
       const row = record(value, "Continuum issue record");
-      const issue = record(row["issue"], "Continuum issue");
+      const { artifacts, ...issue } = record(row["issue"], "Continuum issue");
       const { arn, id, scope } = issueIdentity(issue);
       const evidenceArtifacts = issueEvidenceArtifacts(
-        row["evidenceArtifacts"],
+        artifacts ?? row["evidenceArtifacts"],
       );
       const verdicts = new Set<string>();
       for (const artifact of evidenceArtifacts) {

@@ -276,7 +276,10 @@ test("local Continuum issue import keeps evidence and reprojects ranges for Clou
     ...input,
     issues: input.issues.map((row) => ({
       ...row,
-      evidenceArtifacts: [continuumEvidenceArtifact(row.issue.issueId)],
+      issue: {
+        ...row.issue,
+        artifacts: [continuumEvidenceArtifact(row.issue.issueId)],
+      },
     })),
   };
   const row = report.issues[0]!;

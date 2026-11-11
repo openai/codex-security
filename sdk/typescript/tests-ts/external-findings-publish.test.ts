@@ -3716,14 +3716,17 @@ test("a Continuum private upload keeps every structured signal and reports confl
     issues: [
       {
         ...input.issues[0]!,
-        evidenceArtifacts: [
-          ...evidence,
-          {
-            artifactType: "EVIDENCE",
-            artifactId: "narrative",
-            body: { raw: "Example narrative" },
-          },
-        ],
+        issue: {
+          ...issue,
+          artifacts: [
+            ...evidence,
+            {
+              artifactType: "EVIDENCE",
+              artifactId: "narrative",
+              body: { raw: "Example narrative" },
+            },
+          ],
+        },
       },
     ],
   };
