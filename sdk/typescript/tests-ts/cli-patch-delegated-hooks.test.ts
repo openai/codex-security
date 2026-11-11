@@ -191,8 +191,8 @@ for (const outside of [true, false])
     process.platform === "win32" ? 300000 : 90000,
   );
 
-test.each(["workspace", "read-only", "named"])(
-  "resumed publication confines the original pre-push hook with the effective operator settings: %s",
+test.each(["workspace", "read-only", "named", "danger-full-access"])(
+  "resumed publication uses patch workspace permissions for the original pre-push hook with operator default %s",
   async (selection) => {
     const { directory, remote, git } = await publicationRepository(fixtures);
     const branch = "codex-security/saved-hook";
@@ -204,28 +204,18 @@ test.each(["workspace", "read-only", "named"])(
     );
     const home = await fixtures.create("resume-hook-home-");
     const temporary = await fixtures.create("resume-hook-tmp-");
-    const allowed =
-      selection === "read-only"
-        ? directory
-        : await fixtures.create("resume-hook-approved-output-");
-    const denied = join(
-      selection === "named"
-        ? directory
-        : await fixtures.create("resume-hook-outside-"),
-      "marker",
-    );
-    const privateFile = join(directory, "synthetic-private");
-    if (selection === "named")
-      await writeFile(privateFile, "private synthetic contents\n");
+    const allowed = await fixtures.create("resume-hook-approved-output-");
+    const outside = await fixtures.create("resume-hook-outside-");
+    const denied = join(outside, "marker");
     await chmod(home, 0o700);
     await writeFile(
       join(home, "config.toml"),
       patchSnapshotWindowsConfig() +
-        (selection === "read-only"
-          ? 'sandbox_mode="read-only"\n'
-          : selection === "named"
-            ? 'default_permissions="qa-hook"\n'
-            : "") +
+        (selection === "named"
+          ? 'default_permissions="qa-hook"\n'
+          : selection === "workspace"
+            ? ""
+            : "sandbox_mode=" + JSON.stringify(selection) + "\n") +
         '\nmodel_provider="hook-fixture"\n' +
         '[model_providers.hook-fixture]\nname="Synthetic"\nbase_url="http://127.0.0.1:1/v1"\nenv_key="SYNTHETIC_MODEL_ACCESS"\n' +
         "[sandbox_workspace_write]\n" +
@@ -235,10 +225,8 @@ test.each(["workspace", "read-only", "named"])(
         "]\n" +
         (selection === "named"
           ? '[permissions.qa-hook]\nextends=":read-only"\nfilesystem={' +
-            JSON.stringify(allowed) +
-            '={ "."="write" },' +
-            JSON.stringify(privateFile) +
-            '={ "."="deny" }}\n'
+            JSON.stringify(outside) +
+            '={ "."="write" }}\n'
           : ""),
     );
     const environment = patchSnapshotEnvironment(temporary, {
@@ -258,13 +246,6 @@ test.each(["workspace", "read-only", "named"])(
         'test -z "${SYNTHETIC_MODEL_ACCESS-}"',
         `grep -F 'refs/heads/${branch}' >/dev/null`,
         "echo 'Entered synthetic resumed hook' >&2",
-        ...(selection === "named"
-          ? [
-              "if cat " +
-                shell(privateFile) +
-                " >/dev/null 2>&1; then exit 19; fi",
-            ]
-          : []),
         "echo reached > " + shell(join(allowed, "ran")),
         "echo denied > " + shell(denied),
       ].join("\n") + "\n",
@@ -296,7 +277,7 @@ test.each(["workspace", "read-only", "named"])(
     expect(
       await readFile(join(allowed, "ran"), "utf8").catch(() => null),
       outcome.stderr,
-    ).toBe(selection === "read-only" ? null : "reached\n");
+    ).toBe("reached\n");
     expect(await readFile(denied).catch(() => null)).toBeNull();
     expect(repositoryGit(remote)("for-each-ref", "--format=%(refname)")).toBe(
       "",

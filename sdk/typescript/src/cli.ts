@@ -1479,39 +1479,12 @@ async function resumeHookSandbox(
   const workspace = isJsonObject(config["sandbox_workspace_write"])
     ? config["sandbox_workspace_write"]
     : {};
-  const selected = config["default_permissions"];
-  let profile: JsonObject = patchWorkspaceProfile(workspace, gitDirectories);
-  if (selected === ":read-only" || selected === ":workspace") {
-    // When a named or built-in profile is selected, Codex ignores legacy
-    // sandbox_workspace_write grants.
-    profile = { extends: selected };
-  } else if (selected == null && config["sandbox_mode"] === "read-only") {
-    profile = { extends: ":read-only" };
-  } else if (typeof selected === "string" && !selected.startsWith(":")) {
-    const profiles = config["permissions"];
-    if (!isJsonObject(profiles) || !isJsonObject(profiles[selected]))
-      throw new CodexSecurityError(
-        "Cannot resolve the operator's selected publication hook permission profile.",
-      );
-    profile = { ...profiles[selected] };
-  }
-  // Preserve the selected profile's denies and custom grants. Protected Git
-  // controls can only narrow its permissions.
-  const filesystem = isJsonObject(profile["filesystem"])
-    ? { ...profile["filesystem"] }
-    : {};
-  for (const path of gitDirectories) {
-    const rule = filesystem[path];
-    if (rule === "deny" || (isJsonObject(rule) && rule["."] === "deny"))
-      continue;
-    filesystem[path] = { ...(isJsonObject(rule) ? rule : {}), ".": "read" };
-  }
   return {
     directory,
     environment,
     providerKeyVariable: scanProviderEnvKey(config),
     stripAwsCredentials: scanModelProvider(config) === "amazon-bedrock",
-    profile: { ...profile, filesystem },
+    profile: patchWorkspaceProfile(workspace, gitDirectories),
     configuration: {
       sandbox_workspace_write: {
         writable_roots: [],
