@@ -164,11 +164,18 @@ export async function registerMcp(
       targets.add(type);
     }
   } else {
-    const candidates = options.all
-      ? all
-      : local
-        ? detectProjectAgents(cwd)
-        : await detectGlobalAgents();
+    const candidates = new Set(
+      options.all
+        ? all
+        : local
+          ? detectProjectAgents(cwd)
+          : await detectGlobalAgents(),
+    );
+    // add-mcp detects ~/.codex even when its writer uses a custom CODEX_HOME.
+    if (!local && !options.all && process.env["CODEX_HOME"]) {
+      if (existsSync(dirname(agents.codex.configPath))) candidates.add("codex");
+      else candidates.delete("codex");
+    }
     for (const type of candidates) {
       if (
         (!local || agents[type].localConfigPath) &&

@@ -2754,7 +2754,8 @@ user profile.
 `mcp add` registers detected compatible clients. If it finds none in the
 selected scope, choose a client with `--agent NAME` (repeatable), or register
 every compatible client with `--all`. For example, `mcp add --scope project
---agent cursor` writes Cursor's project configuration. Amp supports user
+--agent cursor` writes Cursor's project configuration. In user scope, Codex
+detection and registration use `CODEX_HOME` when set. Amp supports user
 registration only.
 
 The default launcher runs `npx --yes @openai/codex-security --mcp`. To register

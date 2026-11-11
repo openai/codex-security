@@ -339,6 +339,20 @@ describe("integration command dispatch", () => {
     expect(await readdir(home)).toEqual([]);
   }, 30_000);
 
+  test("user detection follows the configured Codex profile", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-mcp-codex-home-");
+    const profile = join(temp.path, "custom-profile");
+    const { home, run } = await isolatedCli(temp.path, { CODEX_HOME: profile });
+    await mkdir(profile);
+    const result = await run("mcp", "add", "--json");
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).agents).toEqual(["Codex"]);
+    expect(await readFile(join(profile, "config.toml"), "utf8")).toContain(
+      "mcp_servers.codex-security",
+    );
+    expect(await readdir(home)).toEqual([]);
+  }, 30_000);
+
   test("MCP launchers preserve literal arguments and use npm only when selected", async () => {
     await using temp = await scopedTemporaryDirectory("cli-mcp-launcher-");
     const { home, run } = await isolatedCli(temp.path);
