@@ -161,9 +161,28 @@ export async function normalizeRepository(
   return canonical;
 }
 
-export function resolveRepositoryPath(repository: string): string {
+export function resolveRepositoryPath(
+  repository: string,
+  directory = process.cwd(),
+): string {
   requireUtf8Path("Repository path", repository);
-  return resolve(expandHome(repository));
+  return resolveTargetPath(expandHome(repository), directory);
+}
+
+/** Preserve filesystem resolution of symlink/.. paths on POSIX. */
+export function resolveTargetPath(
+  value: string,
+  directory = process.cwd(),
+): string {
+  if (sep === "\\") return resolve(directory, value);
+  const base = isAbsolute(directory)
+    ? directory
+    : `${process.cwd()}/${directory}`;
+  const absolute = isAbsolute(value) ? value : `${base}/${value}`;
+  const parts = absolute
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  return `/${parts.join("/")}`;
 }
 
 function requireUtf8Path(
@@ -600,9 +619,7 @@ export async function normalizeTarget(
       );
     }
     requireUtf8Path("Path target", value);
-    const candidate = isAbsolute(expandHome(value))
-      ? resolve(expandHome(value))
-      : resolve(root, expandHome(value));
+    const candidate = resolveTargetPath(expandHome(value), root);
     let canonical: string;
     try {
       // Some runtimes cannot canonicalize special files to filesystem paths.
@@ -822,8 +839,15 @@ export async function gitHistoryIdentity(
   repository: string,
   git: TrustedExecutable,
   signal?: AbortSignal,
-): Promise<{ commonDirectory: string | null; origin: string | null }> {
-  const read = async (args: readonly string[]): Promise<string | null> => {
+): Promise<{
+  commonDirectory: string | null;
+  origin: string | null;
+  relativePath: string | null;
+}> {
+  const read = async (
+    args: readonly string[],
+    allowEmpty = false,
+  ): Promise<string | null> => {
     try {
       const { stdout } = await execFile(
         git.executable,
@@ -835,20 +859,22 @@ export async function gitHistoryIdentity(
           maxBuffer: Infinity,
         },
       );
-      return (
-        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
-        null
+      const value = stdout.replace(
+        process.platform === "win32" ? /\r?\n$/u : /\n$/u,
+        "",
       );
+      return value || (allowEmpty ? "" : null);
     } catch {
       throwIfAborted(signal);
       return null;
     }
   };
-  const [commonDirectory, origin] = await Promise.all([
+  const [commonDirectory, origin, relativePath] = await Promise.all([
     read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     read(["remote", "get-url", "origin"]),
+    read(["rev-parse", "--show-prefix"], true),
   ]);
-  return { commonDirectory, origin };
+  return { commonDirectory, origin, relativePath };
 }
 
 /** Resolve Git and its sanitized executable search path for a single selected checkout. */
@@ -969,7 +995,7 @@ export async function gitMarkerRoot(
       const code = (error as NodeJS.ErrnoException).code;
       if (
         search !== "outermost" ||
-        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
+        !["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(code ?? "")
       )
         throw error;
       const parent = dirname(candidate);
@@ -1010,7 +1036,8 @@ async function walkGitMarkers(
       if (
         code !== "ENOENT" &&
         code !== "ENOTDIR" &&
-        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
+        (search !== "outermost" ||
+          !["EACCES", "EPERM", "ELOOP"].includes(code ?? ""))
       )
         throw error;
     }
@@ -1074,7 +1101,10 @@ function expandHome(value: string): string {
   if (value.startsWith("~/") || value.startsWith("~\\")) {
     const separators =
       sep === "/" && value.startsWith("~/") ? /^\/+/ : /^[/\\]+/;
-    return resolve(homedir(), value.slice(2).replace(separators, ""));
+    const suffix = value.slice(2).replace(separators, "");
+    const home = homedir();
+    if (process.platform === "win32") return resolve(home, suffix);
+    return home === "" ? resolveTargetPath(suffix) : `${home}${sep}${suffix}`;
   }
   return value;
 }

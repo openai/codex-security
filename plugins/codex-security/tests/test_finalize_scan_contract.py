@@ -1202,7 +1202,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         source_file = self.scan_dir / "source-file"
         source_file.write_text("not a directory\n", encoding="utf-8")
         for source_root in (self.scan_dir / "missing-source", source_file):
-            with self.subTest(source_root=source_root):
+            with self.subTest(source_root=str(source_root)):
                 result = self.run_finalizer(
                     "--export-format", "sarif", "--source-root", str(source_root)
                 )

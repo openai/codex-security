@@ -60,6 +60,7 @@ import {
 import {
   classifyConnectionFailure,
   initialCredentialsAvailable,
+  listRepositoryFindings,
 } from "../src/api.js";
 import {
   OperationTelemetry,
@@ -575,6 +576,43 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test.skipIf(process.platform === "win32")(
+    "Node preflight preserves physical repository and scope paths",
+    async () => {
+      const root = await temporaryDirectory();
+      // Bun's realpath collapses parent traversal before resolving symlinks.
+      const source = new URL(
+        "./fixtures/target-paths-node.ts",
+        import.meta.url,
+      );
+      const built = await Bun.build({
+        entrypoints: [fileURLToPath(source)],
+        target: "node",
+        format: "esm",
+        packages: "external",
+        define: {
+          "import.meta.url": JSON.stringify(
+            new URL("../src/api.ts", import.meta.url).href,
+          ),
+        },
+      });
+      expect(built.success).toBe(true);
+      await symlink(
+        fileURLToPath(new URL("../node_modules", import.meta.url)),
+        join(root, "node_modules"),
+        "dir",
+      );
+      const module = join(root, "target-paths.mjs");
+      await writeFile(module, await built.outputs[0]!.text());
+      const exportRoot = await temporaryDirectory();
+      execFileSync(nodeCommand().command, [module, root, exportRoot], {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, HOME: root, USERPROFILE: root },
+      });
+    },
+  );
+
   test("preflights local inputs without initializing runtime or credentials", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -616,6 +654,13 @@ describe("CodexSecurity orchestration", () => {
         maxTimeHours: "default",
       },
       outputDir: output,
+      stateDirectory: join(
+        root,
+        "ambient",
+        "state",
+        "plugins",
+        "codex-security",
+      ),
       authentication: {
         method: "api_key",
         source: "OPENAI_API_KEY",
@@ -643,6 +688,36 @@ describe("CodexSecurity orchestration", () => {
     expect(prepareRuntime).not.toHaveBeenCalled();
     await expect(stat(output)).rejects.toThrow();
     await client.close();
+  });
+
+  test("checks default storage without creating state or scan directories", async () => {
+    const { root, repository } = await repositoryDirectories();
+    const state = join(root, "private", "state");
+    const { client, prepareRuntime } = localClient(
+      {},
+      { CODEX_SECURITY_STATE_DIR: state },
+    );
+    try {
+      await expect(client.preflight(repository)).resolves.toMatchObject({
+        outputDir: null,
+        stateDirectory: state,
+      });
+      expect(existsSync(join(root, "private"))).toBe(false);
+      await mkdir(dirname(state));
+      await writeFile(state, "not a directory");
+      await expect(client.preflight(repository)).rejects.toThrow(
+        /CODEX_SECURITY_STATE_DIR/,
+      );
+      await rm(state);
+      await mkdir(state);
+      await writeFile(join(state, "scans"), "not a directory");
+      await expect(client.preflight(repository)).rejects.toThrow(
+        /Persistent scan output must use real directories/,
+      );
+      expect(prepareRuntime).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+    }
   });
 
   test("reports configured model and reasoning during local-only preflight", async () => {
@@ -14224,9 +14299,38 @@ if __name__ == "__main__":
     },
   );
 
+  test("discards partial findings when a repository projection becomes unavailable", async () => {
+    const pages: JsonObject[] = [
+      { findings: [{ findingId: "first-page" }], nextOffset: 1 },
+      { findings: [], projectionAvailable: false, nextOffset: null },
+    ];
+    const commands: Array<readonly string[]> = [];
+    expect(
+      await listRepositoryFindings(async (args) => {
+        commands.push(args);
+        return pages[commands.length - 1]!;
+      }, "target_sha256_example"),
+    ).toBeUndefined();
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toEqual([...commands[0]!, "--offset", "1"]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [], projectionAvailable: true }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+    expect(
+      await listRepositoryFindings(
+        async () => ({ findings: [] }),
+        "target_sha256_example",
+      ),
+    ).toEqual([]);
+  });
+
   test.each([
     ["semantic matching fails", "matcher", "matcher unavailable"],
     ["the repository index fails", "index", "index unavailable"],
+    ["the repository projection is unavailable", "projection", undefined],
     ["a cost limit still allows false-positive matching", "budget", undefined],
     [
       "cost-limited matching needs additional context",
@@ -14482,6 +14586,9 @@ if __name__ == "__main__":
             if (args[0] === "list-global-findings") {
               expect(progressSignal?.aborted).toBe(true);
               if (failure === "index") throw new Error("index unavailable");
+              if (failure === "projection") {
+                return { findings: [], projectionAvailable: false };
+              }
               if (
                 failure === "dismissed" ||
                 failure === "managed" ||
@@ -14704,16 +14811,26 @@ if __name__ == "__main__":
               ? []
               : undefined,
         );
-        expect(modelCalled).toBe(failure !== "index");
+        expect(modelCalled).toBe(
+          failure !== "index" && failure !== "projection",
+        );
         expect(observedSingleTurn).toBe(
-          failure === "index" ? undefined : limited,
+          failure === "index" || failure === "projection" ? undefined : limited,
         );
         expect(matchingTurns).toBe(
-          failure === "index" || failure === "matcher" || failure === "managed"
+          failure === "index" ||
+            failure === "projection" ||
+            failure === "matcher" ||
+            failure === "managed"
             ? 0
             : 1,
         );
-        if (failure === "budget-context") {
+        if (failure === "projection") {
+          expect(
+            result.findings.findings.map(({ findingId }) => findingId),
+          ).toContain(current.findingId);
+        } else if (failure === "budget-context") {
+          expect(matchingTurns).toBe(1);
           expect(matched).toBe(false);
         }
         expect(commands.some(([command]) => command === "complete-scan")).toBe(
