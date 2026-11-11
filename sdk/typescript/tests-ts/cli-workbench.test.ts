@@ -1737,9 +1737,12 @@ describe("CLI workbench", () => {
   test("reruns canonical recipes with exact config, policy, plugin, and lineage", async () => {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     const onTurn = mock<(repository: string, options: ScanOptions) => void>();
-    const knowledgeRoot = await temporaryDirectory("rerun-knowledge-");
+    const root = await temporaryDirectory("rerun-recipe-");
     try {
-      const knowledgeBasePath = join(knowledgeRoot, "security.md");
+      const repository = join(root, "repository");
+      await mkdir(join(repository, "src"), { recursive: true });
+      await mkdir(join(repository, "packages", "core"), { recursive: true });
+      const knowledgeBasePath = join(root, "security.md");
       await writeFile(knowledgeBasePath, "Synthetic architecture context.\n");
       const savedConfig = {
         approval_policy: "on-request",
@@ -1758,7 +1761,7 @@ describe("CLI workbench", () => {
             onWorkbench: () => ({
               scanId: "scan-original",
               recipe: {
-                repository: "/original/repository",
+                repository,
                 target: { kind: "paths", paths: ["src", "packages/core"] },
                 mode: "deep",
                 pluginVersion: "1.2.3",
@@ -1778,7 +1781,7 @@ describe("CLI workbench", () => {
         ),
       ).toBe(0);
       expect(onConfig.mock.lastCall?.[0]?.codexOverrides).toEqual(savedConfig);
-      expect(onTurn.mock.lastCall?.[0]).toBe("/original/repository");
+      expect(onTurn.mock.lastCall?.[0]).toBe(repository);
       expect(onTurn.mock.lastCall?.[1]).toMatchObject({
         target: ["src", "packages/core"],
         mode: "deep",
@@ -1793,7 +1796,7 @@ describe("CLI workbench", () => {
         maxTimeHours: 1.5,
       });
     } finally {
-      await rm(knowledgeRoot, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
     }
 
     const references: Array<[JsonObject, ReturnType<typeof DiffTarget.refs>]> =

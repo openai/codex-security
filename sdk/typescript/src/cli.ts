@@ -7083,11 +7083,21 @@ export async function main(
           if (options.records)
             throw new CodexSecurityError("Use validate --records alone.");
           if (options.knowledgeBase.length > 0) {
-            knowledgeBase = await prepareKnowledgeBase(
-              options.knowledgeBase.map((path) =>
-                resolveCliPath(dependencies.currentDirectory(), path),
-              ),
+            const directory = dependencies.currentDirectory();
+            const checkout = await gitMarkerRoot(
+              directory,
+              undefined,
+              "nearest",
             );
+            const paths = options.knowledgeBase.map((path) =>
+              resolveCliPath(directory, path),
+            );
+            const snapshot = await readKnowledgeBaseSnapshot(
+              paths,
+              undefined,
+              checkout ? [checkout] : [],
+            );
+            knowledgeBase = await prepareKnowledgeBase(snapshot);
           }
           exitCode = await runSkill(
             "validation",
@@ -11909,6 +11919,7 @@ async function executeScan(
       options.knowledgeBaseSnapshot = await readKnowledgeBaseSnapshot(
         options.knowledgeBasePaths,
         preparationAbortController.signal,
+        resolve(directory, expandHome(repository)),
       );
     }
     if (arguments_.rerunInputIdentity !== undefined) {
