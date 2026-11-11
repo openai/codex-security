@@ -24,7 +24,7 @@ export interface ScanSeverityClassification extends SeverityClassification {
 }
 
 export interface ClassifyScanSeverityOptions extends ClassifySeverityOptions {
-  /** Exact selection, such as dedupe's uniqueFindingIds. Omit to classify all findings. */
+  /** Exact selection, such as dedupe's scanRepresentativeFindingIds. Omit to classify all findings. */
   findingIds?: readonly string[];
   /** Reclassify selected findings even when their saved assessment matches the inputs. */
   reprocess?: boolean;

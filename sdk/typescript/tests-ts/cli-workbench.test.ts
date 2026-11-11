@@ -55,12 +55,16 @@ describe("CLI workbench", () => {
         fs.stat(replacementPath, { bigint: true }),
       ]);
       expect(actual.ino).not.toBe(replacement.ino);
-      for (const includeMatchingAlias of [false, true]) {
+      for (const [suffix, includeMatchingAlias] of [
+        ["", false],
+        ["", true],
+        ["removed", false],
+      ] as const) {
         const calls: Array<readonly string[]> = [];
         const stdout = captureCli(main, "stdout");
         expect(
           await stdout.run(
-            ["findings", "list", alias, "--json"],
+            ["findings", "list", join(alias, suffix), "--json"],
             dependencies({
               onWorkbench: (args): JsonObject => {
                 calls.push(args);
@@ -69,7 +73,7 @@ describe("CLI workbench", () => {
                       repositories: [
                         {
                           targetId: "unrelated",
-                          targetPath: replacementPath,
+                          targetPath: join(replacementPath, suffix),
                         },
                         ...(includeMatchingAlias
                           ? [{ targetId: "selected", targetPath: savedAlias }]
@@ -99,12 +103,74 @@ describe("CLI workbench", () => {
             : []),
         ]);
         expect(JSON.parse(stdout.text())).toEqual({
-          repository: alias,
+          repository: join(alias, suffix),
           findings: includeMatchingAlias ? [{ title: "selected finding" }] : [],
         });
       }
     },
   );
+  test("findings list resolves parent paths after the checkout is removed", async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "finding-removed-checkout-",
+    );
+    const root = temp.path;
+    const repository = join(root, "repository");
+    const directory = join(root, "tools");
+    await mkdir(repository);
+    await mkdir(directory);
+    await rm(repository, { recursive: true });
+    const requests: [string, string][] = [
+      [repository, repository],
+      ["../repository", repository],
+    ];
+    if (process.platform !== "win32") {
+      const moved = join(root, "moved");
+      await mkdir(join(moved, "child"), { recursive: true });
+      await symlink(join(moved, "child"), join(directory, "link"));
+      await symlink(root, join(moved, "archive"));
+      requests.push([
+        "link/../archive/repository",
+        join(moved, "archive", "repository"),
+      ]);
+    }
+    for (const [requested, displayed] of requests) {
+      const calls: Array<readonly string[]> = [];
+      const stdout = captureCli(main, "stdout");
+      expect(
+        await stdout.run(
+          ["findings", "list", requested, "--json"],
+          dependencies({
+            currentDirectory: directory,
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              return args[0] === "list-repositories"
+                ? {
+                    repositories: [
+                      { targetId: "saved", targetPath: repository },
+                    ],
+                  }
+                : {
+                    findings: [{ title: "Saved finding" }],
+                    nextOffset: null,
+                  };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls[1]).toEqual([
+        "list-global-findings",
+        "--target-id",
+        "saved",
+        "--status",
+        "open",
+      ]);
+      expect(JSON.parse(stdout.text())).toEqual({
+        repository: displayed,
+        findings: [{ title: "Saved finding" }],
+      });
+    }
+  });
+
   test("findings list matches directory identity when realpath preserves alias spelling", async () => {
     const root = await temporaryDirectory("finding-repository-identity-");
     const originalRealpath = fs.realpath;
@@ -317,6 +383,7 @@ describe("CLI workbench", () => {
                         findings: [
                           {
                             title: "Saved finding",
+                            occurrenceId: "occ_sample_copyable",
                             severity: "high",
                             path: "source.ts:1",
                           },
@@ -332,6 +399,7 @@ describe("CLI workbench", () => {
               findings: [
                 {
                   title: "Saved finding",
+                  occurrenceId: "occ_sample_copyable",
                   severity: "high",
                   path: "source.ts:1",
                 },
@@ -340,9 +408,35 @@ describe("CLI workbench", () => {
           } else {
             expect(stdout.text()).toContain(basename(requested!));
             expect(stdout.text()).toContain("Saved finding");
+            expect(stdout.text()).toContain("occ_sample_copyable");
           }
         }
       }
+    },
+  );
+  test.each([false, true])(
+    "distinguishes missing repository history from an empty finding list in the terminal (scanned=%j)",
+    async (scanned) => {
+      const repository = resolve("/sample/repository");
+      const deps = dependencies({
+        currentDirectory: repository,
+        onWorkbench: (args): JsonObject =>
+          args[0] === "list-repositories"
+            ? {
+                repositories: scanned
+                  ? [{ targetId: "repo", targetPath: repository }]
+                  : [],
+              }
+            : { findings: [], nextOffset: null },
+      });
+      const tty = captureCli(main, "stdout", true);
+      expect(await tty.run(["findings", "list"], deps)).toBe(0);
+      expect(tty.text()).toContain(
+        scanned ? "0 open findings" : `No saved scan for ${repository}`,
+      );
+      const json = captureCli(main, "stdout");
+      expect(await json.run(["findings", "list", "--json"], deps)).toBe(0);
+      expect(JSON.parse(json.text())).toEqual({ repository, findings: [] });
     },
   );
   test("lists and summarizes open findings for the current repository", async () => {

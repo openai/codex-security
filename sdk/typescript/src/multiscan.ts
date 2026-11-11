@@ -68,6 +68,7 @@ import {
   normalizeTarget,
   UNSUPPORTED_GIT_ENVIRONMENT,
   relativePathIsOutside,
+  resolveTargetPath,
   type ScanMode,
 } from "./targets.js";
 import {
@@ -194,7 +195,7 @@ export async function runMultiscan(
   }
   const tasks = parseInventory(
     await readFile(options.inputPath, "utf8"),
-    dirname(resolve(options.inputPath)),
+    dirname(resolveTargetPath(options.inputPath)),
     options.mode,
   );
   for (const mode of new Set(tasks.map((task) => task.mode))) {
@@ -1841,9 +1842,10 @@ function parseInventory(
     ) {
       throw new Error("Multiscan scope must stay inside its repository.");
     }
+    const repository = normalizeRepository(get("repository"), directory);
     return {
       id,
-      repository: normalizeRepository(get("repository"), directory),
+      repository,
       revision,
       mode: mode as ScanMode,
       ...(scope ? { scope } : {}),
@@ -1860,7 +1862,7 @@ function normalizeRepository(repository: string, directory: string): string {
   }
   if (/^[^@\s/:]+@[^:\s/]+:.+$/u.test(repository)) return repository;
   if (!repository.includes("://")) {
-    const path = resolve(directory, repository);
+    const path = resolveTargetPath(repository, directory);
     if (process.platform !== "win32") return path;
     try {
       return realpathSync.native(path);
