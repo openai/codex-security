@@ -629,7 +629,7 @@ available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an importe
 scan uses `SCAN_IMPORT_FAILED` if the import fails. YAML and TOON failures remain
 on stderr without `--full-output`, or when retained results are unavailable.
 
-Scan argument errors with `--full-output` and JSON or JSONL use an `ok: false`
+Argument and execution errors with `--full-output` and JSON or JSONL use an `ok: false`
 envelope with `error.code` and `error.message`. Command schema validation errors
 with JSON or JSONL retain their field details and name missing or invalid
 options by their CLI flags. Diagnostics stay on stderr.
@@ -2809,10 +2809,19 @@ retain exit codes `130` and `143` without a result.
 
 Start with `codex-security --help` for the task groups and shared output and agent options. Each command’s help shows its inputs and supported output formats. Use `import --help` to choose between a live collector, a saved scanner report, and a Codex Security CSV or JSON export.
 
-Use `--llms` for the command manifest, `--llms-full` for argument details, and `scan --schema --format json` for the scan schema. The manifests and shell completion include `scan import` alongside the ordinary `scan [repository]` command. Generate completions with `completions bash|fish|nushell|zsh`. Scan output supports
+Use `--llms` for the command manifest, `--llms-full` for argument details, and `scan --schema --format json` for the scan schema. The manifests and shell completion include `scan import` alongside the ordinary `scan [repository]` command. Generate completions with `completions bash|fish|nushell|zsh`. Add `--json` to return the generated script as a JSON string. The same option returns the menu text when an omitted command or subcommand displays help. With `--full-output`, the text is in `data`. Scan output supports
 `--format toon|json|yaml|jsonl` and `--full-output`. The existing `--format`,
 `--filter-output`, `--token-limit`, and `--token-offset` options accept either
 `--option value` or `--option=value`.
+
+`--token-limit` and `--token-offset` take nonnegative integers and select a
+text view of the formatted result. Truncated JSON and JSONL views are returned
+as a JSON string containing the excerpt and its token range. With
+`--full-output`, the excerpt is in `data` and `meta.nextOffset` identifies
+the next page when more tokens are available. `--token-count` returns the
+estimated size instead. A failed full-output JSON or JSONL response always
+retains its error code and message. If the failure carries result data,
+`--token-count` reports its size in `meta.tokenCount`.
 
 `skills add` syncs generated CLI command guidance; it does not install the full
 Codex Security plugin. `mcp add` registers the CLI as an MCP server, exposing

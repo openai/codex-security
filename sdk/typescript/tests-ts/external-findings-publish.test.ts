@@ -952,6 +952,12 @@ test("an entirely excluded report fails with all positions intact and a short di
     data: expect.any(String),
     meta: { nextOffset: 5 },
   });
+  const counted = createCliTest(main);
+  expect(await counted.runCli([...flags, "--token-count"], f.cliDeps)).toBe(2);
+  const count = JSON.parse(counted.stdout.text());
+  expect(count.error).toEqual(failure.error);
+  expect(count.meta.tokenCount).toBeGreaterThan(5);
+  expect(count).not.toHaveProperty("data");
   expect(f.posts).toHaveLength(0);
 });
 
