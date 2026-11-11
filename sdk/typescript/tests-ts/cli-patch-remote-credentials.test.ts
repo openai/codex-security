@@ -1,6 +1,7 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   completePatches,
@@ -13,6 +14,76 @@ import {
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+
+test.each(["initial", "resume", "changed before push"] as const)(
+  "refuses a local receiver alongside a hosted push destination (%s)",
+  async (stage) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const receiver = join(directory, "receiver.git");
+    git("init", "--bare", receiver);
+    await writeFile(
+      join(receiver, "hooks", "pre-receive"),
+      "#!/bin/sh\nprintf ran > receiver-ran\n",
+      { mode: 0o755 },
+    );
+    const hosted = "git://127.0.0.1:1/team/repository.git";
+    git("remote", "set-url", "origin", hosted);
+    const local =
+      process.platform === "win32" ? receiver : pathToFileURL(receiver).href;
+    if (stage !== "changed before push")
+      git("config", "--add", "remote.origin.pushurl", local);
+    git("config", "--add", "remote.origin.pushurl", hosted);
+    const branch = "codex-security/patch-scan-1";
+    if (stage !== "initial") {
+      git("branch", branch);
+      git(
+        "config",
+        `branch.${branch}.codexSecurityPatchCommit`,
+        git("rev-parse", "HEAD"),
+      );
+    }
+    const model = mock(async () => 0);
+    const outcome = await runWorkflow(
+      stage !== "initial"
+        ? ["patch", "--resume-pr", branch, "--json"]
+        : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        environment: {
+          GITLAB_HOST: "127.0.0.1:1",
+          GIT_ALLOW_PROTOCOL: "git:file",
+        },
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onCodex: model,
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command !== "git") return "";
+          if (stage === "changed before push" && args.includes("push"))
+            git("config", "--replace-all", "remote.origin.pushurl", local);
+          return runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: {
+              GIT_ALLOW_PROTOCOL: "git:file",
+              ...options?.environment,
+            },
+          });
+        },
+      },
+      { localHosting: false },
+    );
+    expect(
+      await readFile(join(receiver, "receiver-ran"), "utf8").catch(() => ""),
+    ).toBe("");
+    expect(git("--git-dir", receiver, "for-each-ref")).toBe("");
+    expect(outcome.exitCode).toBe(2);
+    expect(outcome.stderr).toContain(
+      stage === "changed before push"
+        ? "transport 'file' not allowed"
+        : "network push URL",
+    );
+    expect(model).not.toHaveBeenCalled();
+  },
+);
 
 test.each(["github.example.test", "gitlab.com"])(
   "keeps remote credentials in Git configuration for %s",
