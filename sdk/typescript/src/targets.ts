@@ -984,7 +984,7 @@ export async function gitMarkerRoot(
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let candidate = resolve(repository);
+  let candidate = resolveTargetPath(repository);
   let current: string;
   while (true) {
     try {
