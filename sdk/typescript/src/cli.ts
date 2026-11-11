@@ -1504,6 +1504,8 @@ interface CliDependencies {
 }
 
 // Apply coordinator-owned Git bindings after native shell environment filtering.
+const snapshotCredentialName =
+  /(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK)(?:_FILE)?$/iu;
 const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
 const { readSync, writeSync } = require("node:fs");
@@ -1535,10 +1537,9 @@ for (const [name, value] of bindings) {
   else process.env[name] = value;
 }
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
-if (stripAwsCredentials) {
-  for (const name of Object.keys(process.env)) {
-    if (/^AWS_/i.test(name)) delete process.env[name];
-  }
+for (const name of Object.keys(process.env)) {
+  if (${snapshotCredentialName}.test(name) || (stripAwsCredentials && /^AWS_/i.test(name)))
+    delete process.env[name];
 }
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
@@ -1655,6 +1656,7 @@ export async function runRepositoryCommand(
       for (const name of Object.keys(environment)) {
         if (
           name.toUpperCase() === "CODEX_HOME" ||
+          snapshotCredentialName.test(name) ||
           (sandbox.stripAwsCredentials && /^AWS_/i.test(name)) ||
           credentialVariables.some(
             (key) => key.toUpperCase() === name.toUpperCase(),
@@ -9384,28 +9386,108 @@ type SavedPatchPublication = Awaited<
   ReturnType<typeof prepareSavedPatchPublication>
 >;
 
+interface SavedPatchTrees {
+  tree: string;
+  filteredInputs?: Map<string, string>;
+  changedDuringCapture?: Set<string>;
+}
+
 async function prepareSavedPatchPublication(
   repository: string,
   dependencies: CliDependencies,
   worktree: string,
+  root: string,
 ) {
   const git = (args: string[], options?: { trim?: boolean; input?: string }) =>
     dependencies.runRepositoryCommand("git", args, repository, options);
   const parent = await git(["rev-parse", "HEAD"]);
   const parentTree = await git(["rev-parse", parent + "^{tree}"]);
   let tree = parentTree;
+  // Capture the input to clean filters separately. An operator's filter can
+  // produce different blobs each time Git stages identical worktree bytes.
+  const keys = await dependencies.runRepositoryCommand(
+    "git",
+    ["config", "--includes", "--null", "--name-only", "--list"],
+    repository,
+    { trim: false, environment: { GIT_CONFIG: undefined } },
+  );
+  const filterDrivers = new Set(
+    keys.split("\0").flatMap((key) => {
+      const match = /^(filter\..+)\.(?:clean|process)$/u.exec(key);
+      return match ? [match[1]!] : [];
+    }),
+  );
+  const filteredInputs = async () => {
+    const inputs = new Map<string, string>();
+    if (!filterDrivers.size) return inputs;
+    const paths = await patchGitRecords(
+      root,
+      [
+        "-C",
+        root,
+        "-c",
+        "core.fsmonitor=false",
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--deduplicate",
+        "-z",
+      ],
+      dependencies,
+    );
+    const attrs = await patchGitRecords(
+      root,
+      [
+        "-C",
+        root,
+        "-c",
+        "core.fsmonitor=false",
+        "check-attr",
+        "-z",
+        "--stdin",
+        "filter",
+      ],
+      dependencies,
+      {
+        input: Buffer.from(paths.join("\0"), "latin1"),
+      },
+    );
+    for (let i = 0; i + 2 < attrs.length; i += 3) {
+      const path = attrs[i]!;
+      const driver = patchPathText(attrs[i + 2]!);
+      if (!filterDrivers.has("filter." + driver)) continue;
+      const metadata = await lstat(patchFilePath(root, path)).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR")
+            return undefined;
+          throw error;
+        },
+      );
+      if (!metadata?.isFile()) continue;
+      const hash = await hashPublicationFile(root, path);
+      if (hash === undefined && metadata.size !== 0)
+        throw new CodexSecurityError(
+          "Cannot verify the input to a Git clean filter.",
+        );
+      inputs.set(
+        path,
+        JSON.stringify([driver, metadata.mode & 0o111, hash ?? ""]),
+      );
+    }
+    return inputs;
+  };
+  let verifiedInputs: Map<string, string> | undefined;
 
-  // Git quotes arbitrary path bytes the same way in a raw diff and --index-info.
   const diff = async (
     from: string,
     to?: string,
     paths: readonly string[] = [],
     previous?: Map<string, string>,
   ) => {
-    const output = await git(
+    const output = await patchGitRecords(
+      repository,
       [
-        "-c",
-        "core.quotePath=true",
         "--literal-pathspecs",
         "diff",
         "--no-relative",
@@ -9413,62 +9495,108 @@ async function prepareSavedPatchPublication(
         "--ignore-submodules=none",
         "--raw",
         "--no-abbrev",
+        "-z",
         ...(to === undefined
           ? ["--cached", "--ita-visible-in-index", from]
           : [from, to]),
         "--",
         ...paths,
       ],
-      { trim: false },
+      dependencies,
     );
-    return new Map(
-      output
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => {
-          const [metadata, path] = line.split("\t");
-          const [oldMode, mode, oldOid, oid] = metadata!.split(" ");
-          previous?.set(path!, `${oldMode!.slice(1)} ${oldOid}`);
-          return [path!, `${mode} ${oid}`];
-        }),
-    );
+    const changes = new Map<string, string>();
+    for (let i = 0; i + 1 < output.length; i += 2) {
+      const [oldMode, mode, oldOid, oid] = output[i]!.split(" ");
+      const path = output[i + 1]!;
+      previous?.set(path, `${oldMode!.slice(1)} ${oldOid}`);
+      changes.set(path, `${mode} ${oid}`);
+    }
+    return changes;
   };
   const dirty = new Set([
     ...(await diff(parent, worktree)).keys(),
     ...(await diff(parent)).keys(),
   ]);
-  const ignoredOutput = await git(
-    [
-      "-c",
-      "core.quotePath=true",
-      "ls-files",
-      "--full-name",
-      "--others",
-      "--ignored",
-      "--exclude-standard",
-      "--",
-      ".",
-    ],
-    { trim: false },
+  const ignored = new Set(
+    await patchGitRecords(
+      repository,
+      [
+        "ls-files",
+        "--full-name",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+        ".",
+      ],
+      dependencies,
+    ),
   );
-  const ignored = new Set(ignoredOutput.split("\n"));
 
+  const apply = (base: string, changes: Map<string, string>) =>
+    withPatchIndex(repository, dependencies, async (run) => {
+      // Remove leaves before adding their replacements when a file becomes a directory.
+      const records = [...changes]
+        .map(([path, entry]) => `${entry}\t${path}\0`)
+        .sort();
+      await run(["read-tree", base]);
+      await run(
+        ["update-index", "-z", "--index-info"],
+        Buffer.from(records.join(""), "latin1"),
+      );
+      return run(["write-tree"]);
+    });
+  const capture = async (
+    snapshot: () => Promise<string>,
+  ): Promise<SavedPatchTrees> => {
+    if (!filterDrivers.size) return { tree: await snapshot() };
+    const before = await filteredInputs();
+    verifiedInputs ??= new Map(before);
+    const tree = await snapshot();
+    const after = await filteredInputs();
+    const changedDuringCapture = new Set(
+      [...before.keys(), ...after.keys()].filter(
+        (path) => before.get(path) !== after.get(path),
+      ),
+    );
+    return { tree, filteredInputs: after, changedDuringCapture };
+  };
   return {
     parent,
+    capture,
     get tree() {
       return tree;
     },
-    async record(paths: string[], before: string, after: string) {
+    async record(
+      paths: string[],
+      before: SavedPatchTrees,
+      after: SavedPatchTrees,
+    ) {
       const changes = paths.length
-        ? await diff(before, after, paths)
+        ? await diff(before.tree, after.tree, paths)
         : new Map<string, string>();
-      if (!changes.size)
-        return "The reported patch files contain no changes from this finding.";
       // A move may be reported under its new name. Include its deleted source
       // only if the full turn contains exactly one removal and one addition
       // of the same mode and object. Never select neighboring directory leaves.
       const previous = new Map<string, string>();
-      const turn = await diff(before, after, ["."], previous);
+      const turn = await diff(before.tree, after.tree, ["."], previous);
+      const filtered = (path: string) =>
+        before.filteredInputs?.has(path) || after.filteredInputs?.has(path);
+      for (const path of turn.keys()) {
+        if (
+          filtered(path) &&
+          before.filteredInputs?.get(path) ===
+            after.filteredInputs?.get(path) &&
+          previous.get(path)?.split(" ")[0] === turn.get(path)?.split(" ")[0]
+        ) {
+          // Only the clean-filter output changed during this finding.
+          changes.delete(path);
+          turn.delete(path);
+        }
+      }
+      if (!changes.size)
+        return "The reported patch files contain no changes from this finding.";
       const additions = new Map<string, string | null>();
       const deletions = new Map<string, string | null>();
       for (const [path, entry] of turn) {
@@ -9483,39 +9611,57 @@ async function prepareSavedPatchPublication(
         if (from && to && changes.has(to)) changes.set(from, turn.get(from)!);
       }
       const changed = [...changes.keys()];
+      if (
+        changed.some(
+          (path) =>
+            before.changedDuringCapture?.has(path) ||
+            after.changedDuringCapture?.has(path),
+        )
+      )
+        return "The selected files changed while capturing the verified patch. Local edits were kept for review.";
       if (changed.some((path) => ignored.has(path)))
         return `Cannot publish files with uncommitted changes before patching: ${changed.filter((path) => ignored.has(path)).join(", ")}. The files were ignored and untracked before patching. Local edits were kept for review.`;
       if (changed.some((path) => dirty.has(path)))
         return `Cannot publish files with uncommitted changes before patching: ${changed.filter((path) => dirty.has(path)).join(", ")}. The selected files contain pre-existing changes. Local edits were kept for review.`;
-      const prior = await diff(tree, before);
-      if (changed.some((path) => prior.has(path)))
+      const prior = await diff(tree, before.tree);
+      if (
+        changed.some((path) =>
+          before.filteredInputs?.has(path) || verifiedInputs?.has(path)
+            ? before.filteredInputs?.get(path) !== verifiedInputs?.get(path)
+            : prior.has(path),
+        )
+      )
         return "The selected files contain earlier unverified changes. Local edits were kept for review.";
-      // Remove leaves before adding their replacements when a file changes into a directory.
-      const records = [...changes]
-        .map(([path, entry]) => `${entry}\t${path}\n`)
-        .sort();
-      const next = await withPatchIndex(
-        repository,
-        dependencies,
-        async (run) => {
-          await run(["read-tree", tree]);
-          await run(["update-index", "--index-info"], records.join(""));
-          return run(["write-tree"]);
-        },
-      );
+      const next = await apply(tree, changes);
       const applied = await diff(tree, next);
       if (
         applied.size !== changes.size ||
         changed.some((path) => applied.get(path) !== changes.get(path))
       )
         return "The selected changes also replace an unreported path. Local edits were kept for review.";
+      for (const path of changed) {
+        const input = after.filteredInputs?.get(path);
+        if (input === undefined) verifiedInputs?.delete(path);
+        else verifiedInputs?.set(path, input);
+      }
       tree = next;
       return undefined;
     },
-    async verifyWorktree(currentTree: string) {
+    async verifyWorktree(currentTree: () => Promise<string>) {
       const verified = await diff(parent, tree);
-      const later = await diff(tree, currentTree);
-      if ([...verified.keys()].some((path) => later.has(path)))
+      const later = await diff(tree, await currentTree());
+      const inputs = verifiedInputs?.size ? await filteredInputs() : undefined;
+      if (
+        [...verified].some(([path, entry]) => {
+          const input = verifiedInputs?.get(path);
+          if (input === undefined) return later.has(path);
+          return (
+            inputs?.get(path) !== input ||
+            (later.has(path) &&
+              later.get(path)!.split(" ")[0] !== entry.split(" ")[0])
+          );
+        })
+      )
         throw new CodexSecurityError(
           "The working tree differs from the verified changes. Local edits were kept for review.",
         );
@@ -9527,7 +9673,7 @@ async function withPatchIndex<T>(
   repository: string,
   dependencies: CliDependencies,
   operation: (
-    git: (args: string[], input?: string) => Promise<string>,
+    git: (args: string[], input?: string | Uint8Array) => Promise<string>,
   ) => Promise<T>,
 ): Promise<T> {
   const root = await mkdtemp(
@@ -9922,6 +10068,7 @@ async function patchTransportEnvironment(
   repository: string,
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv = {},
+  pushing = false,
 ): Promise<NodeJS.ProcessEnv> {
   if (remotes.some((remote) => remote.startsWith("git://"))) {
     const override = environmentEntry(
@@ -9960,14 +10107,6 @@ async function patchTransportEnvironment(
         environment = { ...environment, GIT_PROXY_COMMAND: "" };
     }
   }
-  if (!remotes.some((remote) => /^https?:\/\//u.test(remote)))
-    return environment;
-  // Git accumulates credential helpers until an empty helper resets them.
-  const entries = await patchScopedConfig(
-    "^((http|credential)\\..*|core\\.askpass)$",
-    repository,
-    dependencies,
-  );
   const pinned = { ...environment };
   let count = Number(
     environment["GIT_CONFIG_COUNT"] ??
@@ -9977,7 +10116,17 @@ async function patchTransportEnvironment(
   const set = (key: string, value: string) => {
     pinned[`GIT_CONFIG_KEY_${count}`] = key;
     pinned[`GIT_CONFIG_VALUE_${count++}`] = value;
+    pinned["GIT_CONFIG_COUNT"] = String(count);
   };
+  // An empty command-scope value clears every inherited server-side push option.
+  if (pushing) set("push.pushOption", "");
+  if (!remotes.some((remote) => /^https?:\/\//u.test(remote))) return pinned;
+  // Git accumulates credential helpers until an empty helper resets them.
+  const entries = await patchScopedConfig(
+    "^((http|credential)\\..*|core\\.askpass)$",
+    repository,
+    dependencies,
+  );
   set("credential.helper", "");
   set("core.askPass", "");
   for (let i = 0; i + 2 < entries.length; i += 3) {
@@ -10006,7 +10155,6 @@ async function patchTransportEnvironment(
       );
     }
   }
-  pinned["GIT_CONFIG_COUNT"] = String(count);
   return pinned;
 }
 
@@ -11308,6 +11456,7 @@ async function publishPatchBranch(
             remotes.some(isSshPatchRemote)
               ? { GIT_SSH_COMMAND: await getSshCommand() }
               : {},
+            true,
           ),
         },
       );
@@ -11831,10 +11980,11 @@ async function createPatchPullRequest(
         throwIfNoEntry: false,
       })?.isDirectory()
     );
-  const stagePaths = selectedFiles.filter(
+  const stagingCandidates = [...new Set([...selectedFiles, ...reportedFiles])];
+  const stagePaths = stagingCandidates.filter(
     (file) =>
       !isDeleted(file) &&
-      !selectedFiles.some((parent) => {
+      !stagingCandidates.some((parent) => {
         const descendant = relativePatchPath(parent, file);
         return (
           descendant !== "" && !isDeleted(parent) && !isOutsidePath(descendant)
@@ -11992,8 +12142,8 @@ async function createPatchPullRequest(
     await checkPatchReflogs(repository, dependencies);
     await run(["switch", "-c", branch]);
     if (publication.verified)
-      await publication.verified.verifyWorktree(
-        await snapshotPatchTree(repository, dependencies),
+      await publication.verified.verifyWorktree(() =>
+        snapshotPatchTree(repository, dependencies),
       );
     await withPatchGitIndex(
       indexCommand(false),
@@ -12119,10 +12269,9 @@ async function requireCleanPatchPullRequestBase(
   }
 }
 
-interface GitPatchState {
+interface GitPatchState extends SavedPatchTrees {
   root: string;
   context: Awaited<ReturnType<typeof patchCommandContext>>;
-  tree: string;
   // Git path keys use Latin-1 to retain every byte, including non-UTF-8 names.
   trees: Map<string, string>;
   files: Map<string, string>;
@@ -12144,6 +12293,7 @@ async function changedPatchFiles(
   dependencies: CliDependencies,
   dirtyFiles?: Set<string>,
   retainTrees = false,
+  verified?: SavedPatchPublication,
 ): Promise<{
   files: string[];
   keys: string[];
@@ -12172,6 +12322,7 @@ async function changedPatchFiles(
     retainTrees,
     undefined,
     base.context,
+    verified,
   );
   if (dirtyFiles?.size) {
     const renamed = Buffer.from(
@@ -12301,6 +12452,7 @@ async function snapshotPatchState(
   repository: string,
   dependencies: CliDependencies,
   signal?: AbortSignal,
+  verified?: SavedPatchPublication,
 ): Promise<GitPatchState | Map<string, string>> {
   let root: string;
   try {
@@ -12325,6 +12477,8 @@ async function snapshotPatchState(
     repository,
     false,
     signal,
+    undefined,
+    verified,
   );
 }
 
@@ -12494,6 +12648,7 @@ async function snapshotGitPatchState(
   retainTrees = false,
   signal?: AbortSignal,
   context?: GitPatchState["context"],
+  verified?: SavedPatchPublication,
 ): Promise<GitPatchState> {
   signal?.throwIfAborted();
   dependencies = patchCommandDirectoryDependencies(directory, dependencies);
@@ -12508,7 +12663,11 @@ async function snapshotGitPatchState(
       )
     ).dependencies;
   }
-  const tree = await snapshotPatchTree(repository, dependencies);
+  const snapshot = () => snapshotPatchTree(repository, dependencies);
+  const captured = verified
+    ? await verified.capture(snapshot)
+    : { tree: await snapshot() };
+  const { tree } = captured;
   const files = new Map<string, string>();
   const trees = new Map<string, string>();
   const gitlinks: GitPatchState["gitlinks"] = new Map();
@@ -12622,7 +12781,7 @@ async function snapshotGitPatchState(
   return {
     root: directoryRoot,
     context,
-    tree,
+    ...captured,
     trees,
     files,
     gitlinks,
@@ -13324,6 +13483,21 @@ async function runFindingPatches(
           onBeforeTurn: async (signal, hostFilterSettings) => {
             preparationCompleted = false;
             await options.onBeforeTurn?.(signal, hostFilterSettings);
+            if (options.publication && !options.publication.verified) {
+              const { context, directory, root, tree } = options.publication;
+              const bound = await bindPatchCommandContext(
+                directory,
+                root,
+                context,
+                dependencies,
+              );
+              options.publication.verified = await prepareSavedPatchPublication(
+                directory,
+                bound.dependencies,
+                tree,
+                root,
+              );
+            }
             if (gitBase) {
               const bound = await bindPatchCommandContext(
                 selected.repository,
@@ -13338,12 +13512,14 @@ async function runFindingPatches(
                 false,
                 signal,
                 gitBase.context,
+                options.publication?.verified,
               );
             } else {
               base = await snapshotPatchState(
                 selected.repository,
                 dependencies,
                 signal,
+                options.publication?.verified,
               );
               if (!(base instanceof Map)) gitBase = base;
             }
@@ -13351,20 +13527,6 @@ async function runFindingPatches(
               base instanceof Map
                 ? await realpath(selected.repository)
                 : base.context.directory;
-            if (options.publication && !options.publication.verified) {
-              const { context, directory, root, tree } = options.publication;
-              const bound = await bindPatchCommandContext(
-                directory,
-                root,
-                context,
-                dependencies,
-              );
-              options.publication.verified = await prepareSavedPatchPublication(
-                directory,
-                bound.dependencies,
-                tree,
-              );
-            }
             if (!(base instanceof Map) && base.root !== selected.repository) {
               const [repositoryPath, rootPath] = await Promise.all([
                 realpath(selected.repository, { encoding: "buffer" }),
@@ -13395,6 +13557,8 @@ async function runFindingPatches(
               base,
               dependencies,
               dirtyFiles?.(),
+              false,
+              options.publication?.verified,
             );
       observed = "state" in changes ? changes.state : undefined;
       changedFiles = changes.files;
@@ -13532,8 +13696,8 @@ async function runFindingPatches(
         ) {
           const reason = await options.publication.verified.record(
             selectedFiles,
-            base.tree,
-            observed.tree,
+            base,
+            observed,
           );
           if (reason) {
             const nested = [...observed.gitlinks.keys()].find(
