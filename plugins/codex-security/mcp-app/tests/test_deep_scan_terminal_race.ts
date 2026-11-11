@@ -236,7 +236,7 @@ for (const ordering of [
         failureCommit.release();
         await fail(
           { scanId: run.scanId, message: "synthetic old failure" },
-          {},
+          { _meta: { "openai/threadId": "fixture-owner" } },
         );
         await cleanup.entered;
         const replacementWorkspace = await runWorkbench([

@@ -1,7 +1,9 @@
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { useTestPython } from "./support/python.js";
 
+const pythonExecutable = useTestPython();
 const findingsIndexProbe = [
   "import argparse, json, os, sqlite3, sys",
   "from pathlib import Path",
@@ -24,7 +26,7 @@ const findingsIndexProbe = [
   "''')",
   "history = Path(sys.argv[1]).parent / 'shared' / 'workbench-migrations.json'",
   "for migration in json.loads(history.read_text(encoding='utf-8')):",
-  "    if migration['version'] in (61, 62):",
+  "    if migration['version'] in (61, 62, 64):",
   "        for statement in migration['statements']:",
   "            connection.execute(statement)",
   "connection.executemany('INSERT INTO security_targets VALUES (?, ?, ?)', [('current-target', '/current/repository', 'current'), ('stale-target', '/stale/repository', 'stale')])",
@@ -288,7 +290,7 @@ function runFindingsIndex(
     unsealedScans?: boolean;
   } = {},
 ) {
-  const python = Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
   if (python === null) {
     throw new Error(
