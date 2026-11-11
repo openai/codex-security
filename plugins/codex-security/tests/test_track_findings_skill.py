@@ -48,7 +48,7 @@ class TrackFindingsSkillTest(unittest.TestCase):
         linked_ids = set()
         for path in (PLUGIN_ROOT / "skills").rglob("*.md"):
             for app_id in re.findall(r"app://([\w-]+)", path.read_text(encoding="utf-8")):
-                with self.subTest(path=path, app_id=app_id):
+                with self.subTest(path=str(path), app_id=app_id):
                     self.assertIn(app_id, declared_ids)
                 linked_ids.add(app_id)
         self.assertIn(apps["atlassian"]["id"], linked_ids)
