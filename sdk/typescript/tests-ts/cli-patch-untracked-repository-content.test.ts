@@ -24,12 +24,10 @@ for (const kind of [
   "raw",
   "scrubbed",
   "directory link",
+  "internal directory link",
 ] as const) {
   for (const copied of [false, true]) {
-    test.skipIf(
-      (kind === "raw" && process.platform !== "linux") ||
-        (kind === "directory link" && process.platform === "win32"),
-    )(
+    test.skipIf(kind === "raw" && process.platform !== "linux")(
       `preserves embedded repository content during ${kind} publication, copied: ${copied}`,
       async () => {
         const { directory, git, remote } =
@@ -65,10 +63,18 @@ for (const kind of [
             Buffer.from(`${nested}/local-`),
             Buffer.from([0xff]),
           ]);
-        if (kind === "directory link") {
-          const outside = await fixtures.create("publication-link-target-");
-          await writeFile(join(outside, "local.txt"), content);
-          await symlink(outside, join(nested, "linked"));
+        if (kind.endsWith("directory link")) {
+          const target =
+            kind === "directory link"
+              ? await fixtures.create("publication-link-target-")
+              : join(nested, "private-target");
+          await mkdir(target, { recursive: true });
+          await writeFile(join(target, "local.txt"), content);
+          await symlink(
+            target,
+            join(nested, "linked"),
+            process.platform === "win32" ? "junction" : "dir",
+          );
           source = join(nested, "linked", "local.txt");
         } else await writeFile(source, content);
         if (kind === "committed") {
@@ -148,6 +154,18 @@ for (const kind of [
             },
           },
         );
+        if (kind === "directory link") {
+          expect(outcome.exitCode, outcome.stderr).toBe(2);
+          expect(outcome.stderr).toContain(
+            "symbolic link outside the scanned repository",
+          );
+          expect(index).toBeUndefined();
+          expect({ pushes, creations }).toEqual({ pushes: 0, creations: 0 });
+          expect(git("rev-parse", "HEAD")).toBe(head);
+          expect(repositoryGit(remote)("for-each-ref")).toBe("");
+          expect(await readFile(source, "utf8")).toBe(content);
+          return;
+        }
         expect(index, outcome.stderr).toBeDefined();
         expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
         expect({ pushes, creations }).toEqual(

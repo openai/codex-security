@@ -10688,14 +10688,17 @@ async function publicationContentDigests(
     const path = patchFilePath(root, pathKey);
     try {
       const metadata = await lstat(path);
-      if (metadata.isDirectory()) {
+      if (metadata.isDirectory() || metadata.isSymbolicLink()) {
         const canonical = await realpath(path, { encoding: "buffer" });
         if (
           isOutsidePath(
             relativePatchPath(canonicalRoot, canonical.toString("latin1")),
           )
         )
-          continue;
+          throw new CodexSecurityError(
+            `Patch publication cannot inventory a symbolic link outside the scanned repository: ${safePatchText(patchPathText(pathKey))}. Remove the link before publishing.`,
+          );
+        if (metadata.isSymbolicLink()) continue;
         const entries = await readdir(canonical, { encoding: "buffer" });
         for (const entry of entries) {
           const name = Buffer.from(entry).toString("latin1");
