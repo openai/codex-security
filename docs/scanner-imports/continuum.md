@@ -1,9 +1,8 @@
 # Import AWS Continuum code findings
 
-Use `GetCodeFinding` JSON to import selected findings with their locations
-and mitigation. When AWS has run validation, the export also includes the
-validation result. Use `ListCodeFindings` JSON for summaries from an
-environment dedicated to one repository.
+Collect a selected finding with its locations, mitigation, validation result
+(when available), and any AWS-generated patches for its repository. The import
+saves patches as evidence for review without applying them to your checkout.
 
 ## Quick start
 
@@ -12,7 +11,10 @@ repository supplied the scanned code, including the archive for an S3 source.
 For a finding from another scanner, you can also check its repository in that
 scanner. [AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
 
-**Saved report.** Set `report` to a native detail response, an array of detail responses, or a complete list response with its `items` array. Then [preview the report](#preview-and-import).
+**Saved report.** The importer can read a collector capture, a native
+`GetCodeFinding` response, an array of either, or a complete `ListCodeFindings`
+response from a single-repository environment. With a saved report, the importer
+reads the file offline. Set its path and [preview the report](#preview-and-import).
 
 ```sh
 report=/private/path/continuum.json
@@ -24,20 +26,37 @@ To create a report, sign in to the environment's AWS account and Region with
 AWS CLI v2.38.5 or later, the first release with `aws continuum`. Choose one
 export.
 
-**One finding.** Set `FINDING_ID` to the Continuum ID of the finding you
-verified. In an environment with several repositories, use this command to
-export one verified finding at a time. [AWS CLI get-code-finding](https://docs.aws.amazon.com/cli/latest/reference/continuum/get-code-finding.html)
+**One finding with available patches.** Set `FINDING_ID` to the verified
+finding ID. The bundled Python 3.10+ collector uses your signed-in AWS CLI to read
+the finding, follow its created or duplicate issue ID, and retrieve its
+`PATCH` artifacts. Its IAM permissions are `continuum:GetCodeFinding`,
+`continuum:ListCodeIssueArtifacts`, and `continuum:GetCodeIssueArtifact`.
+[AWS issue artifacts](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ListCodeIssueArtifacts.html)
+
+Run the collector from a trusted directory with the installed `aws` on your
+`PATH`. The example uses a global npm installation and an environment you
+verified contains only the selected repository. For a multi-repository
+environment, replace `--single-repository` with
+`--repository-name "$AWS_SOURCE_NAME"`. Use the exact source name AWS assigns
+to that repository. One issue can have patches for several sources. In this
+mode the collector skips patches without a repository name and prints their
+artifact IDs to stderr for review. [AWS patch fields](https://docs.aws.amazon.com/continuum/latest/APIReference/API_PatchBody.html)
 
 ```sh
 report=
+plugin="$(npm root --global)/@openai/codex-security/_bundled_plugin"
 out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
-  aws continuum get-code-finding --environment-id "$ENVIRONMENT_ID" \
-    --finding-id "$FINDING_ID" --output json > "$out/continuum.tmp" &&
+  python3 -I "$plugin/skills/publish-findings/scripts/collect_continuum.py" \
+    --environment-id "$ENVIRONMENT_ID" --finding-id "$FINDING_ID" \
+    --single-repository > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
   report="$out/continuum.json"
 ```
 
-**Selected findings.** Fetch one detail response per finding ID. Verify each
+If the finding has no linked issue or no matching patches, the collector saves
+the native finding detail. If an AWS read fails, retry the export before import.
+
+**Selected findings.** Run the collector once per finding ID. Verify each
 belongs to the same environment and Git repository. To publish them together,
 combine the saved objects into a JSON array with `jq`.
 
@@ -75,15 +94,26 @@ codex-security publish findings "$report" --to local --repository . \
 
 Check the repository, finding ARNs, paths, and exclusions. In a
 multi-repository environment, a customer-supplied path can begin with a
-repository name. The reader keeps that prefix. For local repeat imports, a summary replaces richer evidence already saved for the same ARN and source key. Use the detail export to keep locations, mitigation and validation evidence. To save locally, remove `--dry-run` and confirm.
+repository name. The reader keeps that prefix. For local repeat imports, a summary replaces richer evidence already saved for the same ARN and source key. Use the collector capture to keep locations, mitigation, validation evidence, and available patches. To save locally, remove `--dry-run` and confirm.
+
+Run `codex-security findings imported . --format json` and match the finding ARN.
+The original AWS record is in `evidence.source_data.finding`. When AWS supplied
+patches, `evidence.source_data.patches` contains one entry per matching
+artifact with its ID (`artifactId`), exact patch text (`patch`), SHA-256
+(`patchSha256`), byte count (`sizeBytes`), and AWS format and repository name
+when supplied.
 
 <a id="publish-to-your-cloud-inbox"></a>
 
 ### Publish to Cloud
 
-If you need locations, mitigation, or validation evidence, publish the detailed
-`get-code-finding` export first. For private inbox imports, a later upload
-with changed evidence for the same ARN can return `source_order_unknown`.
+Publish the collector capture first to include available patches. Cloud uses
+the same `evidence.source_data.patches` field. When patch text would exceed
+the Cloud finding evidence limit, the patch entry retains its descriptors and
+records `contentOmitted: "cloud_evidence_limit"`. If the finding and patch
+metadata alone exceed the limit, the Cloud preview reports an exclusion. The
+local capture retains the complete text. For private inbox imports, a later
+upload with changed evidence for the same ARN can return `source_order_unknown`.
 Preview the file and source key using your connected repository URL.
 
 ```sh
