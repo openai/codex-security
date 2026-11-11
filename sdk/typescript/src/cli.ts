@@ -7672,6 +7672,12 @@ export async function main(
         async run({ format }) {
           const structured = !useDefaultOutput(format);
           const authentication = scanAuthentication(dependencies.environment);
+          if (authentication.method === "api_key") {
+            errorOutput.write(
+              `API key configured via ${authentication.source} (offline check).\n`,
+            );
+            errorOutput.write("Stored sign-in status:\n");
+          }
           exitCode = await withLoginEnvironment(async (environment) => {
             if (authentication.method !== "api_key")
               await initialCredentialsAvailable(
@@ -7704,9 +7710,6 @@ export async function main(
             (exitCode === 0 || exitCode === 1)
           ) {
             exitCode = 0;
-            errorOutput.write(
-              `Effective scan authentication: API key from ${authentication.source}.\n`,
-            );
             errorOutput.write(
               `To use a ChatGPT sign-in, ${formatEnvironmentVariableRemovalGuidance(["OPENAI_API_KEY", "CODEX_API_KEY"])}.\n`,
             );
