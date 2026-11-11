@@ -1760,10 +1760,13 @@ for (const spelling of [
 }
 
 test("qualified campaign recovers its report from an unrelated Python invocation directory", async () => {
+  const invocation = await fixture();
   if (
     await runTestInSubprocess(
       fileURLToPath(import.meta.url),
       "qualified campaign recovers its report from an unrelated Python invocation directory",
+      {},
+      invocation.root,
     )
   )
     return;
@@ -1774,15 +1777,7 @@ test("qualified campaign recovers its report from an unrelated Python invocation
   });
   const initial = await runMultiscan(campaign);
   const ledger = await readFile(initial.resultsPath, "utf8");
-  const invocationDirectory = join(paths.root, "python-invocation");
-  await mkdir(invocationDirectory);
-  const originalDirectory = process.cwd();
-  try {
-    process.chdir(invocationDirectory);
-    await expectReused(campaign);
-  } finally {
-    process.chdir(originalDirectory);
-  }
+  await expectReused(campaign);
   expect(await readFile(initial.resultsPath, "utf8")).toBe(ledger);
   expect(runs).toHaveBeenCalledTimes(1);
 });
