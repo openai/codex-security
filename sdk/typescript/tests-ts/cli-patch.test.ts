@@ -46,6 +46,7 @@ import {
   runWorkflow,
   repositoryGit,
   runGitRepositoryCommand,
+  runLocalHostingTransport,
   publicationRepository as createPublicationRepository,
 } from "./cli-patch-fixtures.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
@@ -1808,7 +1809,7 @@ describe("scan and patch workflow", () => {
                     value === `url.${origin}.insteadOf`,
                 );
                 expect(mapping).toBeDefined();
-                return runGitRepositoryCommand(command, args, cwd, {
+                return runLocalHostingTransport(command, args, cwd, {
                   ...options,
                   environment: {
                     ...options?.environment,
@@ -1823,7 +1824,9 @@ describe("scan and patch workflow", () => {
                   throw new Error("Synthetic push failure");
                 }
               }
-              return runGitRepositoryCommand(command, args, cwd, options);
+              return gitlab && options?.patchTransport
+                ? runLocalHostingTransport(command, args, cwd, options)
+                : runGitRepositoryCommand(command, args, cwd, options);
             }
             expect(command).toBe(gitlab ? "glab" : "gh");
             if (args[0] === "repo") return "synthetic-origin-id";
@@ -1872,7 +1875,7 @@ describe("scan and patch workflow", () => {
           ["patch", "--resume-pr", branch, "--json"],
           fixtures,
         );
-        expect(retry.exitCode).toBe(0);
+        expect(retry.exitCode, retry.stderr).toBe(0);
         expect(JSON.parse(retry.stdout)).toEqual({
           pullRequest: { branch, url },
         });

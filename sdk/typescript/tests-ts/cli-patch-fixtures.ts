@@ -317,6 +317,11 @@ function localHostingOptions(
   for (const [key, value] of Object.entries(environment))
     if (key.startsWith("GIT_CONFIG_KEY_") && value === "protocol.file.allow")
       environment[key.replace("_KEY_", "_VALUE_")] = "always";
+  if (environment["GIT_ALLOW_PROTOCOL"] !== undefined)
+    environment["GIT_ALLOW_PROTOCOL"] = [
+      ...environment["GIT_ALLOW_PROTOCOL"].split(":"),
+      "file",
+    ].join(":");
   return { ...options, environment };
 }
 
