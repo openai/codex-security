@@ -1669,6 +1669,52 @@ test("dependency triage preserves scanner evidence when MCP configuration cannot
   );
 });
 
+test.each(["setup", "source snapshot", "source drift"] as const)(
+  "dependency observers report saved bulk assessment failures after %s",
+  async (failure) => {
+    const f = await fixture({
+      turns: ["completed", "source_changed", "completed"],
+      ...(failure === "setup" ? { runtimeError: true } : {}),
+      ...(failure === "source snapshot" ? { snapshotErrorAt: 1 } : {}),
+    });
+    await using security = f.client;
+    const progress: DependencyScanProgress[] = [];
+    const persisted: ScaResult[] = [];
+    const result = await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+      onProgress(event) {
+        progress.push(event);
+        if (event.phase === "assessing" && event.current === null)
+          persisted.push(
+            JSON.parse(
+              readFileSync(join(f.outputDir, "sca-result.json"), "utf8"),
+            ),
+          );
+      },
+    });
+    const completed = failure === "source drift" ? 1 : 0;
+    expect(result.status).toBe("partial");
+    expect(progress.slice(-2)).toEqual([
+      {
+        phase: "assessing",
+        assessmentsTotal: 3,
+        assessmentsCompleted: completed,
+        assessmentsFailed: 3 - completed,
+        current: null,
+      },
+      { phase: "saving" },
+    ]);
+    expect(persisted.at(-1)).toEqual(result);
+    expect(result.assessments.map((assessment) => assessment.status)).toEqual(
+      completed === 1
+        ? ["completed", "failed", "failed"]
+        : ["failed", "failed", "failed"],
+    );
+    expect(f.calls.model).toBe(failure === "source drift" ? 1 : 0);
+  },
+);
+
 test("dependency observers report saved assessments, activity, usage, and total cost", async () => {
   const f = await fixture({
     turns: ["completed", "malformed", "completed"],

@@ -1176,6 +1176,31 @@ export class CodexSecurity {
       await saveDependencyScan(result);
       throwIfAborted(signal, outputDir);
       if (result.matches.length === 0) return result;
+      const reportAssessment = (match: ScaMatch | null): void => {
+        const component = result!.components.find(
+          (item) => item.id === match?.componentId,
+        );
+        reportProgress({
+          phase: "assessing",
+          assessmentsTotal: result!.matches.length,
+          assessmentsCompleted: result!.assessments.filter(
+            (item) => item.status === "completed",
+          ).length,
+          assessmentsFailed: result!.assessments.filter(
+            (item) => item.status === "failed",
+          ).length,
+          current:
+            match === null
+              ? null
+              : {
+                  matchId: match.id,
+                  componentId: match.componentId,
+                  packageName: component?.name ?? null,
+                  packageVersion: component?.version ?? null,
+                  advisoryIds: [...match.advisoryIds],
+                },
+        });
+      };
       // Authentication is deliberately deferred until deterministic evidence is durable.
       try {
         reportProgress({ phase: "preparing_assessment" });
@@ -1303,31 +1328,7 @@ export class CodexSecurity {
           onUsage: notifyObserver(options, "onUsage"),
           onError: reportTrackingError,
         });
-        const reportAssessment = (match: ScaMatch | null): void => {
-          const component = result!.components.find(
-            (item) => item.id === match?.componentId,
-          );
-          reportProgress({
-            phase: "assessing",
-            assessmentsTotal: result!.matches.length,
-            assessmentsCompleted: result!.assessments.filter(
-              (item) => item.status === "completed",
-            ).length,
-            assessmentsFailed: result!.assessments.filter(
-              (item) => item.status === "failed",
-            ).length,
-            current:
-              match === null
-                ? null
-                : {
-                    matchId: match.id,
-                    componentId: match.componentId,
-                    packageName: component?.name ?? null,
-                    packageVersion: component?.version ?? null,
-                    advisoryIds: [...match.advisoryIds],
-                  },
-          });
-        };
+
         try {
           for (const [index, match] of result.matches.entries()) {
             throwIfAborted(signal, outputDir);
@@ -1452,9 +1453,10 @@ export class CodexSecurity {
           assessment.status = "failed";
           assessment.error = message;
         }
-        reportProgress({ phase: "saving" });
         await saveDependencyScan(result);
         throwIfAborted(signal, outputDir);
+        reportAssessment(null);
+        reportProgress({ phase: "saving" });
         return result;
       }
       reportProgress({ phase: "saving" });
