@@ -26,7 +26,7 @@ const nativeRecord = z.record(z.string(), z.unknown());
 export const continuumIssueExport = z.object({
   format: z.literal(continuumIssueFormat),
   environmentId: continuumEnvironmentId,
-  sourceRepositoryUrl: z.string().optional(),
+  sourceRepositoryUrl: z.string(),
   issues: z.array(
     z.object({ issue: nativeRecord, findings: z.array(nativeRecord) }),
   ),
@@ -69,12 +69,15 @@ const gitLabIntegration = z.object({
 async function firstRepositoryUrl(
   environment: Record<string, unknown>,
   getIntegration: (id: string) => Promise<Record<string, unknown>>,
-): Promise<string | undefined> {
+): Promise<string> {
   const { configuration } = environmentSources.parse(environment);
   const first =
     configuration?.codeConfiguration?.sourceConfiguration
       ?.repositorySources?.[0];
-  if (first === undefined) return;
+  if (first === undefined)
+    throw new CodexSecurityError(
+      "The Continuum environment has no configured Git repository. Select an environment with a GitHub or GitLab repository.",
+    );
   const { integrationId, repository } = repositorySource.parse(first);
   const integration = await getIntegration(integrationId);
   const type = integration["integrationType"];
@@ -204,7 +207,7 @@ export async function collectContinuumIssues(
   return {
     format: continuumIssueFormat,
     environmentId,
-    ...(sourceRepositoryUrl && { sourceRepositoryUrl }),
+    sourceRepositoryUrl,
     issues,
   };
 }

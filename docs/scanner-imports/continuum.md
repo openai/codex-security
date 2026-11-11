@@ -25,12 +25,13 @@ report=/private/path/continuum.json
 ### Export issues from an environment
 
 Use AWS CLI v2.38.5 or later and sign in to the environment's AWS account and
-Region. The export needs permissions for `GetEnvironment`, `ListCodeIssues`,
-`GetCodeIssue`, and `GetCodeFinding`. When a Git repository is configured, it also
-needs `GetIntegration` for that repository's integration.
+Region. The export needs permissions for `GetEnvironment`, `GetIntegration`,
+`ListCodeIssues`, `GetCodeIssue`, and `GetCodeFinding`.
 [AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html)
 
 Pass the short Continuum environment ID to `codex-security import continuum`.
+An environment without a Git repository, including an S3-only environment,
+fails before the command fetches issues.
 The command records the first configured Git repository as `sourceRepositoryUrl`
 and ignores S3 sources when choosing the repository. It still collects all issue
 pages, issue details, and linked findings across the environment. Before
@@ -52,8 +53,8 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 ### Preview and import
 
 Preview the report with a source key for this environment and repository.
-The importer uses the repository URL saved in the issue export. For an
-S3-only environment or a saved report without a repository URL, add
+The importer uses the repository URL saved in the issue export. For a saved
+report without a repository URL, add
 `--source-repository-url URL` with the verified Git URL.
 
 ```sh

@@ -11,7 +11,7 @@ import {
 
 const command = ["import", "continuum", "example", "--format", "json"];
 
-function awsFixture(provider: "github" | "gitlab" | "s3" = "github") {
+function awsFixture(provider: "github" | "gitlab" = "github") {
   const report = continuumIssueExport();
   const { issue, findings } = report.issues[0]!;
   const [shared, first] = findings;
@@ -43,21 +43,15 @@ function awsFixture(provider: "github" | "gitlab" | "s3" = "github") {
           codeConfiguration: {
             sourceConfiguration: {
               s3Sources: [{ integrationId: "archive", codePrefix: "code/" }],
-              ...(provider !== "s3" && {
-                repositorySources: [
-                  { integrationId: "first", repository },
-                  { integrationId: "second", repository: "example/other" },
-                ],
-              }),
+              repositorySources: [
+                { integrationId: "first", repository },
+                { integrationId: "second", repository: "example/other" },
+              ],
             },
           },
         },
       };
-    if (
-      args[1] === "get-integration" &&
-      args[3] === "first" &&
-      provider !== "s3"
-    )
+    if (args[1] === "get-integration" && args[3] === "first")
       return provider === "github"
         ? { integrationType: "GITHUB" }
         : {
@@ -79,7 +73,7 @@ function awsFixture(provider: "github" | "gitlab" | "s3" = "github") {
     run,
     report: {
       ...report,
-      ...(provider !== "s3" && { sourceRepositoryUrl }),
+      sourceRepositoryUrl,
       issues: [
         { issue, findings: [first!, shared!] },
         { issue: secondIssue, findings: [shared!] },
@@ -140,17 +134,36 @@ test.each([false, true])(
   },
 );
 
-test.each(["gitlab", "s3"] as const)(
-  "import continuum resolves the repository association for a %s environment",
-  async (provider) => {
-    const { run, report } = awsFixture(provider);
-    const captured = await collectContinuumIssues(
-      { environmentId: "example", cwd: ".", environment: {} },
-      run,
-    );
-    expect(captured).toEqual(report);
-  },
-);
+test("import continuum resolves the repository association for self-managed GitLab", async () => {
+  const { run, report } = awsFixture("gitlab");
+  const captured = await collectContinuumIssues(
+    { environmentId: "example", cwd: ".", environment: {} },
+    run,
+  );
+  expect(captured).toEqual(report);
+});
+
+test("import continuum rejects an S3-only environment before listing issues", async () => {
+  const aws = mock(async (_args: string[]) => ({
+    configuration: {
+      codeConfiguration: {
+        sourceConfiguration: {
+          s3Sources: [{ integrationId: "archive", codePrefix: "code/" }],
+        },
+      },
+    },
+  }));
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(command, {
+      ...dependencies(),
+      collectContinuumIssues: (options) => collectContinuumIssues(options, aws),
+    }),
+  ).toBe(2);
+  expect(aws.mock.calls.map(([args]) => args[1])).toEqual(["get-environment"]);
+  expect(cli.stdout.text()).toBe("");
+  expect(cli.stderr.text()).toContain("no configured Git repository");
+});
 test.each([
   ["list-code-issues", "complete Continuum issue list"],
   ["get-integration", "AWS AccessDenied"],
