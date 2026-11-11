@@ -15,12 +15,12 @@ workbench or send a supported report to Codex Security Cloud.
 
 The `--provider` value selects the reader for a saved report. To see which
 readers your installed CLI supports, run `codex-security publish findings --help`.
-The guides cover local and Cloud imports unless an input is marked local only.
+The guides cover local and Cloud imports unless a row limits its scope.
 
 | Guide                                                       | `--provider` | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | `inspector`  | Inspector2 `ListFindings` JSON for one Code Security repository                 |
-| [ArmorCode](armorcode.md)                                   | `armorcode`  | Findings API response JSON (`data.findings`)                                    |
+| [ArmorCode](armorcode.md)                                   | `armorcode`  | Findings API JSON for one repository (local verified, Cloud unverified)         |
 | [AWS Continuum](continuum.md)                               | `continuum`  | Summaries or selected code finding details for one verified repository          |
 | [Black Duck SCA](blackduck.md)                              | `blackduck`  | BOM-6 vulnerable components for one project version                             |
 | [Checkmarx SAST](checkmarx.md)                              | `checkmarx`  | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |

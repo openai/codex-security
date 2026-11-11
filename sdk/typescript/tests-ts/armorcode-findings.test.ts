@@ -1,7 +1,64 @@
 import { describe, expect, test } from "bun:test";
 import { normalizeArmorCodeFindings } from "../src/armorcode-findings.js";
+import { localReportFixture } from "./external-findings-local-helpers.js";
 
 describe("ArmorCode finding imports", () => {
+  const repositoryUrl = "https://github.com/example/project";
+  const source = { provider: "armorcode", sourceKey: "org/app" } as const;
+
+  test("uses a declared source for SAST rows without changing the stored source record", async () => {
+    await using fixture = await localReportFixture("armorcode.json", source, {
+      remote: repositoryUrl,
+    });
+    const row = { id: 1, title: "Unchecked index", scanType: ["SAST"] };
+    await fixture.writeJson({ data: { findings: [row] } });
+    const { preview } = await fixture.prepare({
+      sourceRepositoryUrl: repositoryUrl,
+    });
+    expect(preview.excluded).toEqual([]);
+    expect(preview.findings[0]?.evidence.details).toMatchObject({
+      kind: "sast",
+      repository: { url: repositoryUrl },
+    });
+    expect(preview.findings[0]?.evidence.source_data).toEqual(row);
+    await expect(
+      fixture.prepare({
+        sourceRepositoryUrl: "https://github.com/example/other",
+      }),
+    ).rejects.toThrow(/does not match/iu);
+  });
+
+  test("rejects a mixed report when a generic row belongs to another checkout", async () => {
+    await using fixture = await localReportFixture("armorcode.json", source, {
+      remote: repositoryUrl,
+    });
+    const report = {
+      data: {
+        findings: [
+          {
+            id: 1,
+            title: "Unchecked index",
+            scanType: ["SAST"],
+            repositoryUrl,
+          },
+          {
+            id: 2,
+            title: "Vulnerable package",
+            scanType: ["SCA"],
+            repository: { url: "https://github.com/example/other" },
+          },
+        ],
+      },
+    };
+    await fixture.writeJson(report);
+    await expect(fixture.prepare()).rejects.toThrow(
+      /single source repository/iu,
+    );
+    await expect(
+      fixture.prepareNormalized(normalizeArmorCodeFindings(report, "local")),
+    ).rejects.toThrow(/single source repository/iu);
+  });
+
   test("normalizes findings and retains the source records", () => {
     const result = normalizeArmorCodeFindings({
       findings: [

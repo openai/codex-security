@@ -77,6 +77,7 @@ import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+import { armorCodeRepositoryUrl } from "./armorcode-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -994,6 +995,10 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     }
     const { evidence } = finding;
+    if (options.provider === "armorcode") {
+      const nativeUrl = armorCodeRepositoryUrl(evidence.source_data, "local");
+      if (nativeUrl) sources.set(nativeUrl, { url: nativeUrl });
+    }
     if (options.provider === "github") {
       const source = retainedGitHubRepository(
         finding,
@@ -1242,6 +1247,20 @@ export async function prepareLocalImport(
     throw new Error(
       "The retained Checkmarx report repository does not match the finding repository.",
     );
+  if (options.provider === "armorcode") {
+    if (options.sourceRepositoryUrl !== undefined) {
+      const url = declaredScannerRepositoryUrl(
+        options.sourceRepositoryUrl,
+        "ArmorCode",
+        "local",
+      );
+      sources.set(url, { url });
+    }
+    if (!sameRepositories(sources.keys()))
+      throw new CodexSecurityError(
+        "ArmorCode findings must belong to a single source repository.",
+      );
+  }
   const sonarSources = sonarRepositoryUrls(
     options.provider,
     current.findings,

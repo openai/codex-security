@@ -225,7 +225,13 @@ export async function readExternalFindings(
   }
   if (provider === "armorcode") {
     const input = await readScannerJson(path);
-    return { findings: normalizeArmorCodeFindings(input, target) };
+    return {
+      findings: normalizeArmorCodeFindings(
+        input,
+        target,
+        options.sourceRepositoryUrl,
+      ),
+    };
   }
   if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };

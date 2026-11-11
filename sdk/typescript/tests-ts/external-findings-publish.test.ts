@@ -21,6 +21,7 @@ import {
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 import { normalizeEndorFindings } from "../src/endor-findings.js";
+import { normalizeArmorCodeFindings } from "../src/armorcode-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
 import { hash } from "node:crypto";
@@ -306,6 +307,45 @@ test("Wiz's gzip JSON report retains finding identity, evidence and repository l
   expect(
     workload.findings[0]!.evidence.packages?.[0]?.manifest_path,
   ).toBeNull();
+});
+
+test("ArmorCode rejects generic rows from a different Cloud repository before publishing", async () => {
+  const sourceRepositoryUrl = "https://github.com/example/project";
+  const report = {
+    data: {
+      findings: [
+        {
+          id: 1,
+          title: "Unchecked index",
+          scanType: ["SAST"],
+          repositoryUrl: sourceRepositoryUrl,
+        },
+        {
+          id: 2,
+          title: "Vulnerable package",
+          scanType: ["SCA"],
+          repositoryUrl: "https://github.com/example/other",
+        },
+      ],
+    },
+  };
+  const f = await fixture(report, sourceRepositoryUrl);
+  const selection = {
+    ...options,
+    provider: "armorcode" as const,
+    sourceRepositoryUrl,
+  };
+  await expect(
+    prepareExternalPublication(f.file, selection, f.deps),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  await expect(
+    prepareNormalizedExternalPublication(
+      normalizeArmorCodeFindings(report),
+      selection,
+      f.deps,
+    ),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  expect(f.posts).toHaveLength(0);
 });
 
 test("a Wiz Raw Event export explains the finding-report path before contacting Cloud", async () => {

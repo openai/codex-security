@@ -2,6 +2,7 @@ import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
+import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { isRecord } from "./record.js";
 import {
   normalizeRecords,
@@ -30,10 +31,26 @@ function stringValues(value: unknown): string[] {
   });
 }
 
+/** Recover the source repository independently of the finding's scan type. */
+export function armorCodeRepositoryUrl(
+  finding: ArmorCodeFinding | null | undefined,
+  target: ExternalImportTarget,
+): string | undefined {
+  const repository = finding?.["repository"];
+  const url =
+    text(finding?.["sourceRepositoryUrl"]) ??
+    text(finding?.["repositoryUrl"]) ??
+    text(isRecord(repository) ? repository["url"] : repository);
+  return url
+    ? declaredScannerRepositoryUrl(url, "ArmorCode", target)
+    : undefined;
+}
+
 /** Normalize stable finding records while retaining the original ArmorCode row. */
 export function normalizeArmorCodeFindings(
   input: unknown,
   target: ExternalImportTarget = "cloud",
+  sourceRepositoryUrl?: string,
 ): ExternalFindings {
   const document = Array.isArray(input)
     ? { findings: input }
@@ -53,6 +70,10 @@ export function normalizeArmorCodeFindings(
     if (Object.keys(data).length) report["data"] = data;
     else delete report["data"];
   }
+  const declaredUrl =
+    sourceRepositoryUrl === undefined
+      ? undefined
+      : declaredScannerRepositoryUrl(sourceRepositoryUrl, "ArmorCode", target);
   return normalizeRecords(
     raw as ArmorCodeFinding[],
     (finding) => {
@@ -82,12 +103,12 @@ export function normalizeArmorCodeFindings(
         ...stringValues(finding["cwe"]),
         ...stringValues(finding["cwesStrings"]),
       ];
-      const repository = finding["repository"];
-      const repositoryUrl = text(
-        finding["sourceRepositoryUrl"] ??
-          finding["repositoryUrl"] ??
-          (isRecord(repository) ? repository["url"] : repository),
-      );
+      const repositoryUrl =
+        armorCodeRepositoryUrl(finding, target) ?? declaredUrl;
+      if (isSast && !repositoryUrl)
+        throw new Error(
+          "ArmorCode SAST evidence requires its source repository. For a single-repository report, supply its verified --source-repository-url.",
+        );
       const evidence: ExternalFindingEvidence = {
         title: requiredText(
           finding["title"] ?? finding["name"] ?? finding["findingName"],
