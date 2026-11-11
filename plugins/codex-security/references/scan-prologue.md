@@ -1,6 +1,6 @@
 # Scan Prologue
 
-Apply this guidance once when a Standard or Deep Security Scan owns the top-level workflow. An independent worker inherits its assigned scan context and must not repeat top-level setup, scan ownership, or completed phases.
+Apply this guidance once for the top-level Deep scan. Standard scans use their [own entrypoint](../skills/security-scan/SKILL.md). An independent worker inherits its assigned scan context and must not repeat top-level setup, scan ownership, or completed phases.
 
 ## Setup and Scan Ownership
 
@@ -24,7 +24,7 @@ Code mode is a fresh JavaScript isolate, not a Node.js shell. Use only the host'
 
 ## Runtime Tools
 
-A top-level Standard scan reads `scan-runtime.md` once after its authoritative scan context exists, then begins source review using available tools and parent fallback. A Deep scan's coordinator validates scan ownership, target, scope, and sandbox and owns the transition from `preflight` into discovery.
+A Deep scan's coordinator validates scan ownership, target, scope, and sandbox and owns the transition from `preflight` into discovery.
 
 ## Deep Worker Failures
 

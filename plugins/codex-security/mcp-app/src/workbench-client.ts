@@ -65,13 +65,10 @@ function workbenchExitMessage(error: unknown, command: string) {
     return `${operation} exited with code ${error.code}.`;
 }
 
-async function executeWorkbench(
-  pythonCommand: string,
-  args: string[],
-  input?: string | Buffer,
-  options: WorkbenchOptions = {},
-): Promise<JsonObject> {
-  const timeout = [
+function workbenchTimeout(args: string[]): number {
+  const contextHandoff =
+    args[0] === "mark-handoff-delivered" && args.includes("--return-context");
+  const longRunningCommand = [
     "begin-deep-scan",
     "cancel-scan",
     "fail-scan",
@@ -96,9 +93,17 @@ async function executeWorkbench(
     "start-prompt-only-scan",
     "start-scan",
     "upsert-deep-scan-worker",
-  ].includes(args[0] ?? "")
-    ? 300_000
-    : 30_000;
+  ].includes(args[0] ?? "");
+  return contextHandoff || longRunningCommand ? 300_000 : 30_000;
+}
+
+async function executeWorkbench(
+  pythonCommand: string,
+  args: string[],
+  input?: string | Buffer,
+  options: WorkbenchOptions = {},
+): Promise<JsonObject> {
+  const timeout = workbenchTimeout(args);
   const execution = execFileAsync(
     pythonCommand,
     [
