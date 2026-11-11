@@ -40,7 +40,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
@@ -116,7 +116,10 @@ import {
   normalizeInspectorFindings,
   normalizePreviousInspectorFindings,
 } from "../src/inspector-findings.js";
-import { normalizePreviousContinuumFindings } from "../src/continuum-findings.js";
+import {
+  normalizePreviousContinuumFindings,
+  readContinuumFindings,
+} from "../src/continuum-findings.js";
 import {
   trivyReport,
   trivyReportWithManyLocations,
@@ -4463,6 +4466,36 @@ test("request and pagination metadata retain Cloud byte limits and distinct iden
   ).toThrow("4096 UTF-8");
 });
 
+test("Cloud previews the findings file selected through a directory link and parent", async () => {
+  const f = await fixture();
+  const directory = join(f.root, "physical", "child");
+  await mkdir(directory, { recursive: true });
+  await fs.symlink(
+    directory,
+    join(f.root, "link"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const name = basename(f.file);
+  await writeFile(
+    join(f.root, "physical", name),
+    JSON.stringify([normalized("other")]),
+  );
+  const input = `link/../${name}`;
+  const [expected] = JSON.parse(await readFile(`${f.root}/${input}`, "utf8"));
+  const cli = createCliTest(main);
+  const args = [...f.command];
+  args[2] = input;
+  expect(
+    await cli.runCli([...args, "--dry-run"], {
+      ...f.cliDeps,
+      currentDirectory: () => f.root,
+    }),
+  ).toBe(0);
+  expect(JSON.parse(cli.stdout.text()).findings).toMatchObject([
+    { source_finding_id: expected.source_finding_id },
+  ]);
+});
+
 const inspectorOptions = {
   ...options,
   provider: "inspector" as const,
@@ -4545,6 +4578,37 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
   expect(f.posts[1]).toBe(f.posts[0]!);
 });
 
+test("explains a Cloud account or deployment without the import catalog", async () => {
+  const f = await fixture(continuumDetail(), continuumRepository);
+  const missing = (status: number) => ({
+    ...f.deps,
+    fetch: async () =>
+      Response.json({ error: { message: "Not found" } }, { status }),
+  });
+  const selected = {
+    ...options,
+    provider: "continuum" as const,
+    sourceKey: "continuum/example/project",
+    sourceRepositoryUrl: continuumRepository,
+  };
+  await expect(
+    prepareExternalPublication(f.file, selected, missing(404)),
+  ).rejects.toThrow(
+    "Cloud import failed (HTTP 404). Not found. Cloud import is not available for this account or deployment.",
+  );
+  await expect(
+    prepareExternalPublication(f.file, selected, {
+      ...f.deps,
+      fetch: async () => new Response(null, { status: 404 }),
+    }),
+  ).rejects.toThrow(
+    "Cloud import failed (HTTP 404). Cloud import is not available for this account or deployment.",
+  );
+  await expect(
+    prepareExternalPublication(f.file, selected, missing(500)),
+  ).rejects.toThrow(/^Cloud import failed \(HTTP 500\)\. Not found$/u);
+});
+
 test("Continuum Cloud publication checks repository and provider and replays an interrupted request", async () => {
   const detail = continuumDetail();
   const f = await fixture(detail, continuumRepository);
@@ -4590,6 +4654,70 @@ test("Continuum Cloud publication checks repository and provider and replays an 
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
 });
+
+test.each(["single detail", "selected array"])(
+  "a Continuum %s reuses its interrupted 0.9.x request after CWE enrichment",
+  async (shape) => {
+    const { cweIds: _, ...detail } = continuumDetail();
+    const native = {
+      ...detail,
+      source: "CONTINUUM",
+      type: "CONTINUUM_CODE_VULN",
+      vulnerabilities: [],
+      subCategory: "CWE-89: SQL Injection",
+    };
+    const f = await fixture(
+      shape === "single detail" ? native : [native],
+      continuumRepository,
+    );
+    const settings = {
+      ...options,
+      provider: "continuum" as const,
+      sourceRepositoryUrl: continuumRepository,
+    };
+    // 0.9.x retained the status timestamp but did not infer a structured CWE.
+    const released = normalizePreviousContinuumFindings(
+      native,
+      continuumRepository,
+    );
+    released.findings[0]!.evidence.source_updated_at =
+      Date.parse(native.statusUpdatedAt) / 1000;
+    expect(hash("sha256", canonicalJson(released.findings))).toBe(
+      "2d1bca6f9e46758b8b7d9d679e5e7912a9dd8f99ca4c3cb6889b40eaa4b2506e",
+    );
+    const original = await prepareNormalizedExternalPublication(
+      released,
+      settings,
+      f.deps,
+    );
+    const pending = await f.loseResponse(original);
+
+    const prepare = () => prepareExternalPublication(f.file, settings, f.deps);
+    const retry = await prepare();
+    expect(retry.preview.resumed).toBe(true);
+    expect(retry.preview.requests).toEqual(original.preview.requests);
+    expect(await f.loseResponse(retry)).toBe(pending);
+
+    const sdk = await readContinuumFindings(f.file, continuumRepository);
+    const prepareSdk = (input: ExternalFindings) =>
+      prepareNormalizedExternalPublication(input, settings, f.deps);
+    const edited = structuredClone(sdk);
+    edited.findings[0]!.evidence.details!.weakness_ids = ["CWE-20"];
+    expect((await prepareSdk(edited)).preview.resumed).toBe(false);
+
+    const sdkRetry = await prepareSdk(sdk);
+    expect(sdkRetry.preview.requests).toEqual(original.preview.requests);
+    expect(await f.loseResponse(sdkRetry)).toBe(pending);
+    const restored = await prepareSdk(JSON.parse(JSON.stringify(sdk)));
+    expect(restored.preview.resumed).toBe(true);
+    expect((await restored.publish()).verified).toBe(1);
+    expect(f.posts).toEqual(Array(4).fill(f.posts[0]));
+    expect(await Bun.file(pending).exists()).toBe(false);
+    expect(
+      (await prepare()).preview.findings[0]!.evidence.details?.weakness_ids,
+    ).toEqual(["CWE-89"]);
+  },
+);
 
 test("Inspector publication checks its source and reuses the finding ARN", async () => {
   const { f, input, prepare } = await inspectorPublicationFixture();

@@ -119,6 +119,7 @@ assert.deepEqual(
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_SCAN_DIR",
     "CODEX_SECURITY_PLUGIN_ROOT",
+    "CODEX_SECURITY_REPOSITORY",
     "CODEX_SECURITY_SCAN_ROOT",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_SURFACE",
@@ -343,6 +344,7 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
   if (scope !== scope.trim() && scope.trim() !== "./")
     await mkdir(path.join(targetPath, scope.trim()));
   await writeFile(path.join(targetPath, scope, "source.py"), "pass\n");
+  await writeFile(path.join(targetPath, "SECURITY.md"), "Review this scope.");
   await writeFile(path.join(targetPath, "outside.py"), "pass\n");
   const userContext = "--data\nUnicode Ä 日本語\n".repeat(200).trim();
   const nonUiStateDir = path.join(tmpdir(), randomUUID());
@@ -441,6 +443,7 @@ async function assertWorkspaceWorksWithoutUiCapability(scope: string) {
       assertScanTarget(launched._meta, launched.structuredContent.scan.scanId);
       assert.equal(launched.structuredContent.scan.targetPath, canonicalTarget);
       assert.equal(launched.structuredContent.scan.scope, scope);
+      assert.equal(launched.structuredContent.securityPolicyPaths, undefined);
       assert.deepEqual(
         launched.structuredContent.scan.contract.scope.requiredIncludePaths,
         [scope],
@@ -530,14 +533,13 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(result.scan.scanId, result.scanId);
     assert.equal(result.scan.scanDir, result.scanDir);
     assert.equal(result.scan.handoffClaimToken, undefined);
-    assert.equal(result.workspace.results.handoffClaimToken, undefined);
+    assert.equal(result.workspace, undefined);
     assert.equal(result.scan.continuationThreadId, ownerThread);
-    assert.equal(result.scan.progress.phase, "preflight");
+    assert.equal(result.scan.progress.phase, "threat_model");
     assert.equal(result.scan.progress.status, "running");
     assert.equal(result.scan.model, "gpt-5.6-sol");
     assert.equal(result.scan.reasoningEffort, "high");
     assert.equal(result.scan.userContext, headlessContext);
-    assert.equal(result.workspace.userContext, headlessContext);
 
     const joined = await headlessServer.callTool(4, {
       name: "start_codex_security_standard_scan",
@@ -550,6 +552,11 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assertNoError(joined);
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
+    assert.match(
+      started.result.content[0].text,
+      /Skip it for Amazon Bedrock or API-key-only scans/,
+    );
+    assert.doesNotMatch(joined.result.content[0].text, /access-advisory/);
     for (const response of [started, joined]) {
       assertScanTarget(response.result._meta, result.scanId);
       assert.deepEqual(
@@ -557,13 +564,9 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
         result.scan.lifecycle,
       );
       assert.equal(result.scan.lifecycle.status, "running");
-      assert.match(
-        response.result.content[0].text,
-        /references\/scan-runtime\.md/,
-      );
       assert.doesNotMatch(
         response.result.content[0].text,
-        /security_scan preflight/,
+        /Daybreak|scan-runtime|preflight/,
       );
     }
     assert.equal(
@@ -601,7 +604,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: {
         scanId: result.scanId,
         handoffClaimToken: result.handoffClaimToken,
-        phase: "threat_model",
+        phase: "discovery",
       },
       _meta: { "openai/threadId": ownerThread },
     });
@@ -619,7 +622,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     );
     assert.equal(
       rejoinedAfterPreflight.structuredContent.scan.progress.phase,
-      "threat_model",
+      "discovery",
     );
 
     for (const threadSource of [undefined, "security_scan"]) {
@@ -1629,6 +1632,13 @@ try {
   );
   const exportFindings = findTool("export_codex_security_findings");
   const listFindings = findTool("list_codex_security_findings");
+  for (const tool of [
+    startHeadlessStandardScan,
+    startPromptOnlyScan,
+    getScanContext,
+  ]) {
+    assert.equal(tool._meta["openai/requestedEntitlements"], undefined);
+  }
   assert.deepEqual(start.inputSchema.required, ["sessionId"]);
   assert.equal(startDeepScan.annotations.idempotentHint, true);
   assert.equal(
@@ -2282,10 +2292,46 @@ try {
   const delivered = await testServer.callSuccessfulTool(2003, {
     name: "get_codex_security_scan_context",
     arguments: { handoffClaimToken, scanId },
-    _meta: { "openai/threadId": "fixture-thread" },
+    _meta: {
+      threadId: "fixture-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: {
+          cyber_trusted_access: {
+            schemaVersion: 1,
+            status: "not_granted",
+            grants: [],
+            stale: false,
+          },
+        },
+      },
+    },
   });
   assert.equal(delivered.structuredContent.scan.handoffStatus, "delivered");
   assert.equal(delivered.structuredContent.scan.handoffClaimToken, undefined);
+  assert.equal(delivered.structuredContent.scan.progress.phase, "threat_model");
+  assert.equal(delivered.structuredContent.securityPolicyPaths, undefined);
+  assert.match(
+    delivered.content[0].text,
+    /Skip it for Amazon Bedrock or API-key-only scans/,
+  );
+  assert.doesNotMatch(delivered.content[0].text, /lacks Daybreak access/);
+  const repeatedHandoff = await testServer.callTool(2004, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId },
+    _meta: {
+      threadId: "fixture-thread",
+      "openai/entitlementContext": {
+        schemaVersion: 1,
+        entitlements: { cyber_trusted_access: grantedTrustedAccess },
+      },
+    },
+  });
+  assertNoError(repeatedHandoff);
+  assert.doesNotMatch(
+    repeatedHandoff.result.content[0].text,
+    /Daybreak|access-advisory/,
+  );
   assert.equal(
     delivered.structuredContent.workspace.results.handoffClaimToken,
     undefined,
@@ -2355,7 +2401,7 @@ try {
     appUserContext,
   );
 
-  const readyPreflightProgress = await testServer.callSuccessfulTool(90164, {
+  const mappingProgress = await testServer.callSuccessfulTool(90164, {
     name: "update_codex_security_scan_progress",
     _meta: {
       "openai/threadId": "fixture-thread",
@@ -2369,23 +2415,29 @@ try {
       handoffClaimToken,
       phaseItemsTotal: 4,
       phaseItemsCompleted: 4,
-      phaseProgressUnit: "checks",
+      phaseProgressUnit: "threat_surfaces",
     },
   });
-  assert.equal(
-    readyPreflightProgress.structuredContent.scan.model,
-    "gpt-5.6-terra",
-  );
-  assert.equal(
-    readyPreflightProgress.structuredContent.scan.reasoningEffort,
-    "low",
-  );
+  const savedPreflight = await testServer.callSuccessfulTool(90165, {
+    name: "get_codex_security_scan",
+    arguments: { scanId },
+  });
+  const savedScan = savedPreflight.structuredContent.scan;
+  assert.deepEqual(mappingProgress.structuredContent, {
+    scan: {
+      scanId,
+      progress: savedScan.progress,
+      userContext: appUserContext,
+    },
+  });
+  assert.equal(savedScan.model, "gpt-5.6-terra");
+  assert.equal(savedScan.reasoningEffort, "low");
   assert.deepEqual(
-    readyPreflightProgress.structuredContent.scan.progress.preflightProgress,
-    { completed: 4, total: 4 },
+    mappingProgress.structuredContent.scan.progress.preflightProgress,
+    { completed: 0, total: 0 },
   );
   assert.equal(
-    readyPreflightProgress.structuredContent.scan.userContext,
+    mappingProgress.structuredContent.scan.userContext,
     appUserContext,
   );
 
@@ -2429,8 +2481,8 @@ try {
     unit: "candidate_findings",
   });
   assert.deepEqual(updated.structuredContent.scan.progress.preflightProgress, {
-    completed: 4,
-    total: 4,
+    completed: 0,
+    total: 0,
   });
 
   await writeCompletedContract(initializedScanDir, scanId, snapshotDigest);

@@ -76,7 +76,7 @@ export function scanArguments(inputs: Inputs, target: {repository: string; diffB
   const options: Array<[string, string | number | undefined]> = [
     ['--cyber-access-program', inputs.cyberAccessProgram],
     ['--diff', target.diffBase], ['--head', target.diffHead], ['--max-cost', inputs.maxCost],
-    ['--max-time-hours', inputs.maxTimeHours],
+    ['--max-time', inputs.maxTimeHours === undefined ? undefined : inputs.maxTimeHours * 60],
   ];
   for (const [name, value] of options) if (value !== undefined) args.push(name, String(value));
   if (inputs.failOnSeverity !== 'none') args.push('--fail-on-severity', inputs.failOnSeverity);

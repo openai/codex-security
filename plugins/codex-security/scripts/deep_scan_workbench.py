@@ -524,7 +524,7 @@ def existing_deep_scan_for_target(
         SELECT scans.*
         FROM scans
         JOIN workspaces ON workspaces.id = scans.workspace_id
-        WHERE workspaces.thread_id = ?
+        WHERE (workspaces.thread_id = ? OR workspaces.thread_id IS NULL)
             AND COALESCE(scans.deep_scan_owner_thread_id, workspaces.thread_id) = ?
             AND scans.target_path = ?
             AND scans.scope = ?
@@ -576,6 +576,7 @@ def terminal_deep_scan_for_target_snapshot(
             AND scans.target_inode = ?
             AND scans.handoff_status = 'delivered'
             AND scans.handoff_claim_token IS NULL
+            AND scans.continuation_thread_id IS NULL
             AND workspaces.active_scan_id = scans.id
             AND deep_scan_runs.status = 'succeeded'
             AND deep_scan_runs.phase = 'terminal'
@@ -616,7 +617,9 @@ def begin_deep_scan_for_scan(
     if (
         candidate["mode"] == "deep"
         and candidate["status"] == "running"
-        and candidate["recipe_json"] is not None
+        and (
+            candidate["recipe_json"] is not None or candidate["continuation_thread_id"] == thread_id
+        )
         and candidate["handoff_status"] == "delivered"
         and candidate["deep_scan_owner_thread_id"] is None
         and workspace["thread_id"] is None
@@ -628,17 +631,23 @@ def begin_deep_scan_for_scan(
         )
         timestamp = dependencies().now()
         with connection:
-            claimed_workspace = connection.execute(
-                "UPDATE workspaces SET thread_id = ?, updated_at = ? "
-                "WHERE id = ? AND thread_id IS NULL",
-                (thread_id, timestamp, workspace["id"]),
-            )
+            # Legacy scans can share a workspace. Only registered scans claim the workspace.
+            if candidate["recipe_json"] is not None:
+                claimed_workspace = connection.execute(
+                    "UPDATE workspaces SET thread_id = ?, updated_at = ? "
+                    "WHERE id = ? AND thread_id IS NULL",
+                    (thread_id, timestamp, workspace["id"]),
+                )
+                if claimed_workspace.rowcount != 1:
+                    raise SystemExit(
+                        "A scan can only be orchestrated from its owning Codex thread."
+                    )
             claimed_scan = connection.execute(
                 "UPDATE scans SET deep_scan_owner_thread_id = ?, updated_at = ? "
                 "WHERE id = ? AND deep_scan_owner_thread_id IS NULL "
                 "AND handoff_status = 'delivered' AND handoff_claim_token IS ? "
-                "AND (handoff_claim_token IS NOT NULL OR continuation_thread_id = ? "
-                "OR (? IS NULL AND continuation_thread_id IS NULL))",
+                "AND (continuation_thread_id = ? OR (recipe_json IS NOT NULL AND "
+                "(handoff_claim_token IS NOT NULL OR (? IS NULL AND continuation_thread_id IS NULL))))",
                 (
                     thread_id,
                     timestamp,
@@ -648,7 +657,7 @@ def begin_deep_scan_for_scan(
                     model_thread_id,
                 ),
             )
-            if claimed_workspace.rowcount != 1 or claimed_scan.rowcount != 1:
+            if claimed_scan.rowcount != 1:
                 raise SystemExit("A scan can only be orchestrated from its owning Codex thread.")
     scan, _ = require_owned_scan(connection, scan_id, thread_id)
     require_current_continuation(
@@ -733,7 +742,8 @@ def begin_deep_scan_for_target(
                 AND (deep_scan_runs.pending_target_project_path IS NULL
                     OR deep_scan_runs.pending_target_project_path = ?)
                 AND scans.recipe_json IS NULL
-                AND scans.handoff_claim_token IS NULL AND deep_scan_runs.status = 'succeeded'
+                AND scans.handoff_claim_token IS NULL AND scans.continuation_thread_id IS NULL
+                AND deep_scan_runs.status = 'succeeded'
                 AND deep_scan_runs.discovery_user_context_json = ?
             LIMIT 1
             """,

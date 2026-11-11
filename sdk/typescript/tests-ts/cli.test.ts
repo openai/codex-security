@@ -2,6 +2,7 @@ import { resolving } from "./support/promises.js";
 import { parseJsonLines } from "./support/json.js";
 import { writeFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -1024,7 +1025,12 @@ describe("CLI", () => {
         definitions.options?.properties ?? {},
       )) {
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
-        expect(help.text()).toContain(flag);
+        // The CSV input belongs to the internal publication destination.
+        if (command.join(" ") === "publish scan" && flag === "--csv") {
+          expect(help.text()).not.toContain(flag);
+        } else {
+          expect(help.text()).toContain(flag);
+        }
         expect(typeof option.description).toBe("string");
         expect(option.description?.trim().length).toBeGreaterThan(0);
       }
@@ -1167,7 +1173,13 @@ describe("CLI", () => {
         { mode: 0o700 },
       );
     }
-    for (const selected of [component, join(alias, "component")]) {
+    const selections = [component, join(alias, "component")];
+    if (process.platform !== "win32") {
+      const componentLink = join(caller, "component-link");
+      await symlink(component, componentLink);
+      selections.push(componentLink + "/..");
+    }
+    for (const selected of selections) {
       const { stdout, stderr, runCli } = createCliTest(main);
       const status = await runCli(
         ["install-hook", selected, "--json"],
@@ -1193,6 +1205,38 @@ describe("CLI", () => {
     await expect(stat(join(otherHooks, "pre-commit"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  test("rejects malformed boolean options before running the command", async () => {
+    const onRun = mock(() => {});
+    const deps = dependencies({ onRun });
+    for (const args of [
+      ["scan", ".", "--working-tree=1", "--dry-run"],
+      ["scan", ".", "--workingTree=treu", "--dry-run"],
+      ["scan", "--mock", "--dry-run=1"],
+      ["scan", "--working-tree=1", "--schema"],
+      ["scan", "import", "--csv", "unread.csv", "--dry-run=TRUE"],
+      ["publish", "findings", "unread.sarif", "--yes=maybe"],
+    ]) {
+      const stderr = captureCli(main, "stderr");
+      expect(await stderr.run(args, deps)).toBe(2);
+      expect(stderr.text()).toContain("Invalid boolean value for");
+    }
+    const typo = captureCli(main, "stderr");
+    expect(
+      await typo.run(["scan", ".", "--max-cots", "1", "--dry-run"], deps),
+    ).toBe(2);
+    expect(typo.text()).toContain("--max-cots");
+    expect(onRun).not.toHaveBeenCalled();
+    const out = captureCli(main, "stdout");
+    expect(
+      await out.run(
+        ["scan", ".", "--dry-run=true", "--working-tree=false", "--json"],
+        deps,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(out.text()).dryRun).toBe(true);
+    expect(onRun).not.toHaveBeenCalled();
   });
 
   test("installs a pre-commit hook that blocks failed diff scans", async () => {
@@ -1228,6 +1272,10 @@ describe("CLI", () => {
         };
         expect(normalize(result.hook)).toBe(hook);
         expect(result.failOnSeverity).toBe("medium");
+        if (process.platform !== "win32") {
+          expect((await stat(hook)).mode & 0o100).toBe(0o100);
+          if (attempt === 0) await chmod(hook, 0o600);
+        }
       }
       expect(await readFile(hook, "utf8")).toContain(
         "--working-tree --fail-on-severity medium",
@@ -1558,6 +1606,50 @@ describe("CLI", () => {
     }
   });
 
+  test.skipIf(process.platform === "win32").each(["present", "missing"])(
+    "reads the physical bulk scan CSV through a symlink parent with the lexical CSV %s",
+    async (lexicalCsv) => {
+      const root = await temporaryDirectory("codex-security-cli-csv-link-");
+      const currentDirectory = join(root, "entry");
+      const physical = join(root, "physical");
+      const output = join(root, "results");
+      try {
+        await mkdir(currentDirectory);
+        await mkdir(join(physical, "child"), { recursive: true });
+        await multiscanInventory(physical);
+        if (lexicalCsv === "present")
+          await multiscanInventory(currentDirectory);
+        await symlink(join(physical, "child"), join(currentDirectory, "link"));
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "bulk-scan",
+              "link/../repositories.csv",
+              "--output-dir",
+              output,
+              "--json",
+            ],
+            dependencies({ currentDirectory }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          total: 1,
+          completed: 1,
+          failed: 0,
+        });
+        expect(
+          parseJsonLines(await readFile(join(output, "results.jsonl"), "utf8")),
+        ).toMatchObject([
+          { repository: join(physical, "repository"), status: "completed" },
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("expands home-relative bulk scan paths", async () => {
     const root = await temporaryDirectory("codex-security-cli-home-");
     const home = join(root, "home");
@@ -1874,7 +1966,7 @@ describe("CLI", () => {
     });
   }, 30_000);
 
-  test("presents interactive scan history and hides abandoned running scans", async () => {
+  test("keeps inactive running scans visible with their last activity in interactive history", async () => {
     const stdout = captureCli(main, "stdout", true);
     const scan = {
       mode: "standard",
@@ -1897,6 +1989,22 @@ describe("CLI", () => {
           {
             ...scan,
             scanId: "abandoned-scan",
+            mode: "deep",
+            continuationThreadId: "thread-for-deep",
+            handoffStatus: "delivered",
+            recipeAvailable: true,
+            progress: { status: "running" },
+            findingCount: 0,
+            startedAt: "2026-07-20T12:00:00Z",
+            updatedAt: "2026-07-20T12:00:00Z",
+          },
+          {
+            ...scan,
+            scanId: "recipe-less-scan",
+            mode: "deep",
+            continuationThreadId: "retained-thread",
+            handoffStatus: "delivered",
+            recipeAvailable: false,
             progress: { status: "running" },
             findingCount: 0,
             startedAt: "2026-07-20T12:00:00Z",
@@ -1940,7 +2048,13 @@ describe("CLI", () => {
     expect(text).not.toContain("latest: 0 findings");
     expect(text).toContain("active-scan");
     expect(text).toContain("completed-scan");
-    expect(text).not.toContain("abandoned-scan");
+    expect(text).toContain("abandoned-scan");
+    expect(text).toContain("Last activity: 2026-07-20T12:00:00Z");
+    expect(text).toContain("codex-security scans resume abandoned-scan");
+    expect(text).not.toContain("scans resume active-scan");
+    expect(text).toContain("recipe-less-scan");
+    expect(text).not.toContain("scans resume recipe-less-scan");
+    expect(text).toContain("5 scans");
     expect(text).not.toContain("juice-shop-remediated");
     expect(text).not.toContain("/private/tmp");
     expect(text).not.toContain("target-internal-id");
@@ -2230,6 +2344,25 @@ describe("CLI", () => {
       nextStep: "codex-security scan . --dry-run",
     });
     expect(stderr.text()).toBe("");
+  });
+
+  test("projects nested info settings and other top-level metadata", async () => {
+    const { stdout, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "info",
+          "--json",
+          "--filter-output",
+          "model,configuration.settings.mode",
+        ],
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({
+      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
+      configuration: { settings: { mode: "standard" } },
+    });
   });
 
   test("rejects scan-only filters before running the info command", async () => {
@@ -2807,12 +2940,15 @@ describe("CLI", () => {
   ] as const)(
     "shows the resolved directory name in the scan title for %p",
     async (repository, name) => {
+      await using temp = await scopedTemporaryDirectory("scan-title-");
+      const currentDirectory = join(temp.path, "workspace", "repository");
+      await mkdir(join(currentDirectory, "child"), { recursive: true });
       const { stderr, runCli } = createCliTest(main, { stderr: true });
       expect(
         await runCli(
           ["scan", ...(repository === undefined ? [] : [repository])],
           dependencies({
-            currentDirectory: resolve("/workspace/repository"),
+            currentDirectory,
             environment: { NO_COLOR: "1" },
           }),
         ),
@@ -3125,7 +3261,6 @@ describe("CLI", () => {
     for (const [command, ...args] of [
       ["validate", "finding", "--json"],
       ["login", "--format", "json"],
-      ["login", "status", "--format=jsonl"],
       ["logout", "--format", "jsonl"],
       ["logout", "--format=json"],
     ] as const) {
@@ -5049,6 +5184,25 @@ describe("CLI", () => {
     }
   });
 
+  test("reports an unreadable mock scan artifact as a local failure", async () => {
+    const message =
+      "Could not save the mock scan: scan-manifest.json: [Errno 13] Permission denied";
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.createSecurity = () => failingSecurity(message);
+
+    expect(
+      await runCli(["scan", ".", "--mock", "--json", "--verbose"], deps),
+    ).toBe(2);
+    expect(JSON.parse(stdout.text())).toEqual({
+      status: "failed",
+      code: "SCAN_FAILED",
+      message,
+    });
+    expect(stderr.text()).toContain(message);
+    expect(stderr.text()).toContain('scan.failed classification="local"');
+  });
+
   test("keeps model authorization advice for genuine transport failures", async () => {
     // The bypass must not swallow real 401/403 handling, and the advice must
     // still replace upstream text that can name the organization or project.
@@ -6130,7 +6284,7 @@ describe("CLI", () => {
       );
       expect(stderr.text()).toContain(
         process.platform === "win32"
-          ? `Re-run with --output-dir "${suggestion}".`
+          ? `Re-run (PowerShell) with --output-dir '${suggestion.replaceAll("'", "''")}'.`
           : `Re-run with --output-dir '${suggestion.replaceAll("'", `'"'"'`)}'.`,
       );
     } finally {
@@ -6171,6 +6325,28 @@ describe("CLI", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  test("explains how to fix an overlapping state directory", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const failing = scanDependencies(async () => {
+      throw new OutputInsideProtectedRootError(
+        "/state",
+        "/state/repo",
+        "state",
+      );
+    });
+
+    expect(await runCli(["scan", ".", "--json"], failing)).toBe(2);
+    const { message } = JSON.parse(stdout.text());
+    expect(message).toContain(
+      "Codex Security state directory must be outside the protected scan root and cannot contain it.",
+    );
+    expect(message).toContain("Resolved path:  /state");
+    expect(message).toContain("Protected root: /state/repo");
+    expect(message).toContain("Set CODEX_SECURITY_STATE_DIR");
+    expect(message).not.toContain("--output-dir");
+    expect(stderr.text()).toContain(message);
   });
 
   test("identifies the output directory for a late protected-root failure", async () => {

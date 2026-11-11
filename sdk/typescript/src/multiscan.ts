@@ -31,7 +31,7 @@ import { promisify } from "node:util";
 import Papa from "papaparse";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { CodexSecurityConfig, JsonObject } from "./config.js";
-import { ContractSchemaError, loadContract } from "./contract.js";
+import { ContractSchemaError, loadContract, readScanFile } from "./contract.js";
 import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
 import { deepScanOptions } from "./deep-config.js";
 import { readThreatModelPath } from "./artifact-export.js";
@@ -58,6 +58,7 @@ import {
   gitOutput,
   nullIfMissingPath,
   UNSUPPORTED_GIT_ENVIRONMENT,
+  resolveTargetPath,
   type ScanMode,
 } from "./targets.js";
 import {
@@ -70,6 +71,7 @@ import type { ScanResult } from "./result.js";
 import { resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
+const CHECKOUT_MARKER = ".git/codex-security-campaign-attempt";
 const REQUIRED_ARTIFACTS = ["scan-manifest.json", "findings.json", "report.md"];
 const LOCK_LEASE_MS = 30_000;
 const LOCK_HEARTBEAT_MS = 5_000;
@@ -94,6 +96,7 @@ interface MultiscanReceipt extends MultiscanTask {
   warnings?: string[];
   policyFailed?: boolean;
   knowledgeBaseFailure?: true;
+  checkoutOccupied?: true;
   cleanupPending?: "checkout" | "recovery-checkout";
 }
 
@@ -173,7 +176,7 @@ export async function runMultiscan(
   }
   const tasks = parseInventory(
     await readFile(options.inputPath, "utf8"),
-    dirname(resolve(options.inputPath)),
+    dirname(resolveTargetPath(options.inputPath)),
     options.mode,
   );
   for (const mode of new Set(tasks.map((task) => task.mode))) {
@@ -406,10 +409,11 @@ async function runCampaign(
       if (receipt.status === "completed") {
         try {
           if (receipt.cleanupPending === "checkout") {
-            await rm(join(output, "checkouts", task.id), {
-              recursive: true,
-              force: true,
-            });
+            await removeCheckout(
+              join(output, "checkouts", task.id),
+              artifactOutput,
+              options.signal,
+            );
           } else if (receipt.cleanupPending === "recovery-checkout") {
             const recoveryRoot = join(output, "recovery-checkouts");
             await lstat(recoveryRoot);
@@ -417,10 +421,11 @@ async function runCampaign(
             const taskRoot = join(recoveryRoot, task.id);
             await lstat(taskRoot);
             await ensureOutputDirectory(taskRoot);
-            await rm(join(taskRoot, `attempt-${receipt.attempt}`), {
-              recursive: true,
-              force: true,
-            });
+            await removeCheckout(
+              join(taskRoot, `attempt-${receipt.attempt}`),
+              artifactOutput,
+              options.signal,
+            );
           }
         } catch {}
       }
@@ -517,6 +522,7 @@ async function runCampaign(
         let exhaustedBudget = false;
         let requiresRecovery = false;
         let knowledgeBaseFailure = false;
+        let checkoutOccupied = false;
         try {
           await ensureOutputDirectory(artifactRoot);
           let result:
@@ -595,11 +601,27 @@ async function runCampaign(
               await mkdir(scanDir, { mode: 0o700 });
               await mkdir(checkout, { mode: 0o700 });
             } else {
-              checkout = join(output, "checkouts", task.id);
-              await rm(checkout, { recursive: true, force: true });
-              await mkdir(checkout, { mode: 0o700 });
+              const destination = join(output, "checkouts", task.id);
+              try {
+                await mkdir(destination, { mode: 0o700 });
+                checkout = destination;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+                  throw error;
+                checkoutOccupied = true;
+                throw new Error(
+                  `Bulk checkout is already occupied: ${destination}. Retry with --recover to use a fresh checkout, or inspect and move the retained checkout before an ordinary retry.`,
+                );
+              }
             }
             protectedRoot = checkout;
+            // Claim the fresh checkout before Git or the scanner can fail.
+            const marker = await checkoutMarker(checkout, scanDir);
+            await mkdir(join(checkout, ".git"), { mode: 0o700 });
+            await writeFile(join(checkout, CHECKOUT_MARKER), marker, {
+              flag: "wx",
+              mode: 0o600,
+            });
             await checkoutRevision(
               task,
               checkout,
@@ -684,7 +706,7 @@ async function runCampaign(
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
-            cleanupFailure = await removeCheckout(checkout);
+            cleanupFailure = await removeCheckout(checkout, scanDir);
           }
         }
         const reportedErrors = [failure, cleanupFailure].filter(
@@ -721,6 +743,7 @@ async function runCampaign(
               ? { cleanupPending: "checkout" }
               : {}),
           ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
+          ...(checkoutOccupied ? { checkoutOccupied: true } : {}),
           ...(runWarnings.length === 0 ? {} : { warnings: runWarnings }),
           policyFailed: attemptPolicyFailed,
         };
@@ -731,7 +754,7 @@ async function runCampaign(
         await receiptTail;
         options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
-          reportedError = await removeCheckout(recoveryCheckout);
+          reportedError = await removeCheckout(recoveryCheckout, scanDir);
         }
         notifyProgress(options, {
           repository: task.id,
@@ -747,7 +770,12 @@ async function runCampaign(
           completed += 1;
           break;
         }
-        if (exhaustedBudget || attemptedResume || requiresRecovery) {
+        if (
+          exhaustedBudget ||
+          attemptedResume ||
+          requiresRecovery ||
+          checkoutOccupied
+        ) {
           failed += 1;
           break;
         }
@@ -780,12 +808,48 @@ function notifyProgress(
   notify(() => options.onProgress?.(event));
 }
 
-async function removeCheckout(path: string): Promise<string | undefined> {
-  return rm(path, { recursive: true, force: true }).then(
-    () => undefined,
-    (error: unknown) =>
-      `Multiscan checkout cleanup failed: ${errorMessage(error)}`,
-  );
+// A completed attempt can be revisited after its checkout path was reused.
+async function checkoutMarker(
+  checkout: string,
+  scanDir: string,
+): Promise<string> {
+  const directory = await lstat(checkout, { bigint: true });
+  if (!directory.isDirectory())
+    throw new Error("The campaign checkout is no longer a directory.");
+  return JSON.stringify([
+    scanDir,
+    String(directory.dev),
+    String(directory.ino),
+  ]);
+}
+
+async function removeCheckout(
+  checkout: string,
+  scanDir: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
+      undefinedIfMissingFile,
+    );
+    if (!marker?.isFile()) return undefined;
+    const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
+    if (
+      marker.size === expected.length &&
+      (
+        await readScanFile(
+          checkout,
+          CHECKOUT_MARKER,
+          "campaign checkout marker",
+          signal,
+        )
+      ).equals(expected)
+    ) {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  } catch (error) {
+    return `Multiscan checkout cleanup failed: ${errorMessage(error)}`;
+  }
 }
 
 async function ensureOutputDirectory(
@@ -948,7 +1012,7 @@ async function inspectLock(
     processStartedAt?: number;
   };
   try {
-    identity = JSON.parse(owner) as typeof identity;
+    identity = (JSON.parse(owner) ?? {}) as typeof identity;
   } catch {
     return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
   }
@@ -1168,8 +1232,11 @@ async function readReceipts(
     const previous = receipts.get(id);
     receipts.set(id, {
       maxAttempt: Math.max(previous?.maxAttempt ?? 0, receipt.attempt),
-      // Extraction failures never start or modify a scan; keep its last receipt.
-      scan: receipt.knowledgeBaseFailure ? previous?.scan : receipt,
+      // Pre-scan failures reserve an attempt but leave the last scan recoverable.
+      scan:
+        receipt.knowledgeBaseFailure || receipt.checkoutOccupied
+          ? previous?.scan
+          : receipt,
     });
   }
   if (contents.at(-1) !== 10) {
@@ -1275,9 +1342,10 @@ function parseInventory(
     ) {
       throw new Error("Multiscan scope must stay inside its repository.");
     }
+    const repository = normalizeRepository(get("repository"), directory);
     return {
       id,
-      repository: normalizeRepository(get("repository"), directory),
+      repository,
       revision,
       mode: mode as ScanMode,
       ...(scope ? { scope } : {}),
@@ -1294,7 +1362,7 @@ function normalizeRepository(repository: string, directory: string): string {
   }
   if (/^[^@\s/:]+@[^:\s/]+:.+$/u.test(repository)) return repository;
   if (!repository.includes("://")) {
-    const path = resolve(directory, repository);
+    const path = resolveTargetPath(repository, directory);
     if (process.platform !== "win32") return path;
     try {
       return realpathSync.native(path);

@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { ConfigurationError } from "../src/errors.js";
@@ -533,6 +533,18 @@ describe("scan knowledge bases", () => {
       ),
     );
     await writeFile(
+      join(root, "content-controls.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Owner: </w:t></w:r>' +
+          "<w:sdt><w:sdtPr><w:showingPlcHdr/></w:sdtPr><w:sdtContent>" +
+          "<w:r><w:t>Click here to enter text.</w:t></w:r></w:sdtContent></w:sdt></w:p>" +
+          '<w:p><w:r><w:t xml:space="preserve">Data: </w:t></w:r>' +
+          '<w:sdt><w:sdtPr><w:showingPlcHdr w:val="0"/></w:sdtPr><w:sdtContent>' +
+          "<w:r><w:t>Confidential</w:t></w:r>" +
+          "</w:sdtContent></w:sdt></w:p>",
+      ),
+    );
+    await writeFile(
       join(root, "field-code.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
@@ -555,6 +567,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
+    expect(documents).toContain("Owner: \nData: Confidential\n");
   });
 
   test.each([
@@ -883,6 +896,36 @@ describe("scan knowledge bases", () => {
     ]);
   });
 
+  test.each(["relative", "linked parent"])(
+    "stages knowledge in the worker-readable temporary directory: %s",
+    async (spelling) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "policy.md");
+      await writeFile(source, "Synthetic policy.");
+      const staging = join(root, "staging");
+      await mkdir(staging);
+      let temporary = relative(process.cwd(), staging);
+      if (spelling === "linked parent") {
+        const child = join(staging, "child");
+        const link = join(root, "alias");
+        await mkdir(child);
+        await symlink(
+          child,
+          link,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        temporary = link + sep + "..";
+      }
+      const expected = await filesystem.realpath(temporary);
+      using _temporary = spyOn(os, "tmpdir").mockReturnValue(temporary);
+      const prepared = await prepareKnowledgeBase([source]);
+      expect(dirname(prepared.path)).toBe(expected);
+      expect(await extractedDocuments(prepared.path)).toEqual([
+        "Synthetic policy.",
+      ]);
+    },
+  );
+
   test("skips macOS metadata files copied next to documents", async () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
@@ -968,6 +1011,25 @@ describe("scan knowledge bases", () => {
       "Cannot extract text from knowledge base DOCX",
     );
   });
+
+  testPosix(
+    "a directory link before a parent traversal cannot select outside documents",
+    async () => {
+      const repository = await temporaryDirectory();
+      const outside = await temporaryDirectory();
+      await mkdir(join(outside, "child"));
+      await symlink(join(outside, "child"), join(repository, "context"));
+      await writeFile(join(outside, "guide.md"), "External data");
+      const requested = `${repository}/context/../guide.md`;
+      await expect(prepareKnowledgeBase([requested])).rejects.toThrow();
+      await writeFile(join(repository, "guide.md"), "Repository guide");
+      const prepared = await prepareKnowledgeBase([requested]);
+      temporaryDirectories.track(prepared.path);
+      expect(await extractedDocuments(prepared.path)).toEqual([
+        "Repository guide",
+      ]);
+    },
+  );
 
   testPosix("does not follow symbolic links", async () => {
     const root = await temporaryDirectory();

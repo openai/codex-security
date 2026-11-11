@@ -132,6 +132,7 @@ The CLI and SDK return the same result:
 {
   "scanId": "scan_example_001",
   "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
+  "scanRepresentativeFindingIds": ["csf_852f90d6e1177502ff113d4a"],
   "duplicateGroups": [],
   "deduplicationStatus": "completed"
 }
@@ -140,8 +141,12 @@ The CLI and SDK return the same result:
 `uniqueFindingIds` contains one representative for each selected finding after
 accepted groups are collapsed. A representative can come from outside the scan.
 Each group lists its canonical finding first: highest reported severity, then
-finding ID to break ties. Group associations are saved before returning success;
-the original findings and scan artifacts remain unchanged.
+finding ID to break ties. `scanRepresentativeFindingIds` gives the highest-ranked
+member from the selected scan for each canonical ID in the same order, including
+ungrouped findings. Pass these IDs to severity classification or Linear publication
+for that scan. The SDK also returns them when resuming older saved workflows.
+Dedupe saves the group associations separately from the original findings and
+scan artifacts before returning success.
 
 If a model refuses a review, the result uses `completed_with_refusals` and adds
 `refusals`. Each entry contains `decision: "NO_DECISION"`, `stage`, `model`,

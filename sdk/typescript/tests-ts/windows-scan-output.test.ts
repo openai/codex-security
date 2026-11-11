@@ -34,6 +34,37 @@ const example = join(PLUGIN_ROOT, "examples", "completed-scan");
 const system = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32");
 const powershell = join(system, "WindowsPowerShell", "v1.0");
 
+windowsTest(
+  "a selected registration script keeps its ordinary entrypoint and stdin",
+  async () => {
+    const pluginRoot = await temporaryDirectory();
+    const scripts = join(pluginRoot, "scripts");
+    await mkdir(scripts);
+    await writeFile(
+      join(scripts, "workbench_db.py"),
+      [
+        "import json, sys",
+        "if __name__ == '__main__':",
+        "    print(json.dumps({'args': sys.argv[1:], 'fd': sys.stdin.fileno(), 'input': sys.stdin.buffer.read().decode('utf-8')}))",
+      ].join("\n"),
+    );
+    const args = ["register-cli-scan", "--plugin-option", "出力\0line\ntwo"];
+    const input = "\ncafé\r\nlast";
+    expect(
+      await runtime.runWorkbench(
+        {
+          python: await runtime.resolvePluginPython(),
+          pluginRoot,
+          environment: { SystemRoot: process.env["SystemRoot"] },
+          signal: new AbortController().signal,
+        },
+        args,
+        input,
+      ),
+    ).toEqual({ args, fd: 0, input });
+  },
+);
+
 async function icacls(path: string, ...args: string[]): Promise<void> {
   await exec(join(system, "icacls.exe"), [path, ...args]);
 }

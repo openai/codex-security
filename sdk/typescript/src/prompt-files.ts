@@ -7,15 +7,13 @@ import {
   isAbsolute,
   join,
   parse,
-  resolve,
   sep,
 } from "node:path";
 import { CodexSecurityError } from "./errors.js";
-import { expandHome } from "./runtime.js";
+import { resolveInputPath, resolveParentTraversal } from "./runtime.js";
 import { isWithin } from "./trusted-executable.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
 
-/** Canonical source directories, with null for an unknown checkout. */
 /** Canonical source directories, or null when a checkout cannot be verified. */
 export type DocumentRoots = readonly string[] | null;
 export type DocumentRootSource = DocumentRoots | (() => Promise<DocumentRoots>);
@@ -39,7 +37,7 @@ export async function resolveScanPrompts(
     inline !== undefined || file === undefined
       ? inline
       : await readRegularInputFile(
-          resolve(directory, expandHome(file)),
+          resolveInputPath(file, directory),
           repository,
         );
   const [scanPrompt, validationPrompt, postScanPrompt] = await Promise.all([
@@ -98,7 +96,7 @@ export async function checkDocumentPath(
         "Select the document by its canonical path when the source checkout is unknown.",
       );
     }
-    const owner = await realpath(parsed.dir);
+    const owner = await realpath(await resolveParentTraversal(parsed.dir));
     if (outside.some((root) => isWithin(root, owner))) {
       throw new CodexSecurityError(
         `Input files must not follow repository directory links outside the selected repository: ${entry}`,
@@ -119,13 +117,20 @@ export async function readRegularInputFile(
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
-  const canonical = join(await realpath(dirname(path)), basename(path));
+  const canonical = join(
+    await realpath(await resolveParentTraversal(dirname(path))),
+    basename(path),
+  );
   const roots = typeof repository === "string" ? [repository] : repository;
   await checkDocumentPath(
     path,
     canonical,
     Array.isArray(roots)
-      ? await Promise.all(roots.map((root: string) => realpath(root)))
+      ? await Promise.all(
+          roots.map(async (root: string) =>
+            realpath(await resolveParentTraversal(root)),
+          ),
+        )
       : roots,
   );
   const file = await open(

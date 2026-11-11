@@ -2,8 +2,16 @@ import { isNonEmptyString } from "./value.js";
 import { isUtf8 } from "node:buffer";
 import { execFile as execFileCallback } from "node:child_process";
 import { realpathSync, type Stats } from "node:fs";
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import {
+  copyFile,
+  lstat,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -153,9 +161,28 @@ export async function normalizeRepository(
   return canonical;
 }
 
-export function resolveRepositoryPath(repository: string): string {
+export function resolveRepositoryPath(
+  repository: string,
+  directory = process.cwd(),
+): string {
   requireUtf8Path("Repository path", repository);
-  return resolve(expandHome(repository));
+  return resolveTargetPath(expandHome(repository), directory);
+}
+
+/** Preserve filesystem resolution of symlink/.. paths on POSIX. */
+export function resolveTargetPath(
+  value: string,
+  directory = process.cwd(),
+): string {
+  if (sep === "\\") return resolve(directory, value);
+  const base = isAbsolute(directory)
+    ? directory
+    : `${process.cwd()}/${directory}`;
+  const absolute = isAbsolute(value) ? value : `${base}/${value}`;
+  const parts = absolute
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  return `/${parts.join("/")}`;
 }
 
 function requireUtf8Path(
@@ -592,9 +619,7 @@ export async function normalizeTarget(
       );
     }
     requireUtf8Path("Path target", value);
-    const candidate = isAbsolute(expandHome(value))
-      ? resolve(expandHome(value))
-      : resolve(root, expandHome(value));
+    const candidate = resolveTargetPath(expandHome(value), root);
     let canonical: string;
     try {
       // Some runtimes cannot canonicalize special files to filesystem paths.
@@ -675,11 +700,59 @@ export async function validateCommittedDiffCheckout(
     );
   }
 
-  const tracked = await gitOutput(repository, ["ls-files", "-t", "-z"], signal);
-  if (tracked.split("\0").some((entry) => entry.startsWith("S "))) {
+  const tracked = (
+    await gitOutput(repository, ["ls-files", "-v", "-z"], signal)
+  ).split("\0");
+  if (tracked.some((entry) => /^[Ss] /u.test(entry))) {
     throw new InvalidTargetError(
       "Committed-diff scans require a full repository checkout. Sparse checkouts are not supported; materialize skipped tracked files and retry.",
     );
+  }
+  if (tracked.some((entry) => entry.startsWith("h "))) {
+    await verifyAssumedUnchangedFiles(repository, signal);
+  }
+}
+
+async function verifyAssumedUnchangedFiles(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const index = await gitOutput(
+    repository,
+    ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    signal,
+  );
+  // Git changes to the repository before resolving GIT_INDEX_FILE, even when TMPDIR is relative.
+  const directory = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-git-index-"),
+  );
+  const copy = join(directory, "index");
+  try {
+    // Git refreshes stat data and flags. Keep that write and any hooks out of the checkout.
+    await copyFile(index, copy);
+    await gitOutput(
+      repository,
+      [
+        "-c",
+        `core.hooksPath=${directory}`,
+        "-c",
+        "core.splitIndex=false",
+        "update-index",
+        "--really-refresh",
+      ],
+      signal,
+      { GIT_INDEX_FILE: copy },
+    );
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === 1) {
+      throw new InvalidTargetError(
+        "Committed-diff scans require a clean repository checkout. A tracked file marked assume-unchanged has changed on disk.",
+        { cause: error },
+      );
+    }
+    throw error;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 }
 
@@ -1027,7 +1100,12 @@ function expandHome(value: string): string {
     return homedir();
   }
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
+    const separators =
+      sep === "/" && value.startsWith("~/") ? /^\/+/ : /^[/\\]+/;
+    const suffix = value.slice(2).replace(separators, "");
+    const home = homedir();
+    if (process.platform === "win32") return resolve(home, suffix);
+    return home === "" ? resolveTargetPath(suffix) : `${home}${sep}${suffix}`;
   }
   return value;
 }
