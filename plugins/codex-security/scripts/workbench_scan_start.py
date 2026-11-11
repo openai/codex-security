@@ -366,6 +366,7 @@ def insert_running_scan(
     surface: str | None = "plugin",
     package_version: str | None = None,
     launch_kind: str = "scan",
+    hosted: bool = False,
 ) -> str:
     revision = target_identity[0]
     native_scan = scan_dir is None
@@ -411,7 +412,7 @@ def insert_running_scan(
             reasoning_effort, status, phase, handoff_status, started_at, created_at, updated_at,
             launch_surface, launch_package_version, launch_plugin_version, launch_kind
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', 'preflight', ?, ?, ?, ?, ?, ?, ?, ?)
+            'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
@@ -431,6 +432,12 @@ def insert_running_scan(
             str(scan_dir),
             optional_text(model, maximum=200),
             optional_text(reasoning_effort, maximum=32),
+            "threat_model"
+            if not hosted
+            and launch_kind == "scan"
+            and workspace["default_mode"] == "standard"
+            and handoff_status == "delivered"
+            else "preflight",
             handoff_status,
             timestamp,
             timestamp,
