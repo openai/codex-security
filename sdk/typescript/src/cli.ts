@@ -30,6 +30,7 @@ import {
   writeSync,
 } from "node:fs";
 import {
+  access,
   chmod,
   lstat,
   mkdir,
@@ -64,6 +65,11 @@ import {
   stripVTControlCharacters,
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
+import {
+  completeCli,
+  completionShell,
+  serveIntegration,
+} from "./cli-integrations.js";
 import type { ZodType } from "zod";
 import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
@@ -117,7 +123,7 @@ import {
   formatDeepScanReviews,
   type DeepScanProgress,
 } from "./scan-progress.js";
-import { isRecord as isJsonObject } from "./record.js";
+import { asRecord, isRecord as isJsonObject } from "./record.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
 import { publishScanToCustom } from "./custom-publish.js";
@@ -162,6 +168,8 @@ import {
   verificationBatches,
   VerificationModeSchema,
   type FindingPatch,
+  FindingPatchSchema,
+  FindingVerificationSchema,
   type FindingVerification,
 } from "./remediation.js";
 import {
@@ -402,6 +410,7 @@ import {
   CODEX_EXECUTABLE_VERSION,
   CODEX_SDK_VERSION,
   formatUpdateNotice,
+  installUpdate,
   invokedWithNpx,
   updateNoticeEnabled,
   type UpdateNotice,
@@ -543,7 +552,14 @@ const ASSESS_PATCH_RISK_OPTION = z
   .describe("Assess the completed patch and return the risk report.");
 
 function optionValue(flag: string) {
-  return z.string().min(1, `${flag} must not be empty.`);
+  return z
+    .string({
+      error: (issue) =>
+        issue.input === undefined
+          ? `Missing required option ${flag}.`
+          : undefined,
+    })
+    .min(1, `${flag} must not be empty.`);
 }
 
 function remediationInputOptions(verb: "Patch" | "Verify") {
@@ -587,7 +603,10 @@ function linearApiKeyOption() {
 }
 
 const PUBLICATION_DESTINATION_OPTIONS = z.object({
-  to: z.literal("linear").describe("Publication destination."),
+  to: z
+    .literal("linear")
+    .default("linear")
+    .describe("Publication destination."),
   linearTeam: optionValue("--linear-team")
     .optional()
     .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
@@ -1237,15 +1256,88 @@ interface ScanOutcome {
   error?: string;
 }
 
-function scanOutputSchema(...codes: [string, ...string[]]) {
+const jsonDocument = z.record(z.string(), z.unknown());
+const scanArtifactFields = {
+  manifest: jsonDocument,
+  findings: jsonDocument,
+  review: jsonDocument,
+  scanDir: z.string(),
+  reportPath: z.string(),
+};
+const retainedScanOutput = z.object({
+  ...scanArtifactFields,
+  mode: z.string(),
+});
+const completedScanOutput = z.looseObject({
+  ...scanArtifactFields,
+  artifactsDir: z.string(),
+  sarifPath: z.string().nullable(),
+  threadId: z.string(),
+  turn: jsonDocument,
+  cost: jsonDocument.nullable(),
+  threatModel: jsonDocument.nullable(),
+  threatModelPath: z.string().nullable(),
+  repositoryFindings: z.array(jsonDocument).optional(),
+  ownerSuggestionsPath: z.string().optional(),
+  ownerSuggestionsError: z.string().optional(),
+  validation: jsonDocument.optional(),
+  warnings: z.array(z.string()).optional(),
+  patchSeverity: FailureSeveritySchema.optional(),
+  patches: z.array(FindingPatchSchema).optional(),
+  pullRequest: jsonDocument.optional(),
+});
+
+const scanPreflightOutput = z.looseObject({
+  ...DeepScanSettingsSchema.shape,
+  dryRun: z.literal(true),
+  repository: z.string(),
+  target: z.object({
+    kind: z.enum(["repository", "paths", "refs", "working_tree"]),
+    paths: z.array(z.string()),
+    base: z.string().optional(),
+    head: z.string().optional(),
+    baseRef: z.string().optional(),
+    headRef: z.string().optional(),
+  }),
+  mode: ScanSettingsSchema.shape.mode.unwrap(),
+  model: z.string(),
+  reasoningEffort: z.string(),
+  modelProvider: z.string().optional(),
+  outputDir: z.string().nullable(),
+  stateDirectory: z.string().optional(),
+  archiveDir: z.string().optional(),
+  authentication: z.looseObject({
+    method: z.string(),
+    verified: z.literal(false),
+  }),
+  maxTimeMinutes: ScanSettingsSchema.shape.maxTimeMinutes,
+  maxCostUsd: ScanSettingsSchema.shape.maxCostUsd,
+  costLimitNote: z.string().optional(),
+  knowledgeBasePaths: ScanSettingsSchema.shape.knowledgeBasePaths,
+  scanPromptFile: ScanSettingsSchema.shape.scanPromptFile,
+  validationPromptFile: ScanSettingsSchema.shape.validationPromptFile,
+  failOnSeverity: FailureSeveritySchema.optional(),
+  projectConfig: jsonDocument.optional(),
+  deepScanSources: jsonDocument.optional(),
+});
+
+function cliFailureSchema(...codes: [string, ...string[]]) {
+  return z.object({
+    status: z.literal("failed"),
+    code: z.literal(codes),
+    message: z.string(),
+  });
+}
+
+function scanOutputSchema(
+  ...codes: [string, ...string[]]
+): z.ZodType<Record<string, unknown> | undefined> {
   return z
     .union([
-      z.record(z.string(), z.unknown()),
-      z.object({
-        status: z.literal("failed"),
-        code: z.literal(codes),
-        message: z.string(),
-      }),
+      completedScanOutput,
+      retainedScanOutput,
+      scanPreflightOutput,
+      cliFailureSchema(...codes),
     ])
     .optional();
 }
@@ -2312,6 +2404,26 @@ export async function main(
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
+  // Build the command tree with no executable arguments for shell callbacks.
+  // Completion words, including literal action flags, belong to the shell.
+  const completion = completionShell.safeParse(process.env["COMPLETE"]);
+  const shellArgv = argv;
+  if (completion.success) argv = [];
+  if (
+    argv.includes("--mcp") &&
+    argv.some((arg) =>
+      [
+        "--help",
+        "-h",
+        "--schema",
+        "--version",
+        "--llms",
+        "--llms-full",
+      ].includes(arg),
+    )
+  ) {
+    argv = argv.filter((arg) => arg !== "--mcp");
+  }
   const remediationOperation =
     argv[0] === "patch"
       ? "patch"
@@ -2441,7 +2553,8 @@ export async function main(
       const message = errorMessage(outcome.error);
       if (!argv.includes("--full-output")) {
         const data = { status: "failed", code, message };
-        if (frameworkFlags.filterOutput) filteredScanFailure = { format, data };
+        if (frameworkFlags.filters.length)
+          filteredScanFailure = { format, data };
         return data;
       }
       // Incur would wrap returned data in an ok: true envelope.
@@ -4313,7 +4426,7 @@ export async function main(
             if (
               machineFormat &&
               (!argv.includes("--full-output") || selection !== undefined) &&
-              frameworkFlags.filterOutput
+              frameworkFlags.filters.length
             )
               filteredScanFailure = { format, data: failure };
             return structured ? failure : undefined;
@@ -4484,7 +4597,7 @@ export async function main(
     environment: dependencies.environment,
     fetch: dependencies.hostedScannerFetch,
   };
-  function setHostedOutputFormat(format?: string) {
+  function setTerminalOutputFormat(format?: string) {
     escapeFrameworkOutput =
       format === "md" || (format === "toon" && output.isTTY === true);
   }
@@ -4617,7 +4730,7 @@ export async function main(
         })
         .optional(),
       run: ({ args, options, error, format }) => {
-        setHostedOutputFormat(format);
+        setTerminalOutputFormat(format);
         return collectHostedFindings("Snyk", error, (signal) =>
           collectSnykIssues(
             {
@@ -4698,7 +4811,7 @@ export async function main(
         })
         .optional(),
       run: ({ args, options, error, format }) => {
-        setHostedOutputFormat(format);
+        setTerminalOutputFormat(format);
         return collectHostedFindings("Semgrep", error, (signal) =>
           collectSemgrepPlatformFindings(
             {
@@ -4970,8 +5083,29 @@ export async function main(
     configuration: z.record(z.string(), z.unknown()),
   });
 
+  const inspectionFlags = [
+    "-h",
+    "--help",
+    "--version",
+    "--schema",
+    "--llms",
+    "--llms-full",
+  ];
+  if (
+    argv.includes("--update") &&
+    argv.some((arg) => inspectionFlags.includes(arg))
+  )
+    argv = argv.filter((arg) => arg !== "--update");
   const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
+    // The SDK owns update notices and uses the same installation resolver for
+    // the explicit update action. Avoid Incur's second, global npm updater.
+    update: argv.includes("--update")
+      ? {
+          package: "@openai/codex-security",
+          install: () => installUpdate(dependencies.environment),
+        }
+      : false,
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
@@ -5583,6 +5717,32 @@ export async function main(
             await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
           } else if (existing !== contents) {
             await writeFile(hook, contents, { flag: "w" });
+          }
+          if (process.platform !== "win32") {
+            try {
+              await access(hook, constants.X_OK);
+            } catch {
+              const file = await open(
+                hook,
+                constants.O_RDONLY |
+                  constants.O_NOFOLLOW |
+                  constants.O_NONBLOCK,
+              );
+              try {
+                const metadata = await file.stat();
+                if (
+                  !metadata.isFile() ||
+                  (await file.readFile("utf8")) !== contents
+                )
+                  throw new Error(
+                    `Cannot make an unrecognized pre-commit hook executable: ${hook}`,
+                  );
+                await file.chmod((metadata.mode & 0o777) | 0o100);
+              } finally {
+                await file.close();
+              }
+              await access(hook, constants.X_OK);
+            }
           }
           return {
             hook,
@@ -6719,7 +6879,9 @@ export async function main(
         "findings...": z
           .string()
           .min(1, "A finding must not be empty.")
-          .describe("Finding text or a file containing findings."),
+          .describe(
+            "Finding text, an existing path, or an explicit local file URL (file:///path/to/findings).",
+          ),
       }),
       options: z.object({
         records: z
@@ -6800,7 +6962,9 @@ export async function main(
           .string()
           .min(1, "A finding must not be empty.")
           .optional()
-          .describe("Finding text, a file, or a saved finding identifier."),
+          .describe(
+            "Finding text, a file path or local file URL, or a saved finding identifier.",
+          ),
       }),
       options: z.object({
         host: z
@@ -6825,7 +6989,16 @@ export async function main(
           description: "Verify a fix described in a file.",
         },
       ],
-      output: z.record(z.string(), z.unknown()).optional(),
+      output: z
+        .union([
+          z.object({
+            repository: z.string(),
+            scanId: z.string().optional(),
+            results: z.array(FindingVerificationSchema),
+          }),
+          cliFailureSchema("VERIFICATION_FAILED"),
+        ])
+        .optional() as z.ZodType<Record<string, unknown> | undefined>,
       async run({ format, options, error: incurError }) {
         let workerDiagnostic: string | undefined;
         const structured = format === "json" || format === "jsonl";
@@ -6992,7 +7165,8 @@ export async function main(
             }
           }
 
-          if (structured) {
+          if (!useDefaultOutput(format)) {
+            setTerminalOutputFormat(format);
             return {
               repository,
               ...(selected === undefined ? {} : { scanId: selected.scanId }),
@@ -7038,7 +7212,9 @@ export async function main(
           .string()
           .min(1, "An issue must not be empty.")
           .optional()
-          .describe("Issue text, a file, or a saved finding identifier."),
+          .describe(
+            "Issue text, a file path or local file URL, or a saved finding identifier.",
+          ),
       }),
       options: z.object({
         host: z
@@ -7686,6 +7862,14 @@ export async function main(
       },
     });
 
+  if (completion.success) {
+    await writeCliOutput(
+      output,
+      completeCli(cli, cliOptions, completion.data, shellArgv),
+    );
+    return 0;
+  }
+
   const commands = Cli.toCommands.get(cli)!;
   prepareCliExamples(commands);
   const valueOptions = cliValueOptions(commands);
@@ -7720,18 +7904,10 @@ export async function main(
 
   function validateCliArguments(): string | undefined {
     if (argv.includes("--help") || argv.includes("-h")) return undefined;
+    if (frameworkFlags.malformedFilter)
+      return "--filter-output requires matching brackets for array slices.";
     if (command === undefined || !commands.has(command)) return undefined;
-    const structuredOutput = argv.some(
-      (value, index) =>
-        value === "--json" ||
-        ((value === "--format" ||
-          value === "--format=json" ||
-          value === "--format=jsonl") &&
-          (value.endsWith("=json") ||
-            value.endsWith("=jsonl") ||
-            argv[index + 1] === "json" ||
-            argv[index + 1] === "jsonl")),
-    );
+    const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
       ["validate", "login", "logout"].includes(command) &&
@@ -7765,21 +7941,10 @@ export async function main(
       }
     }
     if (command === "scan" && !argv.includes("--schema")) {
-      if (
-        argv.some(
-          (value) =>
-            value === "--filter-output" || value.startsWith("--filter-output="),
-        )
-      ) {
+      if (frameworkFlags.filters.length) {
         return "--filter-output is not supported for scan results.";
       }
-      if (
-        argv.some(
-          (value, index) =>
-            value === "--format=md" ||
-            (value === "--format" && argv[index + 1] === "md"),
-        )
-      ) {
+      if (frameworkFlags.formats.includes("md")) {
         return "Markdown output is not supported for scan results.";
       }
     }
@@ -7791,35 +7956,32 @@ export async function main(
       command === "import";
     const subcommand = nestedCommand ? argv[commandIndex + 1] : undefined;
     if (
-      command === "import" &&
-      subcommand !== "sonar" &&
-      frameworkFlags.rawCollector
+      frameworkFlags.rawStructuredOutput &&
+      !(command === "scans" && subcommand === "logs")
     ) {
-      // Incur's skill-sync notice turns a saved collector array into an object.
+      // Saved logs include the framework's CTA after streamed events. Other
+      // raw result objects and arrays keep notices in full-output metadata.
       cliOptions.sync = false;
     }
     if (command === "info") {
-      for (let index = 0; index < argv.length; index += 1) {
-        const argument = argv[index]!;
-        if (
-          argument !== "--filter-output" &&
-          !argument.startsWith("--filter-output=")
-        ) {
-          continue;
-        }
-        const selector = argument.includes("=")
-          ? argument.slice(argument.indexOf("=") + 1)
-          : argv[index + 1];
-        if (
-          selector !== undefined &&
-          !selector
-            .split(",")
-            .every((field) => Object.hasOwn(infoOutput.shape, field))
-        ) {
+      for (const selector of frameworkFlags.filters) {
+        if (selector === undefined) continue;
+        const valid = selector.split(/,(?!\d+\])/u).every((field) => {
+          const match = /^([\w-]+)(?:\.[\w-]+|\[\d+,\d+\])*$/u.exec(field);
+          return match !== null && Object.hasOwn(infoOutput.shape, match[1]!);
+        });
+        if (!valid)
           return "--filter-output must select an info metadata field.";
-        }
       }
     }
+    const entry = commands.get(command)!;
+    const selected =
+      "_group" in entry
+        ? subcommand === undefined
+          ? entry.root
+          : entry.commands.get(subcommand)
+        : entry;
+    let lastPositionalIndex = -1;
     for (
       let index = commandIndex + (nestedCommand ? 2 : 1);
       index < argv.length;
@@ -7828,6 +7990,7 @@ export async function main(
       const value = argv[index]!;
       if (!value.startsWith("-")) {
         positionals.push(value);
+        lastPositionalIndex = index;
         continue;
       }
       const equals = value.indexOf("=");
@@ -7836,6 +7999,21 @@ export async function main(
         /[A-Z]/g,
         (letter) => `-${letter.toLowerCase()}`,
       );
+      if (equals >= 0 && selected && "options" in selected) {
+        const name = option
+          .slice(2)
+          .replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+        const shape = selected.options?.shape;
+        const field =
+          shape && Object.hasOwn(shape, name) ? shape[name] : undefined;
+        if (
+          field &&
+          z.toJSONSchema(field, { io: "input" }).type === "boolean" &&
+          !["true", "false"].includes(value.slice(equals + 1))
+        ) {
+          return `Invalid boolean value for ${option}: ${diagnosticValue(value.slice(equals + 1))}. Use ${option}, ${option}=true, or ${option}=false.`;
+        }
+      }
       if (
         equals >= 0 ||
         (!valueOptions.has(canonicalOption) &&
@@ -7874,43 +8052,38 @@ export async function main(
             ? 2
             : 1)
     ) {
-      return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
+      const previous = argv[lastPositionalIndex - 1]?.split("=", 1)[0];
+      const hint = previous?.startsWith("-")
+        ? ` Check the flag ${diagnosticValue(previous)} and whether it takes a value.`
+        : "";
+      return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.${hint}`;
     }
   }
-  const firstImportOption = scanImport ? commandIndex + 2 : argv.length;
-  const frameworkArgv: string[] = [];
-  for (let index = 0; index < argv.length; index++) {
-    const argument = argv[index]!;
-    const next = argv[index + 1];
-    const separator = argument.indexOf("=");
-    if (
-      index >= firstImportOption &&
-      argument === "--json" &&
-      next !== undefined &&
-      !next.startsWith("--") &&
-      next !== "-h"
-    ) {
-      // Incur reserves bare --json for output, but parses --json=FILE normally.
-      frameworkArgv.push(`--json=${next}`);
-      index++;
-    } else if (
-      separator >= 0 &&
-      FRAMEWORK_VALUE_OPTIONS.has(argument.slice(0, separator))
-    ) {
-      frameworkArgv.push(
-        argument.slice(0, separator),
-        argument.slice(separator + 1),
-      );
-    } else {
-      frameworkArgv.push(argument);
-    }
-  }
-  const frameworkFlags = frameworkOutputFlags(frameworkArgv);
-  const policyFullOutput =
-    command === "policy" && argv.includes("--full-output");
+  const frameworkFlags = parseFrameworkArguments(
+    argv,
+    scanImport ? commandIndex + 2 : argv.length,
+  );
+  const frameworkArgv = frameworkFlags.args;
+  const { jsonFormat } = frameworkFlags;
+  const policyFullOutput = command === "policy" && frameworkFlags.fullOutput;
+  const scanErrorFormat =
+    command === "scan" && !scanImport && frameworkFlags.fullOutput
+      ? jsonFormat
+      : undefined;
+  const argumentFailure = (message: string) =>
+    Formatter.format(
+      {
+        ok: false,
+        error: { code: "SCAN_FAILED", message },
+        meta: { command: "scan" },
+      },
+      scanErrorFormat,
+    ) + "\n";
   const argumentError = validateCliArguments();
   if (argumentError !== undefined && !policyFullOutput) {
     errorOutput.write(`codex-security: ${argumentError}\n`);
+    if (scanErrorFormat)
+      await writeCliOutput(output, argumentFailure(argumentError));
     return 2;
   }
   const updateController = new AbortController();
@@ -7920,15 +8093,7 @@ export async function main(
     argv[0] !== "completions" &&
     !process.env["COMPLETE"] &&
     !argv.some((argument) =>
-      [
-        "--help",
-        "-h",
-        "--version",
-        "--llms",
-        "--llms-full",
-        "--schema",
-        "--dry-run",
-      ].includes(argument),
+      [...inspectionFlags, "--dry-run", "--update"].includes(argument),
     ) &&
     updateNoticeEnabled(dependencies.environment)
       ? dependencies
@@ -7937,16 +8102,27 @@ export async function main(
       : undefined;
 
   let notice: UpdateNotice | undefined;
+  if (argv.includes("--schema") || argv.includes("--llms-full")) {
+    describeCommandInputs(commands);
+  }
   try {
-    await cli.serve(frameworkArgv, {
+    const serveOptions: Cli.serve.Options = {
       stdout: frameworkCapture.stream.write,
       exit: (code) => {
         frameworkExit = code;
       },
-    });
+    };
+    if (
+      !(await serveIntegration(frameworkArgv, cli, cliOptions, serveOptions))
+    ) {
+      await cli.serve(frameworkArgv, serveOptions);
+    }
     if (pendingUpdate !== undefined) {
       notice = await Promise.race([pendingUpdate, undefined]);
     }
+  } catch (error) {
+    errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
+    return 2;
   } finally {
     updateController.abort();
   }
@@ -8006,10 +8182,61 @@ export async function main(
       if (exitCode === 0) exitCode = 2;
     } else {
       if (exitCode !== 0) return exitCode;
-      errorOutput.write(
-        `codex-security: ${diagnosticLines(await incurErrorMessage(frameworkOutput))}\n`,
-      );
-      return 2;
+      const envelope = jsonFormat
+        ? parseJson(() => frameworkOutput)
+        : undefined;
+      const record = asRecord(envelope);
+      const error =
+        record?.["ok"] === false ? asRecord(record["error"]) : record;
+      const validationError = error?.["code"] === "VALIDATION_ERROR";
+      const structuredFailure = Boolean(scanErrorFormat || validationError);
+      let message =
+        structuredFailure && typeof error?.["message"] === "string"
+          ? error["message"]
+          : await incurErrorMessage(frameworkOutput);
+      if (validationError && Array.isArray(error["fieldErrors"])) {
+        const entry = command ? commands.get(command) : undefined;
+        const leaf =
+          entry && "_group" in entry
+            ? (entry.commands.get(following ?? "") ?? entry.root)
+            : entry;
+        const options =
+          leaf && "options" in leaf ? leaf.options?.shape : undefined;
+        const messages = error["fieldErrors"].map((field) => {
+          if (!isJsonObject(field) || typeof field["path"] !== "string")
+            return message;
+          const detail =
+            typeof field["message"] === "string" ? field["message"] : message;
+          if (options && Object.hasOwn(options, field["path"])) {
+            const flag = field["path"].replace(
+              /[A-Z]/g,
+              (letter) => `-${letter.toLowerCase()}`,
+            );
+            return field["missing"]
+              ? `Missing required option --${flag}.`
+              : `Invalid value for --${flag}: ${detail}`;
+          }
+          return detail;
+        });
+        message = messages.join("\n");
+        error["message"] = message;
+        frameworkOutput = Formatter.format(envelope, jsonFormat) + "\n";
+      }
+      errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
+      if (!structuredFailure) return 2;
+      exitCode = 2;
+      // Errors in built-in flags precede Incur's format selection. Its other
+      // parse errors already carry the requested envelope or token view.
+      if (
+        scanErrorFormat &&
+        record?.["ok"] !== false &&
+        !(
+          typeof envelope === "number" &&
+          frameworkFlags.tokenArguments.includes("--token-count")
+        )
+      ) {
+        frameworkOutput = argumentFailure(message);
+      }
     }
   }
   if (rawExportOutput) return exitCode;
@@ -8378,33 +8605,101 @@ async function prepareScanArgumentsFromRecipe(
   };
 }
 
-function frameworkOutputFlags(argv: readonly string[]) {
-  let fullOutput = false;
-  let rawCollector = false;
-  const tokenArguments: string[] = [];
-  let filterOutput = false;
-  for (let index = 0; index < argv.length; index++) {
-    const value = argv[index]!;
-    if (value === "--full-output") fullOutput = true;
-    if (value === "--json") rawCollector = true;
-    if (value === "--token-count") tokenArguments.push(value);
-    if (FRAMEWORK_VALUE_OPTIONS.has(value)) {
-      const operand = argv[++index];
-      if (value === "--filter-output") filterOutput = true;
-      if (
-        (value === "--token-limit" || value === "--token-offset") &&
-        operand !== undefined
-      )
-        tokenArguments.push(value, operand);
-      if (value === "--format")
-        rawCollector =
-          operand === "json" || operand === "jsonl" || operand === "yaml";
+/** Incur describes parsed Zod outputs by default. Callers supply the inputs,
+ * which may omit fields populated by CLI defaults. Keep the runtime defaults. */
+function describeCommandInputs(
+  commands: NonNullable<ReturnType<typeof Cli.toCommands.get>>,
+): void {
+  for (const entry of commands.values()) {
+    if ("_group" in entry) describeCommandInputs(entry.commands);
+    const command = "_group" in entry ? entry.root : entry;
+    if (command && "options" in command && command.options) {
+      const input = z.toJSONSchema(command.options, { io: "input" });
+      command.options = command.options.meta({
+        required: input.required ?? [],
+      });
     }
   }
+}
+
+function isJsonFormat(format: string | undefined): format is "json" | "jsonl" {
+  return format === "json" || format === "jsonl";
+}
+
+function parseFrameworkArguments(
+  argv: readonly string[],
+  firstImportOption: number,
+) {
+  const args: string[] = [];
+  const formats: string[] = [];
+  const filters: (string | undefined)[] = [];
+  const tokenArguments: string[] = [];
+  let fullOutput = false;
+  let malformedFilter = false;
+  for (let index = 0; index < argv.length; index++) {
+    const argument = argv[index]!;
+    const next = argv[index + 1];
+    if (
+      index >= firstImportOption &&
+      argument === "--json" &&
+      next !== undefined &&
+      !next.startsWith("--") &&
+      next !== "-h"
+    ) {
+      // Incur accepts the import's JSON input in the equals form.
+      args.push(`--json=${next}`);
+      index++;
+      continue;
+    }
+    const equals = argument.indexOf("=");
+    const flag = equals < 0 ? argument : argument.slice(0, equals);
+    if (!FRAMEWORK_VALUE_OPTIONS.has(flag)) {
+      args.push(argument);
+      if (argument === "--json") formats.push("json");
+      if (argument === "--full-output") fullOutput = true;
+      if (argument === "--token-count") tokenArguments.push(argument);
+      continue;
+    }
+    // Leave a following flag available when the option is missing its operand.
+    const operand =
+      equals >= 0
+        ? argument.slice(equals + 1)
+        : next?.startsWith("--")
+          ? undefined
+          : next;
+    if (equals < 0 && operand !== undefined) index++;
+    if (flag === "--filter-output") {
+      filters.push(operand);
+      // Incur cannot advance past an unterminated array slice.
+      if (
+        operand !== undefined &&
+        !/^(?:[^\[\]]|\[[^\[\]]*\])*$/u.test(operand)
+      ) {
+        malformedFilter = true;
+        continue;
+      }
+    }
+    args.push(flag);
+    if (operand !== undefined) args.push(operand);
+    if (flag === "--format" && operand) formats.push(operand);
+    if (
+      (flag === "--token-limit" || flag === "--token-offset") &&
+      operand !== undefined
+    )
+      tokenArguments.push(flag, operand);
+  }
+  const format = formats.at(-1);
+  const jsonFormat = isJsonFormat(format) ? format : undefined;
   return {
-    rawCollector: rawCollector && !fullOutput,
-    filterOutput,
+    args,
+    formats,
+    jsonFormat,
+    fullOutput,
+    malformedFilter,
+    filters,
     tokenArguments,
+    rawStructuredOutput:
+      !fullOutput && (jsonFormat !== undefined || format === "yaml"),
   };
 }
 
@@ -9756,6 +10051,14 @@ async function runSkill(
       );
     }
     let contentsOrLiteral = input;
+    const explicitFile = /^file:\/\//iu.test(input)
+      ? new URL(input)
+      : undefined;
+    if (explicitFile?.hostname) {
+      throw new CodexSecurityError(
+        "Finding file URLs must refer to local files.",
+      );
+    }
     const windowsNamespace =
       process.platform === "win32" || input.startsWith("\\");
     const rawDeviceRoot = WINDOWS_LOCAL_DEVICE_ROOT.exec(input)?.[0];
@@ -9773,9 +10076,13 @@ async function runSkill(
         !staysWithinWindowsDeviceRoot(input, rawDeviceRoot) ||
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
-      const path = resolveCliPath(directory, input);
+      const path = resolveCliPath(
+        directory,
+        explicitFile ? fileURLToPath(explicitFile) : input,
+      );
       const metadata = await lstat(path, { bigint: true }).catch(
         (error: unknown) => {
+          if (explicitFile) throw error;
           if (
             typeof error === "object" &&
             error !== null &&

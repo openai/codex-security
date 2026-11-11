@@ -4,6 +4,7 @@ import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { join, posix, resolve, win32 } from "node:path";
 import { Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
@@ -967,6 +968,36 @@ describe("CLI skill commands", () => {
     ]);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toBe("");
+  });
+
+  test("explicit local finding file URLs resolve escapes and fail before model work when missing", async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "codex-security-file-url-",
+    );
+    const directory = temp.path;
+    const file = join(directory, "finding #1.md");
+    const url = pathToFileURL(file).href;
+    const onCodex = mock<OnCodex>().mockReturnValue(0);
+    const deps = dependencies({ currentDirectory: directory, onCodex });
+    for (const command of ["validate", "patch", "verify-fix"]) {
+      const stderr = captureCli(main, "stderr");
+      expect(await stderr.run([command, url], deps)).toBe(2);
+      expect(stderr.text()).toContain("finding #1.md");
+    }
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        ["validate", "file://example.invalid/share/finding"],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("must refer to local files");
+    expect(onCodex).not.toHaveBeenCalled();
+    await writeFile(file, "Finding supplied through a file URL.");
+    expect(await runCapturedCli(main, ["validate", url], deps)).toBe(0);
+    expect(onCodex.mock.lastCall?.[3]).toContain(
+      "Finding supplied through a file URL.",
+    );
   });
 
   test("applies bounded model and reasoning overrides to validation and patching", async () => {

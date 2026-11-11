@@ -13,6 +13,8 @@ const distModules = [
   "cli-argument",
   "cli-daybreak",
   "cli-help",
+  "cli-integrations",
+  "cli-mcp",
   "cli-scan-logs-json",
   "cli-signals",
   "classify-severity",

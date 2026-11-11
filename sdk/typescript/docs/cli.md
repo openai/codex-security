@@ -37,6 +37,23 @@ codex-security info --json
 - [Use a hosted executor](#hosted-standard-scan) or
   [run bulk scans in containers](#containerized-bulk-scans).
 
+## Updating the CLI
+
+Run `cs --update` to update an npm global installation managed by the running
+Node distribution. It uses Node’s bundled npm, the public npm registry, and
+disabled lifecycle scripts. If you use a custom registry or proxy, run your
+package manager’s update command directly.
+
+For a project dependency, `cs --update` prints the package-manager command for
+you to run in the declaring project. For other global installations it prints
+the corresponding package-manager command and installation location. For npx,
+use `npx @openai/codex-security@latest` on the next run. For a standalone
+release, download and extract the latest release.
+
+Interactive update notices use the same installation detection. Set
+`CODEX_SECURITY_NO_UPDATE_NOTICE=1` to disable these notices. Explicit updates
+are available with notifications disabled.
+
 ## Authentication
 
 Sign in with ChatGPT, or supply an API key for CI:
@@ -494,6 +511,10 @@ show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
 
+A dry run reports `stateDirectory`, the root for saved scan state. It checks the
+storage location without creating a scan directory. Pass boolean scan options
+as bare flags or use lowercase `=true` or `=false`.
+
 When a cost limit is configured, `scan --dry-run` shows the resolved
 `maxCostUsd` and a `costLimitNote` explaining how the scan measures usage
 against the limit and why in-flight requests can exceed it.
@@ -598,8 +619,13 @@ available) or `SCAN_RESUME_UNAVAILABLE` for `scans resume`. Rerunning an importe
 scan uses `SCAN_IMPORT_FAILED` if the import fails. YAML and TOON failures remain
 on stderr without `--full-output`, or when retained results are unavailable.
 
-Diagnostics stay on stderr. Each command's `--schema --format json` describes
-its successful output and failure codes.
+Scan argument errors with `--full-output` and JSON or JSONL use an `ok: false`
+envelope with `error.code` and `error.message`. Command schema validation errors
+with JSON or JSONL retain their field details and name missing or invalid
+options by their CLI flags. Diagnostics stay on stderr.
+`scan --schema --format json` describes optional caller inputs before defaults
+and the fields returned by preflight, completed scans, and execution failures,
+including sealed results recovered after an interruption.
 See [Exports and CI](#exports-and-ci) for exit codes and CI examples.
 
 ### Follow-up finding validation
@@ -1773,7 +1799,8 @@ Select one completed scan by ID, prefix, `latest`, or directory; omit the select
 for the picker. Live publication and `--skip-existing` require local history.
 A directory-only dry run does not.
 
-`--linear-project PROJECT_ID` (`--project`) selects a project. Flags override
+`--linear-project PROJECT_ID` selects a project. Existing scripts using the deprecated
+`--project PROJECT_ID` spelling continue to work. Flags override
 `CODEX_SECURITY_LINEAR_TEAM` and `CODEX_SECURITY_LINEAR_PROJECT`. `--dry-run`
 previews titles offline; `--json` returns structured output.
 
@@ -1785,10 +1812,10 @@ Keys are omitted from saved results; diagnostic messages remain unchanged.
 
 ```bash
 codex-security publish check /path/to/completed-scan \
-  --to linear --linear-team TEAM_ID --json
+  --linear-team TEAM_ID --json
 ```
 
-`publish check` verifies artifacts and recorded publications. With an API key,
+`publish check` defaults to `--to linear`. It verifies artifacts and recorded publications. With an API key,
 it also checks authentication and destination access. It does not test issue
 creation; connected-app access is reported as `not-checked`.
 
@@ -2422,6 +2449,8 @@ with `--fail-on-severity` set to its original threshold. It recognizes the legac
 `npx` hook and supported earlier templates with matching absolute Node and CLI
 paths. If it refuses to overwrite the verified hook, back it up, remove it and
 reinstall with the same threshold. Restore the backup if installation fails.
+On POSIX, reinstalling a recognized hook restores its owner execute bit if Git
+could not execute it. The installer checks that the resulting hook is executable.
 The installer uses host Git for the selected repository and respects
 `core.hooksPath`.
 
@@ -2449,6 +2478,13 @@ codex-security patch OCCURRENCE_ID
 codex-security patch --scan SCAN_ID --severity high --json
 codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 ```
+
+For `validate`, `patch`, and `verify-fix`, an explicit local file URL such as
+`file:///home/reviewer/finding.md` (Windows: `file:///C:/reviews/finding.md`)
+requires the file to exist. A missing file stops the command before the model
+runs. Use `pathToFileURL(absolutePath).href` in Node to encode spaces and
+special characters correctly. Existing plain paths and inline finding text
+keep their original behavior.
 
 Context inputs are optional and can be combined:
 
@@ -2674,7 +2710,10 @@ SDK's local `validate()` and `patch()` methods use the same fallback.
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
-`--json` returns structured output. Exit codes are `0` when all findings are
+Without output options, each finding prints a verdict and its evidence.
+Explicit output formats, field selection and token controls operate on the
+structured result containing `repository`, optional `scanId`, and `results`.
+Exit codes are `0` when all findings are
 fixed, `1` when any remain vulnerable, and `2` for inconclusive/failed checks.
 With `--json` or `--format jsonl`, authentication and execution failures return
 `status: "failed"`, `code: "VERIFICATION_FAILED"`, and `message`. With
@@ -2699,6 +2738,24 @@ Codex Security plugin. `mcp add` registers the CLI as an MCP server, exposing
 only read-only `info` because the transport cannot cancel scans. For the plugin's
 scan, triage, patch, and verification workflows, see the
 [agent workflow guide](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md).
+
+Use `skills add --no-global` to write generated guidance to the current project.
+`--depth 0` creates a single skill; the default depth of 1 groups guidance by
+top-level command. `skills list` checks installation status at depth 1 by
+default. To inspect a different grouping, pass the installation depth, for
+example `skills list --depth 0 --json`. Installation status uses the paths
+recorded by the most recent `skills add` for this user, including project installs.
+For both installers, `--help`, `--schema`, and `--version` can be inspected
+before writing any configuration.
+
+`mcp add` registers in the user profile by default. `mcp add --no-global`
+selects project-capable clients. Registration uses the client adapters installed
+with the SDK. Selecting a user-only client in project scope fails before the
+CLI writes configuration. For example, use
+`mcp add --no-global --agent cursor` to target Cursor. The built-in Amp
+registration supports only user settings. `mcp doctor` checks the current CLI's
+server startup and tool catalog. To verify a registered launcher, connect from
+the client where it was registered.
 
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).
