@@ -2973,15 +2973,6 @@ export async function main(
         },
       ],
       hint: "Future scans of the repository can reuse the reason while it applies. Read the occurrence’s triage.note in codex-security scans show SCAN_ID --json.",
-      examples: [
-        {
-          args: { occurrenceId: "occurrence_abc123" },
-          options: { reason: "unreachable" },
-          description:
-            "Use the occurrence ID from findings list and explain why it does not apply.",
-        },
-      ],
-      hint: "Future scans of the repository can reuse the reason while it applies. Read the occurrence’s triage.note in codex-security scans show SCAN_ID --json.",
       destructive: true,
       mcp: false,
       args: z.object({
