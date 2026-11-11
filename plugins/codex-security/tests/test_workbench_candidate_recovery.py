@@ -1175,13 +1175,13 @@ def test_failed_receipt_publication_retries_its_frozen_decision(
         call_workbench(patch, state, codex_home, "cancel-scan", "--scan-id", scan_id)
     if legacy_freeze != "current":
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
-            frozen, model_source = saved._retained_source_state(
-                json.loads(
-                    connection.execute(
-                        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
-                    ).fetchone()[0]
-                )
+            retained = saved._retained_source_state(
+                connection.execute(
+                    "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+                ).fetchone()[0]
             )
+            frozen = retained["sources"]
+            model_source = retained.get("threatModelSource")
             for relative in list(frozen):
                 if not saved._is_source_order_snapshot(relative):
                     continue

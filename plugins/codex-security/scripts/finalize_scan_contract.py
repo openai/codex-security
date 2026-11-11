@@ -3159,6 +3159,7 @@ def _prepare_scan_finalization(
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
+    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     provisional_manifest = copy.deepcopy(manifest)
     provisional_manifest["scan"]["artifacts"] = [
         {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
@@ -3171,7 +3172,6 @@ def _prepare_scan_finalization(
     validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
     del provisional_manifest
     validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent

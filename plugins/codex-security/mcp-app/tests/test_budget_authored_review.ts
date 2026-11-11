@@ -15,10 +15,12 @@ import { finding } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { recordCodexSecurityScanDraftViaWorkbench } = await importSource(
-  new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+  fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
 );
 const { recordCodexSecurityCandidateValidations } = await importSource(
-  new URL("../src/artifact-candidate-ledger.ts", import.meta.url).pathname,
+  fileURLToPath(
+    new URL("../src/artifact-candidate-ledger.ts", import.meta.url),
+  ),
 );
 const pluginRoot = fileURLToPath(new URL("../../", import.meta.url));
 const python = process.env.PYTHON?.trim() || "python3";
@@ -389,7 +391,7 @@ for (const scenario of ["unlinked", "worker-owned", "supplied", "finding"]) {
 }
 
 const { prepareCodexSecurityReviewItems } = await importSource(
-  new URL("../src/artifact-inventory.ts", import.meta.url).pathname,
+  fileURLToPath(new URL("../src/artifact-inventory.ts", import.meta.url)),
   {
     define: {
       "import.meta.url": JSON.stringify(
@@ -424,7 +426,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
           ),
         );
       const { createScanArtifactContext } = await importSource(
-        new URL("../src/artifact-context.ts", import.meta.url).pathname,
+        fileURLToPath(new URL("../src/artifact-context.ts", import.meta.url)),
       );
       const context = await createScanArtifactContext(scan.scanId, workbench, {
         requireRunning: true,
