@@ -280,7 +280,7 @@ test('Deep scans forward their budget and publish completed reports with cleanup
   const result = await app.run();
   assertAttribution(result.args, 'openai');
   assert.equal(result.args[result.args.indexOf('--mode') + 1], 'deep');
-  assert.equal(result.args[result.args.indexOf('--max-time-hours') + 1], '1.5');
+  assert.equal(result.args[result.args.indexOf('--max-time') + 1], '90');
   assert.equal(result.exitCode, 0); assert.equal(result.cleanups, 1);
   assert.equal(result.outputs['scan-status'], 'completed');
   assert.equal(result.outputs['policy-status'], 'passed');
