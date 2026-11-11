@@ -352,14 +352,21 @@ function linkedIssueFindings(
   return ids.map((id) => findings.get(id)!);
 }
 
-function issueFindingEvidence(finding: Record<string, unknown>) {
+function issueFindingEvidence(
+  finding: Record<string, unknown>,
+  includeReviewEvidence: boolean,
+) {
   const dependencyFields = (row: Record<string, unknown>) => ({
     cveId: text(row["cveId"]),
     affectedPackages: Array.isArray(row["affectedPackages"])
       ? row["affectedPackages"]
       : [],
   });
-  // Keep only the linked fields used by this projection. The export on disk
+  const vulnerableCode =
+    includeReviewEvidence && text(finding["vulnerableCode"]);
+  const mitigation = includeReviewEvidence && text(finding["mitigation"]);
+  const validation = finding["validation"];
+  // Retain the inputs needed to replay the stored issue. The export on disk
   // retains the full finding details.
   return {
     findingArn: finding["findingArn"],
@@ -373,10 +380,17 @@ function issueFindingEvidence(finding: Record<string, unknown>) {
     filePath: text(finding["filePath"]),
     lineNumber: locationLine(finding["lineNumber"]),
     endLine: locationLine(finding["endLine"]),
-    vulnerabilities: findingVulnerabilities(finding).map((vulnerability) => ({
-      ...dependencyFields(vulnerability),
-      locations: vulnerability["locations"] ?? [],
-    })),
+    ...(vulnerableCode && { vulnerableCode }),
+    ...(mitigation && { mitigation }),
+    ...(includeReviewEvidence && isRecord(validation) && { validation }),
+    vulnerabilities: findingVulnerabilities(finding).map((vulnerability) => {
+      const code = includeReviewEvidence && text(vulnerability["code"]);
+      return {
+        ...dependencyFields(vulnerability),
+        locations: vulnerability["locations"] ?? [],
+        ...(code && { code }),
+      };
+    }),
   };
 }
 
@@ -397,8 +411,9 @@ function normalizeContinuumIssues(
       const row = record(value, "Continuum issue record");
       const issue = record(row["issue"], "Continuum issue");
       const { scope } = issueIdentity(issue);
-      const findings = linkedIssueFindings(row["findings"], issue, scope).map(
-        issueFindingEvidence,
+      const linked = linkedIssueFindings(row["findings"], issue, scope);
+      const findings = linked.map((finding) =>
+        issueFindingEvidence(finding, true),
       );
       const ranges = findings.flatMap((finding) =>
         Array.from(findingCodeLocations(finding, finding.vulnerabilities)),
@@ -433,9 +448,19 @@ function normalizeContinuumIssues(
                 repository: { url: repository },
                 source_status: status,
                 remediation_instructions: text(issue["summary"]),
-                code,
+                code: { ...code, snippet: null },
               },
             };
+      const reviewDetails = details && {
+        details: {
+          ...details.details,
+          remediation_instructions:
+            details.details.remediation_instructions ??
+            findings.find(({ mitigation }) => mitigation)?.mitigation ??
+            null,
+          code,
+        },
+      };
       const dependencyEvidence = dependency
         ? {
             advisory_ids:
@@ -443,6 +468,12 @@ function normalizeContinuumIssues(
             packages: affectedPackages(packages, target),
           }
         : undefined;
+      const source = {
+        format: continuumIssueFormat,
+        sourceRepositoryUrl: repository,
+        environmentId,
+        issue,
+      };
       return validateEnrichedExternalEvidence(
         {
           title: requiredText(issue["name"], "Continuum issue name"),
@@ -457,14 +488,24 @@ function normalizeContinuumIssues(
             statusUpdatedAt(issue["updatedAt"]) ??
             statusUpdatedAt(issue["statusUpdatedAt"]),
           source_data: structuredClone({
-            format: continuumIssueFormat,
-            sourceRepositoryUrl: repository,
-            environmentId,
-            issue,
-            findings,
+            ...source,
+            findings: linked.map((finding) =>
+              issueFindingEvidence(finding, false),
+            ),
           }),
         },
         target,
+        {
+          ...reviewDetails,
+          ...dependencyEvidence,
+          source_data: structuredClone({ ...source, findings }),
+        },
+        // If linked evidence exceeds the Cloud record limit, retain the issue
+        // and as much of its structured evidence as fits.
+        dependencyEvidence
+          ? { ...reviewDetails, ...dependencyEvidence }
+          : undefined,
+        reviewDetails,
         dependencyEvidence ? { ...details, ...dependencyEvidence } : undefined,
         details,
         dependencyEvidence,

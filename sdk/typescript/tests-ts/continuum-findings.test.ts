@@ -42,7 +42,7 @@ test("imports a Continuum issue by ARN with locations from every linked finding"
           details: {
             source_status: "COMPLETED",
             remediation_instructions: issue.summary,
-            code: { end_line: 5 },
+            code: { end_line: 5, snippet: "readExample(input)" },
           },
           source_data: {
             issue,
@@ -59,6 +59,94 @@ test("imports a Continuum issue by ARN with locations from every linked finding"
         },
       },
     ],
+  });
+});
+
+test("a Continuum issue uses linked mitigation and code from its primary location and retains separate validation", () => {
+  const report = continuumIssueExport();
+  const row = report.issues[0]!;
+  const first = continuumDetail();
+  const second = {
+    ...row.findings[0]!,
+    vulnerableCode: "readOtherExample(input)",
+    mitigation: "Check the other example.",
+    validation: {
+      verdict: "FALSE_POSITIVE",
+      rationale: "Other example evidence.",
+    },
+  };
+  const issue = { ...row.issue, summary: undefined };
+  const linked = {
+    ...first,
+    lineNumber: undefined,
+    vulnerabilities: [
+      {
+        code: "readNestedExample(input)",
+        locations: [{ filePath: "src/nested.ts", startLine: 7, endLine: 9 }],
+      },
+    ],
+  };
+  const input = { ...report, issues: [{ issue, findings: [second, linked] }] };
+  const result = normalize(input);
+  expect(result.excluded).toEqual([]);
+  expect(result.findings).toHaveLength(1);
+  const finding = result.findings[0]!;
+  expect(finding.source_finding_id).toBe(issue.issueArn);
+  expect(finding.evidence.locations?.[0]).toEqual({
+    path: "src/nested.ts",
+    line: 7,
+  });
+  expect(finding.evidence).toMatchObject({
+    details: {
+      remediation_instructions: first.mitigation,
+      code: { end_line: 9, snippet: "readNestedExample(input)" },
+    },
+    source_data: {
+      findings: [
+        { findingId: first.findingId, validation: first.validation },
+        { findingId: second.findingId, validation: second.validation },
+      ],
+    },
+  });
+  expect(finding.evidence.details?.scanner_verdict ?? null).toBeNull();
+});
+
+test("oversized Continuum validation preserves the Cloud issue and its structured code evidence", () => {
+  const report = continuumIssueExport();
+  const row = report.issues[0]!;
+  const first = continuumDetail();
+  const large = {
+    ...first,
+    validation: {
+      verdict: first.validation.verdict,
+      evidence: Array.from({ length: 40 }, () => ({
+        file: first.filePath,
+        line: first.lineNumber,
+        snippet: "x".repeat(8192),
+      })),
+    },
+  };
+  const issue = { ...row.issue, summary: undefined };
+  const input = {
+    ...report,
+    issues: [{ issue, findings: [row.findings[0], large] }],
+  };
+  const cloud = normalize(input);
+  expect(cloud.excluded).toEqual([]);
+  expect(cloud.findings).toMatchObject([
+    {
+      source_finding_id: issue.issueArn,
+      evidence: {
+        details: {
+          remediation_instructions: first.mitigation,
+          code: { snippet: first.vulnerableCode },
+        },
+      },
+    },
+  ]);
+  const local = normalizeContinuumFindings(input, continuumRepository, "local");
+  expect(local.findings[0]?.evidence.source_data).toMatchObject({
+    findings: [{ validation: large.validation }, { findingId: "two" }],
   });
 });
 

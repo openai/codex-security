@@ -3678,11 +3678,14 @@ test("Continuum Cloud publication preserves issue identity and linked source ran
           { path: "src/other.ts", line: 12 },
           { path: "src/second.ts", line: 20 },
         ],
-        details: { code: { end_line: 5 } },
+        details: {
+          remediation_instructions: issue.summary,
+          code: { end_line: 5, snippet: "readExample(input)" },
+        },
         source_data: {
           issue,
           findings: [
-            { findingId: "one" },
+            { findingId: "one", validation: { verdict: "TRUE_POSITIVE" } },
             { findingId: "two", lineNumber: 20, endLine: 24 },
           ],
         },
