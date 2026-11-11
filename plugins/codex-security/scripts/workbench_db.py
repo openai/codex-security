@@ -2774,9 +2774,13 @@ def scan_finding_triage(
 
 def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     scan = require_scan(connection, args.scan_id)
-    if args.check_target:
+    if getattr(args, "check_target", False):
         require_scan_target_unchanged(scan)
-    _require_finding_checkout_owner(connection, scan)
+    context_claim = getattr(args, "context_claim_token", None)
+    if args.occurrence_id is not None or not scan_history.is_unbound_standard_handoff(
+        connection, scan, context_claim
+    ):
+        _require_finding_checkout_owner(connection, scan)
     if getattr(args, "progress_only", False):
         scan = connection.execute(
             """
@@ -2813,7 +2817,6 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
         return assigned_remediation_context(
             connection, scan_id, args.occurrence_id, request_id, action_token
         )
-    context_claim = getattr(args, "context_claim_token", None)
     model_thread = getattr(args, "model_thread_id", None)
     if context_claim is not None:
         scan = require_scan(connection, args.scan_id)
