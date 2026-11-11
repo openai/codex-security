@@ -90,6 +90,7 @@
 - keep scans running while Codex waits for the network ([#2411](https://github.com/openai/codex-security/pull/2411))
 - publish versioned workbench findings through the shared Cloud transport ([#2603](https://github.com/openai/codex-security/pull/2603))
 - clarify blocked patch results ([#2609](https://github.com/openai/codex-security/pull/2609))
+- guide Codex through scanner imports and workbench publication ([#2604](https://github.com/openai/codex-security/pull/2604))
 
 </details>
 

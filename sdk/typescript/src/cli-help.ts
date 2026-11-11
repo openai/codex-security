@@ -306,6 +306,16 @@ export function formatCliHelp(text: string, columns = 80): string | undefined {
                 description: "Choose a collector below.",
               },
               {
+                label: "CLI, API, or MCP source",
+                description:
+                  "Ask Codex to import it using the publish-findings skill.",
+              },
+              {
+                label: "Workbench findings",
+                description:
+                  "Ask Codex to publish a stored import or selected finding versions.",
+              },
+              {
                 label: "Saved vendor report",
                 description:
                   "See codex-security publish findings --help for local storage and publication.",
