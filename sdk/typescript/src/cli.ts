@@ -705,7 +705,7 @@ function fitProgressLine(line: string, width: number): string {
   for (const { index, segment } of graphemes.segment(plain)) {
     used += stringWidth(segment.toWellFormed());
     if (used > width)
-      return width > 0 ? `${plain.slice(0, ellipsisIndex)}…` : "";
+      return width > 0 ? `${plain.slice(0, ellipsisIndex)}â€¦` : "";
     if (used < width) ellipsisIndex = index + segment.length;
   }
   return line;
@@ -805,7 +805,7 @@ function renderExternalPublicationSummary(
     result.privateJob
       ? `Private inbox import ${result.privateJob.status}. Job: ${diagnosticValue(result.privateJob.id)}`
       : `Import ${result.status}.`,
-    `Submission totals — Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}`,
+    `Submission totals â€” Created: ${result.counts.created}  Updated: ${result.counts.updated}  Unchanged: ${result.counts.unchanged}  Failed: ${result.counts.error}`,
     result.privateJob
       ? `Excluded: ${result.excluded.length}  Unprocessed: ${result.privateJob.counts.unprocessed}`
       : `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
@@ -843,7 +843,7 @@ function renderPublicationSummary(
 ): string {
   const created = result.created.length;
   const failed = result.failed.length;
-  const marker = failed === 0 ? "✓" : "!";
+  const marker = failed === 0 ? "âœ“" : "!";
   const title =
     failed === 0
       ? "Linear publication complete"
@@ -928,7 +928,7 @@ class PublicationProgressPresenter {
     if (event.type === "started") {
       if (this.#dashboard !== null) {
         this.#dashboard.setPublicationProgress(0, event.total);
-        this.#dashboard.setStage(`Publishing findings · 0/${event.total}`);
+        this.#dashboard.setStage(`Publishing findings Â· 0/${event.total}`);
       } else {
         this.#write(
           `Publishing ${formatItemCount(event.total, "finding")} to Linear.`,
@@ -991,7 +991,7 @@ class PublicationProgressPresenter {
       if (this.#dashboard !== null) {
         this.#dashboard.setPublicationProgress(event.completed, event.total);
         this.#dashboard.setStage(
-          `Publishing findings · ${event.completed}/${event.total}`,
+          `Publishing findings Â· ${event.completed}/${event.total}`,
         );
         this.#dashboard.note(detail);
       } else {
@@ -1063,7 +1063,7 @@ class FindingProgressPresenter {
         color: this.#dependencies.environment["NO_COLOR"] === undefined,
       });
       dashboard.setPublicationProgress(0, this.#total);
-      dashboard.setStage(`Verifying findings · 0/${this.#total}`);
+      dashboard.setStage(`Verifying findings Â· 0/${this.#total}`);
       try {
         dashboard.start();
         this.#dashboard = dashboard;
@@ -1079,7 +1079,7 @@ class FindingProgressPresenter {
   public startPatch(finding: Finding, index: number): void {
     try {
       this.#progress.startTimer(
-        `Patching ${index + 1}/${this.#total} · ${safePatchText(finding.title)}`,
+        `Patching ${index + 1}/${this.#total} Â· ${safePatchText(finding.title)}`,
       );
     } catch {
       this.stop();
@@ -1162,7 +1162,7 @@ class FindingProgressPresenter {
     if (this.#dashboard === null) return;
     this.#dashboard.setPublicationProgress(results.length, this.#total);
     this.#dashboard.setStage(
-      `Verification complete · ${results.length}/${this.#total}`,
+      `Verification complete Â· ${results.length}/${this.#total}`,
     );
     for (const result of results) {
       this.#dashboard.note(`${result.status.toUpperCase()} ${result.id}`);
@@ -4297,7 +4297,7 @@ export async function main(
                   fitCell(row.age, ageWidth),
                   row.scanId,
                 ].join("  "),
-                short: `${repository} · ${row.scanId}`,
+                short: `${repository} Â· ${row.scanId}`,
                 value: row.value,
               };
             });
@@ -5226,7 +5226,7 @@ export async function main(
         sonarProject: optionValue("--sonar-project")
           .optional()
           .describe(
-            "Sonar project key (defaults to the checkout’s project binding).",
+            "Sonar project key (defaults to the checkoutâ€™s project binding).",
           ),
         sonarBranch: optionValue("--sonar-branch")
           .optional()
@@ -5340,7 +5340,7 @@ export async function main(
                 `Cloud account: ${diagnosticValue(cloud.accountId)} on ${diagnosticValue(cloud.cloudApiUrl)}`,
               );
               note(
-                `Cloud repository: ${diagnosticValue(cloud.destination.url)} · ${cloud.privateImport ? `Private inbox · ${cloud.privateImport.format} (${cloud.privateImport.bytes} bytes)` : `Environments: ${[...environments].map(diagnosticValue).join(", ")}`}`,
+                `Cloud repository: ${diagnosticValue(cloud.destination.url)} Â· ${cloud.privateImport ? `Private inbox Â· ${cloud.privateImport.format} (${cloud.privateImport.bytes} bytes)` : `Environments: ${[...environments].map(diagnosticValue).join(", ")}`}`,
               );
               note(
                 `Cloud: ${cloud.findings.length} ready, ${cloud.excluded.length} excluded.`,
@@ -5684,7 +5684,7 @@ export async function main(
           safetyIdentifier: optionValue("--safety-identifier")
             .optional()
             .describe(
-              "Stable hashed end-user ID for this scan's model requests (1–64 characters).",
+              "Stable hashed end-user ID for this scan's model requests (1â€“64 characters).",
             ),
           path: z
             .array(optionValue("--path"))
@@ -6070,7 +6070,7 @@ export async function main(
       destructive: true,
       options: z.object({
         runs: reviewRunsOption.describe(
-          `Number of independent classification runs (1–10; default: ${DEFAULT_REVIEW_RUNS}).`,
+          `Number of independent classification runs (1â€“10; default: ${DEFAULT_REVIEW_RUNS}).`,
         ),
         records: z
           .boolean()
@@ -6597,7 +6597,7 @@ export async function main(
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings â†’ ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(
@@ -9618,6 +9618,7 @@ interface PatchPublication {
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   branch: string;
   sshCommand?: string;
+  proxyBindings: Map<string, string | null>;
   // Opaque Git path keys, using Latin-1 to preserve filename bytes.
   dirtyFiles: Set<string>;
   ignoredFiles: Set<string>;
@@ -9895,6 +9896,218 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
+async function patchTransportDirectories(
+  repository: string,
+  dependencies: CliDependencies,
+) {
+  const root = await realpath(
+    await patchRepositoryRoot(repository, dependencies),
+  );
+  const caller = await realpath(repository);
+  return {
+    root,
+    caller,
+    directory: isOutsidePath(relative(root, caller)) ? caller : root,
+  };
+}
+
+async function runPatchTransport(
+  args: string[],
+  remotes: readonly string[],
+  repository: string,
+  dependencies: CliDependencies,
+  proxyBindings: Map<string, string | null>,
+  transportEnvironment: NodeJS.ProcessEnv,
+  options: { maxBuffer?: number } = {},
+) {
+  const environment = await patchTransportEnvironment(
+    remotes,
+    repository,
+    dependencies,
+    transportEnvironment,
+    args[0] === "push",
+  );
+  const run = (overrides: NodeJS.ProcessEnv = {}) =>
+    dependencies.runRepositoryCommand("git", args, repository, {
+      ...options,
+      environment: { ...environment, ...overrides },
+    });
+  if (!remotes.some((remote) => remote.startsWith("git://"))) return run();
+  const override = environmentEntry(
+    dependencies.environment,
+    "GIT_PROXY_COMMAND",
+  );
+  if (override === "") return run({ GIT_PROXY_COMMAND: "" });
+  const entries =
+    override === undefined
+      ? await patchScopedConfig("^core\\.gitproxy$", repository, dependencies)
+      : [];
+  if (override === undefined && entries.length < 3)
+    return run({ GIT_PROXY_COMMAND: "" });
+  const { root, caller, directory } = await patchTransportDirectories(
+    repository,
+    dependencies,
+  );
+  let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
+  const hostPath =
+    environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
+  const pin = async (command: string): Promise<string | null> => {
+    if (!proxyBindings.has(command)) {
+      if (
+        !execPath &&
+        !command.includes("/") &&
+        !command.includes("\\") &&
+        !parse(command).root
+      )
+        execPath = (
+          await dependencies.runRepositoryCommand(
+            "git",
+            ["--exec-path"],
+            repository,
+            { trim: false },
+          )
+        ).replace(/\n$/u, "");
+      const path = [execPath, hostPath].filter(Boolean).join(delimiter);
+      const result = await inspectTrustedExecutable(
+        command,
+        { PATH: path },
+        [root, caller],
+        { gitTransportDirectory: directory },
+      );
+      proxyBindings.set(command, result.executable);
+    }
+    return proxyBindings.get(command)!;
+  };
+  if (override !== undefined) {
+    const executable = await pin(override);
+    if (executable === null)
+      throw new CodexSecurityError(
+        "Patch publication cannot use the selected GIT_PROXY_COMMAND. Select an executable outside the checkout.",
+      );
+    return run({ GIT_PROXY_COMMAND: executable });
+  }
+  const rules: {
+    command: string;
+    suffix: string;
+    executable: string | null;
+  }[] = [];
+  for (let i = 0; i + 2 < entries.length; i += 3) {
+    const rule = entries[i + 2]!.slice("core.gitproxy\n".length);
+    const separator = rule.indexOf(" for ");
+    const command = separator < 0 ? rule : rule.slice(0, separator);
+    const suffix = separator < 0 ? "" : rule.slice(separator);
+    if (command === "" || command === "none") {
+      rules.push({ command, suffix, executable: command });
+    } else {
+      if (
+        !(await operatorPatchConfig(entries[i]!, entries[i + 1]!, repository))
+      ) {
+        throw new CodexSecurityError(
+          "Patch publication cannot run checkout-selected core.gitProxy. Select the Git proxy through your user Git configuration or GIT_PROXY_COMMAND.",
+        );
+      }
+      rules.push({ command, suffix, executable: await pin(command) });
+    }
+  }
+  if (rules.every(({ command }) => command === "" || command === "none"))
+    return run({ GIT_PROXY_COMMAND: "" });
+  if (rules.every(({ command, executable }) => command === executable))
+    return run();
+  const first = rules[0]!;
+  if (first.suffix === "") {
+    if (first.executable === null)
+      throw new CodexSecurityError(
+        "Patch publication cannot use the selected core.gitProxy. Select an executable outside the checkout.",
+      );
+    return run({
+      GIT_PROXY_COMMAND: first.command === "none" ? "" : first.executable,
+    });
+  }
+
+  // The first matching rule wins, including 'none'. A single override cannot
+  // preserve different routes for multiple push URLs. Prepend bound rules to
+  // Git's configuration and leave matching, ports and host spelling to Git.
+  const temp = await realpath(tmpdir());
+  if (
+    [root, caller].some(
+      (protectedRoot) => !isOutsidePath(relative(protectedRoot, temp)),
+    )
+  ) {
+    throw new CodexSecurityError(
+      "Patch publication needs a temporary directory outside the checkout to bind Git proxy rules.",
+    );
+  }
+  const privateDirectory = await mkdtemp(
+    join(temp, "codex-security-git-proxy-"),
+  );
+  try {
+    const config = join(privateDirectory, "gitconfig");
+    const quote = (value: string) =>
+      '"' +
+      value
+        .replaceAll("\\", "\\\\")
+        .replaceAll('"', '\\"')
+        .replaceAll("\n", "\\n")
+        .replaceAll("\t", "\\t") +
+      '"';
+    const lines = ["[core]"];
+    let wrapperPath: string | undefined;
+    for (const { executable, suffix } of rules) {
+      // An unavailable rule must fail only if Git selects it. The private
+      // nonexistent path cannot be supplied by the checkout after preflight.
+      let program = executable ?? join(privateDirectory, "unavailable-proxy");
+      if (program.includes(" for ")) {
+        // Git interprets this literal separator even within a quoted config
+        // value. Keep a PATH alias for physical paths containing it.
+        const name = "codex-security-git-proxy-" + randomUUID();
+        const literal = "'" + program.replaceAll("'", "'\\''") + "'";
+        await writeFile(
+          join(privateDirectory, name),
+          "#!/bin/sh\nexec " + literal + ' "$@"\n',
+          { mode: 0o700, flag: "wx" },
+        );
+        const trusted = await inspectTrustedExecutable(
+          "git",
+          { PATH: hostPath },
+          [root, caller],
+          { gitTransportDirectory: directory },
+        );
+        wrapperPath = [privateDirectory, trusted.environment["PATH"]]
+          .filter(Boolean)
+          .join(delimiter);
+        program = name;
+      }
+      lines.push("gitProxy = " + quote(program + suffix));
+    }
+    lines.push("gitProxy = none");
+    const system = await dependencies
+      .runRepositoryCommand("git", ["var", "GIT_CONFIG_SYSTEM"], repository, {
+        trim: false,
+      })
+      .catch((error: unknown) => {
+        // Git omits the system path when GIT_CONFIG_NOSYSTEM is active.
+        if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+          return "";
+        throw error;
+      });
+    for (const file of system.replace(/\n$/u, "").split("\n").filter(Boolean)) {
+      const original = isAbsolute(file) ? file : `${directory}${sep}${file}`;
+      lines.push("[include]", "path = " + quote(original));
+    }
+    await writeFile(config, lines.join("\n") + "\n", {
+      mode: 0o600,
+      flag: "wx",
+    });
+    return await run({
+      GIT_CONFIG_NOSYSTEM: "0",
+      GIT_CONFIG_SYSTEM: config,
+      ...(wrapperPath ? { PATH: wrapperPath } : {}),
+    });
+  } finally {
+    await rm(privateDirectory, { recursive: true, force: true });
+  }
+}
+
 // Read the active includes again on the patch branch, including on resume.
 async function patchTransportEnvironment(
   remotes: readonly string[],
@@ -9903,38 +10116,6 @@ async function patchTransportEnvironment(
   environment: NodeJS.ProcessEnv = {},
   pushing = false,
 ): Promise<NodeJS.ProcessEnv> {
-  if (remotes.some((remote) => remote.startsWith("git://"))) {
-    const override = environmentEntry(
-      dependencies.environment,
-      "GIT_PROXY_COMMAND",
-    );
-    if (override !== undefined) {
-      environment = { ...environment, GIT_PROXY_COMMAND: override };
-    } else {
-      const proxies = await patchScopedConfig(
-        "^core\\.gitproxy$",
-        repository,
-        dependencies,
-      );
-      let hasProxyCommand = false;
-      for (let i = 0; i + 2 < proxies.length; i += 3) {
-        const value = proxies[i + 2]!.slice("core.gitproxy\n".length);
-        const [command] = value.split(" for ", 1);
-        if (!command || command === "none") continue;
-        hasProxyCommand = true;
-        if (
-          !(await operatorPatchConfig(proxies[i]!, proxies[i + 1]!, repository))
-        ) {
-          throw new CodexSecurityError(
-            "Patch publication cannot run checkout-selected core.gitProxy. Select the Git proxy through your user Git configuration or GIT_PROXY_COMMAND.",
-          );
-        }
-      }
-      // Git treats an explicitly empty proxy environment variable as a direct connection.
-      if (!hasProxyCommand)
-        environment = { ...environment, GIT_PROXY_COMMAND: "" };
-    }
-  }
   const pinned = { ...environment };
   let count = Number(
     environment["GIT_CONFIG_COUNT"] ??
@@ -10230,6 +10411,7 @@ async function preparePatchPublication(
     });
   }
   let sshCommand: string | undefined;
+  const proxyBindings = new Map<string, string | null>();
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -10249,8 +10431,7 @@ async function preparePatchPublication(
       for (const remote of destination.pushRemotes) {
         const ssh = isSshPatchRemote(remote);
         if (ssh) sshCommand = await destination.getSshCommand();
-        const refs = await dependencies.runRepositoryCommand(
-          "git",
+        const refs = await runPatchTransport(
           [
             ...settings,
             "-c",
@@ -10260,21 +10441,17 @@ async function preparePatchPublication(
             "--",
             name,
           ],
+          [remote],
           repository,
+          dependencies,
+          proxyBindings,
           {
-            maxBuffer: Infinity,
-            environment: await patchTransportEnvironment(
-              [remote],
-              repository,
-              dependencies,
-              {
-                ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
-                GIT_CONFIG_COUNT: String(configurationCount + 1),
-                [`GIT_CONFIG_KEY_${configurationCount}`]: `url.${remote}.insteadOf`,
-                [`GIT_CONFIG_VALUE_${configurationCount}`]: name,
-              },
-            ),
+            ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
+            GIT_CONFIG_COUNT: String(configurationCount + 1),
+            [`GIT_CONFIG_KEY_${configurationCount}`]: `url.${remote}.insteadOf`,
+            [`GIT_CONFIG_VALUE_${configurationCount}`]: name,
           },
+          { maxBuffer: Infinity },
         );
         if (
           refs.split("\n").some((line) => conflicts(line.split("\t")[1] ?? ""))
@@ -10356,6 +10533,7 @@ async function preparePatchPublication(
     hostFilterSettings,
     untrackedRepositoryDigests,
     sshCommand,
+    proxyBindings,
     tree,
     root,
   };
@@ -10540,6 +10718,7 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
   approvedSshCommand?: string,
+  proxyBindings = new Map<string, string | null>(),
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
@@ -10650,8 +10829,7 @@ async function publishPatchBranch(
           dependencies,
         );
       await checkPatchReflogs(repository, dependencies);
-      await dependencies.runRepositoryCommand(
-        "git",
+      await runPatchTransport(
         [
           "push",
           "--no-signed",
@@ -10662,18 +10840,13 @@ async function publishPatchBranch(
           "origin",
           `${commit}:refs/heads/${branch}`,
         ],
+        pushRemotes,
         repository,
-        {
-          environment: await patchTransportEnvironment(
-            pushRemotes,
-            repository,
-            dependencies,
-            pushRemotes.some(isSshPatchRemote)
-              ? { GIT_SSH_COMMAND: await getSshCommand() }
-              : {},
-            true,
-          ),
-        },
+        dependencies,
+        proxyBindings,
+        pushRemotes.some(isSshPatchRemote)
+          ? { GIT_SSH_COMMAND: await getSshCommand() }
+          : {},
       );
       await run("git", [
         "config",
@@ -11404,6 +11577,7 @@ async function createPatchPullRequest(
     stderr,
     dependencies,
     publication.sshCommand,
+    publication.proxyBindings,
   );
 }
 
@@ -14442,7 +14616,7 @@ async function executeScan(
       onTrustedAccessStatus: (status) => {
         if (status === "granted") {
           errorOutput.write(
-            "codex-security: ✓ Your account has Trusted Access for Cyber.\n",
+            "codex-security: âœ“ Your account has Trusted Access for Cyber.\n",
           );
         }
       },
@@ -14936,7 +15110,7 @@ async function executeScan(
     };
   }
   progress?.stage(
-    `Scan ${result.manifest.scan.status === "completed" ? "complete" : result.manifest.scan.status} · ${result.manifest.scan.id.slice(0, 8)}`,
+    `Scan ${result.manifest.scan.status === "completed" ? "complete" : result.manifest.scan.status} Â· ${result.manifest.scan.id.slice(0, 8)}`,
   );
   printScanSummary(
     result,
@@ -15452,7 +15626,7 @@ function printScanReference(
   ];
   const argument = quoteCliPath(diagnosticValue(scanId));
   output.write(
-    `\n${detail.join(" · ")}\n` +
+    `\n${detail.join(" Â· ")}\n` +
       (selection === undefined ? "" : `Selected ${selection}.\n`) +
       `Inspect: codex-security scans show ${argument}\n` +
       (showLogs ? `Logs:    codex-security scans logs ${argument}\n` : ""),
