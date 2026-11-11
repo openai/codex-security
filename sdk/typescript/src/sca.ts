@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { rename, rm, writeFile } from "node:fs/promises";
+import { open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { retryWindowsRename } from "./retry-windows-rename.js";
@@ -48,8 +48,13 @@ export async function saveDependencyScan(result: ScaResult): Promise<void> {
   ] as const) {
     const path = join(result.outputDir, name);
     const temporary = `${path}.${randomUUID()}.tmp`;
-    await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
+    const file = await open(temporary, "wx", 0o600);
     try {
+      try {
+        await file.writeFile(content);
+      } finally {
+        await file.close();
+      }
       await retryWindowsRename(() => rename(temporary, path));
     } finally {
       await rm(temporary, { force: true });
