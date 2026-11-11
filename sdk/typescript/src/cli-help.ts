@@ -13,7 +13,7 @@ const COMMAND_GROUPS: readonly Group[] = [
   ["Automate", ["bulk-scan", "scan-components", "install-hook"]],
   [
     "Configure and troubleshoot",
-    ["login", "logout", "init", "info", "feedback"],
+    ["login", "logout", "init", "info", "feedback", "update"],
   ],
 ];
 
@@ -105,7 +105,6 @@ const OUTPUT_FLAGS = ["format", "json", "filter-output", "full-output"];
 
 const OUTPUT_GROUPS: readonly Group[] = [
   ["Help and version", ["help", "version"]],
-  ["Maintenance", ["update"]],
   ["Output", OUTPUT_FLAGS],
 ];
 
@@ -212,6 +211,7 @@ function globalRows(rows: Row[], command: string): Row[] {
     command,
   );
   const visible = rows.filter(({ label }) => {
+    if (label === "--update") return false;
     if (scan && label.startsWith("--filter-output")) return false;
     return !(
       plainOutput &&

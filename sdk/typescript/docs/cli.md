@@ -14,7 +14,10 @@ codex-security info --json
 
 `--help` lists commands by task; `<command> --help` lists its options.
 `info --json` reports package, plugin, runtime, and model details.
-`scans` and `findings` default to their `list` subcommands.
+`scans` and `findings` default to their `list` subcommands. Global output options
+can appear around a subcommand, for example `cs scans --json show`. Use `--`
+after the command to pass the remaining words as literal positional arguments,
+including file names that begin with a dash.
 
 ## Find a workflow
 
@@ -39,12 +42,15 @@ codex-security info --json
 
 ## Updating the CLI
 
-Run `cs --update` to update an npm global installation managed by the running
+Run `cs update` to update an npm global installation managed by the running
 Node distribution. It uses Node’s bundled npm, the public npm registry, and
 disabled lifecycle scripts. If you use a custom registry or proxy, run your
 package manager’s update command directly.
 
-For a project dependency, `cs --update` prints the package-manager command for
+The legacy `cs --update` spelling also works. Invoke the updater or the stdio
+server (`cs --mcp`) on its own.
+
+For a project dependency, `cs update` prints the package-manager command for
 you to run in the declaring project. For other global installations it prints
 the corresponding package-manager command and installation location. For npx,
 use `npx @openai/codex-security@latest` on the next run. For a standalone

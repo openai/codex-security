@@ -3739,10 +3739,6 @@ describe("CLI", () => {
         ["bulk-scan", "--knowledge-base="],
         "--knowledge-base must not be empty",
       ],
-      [
-        ["bulk-scan", "--output-dir", "results", "--", "repositories.csv"],
-        "Unknown flag: --",
-      ],
       [["scan", ".", "--model="], "--model must not be empty"],
       [
         ["scan", ".", "--provider", "openrouter"],
