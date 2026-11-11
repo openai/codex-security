@@ -1,21 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { PATCH_GIT_ENVIRONMENT_RUNNER as runner } from "../src/cli.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
-
-const source = await readFile(
-  new URL("../src/cli.ts", import.meta.url),
-  "utf8",
-);
-const declaration = source.match(
-  /const PATCH_GIT_ENVIRONMENT_RUNNER = (`[\s\S]*?`);/u,
-);
-expect(declaration).not.toBeNull();
-const runner = new Function(`return ${declaration![1]};`)() as string;
 
 function bindingFrame(environment: Record<string, string> = {}): Buffer {
   return Buffer.from(JSON.stringify({ bindings: Object.entries(environment) }));
