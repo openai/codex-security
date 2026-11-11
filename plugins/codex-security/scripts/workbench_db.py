@@ -80,6 +80,7 @@ from workbench_instruction_digest import (
     selected_instruction_digest,
     verify_sealed_instruction_digests,
 )
+from workbench_scan_history import _require_finding_checkout_owner, expected_coverage_mode
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
@@ -335,9 +336,6 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-expected_coverage_mode = scan_history.expected_coverage_mode
-
-
 def workbench_completion_binding(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -382,7 +380,6 @@ def workbench_completion_binding(
         binding["producer"]["instructionDigests"] = digests
     manifest_scan = manifest.get("scan") if manifest is not None else None
     if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-        # Keep the original producer; finalization still validates schema, seal and owner.
         binding["startedAt"] = manifest_scan.get("startedAt")
         binding["completedAt"] = manifest_scan.get("completedAt")
         producer = manifest_scan.get("producer")
@@ -2733,9 +2730,6 @@ def scan_context(
         context["parentScanId"] = scan["parent_scan_id"]
         context["recipe"] = public_scan_recipe(scan)
     return context
-
-
-_require_finding_checkout_owner = scan_history._require_finding_checkout_owner
 
 
 def _indexed_scan_findings(
