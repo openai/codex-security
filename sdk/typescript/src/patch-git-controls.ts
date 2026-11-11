@@ -1712,18 +1712,61 @@ export async function capturePatchGitControls(
     await visit(root);
     if (capture && checkoutCleanFilter) {
       // Inspect the original checkout before status or add can invoke a filter.
+      const passive = [
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.ignoreStat=false",
+        "-c",
+        "core.trustctime=true",
+        "-c",
+        "core.checkStat=default",
+      ];
+      for (const key of activeHostFilters)
+        passive.push(
+          "-c",
+          `${key}=`,
+          "-c",
+          `${key.slice(0, key.lastIndexOf("."))}.required=false`,
+        );
       for (const checkout of visited) {
         const local = await runBytes(root, checkout, [
+          ...passive,
           "ls-files",
           "--others",
           "--directory",
           "--no-empty-directory",
           "-z",
         ]);
-        if (local.length)
-          throw new Error(
-            "Cannot automatically publish from a checkout with local-only files and a checkout-selected Git filter. Run patch without --create-pr and review the changes before publishing.",
-          );
+        const error =
+          "Cannot automatically publish from a checkout with local-only files or tracked edits and a checkout-selected Git filter. Run patch without --create-pr and review the changes before publishing.";
+        if (local.length) throw new Error(error);
+        // Git normally skips these paths when it compares the worktree to the index.
+        const entries = await runBytes(root, checkout, [
+          ...passive,
+          "ls-files",
+          "-v",
+          "-z",
+        ]);
+        if (/(?:^|\0)[a-zS] /u.test(entries.toString("latin1")))
+          throw new Error(error);
+        // The index may itself contain private edits. Check it separately even when
+        // the worktree exactly matches those staged bytes. Visit gitlinks below
+        // their own root rather than letting Git invoke a nested status command.
+        for (const comparison of [["diff", "--cached"], ["diff-files"]]) {
+          const changed = await runBytes(root, checkout, [
+            ...passive,
+            ...comparison,
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=dirty",
+            "--",
+          ]);
+          if (changed.length) throw new Error(error);
+        }
       }
     }
     for (const { path, userSelected } of pendingStoragePaths) {

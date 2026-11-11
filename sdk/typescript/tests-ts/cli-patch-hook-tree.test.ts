@@ -88,7 +88,7 @@ test.each([
     );
     git("add", "other.ts");
     git("commit", "-m", "Synthetic unrelated file");
-    await writeFile(join(directory, "other.ts"), "unrelated local edit\n");
+    // The separate edit arrives after the clean-filter preflight, before the native hook.
     const postIndex = hook === "post-index stage unrelated";
     const hooks = join(directory, ".git", "hooks");
     const hookPath = join(
@@ -146,8 +146,13 @@ test.each([
       options,
     ) => {
       if (command === "git") {
-        if (args[0] === "switch" && args[1] === "-c")
+        if (args[0] === "switch" && args[1] === "-c") {
+          await writeFile(
+            join(directory, "other.ts"),
+            "unrelated local edit\n",
+          );
           indexBefore = await readFile(indexPath);
+        }
         if (args[0] === "push") pushes++;
         const output = await runGitRepositoryCommand(command, args, cwd, {
           ...options,
