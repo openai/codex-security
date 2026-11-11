@@ -4,22 +4,17 @@ type Row = { label: string; description: string };
 type Group = readonly [title: string, names: readonly string[]];
 
 const COMMAND_GROUPS: readonly Group[] = [
-  ["Scan and fix", ["scan", "policy", "validate", "patch", "verify-fix"]],
+  ["Scan and remediate", ["scan", "policy", "validate", "patch", "verify-fix"]],
   [
-    "Review and share",
-    [
-      "scans",
-      "findings",
-      "classify-severity",
-      "dedupe",
-      "suggest-owners",
-      "export",
-      "import",
-      "publish",
-    ],
+    "Review results",
+    ["scans", "findings", "classify-severity", "dedupe", "suggest-owners"],
   ],
+  ["Import and share", ["import", "publish", "export"]],
   ["Automate", ["bulk-scan", "scan-components", "install-hook"]],
-  ["Setup and support", ["login", "logout", "init", "info", "feedback"]],
+  [
+    "Configure and troubleshoot",
+    ["login", "logout", "init", "info", "feedback"],
+  ],
 ];
 
 const SCAN_GROUPS: readonly Group[] = [
@@ -50,7 +45,7 @@ const SCAN_GROUPS: readonly Group[] = [
 ];
 
 const PUBLISH_GROUPS: readonly Group[] = [
-  ["Input", ["scan", "scan-dir", "csv", "finding-id", "workflow-id"]],
+  ["Input", ["scan", "scan-dir", "finding-id", "workflow-id"]],
   ["Destination", ["to", "findings-url"]],
   [
     "Linear",
@@ -106,9 +101,12 @@ const VALUE_LABELS: Record<string, string> = {
   to: "destination",
 };
 
+const OUTPUT_FLAGS = ["format", "json", "filter-output", "full-output"];
+
 const OUTPUT_GROUPS: readonly Group[] = [
-  ["Help and updates", ["help", "version", "update"]],
-  ["Output", ["format", "json", "filter-output", "full-output"]],
+  ["Help and version", ["help", "version"]],
+  ["Maintenance", ["update"]],
+  ["Output", OUTPUT_FLAGS],
 ];
 
 function rowName(row: Row): string {
@@ -221,7 +219,10 @@ function globalRows(rows: Row[], command: string): Row[] {
     );
   });
   const formats = visible.find((row) => rowName(row) === "format");
-  if (formats && (scan || command === "scans rerun")) {
+  if (
+    formats &&
+    (scan || command === "scans rerun" || command === "scans resume")
+  ) {
     formats.label = formats.label.replace("|md", "");
   }
   if (formats && command !== "scan import") {
@@ -270,38 +271,48 @@ export function formatCliHelp(text: string, columns = 80): string {
       sections.push(
         usage
           .split("\n")
-          .map((line) => wrap(line, width, "", "       "))
+          .map((line) =>
+            wrap(
+              line.trimStart(),
+              width,
+              line.startsWith("       ") ? "       " : "",
+              "       ",
+            ),
+          )
           .join("\n"),
       );
       if (command === "") {
         sections.push(
           [
             "Get started:",
+            "  codex-security scan . --dry-run",
             "  codex-security login",
-            "",
-            wrap(
-              "In your repository, draft SECURITY.md (optional):",
-              width,
-              "  ",
-              "  ",
-            ),
-            "  codex-security policy .",
-            wrap(
-              "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.",
-              width,
-              "  ",
-              "  ",
-            ),
-            wrap(
-              "Skip this step to keep your existing policy or scan without one.",
-              width,
-              "  ",
-              "  ",
-            ),
-            "",
             "  codex-security scan .",
-            "  codex-security findings",
+            "  codex-security scans show",
           ].join("\n"),
+        );
+      } else if (command === "import") {
+        sections.push(
+          renderRows(
+            "Choose your input",
+            [
+              {
+                label: "Live provider",
+                description: "Choose a collector below.",
+              },
+              {
+                label: "Saved vendor report",
+                description:
+                  "See codex-security publish findings --help for local storage and publication.",
+              },
+              {
+                label: "Codex Security CSV or JSON",
+                description:
+                  "See codex-security scan import --help to add the export to local scan history.",
+              },
+            ],
+            width,
+          ),
         );
       } else if (examples) {
         sections.push(examples);
@@ -316,7 +327,12 @@ export function formatCliHelp(text: string, columns = 80): string {
           : [renderRows("Commands", rows, width)]),
       );
     } else if (title === "Options:") {
-      const rows = parseRows(lines).map((row) => optionRow(row, command));
+      const options = parseRows(lines)
+        .filter((row) => command !== "publish scan" || rowName(row) !== "csv")
+        .map((row) => optionRow(row, command));
+      const rows = options.filter(
+        (row) => !row.description.startsWith("[deprecated]"),
+      );
       sections.push(
         ...(command === "scan"
           ? groupedRows(rows, SCAN_GROUPS, "Advanced", width)
@@ -324,15 +340,30 @@ export function formatCliHelp(text: string, columns = 80): string {
             ? groupedRows(rows, PUBLISH_GROUPS, "Options", width)
             : [renderRows("Options", rows, width)]),
       );
-    } else if (title === "Global Options:") {
-      sections.push(
-        ...groupedRows(
-          globalRows(parseRows(lines), command),
-          OUTPUT_GROUPS,
-          "Agent options",
-          width,
-        ),
+      const deprecated = options.filter((row) =>
+        row.description.startsWith("[deprecated]"),
       );
+      if (deprecated.length)
+        sections.push(renderRows("Deprecated options", deprecated, width));
+    } else if (title === "Global Options:") {
+      const rows = globalRows(parseRows(lines), command);
+      if (command === "") {
+        sections.push(
+          ...groupedRows(rows, OUTPUT_GROUPS, "Agent options", width),
+        );
+      } else {
+        const outputRows = rows.filter((row) =>
+          OUTPUT_FLAGS.includes(rowName(row)),
+        );
+        if (outputRows.length)
+          sections.push(renderRows("Output", outputRows, width));
+        sections.push(
+          wrap(
+            "See codex-security --help for shared help and agent options.",
+            width,
+          ),
+        );
+      }
     } else if (
       ["Arguments:", "Integrations:", "Environment Variables:"].includes(title)
     ) {
@@ -352,6 +383,14 @@ export function formatCliHelp(text: string, columns = 80): string {
           .join("\n"),
       );
     }
+  }
+  if (command === "completions") {
+    sections.push(
+      wrap(
+        "Shell setup: https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md#shell-completions",
+        width,
+      ),
+    );
   }
   if (command === "") {
     sections.push(
