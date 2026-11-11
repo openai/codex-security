@@ -4,6 +4,7 @@ import json
 import os
 import runpy
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,15 +23,31 @@ def arguments(checkout, *scope):
     return [str(SCRIPT), "--source-root", str(checkout), *identity, *scope]
 
 
+def collect_one(checkout, directories, **environment):
+    return subprocess.run(
+        [sys.executable, "-I", *arguments(checkout, "--single-repository")],
+        cwd=checkout.parent,
+        env={**os.environ, "PATH": os.pathsep.join(map(str, directories)), **environment},
+        capture_output=True,
+        text=True,
+    )
+
+
 @pytest.fixture
-def invoke(monkeypatch, tmp_path):
+def checkout(tmp_path):
     checkout = tmp_path / "source"
     checkout.mkdir()
+    return checkout
+
+
+@pytest.fixture
+def invoke(monkeypatch, tmp_path, checkout):
     for directory in (checkout, tmp_path):
         executable = directory / AWS_NAME
         executable.touch()
         executable.chmod(0o755)
     monkeypatch.setenv("PATH", os.pathsep.join(map(str, (checkout, tmp_path))))
+    monkeypatch.setenv("NODE_OPTIONS", f"--require={checkout / 'startup.cjs'}")
 
     def run(scope, *responses):
         replies = iter(responses)
@@ -38,6 +55,7 @@ def invoke(monkeypatch, tmp_path):
 
         def aws(command, **kwargs):
             assert Path(command[0]) == (tmp_path / AWS_NAME).resolve()
+            assert "NODE_OPTIONS" not in kwargs["env"]
             calls.append(command)
             reply = next(replies)
             if isinstance(reply, Exception):
@@ -139,9 +157,7 @@ def test_failure_after_first_patch_emits_no_partial_report(invoke, capsys):
 
 
 @pytest.mark.cross_platform
-def test_no_installed_aws_never_launches_checkout_executable(tmp_path, monkeypatch):
-    checkout = tmp_path / "source"
-    checkout.mkdir()
+def test_no_installed_aws_never_launches_checkout_executable(checkout, monkeypatch):
     executable = checkout / AWS_NAME
     executable.touch()
     executable.chmod(0o755)
@@ -154,6 +170,39 @@ def test_no_installed_aws_never_launches_checkout_executable(tmp_path, monkeypat
     monkeypatch.setattr(subprocess, "check_output", unexpected)
     with pytest.raises(SystemExit, match="(?i)aws"):
         main()
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("setting", ["AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE"])
+def test_checkout_credential_process_file_is_rejected(checkout, invoke, monkeypatch, setting):
+    config = checkout / "profile"
+    config.write_text("[default]\ncredential_process = checkout-command\n")
+    monkeypatch.setenv(setting, str(config))
+    with pytest.raises(SystemExit, match="checkout"):
+        invoke(["--single-repository"], {})
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Fixture links a settings file into the checkout")
+@pytest.mark.parametrize(
+    ("name", "contents"),
+    [
+        ("config", "[default]\ncredential_process = checkout-command\n"),
+        ("cli/alias", "[toplevel]\ncontinuum = !checkout-command\n"),
+    ],
+)
+def test_default_settings_linked_into_checkout_are_rejected(
+    tmp_path, checkout, invoke, monkeypatch, name, contents
+):
+    config = checkout / "settings"
+    config.write_text(contents)
+    home = tmp_path / "home"
+    default_file = home / ".aws" / name
+    default_file.parent.mkdir(parents=True)
+    default_file.symlink_to(config)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("AWS_CONFIG_FILE", raising=False)
+    with pytest.raises(SystemExit, match="checkout"):
+        invoke(["--single-repository"], {})
 
 
 @pytest.mark.native_macos
@@ -174,7 +223,7 @@ def test_aws_and_its_credential_helper_skip_checkout_launchers_and_startup_hooks
 
     marker = tmp_path / "ran-source-tool"
     for name in ("aws", "fixture-credentials"):
-        script(repo_bin / name, ': > "$SHIM_MARKER"\nexit 9\n')
+        script(repo_bin / name, f": > {shlex.quote(str(marker))}\nexit 9\n")
     alias = tmp_path / "alias"
     alias.symlink_to(repo_bin, target_is_directory=True)
     (linked_bin / "aws").symlink_to(repo_bin / "aws")
@@ -191,24 +240,53 @@ def test_aws_and_its_credential_helper_skip_checkout_launchers_and_startup_hooks
     (checkout / "sitecustomize.py").write_text(
         f"from pathlib import Path\nPath({str(python_marker)!r}).touch()\n"
     )
-    result = subprocess.run(
-        [sys.executable, "-I", *arguments(checkout, "--single-repository")],
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "PATH": os.pathsep.join(
-                map(str, (repo_bin, alias, linked_bin, trusted_bin, helper_bin))
-            ),
-            "AWS_PROFILE": "synthetic",
-            "BASH_ENV": str(hook),
-            "PYTHONPATH": str(checkout),
-            "SHIM_MARKER": str(marker),
-        },
-        capture_output=True,
-        text=True,
+    result = collect_one(
+        checkout,
+        (repo_bin, alias, linked_bin, trusted_bin, helper_bin),
+        AWS_PROFILE="synthetic",
+        BASH_ENV=str(hook),
+        PYTHONPATH=str(checkout),
     )
     assert not marker.exists()
     assert not hook_marker.exists()
     assert not python_marker.exists()
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"profile": "synthetic"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Fixture uses POSIX executable scripts")
+def test_node_credential_helper_ignores_checkout_preload(tmp_path, checkout):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node credential helper requires an installed Node runtime")
+    preload = checkout / "preload.cjs"
+    marker = tmp_path / "ran-node-preload"
+    preload.write_text(f"require('node:fs').writeFileSync({json.dumps(str(marker))}, 'ran');\n")
+
+    aws = tmp_path / "aws"
+    aws.write_text("#!/bin/sh\nexec fixture-node-credentials\n")
+    aws.chmod(0o755)
+    helper = tmp_path / "fixture-node-credentials"
+    helper.write_text(
+        "#!/usr/bin/env node\n"
+        "const { AWS_PROFILE, AWS_REGION, AWS_CONFIG_FILE, HTTPS_PROXY } = process.env;\n"
+        "console.log(JSON.stringify({ AWS_PROFILE, AWS_REGION, AWS_CONFIG_FILE, HTTPS_PROXY }));\n"
+    )
+    helper.chmod(0o755)
+    config = tmp_path / "profile"
+    config.write_text("[profile synthetic]\ncredential_process = fixture-node-credentials\n")
+    settings = {
+        "AWS_PROFILE": "synthetic",
+        "AWS_REGION": "us-east-1",
+        "AWS_CONFIG_FILE": str(config),
+        "HTTPS_PROXY": "http://proxy.example.invalid:8080",
+    }
+    result = collect_one(
+        checkout,
+        (tmp_path, Path(node).parent),
+        NODE_OPTIONS=f"--require={json.dumps(str(preload))}",
+        **settings,
+    )
+    assert not marker.exists()
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == settings

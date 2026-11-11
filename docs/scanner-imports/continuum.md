@@ -34,11 +34,15 @@ the finding, follow its created or duplicate issue ID, and retrieve its
 [AWS issue artifacts](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ListCodeIssueArtifacts.html)
 
 Run the collector from a trusted shell outside the checkout. Set `source_root`
-to the absolute path of the local checkout that owns the finding. The collector
-uses your selected AWS profile and Region and omits shell, Python, and native
-loader startup hooks when launching AWS and its credential helpers.
-The example uses a global npm installation and a verified single-repository environment. For a multi-repository
-environment, replace `--single-repository` with
+to the absolute path of the local checkout that owns the finding. Keep your AWS
+config, shared credentials, and CLI aliases outside that checkout. The AWS CLI
+and its helpers receive your AWS settings (including profile and Region), proxy
+and OS account settings, and a `PATH` that excludes the checkout. If a custom
+helper needs other shell variables, use a profile that works with these settings
+or import a saved report.
+
+The example uses a global npm installation and a verified single-repository
+environment. For a multi-repository environment, replace `--single-repository` with
 `--repository-name "$AWS_SOURCE_NAME"`. Use the exact source name AWS assigns
 to that repository. One issue can have patches for several sources. In this
 mode the collector skips patches without a repository name and prints their

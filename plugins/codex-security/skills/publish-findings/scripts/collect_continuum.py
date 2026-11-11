@@ -11,29 +11,67 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from collector_paths import in_source, source_root  # noqa: E402
 
-# The installed AWS CLI and its credential helpers can be shell or Python
-# scripts. These settings can execute code before the selected script starts.
-STARTUP_VARIABLES = {
-    "BASHOPTS",
-    "BASH_ENV",
-    "ENV",
-    "FPATH",
-    "PS4",
-    "PYTHONEXECUTABLE",
-    "PYTHONHOME",
-    "PYTHONPATH",
-    "PYTHONPLATLIBDIR",
-    "PYTHONSTARTUP",
-    "PYTHONUSERBASE",
-    "PYTHONWARNINGS",
-    "PYTHON_PRESITE",
-    "SHELLOPTS",
-    "ZDOTDIR",
-    "__PYVENV_LAUNCHER__",
+# Credential helpers may use any interpreter. Forward AWS and host settings
+# explicitly so a helper cannot inherit language-specific startup hooks.
+ACCOUNT_DIRECTORIES = {"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"}
+HOST_SETTINGS = ACCOUNT_DIRECTORIES | {
+    "ALL_PROXY",
+    "CURL_CA_BUNDLE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "LANG",
+    "LANGUAGE",
+    "LOGNAME",
+    "NO_PROXY",
+    "REQUESTS_CA_BUNDLE",
+    "SSH_AUTH_SOCK",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "USER",
+    "USERNAME",
+    "WINDIR",
 }
 
 
-def installed_aws(target: Path) -> tuple[Path, dict[str, str], Path | None]:
+def aws_environment(source: Path | None, cwd: Path, directories: list[str]) -> dict[str, str]:
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith(("AWS_", "LC_")) or name.upper() in HOST_SETTINGS
+    }
+    env["PATH"] = os.pathsep.join(directories)
+    for name in ACCOUNT_DIRECTORIES:
+        if env.get(name) and in_source(cwd / env[name], source):
+            raise ValueError(f"Use an account {name} directory outside the selected checkout.")
+
+    # AWS can run credential_process from either profile file and shell commands
+    # from its per-account alias file. Check the paths AWS will actually read.
+    for name, default in (
+        ("AWS_CONFIG_FILE", "~/.aws/config"),
+        ("AWS_SHARED_CREDENTIALS_FILE", "~/.aws/credentials"),
+    ):
+        filename = os.path.expanduser(os.path.expandvars(env.get(name, default)))
+        path = cwd / filename
+        if in_source(path, source):
+            raise ValueError(f"Use an {name} file outside the selected checkout.")
+        if name in env:
+            # Pin the selected location even when it used a parent-only variable.
+            if os.path.expandvars(str(path)) != str(path):
+                raise ValueError(f"Use a fully expanded file path for {name}.")
+            env[name] = str(path)
+    if in_source(cwd / os.path.expanduser("~/.aws/cli/alias"), source):
+        raise ValueError("Use an AWS CLI alias file outside the selected checkout.")
+    return env
+
+
+def installed_aws(target: Path) -> tuple[Path, dict[str, str], Path]:
     source = source_root(target)
     name = "aws.exe" if os.name == "nt" else "aws"
     executable = None
@@ -65,14 +103,8 @@ def installed_aws(target: Path) -> tuple[Path, dict[str, str], Path | None]:
 
     # Credential helpers inherit the same lookup boundary, including on Windows
     # where executable searches can also use the current directory.
-    environment = {
-        name: value
-        for name, value in os.environ.items()
-        if name not in STARTUP_VARIABLES and not name.startswith(("BASH_FUNC_", "LD_", "DYLD_"))
-    }
-    environment["PATH"] = os.pathsep.join(directories)
-    cwd = executable.parent if in_source(Path.cwd(), source) else None
-    return executable, environment, cwd
+    cwd = executable.parent if in_source(Path.cwd(), source) else Path.cwd()
+    return executable, aws_environment(source, cwd, directories), cwd
 
 
 def collect(
