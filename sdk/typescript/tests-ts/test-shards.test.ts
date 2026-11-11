@@ -310,6 +310,8 @@ test.each([
   [defaultTimeoutMs, [], "available", true],
   [defaultTimeoutMs, ["-t", "--timeout=5000"], "blocked directory", false],
   [defaultTimeoutMs, [], "blocked directory", true],
+  [defaultTimeoutMs, [], "missing diagnostics directory", false],
+  [defaultTimeoutMs, [], "missing diagnostics directory", true],
 ] as const)(
   "uses timeout %s with %p, %s reports and failure=%p",
   async (timeout, options, report, fail) => {
@@ -342,6 +344,14 @@ test("synthetic report probe --timeout=5000", () => {
         env: {
           ...process.env,
           CODEX_SECURITY_TEST_TIMEOUT_MS: "1",
+          ...(report === "missing diagnostics directory"
+            ? Object.fromEntries(
+                ["TEMP", "TMP", "TMPDIR"].map((name) => [
+                  name,
+                  join(root, "absent"),
+                ]),
+              )
+            : {}),
           PATH: `${dirname(process.execPath)}${delimiter}${process.env["PATH"] ?? ""}`,
         },
         stdin: "ignore",
@@ -353,7 +363,7 @@ test("synthetic report probe --timeout=5000", () => {
       expect(status, stderr).toBe(fail ? 1 : 0);
       expect(stdout).toContain("Test shard 1/1: probe.test.ts");
       expect(stderr).toContain("synthetic report probe");
-      if (report === "available") {
+      if (report !== "blocked directory") {
         const xml = await readFile(
           join(root, "reports", "junit-1.xml"),
           "utf8",

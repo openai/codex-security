@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, readdir, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
 import {
@@ -18,17 +19,20 @@ import {
 import { finding } from "./scan-draft-fixture.ts";
 
 const { addScanCoverage, validateDiscoveryArtifacts } = await importSource(
-  new URL("../src/deep-scan/artifact-validation.ts", import.meta.url).pathname,
+  fileURLToPath(
+    new URL("../src/deep-scan/artifact-validation.ts", import.meta.url),
+  ),
 );
 const { preserveDiffCandidateDecisions } = await importSource(
-  new URL("../src/artifact-diff-candidates.ts", import.meta.url).pathname,
+  fileURLToPath(new URL("../src/artifact-diff-candidates.ts", import.meta.url)),
 );
 
 for (const field of ["surfaces", "explicitExclusions", "deferred"] as const) {
   test(`coverage history retains separate legacy workers in ${field}`, () => {
     const rows = ["worker-one", "worker-two"].map((workerId) => ({
-      id: workerId,
+      id: "shared-id",
       candidateId: "shared-candidate",
+      sourceWorkerId: " ",
       workerId,
       reason: "Independent synthetic review evidence.",
     }));
@@ -581,7 +585,7 @@ for (const candidateId of ["legacy-candidate", "review/auth"]) {
 }
 
 const { recordCodexSecurityScanDraftViaWorkbench } = await importSource(
-  new URL("../src/artifact-scan-draft.ts", import.meta.url).pathname,
+  fileURLToPath(new URL("../src/artifact-scan-draft.ts", import.meta.url)),
 );
 
 test("publishes colliding worker-local deferred IDs without changing their evidence", async (t) => {
@@ -1286,8 +1290,12 @@ for (const reopened of [false, true]) {
       ? [{ ...pending, sourceWorkerId: "worker-a" }]
       : [];
     const { unresolvedCandidates } = await importSource(
-      new URL("../../../../sdk/typescript/src/candidates.ts", import.meta.url)
-        .pathname,
+      fileURLToPath(
+        new URL(
+          "../../../../sdk/typescript/src/candidates.ts",
+          import.meta.url,
+        ),
+      ),
     );
     for (let replay = 0; replay < 2; replay++) {
       const saved = await mergeWorkerFiles(

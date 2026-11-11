@@ -1,5 +1,13 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, open, readFile, readdir, rm } from "node:fs/promises";
+import {
+  type FileHandle,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  rm,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bunTestTimeout } from "./bun-test-timeout.mts";
@@ -50,12 +58,17 @@ const testArguments = [
 // Bun's text coverage writer can abort on a backpressured stderr pipe before
 // writing JUnit/LCOV reports. Preserve its diagnostics in a regular file, then
 // relay them live with Node's stream backpressure while keeping the test exit status.
-const outputDirectory = await mkdtemp(
-  join(tmpdir(), "codex-security-ci-output-"),
-);
-const outputPath = join(outputDirectory, "stderr.log");
-const output = await open(outputPath, "w");
-const reader = await open(outputPath, "r");
+let outputDirectory: string | undefined;
+let output: FileHandle | undefined;
+let reader: FileHandle | undefined;
+try {
+  outputDirectory = await mkdtemp(join(tmpdir(), "codex-security-ci-output-"));
+  const outputPath = join(outputDirectory, "stderr.log");
+  output = await open(outputPath, "w");
+  reader = await open(outputPath, "r");
+} catch {
+  // Fall back to inherited stderr when the diagnostic file is unavailable.
+}
 const buffer = Buffer.allocUnsafe(64 * 1024);
 let offset = 0;
 let flushing: Promise<void> | undefined;
@@ -66,7 +79,7 @@ process.stderr.on("error", () => {
 });
 const flush = (): Promise<void> => {
   flushing ??= (async () => {
-    while (!relayFailed) {
+    while (reader && !relayFailed) {
       const { bytesRead } = await reader.read(buffer, 0, buffer.length, offset);
       if (bytesRead === 0) return;
       offset += bytesRead;
@@ -87,10 +100,12 @@ const flush = (): Promise<void> => {
   return flushing;
 };
 // Keep diagnostics visible before an interrupted or timed-out child exits.
-const relay = setInterval(() => {
-  void flush();
-}, 100);
-relay.unref();
+const relay =
+  reader &&
+  setInterval(() => {
+    void flush();
+  }, 100);
+relay?.unref();
 try {
   const child = spawn("bun", testArguments, {
     cwd: new URL("../", import.meta.url),
@@ -98,7 +113,7 @@ try {
       ...process.env,
       CODEX_SECURITY_TEST_TIMEOUT_MS: bunTestTimeout(testArguments),
     },
-    stdio: ["inherit", "inherit", output.fd],
+    stdio: ["inherit", "inherit", reader && output ? output.fd : "inherit"],
     windowsHide: true,
   });
   process.exitCode = await new Promise<number>((resolve) => {
@@ -112,7 +127,8 @@ try {
   clearInterval(relay);
   await flushing;
   await flush();
-  await Promise.allSettled([reader.close(), output.close()]);
+  await Promise.allSettled([reader?.close(), output?.close()]);
   // A lingering Windows file lock only affects these temporary diagnostics.
-  await rm(outputDirectory, { recursive: true, force: true }).catch(() => {});
+  if (outputDirectory)
+    await rm(outputDirectory, { recursive: true, force: true }).catch(() => {});
 }
