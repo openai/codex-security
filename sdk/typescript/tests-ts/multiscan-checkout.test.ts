@@ -474,6 +474,35 @@ describe("multiscan", () => {
     );
   });
 
+  test("preserves an existing checkout directory on the first campaign attempt", async () => {
+    const { paths } = await repositoryFixture("occupied-first", "demo");
+    const checkout = join(paths.output, "checkouts", "demo");
+    await mkdir(checkout, { recursive: true });
+    const note = join(checkout, "local-notes.txt");
+    await writeFile(note, "Local work.\n");
+    const run = mock<SecurityClient["run"]>(completeRun);
+    const configured = options(paths, client(run));
+
+    expect(await runMultiscan(configured)).toMatchObject({
+      completed: 0,
+      failed: 1,
+    });
+    expect(run).not.toHaveBeenCalled();
+    expect(await readFile(note, "utf8")).toBe("Local work.\n");
+    const ledger = join(paths.output, "results.jsonl");
+    expect(await results(ledger)).toMatchObject([
+      { attempt: 1, status: "failed", checkoutOccupied: true },
+    ]);
+
+    const recovered = await runMultiscan({
+      ...configured,
+      recoverScan: async () => undefined,
+    });
+    expect(recovered).toMatchObject({ completed: 1, failed: 0 });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(await readFile(note, "utf8")).toBe("Local work.\n");
+  });
+
   test("continues later tasks when a failed scan leaves its checkout occupied", async () => {
     const { paths, source } = await repositoryFixture("cleanup-retry", "retry");
     await appendFile(paths.input, `next,${source.path},${source.revision}\n`);
@@ -704,7 +733,7 @@ describe("multiscan", () => {
     expect(await results(summary.resultsPath)).toHaveLength(3);
   });
 
-  test("rejects another supervisor and recovers a crashed owner's checkout", async () => {
+  test("rejects another supervisor and preserves a crashed owner's checkout", async () => {
     const { paths, source } = await repositoryFixture("exclusive");
     const running = Promise.withResolvers<void>();
     const finish = Promise.withResolvers<void>();
@@ -887,6 +916,28 @@ describe("multiscan", () => {
     expect((await lstat(lock)).isDirectory()).toBe(true);
   });
 
+  test("preserves a null lock owner until its lease expires", async () => {
+    const { paths } = await repositoryFixture("null-owner");
+    const lock = join(paths.output, ".lock");
+    const ownerPath = join(lock, "owner.json");
+    await mkdir(lock, { recursive: true, mode: 0o700 });
+    await writeFile(ownerPath, "null", { mode: 0o600 });
+    const configured = options(paths, client(completeRun));
+
+    await expect(runMultiscan(configured)).rejects.toThrow(
+      "A multiscan supervisor is already running.",
+    );
+    expect(await readFile(ownerPath, "utf8")).toBe("null");
+
+    const expired = new Date(Date.now() - 120_000);
+    await utimes(ownerPath, expired, expired);
+    expect(await runMultiscan(configured)).toMatchObject({
+      completed: 1,
+      failed: 0,
+    });
+    await expect(access(lock)).rejects.toThrow();
+  });
+
   test("recovers an interrupted stale-lock recovery claim", async () => {
     const { paths } = await repositoryFixture(
       "interrupted-recovery",
@@ -935,14 +986,18 @@ describe("multiscan", () => {
       active -= 1;
       return completedScan(scanOptions.outputDir!);
     });
-    const contenders = Promise.allSettled([
+    const contenders = [
       runMultiscan(options(paths, security)),
       runMultiscan(options(paths, security)),
-    ]);
+    ];
 
-    await running.promise;
-    finish.resolve();
-    const outcomes = await contenders;
+    try {
+      // One contender can lose the lock before the winning client starts.
+      await Promise.race([running.promise, Promise.any(contenders)]);
+    } finally {
+      finish.resolve();
+    }
+    const outcomes = await Promise.allSettled(contenders);
 
     expect(maximum).toBe(1);
     expect(

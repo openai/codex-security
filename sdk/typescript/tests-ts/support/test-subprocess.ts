@@ -4,7 +4,8 @@ import { expect } from "bun:test";
 export function runTestInSubprocess(
   file: string,
   name: string,
-  environment: NodeJS.ProcessEnv = process.env,
+  environment: NodeJS.ProcessEnv = {},
+  cwd: string | URL = new URL("../../", import.meta.url),
 ): boolean {
   const identity = `${file}::${name}`;
   if (process.env["CODEX_SECURITY_ISOLATED_TEST"] === identity) return false;
@@ -15,9 +16,13 @@ export function runTestInSubprocess(
     process.execPath,
     ["test", "--timeout", timeout, "--test-name-pattern", pattern, file],
     {
-      cwd: new URL("../../", import.meta.url),
+      cwd,
       encoding: "utf8",
-      env: { ...environment, CODEX_SECURITY_ISOLATED_TEST: identity },
+      env: {
+        ...process.env,
+        ...environment,
+        CODEX_SECURITY_ISOLATED_TEST: identity,
+      },
       windowsHide: true,
     },
   );

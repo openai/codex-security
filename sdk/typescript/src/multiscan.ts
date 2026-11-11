@@ -71,6 +71,7 @@ import {
   executablePathForSpawn,
   pluginHelperEnvironment,
   requireSecureOutputAncestry,
+  requireWindowsOutputPath,
   validateOutputDir,
   resolvePluginPath,
   resolvePluginPythonCommand,
@@ -275,8 +276,10 @@ export async function runMultiscan(
     if (!manifest?.isFile())
       throw new Error("Bulk recovery requires an existing campaign manifest.");
   }
-  const output = await ensureOutputDirectory(requestedOutput);
-  await requireSecureOutputAncestry(output);
+  const output = await ensureOutputDirectory(requestedOutput, {
+    retainedDirectory: "artifacts",
+  });
+  if (process.platform !== "win32") await requireSecureOutputAncestry(output);
   const unlock = await acquireLock(output);
   let pluginWorkspace: string | undefined;
   let pluginRoot: Promise<string> | undefined;
@@ -763,7 +766,7 @@ async function runCampaign(
                 checkoutOccupied = true;
                 requiresRecovery = true;
                 throw new Error(
-                  `Bulk checkout is already occupied: ${normalCheckout}. Inspect and move the retained checkout before retrying.`,
+                  `Bulk checkout is already occupied: ${normalCheckout}. Retry with --recover to use a fresh checkout, or inspect and move the retained checkout before an ordinary retry.`,
                 );
               }
             } else {
@@ -779,6 +782,8 @@ async function runCampaign(
               checkout = isolatedCheckout;
             }
             protectedRoot = checkout;
+            // Claim the fresh checkout before Git or the scanner can fail.
+            await claimCheckout(checkout, scanDir);
             await checkoutRevision(
               task,
               checkout,
@@ -793,11 +798,6 @@ async function runCampaign(
               throw new Error(
                 "The campaign checkout must have a real Git directory.",
               );
-            await writeFile(
-              join(checkout, CHECKOUT_MARKER),
-              await checkoutMarker(checkout, scanDir),
-              { flag: "wx", mode: 0o600 },
-            );
             if (task.scope !== undefined) {
               const scoped = await realpath(join(checkout, task.scope));
               const outside = relative(await realpath(checkout), scoped);
@@ -875,7 +875,7 @@ async function runCampaign(
           }
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
-            cleanupFailure = await removeCheckout(checkout);
+            cleanupFailure = await removeCheckout(checkout, scanDir);
           }
         }
         const reportedErrors = [failure, cleanupFailure].filter(
@@ -931,7 +931,7 @@ async function runCampaign(
         await receiptTail;
         options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
-          reportedError = await removeCheckout(recoveryCheckout);
+          reportedError = await removeCheckout(recoveryCheckout, scanDir);
         }
         notifyProgress(options, {
           repository: task.id,
@@ -947,7 +947,12 @@ async function runCampaign(
           completed += 1;
           break;
         }
-        if (exhaustedBudget || attemptedResume || requiresRecovery) {
+        if (
+          exhaustedBudget ||
+          attemptedResume ||
+          requiresRecovery ||
+          checkoutOccupied
+        ) {
           failed += 1;
           break;
         }
@@ -996,18 +1001,53 @@ async function checkoutMarker(
   ]);
 }
 
-async function removeCheckout(path: string): Promise<string | undefined> {
-  return rm(path, { recursive: true, force: true }).then(
-    () => undefined,
-    (error: unknown) =>
-      `Multiscan checkout cleanup failed: ${errorMessage(error)}`,
-  );
+async function claimCheckout(checkout: string, scanDir: string): Promise<void> {
+  const marker = await checkoutMarker(checkout, scanDir);
+  await mkdir(join(checkout, ".git"), { mode: 0o700 });
+  await writeFile(join(checkout, CHECKOUT_MARKER), marker, {
+    flag: "wx",
+    mode: 0o600,
+  });
+}
+
+async function removeCheckout(
+  checkout: string,
+  scanDir: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  try {
+    const marker = await lstat(join(checkout, CHECKOUT_MARKER)).catch(
+      undefinedIfMissingFile,
+    );
+    if (!marker?.isFile()) return undefined;
+    const expected = Buffer.from(await checkoutMarker(checkout, scanDir));
+    if (
+      marker.size === expected.length &&
+      (
+        await readScanFile(
+          checkout,
+          CHECKOUT_MARKER,
+          "campaign checkout marker",
+          signal,
+        )
+      ).equals(expected)
+    ) {
+      await rm(checkout, { recursive: true, force: true });
+    }
+  } catch (error) {
+    return `Multiscan checkout cleanup failed: ${errorMessage(error)}`;
+  }
 }
 
 async function ensureOutputDirectory(
   path: string,
-  privateGitMetadata = false,
+  {
+    privateGitMetadata = false,
+    retainedDirectory,
+  }: { privateGitMetadata?: boolean; retainedDirectory?: string } = {},
 ): Promise<string> {
+  const linkedOutput =
+    "Multiscan output directories must not be symbolic links.";
   let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
@@ -1015,14 +1055,21 @@ async function ensureOutputDirectory(
     if (process.platform === "win32") {
       // Resolve parent aliases while leaving the leaf for lstat to verify.
       path = join(await canonicalConfigPath(dirname(path)), basename(path));
-      await createWindowsOutputDirectory(path, true);
+      try {
+        await createWindowsOutputDirectory(path, true);
+      } catch (error) {
+        if ((await lstat(path).catch(() => undefined))?.isSymbolicLink()) {
+          throw new Error(linkedOutput, { cause: error });
+        }
+        throw error;
+      }
     } else {
       await mkdir(path, { recursive: true, mode: 0o700 });
     }
     metadata = await lstat(path, { bigint: true });
   }
   if (metadata.isSymbolicLink()) {
-    throw new Error("Multiscan output directories must not be symbolic links.");
+    throw new Error(linkedOutput);
   }
   if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");
@@ -1032,7 +1079,10 @@ async function ensureOutputDirectory(
   if (directory.dev !== metadata.dev || directory.ino !== metadata.ino) {
     throw new Error("Multiscan output directories changed during preparation.");
   }
-  if (process.platform === "win32") return canonical;
+  if (process.platform === "win32") {
+    await requireWindowsOutputPath(canonical, true, retainedDirectory);
+    return canonical;
+  }
   const owner = process.geteuid?.();
   if (owner !== undefined && directory.uid !== BigInt(owner)) {
     throw new Error(
@@ -1190,7 +1240,7 @@ async function inspectLock(
     processStartedAt?: number;
   };
   try {
-    identity = JSON.parse(owner) as typeof identity;
+    identity = (JSON.parse(owner) ?? {}) as typeof identity;
   } catch {
     return { owner, stale: Date.now() - modifiedAt > LOCK_LEASE_MS };
   }
@@ -1712,6 +1762,7 @@ async function loadResumableScan(
       return;
     }
     createdCheckout = root;
+    await claimCheckout(root, path);
     await checkoutRevision(receipt, root, signal, options.githubHost);
   };
   try {
@@ -1858,24 +1909,7 @@ async function loadResumableScan(
           const parent = await ensureOutputDirectory(dirname(selected));
           if (relative(parent, dirname(matchedRoot)) !== "")
             throw new Error("The registered checkout directory has moved.");
-          const expected = Buffer.from(await checkoutMarker(selected, path));
-          const marker = await lstat(join(selected, CHECKOUT_MARKER)).catch(
-            undefinedIfMissingFile,
-          );
-          if (
-            !marker?.isFile() ||
-            marker.size !== expected.length ||
-            !(
-              await readScanFile(
-                selected,
-                CHECKOUT_MARKER,
-                "campaign checkout marker",
-                signal,
-              )
-            ).equals(expected)
-          )
-            return accepted.contract.findings;
-          const warning = await removeCheckout(selected);
+          const warning = await removeCheckout(selected, path, signal);
           if (warning !== undefined) onWarning(warning);
         }
       } catch (error) {
@@ -1885,7 +1919,7 @@ async function loadResumableScan(
     return accepted.contract.findings;
   } finally {
     if (createdCheckout !== undefined) {
-      const warning = await removeCheckout(createdCheckout);
+      const warning = await removeCheckout(createdCheckout, path);
       if (warning !== undefined) onWarning(warning);
     }
   }
@@ -2197,19 +2231,25 @@ async function checkoutRevision(
     restoreIncomplete &&
     (await lstat(gitDirectory).catch(undefinedIfMissingFile))
   ) {
-    const canonicalGit = await ensureOutputDirectory(gitDirectory, true);
+    const canonicalGit = await ensureOutputDirectory(gitDirectory, {
+      privateGitMetadata: true,
+    });
     const canonicalObjects = await ensureOutputDirectory(
       join(gitDirectory, "objects"),
-      true,
+      { privateGitMetadata: true },
     );
     for (const entry of await readdir(canonicalObjects)) {
       if (/^[0-9a-f]{2}$/.test(entry))
-        await ensureOutputDirectory(join(canonicalObjects, entry), true);
+        await ensureOutputDirectory(join(canonicalObjects, entry), {
+          privateGitMetadata: true,
+        });
     }
     if (
       await lstat(join(canonicalObjects, "pack")).catch(undefinedIfMissingFile)
     )
-      await ensureOutputDirectory(join(canonicalObjects, "pack"), true);
+      await ensureOutputDirectory(join(canonicalObjects, "pack"), {
+        privateGitMetadata: true,
+      });
     for (const entry of [
       "config",
       "config.worktree",
@@ -2237,7 +2277,9 @@ async function checkoutRevision(
       undefinedIfMissingFile,
     );
     if (refs !== undefined)
-      await ensureOutputDirectory(join(gitDirectory, "refs"), true);
+      await ensureOutputDirectory(join(gitDirectory, "refs"), {
+        privateGitMetadata: true,
+      });
     const commonBinding = await readFile(
       join(gitDirectory, "commondir"),
       "utf8",

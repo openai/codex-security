@@ -1,4 +1,5 @@
-import { runNodePython } from "./support/python-probe.js";
+import { execNodePython, runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import { nodeCommand } from "./support/shell.js";
 import { scanRegistrationArguments } from "./support/workbench-command.js";
 import {
@@ -10,7 +11,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { Codex } from "@openai/codex-sdk";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, renameSync, symlinkSync } from "node:fs";
+import { existsSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import {
   chmod,
   copyFile,
@@ -74,6 +75,8 @@ import {
   acquireCodexSecurityCredentialHomeLock,
   bundledPluginCandidates,
   canonicalizeModelSafePath,
+  beginCredentialLogin,
+  credentialHomeUsesFileStorage,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
@@ -90,6 +93,7 @@ import {
   preparePersistentOutputRoot,
   prepareScanArtifactRestorer,
   prepareScanRegistrationOutput,
+  requireWindowsOutputPath,
   preserveCodexSecurityPluginRegistration,
   environmentWithGit,
   requirePrivateCredentialHome,
@@ -102,6 +106,8 @@ import {
   resolvePluginPythonCommand,
   runWorkbench,
   workbenchEnvironment,
+  writeCredentialHomeConfig,
+  logoutCredentialHome,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
   windowsCredentialAncestorAclScript,
@@ -121,6 +127,11 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const { temporaryDirectory, cleanup, temporaryDirectories } =
   createApiTestFixtures("codex-security-runtime-");
+const pythonWithLauncher = useTestPython(false);
+const pythonOnPath =
+  process.platform === "win32"
+    ? pythonWithLauncher
+    : () => Bun.which("python3") ?? Bun.which("python");
 const testPosix = process.platform === "win32" ? test.skip : test;
 const restoreSpawn = (spawn: typeof childProcess.spawn) =>
   mock.module("node:child_process", () => ({ ...childProcess, spawn }));
@@ -532,7 +543,7 @@ describe("plugin runtime preparation", () => {
   );
 
   test("preserves remediation when the filesystem device changes", async () => {
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const target = await temporaryDirectory("codex-security-remounted-target-");
     const verification = runNodePython(python!, [
@@ -899,6 +910,25 @@ describe("plugin runtime preparation", () => {
     ).toBeDefined();
   });
 
+  test("installs a local marketplace when the Codex home contains a literal hash", async () => {
+    const root = await temporaryDirectory();
+    const home = join(root, "codex #team");
+    const source = await bundledPluginRoot();
+    const installed = await bootstrapPlugin(home, source, {
+      environment: {
+        HOME: root,
+        USERPROFILE: root,
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+      },
+    });
+
+    const manifest = join(".codex-plugin", "plugin.json");
+    expect(
+      await readFile(join(installed.installedRoot, manifest), "utf8"),
+    ).toBe(await readFile(join(source, manifest), "utf8"));
+  });
+
   test("keeps local marketplace failures separate from installer failures", async () => {
     const root = await temporaryDirectory();
     const selected = await plugin(root);
@@ -1020,7 +1050,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1098,12 +1128,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         cwd: mcp.mcpServers["codex-security"].cwd,
         startup_timeout_sec:
           mcp.mcpServers["codex-security"].startup_timeout_sec,
-        env_vars: declaredRoot
-          ? mcp.mcpServers["codex-security"].env_vars
-          : [
-              ...mcp.mcpServers["codex-security"].env_vars,
-              "CODEX_SECURITY_PLUGIN_ROOT",
-            ],
+        env_vars: [
+          ...mcp.mcpServers["codex-security"].env_vars,
+          ...(declaredRoot ? [] : ["CODEX_SECURITY_PLUGIN_ROOT"]),
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         JSON.parse(await readFile(join(selected, ".mcp.json"), "utf8")),
@@ -1129,6 +1158,11 @@ for await (const line of createInterface({ input: process.stdin })) {
               ...environment,
               CODEX_HOME: home,
               CODEX_SQLITE_HOME: sqliteHome,
+              CODEX_SECURITY_REPOSITORY: join(
+                root,
+                pluginRoot === second ? "second source" : "first source",
+              ),
+              SYNTHETIC_UNDECLARED_VALUE: "ambient fixture",
               ...(pluginRoot === undefined
                 ? {}
                 : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
@@ -1192,6 +1226,10 @@ for await (const line of createInterface({ input: process.stdin })) {
         });
         const details = server.tools.probe._meta.launch;
         expect(details.pluginRoot).toBe(await realpath(pluginRoot));
+        expect(details.repository).toBe(
+          join(root, pluginRoot === second ? "second source" : "first source"),
+        );
+        expect(details.ambient).toBeUndefined();
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
           process.platform === "win32"
@@ -1530,6 +1568,114 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
   });
 
+  test.skipIf(process.platform !== "win32").each(["released", "held"])(
+    "handles plugin ZIP publication when a Windows directory lock is %s",
+    async (lock) => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const destination = join(root, "extracted");
+      const manifest = ".codex-plugin/plugin.json";
+      const contents = JSON.stringify({
+        name: "codex-security",
+        version: "1.2.3",
+      });
+      await writeFile(archive, zipSync({ [manifest]: strToU8(contents) }));
+      const nativeRename = fsPromises.rename;
+      let blocked: NodeJS.ErrnoException | undefined;
+      let staging = "";
+      let release: (() => Promise<void>) | undefined;
+      using publication = spyOn(fsPromises, "rename").mockImplementation(
+        async (from, to) => {
+          if (to !== destination || staging) return nativeRename(from, to);
+          staging = String(from);
+          // Windows keeps a process's current directory open until the process exits.
+          const holder = childProcess.spawn(
+            "node",
+            ["-e", 'process.stdout.write("ready"); process.stdin.resume()'],
+            {
+              cwd: join(staging, ".codex-plugin"),
+              windowsHide: true,
+            },
+          );
+          const exited = once(holder, "exit");
+          release = async () => {
+            holder.stdin.end();
+            await exited;
+          };
+          await once(holder.stdout, "data");
+          try {
+            await nativeRename(from, to);
+          } catch (error) {
+            blocked = error as NodeJS.ErrnoException;
+            throw error;
+          } finally {
+            if (lock === "released") await release();
+          }
+        },
+      );
+      try {
+        const result = extractPluginZip(archive, destination);
+        if (lock === "held") {
+          const failure = await result.catch((error: unknown) => error);
+          expect((failure as Error).message).toContain(
+            `Could not remove staging directory ${staging}:`,
+          );
+          expect(failure).toMatchObject({
+            message: expect.stringMatching(/publish.*ZIP.*rename/iu),
+            cause: { syscall: "rename", dest: destination },
+          });
+          expect(existsSync(staging)).toBe(true);
+          expect(existsSync(destination)).toBe(false);
+        } else {
+          expect(await result).toBe(destination);
+          expect(await readFile(join(destination, manifest), "utf8")).toBe(
+            contents,
+          );
+          expect(existsSync(staging)).toBe(false);
+        }
+        expect(["EPERM", "EACCES", "EBUSY"]).toContain(blocked?.code ?? "");
+        expect(publication.mock.calls.length).toBeGreaterThan(1);
+      } finally {
+        if (lock === "held") await release?.();
+      }
+    },
+  );
+
+  test.each(["empty", "nonempty"])(
+    "preserves platform behavior for an existing %s plugin ZIP destination",
+    async (kind) => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const destination = join(root, "extracted");
+      await mkdir(destination);
+      const sentinel = join(destination, "previous");
+      if (kind === "nonempty") await writeFile(sentinel, "keep");
+      await writeFile(
+        archive,
+        zipSync({
+          ".codex-plugin/plugin.json": strToU8(
+            JSON.stringify({ name: "codex-security", version: "1.2.3" }),
+          ),
+        }),
+      );
+      const result = extractPluginZip(archive, destination);
+      if (process.platform === "win32" || kind === "nonempty") {
+        await expect(result).rejects.toThrow(
+          process.platform === "win32"
+            ? "Destination already exists"
+            : "Invalid plugin ZIP",
+        );
+        if (kind === "nonempty")
+          expect(await readFile(sentinel, "utf8")).toBe("keep");
+        else expect(await readdir(destination)).toEqual([]);
+      } else {
+        expect(await result).toBe(destination);
+        expect(await readdir(destination)).toEqual([".codex-plugin"]);
+      }
+      expect((await readdir(root)).sort()).toEqual(["extracted", "plugin.zip"]);
+    },
+  );
+
   test("decodes flag-clear ZIP filenames with the legacy CP437 encoding", async () => {
     const root = await temporaryDirectory();
     const archive = Buffer.from(
@@ -1727,6 +1873,38 @@ for await (const line of createInterface({ input: process.stdin })) {
       expect(await readdir(root)).toEqual([`${name}.zip`]);
     }
   });
+
+  test.skipIf(process.platform !== "win32")(
+    "extracts plugin ZIPs across Windows temporary directory path limits",
+    async () => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const manifest = ".codex-plugin/plugin.json";
+      const data = JSON.stringify({ name: "codex-security", version: "1.2.3" });
+      await writeFile(
+        archive,
+        zipSync({ [`release/${manifest}`]: strToU8(data) }),
+      );
+      const templateLength = join(root, ".codex-security-plugin-XXXXXX").length;
+      using createStaging = spyOn(fsPromises, "mkdtemp");
+      for (const length of [247, 248, 259, 260, 280]) {
+        const padding = Math.max(1, length - templateLength - 1);
+        const parent = join(root, "p".repeat(padding));
+        const destination = join(parent, `extracted-${length}`);
+        const plugin = await extractPluginZip(archive, destination);
+        expect(createStaging).toHaveBeenLastCalledWith(
+          win32.toNamespacedPath(join(parent, ".codex-security-plugin-")),
+        );
+        expect(plugin).toBe(join(destination, "release"));
+        expect(await readFile(join(plugin, manifest), "utf8")).toBe(data);
+        expect(
+          (await readdir(parent)).some((entry) =>
+            entry.startsWith(".codex-security-plugin-"),
+          ),
+        ).toBe(false);
+      }
+    },
+  );
 
   test("rejects a ZIP entry with an invalid CRC-32", async () => {
     const root = await temporaryDirectory();
@@ -2157,7 +2335,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         command: "./scripts/launch_codex_security_mcp_sdk",
         args: ["--stdio", "synthetic argument"],
         cwd: ".",
-        env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
+        env_vars: [
+          "CODEX_HOME",
+          "CODEX_SECURITY_PLUGIN_ROOT",
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         (await stat(join(staged, "scripts", "launch_codex_security_mcp")))
@@ -3221,26 +3403,34 @@ describe("runtime directories and plugin Python boundary", () => {
       const root = await temporaryDirectory();
       // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
       // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = join(root, "shared");
+      const shared = join(root, "shared");
+      let stickyParent = shared;
       await mkdir(stickyParent, { mode: 0o1777 });
       await chmod(stickyParent, 0o1777);
-      if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
+      try {
         if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
+        const stateDirectory = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
+        await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+        const home = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        });
+        await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
+        await expect(
+          requireSecureOutputAncestry(home),
+        ).resolves.toBeUndefined();
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
       }
-      const stateDirectory = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      temporaryDirectories.track(stateDirectory);
-      await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      });
-      await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
-      await expect(requireSecureOutputAncestry(home)).resolves.toBeUndefined();
     },
   );
 
@@ -3693,6 +3883,122 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  test.each(["upgraded", "new"] as const)(
+    "logout retries a previous keyring login after revoking a newer file credential (%s)",
+    async (origin) => {
+      const { home, root } = await credentialHome(true);
+      const file = join(home, "auth.json");
+      if (origin === "upgraded") {
+        await writeFile(
+          join(home, "config.toml"),
+          'cli_auth_credentials_store = "auto"\n',
+        );
+      } else {
+        await writeCredentialHomeConfig(home, {
+          cli_auth_credentials_store: "auto",
+        });
+        // Successful auto sign-in with no fallback file used the keyring.
+        await setCodexSecurityCredentialLogout(home, false);
+      }
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "file",
+      });
+      await writeFile(file, "synthetic credential", { mode: 0o600 });
+      await setCodexSecurityCredentialLogout(home, false);
+      let keyringAvailable = false;
+      const revoke = mock(async (store?: string) => {
+        if (store === "keyring") return keyringAvailable ? 0 : 17;
+        await rm(file, { force: true });
+        return 0;
+      });
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(17);
+      expect(revoke.mock.calls).toEqual([[undefined], ["keyring"]]);
+      expect(await codexSecurityCredentialAllowsAmbientImport(home)).toBe(
+        false,
+      );
+      keyringAvailable = true;
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([["keyring"]]);
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([[undefined]]);
+    },
+  );
+  test("a confirmed file-only home can log out after the configured backend changes", async () => {
+    const { home, root } = await credentialHome(true);
+    const path = join(home, "auth.json");
+    await writeFile(path, "synthetic key", { mode: 0o600 });
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "auto",
+    });
+    await beginCredentialLogin(home);
+    expect(await credentialHomeUsesFileStorage(home)).toBe(false);
+    // Native auto fell back to the file because no keyring was available.
+    await setCodexSecurityCredentialLogout(home, false);
+    expect(await credentialHomeUsesFileStorage(home)).toBe(true);
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "keyring",
+    });
+    const revoke = mock(async (_store?: string) => {
+      await rm(path);
+      return 0;
+    });
+    expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+    expect(revoke.mock.calls).toEqual([["file"]]);
+  });
+
+  test.each(["auto", "file"])(
+    "logout finds a credential native auto refreshed into the keyring (current store: %s)",
+    async (store) => {
+      const { home, root } = await credentialHome(true);
+      const path = join(home, "auth.json");
+      await writeFile(path, "synthetic credential", { mode: 0o600 });
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "auto",
+      });
+      // Auto refresh saves to the keyring and unlinks the former file.
+      await rm(path);
+      if (store === "file")
+        await writeCredentialHomeConfig(home, {
+          cli_auth_credentials_store: "file",
+        });
+      const revoke = mock(async (_store?: string) => 0);
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([
+        [store === "auto" ? undefined : "keyring"],
+      ]);
+      revoke.mockClear();
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([
+        [store === "auto" ? "file" : undefined],
+      ]);
+    },
+  );
+
+  test.each(["auto", "keyring"])(
+    "logout clears an interrupted first %s login even after a later file login",
+    async (store) => {
+      const { home, root } = await credentialHome(true);
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: store,
+      });
+      await beginCredentialLogin(home);
+      // Native persisted the grant but the wrapper never got its success callback.
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: "file",
+      });
+      const file = join(home, "auth.json");
+      await writeFile(file, "second synthetic login", { mode: 0o600 });
+      await setCodexSecurityCredentialLogout(home, false);
+      const revoke = mock(async (backend?: string) => {
+        if (backend === undefined) await rm(file);
+        return 0;
+      });
+      expect(await logoutCredentialHome(home, root, revoke)).toBe(0);
+      expect(revoke.mock.calls).toEqual([[undefined], ["keyring"]]);
+    },
+  );
   test("prevents ambient credential imports after an explicit logout", async () => {
     const { home } = await credentialHome(true);
 
@@ -5604,6 +5910,19 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "preserves trailing whitespace in an explicit POSIX state directory",
+    async () => {
+      const root = await temporaryDirectory();
+      for (const suffix of [" ", "\u00a0"]) {
+        const state = join(root, `explicit-state${suffix}`);
+        expect(
+          codexSecurityStateDirectory({ CODEX_SECURITY_STATE_DIR: state }),
+        ).toBe(state);
+      }
+    },
+  );
+
   test("derives persistent state from the ambient home or explicit override", async () => {
     const root = await temporaryDirectory();
     expect(codexSecurityStateDirectory({ CODEX_HOME: root })).toBe(
@@ -5921,7 +6240,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await mkdir(stateDirectory);
     await mkdir(scanDirectory, { mode: 0o700 });
 
-    const python = Bun.which("python3") ?? Bun.which("python");
+    const python = pythonOnPath();
     expect(python).not.toBeNull();
     const fixture = runNodePython(python!, [
       "-c",
@@ -6036,7 +6355,7 @@ describe("runtime directories and plugin Python boundary", () => {
   ] as const)(
     "rejects recipe scans when the agent did not create %s",
     async (_description, present) => {
-      const python = Bun.which("python3") ?? Bun.which("python");
+      const python = pythonOnPath();
       expect(python).not.toBeNull();
       const requiredDrafts = ["scan-manifest.json", "findings.json"] as const;
       const root = await temporaryDirectory("codex-security-missing-drafts-");
@@ -6243,25 +6562,30 @@ describe("runtime directories and plugin Python boundary", () => {
       const shared = join(root, "shared");
       await mkdir(shared, { mode: 0o1777 });
       await chmod(shared, 0o1777);
-      // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
-      // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = shared;
-      if (((await lstat(shared)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
-        if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+      try {
+        // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
+        // chmod; fall back to the process temp root when it is already sticky.
+        let stickyParent = shared;
+        if (((await lstat(shared)).mode & 0o1000) === 0) {
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
-      }
-      const output = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      temporaryDirectories.track(output);
+        const output = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(output);
 
-      await expect(
-        requireSecureOutputAncestry(output),
-      ).resolves.toBeUndefined();
-      expect(await prepareOutputDir(output, "repo")).toBe(output);
+        await expect(
+          requireSecureOutputAncestry(output),
+        ).resolves.toBeUndefined();
+        expect(await prepareOutputDir(output, "repo")).toBe(output);
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
+      }
     },
   );
 
@@ -6291,6 +6615,31 @@ describe("runtime directories and plugin Python boundary", () => {
       requireTrustedOutputAncestor({ mode: 0o41777, uid: 0 }, "/tmp", 1000),
     ).not.toThrow();
   });
+
+  testPosix.each([
+    [230, "a".repeat(230)],
+    [250, "é".repeat(125)],
+  ] as const)(
+    "previews and archives a %i-byte output name",
+    async (_bytes, name) => {
+      const root = await temporaryDirectory();
+      const output = join(root, name);
+      await mkdir(output, { mode: 0o700 });
+      await writeFile(join(output, "report.md"), "first report");
+      const preview = await planOutputArchive(output);
+      expect(dirname(preview!)).toBe(root);
+      await expect(lstat(preview!)).rejects.toMatchObject({ code: "ENOENT" });
+      const archived: string[] = [];
+      await prepareOutputDir(output, "repo", root, undefined, true, (path) => {
+        archived.push(path);
+      });
+      expect(archived).toHaveLength(1);
+      expect(await readFile(join(archived[0]!, "report.md"), "utf8")).toBe(
+        "first report",
+      );
+      expect(await readdir(output)).toEqual([]);
+    },
+  );
 
   test("prepares an output directory without moving prior results", async () => {
     const root = await temporaryDirectory();
@@ -6445,6 +6794,111 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  testPosix(
+    "rejects a selected directory replaced in a shared parent during validation",
+    async () => {
+      const root = await temporaryDirectory();
+      const shared = join(root, "shared");
+      const output = join(shared, "output");
+      const unrelated = join(root, "unrelated");
+      await mkdir(output, { recursive: true });
+      await chmod(shared, 0o777);
+      await mkdir(unrelated);
+      const uid = process.geteuid!();
+      using _swap = spyOn(process, "geteuid").mockImplementationOnce(() => {
+        renameSync(output, join(shared, "moved"));
+        symlinkSync(unrelated, output);
+        return uid;
+      });
+      await expect(validateOutputDir(output)).rejects.toThrow("writable");
+      expect(await realpath(output)).toBe(unrelated);
+    },
+  );
+
+  test("creates temporary output under the directory selected before an alias changes", async () => {
+    const root = await temporaryDirectory();
+    const selected = join(root, "selected");
+    const replacement = join(root, "replacement");
+    const alias = join(root, "alias");
+    await mkdir(selected);
+    await mkdir(replacement);
+    await symlink(selected, alias, "junction");
+    const output = await prepareOutputDir(undefined, "repo", alias, (path) => {
+      if (path === selected) {
+        unlinkSync(alias);
+        symlinkSync(replacement, alias, "junction");
+      }
+    });
+    expect(await realpath(alias)).toBe(replacement);
+    expect(dirname(output)).toBe(selected);
+    expect(await readdir(replacement)).toEqual([]);
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "keeps existing output validation on the selected Windows directory",
+    async () => {
+      const root = await temporaryDirectory();
+      const output = join(root, "output");
+      for (const writable of [false, true]) {
+        await expect(
+          requireWindowsOutputPath(output, writable),
+        ).rejects.toThrow();
+      }
+      await mkdir(output);
+      await writeFile(join(output, "old"), "");
+      expect(await validateOutputDir(join(root, "OUTPUT"), true)).toBe(output);
+
+      const staged = join(root, "staged");
+      const unrelated = join(staged, "output");
+      await mkdir(unrelated, { recursive: true });
+      await writeFile(join(unrelated, "keep"), "");
+      const original = fsPromises.realpath;
+      const substitution = spyOn(fsPromises, "realpath").mockImplementation(
+        new Proxy(original, {
+          async apply(target, receiver, args) {
+            if (args[0] !== output)
+              return Reflect.apply(target, receiver, args);
+            const moved = join(root, "moved");
+            renameSync(output, moved);
+            symlinkSync(unrelated, output, "junction");
+            const redirected = await original(output);
+            unlinkSync(output);
+            renameSync(moved, output);
+            renameSync(staged, join(root, "saved"));
+            symlinkSync(root, staged, "junction");
+            return redirected;
+          },
+        }),
+      );
+      try {
+        // The redirected path now identifies the original leaf under a different parent.
+        await expect(validateOutputDir(output, true)).rejects.toThrow(
+          "changed during preparation",
+        );
+        expect(await readdir(join(root, "saved", "output"))).toEqual(["keep"]);
+      } finally {
+        substitution.mockRestore();
+      }
+    },
+  );
+
+  testPosix(
+    "creates private scan directories for a maximum-length repository name",
+    async () => {
+      const root = await realpath(await temporaryDirectory());
+      const repositoryName = "r".repeat(255);
+      const outputs = await Promise.all([
+        prepareOutputDir(undefined, repositoryName, root),
+        prepareOutputDir(undefined, repositoryName, root),
+      ]);
+      expect(new Set(outputs).size).toBe(2);
+      for (const output of outputs) {
+        expect(dirname(output)).toBe(root);
+        expect((await stat(output)).mode & 0o777).toBe(0o700);
+      }
+    },
+  );
+
   test("validates explicit output directories and creates private temporary paths", async () => {
     const root = await temporaryDirectory();
     const absent = join(root, "scan");
@@ -6580,7 +7034,7 @@ describe("runtime directories and plugin Python boundary", () => {
     ) {
       return;
     }
-    const available = Bun.which("python3") ?? Bun.which("python");
+    const available = pythonWithLauncher();
     expect(available).not.toBeNull();
     const interpreter = await realpath(available!);
     const roots = ["invoking", "campaign", "source"].map((name) =>
@@ -6650,9 +7104,130 @@ describe("runtime directories and plugin Python boundary", () => {
     }
   });
 
+  testPosix(
+    "discovers Python outside explicit targets from a filesystem-root working directory",
+    async () => {
+      if (
+        runTestInSubprocess(
+          fileURLToPath(import.meta.url),
+          "discovers Python outside explicit targets from a filesystem-root working directory",
+          {},
+          "/",
+        )
+      )
+        return;
+      const target = await temporaryDirectory();
+      const tools = await temporaryDirectory();
+      const system = pythonWithLauncher();
+      expect(system).not.toBeNull();
+      const name = "fixture-python";
+      await symlink(system!, join(tools, name));
+      await symlink(system!, join(target, name));
+      const alias = join(tools, "root-directory");
+      await symlink("/", alias, "dir");
+      expect(process.cwd()).toBe("/");
+      const environment = { PATH: [target, tools].join(":"), PYTHON: name };
+      for (const caller of ["/", alias]) {
+        const selected = await resolvePluginPython({
+          currentDirectory: caller,
+          protectedRoot: target,
+          environment,
+        });
+        expect(selected).toBe(join(tools, name));
+      }
+      await expect(
+        resolvePluginPython({
+          currentDirectory: `/${basename(target)}-missing/..`,
+          protectedRoot: target,
+          environment,
+        }),
+      ).rejects.toThrow("unavailable");
+      await expect(resolvePluginPython({ environment })).rejects.toThrow(
+        "unavailable",
+      );
+      for (const protectedRoot of [[], "/"]) {
+        await expect(
+          resolvePluginPython({ protectedRoot, environment }),
+        ).rejects.toThrow("unavailable");
+      }
+      await expect(
+        resolvePluginPython({
+          protectedRoot: target,
+          environment: { PATH: target, PYTHON: name },
+        }),
+      ).rejects.toThrow("unavailable");
+    },
+  );
+
+  testPosix(
+    "preserves literal executable override names and accepts padding",
+    async () => {
+      const tools = await realpath(await temporaryDirectory());
+      const repository = await temporaryDirectory();
+      const interpreter = pythonWithLauncher();
+      expect(interpreter).not.toBeNull();
+      const ordinary = join(tools, "tool");
+      const literal = ordinary + " ";
+      await symlink(interpreter!, ordinary);
+      await symlink(interpreter!, literal);
+
+      for (const [configured, expected] of [
+        [literal, literal],
+        [` ${ordinary} `, ordinary],
+      ] as const) {
+        expect(
+          resolveCodexCommand({ CODEX_CLI_PATH: configured }).command,
+        ).toBe(expected);
+        await expect(
+          resolvePluginPython({
+            environment: { PYTHON: configured, PATH: tools },
+            protectedRoot: repository,
+          }),
+        ).resolves.toBe(expected);
+      }
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: "tool ", PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
+
+      const paddedAbsolute = ` ${ordinary} `;
+      const shadow = join(repository, paddedAbsolute);
+      await mkdir(dirname(shadow), { recursive: true });
+      await writeFile(shadow, "#!/bin/sh\nexit 93\n", { mode: 0o700 });
+      const runtime = new URL("../src/runtime.ts", import.meta.url).href;
+      const child = spawnSync(
+        process.execPath,
+        [
+          "-e",
+          `import { resolveCodexCommand } from ${JSON.stringify(runtime)};
+         import { spawnSync } from "node:child_process";
+         const { command } = resolveCodexCommand();
+         process.exit(spawnSync(command, ["-I", "-c", "pass"]).status ?? 1);`,
+        ],
+        {
+          cwd: repository,
+          env: { ...process.env, CODEX_CLI_PATH: paddedAbsolute },
+        },
+      );
+      expect(child.status).toBe(0);
+
+      await rm(literal);
+      expect(resolveCodexCommand({ CODEX_CLI_PATH: literal }).command).toBe(
+        ordinary,
+      );
+      await expect(
+        resolvePluginPython({
+          environment: { PYTHON: literal, PATH: tools },
+          protectedRoot: repository,
+        }),
+      ).resolves.toBe(ordinary);
+    },
+  );
+
   test("resolves inherited Python names case-insensitively", async () => {
-    const discovered =
-      Bun.which("python3") ?? Bun.which("python") ?? Bun.which("py");
+    const discovered = pythonWithLauncher();
     expect(discovered).not.toBeNull();
     const interpreter = join(
       await realpath(dirname(discovered!)),
@@ -6852,8 +7427,46 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(result.status, result.stderr).toBe(0);
   });
 
+  test.skipIf(process.platform !== "linux")(
+    "discovers system Python when the account has no home for the managed cache",
+    async () => {
+      const options = {
+        environment: {
+          PATH: process.env["PATH"],
+          LD_LIBRARY_PATH: process.env["LD_LIBRARY_PATH"],
+        },
+        protectedRoot: await temporaryDirectory(),
+      };
+      const systemPython = await resolvePluginPython({
+        ...options,
+        managedRuntimeRoots: [],
+      });
+      const homeError = new Error("home lookup failed");
+      using home = spyOn(await import("node:os"), "homedir").mockImplementation(
+        () => {
+          throw Object.assign(new Error("no home for this UID"), {
+            info: { code: "ENOENT", syscall: "uv_os_homedir" },
+          });
+        },
+      );
+      expect(await resolvePluginPython(options)).toBe(systemPython);
+      await expect(
+        resolvePluginPython({ ...options, environment: { PATH: "" } }),
+      ).rejects.toBeInstanceOf(PluginPythonUnavailableError);
+      home.mockImplementation(() => {
+        throw homeError;
+      });
+      await expect(resolvePluginPython(options)).rejects.toBe(homeError);
+    },
+  );
+
   testPosix("uses configured, inherited, and managed Python", async () => {
     const root = await temporaryDirectory();
+    using _home = spyOn(await import("node:os"), "homedir").mockImplementation(
+      () => {
+        throw new Error("No home directory for this account");
+      },
+    );
     const configured = join(root, "configured-python");
     await writeFile(
       configured,
@@ -6907,7 +7520,6 @@ describe("runtime directories and plugin Python boundary", () => {
       expect(
         await resolvePluginPython({
           environment: { PATH: "", XDG_CACHE_HOME: cacheDirectory },
-          homeDirectory: join(root, "unused-home"),
         }),
       ).toBe(cachedPython);
     }
@@ -6961,7 +7573,7 @@ describe("runtime directories and plugin Python boundary", () => {
   test.skipIf(process.platform !== "win32")(
     "uses a configured Windows Python path without the executable suffix",
     async () => {
-      const discovered = Bun.which("python3") ?? Bun.which("python");
+      const discovered = pythonOnPath();
       expect(discovered).not.toBeNull();
       if (discovered === null) return;
       const python = await realpath(discovered);
@@ -6987,9 +7599,18 @@ describe("runtime directories and plugin Python boundary", () => {
     async () => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
-      const installedPython = process.env["PYTHON"] ?? Bun.which("python");
-      expect(installedPython).not.toBeNull();
-      if (installedPython === null) return;
+      let installedPython = process.env["PYTHON"];
+      if (installedPython === undefined) {
+        const command = pythonWithLauncher();
+        expect(command).not.toBeNull();
+        if (command === null) return;
+        // The Windows py launcher and the interpreter's DLLs can live in different directories.
+        installedPython = execNodePython(
+          command,
+          ["-X", "utf8", "-c", "import sys; print(sys.executable)"],
+          process.env,
+        ).trimEnd();
+      }
       await mkdir(repository);
       const launcher = join(root, "py.exe");
       await copyFile(installedPython, launcher);
