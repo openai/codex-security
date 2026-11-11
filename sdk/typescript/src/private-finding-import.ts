@@ -299,7 +299,7 @@ export function readPrivateCheckpoint(
   return sameContext ? checkpoint : undefined;
 }
 
-export class PrivateImportRequestError extends CodexSecurityError {
+class PrivateImportRequestError extends CodexSecurityError {
   constructor(
     readonly status: number,
     readonly code: string | undefined,

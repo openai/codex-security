@@ -2558,6 +2558,52 @@ test("Cloud binds newly approved marked ticket context to its deployment", async
   expect(f.posts[1]).toBe(f.posts[0]);
 });
 
+test.each([true, false])(
+  "a new Semgrep reader mapping rechecks the original saved SCA row (exact case %s)",
+  async (exact) => {
+    const url = "https://scm.example.test/Team/Project";
+    const report = {
+      format: semgrepPlatformFormat,
+      deployment: "example",
+      project: { id: "14", name: "Team/Project", url },
+      product: "sca",
+      ref: "refs/heads/topic",
+      repositoryAliases: [],
+      findingCount: 1,
+      findings: [
+        JSON.stringify({
+          id: 23,
+          rule_name: "sample.rule",
+          repository: { url: exact ? url : url.toLowerCase() },
+        }),
+      ],
+    };
+    const input = normalizeSemgrepFindings(
+      report,
+      { sourceRepositories: [{ url, platform: "github" }] },
+      "cloud",
+    );
+    const f = await hostedFixture("semgrep", report, url);
+    const strict = () =>
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider: "semgrep" },
+        {
+          ...f.deps,
+          sourceRepositories: [{ url, platform: "gitlab" }],
+        },
+      );
+    if (!exact) await expect(strict()).rejects.toThrow(/repository/iu);
+    const pending = await f.loseResponse(await f.prepareNormalized(input));
+    const approved = await readFile(pending, "utf8");
+    if (exact) expect((await strict()).preview.resumed).toBe(true);
+    else await expect(strict()).rejects.toThrow(/repository/iu);
+    expect(await readFile(pending, "utf8")).toBe(approved);
+    await (await f.prepareNormalized(input)).publish();
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  },
+);
+
 test("marked Semgrep rows require their provider while unmarked Wiz records can publish", async () => {
   const url = "https://github.com/example/project";
   const f = await fixture([], url);
@@ -2810,6 +2856,40 @@ test("Semgrep Cloud validates a normalized report's monitored scope on import an
   await expect(projected("New title", false)).rejects.toThrow(
     "pending hosted Cloud request",
   );
+});
+
+test("Semgrep checks an alias witness before excluding it from the Cloud preview", async () => {
+  const url = "https://scm.example.test/Org/Project";
+  const report = (witnessUrl: string) => ({
+    format: semgrepPlatformFormat,
+    deployment: "example",
+    project: { id: "14", name: "Org/Project", url },
+    product: "sast",
+    ref: "refs/heads/topic",
+    findingCount: 2,
+    repositoryAliases: ["display"],
+    findings: [
+      JSON.stringify({
+        id: 11,
+        rule_name: "sample.rule",
+        repository: { name: "display" },
+      }),
+      JSON.stringify({
+        id: 12,
+        rule_name: "x".repeat(513),
+        repository: { name: "display", url: witnessUrl },
+      }),
+    ],
+  });
+  const f = await hostedFixture("semgrep", report(url), url);
+  const matching = await f.prepareFile();
+  expect(matching.preview.findings).toHaveLength(1);
+  expect(matching.preview.excluded).toHaveLength(1);
+  const wrong = report("https://scm.example.test:443/Org/Project");
+  expect(normalizeSemgrepFindings(wrong, {}, "local").findings).toHaveLength(2);
+  await writeFile(f.file, JSON.stringify(wrong));
+  await expect(f.prepareFile()).rejects.toThrow(/repository/i);
+  expect(f.posts).toHaveLength(0);
 });
 
 test("Semgrep Supply Chain binds package evidence to its case-sensitive source project", async () => {
@@ -6715,11 +6795,16 @@ test("GitHub publication previews, imports, re-imports, updates and resumes sele
   ).toBe(0);
   expect(f.posts).toHaveLength(0);
   expect(JSON.parse(cli.stdout.text()).source.provider).toBe("github");
-  const first = await (
-    await prepareExternalPublication(f.file, githubOptions, f.deps)
-  ).publish();
+  const initialPreview = await prepareExternalPublication(
+    f.file,
+    githubOptions,
+    f.deps,
+  );
+  const first = await initialPreview.publish();
   expect(first.counts.created).toBe(1);
   expect(first.verified).toBe(1);
+  expect(await initialPreview.publish()).toEqual(first);
+  expect(f.posts).toHaveLength(1);
   const repeated = await (
     await prepareExternalPublication(f.file, githubOptions, f.deps)
   ).publish();
@@ -8952,7 +9037,10 @@ const readerReports = {
   },
   blackduck: blackDuckBomReport(),
   checkmarx: { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
-  continuum: { finding: continuumDetail(), patches: [continuumPatch] },
+  continuum: {
+    finding: { ...continuumDetail(), createdIssueId: "oneissue" },
+    patches: [continuumPatch],
+  },
   endor: [endorSource],
   github: [importedAlert()],
   inspector: inspectorReport(),
@@ -9081,6 +9169,18 @@ test.each(scannerReports)(
 
 test.each([
   {
+    provider: "continuum",
+    format: "security.findings.v1",
+    raw: readerReports.continuum,
+    jobApiVersion: 2,
+  },
+  {
+    provider: "blackduck",
+    format: "security.findings.v1",
+    raw: readerReports.blackduck,
+    jobApiVersion: 3,
+  },
+  {
     provider: "github",
     format: "security.findings.v1",
     raw: [importedAlert()],
@@ -9107,13 +9207,15 @@ test.each([
     const { provider, format, raw } = scenario;
     const f = await fixture(raw);
     const originalBytes = await readFile(f.file, "utf8");
-    const settings = { ...options, provider };
+    const settings = {
+      ...options,
+      provider,
+      ...("jobApiVersion" in scenario && {
+        sourceRepositoryUrl: exampleRepository,
+      }),
+    };
     let contextVersion = "generation-a";
-    let formats = [
-      "security.findings.v1",
-      "endor.findings_json.v1",
-      "wiz.vulnerability_json.v1",
-    ];
+    let formats: string[] = [format];
     let expectedFormat: typeof format = format;
     let loseResponses = true;
     let unavailable = false;
@@ -9172,7 +9274,7 @@ test.each([
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
             reportCount = doc.findings.length;
           } else {
-            expect(bytes).toBe(originalBytes);
+            expect(JSON.parse(bytes)).toEqual(JSON.parse(originalBytes));
           }
           uploadedReports.push({ id, bytes });
           if (loseResponses && uploadedReports.length === 1)
@@ -9227,6 +9329,8 @@ test.each([
     expect(original.preview.privateImport?.format).toBe(format);
     const cli = createCliTest(main);
     const dryRun = [...f.command, "--dry-run"];
+    if ("jobApiVersion" in scenario)
+      dryRun.push("--source-repository-url", exampleRepository);
     dryRun[dryRun.indexOf("--provider") + 1] = provider;
     dryRun[dryRun.indexOf("--format") + 1] = "toon";
     expect(
@@ -9235,11 +9339,12 @@ test.each([
     expect(cli.stderr.text()).toContain(
       `Report: ${format} (${original.preview.privateImport?.bytes} bytes)`,
     );
-    if (format === "endor.findings_json.v1") {
-      const supported = formats;
+    if (format !== "security.findings.v1") {
+      formats = [format, "security.findings.v1"];
+      expect((await prepare()).preview.privateImport?.format).toBe(
+        "security.findings.v1",
+      );
       formats = [format];
-      expect((await prepare()).preview.privateImport?.format).toBe(format);
-      formats = supported;
     }
     expect(calls.filter((call) => call.startsWith("POST"))).toEqual([]);
     contextVersion = "generation-b";
@@ -9254,9 +9359,8 @@ test.each([
         cause: interrupted,
       });
     expect(interrupted.message).toContain("lost upload response");
-    const saved = JSON.parse(
-      await readFile(interrupted.result.savedSubmission!, "utf8"),
-    );
+    const checkpointPath = interrupted.result.savedSubmission!;
+    const saved = JSON.parse(await readFile(checkpointPath, "utf8"));
     expect(saved).toMatchObject({
       sha256: fileMetadata().sha256,
       uploadRequestId: uploadedReports.at(-1)!.id,
@@ -9268,13 +9372,12 @@ test.each([
     if ("rename" in scenario) {
       f.state.repositoryUrl = "https://github.com/example/renamed";
       expect(saved.approvedRepositoryUrl).toBe(exampleRepository);
-      const path = interrupted.result.savedSubmission!;
       const pending = await prepare();
-      await rm(path);
+      await rm(checkpointPath);
       await expect(pending.publish()).rejects.toThrow(
         "saved private import changed",
       );
-      await writeFile(path, JSON.stringify(saved));
+      await writeFile(checkpointPath, JSON.stringify(saved));
     }
     advertised = false;
     const resumed = await prepare();
@@ -9283,6 +9386,17 @@ test.each([
     await expect(resumed.publish()).rejects.toThrow("lost job response");
     expect(jobRequest).toBe(saved.jobRequestId);
     expect(calls.at(-1)).toBe(`POST ${jobsPath}`);
+    // Earlier clients recorded the versioned route for both pending and accepted jobs.
+    async function restoreVersionedCheckpoint() {
+      if (!("jobApiVersion" in scenario)) return;
+      const current = JSON.parse(await readFile(checkpointPath, "utf8"));
+      expect(current.fileId).toBe(fileId);
+      expect(current.jobRequestId).toBe(saved.jobRequestId);
+      current.jobApiVersion = scenario.jobApiVersion;
+      delete current.receipt;
+      await writeFile(checkpointPath, JSON.stringify(current));
+    }
+    await restoreVersionedCheckpoint();
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
     expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
@@ -9291,8 +9405,13 @@ test.each([
     expect(uploadedReports).toHaveLength(1);
     canCreate = false;
     advertised = false;
+    await restoreVersionedCheckpoint();
+    const acceptedCalls = calls.length;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
     expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
+    expect(
+      calls.slice(acceptedCalls).filter((call) => call.startsWith("POST")),
+    ).toEqual([]);
     unavailable = true;
     const acknowledged = {
       result: {
@@ -9493,55 +9612,34 @@ test("a private structured report retains occurrence IDs, unknown severity and s
   ).toThrow("record limit");
 });
 
-test("filtered, unsupported and changed files never upload an unreviewed native record", async () => {
-  const raw = endorFinding();
-  const f = await fixture(raw);
-  const selection = normalizeEndorFindings(raw);
+test("native private uploads encode only the reviewed occurrences", () => {
+  const first = endorFinding();
+  const second = { ...first, uuid: "unselected" };
+  const reviewed = normalizeEndorFindings([first, second]).findings.slice(0, 1);
+  const nativeFormat = "endor.findings_json.v1";
   const context = {
     object: "security.finding_import_context" as const,
     context_version: "v1",
     can_upload: true,
     can_create_import_jobs: true,
     can_read: true,
-    formats: ["security.findings.v1", "endor.findings_json.v1"],
+    formats: [nativeFormat],
     limits: {
       max_direct_file_bytes: 32 * 1024 * 1024,
       max_record_bytes: 1024 * 1024,
     },
   };
-  const select = (findings = selection, formats = context.formats) =>
-    selectPrivateReport(
-      findings,
-      "endor",
-      f.file,
-      { ...context, formats },
-      undefined,
-    );
-  expect((await select()).format).toBe("endor.findings_json.v1");
-  expect((await select(selection, ["security.findings.v1"])).format).toBe(
+  const native = selectPrivateReport(reviewed, "endor", context);
+  expect(native.format).toBe(nativeFormat);
+  expect(JSON.parse(native.bytes)).toEqual({ list: { objects: [first] } });
+  const both = { ...context, formats: [nativeFormat, "security.findings.v1"] };
+  expect(selectPrivateReport(reviewed, "endor", both).format).toBe(
     "security.findings.v1",
   );
-  expect(
-    (
-      await select({
-        ...selection,
-        read: 2,
-        excluded: [
-          { position: 2, source_finding_id: null, reason: "excluded" },
-        ],
-      })
-    ).format,
-  ).toBe("security.findings.v1");
-  await writeFile(
-    f.file,
-    JSON.stringify({ list: { objects: [raw] }, unreviewed: "omitted" }),
+  reviewed[0]!.evidence.title = "Changed after normalization";
+  expect(() => selectPrivateReport(reviewed, "endor", context)).toThrow(
+    "security.findings.v1",
   );
-  expect((await select()).bytes).not.toContain("unreviewed");
-  await writeFile(
-    f.file,
-    JSON.stringify({ ...raw, meta: { ...raw.meta, name: "unreviewed" } }),
-  );
-  expect((await select()).bytes).not.toContain("unreviewed");
 });
 
 function localFinding(id?: string, severity?: string) {

@@ -999,7 +999,8 @@ function hostedPublicationFindings(
   const scope = semgrepPlatformReportScope(current, provider, references);
   const findings = current.findings.map((finding) => {
     if (!isSemgrepPlatformEvidence(finding, provider)) return finding;
-    const original = isRecord(finding.evidence.source_data?.["finding"]);
+    const data = finding.evidence.source_data;
+    const original = isRecord(data?.["finding"]);
     const binding = semgrepPlatformFindingBinding(
       finding,
       provider,
@@ -1010,7 +1011,9 @@ function hostedPublicationFindings(
     );
     if (binding?.nativeId) nativeIds.add(binding.nativeId);
     return binding?.sourceData &&
-      (original || binding.sourceData["format"] !== semgrepPlatformFormat)
+      (original ||
+        (data?.["format"] === semgrepPlatformFormat &&
+          binding.sourceData["format"] !== semgrepPlatformFormat))
       ? {
           ...finding,
           evidence: {
@@ -1429,7 +1432,8 @@ async function preparePublicationInput(
               destination.repo_connector_id &&
             batch.source?.provider === source.provider &&
             batch.source.source_key === source.source_key &&
-            (batch.items?.some((item) => overlaps(item.source_finding_id)) ||
+            Array.isArray(batch.items) &&
+            (batch.items.some((item) => overlaps(item.source_finding_id)) ||
               (Array.isArray(prior.nativeIds) &&
                 prior.nativeIds.some(overlaps))),
         )
@@ -2185,6 +2189,19 @@ async function preparePublicationInput(
           if (!submission.receipts?.length) throw error;
           throw interruptedPreview(errorMessage(error), error);
         });
+        if (!pending || !sameSubmission(pending, submission)) {
+          const message = pending
+            ? "Another publication prepared this input. Run the command again to review and resume that saved request."
+            : "The saved publication changed after preview. Review its result before publishing again.";
+          const completed = await readCompletedPublication(requests);
+          if (completed) return result(completed.receipts, completed.verified);
+          if (saved) throw interruptedPreview(message);
+          if (pending) throw new CodexSecurityError(message);
+          if ((await readOptionalFile(privatePath)) !== undefined)
+            throw new CodexSecurityError(
+              "A private import already owns this selection. Review its saved job before continuing.",
+            );
+        }
         const current = pending ?? submission;
         if (current.inspectorProjectMapRequired && !inspectorProjectMap)
           throw new CodexSecurityError(
@@ -2199,19 +2216,6 @@ async function preparePublicationInput(
             current.approvedRepositoryUrl,
             current.approvedRepositoryPlatform,
           );
-        if (!pending || !sameSubmission(current, submission)) {
-          const message = pending
-            ? "Another publication prepared this input. Run the command again to review and resume that saved request."
-            : "The saved publication changed after preview. Review its result before publishing again.";
-          const completed = await readCompletedPublication(requests);
-          if (completed) return result(completed.receipts, completed.verified);
-          if (saved) throw interruptedPreview(message);
-          if (pending) throw new CodexSecurityError(message);
-          if ((await readOptionalFile(privatePath)) !== undefined)
-            throw new CodexSecurityError(
-              "A private import already owns this selection. Review its saved job before continuing.",
-            );
-        }
         // A preview can pin the catalog URL. Tighten its SCM comparison only
         // once the caller confirms publication, including when resuming a request.
         const adoptStrictRepository =
