@@ -13116,13 +13116,14 @@ async function runFindingPatches(
             .filter((group) => group.length > 1)
             .map((group) => ({
               keys: group.map(({ key }) => key),
-              allReported: group.every(({ key }) => {
-                const path = relativePatchPath(
+              allReported: group.every(({ key, path }) => {
+                const raw = relativePatchPath(
                   repositoryKey,
                   resolve(rootKey, key),
                 );
-                return reported.some(
-                  (file) => path === file || path.startsWith(file + sep),
+                return (
+                  reported.includes(raw) ||
+                  files.some((directory) => path.startsWith(directory + sep))
                 );
               }),
             }));

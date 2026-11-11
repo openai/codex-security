@@ -300,62 +300,78 @@ describe("saved-finding Git publication", () => {
     expect(outcome.stdout).not.toContain("codex-security:patch-risk-summary");
   });
 
-  test("publishes the staged case-only rename of an entry already in HEAD", async () => {
-    const fixtures = await publicationFixtures({
-      "src/README": "original\n",
-      "src/sibling": "old\n",
-    });
-    const { currentDirectory: repository, git, remote, result } = fixtures;
-    result.findings.findings[0]!.locations[0]!.path = "src";
-    const index = join(repository, ".git", "index");
-    let checkedIndex = false;
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        ...fixtures,
-        onCodex: async (args, output) => {
-          git("mv", "--", "src/README", "src/intermediate");
-          git("mv", "--", "src/intermediate", "src/readme");
-          await writeFile(join(repository, "src/sibling"), "fixed\n");
-          completePatches(args, output);
-          return 0;
+  test.each(["src", "SRC"])(
+    "publishes the staged case-only rename of an entry already in HEAD under reported directory %s",
+    async (directory) => {
+      const fixtures = await publicationFixtures({
+        "src/README": "original\n",
+        "src/sibling": "old\n",
+      });
+      const { currentDirectory: repository, git, remote, result } = fixtures;
+      result.findings.findings[0]!.locations[0]!.path = directory;
+      const selectsDirectory = await readFile(
+        join(repository, directory, "README"),
+      ).then(
+        () => true,
+        () => false,
+      );
+      const index = join(repository, ".git", "index");
+      let checkedIndex = false;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          ...fixtures,
+          onCodex: async (args, output) => {
+            git("mv", "--", "src/README", "src/intermediate");
+            git("mv", "--", "src/intermediate", "src/readme");
+            await writeFile(join(repository, "src/readme"), "edited\n");
+            git("add", "--", "src/readme");
+            await writeFile(join(repository, "src/sibling"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: async (command, args, cwd, options) => {
+            if (command !== "git")
+              return args[1] === "create"
+                ? "https://github.example.test/example/repo/pull/1"
+                : "[]";
+            if (
+              !checkedIndex &&
+              args.includes("--index-info") &&
+              Buffer.isBuffer(options?.input) &&
+              options.input.toString("latin1").startsWith("0 ") &&
+              options?.environment?.["GIT_INDEX_FILE"]
+            ) {
+              const before = await readFile(index);
+              const output = await runGitRepositoryCommand(
+                command,
+                args,
+                cwd,
+                options,
+              );
+              expect(await readFile(index)).toEqual(before);
+              checkedIndex = true;
+              return output;
+            }
+            return runGitRepositoryCommand(command, args, cwd, options);
+          },
         },
-        onRepositoryCommand: async (command, args, cwd, options) => {
-          if (command !== "git")
-            return args[1] === "create"
-              ? "https://github.example.test/example/repo/pull/1"
-              : "[]";
-          if (
-            !checkedIndex &&
-            args.includes("--index-info") &&
-            Buffer.isBuffer(options?.input) &&
-            options.input.toString("latin1").startsWith("0 ") &&
-            options?.environment?.["GIT_INDEX_FILE"]
-          ) {
-            const before = await readFile(index);
-            const output = await runGitRepositoryCommand(
-              command,
-              args,
-              cwd,
-              options,
-            );
-            expect(await readFile(index)).toEqual(before);
-            checkedIndex = true;
-            return output;
-          }
-          return runGitRepositoryCommand(command, args, cwd, options);
-        },
-      },
-    );
-    expect(outcome.exitCode, outcome.stderr).toBe(0);
-    expect(checkedIndex).toBe(true);
-    expect(git("ls-remote", remote)).toContain(git("rev-parse", "HEAD"));
-    expect(git("ls-tree", "-r", "--name-only", "HEAD", "src")).toBe(
-      "src/readme\nsrc/sibling",
-    );
-    expect(git("show", "HEAD:src/readme")).toBe("original");
-    expect(git("show", "HEAD:src/sibling")).toBe("fixed");
-  });
+      );
+      if (!selectsDirectory) {
+        expect(outcome.exitCode).toBe(2);
+        expect(git("ls-remote", remote)).toBe("");
+        return;
+      }
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(checkedIndex).toBe(true);
+      expect(git("ls-remote", remote)).toContain(git("rev-parse", "HEAD"));
+      expect(git("ls-tree", "-r", "--name-only", "HEAD", "src")).toBe(
+        "src/readme\nsrc/sibling",
+      );
+      expect(git("show", "HEAD:src/readme")).toBe("edited");
+      expect(git("show", "HEAD:src/sibling")).toBe("fixed");
+    },
+  );
 
   test.each([
     "unchanged",
