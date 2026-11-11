@@ -1046,7 +1046,18 @@ describe("inventory source ordering", () => {
         return handle;
       },
     );
-    tracker.start("scan-thread");
+    // These cases stage writes and close hooks around explicit refreshes.
+    // A periodic poll must not consume the rows before those hooks are ready.
+    const originalSetInterval = globalThis.setInterval;
+    const polling = spyOn(globalThis, "setInterval").mockImplementationOnce(((
+      _: unknown,
+      delay?: number,
+    ) => originalSetInterval(() => {}, delay)) as typeof originalSetInterval);
+    try {
+      tracker.start("scan-thread");
+    } finally {
+      polling.mockRestore();
+    }
     await tracker.refresh();
     tracker.beginParentTurn();
     return {
@@ -6053,16 +6064,18 @@ describe("live scan cost tracking", () => {
           type: "item.completed",
           item: { type: "agent_message", text },
         });
-        await appendSessionItem(parent, {
-          type: "custom_tool_call_output",
-          output:
-            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":0,"filesTotal":8}',
-        });
-        // The inventory marker is absent from this persisted output. Matching its
-        // completion is the only proof that the live 9-file inventory is newer.
+        // Publish the older receipt and its ordering evidence in the same batch.
+        // Until the persisted command is visible, the tool receipt can be newer.
         await appendFile(
           parent,
           jsonLines([
+            {
+              type: "response_item",
+              payload: {
+                type: "custom_tool_call_output",
+                output: progressMarker("discovery", 0, 8),
+              },
+            },
             native({
               type: "CommandExecution",
               command: ["inventory"],

@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -31,6 +31,7 @@ import {
   gitMarkerRoot,
   isGitMetadataDirectory,
   gitProtectionRoots,
+  validateCommittedDiffCheckout,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runCommand } from "./support/shell.js";
@@ -161,7 +162,10 @@ function git(repo: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
-function validateCommittedDiffWithCredentialConfig(repo: string) {
+function validateCommittedDiffWithCredentialConfig(
+  repo: string,
+  environment: NodeJS.ProcessEnv = {},
+) {
   return spawnSync(
     process.execPath,
     [
@@ -174,6 +178,7 @@ function validateCommittedDiffWithCredentialConfig(repo: string) {
       encoding: "utf8",
       env: {
         ...process.env,
+        ...environment,
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.extraHeader",
         GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
@@ -569,6 +574,42 @@ describe("scan target normalization", () => {
     }
   });
 
+  test("checks assumed-unchanged files against a committed diff without changing index flags", async () => {
+    const repo = await repository();
+    const name = "src/app.ts";
+    const file = join(repo, name);
+    const original = await readFile(file);
+    const target = await normalizeTarget(
+      repo,
+      DiffTarget.refs({ base: "HEAD" }),
+    );
+    git(repo, "update-index", "--assume-unchanged", "--", name);
+    const hook = join(repo, ".git", "hooks", "post-index-change");
+    await writeFile(
+      hook,
+      '#!/bin/sh\nif test -n "$GIT_INDEX_FILE"; then echo ran >.git/refresh-hook-ran; fi\n',
+      { mode: 0o755 },
+    );
+    await validateCommittedDiffCheckout(repo, target);
+
+    await writeFile(file, "export const changed = true;\n");
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    await expect(validateCommittedDiffCheckout(repo, target)).rejects.toThrow(
+      "clean repository checkout",
+    );
+    if (process.platform !== "win32") {
+      const child = validateCommittedDiffWithCredentialConfig(repo, {
+        TMPDIR: relative(process.cwd(), join(repo, "..")),
+      });
+      expect(child.status).toBe(1);
+      expect(child.stderr).toContain("clean repository checkout");
+    }
+    expect(git(repo, "ls-files", "-v", "--", name)).toBe(`h ${name}`);
+    await writeFile(file, original);
+    await validateCommittedDiffCheckout(repo, target);
+    expect(existsSync(join(repo, ".git", "refresh-hook-ran"))).toBe(false);
+  });
+
   test("does not expose Git configuration to repository fsmonitor hooks", async () => {
     const repo = await repository();
     const root = join(repo, "..");
@@ -901,14 +942,19 @@ describe("scan target normalization", () => {
     );
   });
 
-  test("keeps repeated home separators anchored under the home directory", async () => {
+  test("resolves home-relative scan paths using native separators", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-security-home-"));
     temporaryDirectories.track(root);
-    const project = join(await realpath(root), "project");
-    await mkdir(project);
+    const home = await realpath(root);
+    const names = ["project"];
+    if (process.platform !== "win32") names.push("\\project");
+    for (const name of names) await mkdir(join(home, name));
+    const inputs = names.flatMap((name) =>
+      ["~/", "~//", "~///"].map((prefix) => prefix + name),
+    );
     const script = `
       const { normalizeRepository } = await import(process.argv[1]);
-      for (const value of ["~/project", "~//project", "~///project"]) {
+      for (const value of process.argv.slice(2)) {
         console.log(await normalizeRepository(value));
       }
     `;
@@ -918,6 +964,7 @@ describe("scan target normalization", () => {
         "-e",
         script,
         fileURLToPath(new URL("../src/targets.ts", import.meta.url)),
+        ...inputs,
       ],
       {
         encoding: "utf8",
@@ -925,12 +972,9 @@ describe("scan target normalization", () => {
       },
     );
     expect(result.status).toBe(0);
-    const canonicalProject = await realpath(project);
-    expect(result.stdout.trim().split(/\r?\n/)).toEqual([
-      canonicalProject,
-      canonicalProject,
-      canonicalProject,
-    ]);
+    expect(result.stdout.trim().split(/\r?\n/)).toEqual(
+      inputs.map((value) => join(home, value.slice(2))),
+    );
   });
 });
 

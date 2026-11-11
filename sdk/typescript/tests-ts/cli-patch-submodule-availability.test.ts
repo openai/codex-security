@@ -61,14 +61,9 @@ describe("deinitialized patch submodule availability", () => {
               }
               if (initialized) {
                 // A matching ref lets an unintended recursive push succeed.
-                const branch = arguments_.at(-1)!;
-                if (
-                  !inner(
-                    "for-each-ref",
-                    "--format=%(refname)",
-                    `refs/heads/${branch}`,
-                  )
-                )
+                const destination = arguments_.at(-1)!.split(":")[1]!;
+                const branch = destination.slice("refs/heads/".length);
+                if (!inner("for-each-ref", "--format=%(refname)", destination))
                   inner("branch", branch);
               }
               try {
@@ -467,13 +462,13 @@ describe("deinitialized patch submodule availability", () => {
         expect(current.pushes).toEqual(
           Array.from({ length: interrupted ? 2 : 1 }, () => [
             "push",
+            "--no-signed",
             configuration.expected === "opt-out"
               ? "--recurse-submodules=no"
               : "--recurse-submodules=check",
-            "--set-upstream",
             `--force-with-lease=refs/heads/${branch}:`,
             "origin",
-            branch,
+            `${current.git("rev-parse", branch)}:refs/heads/${branch}`,
           ]),
         );
         expect(current.nativePushes).toHaveLength(1);

@@ -13,6 +13,7 @@ import {
   symlink,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   basename,
   delimiter,
@@ -24,7 +25,7 @@ import {
   resolve,
   sep,
 } from "node:path";
-import { gitAlternatePathBytes } from "./targets.js";
+import { gitAlternatePathBytes, gitMarkerRoot } from "./targets.js";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
 const GIT_HOOKS = [
@@ -95,7 +96,9 @@ export async function withPatchGitIndex<T>(
   files?: readonly string[],
   sourcePathspecs?: readonly string[],
 ): Promise<T> {
-  const directory = await mkdtemp(join(tmpdir(), "codex-security-patch-tree-"));
+  const directory = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-tree-"),
+  );
   const indexFile = join(directory, "index");
   const indexed: RunIndexGit = (args, options) =>
     run(args, { ...options, indexFile });
@@ -147,7 +150,49 @@ export interface PatchGitControls {
   readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
+  readonly snapshotConfigPaths: readonly string[];
+  hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
+  validateCapturedSelection(): Promise<void>;
+}
+
+// Windows provisions read ACLs in the background. Ask Git to read the same
+// files explicitly before a snapshot can silently ignore an inaccessible config.
+export async function ensureWindowsSnapshotConfigReadable(
+  paths: readonly string[],
+  probe: (
+    args: string[],
+    input: string,
+    refreshReadGrants: boolean,
+  ) => Promise<unknown>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const input =
+    paths.map((path) => path.replaceAll("\\", "/")).join("\n") + "\n";
+  const deadline = Date.now() + 30_000;
+  let refreshReadGrants = false;
+  for (;;) {
+    signal?.throwIfAborted();
+    try {
+      await probe(
+        ["hash-object", "--no-filters", "--stdin-paths"],
+        input,
+        refreshReadGrants,
+      );
+      return;
+    } catch (error) {
+      const stderr = (error as { stderr?: string } | null)?.stderr;
+      if (
+        typeof stderr !== "string" ||
+        !/permission denied|access is denied/iu.test(stderr) ||
+        Date.now() >= deadline
+      )
+        throw error;
+      // A fresh sandbox launch can schedule an ACL refresh skipped by a busy helper.
+      refreshReadGrants = true;
+      await delay(250, undefined, { signal });
+    }
+  }
 }
 
 const missing = (error: unknown): undefined => {
@@ -657,6 +702,7 @@ export async function capturePatchGitControls(
     }
   >();
   const snapshotStoragePaths = new Set<string>();
+  const snapshotConfigPaths = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const externalCachePaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
@@ -901,9 +947,50 @@ export async function capturePatchGitControls(
         { environment: { GIT_OBJECT_DIRECTORY: "." } },
       )
     ).replace(/\n$/u, "");
+  const activeHostFilters = new Set<string>();
+  const branchFilterSettings = new Set<string>();
+  let hasConditionalFilters = false;
+  const filterDirectories = new Map<string, string>();
   let checkoutCleanFilter = false;
+  const activeCheckoutFilters = async (
+    checkout: string,
+    configurationDirectory: string,
+  ): Promise<string[]> => {
+    const entries = await runConfigFields(checkout, [
+      "config",
+      "--null",
+      "--show-scope",
+      "--show-origin",
+      "--includes",
+      "--get-regexp",
+      "^filter\\..+\\.(clean|smudge|process)$",
+    ]).catch((error: NodeJS.ErrnoException & { status?: number }) => {
+      if (error.status === 1 || Number(error.code) === 1) return [];
+      throw error;
+    });
+    const drivers = new Map<string, boolean>();
+    for (let index = 0; index + 2 < entries.length; index += 3) {
+      const setting = entries[index + 2]!;
+      const separator = setting.indexOf("\n");
+      const key = separator < 0 ? setting : setting.slice(0, separator);
+      drivers.set(
+        configPath(key),
+        separator >= 0 &&
+          separator + 1 < setting.length &&
+          !(await userSelectedConfig(
+            entries[index],
+            configPath(entries[index + 1]!),
+            configurationDirectory,
+          )),
+      );
+    }
+    return [...drivers]
+      .filter(([, untrusted]) => untrusted)
+      .map(([key]) => key);
+  };
   const captureReferences = async (checkout: string): Promise<void> => {
     const configurationDirectory = await setupDirectory(checkout);
+    filterDirectories.set(checkout, configurationDirectory);
     const origins = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -1043,6 +1130,15 @@ export async function capturePatchGitControls(
         const separator = entry.indexOf("\n");
         const key = entry.slice(0, separator);
         const value = entry.slice(separator + 1);
+        if (
+          automaticPublication &&
+          value &&
+          /^filter\..+\.(clean|smudge|process)$/u.test(key)
+        ) {
+          hasConditionalFilters = true;
+          if (!userSelected || insideSelectedRoots(control.canonical))
+            branchFilterSettings.add(configPath(key));
+        }
         if (key === "core.hookspath") await captureHooks(configPath(value));
         else if (/^(include|includeif\..*)\.path$/u.test(key))
           await captureInclude(
@@ -1085,44 +1181,29 @@ export async function capturePatchGitControls(
     for (const path of activeConfigurations) await rememberConfiguration(path);
     if (
       automaticPublication &&
-      !checkoutCleanFilter &&
       origins.some(
         (key, index) =>
-          index % 2 === 1 && /^filter\..+\.(clean|process)$/u.test(key),
+          index % 2 === 1 && /^filter\..+\.(clean|smudge|process)$/u.test(key),
       )
     ) {
-      const entries = await runConfigFields(checkout, [
-        "config",
-        "--null",
-        "--show-scope",
-        "--show-origin",
-        "--includes",
-        "--get-regexp",
-        "^filter\\..+\\.(clean|process)$",
-      ]);
-      const drivers = new Map<string, boolean>();
-      for (let index = 0; index + 2 < entries.length; index += 3) {
-        const setting = entries[index + 2]!;
-        const separator = setting.indexOf("\n");
-        const key = separator < 0 ? setting : setting.slice(0, separator);
-        drivers.set(
-          key,
-          separator >= 0 &&
-            separator + 1 < setting.length &&
-            !(await userSelectedConfig(
-              entries[index],
-              configPath(entries[index + 1]!),
-              configurationDirectory,
-            )),
-        );
+      for (const key of await activeCheckoutFilters(
+        checkout,
+        configurationDirectory,
+      )) {
+        activeHostFilters.add(key);
+        if (!key.endsWith(".smudge")) checkoutCleanFilter = true;
       }
-      checkoutCleanFilter = [...drivers.values()].includes(true);
     }
-    for (const path of globalConfigurationPaths)
-      await rememberSelectedConfiguration(
-        relativeFile(configurationDirectory, path),
-        true,
-      );
+    for (const path of globalConfigurationPaths) {
+      const selected = relativeFile(configurationDirectory, path);
+      await rememberSelectedConfiguration(selected, true);
+      activeConfigurations.add(selected);
+    }
+    for (const path of activeConfigurations) {
+      const control = controlPaths.get(path);
+      if (control && Buffer.isBuffer(control.contents))
+        snapshotConfigPaths.add(control.canonical);
+    }
     const localConfig = (
       await runControl(root, checkout, [
         "rev-parse",
@@ -1167,18 +1248,79 @@ export async function capturePatchGitControls(
     }
     await captureHooks();
   };
-  const selectedDirectories: string[] = [];
-  for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
-    const output = await runControl(root, root, [
-      "rev-parse",
-      "--path-format=absolute",
-      argument,
-    ]);
-    const selectedPath = output.replace(/\n$/u, "");
-    const path = await realControlPath(selectedPath);
-    selectedDirectories.push(path);
+  const directoryArguments = ["--absolute-git-dir", "--git-common-dir"];
+  const readSelectedPath = async (argument: string) =>
+    (
+      await runControl(root, root, [
+        "rev-parse",
+        "--path-format=absolute",
+        argument,
+      ])
+    ).replace(/\n$/u, "");
+  const selectedPaths: string[] = [];
+  for (const argument of directoryArguments)
+    selectedPaths.push(await readSelectedPath(argument));
+  const selectedDirectories = await Promise.all(
+    selectedPaths.map(realControlPath),
+  );
+  const gitDirectory = selectedDirectories[0]!;
+  const commonDirectory = selectedDirectories[1]!;
+  // A checkout's core.worktree can change Git's reported top-level directory.
+  // Anchor implicit metadata to the checkout selected by the caller.
+  const requestedDirectory = await realControlPath(directory);
+  const gitDirectorySelected =
+    !usesWorktreeMarker ||
+    (!usesCommonDirectoryMarker &&
+      relative(gitDirectory, commonDirectory) === "");
+  const commonDirectorySelected =
+    !usesCommonDirectoryMarker ||
+    (!usesWorktreeMarker && inside(gitDirectory, commonDirectory));
+  let markerRoot =
+    (gitDirectorySelected || inside(requestedDirectory, gitDirectory)) &&
+    (commonDirectorySelected || inside(requestedDirectory, commonDirectory))
+      ? null
+      : await gitMarkerRoot(requestedDirectory, undefined, "nearest");
+  // Git skips an empty .git directory when searching upward from a component.
+  while (markerRoot !== null && markerRoot !== root) {
+    const marker = join(markerRoot, ".git");
+    const contents = await readGitMarker(marker);
+    if (
+      contents !== undefined &&
+      (await isGitDirectory(marker, contents, true))
+    )
+      break;
+    const parent = dirname(markerRoot);
+    markerRoot =
+      parent === markerRoot
+        ? null
+        : await gitMarkerRoot(parent, undefined, "nearest");
+  }
+  const checkout = usesWorktreeMarker
+    ? (markerRoot ?? requestedDirectory)
+    : requestedDirectory;
+  const trustedGitDirectory =
+    gitDirectorySelected || inside(checkout, gitDirectory);
+  const trustedCommonDirectory =
+    commonDirectorySelected || inside(checkout, commonDirectory);
+  const validateRegistration = async () => {
+    if (
+      (!trustedGitDirectory || !trustedCommonDirectory) &&
+      (markerRoot === null ||
+        !(await isRegisteredLinkedWorktree(markerRoot, selectedDirectories)) ||
+        (await selectedGitFileReference(
+          join(markerRoot, ".git"),
+          gitDirectory,
+        )) === undefined)
+    ) {
+      throw new Error(
+        "External Git administration requires an explicitly selected Git directory or a registered worktree. Set GIT_DIR or GIT_COMMON_DIR to the intended directory.",
+      );
+    }
+  };
+  await validateRegistration();
+  for (const [index, path] of selectedDirectories.entries()) {
     await remember(path);
-    for (const link of await directoryLinks(selectedPath))
+    for (const link of await directoryLinks(selectedPaths[index]!))
       administrationLinks.add(link);
   }
   const selectedCommonDirectory = usesCommonDirectoryMarker
@@ -1357,6 +1499,7 @@ export async function capturePatchGitControls(
           "Selected Git administration changed during the patch. Inspect the checkout before retrying.",
         );
       }
+      await validateRegistration();
     }
     const visited = new Set<string>();
     const visit = async (checkout: string): Promise<void> => {
@@ -1833,6 +1976,37 @@ export async function capturePatchGitControls(
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
+    snapshotConfigPaths: [...snapshotConfigPaths],
+    async hostFilterSettings(switchingBranch) {
+      if (!hasConditionalFilters) return [...activeHostFilters];
+      // Switching can activate a conditional config before Git calls post-checkout.
+      if (switchingBranch)
+        return [...new Set([...activeHostFilters, ...branchFilterSettings])];
+      // Once HEAD is bound, use Git's actual config order so operator overrides survive.
+      return [
+        ...new Set(
+          (
+            await Promise.all(
+              [...filterDirectories].map(([checkout, directory]) =>
+                activeCheckoutFilters(checkout, directory),
+              ),
+            )
+          ).flat(),
+        ),
+      ];
+    },
     validate: () => discover(false),
+    async validateCapturedSelection() {
+      for (const [index, argument] of directoryArguments.entries()) {
+        if (
+          (await realControlPath(await readSelectedPath(argument))) !==
+          selectedDirectories[index]
+        )
+          throw new Error(
+            "Selected Git administration changed during the patch. Inspect the checkout before retrying.",
+          );
+      }
+      await discover(false);
+    },
   };
 }

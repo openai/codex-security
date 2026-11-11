@@ -263,6 +263,7 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
     assert "No findings were reported." in report
+    assert "Validation was deferred because the scan reached its cost limit." in report
 
 
 def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
@@ -275,6 +276,11 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
         coverage_mode="deep_repository",
     )
 
+    manifest_path = scan_dir / "scan-manifest.json"
+    draft = json.loads(manifest_path.read_text())
+    draft["scan"]["scope"]["limitations"] = ["The deployment configuration was unavailable."]
+    manifest_path.write_text(json.dumps(draft))
+
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
     assert completed["progress"]["status"] == "complete"
@@ -283,6 +289,12 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     coverage = read_review_state(state_dir, scan_dir)
 
     assert coverage["deferred"][0]["id"] == "candidate-1"
+    limitation = "Validation was deferred because the scan reached its cost limit."
+    assert json.loads(manifest_path.read_text())["scan"]["scope"]["limitations"] == [
+        "The deployment configuration was unavailable.",
+        limitation,
+    ]
+    assert limitation in (scan_dir / "report.md").read_text()
 
 
 @pytest.mark.parametrize(
@@ -3097,7 +3109,9 @@ def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_contex
         patch += b"@@ -1,3 +1,3 @@\n-old\n+new\n" + blank_context + b" last\n"
     (tmp_path / "patch.diff").write_bytes(patch)
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "apply", "patch.diff"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "core.autocrlf=false", "apply", "patch.diff"], cwd=tmp_path, check=True
+    )
     for filename in ("first.txt", "second.txt"):
         assert (tmp_path / filename).read_bytes() == b"new\n\nlast\n"
     preview, stats = namespace["patch_artifact_preview"](
