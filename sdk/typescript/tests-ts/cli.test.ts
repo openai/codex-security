@@ -1282,14 +1282,15 @@ describe("CLI", () => {
         hook,
         "#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity medium\n",
       );
-      const migratedHook = captureCli(main, "stdout");
+      const migratedHook = createCliTest(main);
       expect(
-        await migratedHook.run(
+        await migratedHook.runCli(
           ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
           deps,
         ),
+        migratedHook.stderr.text(),
       ).toBe(0);
-      const migrated = JSON.parse(migratedHook.text()) as {
+      const migrated = JSON.parse(migratedHook.stdout.text()) as {
         hook: string;
         failOnSeverity: string;
       };
@@ -1302,10 +1303,11 @@ describe("CLI", () => {
       ]) {
         await writeFile(hook, trustedHook.replace(/^unset .*\n/m, unset));
         expect(
-          await migratedHook.run(
+          await migratedHook.runCli(
             ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
             deps,
           ),
+          migratedHook.stderr.text(),
         ).toBe(0);
         expect(await readFile(hook, "utf8")).toBe(trustedHook);
       }

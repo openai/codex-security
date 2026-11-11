@@ -5188,7 +5188,7 @@ export async function main(
         "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.\n" +
         "Your existing policy stays unchanged until you replace it.\n\n" +
         "Save a draft without answering questions:\n" +
-        "  codex-security policy . --output-dir /path/outside/repository/policy --json",
+        "  codex-security policy . --output-dir ../policy-draft --json",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
         .optional(),
