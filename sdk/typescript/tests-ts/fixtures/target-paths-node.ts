@@ -43,6 +43,26 @@ await symlink(
   join(repository, "scope"),
 );
 const requestedRepository = `${entry}/link/../repository`;
+const dependencyPaths = createCliTest(main);
+let dependencyRepository: string | undefined;
+assert.equal(
+  await dependencyPaths.runCli(
+    ["scan", "dependencies", requestedRepository, "--json"],
+    dependencies({
+      currentDirectory: root,
+      onScanDependencies: async (options) => {
+        dependencyRepository = await realpath(options.repositoryPath);
+        throw new Error("Synthetic dependency boundary reached");
+      },
+    }),
+  ),
+  2,
+);
+assert.match(
+  dependencyPaths.stderr.text(),
+  /Synthetic dependency boundary reached/,
+);
+assert.equal(dependencyRepository, await realpath(repository));
 const localClient = () =>
   new TestClient(
     {},

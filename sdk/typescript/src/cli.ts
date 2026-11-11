@@ -5772,9 +5772,9 @@ export async function main(
             outcome = await withTerminalErrorsHandled(errorOutput, () =>
               runDependencyScan(
                 {
-                  repositoryPath: resolveCliPath(
-                    directory,
+                  repositoryPath: resolveInputPath(
                     args.repository ?? ".",
+                    directory,
                   ),
                   auth: resolved.options.auth,
                   outputDir: resolved.options.outputDir,
