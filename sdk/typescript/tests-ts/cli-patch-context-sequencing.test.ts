@@ -19,8 +19,8 @@ import {
 } from "./support/patch-snapshot-environment.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
-// Publication cases can run 53 native Git commands, each with Windows ACL setup.
-const preparedSnapshotTimeout = process.platform === "win32" ? 180_000 : 30_000;
+// Batch publication captures clean-filter inputs around each finding's immutable tree.
+const preparedSnapshotTimeout = process.platform === "win32" ? 180_000 : 90_000;
 for (const policy of ["set", "exclude", "control"] as const) {
   for (const action of [
     "no-op",
@@ -33,6 +33,7 @@ for (const policy of ["set", "exclude", "control"] as const) {
     "batch-publish",
     "batch-risk-publish",
     "inline-publish",
+    ...(policy === "control" ? (["batch-edited-publish"] as const) : []),
   ] as const) {
     test(
       `prepared snapshot context preserves ${policy} filter policy for ${action}`,
@@ -84,8 +85,11 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
             encoding: "utf8",
             stdio: ["ignore", "pipe", "pipe"],
           }).trim();
+        // This operator-installed filter deliberately maps local bytes to a different blob.
         git([
           "config",
+          "--file",
+          emptyConfig,
           "filter.synthetic.clean",
           `node ${JSON.stringify(clean.replaceAll("\\", "/"))}`,
         ]);
@@ -104,6 +108,10 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
             : environment;
         git(["add", "."], recorded);
         git(["commit", "-m", "Synthetic filter baseline"], recorded);
+        const originalDataBlob = git(
+          ["rev-parse", `HEAD:${dataPath}`],
+          recorded,
+        );
         const index = await readFile(join(directory, ".git", "index"));
         const trees: string[] = [];
         let assessedPatch = "";
@@ -137,6 +145,15 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
                 return args[1] === "list"
                   ? "[]"
                   : "https://github.example.test/example/repository/pull/1";
+              if (
+                action === "batch-edited-publish" &&
+                args[0] === "switch" &&
+                args.includes("-c")
+              )
+                await writeFile(
+                  join(directory, "src/new-1.txt"),
+                  "actual later edit\n",
+                );
               if (args.includes("add") && !inline)
                 expect(options?.sandbox).toBeDefined();
               const status = args[0] === "status";
@@ -248,6 +265,19 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
         expect(await readFile(join(directory, dataPath), "utf8")).toBe(
           "Unchanged filter input\n",
         );
+        if (action === "batch-edited-publish") {
+          expect(outcome.exitCode).toBe(2);
+          expect(outcome.stderr).toContain(
+            "working tree differs from the verified changes",
+          );
+          expect(await readFile(join(directory, "src/new-1.txt"), "utf8")).toBe(
+            "actual later edit\n",
+          );
+          expect(
+            repositoryGit(remote)("for-each-ref", "refs/heads/codex-security/"),
+          ).toBe("");
+          return;
+        }
         if (action === "no-op") {
           expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(2);
           expect(JSON.parse(outcome.stdout).error.code).toBe(
@@ -256,13 +286,9 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
           expect(trees).toHaveLength(2);
           expect(trees[0]).toBe(trees[1]);
         } else if (inline) {
-          expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(
-            policy === "control" ? 0 : 2,
-          );
-          if (policy !== "control")
-            expect(outcome.stderr).toContain(
-              "uncommitted changes before patching",
-            );
+          // The requested directory contains a pre-existing policy difference.
+          // Only the two leaves actually edited in the finding's turn can publish.
+          expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
         } else {
           expect(outcome.exitCode, outcome.stdout + outcome.stderr).toBe(0);
           expect(JSON.parse(outcome.stdout).files).toEqual(
@@ -281,7 +307,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
           await expect(readFile(outsideWrite)).rejects.toMatchObject({
             code: "ENOENT",
           });
-        if (publish && !(inline && policy !== "control")) {
+        if (publish) {
           const published = repositoryGit(remote);
           const branch = published(
             "for-each-ref",
@@ -307,8 +333,8 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
                   .join(""),
               );
           }
-          expect(published("show", `${branch}:${dataPath}`)).toBe(
-            `Unchanged filter input\n${effective}`,
+          expect(published("rev-parse", `${branch}:${dataPath}`)).toBe(
+            originalDataBlob,
           );
         } else
           expect(await readFile(join(directory, ".git", "index"))).toEqual(
