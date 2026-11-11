@@ -664,16 +664,7 @@ export function renderScanHistory(
       }
     }
   } else if (command === "list") {
-    const scans = (result["scans"] as JsonObject[]).filter((scan) => {
-      if ((scan["progress"] as JsonObject)["status"] !== "running") {
-        return true;
-      }
-      const updated = Date.parse(scan["updatedAt"] as string);
-      return (
-        !Number.isFinite(updated) ||
-        (options.now ?? Date.now()) - updated < STALE_SCAN_MILLISECONDS
-      );
-    });
+    const scans = result["scans"] as JsonObject[];
     const repository = basename(
       String(
         options.scanRoot ??
