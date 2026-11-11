@@ -65,6 +65,7 @@ export interface PatchGitCommandOptions {
   readonly encoding?: "base64";
   readonly nestedProbe?: boolean;
   readonly indexFile?: string;
+  readonly hookMessagePath?: string;
   readonly input?: string | Uint8Array;
   readonly environment?: NodeJS.ProcessEnv;
 }
@@ -164,6 +165,7 @@ export async function withPatchGitIndex<T>(
 }
 
 export interface PatchGitControls {
+  readonly publicationHooks: PatchPublicationHooks;
   readonly nestedCheckouts: readonly string[];
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
@@ -172,6 +174,93 @@ export interface PatchGitControls {
   readonly snapshotConfigPaths: readonly string[];
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
+}
+
+export interface PatchPublicationHooks {
+  readonly gitDirectory: string;
+  readonly events: Set<string>;
+  readonly configured: Set<string>;
+}
+
+function recordConfiguredHook(
+  hooks: Pick<PatchPublicationHooks, "events" | "configured">,
+  key: string,
+  event: string,
+) {
+  const name = /^hook\.(.+)\.event$/u.exec(key)?.[1];
+  if (name !== undefined && GIT_HOOKS.includes(event)) {
+    hooks.events.add(event);
+    hooks.configured.add(name);
+  }
+}
+
+async function hookIsAvailable(path: string): Promise<boolean> {
+  const executable = await access(path, constants.X_OK).then(
+    () => true,
+    () => false,
+  );
+  if (!executable) return false;
+  const metadata = await stat(path).catch(missing);
+  return metadata !== undefined && !metadata.isDirectory();
+}
+
+async function readConfiguredHooks(
+  hooks: Pick<PatchPublicationHooks, "events" | "configured">,
+  run: (args: string[]) => Promise<string>,
+) {
+  let entries: string;
+  try {
+    entries = await run([
+      "config",
+      "--includes",
+      "--null",
+      "--get-regexp",
+      "^hook\\..+\\.event$",
+    ]);
+  } catch (error) {
+    const failure = error as { code?: unknown; status?: unknown };
+    if ((failure.code ?? failure.status) === 1) return;
+    throw error;
+  }
+  for (const entry of entries.split("\0")) {
+    const separator = entry.indexOf("\n");
+    if (separator !== -1)
+      recordConfiguredHook(
+        hooks,
+        entry.slice(0, separator),
+        entry.slice(separator + 1),
+      );
+  }
+}
+
+// Resume has no model turn or private-index discovery. These queries only read configuration and paths.
+export async function activePatchPublicationHooks(
+  run: (args: string[]) => Promise<string>,
+): Promise<PatchPublicationHooks> {
+  const hooks = { events: new Set<string>(), configured: new Set<string>() };
+  await readConfiguredHooks(hooks, run);
+  const directory = dirname(
+    (
+      await run([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "hooks/pre-push",
+      ])
+    ).replace(/\n$/u, ""),
+  );
+  for (const hook of GIT_HOOKS) {
+    const path = join(directory, hook);
+    if (await hookIsAvailable(path))
+      hooks.events.add(hook.replace(/\.exe$/u, ""));
+  }
+  return {
+    ...hooks,
+    gitDirectory: (await run(["rev-parse", "--absolute-git-dir"])).replace(
+      /\n$/u,
+      "",
+    ),
+  };
 }
 
 // Windows provisions read ACLs in the background. Ask Git to read the same
@@ -732,15 +821,6 @@ export async function capturePatchGitControls(
     Buffer | { size: bigint; mtimeNs: bigint; ctimeNs: bigint }
   >();
   const hookDirectories = new Set<string>();
-  const hookIsAvailable = async (path: string): Promise<boolean> => {
-    const executable = await access(path, constants.X_OK).then(
-      () => true,
-      () => false,
-    );
-    if (!executable) return false;
-    const metadata = await stat(path).catch(missing);
-    return metadata !== undefined && !metadata.isDirectory();
-  };
   const rememberControl = async (
     path: string,
     protectDirectory = true,
@@ -911,6 +991,7 @@ export async function capturePatchGitControls(
   };
   const rememberHook = async (path: string): Promise<void> => {
     if (await hookIsAvailable(path)) {
+      publicationHooks.events.add(basename(path).replace(/\.exe$/u, ""));
       await rememberControl(path, false);
       const canonical = controlPaths.get(path)!.canonical;
       const metadata = await stat(canonical, { bigint: true });
@@ -937,6 +1018,10 @@ export async function capturePatchGitControls(
       // Git ignores inactive entries; reject their activation before bookkeeping.
       inaccessibleHooks.add(path);
     }
+  };
+  const publicationHooks = {
+    events: new Set<string>(),
+    configured: new Set<string>(),
   };
   const activeHostFilters = new Set<string>();
   const branchFilterSettings = new Set<string>();
@@ -988,6 +1073,16 @@ export async function capturePatchGitControls(
     ]);
     let includes = false;
     const activeConfigurations = new Set<string>();
+    if (
+      origins.some(
+        (entry, index) => index % 2 === 1 && /^hook\..+\.event$/u.test(entry),
+      )
+    )
+      await readConfiguredHooks(publicationHooks, (args) =>
+        runControl(root, checkout, args, {
+          environment: configurationEnvironment,
+        }),
+      );
     for (let index = 0; index + 1 < origins.length; index += 2) {
       const origin = origins[index]!;
       if (origin.startsWith("file:")) {
@@ -1111,6 +1206,11 @@ export async function capturePatchGitControls(
         const separator = entry.indexOf("\n");
         const key = entry.slice(0, separator);
         const value = entry.slice(separator + 1);
+        recordConfiguredHook(
+          publicationHooks,
+          configPath(key),
+          configPath(value),
+        );
         if (
           automaticPublication &&
           value &&
@@ -1581,16 +1681,22 @@ export async function capturePatchGitControls(
             "--null",
             "--show-scope",
             "--show-origin",
-            "--default=lfs",
             "--get",
             "lfs.storage",
           ]).catch((error: unknown) => {
             const failure = error as Error & {
               code?: unknown;
               status?: unknown;
+              stderr?: unknown;
               signal?: unknown;
               killed?: boolean;
             };
+            const status = failure.code ?? failure.status;
+            const missingValue =
+              status === 1 &&
+              (failure.stderr === "" ||
+                (Buffer.isBuffer(failure.stderr) &&
+                  failure.stderr.length === 0));
             // Git LFS discards failed config reads, including partial output,
             // and uses the default cache after reporting its warning.
             if (
@@ -1598,7 +1704,7 @@ export async function capturePatchGitControls(
               failure.name !== "AbortError" &&
               !failure.signal &&
               !failure.killed &&
-              (failure.code === 128 || failure.status === 128)
+              (missingValue || status === 128)
             )
               return "";
             throw error;
@@ -1627,6 +1733,8 @@ export async function capturePatchGitControls(
               [
                 "-c",
                 "core.hooksPath=/dev/null",
+                "-c",
+                "hook.post-index-change.enabled=false",
                 "-c",
                 "core.fsmonitor=false",
                 ...args,
@@ -1968,6 +2076,7 @@ export async function capturePatchGitControls(
       alternateObjectDirectories.push(path);
   }
   return {
+    publicationHooks: { ...publicationHooks, gitDirectory },
     readOnlyPaths: [
       ...new Set([
         ...alternateObjectDirectories,

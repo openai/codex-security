@@ -7,6 +7,7 @@ import { listenForAbort } from "./cli-signals.js";
 import { canonicalPatchPath, relativePatchPath } from "./patch-byte-path.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import {
+  nativePermissionPreflight,
   providerPreflightCommand,
   restoreProviderProfile,
   withCodexPreflightLock,
@@ -84,12 +85,15 @@ import { formatCoverageScope } from "./coverage-presentation.js";
 import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
+  activePatchPublicationHooks,
   capturePatchGitControls,
   PATCH_LOCAL_GIT_ENVIRONMENT,
   type PatchGitControls,
+  type PatchPublicationHooks,
   ensureWindowsSnapshotConfigReadable,
   withPatchGitIndex,
 } from "./patch-git-controls.js";
+import { writePublicationHooks } from "./patch-publication-hooks.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
@@ -321,6 +325,7 @@ import {
   withCredentialHomeLock,
   requirePrivateSnapshotProfileHome,
   requirePrivateSnapshotProfileFile,
+  requireSecureOutputAncestry,
   writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
   canonicalizeModelSafePath,
@@ -1389,6 +1394,109 @@ interface PatchSnapshotSandbox {
   readonly snapshotStoragePaths?: readonly string[];
 }
 
+function patchWorkspaceProfile(
+  workspace: JsonObject,
+  readOnlyPaths: readonly string[],
+) {
+  return {
+    extends: ":workspace",
+    network: { enabled: workspace["network_access"] === true },
+    workspace_roots: Object.fromEntries(
+      ((workspace["writable_roots"] ?? []) as string[]).map((root) => [
+        root,
+        true,
+      ]),
+    ),
+    filesystem: {
+      ...Object.fromEntries(
+        readOnlyPaths.map((path) => [path, { ".": "read" }]),
+      ),
+      ...(workspace["exclude_tmpdir_env_var"] === true
+        ? { ":tmpdir": {} }
+        : {}),
+      ...(workspace["exclude_slash_tmp"] === true ? { ":slash_tmp": {} } : {}),
+    },
+  };
+}
+
+function publicationHookCommand(args: readonly string[]): boolean {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === "-C" || arg === "-c") index++;
+    else if (!arg.startsWith("-")) {
+      // Configuration and git-path discovery must see the operator's real hooksPath.
+      return arg !== "config" && arg !== "rev-parse";
+    }
+  }
+  return false;
+}
+
+async function resumeHookSandbox(
+  directory: string,
+  environment: NodeJS.ProcessEnv,
+  gitDirectories: string[],
+  signal: AbortSignal,
+): Promise<PatchSnapshotSandbox> {
+  const operator = resolveCodexCommand(environment);
+  const preflight = await nativePermissionPreflight();
+  const nativeEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  // Resume starts no model turn. Resolve native system, user and managed settings
+  // outside the target, so a target's project config cannot expand hook permissions.
+  const response = (await withCodexPreflightLock(
+    nativeEnvironment,
+    signal,
+    () =>
+      preflight.readDeepScanRuntimeConfigWithOrigins({
+        codexPath: operator.command,
+        commandArgs: operator.args,
+        configOverrides: [],
+        cwd: parse(resolve(directory)).root,
+        env: nativeEnvironment,
+        signal,
+        context: "helper",
+      }),
+  )) as JsonObject;
+  if (
+    !isJsonObject(response) ||
+    !isJsonObject(response["config"]) ||
+    !Array.isArray(response["layers"]) ||
+    response["layers"].some(
+      (layer) =>
+        isJsonObject(layer) &&
+        isJsonObject(layer["name"]) &&
+        layer["name"]["type"] === "project" &&
+        layer["disabledReason"] == null,
+    )
+  )
+    throw new CodexSecurityError(
+      "Cannot resolve operator permissions for the saved patch's publication hooks.",
+    );
+  const config = response["config"];
+  const workspace = isJsonObject(config["sandbox_workspace_write"])
+    ? config["sandbox_workspace_write"]
+    : {};
+  return {
+    directory,
+    environment,
+    providerKeyVariable: scanProviderEnvKey(config),
+    stripAwsCredentials: scanModelProvider(config) === "amazon-bedrock",
+    profile: patchWorkspaceProfile(workspace, gitDirectories),
+    configuration: {
+      sandbox_workspace_write: {
+        writable_roots: [],
+        network_access: false,
+        exclude_tmpdir_env_var: false,
+        exclude_slash_tmp: false,
+        ...workspace,
+      },
+    },
+  };
+}
+
 interface SkillCommandOutput {
   readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
@@ -1408,6 +1516,7 @@ interface SkillCommandOutput {
     readonly permissions?: SkillPermissions;
     readonly snapshotStoragePaths?: readonly string[];
     readonly snapshotConfigPaths?: readonly string[];
+    readonly publicationHooks?: PatchPublicationHooks;
     readonly externalSandbox?: boolean;
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
@@ -1560,6 +1669,10 @@ interface CliDependencies {
       input?: string | Uint8Array;
       patchSnapshot?: readonly string[];
       patchTransport?: true;
+      publicationHooks?: PatchPublicationHooks;
+      hookSandbox?: PatchSnapshotSandbox;
+      hookWritePaths?: readonly string[];
+      hookMessagePath?: string;
       sandbox?: PatchSnapshotSandbox;
       signal?: AbortSignal;
       onStdout?: (chunk: Buffer) => void;
@@ -1616,14 +1729,16 @@ if (process.platform === "win32") {
       nativeGitOptions.push("-c", "safe.directory=" + value);
   }
 }
-const { bindings, stripAwsCredentials } = JSON.parse(header.toString());
+const { bindings, stripAwsCredentials, stripHookProxyCredentials } = JSON.parse(header.toString());
 for (const [name, value] of bindings) {
   if (value === null) delete process.env[name];
   else process.env[name] = value;
 }
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
 for (const name of Object.keys(process.env)) {
-  if (${snapshotCredentialName}.test(name) || (stripAwsCredentials && /^AWS_/i.test(name)))
+  if (${snapshotCredentialName}.test(name) || (stripAwsCredentials && /^AWS_/i.test(name)) ||
+      (stripHookProxyCredentials && /^(?:https?|all)_proxy$/i.test(name) &&
+       ${/^(?:[a-z][\w+.-]*:\/\/)?[^/@\s]+@/iu}.test(process.env[name])))
     delete process.env[name];
 }
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
@@ -1641,7 +1756,8 @@ export async function runRepositoryCommand(
   options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
 ): Promise<string> {
   options?.signal?.throwIfAborted();
-  const sandbox = options?.sandbox;
+  const hooks = options?.publicationHooks;
+  const sandbox = options?.sandbox ?? options?.hookSandbox;
   if (process.platform === "win32" && sandbox !== undefined) {
     // The native Windows sandbox CLI does not enforce narrower read-only
     // carveouts within an explicit write grant. Keep hooks and configuration
@@ -1688,13 +1804,81 @@ export async function runRepositoryCommand(
   }
   const profile = `codex_security_snapshot_${randomUUID()}`;
   let profileFile: string | undefined;
+  let hookDirectory: string | undefined;
+  let hookDataDirectory: string | undefined;
+  let messageDirectory: string | undefined;
+  let hostArgs = args;
   try {
     if (sandbox !== undefined) {
       // Native file layers keep literal path keys out of command-line arguments.
       const home = configuredCodexHome(sandbox.environment);
-      if (process.platform === "win32") {
+      if (hooks || process.platform === "win32") {
         await mkdir(home, { recursive: true, mode: 0o700 });
-        await requirePrivateSnapshotProfileHome(home);
+        if (process.platform === "win32")
+          await requirePrivateSnapshotProfileHome(home);
+      }
+      if (hooks) {
+        const canonicalHome = await realpath(home);
+        if (process.platform === "win32") {
+          // Windows cannot subtract the trusted dispatcher from an explicitly
+          // writable ancestor. These files will execute in the host Git process.
+          const permissions = isJsonObject(sandbox.profile["filesystem"])
+            ? sandbox.profile["filesystem"]
+            : {};
+          const workspace = sandbox.profile["extends"] === ":workspace";
+          const writableRoots = [
+            ...(workspace ? [sandbox.directory] : []),
+            ...Object.keys(sandbox.profile["workspace_roots"] ?? {}),
+            ...(!workspace || Object.hasOwn(permissions, ":tmpdir")
+              ? []
+              : [
+                  sandbox.environment["TMPDIR"],
+                  sandbox.environment["TEMP"],
+                  sandbox.environment["TMP"],
+                ].filter(
+                  (path): path is string =>
+                    path !== undefined && isAbsolute(path),
+                )),
+            ...Object.entries(permissions).flatMap(([path, access]) =>
+              isAbsolute(path) &&
+              isJsonObject(access) &&
+              access["."] === "write"
+                ? [path]
+                : [],
+            ),
+          ];
+          for (const root of writableRoots) {
+            const physical = await realpath(root).catch(
+              (error: NodeJS.ErrnoException) => {
+                if (error.code !== "ENOENT" && error.code !== "ENOTDIR")
+                  throw error;
+                return resolve(root);
+              },
+            );
+            if (!isOutsidePath(relative(physical, canonicalHome)))
+              throw new CodexSecurityError(
+                "The Windows sandbox requires the hook dispatcher’s Codex home outside writable patch directories.",
+              );
+          }
+        }
+        hookDirectory = await mkdtemp(
+          join(canonicalHome, "publication-hooks-"),
+        );
+        if (process.platform !== "win32")
+          await requireSecureOutputAncestry(hookDirectory);
+        // The sandbox cannot traverse a denied credential home to read stdin.
+        // Keep the hook's input in the captured, read-only Git admin directory.
+        hookDataDirectory = await mkdtemp(
+          join(hooks.gitDirectory, "codex-security-hook-data-"),
+        );
+        if (
+          options?.hookMessagePath &&
+          (hooks.events.has("prepare-commit-msg") ||
+            hooks.events.has("commit-msg"))
+        ) {
+          messageDirectory = join(hookDataDirectory, "message");
+          await mkdir(messageDirectory, { mode: 0o700 });
+        }
       }
       const path = join(home, `${profile}.config.toml`);
       const file = await open(path, "wx", 0o600);
@@ -1703,6 +1887,12 @@ export async function runRepositoryCommand(
         await file.chmod(0o600);
         await requirePrivateSnapshotProfileFile(path);
         const permissions = { ...sandbox.profile };
+        if (hookDirectory)
+          permissions["filesystem"] = {
+            ...(permissions["filesystem"] as JsonObject | undefined),
+            [dirname(hookDirectory)]: { ".": "deny" },
+            [hookDataDirectory!]: { ".": "read" },
+          };
         if (sandbox.refreshWindowsReadGrants) {
           // The elevated Windows backend omits explicit read roots for a full-read
           // policy. Denying the probe's own private profile retains the individual
@@ -1712,10 +1902,22 @@ export async function runRepositoryCommand(
             [path]: { ".": "deny" },
           };
         }
+        const profiles = { [profile]: permissions };
+        if (messageDirectory) {
+          // Native hooks and editors can replace their message by rename.
+          // Grant the private message directory while keeping Git controls read-only.
+          profiles[profile + "_message"] = {
+            ...permissions,
+            filesystem: {
+              ...(permissions["filesystem"] as JsonObject),
+              [messageDirectory]: { ".": "write" },
+            },
+          };
+        }
         await file.writeFile(
           Object.entries({
             ...sandbox.configuration,
-            permissions: { [profile]: permissions },
+            permissions: profiles,
           })
             .map(
               ([key, value]) => `${JSON.stringify(key)}=${inlineToml(value)}`,
@@ -1732,7 +1934,29 @@ export async function runRepositoryCommand(
       "CODEX_API_KEY",
       ...(sandbox?.providerKeyVariable ? [sandbox.providerKeyVariable] : []),
     ];
-    if (sandbox !== undefined) {
+    if (hooks && hookDirectory && sandbox && codex) {
+      hostArgs = [
+        ...(await writePublicationHooks(hookDirectory, hooks, {
+          runtime: bridgeRuntime?.executable ?? process.execPath,
+          git: executable.executable,
+          codex: executablePathForSpawn(codex.command),
+          codexArgs: codex.args ?? [],
+          directory: sandbox.directory,
+          home: configuredCodexHome(sandbox.environment),
+          profile,
+          message: options?.hookMessagePath,
+          data: hookDataDirectory!,
+          messageDirectory,
+          runner: PATCH_GIT_ENVIRONMENT_RUNNER,
+          credentialPattern: snapshotCredentialName.source,
+          credentialNames: credentialVariables.map((name) =>
+            name.toUpperCase(),
+          ),
+          stripAwsCredentials: sandbox.stripAwsCredentials === true,
+        })),
+        ...args,
+      ];
+    } else if (sandbox !== undefined) {
       for (const name of Object.keys(environment)) {
         if (
           name.toUpperCase() === "CODEX_HOME" ||
@@ -1747,7 +1971,7 @@ export async function runRepositoryCommand(
       environment["CODEX_HOME"] = configuredCodexHome(sandbox.environment);
     }
     const bindings =
-      sandbox === undefined
+      sandbox === undefined || hooks
         ? undefined
         : Buffer.from(
             JSON.stringify({
@@ -1762,11 +1986,11 @@ export async function runRepositoryCommand(
             }),
           );
     const execution = spawn(
-      codex === undefined
+      codex === undefined || hooks
         ? executable.executable
         : executablePathForSpawn(codex.command),
-      codex === undefined
-        ? [...args]
+      codex === undefined || hooks
+        ? [...hostArgs]
         : [
             ...(codex.args ?? []),
             "sandbox",
@@ -1870,7 +2094,7 @@ export async function runRepositoryCommand(
     options?.signal?.addEventListener("abort", cancel, { once: true });
     if (options?.signal?.aborted) cancel();
     const input =
-      options?.input === undefined && sandbox === undefined
+      options?.input === undefined && options?.sandbox === undefined
         ? undefined
         : new Promise<void>((resolve, reject) => {
             execution.stdin.once("error", reject);
@@ -1909,6 +2133,10 @@ export async function runRepositoryCommand(
     return options?.trim === false ? output : output.trim();
   } finally {
     if (profileFile !== undefined) await rm(profileFile);
+    if (hookDirectory !== undefined)
+      await rm(hookDirectory, { recursive: true, force: true });
+    if (hookDataDirectory !== undefined)
+      await rm(hookDataDirectory, { recursive: true, force: true });
   }
 }
 
@@ -2805,6 +3033,7 @@ export async function main(
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
   let gitRepository: string | undefined;
   let patchSandbox: PatchSnapshotSandbox | undefined;
+  let publicationHooks: PatchPublicationHooks | undefined;
   let snapshotConfigPaths: readonly string[] | undefined;
   let snapshotConfigReady: Promise<void> | undefined;
   let patchPreparationSignal: AbortSignal | undefined;
@@ -2813,6 +3042,8 @@ export async function main(
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
         const appServer = output.appServer;
+        if (appServer.publicationHooks)
+          publicationHooks = appServer.publicationHooks;
         output = {
           ...output,
           appServer: {
@@ -2996,6 +3227,30 @@ export async function main(
           options.signal,
         );
         await snapshotConfigReady;
+      }
+      if (
+        command === "git" &&
+        publicationHooks?.events.size &&
+        patchSandbox &&
+        options.patchSnapshot === undefined &&
+        publicationHookCommand(args)
+      ) {
+        options.publicationHooks = publicationHooks;
+        options.hookSandbox = {
+          ...patchSandbox,
+          profile: {
+            ...patchSandbox.profile,
+            filesystem: {
+              ...(patchSandbox.profile["filesystem"] as JsonObject | undefined),
+              ...Object.fromEntries(
+                [
+                  ...(patchSandbox.snapshotStoragePaths ?? []),
+                  ...(options.hookWritePaths ?? []),
+                ].map((path) => [path, { ".": "write" }]),
+              ),
+            },
+          },
+        };
       }
       return parentDependencies.runRepositoryCommand(
         command,
@@ -7655,6 +7910,38 @@ export async function main(
               options.resumePr,
               errorOutput,
               dependencies,
+              async () => {
+                const directory = dependencies.currentDirectory();
+                const read = (args: string[]) =>
+                  dependencies.runRepositoryCommand("git", args, directory, {
+                    trim: false,
+                    environment: { GIT_CONFIG: undefined },
+                  });
+                publicationHooks = await activePatchPublicationHooks(read);
+                if (!publicationHooks.events.size) return;
+                const gitDirectories = (
+                  await read([
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-dir",
+                    "--git-common-dir",
+                  ])
+                )
+                  .trimEnd()
+                  .split("\n");
+                const controller = new AbortController();
+                const removeSignals = listenForAbort(dependencies, controller);
+                try {
+                  patchSandbox = await resumeHookSandbox(
+                    directory,
+                    dependencies.environment,
+                    gitDirectories,
+                    controller.signal,
+                  );
+                } finally {
+                  removeSignals();
+                }
+              },
             );
             if (format === "json" || format === "jsonl") {
               return { pullRequest };
@@ -11335,6 +11622,7 @@ async function resumePatchPullRequest(
   branch: string,
   stderr: Writable,
   dependencies: CliDependencies,
+  prepareHooks: () => Promise<void>,
 ): Promise<{ branch: string; url: string }> {
   const run = (args: string[]) =>
     dependencies.runRepositoryCommand("git", args, repository);
@@ -11365,6 +11653,7 @@ async function resumePatchPullRequest(
     PATCH_PR_BODY,
     patchPullRequestBodyKey(branch),
   ]);
+  await prepareHooks();
   return publishPatchBranch(
     repository,
     branch,
@@ -11747,6 +12036,10 @@ async function createPatchPullRequest(
             ? []
             : [dirname(options.indexFile)]
           : undefined,
+        ...(!sandbox && options?.indexFile
+          ? { hookWritePaths: [dirname(options.indexFile)] }
+          : {}),
+        hookMessagePath: options?.hookMessagePath,
         environment:
           options?.indexFile === undefined
             ? undefined
@@ -11898,14 +12191,18 @@ async function createPatchPullRequest(
           throw new CodexSecurityError(
             "Cannot resolve Git's COMMIT_EDITMSG path.",
           );
-        const message = await gitPublicationPathMetadata(
-          Buffer.from(join(directoryKey, "COMMIT_EDITMSG"), "latin1"),
+        const messagePath = Buffer.from(
+          join(directoryKey, "COMMIT_EDITMSG"),
+          "latin1",
         );
+        const message = await gitPublicationPathMetadata(messagePath);
         if (message && (!message.isFile() || message.nlink !== 1))
           throw new CodexSecurityError(
             "Patch publication requires a regular, unlinked Git COMMIT_EDITMSG file.",
           );
-        await stage(["commit", "--no-gpg-sign", "-m", PATCH_PR_TITLE]);
+        await stage(["commit", "--no-gpg-sign", "-m", PATCH_PR_TITLE], {
+          hookMessagePath: messagePath.toString("utf8"),
+        });
         committed = true;
         if (!(await matchesCapturedTree()))
           throw new CodexSecurityError(
@@ -13723,6 +14020,9 @@ async function runSkill(
                       },
                       snapshotStoragePaths: gitControls!.snapshotStoragePaths,
                       snapshotConfigPaths: gitControls!.snapshotConfigPaths,
+                      ...(options.automaticPublication
+                        ? { publicationHooks: gitControls!.publicationHooks }
+                        : {}),
                     }),
                 ...(options.onBeforeTurn === undefined &&
                 gitControls === undefined
@@ -14024,32 +14324,11 @@ export async function readSkillCommandOutput(
                     },
                   }
                 : {};
-            const filesystem = Object.fromEntries(
-              appServer.permissions.readOnlyPaths.map((path) => [
-                path,
-                { ".": "read" },
-              ]),
-            );
             // Extend the effective native workspace policy without resetting its settings.
-            const profile = {
-              extends: ":workspace",
-              network: { enabled: workspace["network_access"] === true },
-              workspace_roots: Object.fromEntries(
-                ((workspace["writable_roots"] ?? []) as string[]).map(
-                  (root) => [root, true],
-                ),
-              ),
-              filesystem: {
-                ...filesystem,
-                // Remove implicit temp grants without narrowing explicit writable roots.
-                ...(workspace["exclude_tmpdir_env_var"] === true
-                  ? { ":tmpdir": {} }
-                  : {}),
-                ...(workspace["exclude_slash_tmp"] === true
-                  ? { ":slash_tmp": {} }
-                  : {}),
-              },
-            };
+            const profile = patchWorkspaceProfile(
+              workspace,
+              appServer.permissions.readOnlyPaths,
+            );
             appServer.onPermissions?.(profile, {
               ...config,
               ...workspaceOverride,
