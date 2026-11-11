@@ -6306,8 +6306,8 @@ async function readCodexTurn(options: {
           throw new CodexSecurityError(message);
         }
         const reconnect = reconnectAttempt(message);
-        if (reconnect === null) throw codexTurnError(message);
-        options.onReconnect?.(message, reconnect);
+        if (reconnect !== null) options.onReconnect?.(message, reconnect);
+        else if (!waitingForNetwork(message)) throw codexTurnError(message);
       }
     },
   });
@@ -7129,6 +7129,13 @@ function reconnectAttempt(message: string): [number, number] | null {
   const attempt = Number(match[1]);
   const maxAttempts = Number(match[2]);
   return attempt <= maxAttempts ? [attempt, maxAttempts] : null;
+}
+
+// Codex keeps retrying a dropped connection without a retry count.
+function waitingForNetwork(message: string): boolean {
+  return /^Reconnecting(?:\.\.\.|…)[ \t]+waiting for network(?=[ \t(]|$)/u.test(
+    message,
+  );
 }
 
 function reconnectDetails(message: string): ScanReconnectDetails | undefined {

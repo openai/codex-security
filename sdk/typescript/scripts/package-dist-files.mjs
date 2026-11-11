@@ -20,6 +20,7 @@ const distModules = [
   "cli-mcp",
   "cli-scan-logs-json",
   "cli-signals",
+  "cli-token-view",
   "classify-severity",
   "classify-severity-records",
   "codeowners",
