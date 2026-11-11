@@ -4,7 +4,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
+  completePatches,
   patchRiskAssessment,
+  resultWithFindings,
+  savedScan,
   publicationRepository,
   repositoryGit,
   runGitRepositoryCommand,
@@ -226,6 +229,109 @@ test.each(["root", "nested", "disabled"])(
     } else {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(operations).toEqual([]);
+    }
+  },
+);
+
+test.each([
+  "unstaged",
+  "staged",
+  "index only",
+  "assume unchanged",
+  "skip worktree",
+  "nested",
+  "clean",
+])(
+  "checks tracked local input before any checkout clean filter runs: %s",
+  async (mode) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const checkout = mode === "nested" ? join(directory, "child") : directory;
+    const selected = repositoryGit(checkout);
+    if (mode === "nested") {
+      await mkdir(checkout);
+      selected("init", "--initial-branch=main");
+      selected("config", "user.name", "Synthetic User");
+      selected("config", "user.email", "synthetic@example.test");
+    }
+    const file = "src/finding-1.ts";
+    const local = join(checkout, "private.txt");
+    const support = await fixtures.create("patch-tracked-local-filter-");
+    const marker = join(support, "filter-ran");
+    const script = join(support, "clean.cjs");
+    await writeFile(
+      script,
+      `const fs = require("node:fs");
+const input = fs.readFileSync(0, "utf8");
+fs.writeFileSync(${JSON.stringify(marker)}, "ran");
+process.stdout.write(input === "model edit\\n" ? Buffer.from(fs.readFileSync(${JSON.stringify(local)})).toString("base64") : input);
+`,
+    );
+    await writeFile(
+      join(directory, ".gitattributes"),
+      `${file} filter=synthetic\n`,
+    );
+    git(
+      "config",
+      "filter.synthetic.clean",
+      `node ${JSON.stringify(script.replaceAll("\\", "/"))}`,
+    );
+    git("config", "filter.synthetic.required", "true");
+    await writeFile(local, "public fixture\n");
+    selected("add", "private.txt");
+    selected("commit", "-m", "Synthetic tracked source");
+    git("add", ".");
+    git("commit", "-m", "Synthetic filter baseline");
+    if (mode !== "clean") {
+      await writeFile(local, "private fixture\n");
+      if (mode === "staged" || mode === "index only")
+        selected("add", "private.txt");
+      if (mode === "index only") await writeFile(local, "public fixture\n");
+      if (mode === "assume unchanged")
+        selected("update-index", "--assume-unchanged", "private.txt");
+      if (mode === "skip worktree")
+        selected("update-index", "--skip-worktree", "private.txt");
+    }
+    await writeFile(marker, "before");
+    const head = git("rev-parse", "HEAD");
+    const operations: string[] = [];
+    const result = resultWithFindings(["high"]);
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        result,
+        onWorkbench: () => savedScan(result, "scan-1", directory),
+        onRepositoryCommand(command, args, cwd, options) {
+          if (command !== "git")
+            return args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1";
+          if (args[0] === "push") {
+            operations.push("push");
+            return "";
+          }
+          return runGitRepositoryCommand(command, args, cwd, options);
+        },
+        async onCodex(_args, output) {
+          operations.push("turn");
+          await writeFile(join(directory, file), "model edit\n");
+          completePatches(_args, output);
+          return 0;
+        },
+      },
+    );
+    if (mode === "clean") {
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(operations).toEqual(["turn", "push"]);
+      expect(git("show", `HEAD:${file}`)).toBe(
+        Buffer.from("public fixture\n").toString("base64"),
+      );
+    } else {
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("tracked edits");
+      expect(operations).toEqual([]);
+      expect(await readFile(marker, "utf8")).toBe("before");
+      expect(git("rev-parse", "HEAD")).toBe(head);
     }
   },
 );
