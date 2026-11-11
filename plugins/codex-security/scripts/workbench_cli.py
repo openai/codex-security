@@ -288,6 +288,10 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     list_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
 
     update_progress = add_command("update-progress", "--scan-id")
+    update_progress.add_argument("--model-update", action="store_true")
+    update_progress.add_argument(
+        "--refresh-scope-file-count", action="store_true", help=argparse.SUPPRESS
+    )
     update_progress.add_argument("--model-thread-id")
     update_progress.add_argument("--phase", choices=PHASES)
     update_progress.add_argument("--phase-items-total", type=non_negative_int)
@@ -361,6 +365,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     mark_handoff_delivered = add_command("mark-handoff-delivered", "--scan-id", "--claim-token")
     mark_handoff_delivered.add_argument("--thread-id")
+    mark_handoff_delivered.add_argument("--return-context", action="store_true")
+    mark_handoff_delivered.add_argument("--occurrence-id")
 
     claim_handoff_delivery = add_command("claim-handoff-delivery", "--scan-id", "--claim-token")
     claim_handoff_delivery.add_argument("--take-over-stale", action="store_true")

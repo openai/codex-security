@@ -1,6 +1,7 @@
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { sameCheckedFileDevice } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import { expandHome } from "./runtime.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
@@ -87,8 +88,9 @@ export async function readRegularInputFile(
       }
     }
   }
+  const canonicalPath = join(canonicalParent, basename(path));
   const file = await open(
-    join(canonicalParent, basename(path)),
+    canonicalPath,
     constants.O_RDONLY |
       (constants.O_NOFOLLOW ?? 0) |
       (constants.O_NONBLOCK ?? 0),
@@ -97,8 +99,11 @@ export async function readRegularInputFile(
     const opened = await file.stat({ bigint: true });
     if (
       !opened.isFile() ||
-      opened.dev !== selected.dev ||
-      opened.ino !== selected.ino
+      !(await sameCheckedFileDevice(
+        file,
+        { path: canonicalPath, metadata: selected },
+        opened,
+      ))
     ) {
       throw new CodexSecurityError("Input files must remain regular files.");
     }

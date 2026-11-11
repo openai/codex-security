@@ -1,5 +1,5 @@
 /** Verify committed ownership evidence before the workbench seals the scan. */
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { once } from "node:events";
 import { findingsAtScanRevision, ownerRepository } from "./owner-evidence.js";
 import {
@@ -69,5 +69,15 @@ async function main() {
   }
 }
 
-if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url)
-  await main();
+function invokedAsMain(): boolean {
+  const entrypoint = process.argv[1];
+  if (entrypoint === undefined) return false;
+  if (import.meta.url === pathToFileURL(entrypoint).href) return true;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entrypoint)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) await main();

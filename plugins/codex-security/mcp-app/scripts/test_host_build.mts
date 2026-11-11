@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -83,9 +84,19 @@ test("builds and loads the host runtime from standalone plugin source", async (t
     summary: "",
     locations: [{ path: index === 0 ? "owned.ts" : "other.ts" }],
   }));
+  // Exercise invocation through a directory alias, as with macOS temporary paths.
+  let verifierDirectory = mcp;
+  if (process.platform !== "win32") {
+    verifierDirectory = join(output, "aliased-mcp");
+    await symlink(mcp, verifierDirectory, "dir");
+  }
   const verified = execFileSync(
     process.execPath,
-    [join(mcp, "scan-owners.mjs"), repo, git("rev-parse", "HEAD")],
+    [
+      join(verifierDirectory, "scan-owners.mjs"),
+      repo,
+      git("rev-parse", "HEAD"),
+    ],
     { input: JSON.stringify(inputs), encoding: "utf8" },
   )
     .trimEnd()
