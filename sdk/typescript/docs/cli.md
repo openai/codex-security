@@ -881,9 +881,15 @@ failed matching return `2`; severity-policy violations return `1`. Retry with
 The retry report covers only those components. Each registered component keeps its
 scan ID in the summary, including when the scan fails.
 
-`--max-cost` applies per component, excluding planning and matching. `--model`
-and `--effort` also apply to matching; `--auth` applies throughout. Planning and
-matching reject ambient command providers that conflict with explicit ChatGPT
+`--max-cost` applies per component, excluding planning and matching.
+Use `--max-total-cost USD` with explicit components to split one estimated
+budget among them. The smaller of each component's share and its per-scan
+limit applies. Findings stay separate because model-based matching is skipped.
+The total limit also skips owner suggestions, including when enabled in project configuration.
+Automatic planning and post-scan prompts must run separately.
+
+`--model` and `--effort` also apply to matching. `--auth` applies throughout.
+Planning and matching reject ambient command providers that conflict with explicit ChatGPT
 or API-key auth. SDK-selected command providers retain their authentication.
 
 From TypeScript, use `runComponentScans({ repository, outputDir, components })`.
@@ -1372,6 +1378,15 @@ service,https://github.com/example/service.git,0123456789abcdef0123456789abcdef0
 codex-security bulk-scan repositories.csv \
   --output-dir /path/outside/repositories/results --workers 4
 ```
+
+`--max-cost USD` applies per repository attempt. `--max-total-cost USD` divides an
+estimated limit among the pending repositories and their possible attempts for
+this invocation, including recovery. For example, a $12 limit with three pending
+repositories and `--max-attempts 2` reserves up to $2 per attempt. An earlier
+overrun reduces the remaining budget for queued attempts. In-flight work can
+exceed a limit. The total limit skips model-based matching and owner suggestions,
+including during recovery. Run post-scan prompts separately. A resumed scan also respects its saved
+limit and includes prior recorded usage in its cost estimate.
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.
 CSV scopes are literal paths relative to each checkout, including names such
@@ -2674,7 +2689,10 @@ This explicit option disables Codex filesystem/network enforcement for the patch
 task. The container must provide it. There is no automatic fallback; optional
 patch-risk assessment still uses its read-only sandbox.
 
-`scan --patch` runs after a complete scan. `--patch-severity` defaults to `low`;
+`scan --patch` runs after a complete scan without a cost limit. A cost-limited
+scan saves the findings and skips the interactive patch offer. Use
+`codex-security patch --scan SCAN_ID` to patch separately.
+`--patch-severity` defaults to `low`;
 `high` selects high and critical findings. Interactive users can select findings
 and add instructions. The interactive finding browser lists critical, high,
 medium, then low findings, preserving scan order within each severity.

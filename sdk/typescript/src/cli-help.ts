@@ -82,6 +82,7 @@ const VALUE_LABELS: Record<string, string> = {
   python: "path",
   codex: "key=value",
   "max-cost": "usd",
+  "max-total-cost": "usd",
   "max-time": "minutes",
   "max-time-hours": "hours",
   "fail-on-severity": "level",
