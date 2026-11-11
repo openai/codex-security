@@ -23,6 +23,11 @@ const poetry = (version: string, source = "") =>
   `[[package]]\nname="synthetic-py"\nversion="${version}"\ngroups=["main"]\n${source}`;
 const pipenv = (version: string, local = false) =>
   JSON.stringify({
+    _meta: {
+      sources: [
+        { name: "pypi", url: "https://pypi.org/simple", verify_ssl: true },
+      ],
+    },
     default: {
       "synthetic-py": { version: `==${version}` },
       ...(local
