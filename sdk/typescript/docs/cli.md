@@ -855,7 +855,9 @@ codex-security scan-components . \
 `--plan-only` with `--component` or `--components-file` validates local paths
 without signing in. The CLI prints a command to scan the saved plan into a fresh
 `results` directory inside the plan directory. Running that command starts scans.
-Include any additional scan overrides you need when you run it.
+Run it from the original working directory to reuse relative paths. The command
+includes the selected project configuration and scan flags. Reapply any inline
+`--codex` overrides yourself, since these can contain credentials.
 
 Plans use literal repository-relative paths, so `~/src` selects a directory
 named `~` inside the repository rather than expanding the home directory.

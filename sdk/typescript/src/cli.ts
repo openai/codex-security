@@ -6376,28 +6376,51 @@ export async function main(
             },
           });
           if (options.planOnly) {
-            // A new plan directory contains only components.json. Save subsequent results alongside it.
+            const {
+              auto,
+              component,
+              componentsFile,
+              planOnly,
+              outputDir,
+              config,
+              codex,
+              ...scanOptions
+            } = options;
+            const supplied = new Set(argv.map((arg) => arg.split("=", 1)[0]));
+            const overrides = Object.fromEntries(
+              Object.entries(scanOptions).filter(([key]) => {
+                const flag = cliOptionFlag(key);
+                return (
+                  supplied.has(flag) ||
+                  supplied.has(`--${key}`) ||
+                  supplied.has(`--no-${flag.slice(2)}`)
+                );
+              }),
+            );
             const nextCommand = [
               "codex-security",
               "scan-components",
-              repository,
-              "--components-file",
-              result.planPath,
-              "--output-dir",
-              join(dirname(result.planPath), "results"),
-              ...(options.config === undefined
-                ? []
-                : ["--config", options.config]),
-              ...(options.maxCost === undefined
-                ? []
-                : ["--max-cost", String(options.maxCost)]),
-            ]
-              .map(quoteCliPath)
-              .join(" ");
+              quoteCliPath(repository),
+              ...cliOptionTokens({
+                componentsFile: result.planPath,
+                outputDir: join(dirname(result.planPath), "results"),
+                config: project?.path,
+                ...overrides,
+              }),
+            ].join(" ");
+            const nextCommandNote =
+              codex.length > 0
+                ? "Reapply your --codex overrides when running this command."
+                : undefined;
             errorOutput.write(
               `Run this plan: ${diagnosticValue(nextCommand)}\n`,
             );
-            return { ...result, nextCommand };
+            if (nextCommandNote) errorOutput.write(`${nextCommandNote}\n`);
+            return {
+              ...result,
+              nextCommand,
+              ...(nextCommandNote && { nextCommandNote }),
+            };
           }
           exitCode =
             interruptedExitCode(controller.signal) ??
@@ -8769,6 +8792,23 @@ function parseFrameworkArguments(
   };
 }
 
+function cliOptionFlag(key: string): string {
+  return `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
+}
+
+function cliOptionTokens(options: Record<string, unknown>): string[] {
+  const tokens: string[] = [];
+  for (const [key, value] of Object.entries(options)) {
+    if (value === undefined) continue;
+    const flag = cliOptionFlag(key);
+    for (const item of Array.isArray(value) ? value : [value]) {
+      tokens.push(item === false ? `${flag}=false` : flag);
+      if (typeof item !== "boolean") tokens.push(quoteCliPath(String(item)));
+    }
+  }
+  return tokens;
+}
+
 /** Incur prints example keys verbatim and treats every option as a single value.
  * Give its shared help, manifest and skill renderers the actual shell tokens.
  */
@@ -8783,15 +8823,7 @@ function prepareCliExamples(
       const tokens = Object.values(example.args ?? {}).map((value) =>
         quoteCliPath(String(value)),
       );
-      for (const [key, value] of Object.entries(example.options ?? {})) {
-        const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
-        for (const item of Array.isArray(value) ? value : [value]) {
-          tokens.push(item === false ? `${flag}=false` : flag);
-          if (typeof item !== "boolean")
-            tokens.push(quoteCliPath(String(item)));
-        }
-      }
-      example.args = tokens;
+      example.args = [...tokens, ...cliOptionTokens(example.options ?? {})];
       delete example.options;
     }
   }

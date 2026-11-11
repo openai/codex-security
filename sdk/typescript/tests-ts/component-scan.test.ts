@@ -1911,7 +1911,17 @@ test.each(["auto", "explicit", "file"])(
       [
         ...args,
         "--plan-only",
-        ...(selection === "auto" ? [] : ["--auth", "api-key"]),
+        ...(selection === "auto"
+          ? []
+          : [
+              "--auth",
+              "api-key",
+              "--workers=2",
+              "--max-cost",
+              "1.5",
+              "--codex",
+              'model_providers.example.http_headers.Example="synthetic-header"',
+            ]),
       ],
       {
         environment: {},
@@ -1931,6 +1941,13 @@ test.each(["auto", "explicit", "file"])(
     expect(plan.nextCommand).toContain("codex-security scan-components");
     expect(plan.nextCommand).toContain("--components-file");
     expect(plan.nextCommand).toContain(join(paths.outputDir, "results"));
+    if (selection !== "auto") {
+      expect(plan.nextCommand).toContain("--auth api-key");
+      expect(plan.nextCommand).toContain("--workers 2");
+      expect(plan.nextCommand).toContain("--max-cost 1.5");
+      expect(plan.nextCommandNote).toContain("--codex");
+      expect(result.stdout + result.stderr).not.toContain("synthetic-header");
+    }
     const occupied = await cli(paths, [
       "--components-file",
       plan.planPath,
