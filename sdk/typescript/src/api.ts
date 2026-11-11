@@ -1174,10 +1174,10 @@ export class CodexSecurity {
           signal,
           temporaryRoot,
         );
-        const { runtime } = session;
+        const { runtime, pricingContext } = session;
         const { model } = scanModelConfiguration(session.effectiveConfig);
         result.model.model = model;
-        validateScanCostLimit(options.maxCostUsd, model);
+        validateScanCostLimit(options.maxCostUsd, model, pricingContext);
         const contract = await dependencyTriageContract(
           runtime.plugin.pluginRoot,
         );
@@ -1274,6 +1274,7 @@ export class CodexSecurity {
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
           model,
+          pricingContext,
           repository: inputs.repository,
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
