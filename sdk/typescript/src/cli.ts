@@ -337,6 +337,7 @@ import {
   requireSecureOutputAncestry,
   writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
+  canonicalConfigPath,
   canonicalizeModelSafePath,
   codexSecurityCredentialAllowsAmbientImport,
   codexSecurityCredentialHome,
@@ -1406,6 +1407,93 @@ interface PatchSnapshotSandbox {
   readonly snapshotStoragePaths?: readonly string[];
 }
 
+type PatchSnapshotProfiles = Map<
+  string,
+  {
+    name: string;
+    path: string;
+    contents: string;
+    dev: bigint;
+    ino: bigint;
+    ctimeNs: bigint;
+  }
+>;
+
+// A profile may span the Git commands of one private-index snapshot only when
+// none of their workspace or temporary write grants can reach its directory.
+async function reusableWindowsSnapshotHome(
+  home: string,
+  sandbox: PatchSnapshotSandbox,
+): Promise<boolean> {
+  const policy = sandbox.profile;
+  if (
+    policy["extends"] !== ":workspace" ||
+    Object.keys(policy).some(
+      (key) =>
+        ![
+          "extends",
+          "filesystem",
+          "workspace_roots",
+          "network",
+          "description",
+        ].includes(key),
+    )
+  )
+    return false;
+  const filesystem = policy["filesystem"];
+  const workspaces = policy["workspace_roots"];
+  if (!isJsonObject(filesystem) || !isJsonObject(workspaces)) return false;
+  const writable = [sandbox.directory, ...Object.keys(workspaces)];
+  for (const [path, access] of Object.entries(filesystem)) {
+    if (!isJsonObject(access)) return false;
+    if (
+      (path === ":tmpdir" || path === ":slash_tmp") &&
+      !Object.keys(access).length
+    )
+      continue;
+    if (!isAbsolute(path) || Object.keys(access).length !== 1) return false;
+    if (access["."] === "write") writable.push(path);
+    else if (access["."] !== "read" && access["."] !== "deny") return false;
+  }
+  if (!Object.hasOwn(filesystem, ":tmpdir")) {
+    writable.push(tmpdir());
+    for (const key of ["TMP", "TEMP", "TMPDIR"]) {
+      const value = environmentEntry(sandbox.environment, key);
+      if (value) writable.push(value);
+    }
+  }
+  if (!Object.hasOwn(filesystem, ":slash_tmp"))
+    writable.push(join(parse(home).root, "tmp"));
+  if (relative(home, await realpath(home)) !== "") return false;
+  for (const path of new Set(writable)) {
+    if (!isAbsolute(path) || path.split(/[\\/]/u).includes("..")) return false;
+    const physical = await canonicalConfigPath(path).catch(() => undefined);
+    if (
+      physical === undefined ||
+      !isOutsidePath(relative(physical, home)) ||
+      !isOutsidePath(relative(home, physical))
+    )
+      return false;
+  }
+  return true;
+}
+
+async function removeSnapshotProfiles(profiles: PatchSnapshotProfiles) {
+  const files = [...profiles.values()];
+  profiles.clear();
+  await Promise.all(
+    files.map(async ({ path, dev, ino }) => {
+      const entry = await lstat(path, { bigint: true }).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        },
+      );
+      if (entry?.isFile() && entry.dev === dev && entry.ino === ino)
+        await rm(path);
+    }),
+  );
+}
+
 function patchWorkspaceProfile(
   workspace: JsonObject,
   readOnlyPaths: readonly string[],
@@ -1687,6 +1775,7 @@ interface CliDependencies {
       maxBuffer?: number;
       input?: string | Uint8Array;
       patchSnapshot?: readonly string[];
+      snapshotProfiles?: PatchSnapshotProfiles;
       patchTransport?: true;
       publicationHooks?: PatchPublicationHooks;
       hookSandbox?: PatchSnapshotSandbox;
@@ -1821,16 +1910,65 @@ export async function runRepositoryCommand(
   if (bridgeRuntime === null) {
     throw new CodexSecurityError("Node.js is not available on a trusted PATH.");
   }
-  const profile = `codex_security_snapshot_${randomUUID()}`;
+  let profile = `codex_security_snapshot_${randomUUID()}`;
+  let profileKey: string | undefined;
   let profileFile: string | undefined;
   let hookDirectory: string | undefined;
   let hookDataDirectory: string | undefined;
   let messageDirectory: string | undefined;
   let hostArgs = args;
   try {
-    if (sandbox !== undefined) {
+    const home = sandbox && configuredCodexHome(sandbox.environment);
+    if (
+      home &&
+      sandbox &&
+      options?.snapshotProfiles &&
+      process.platform === "win32" &&
+      !hooks &&
+      !sandbox.refreshWindowsReadGrants
+    ) {
+      await mkdir(home, { recursive: true, mode: 0o700 });
+      if (
+        [...options.snapshotProfiles.values()].some(
+          (entry) => dirname(entry.path) !== home,
+        )
+      )
+        await removeSnapshotProfiles(options.snapshotProfiles);
+      if (await reusableWindowsSnapshotHome(home, sandbox)) {
+        profileKey = JSON.stringify([
+          home,
+          sandbox.profile,
+          sandbox.configuration,
+        ]);
+      } else {
+        await removeSnapshotProfiles(options.snapshotProfiles);
+      }
+    }
+    const retained = profileKey && options?.snapshotProfiles?.get(profileKey);
+    if (retained) {
+      const metadata = await lstat(retained.path, { bigint: true });
+      if (
+        !metadata.isFile() ||
+        metadata.dev !== retained.dev ||
+        metadata.ino !== retained.ino ||
+        metadata.nlink !== 1n ||
+        (await readFile(retained.path, "utf8")) !== retained.contents
+      ) {
+        throw new CodexSecurityError(
+          "The private patch snapshot profile changed while capturing Git state.",
+        );
+      }
+      if (metadata.ctimeNs !== retained.ctimeNs) {
+        // A Windows ACL update can leave the original bytes and inode intact.
+        await requirePrivateSnapshotProfileHome(dirname(retained.path));
+        await requirePrivateSnapshotProfileFile(retained.path);
+        retained.ctimeNs = (
+          await lstat(retained.path, { bigint: true })
+        ).ctimeNs;
+      }
+      profile = retained.name;
+    } else if (sandbox !== undefined && home !== undefined) {
       // Native file layers keep literal path keys out of command-line arguments.
-      const home = configuredCodexHome(sandbox.environment);
       if (hooks || process.platform === "win32") {
         await mkdir(home, { recursive: true, mode: 0o700 });
         if (process.platform === "win32")
@@ -1933,7 +2071,7 @@ export async function runRepositoryCommand(
             },
           };
         }
-        await file.writeFile(
+        const contents =
           Object.entries({
             ...sandbox.configuration,
             permissions: profiles,
@@ -1941,8 +2079,22 @@ export async function runRepositoryCommand(
             .map(
               ([key, value]) => `${JSON.stringify(key)}=${inlineToml(value)}`,
             )
-            .join("\n") + "\n",
-        );
+            .join("\n") + "\n";
+        await file.writeFile(contents);
+        if (profileKey !== undefined && options?.snapshotProfiles) {
+          const entry = await lstat(path, { bigint: true });
+          if (entry.isFile() && entry.ino !== 0n && entry.nlink === 1n) {
+            options.snapshotProfiles.set(profileKey, {
+              name: profile,
+              path,
+              contents,
+              dev: entry.dev,
+              ino: entry.ino,
+              ctimeNs: entry.ctimeNs,
+            });
+            profileFile = undefined;
+          }
+        }
       } finally {
         await file.close();
       }
@@ -13669,6 +13821,7 @@ async function snapshotPatchTree(
       },
     )
   ).replace(/\n$/u, "");
+  const snapshotProfiles: PatchSnapshotProfiles = new Map();
   const workingIndex: Parameters<typeof withPatchGitIndex>[0] = (
     args,
     options,
@@ -13683,6 +13836,7 @@ async function snapshotPatchTree(
         encoding: options?.encoding,
         input: options?.input,
         // Keep filters within the patch workspace while allowing snapshot outputs.
+        snapshotProfiles,
         patchSnapshot: [
           objects,
           ...(options?.indexFile === undefined
@@ -13856,7 +14010,7 @@ async function snapshotPatchTree(
     },
     undefined,
     sourcePathspecs,
-  );
+  ).finally(() => removeSnapshotProfiles(snapshotProfiles));
 }
 
 async function resolvePatchValidationPrompt(

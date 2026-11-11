@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -12,6 +12,80 @@ import { runTestInSubprocess } from "./support/test-subprocess.js";
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+
+test("a private-index snapshot reuses only unchanged profiles outside its writable roots", async () => {
+  const name =
+    "a private-index snapshot reuses only unchanged profiles outside its writable roots";
+  if (runTestInSubprocess(fileURLToPath(import.meta.url), name)) return;
+  const root = await fixtures.create("snapshot-profile-scope-");
+  const home = join(root, "home");
+  const repository = join(root, "repository");
+  await Promise.all([mkdir(home), mkdir(repository)]);
+  const alias = join(repository, "alias");
+  await symlink(root, alias, "junction");
+  const native = join(root, "native.cjs");
+  await writeFile(
+    native,
+    'process.stdin.resume();process.stdin.on("end",()=>process.stdout.write(process.argv[process.argv.indexOf("--profile")+1]));',
+  );
+  const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const homeGuard = spyOn(
+    runtime,
+    "requirePrivateSnapshotProfileHome",
+  ).mockResolvedValue(undefined);
+  const fileGuard = spyOn(
+    runtime,
+    "requirePrivateSnapshotProfileFile",
+  ).mockResolvedValue(undefined);
+  const command = spyOn(runtime, "resolveCodexCommand").mockReturnValue({
+    command: process.execPath,
+    args: [native],
+  });
+  const trusted = spyOn(
+    executables,
+    "resolveTrustedExecutable",
+  ).mockResolvedValue({
+    executable: process.execPath,
+    environment: { ...process.env },
+  });
+  const snapshotProfiles = new Map();
+  const run = (directory: string, description?: string) =>
+    runRepositoryCommand("git", ["status"], repository, {
+      snapshotProfiles,
+      sandbox: {
+        directory,
+        environment: { ...process.env, CODEX_HOME: home },
+        profile: {
+          extends: ":workspace",
+          workspace_roots: {},
+          filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
+          ...(description && { description }),
+        },
+      },
+    });
+  try {
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const profile = await run(repository);
+    expect(await run(repository)).toBe(profile);
+    expect(await run(repository, "different")).not.toBe(profile);
+    expect(fileGuard).toHaveBeenCalledTimes(2);
+    const path = join(home, profile + ".config.toml");
+    await writeFile(path, "tampered");
+    await expect(run(repository)).rejects.toThrow("profile changed");
+    const first = await run(root);
+    expect(await run(root)).not.toBe(first);
+    const viaAlias = await run(alias);
+    expect(await run(alias)).not.toBe(viaAlias);
+    expect(await readdir(home)).toEqual([]);
+    expect(homeGuard).toHaveBeenCalledTimes(6);
+  } finally {
+    Object.defineProperty(process, "platform", original);
+    trusted.mockRestore();
+    command.mockRestore();
+    fileGuard.mockRestore();
+    homeGuard.mockRestore();
+  }
+});
 
 test("snapshot stderr observers retain diagnostics and buffering limits", async () => {
   const name =

@@ -311,8 +311,14 @@ for (const linked of [false, true]) {
         [
           "#!/bin/sh",
           "set -eu",
-          'git interpret-trailers --in-place --trailer "Reviewed-by: synthetic" -- "$1"',
-          linked ? 'ln "$1" "$1.link"' : "exit 7",
+          ...(linked
+            ? [
+                `node -e 'const fs = require("node:fs"); const message = process.argv[1]; fs.linkSync(message, message + ".link"); fs.appendFileSync(message, "Reviewed-by: synthetic\\n");' "$1"`,
+              ]
+            : [
+                'git interpret-trailers --in-place --trailer "Reviewed-by: synthetic" -- "$1"',
+                "exit 7",
+              ]),
         ].join("\n") + "\n",
         { mode: 0o755 },
       );
