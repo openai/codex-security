@@ -363,7 +363,14 @@ def test_registration_restores_output_when_checkout_is_replaced_before_commit(
             patch.setattr(workbench_db, "scan_scope_file_count", replace_target)
             if not full_ids:
                 patch.setattr(windows_scan_local_files, "_full_directory_id", lambda *args: None)
-            with pytest.raises(SystemExit, match="target changed while the scan was starting"):
+            # An archived scan already owns the registered target. Its ownership check
+            # detects the replacement before the final Windows resume pin is acquired.
+            rejection = (
+                "no longer matches its recorded security scan history"
+                if archive
+                else "target changed while the scan was starting"
+            )
+            with pytest.raises(SystemExit, match=rejection):
                 register(archive=archive, connection=connection)
         ids = [row[0] for row in connection.execute("SELECT id FROM scans")]
         assert not list(output.parent.glob(f"{output.name}.previous-*"))
