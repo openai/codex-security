@@ -9880,6 +9880,7 @@ async function prepareSavedPatchPublication(
       verifiedKeys: ReadonlySet<string>,
       before: SavedPatchTrees,
       after: SavedPatchTrees,
+      aliases: readonly { keys: string[]; allReported: boolean }[],
     ) {
       // A move may be reported under its new name. Include its deleted source
       // only if the full turn contains exactly one removal and one addition
@@ -9917,6 +9918,21 @@ async function prepareSavedPatchPublication(
       for (const [entry, to] of additions) {
         const from = deletions.get(entry);
         if (from && to && changes.has(to)) changes.set(from, turn.get(from)!);
+      }
+      for (const { keys, allReported } of aliases) {
+        const from = keys.find((key) => turn.get(key)?.startsWith("000000 "));
+        const to = keys.find((key) => previous.get(key)?.startsWith("000000 "));
+        const entry = to && turn.get(to);
+        // Distinguish a rename from two tracked entries sharing one live path.
+        if (
+          keys.length !== 2 ||
+          !from ||
+          !to ||
+          !entry ||
+          (!allReported &&
+            (additions.get(entry) !== to || deletions.get(entry) !== from))
+        )
+          return "Multiple changed Git paths resolve to the same filesystem entry. Review the changes before publishing.";
       }
       const changed = [...changes.keys()];
       if (
@@ -12449,7 +12465,16 @@ async function createPatchPullRequest(
         throwIfNoEntry: false,
       })?.isDirectory()
     );
-  const stagingCandidates = [...new Set([...selectedFiles, ...reportedFiles])];
+  // A later verified turn may remove a path introduced by an earlier finding.
+  const stagingCandidates = [
+    ...new Set([
+      ...selectedFiles,
+      ...reportedFiles.filter(
+        (file) =>
+          !publication.verified || existsSync(patchFilePath(repository, file)),
+      ),
+    ]),
+  ];
   const stagePaths = stagingCandidates.filter(
     (file) =>
       !isDeleted(file) &&
@@ -14136,8 +14161,9 @@ async function runFindingPatches(
         const selectedFiles = await verifiedPatchFiles(selected, [patch], {
           directory: patchDirectory,
         });
-        const files = selectedFiles.map((file) =>
-          canonicalPatchPath(selected.repository, patchPathKey(file)),
+        const reported = selectedFiles.map(patchPathKey);
+        const files = reported.map((file) =>
+          canonicalPatchPath(selected.repository, file),
         );
         const root =
           base !== undefined && !(base instanceof Map)
@@ -14165,14 +14191,25 @@ async function runFindingPatches(
           base &&
           !(base instanceof Map)
         ) {
-          if (new Set(matched.map(({ path }) => path)).size !== matched.length)
-            throw new CodexSecurityError(
-              "Multiple changed Git paths resolve to the same filesystem entry. Review the changes before publishing.",
-            );
+          const aliases = [...Map.groupBy(matched, ({ path }) => path).values()]
+            .filter((group) => group.length > 1)
+            .map((group) => ({
+              keys: group.map(({ key }) => key),
+              allReported: group.every(({ key }) => {
+                const path = relativePatchPath(
+                  repositoryKey,
+                  resolve(rootKey, key),
+                );
+                return reported.some(
+                  (file) => path === file || path.startsWith(file + sep),
+                );
+              }),
+            }));
           const reason = await options.publication.verified.record(
             new Set(matched.map(({ key }) => key)),
             base,
             observed,
+            aliases,
           );
           if (reason) {
             const nested = [...observed.gitlinks.keys()].find(

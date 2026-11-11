@@ -300,6 +300,88 @@ describe("saved-finding Git publication", () => {
     expect(outcome.stdout).not.toContain("codex-security:patch-risk-summary");
   });
 
+  test.each([
+    "unchanged",
+    "edited, both names",
+    "edited, destination only",
+  ] as const)(
+    "publishes a staged case-only rename with a sibling edit (%s)",
+    async (mode) => {
+      const fixtures = await publicationFixtures({ other: "old\n" }, [
+        "high",
+        "high",
+      ]);
+      const { currentDirectory: repository, git, remote } = fixtures;
+      let turn = 0;
+      let aliases = false;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          ...fixtures,
+          onCodex: async (_args, output) => {
+            turn++;
+            let files: string[];
+            if (turn === 1) {
+              await writeFile(join(repository, "README"), "original\n");
+              git("add", "--", "README");
+              aliases = await readFile(join(repository, "readme")).then(
+                () => true,
+                () => false,
+              );
+              files = ["README"];
+            } else {
+              git("mv", "--", "README", "intermediate");
+              git("mv", "--", "intermediate", "readme");
+              if (mode !== "unchanged")
+                await writeFile(join(repository, "readme"), "edited\n");
+              await writeFile(join(repository, "other"), "sibling\n");
+              git("add", "--", "readme", "other");
+              files =
+                mode === "edited, both names"
+                  ? ["README", "readme", "other"]
+                  : ["readme", "other"];
+            }
+            output!.stdout.write(
+              JSON.stringify({
+                patches: [
+                  {
+                    occurrenceId: `occ_${turn}`,
+                    status: "verified",
+                    files,
+                    verification: "Verified the selected patch files.",
+                  },
+                ],
+              }),
+            );
+            return 0;
+          },
+          onRepositoryCommand: (command, args, cwd, options) =>
+            command === "git"
+              ? runGitRepositoryCommand(command, args, cwd, options)
+              : args[1] === "create"
+                ? "https://github.example.test/example/repo/pull/1"
+                : "[]",
+        },
+      );
+      if (mode === "edited, destination only") {
+        expect(outcome.exitCode).toBe(2);
+        if (aliases)
+          expect(outcome.stderr + outcome.stdout).toContain(
+            "Multiple changed Git paths",
+          );
+        expect(git("ls-remote", remote)).toBe("");
+        return;
+      }
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(git("ls-remote", remote)).toContain(git("rev-parse", "HEAD"));
+      expect(git("show", "HEAD:readme")).toBe(
+        mode === "unchanged" ? "original" : "edited",
+      );
+      expect(git("show", "HEAD:other")).toBe("sibling");
+      expect(git("ls-tree", "--name-only", "HEAD", "README")).toBe("");
+    },
+  );
+
   test.each(["edited", "ambiguous"] as const)(
     "publishes the destination without inferring an %s source deletion",
     async (kind) => {
