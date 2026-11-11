@@ -279,7 +279,11 @@ test("history repair loads implicit rerun prompts from the current checkout", as
     onTurn,
     onWorkbench: (args): JsonObject =>
       args[0] === "list-scans"
-        ? { scans: [{ scanId: "saved" }] }
+        ? {
+            scans: [
+              { scanId: "saved", inCurrentWorktree: true, targetPath: root },
+            ],
+          }
         : {
             scanId: "saved",
             recipe: {
