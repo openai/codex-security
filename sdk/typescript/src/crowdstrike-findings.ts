@@ -65,10 +65,15 @@ function detectionLine(detection: NativeRecord, path: string): number | null {
     path.startsWith(`${source}/`)
   )
     return line;
-  const call = /called by (.+?) at line (\d+)\b/u.exec(
-    text(detection["module_remediation"]) ?? "",
-  );
-  return call?.[1] === path ? positive(Number(call[2])) : null;
+  // Search for this file's exact phrase; the remediation text comes from the report.
+  const remediation = text(detection["module_remediation"]) ?? "";
+  const marker = `called by ${path} at line `;
+  const start = remediation.indexOf(marker);
+  const call =
+    start === -1
+      ? null
+      : /^\d+\b/u.exec(remediation.slice(start + marker.length));
+  return call ? positive(Number(call[0])) : null;
 }
 
 /** Check repository claims, and that each finding's file is in the selected checkout. */
