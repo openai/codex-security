@@ -1662,11 +1662,10 @@ Run the command with `--dry-run --format json`. Check `accountId`,
 - **Private findings inbox.** If the preview includes `privateImport`, the
   report goes to your inbox. The repository and connector identify the
   suggested assessment target. Check `format`, `bytes` and `sha256` in
-  `privateImport` to identify the upload. For an Endor Finding, an Endor
-  `list.objects` response or a Wiz vulnerability JSON export, the CLI can
-  send the original bytes when Cloud accepts the format and every record
-  matches your selection. Other inputs, including arrays of selected Endor
-  Findings, use `security.findings.v1`.
+  `privateImport` to identify the upload. The CLI and SDK encode the reviewed
+  occurrences as `security.findings.v1` when it fits. For Wiz and Endor, an
+  inbox that requires native records or has a smaller upload limit can receive
+  native records that reproduce the reviewed evidence.
 - **Repository publisher.** Check `repository.environment_id` in each entry
   of `requests`. The publisher checks the current source versions. Existing
   records keep their environment. New records use the repository's authorized
@@ -1695,10 +1694,10 @@ instructions. API requests always use the API root. The older
 ### Resume interrupted imports
 
 If the result includes `savedSubmission`, keep that checkpoint. Rerun the
-original command with `--dry-run --format json` using the same input, account,
+original command with `--dry-run --format json` using the same build, input, account,
 destination, API endpoint and state directory. Check `cloudApiUrl`. If
 `resumed` is true, confirm to continue the saved submission. If it's false,
-review the new submission before confirming.
+review the new submission before confirming. Finish older-format pending submissions with the client that created them. If a response was lost, check the inbox job or repository records before starting a fresh upload.
 
 - **Private inbox.** The CLI checks the report digest and reuses its saved
   request IDs. It can read an accepted job even if the deployment has since

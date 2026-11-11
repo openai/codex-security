@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { markPreviousCloudProjection } from "./reader-selection.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
@@ -382,10 +381,7 @@ function expandedDetails(
   };
 }
 
-function rowSelectionValidator(
-  query: URLSearchParams,
-  expand: typeof expandedDetails,
-) {
+function rowSelectionValidator(query: URLSearchParams) {
   const staticOnly = query.has("scan_type");
   const violates = query.get("violates_policy");
   const newOnly = query.get("new") === "true";
@@ -408,7 +404,6 @@ function rowSelectionValidator(
   });
 
   return (row: Record<string, unknown>) => {
-    let expandedFilter = false;
     if (
       newOnly &&
       record(row["finding_status"], "Veracode finding_status")["new"] !== true
@@ -423,14 +418,11 @@ function rowSelectionValidator(
         "Veracode finding contradicts the include_annot selection.",
       );
     if (idFilters.length || scoreFilters.length) {
-      const native = findingDetails(row);
-      const details = expand(native);
+      const details = expandedDetails(findingDetails(row));
       for (const { field, ids } of idFilters) {
         if (row["scan_type"] !== "STATIC") continue;
         const entry = record(details[field], `Veracode ${field}`);
         const id = integer(entry["id"], `${field} ID`);
-        // Older readers required HAL descriptors for filtered IDs.
-        expandedFilter ||= details !== native && native[field] !== entry;
         if (!ids.has(String(id)))
           throw new Error(
             `Veracode finding contradicts the ${field} selection.`,
@@ -459,11 +451,10 @@ function rowSelectionValidator(
       throw new Error(
         "Veracode finding contradicts the violates_policy selection.",
       );
-    return expandedFilter;
   };
 }
 
-function readReport(input: unknown, expand: typeof expandedDetails) {
+function readReport(input: unknown) {
   const pages = (Array.isArray(input) ? input : [input])
     .map(readPage)
     .sort((left, right) => left.number - right.number);
@@ -484,15 +475,14 @@ function readReport(input: unknown, expand: typeof expandedDetails) {
       "Supply every Veracode page exactly once with stable totals, selection, origin and application context.",
     );
   const { scope } = first;
-  const checkSelection = rowSelectionValidator(first.query, expand);
-  let usedExpandedFilter = false;
+  const checkSelection = rowSelectionValidator(first.query);
   const seen = new Set<string>();
   const rows: Record<string, unknown>[] = [];
   for (const page of pages) {
     for (const value of page.rows) {
       const row = record(value, "Veracode finding");
       requireApplication(row, scope);
-      if (checkSelection(row)) usedExpandedFilter = true;
+      checkSelection(row);
       const issue = row["issue_id"];
       if (
         typeof row["scan_type"] === "string" &&
@@ -508,27 +498,24 @@ function readReport(input: unknown, expand: typeof expandedDetails) {
       rows.push(row);
     }
   }
-  return { scope, rows, usedExpandedFilter };
+  return { scope, rows };
 }
 
-function normalizeReport(
+export function normalizeVeracodeFindings(
   input: unknown,
   sourceRepositoryUrl: string,
-  target: ExternalImportTarget,
-  expand: typeof expandedDetails,
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Veracode",
     target,
   );
-  const { scope, rows, usedExpandedFilter } = readReport(input, expand);
-  let admittedScalar = false;
-  const findings = normalizeRecords(
+  const { scope, rows } = readReport(input);
+  return normalizeRecords(
     rows,
     (row) => {
-      const native = findingDetails(row);
-      const details = expand(native);
+      const details = expandedDetails(findingDetails(row));
       const status = record(row["finding_status"], "Veracode finding_status");
       const cwe = record(details["cwe"], "Veracode CWE");
       const weakness = `CWE-${integer(cwe["id"], "CWE ID", 1)}`;
@@ -540,7 +527,7 @@ function normalizeReport(
         severityByScore[integer(details["severity"], "severity")];
       if (!severity)
         throw new Error("Veracode severity must be on the native 0–5 scale.");
-      const evidence = validateExternalEvidence(
+      return validateExternalEvidence(
         {
           title: text(category?.["name"]) ?? text(cwe["name"]) ?? weakness,
           severity,
@@ -562,36 +549,9 @@ function normalizeReport(
         },
         target,
       );
-      if (details !== native) admittedScalar = true;
-      return evidence;
     },
     (row) => occurrenceId(row, scope),
     target,
-  );
-  if (target === "cloud" && admittedScalar && !usedExpandedFilter)
-    markPreviousCloudProjection(findings);
-  return findings;
-}
-
-export function normalizeVeracodeFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalizeReport(input, sourceRepositoryUrl, target, expandedDetails);
-}
-
-/** Reconstruct a saved publication made when only HAL descriptors were admitted. */
-export function normalizePreviousVeracodeFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalizeReport(
-    input,
-    sourceRepositoryUrl,
-    target,
-    (details) => details,
   );
 }
 
