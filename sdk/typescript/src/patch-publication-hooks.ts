@@ -120,8 +120,22 @@ const inputEvent = [
 ].includes(event);
 const messageEvent = event === "prepare-commit-msg" || event === "commit-msg";
 
-function sameFile(left, right) {
-  return left.dev === right.dev && left.ino === right.ino;
+function matchesMessagePath(file, leaf, opened) {
+  if (!leaf.isFile() || leaf.nlink !== 1n || leaf.ino !== opened.ino)
+    return false;
+  if (leaf.dev === opened.dev) return true;
+  // Older Windows libuv reports zero for a path's volume but returns the
+  // volume serial on file handles. Compare both identifiers on that runtime.
+  if (process.platform !== "win32" || leaf.dev !== 0n) return false;
+  const fd = fs.openSync(file, fs.constants.O_RDONLY);
+  try {
+    const named = fs.fstatSync(fd, { bigint: true });
+    return (
+      named.dev === opened.dev && named.ino === opened.ino && named.nlink === 1n
+    );
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 function openMessage(file, flags) {
   const leaf = fs.lstatSync(file, { bigint: true });
@@ -134,7 +148,7 @@ function openMessage(file, flags) {
     flags | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0),
   );
   const stat = fs.fstatSync(fd, { bigint: true });
-  if (!sameFile(leaf, stat) || !stat.isFile() || stat.nlink !== 1n) {
+  if (!stat.isFile() || stat.nlink !== 1n || !matchesMessagePath(file, leaf, stat)) {
     fs.closeSync(fd);
     throw new Error("The commit-message file changed while opening it.");
   }
@@ -144,7 +158,7 @@ function unchanged(file, opened) {
   const current = fs.fstatSync(opened.fd, { bigint: true });
   return (
     current.nlink === 1n &&
-    sameFile(current, fs.lstatSync(file, { bigint: true })) &&
+    matchesMessagePath(file, fs.lstatSync(file, { bigint: true }), current) &&
     current.size === opened.stat.size &&
     // Native Windows sandbox ACL provisioning changes NTFS ChangeTime without
     // changing the original bytes or LastWriteTime.
