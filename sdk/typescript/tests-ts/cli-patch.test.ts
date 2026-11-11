@@ -1272,45 +1272,45 @@ describe("scan and patch workflow", () => {
     }
   });
 
-  test.each([
-    "A long finding title ".repeat(12),
-    "界".repeat(100),
-  ])("keeps a long patch timer on one terminal row: %s", async (title) => {
-    const result = resultWithFindings(["high"]);
-    result.findings.findings[0]!.title = title;
-    const { stderr, runCli } = createCliTest(main, { stderr: true });
+  test.each(["A long finding title ".repeat(12), "界".repeat(100)])(
+    "keeps a long patch timer on one terminal row: %s",
+    async (title) => {
+      const result = resultWithFindings(["high"]);
+      result.findings.findings[0]!.title = title;
+      const { stderr, runCli } = createCliTest(main, { stderr: true });
 
-    Object.assign(stderr.stream, { columns: 36 });
-    let now = 0;
-    const current = patchDependencies({
-      currentDirectory: CURRENT_REPOSITORY,
-      result,
-      onWorkbench: () => savedScan(result),
-      onCodex: (args, output) => {
-        now = 84_000;
-        setIntervalMock.mock.lastCall?.[0]?.();
-        expect(completePatches(args, output)[0]!.title).toBe(title);
-        return 0;
-      },
-    });
-    const setIntervalMock = mock(current.setInterval);
-    current.now = () => now;
-    current.setInterval = setIntervalMock;
-    current.clearInterval = () => {};
+      Object.assign(stderr.stream, { columns: 36 });
+      let now = 0;
+      const current = patchDependencies({
+        currentDirectory: CURRENT_REPOSITORY,
+        result,
+        onWorkbench: () => savedScan(result),
+        onCodex: (args, output) => {
+          now = 84_000;
+          setIntervalMock.mock.lastCall?.[0]?.();
+          expect(completePatches(args, output)[0]!.title).toBe(title);
+          return 0;
+        },
+      });
+      const setIntervalMock = mock(current.setInterval);
+      current.now = () => now;
+      current.setInterval = setIntervalMock;
+      current.clearInterval = () => {};
 
-    expect(await runCli(["patch", "--scan", "scan-1", "--json"], current)).toBe(
-      0,
-    );
+      expect(
+        await runCli(["patch", "--scan", "scan-1", "--json"], current),
+      ).toBe(0);
 
-    const frames = stripVTControlCharacters(stderr.text())
-      .split(/[\r\n]/u)
-      .filter((line) => /^\[\d+:\d+\] Patching/u.test(line));
-    expect(frames).toHaveLength(2);
-    for (const frame of frames) {
-      expect(Bun.stringWidth(frame)).toBeLessThan(36);
-      expect(frame).toEndWith("…");
-    }
-  });
+      const frames = stripVTControlCharacters(stderr.text())
+        .split(/[\r\n]/u)
+        .filter((line) => /^\[\d+:\d+\] Patching/u.test(line));
+      expect(frames).toHaveLength(2);
+      for (const frame of frames) {
+        expect(Bun.stringWidth(frame)).toBeLessThan(36);
+        expect(frame).toEndWith("…");
+      }
+    },
+  );
 
   test("shows each patch and live activity before it finishes, with clean JSON output", async () => {
     for (const args of [
@@ -1510,8 +1510,7 @@ describe("scan and patch workflow", () => {
     "completes required patch output (status %i, failure %p)",
     async (codexStatus, failOutput, expectedStatus) => {
       const { directory } = await createPublicationRepository(repositories);
-      const report =
-        "Synthetic patch report: café → fixed.\n";
+      const report = "Synthetic patch report: café → fixed.\n";
       const started = Promise.withResolvers<(error?: Error) => void>();
       const stdout = new Writable({
         highWaterMark: 1,
