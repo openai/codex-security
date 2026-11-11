@@ -1,48 +1,39 @@
 # Codex Security skills
 
-With the plugin enabled, describe the job in Codex or name a skill directly. For example, `Use $security-diff-scan to check my uncommitted changes for vulnerabilities.` See the [setup instructions and CLI examples](../../../docs/agent-workflows.md).
+With the plugin enabled, you can ask Codex to "check my uncommitted changes for security bugs." To pick the skill yourself, include its name in the request, as in `$security-diff-scan`. [Setup and CLI examples](../../../docs/agent-workflows.md)
 
-## Scan or review code
+## Choosing a scan
 
-| What you want to do                                                                                                                                                       | Skill                                             |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| Scan a repository or folder for vulnerabilities in one pass. Start here for a general audit.                                                                              | [security-scan](security-scan/SKILL.md)           |
-| Check a PR, commit, branch diff, or local edits for vulnerabilities introduced or exposed by the change.                                                                  | [security-diff-scan](security-diff-scan/SKILL.md) |
-| Run several audits of the same repository or folder and get one report combining their findings.                                                                          | [deep-security-scan](deep-security-scan/SKILL.md) |
-| Get a merge recommendation for a saved patch, PR diff, or commit range based on what could break and whether tests would catch it.                                        | [assess-patch-risk](assess-patch-risk/SKILL.md)   |
-| Check a downloaded skill before installing it. From a separate trusted workspace, point Codex to the folder to inspect its instructions and scripts without running them. | [check-skills](check-skills/SKILL.md)             |
+Start with [security-scan](security-scan/SKILL.md) for a one-pass audit of a repo or folder. For a PR, commit, branch diff, or local edits, use [security-diff-scan](security-diff-scan/SKILL.md) to look for vulnerabilities the change introduces or exposes. [deep-security-scan](deep-security-scan/SKILL.md) makes several passes over the same code and combines the findings in one report.
 
-## Set review scope and model threats
+## Before you merge or install something
 
-| What you want to do                                                                                             | Skill                                                     |
-| --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| Write or review `SECURITY.md` to define what a scan should cover and which security rules the code must uphold. | [define-security-policy](define-security-policy/SKILL.md) |
-| Map what a service protects, where it accepts input, and how an attacker could cross a trust boundary.          | [threat-model](threat-model/SKILL.md)                     |
-| Explore an existing threat model as an interactive diagram. You can use the model from the last scan.           | [threat-model-visualize](threat-model-visualize/SKILL.md) |
+- [assess-patch-risk](assess-patch-risk/SKILL.md) takes a patch file, PR diff, or commit range. It explains what could break, whether the tests would catch it, and whether the patch is ready to merge.
+- To check an agent skill before you install it, open Codex in a separate, trusted workspace and point [check-skills](check-skills/SKILL.md) to the downloaded folder. It checks the skill's instructions and scripts without running them.
 
-## Investigate alerts and suspected vulnerabilities
+## Security policy and threat models
 
-| What you want to do                                                                                                     | Skill                                                         |
-| ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| Check a reported issue against the source and security policy. Start with a scanner alert, advisory, report, or ticket. | [triage-finding](triage-finding/SKILL.md)                     |
-| Find out why a flagged package is in your checkout or image and which dependency, if any, needs an upgrade.             | [resolve-dependency-alert](resolve-dependency-alert/SKILL.md) |
-| Look for possible vulnerabilities in a path or diff and identify what still needs proof.                                | [finding-discovery](finding-discovery/SKILL.md)               |
-| Check whether a suspected vulnerability is real by tracing the code or trying to reproduce the bug.                     | [validation](validation/SKILL.md)                             |
-| Trace a finding from attacker input to its impact and explain how severe it is.                                         | [attack-path-analysis](attack-path-analysis/SKILL.md)         |
+Use [define-security-policy](define-security-policy/SKILL.md) to spell out in `SECURITY.md` what reviewers should check and what's out of scope.
 
-## Fix a vulnerability or prevent similar bugs
+[threat-model](threat-model/SKILL.md) maps what the system protects and where an attacker could get in. If you already have a model, [threat-model-visualize](threat-model-visualize/SKILL.md) turns it into a diagram you can explore.
 
-| What you want to do                                                                                                             | Skill                                                             |
-| ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Patch a reported vulnerability and check that the fix blocks the attack while preserving legitimate use.                        | [fix-finding](fix-finding/SKILL.md)                               |
-| Check the original finding against the current checkout after a fix. Get a verdict of fixed, still vulnerable, or inconclusive. | [verify-fix](verify-fix/SKILL.md)                                 |
-| Compare the costs and benefits of design changes that could prevent similar bugs.                                               | [propose-security-hardening](propose-security-hardening/SKILL.md) |
+## Investigating a finding
 
-## Import, read, or share findings
+When a scanner flags a bug, [triage-finding](triage-finding/SKILL.md) checks the alert against your code and security policy. For a flagged package, [resolve-dependency-alert](resolve-dependency-alert/SKILL.md) traces what pulled it into your checkout or image and checks your upgrade options.
 
-| What you want to do                                                                                                                                                                          | Skill                                                   |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Preview a supported scanner report and import its alerts into the local workbench or, for supported inputs, Codex Security Cloud.                                                            | [publish-findings](publish-findings/SKILL.md)           |
-| Open a finding link, read its report, or check the status of a scan in your connected Cloud account.                                                                                         | [cloud-findings](cloud-findings/SKILL.md)               |
-| Turn notes, a proof of concept, or scan findings into a vulnerability report that explains the impact and shows the evidence.                                                                | [vulnerability-writeup](vulnerability-writeup/SKILL.md) |
-| File validated findings in Linear, Jira, GitHub issues, or a draft GitHub security advisory. Supply the completed scan directory and review the proposed tickets or advisory before posting. | [track-findings](track-findings/SKILL.md)               |
+- [finding-discovery](finding-discovery/SKILL.md) looks for possible vulnerabilities in a path or diff and flags what still needs proof.
+- [validation](validation/SKILL.md) checks whether a suspected bug is real by tracing the code or trying to reproduce it.
+- [attack-path-analysis](attack-path-analysis/SKILL.md) traces how an attacker could trigger the bug and what they'd gain.
+
+## Fixing a bug
+
+[fix-finding](fix-finding/SKILL.md) patches a vulnerability and checks that the fix stops the attack and preserves normal use. If there's already a fix, give [verify-fix](verify-fix/SKILL.md) the original finding and the current checkout. It reports whether the fix worked or what evidence is missing.
+
+If the same kind of bug keeps turning up, [propose-security-hardening](propose-security-hardening/SKILL.md) compares design changes that could prevent it.
+
+## Reports and tickets
+
+- [vulnerability-writeup](vulnerability-writeup/SKILL.md) turns notes or a proof of concept into a report explaining the bug, its impact, and the evidence.
+- [publish-findings](publish-findings/SKILL.md) previews alerts from another scanner and imports them into the local workbench. Some formats also support import into Codex Security Cloud.
+- [cloud-findings](cloud-findings/SKILL.md) looks up a finding, report, or scan status in your connected Cloud account. You can paste a finding link.
+- [track-findings](track-findings/SKILL.md) takes validated findings from a completed scan directory and checks for existing tickets. You review any new Linear, Jira, or GitHub issues before it files them. It can also draft a GitHub security advisory.
