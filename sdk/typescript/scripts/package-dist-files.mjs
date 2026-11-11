@@ -1,6 +1,7 @@
 const distModules = [
   "api",
   "accepted-audit",
+  "batch-cost",
   "scan-executor",
   "host-protocol",
   "hosted-remediation",
@@ -80,6 +81,7 @@ const distModules = [
   "config",
   "config-path",
   "contract",
+  "command-words",
   "cost",
   "cost-model",
   "bedrock-pricing",

@@ -392,6 +392,29 @@ test("rerun rejects a blank replacement when scan instructions are required", as
   expect(onConfig).not.toHaveBeenCalled();
 });
 
+test.each(["project", "flag"])(
+  "rejects patching before starting a scan with a %s budget",
+  async (source) => {
+    const input = await fixture({ limits: { max_cost_usd_per_scan: 1 } });
+    const onRun = mock(throwing("unexpected scan"));
+    const onCodex = mock(throwing("unexpected patch"));
+    const stderr = captureCli(main, "stderr");
+    const budget =
+      source === "project" ? ["-c", input.config] : ["--max-cost", "1"];
+    expect(
+      await stderr.run(
+        ["scan", input.repository, "--patch", ...budget, "--json"],
+        dependencies({ onRun, onCodex }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--patch cannot be combined with a scan cost limit",
+    );
+    expect(onRun).not.toHaveBeenCalled();
+    expect(onCodex).not.toHaveBeenCalled();
+  },
+);
+
 test.each(["instructions_file", "validation_file"] as const)(
   "bulk %s retains directory-link protection for local CSV repositories",
   async (file) => {

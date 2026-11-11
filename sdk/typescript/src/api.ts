@@ -391,6 +391,8 @@ const scanLifecycleSchema = z.object({
 export type ScanLifecycle = Readonly<z.infer<typeof scanLifecycleSchema>>;
 
 export interface ScanOptions extends ScanSettings {
+  /** @internal A bounded batch omits unmetered model calls after the scan. */
+  skipFindingMatching?: boolean;
   /** Explicit policy for the initial scan and its workers. */
   severityRubric?: SeverityRubricSnapshot;
   /** Markdown policy file to capture when starting a new scan. */
@@ -4179,11 +4181,9 @@ export class CodexSecurity {
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
           workbench(workbenchOptions, args, input);
-        const previousFindings = await listRepositoryFindings(
-          runWorkbench,
-          targetId,
-          "all",
-        );
+        const previousFindings = options.skipFindingMatching
+          ? undefined
+          : await listRepositoryFindings(runWorkbench, targetId, "all");
         if (previousFindings !== undefined) {
           await matchCompletedScan({
             scanId,
@@ -4206,6 +4206,8 @@ export class CodexSecurity {
               ),
             ...inferenceOptions,
           });
+        }
+        if (previousFindings !== undefined || options.skipFindingMatching) {
           result.repositoryFindings = (await listRepositoryFindings(
             runWorkbench,
             targetId,
