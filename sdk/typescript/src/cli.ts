@@ -78,6 +78,7 @@ import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   capturePatchGitControls,
+  PATCH_LOCAL_GIT_ENVIRONMENT,
   type PatchGitControls,
   ensureWindowsSnapshotConfigReadable,
   withPatchGitIndex,
@@ -1464,6 +1465,7 @@ interface CliDependencies {
       maxBuffer?: number;
       input?: string | Uint8Array;
       patchSnapshot?: readonly string[];
+      patchTransport?: true;
       sandbox?: PatchSnapshotSandbox;
       signal?: AbortSignal;
       onStdout?: (chunk: Buffer) => void;
@@ -2764,6 +2766,9 @@ export async function main(
         );
         options.environment = {
           ...options.environment,
+          ...(options.patchTransport
+            ? { GIT_NO_LAZY_FETCH: "1" }
+            : PATCH_LOCAL_GIT_ENVIRONMENT),
           GIT_CONFIG_COUNT: String(count + 1),
           [`GIT_CONFIG_KEY_${count}`]: "core.fsmonitor",
           [`GIT_CONFIG_VALUE_${count}`]: "false",
@@ -9930,6 +9935,7 @@ async function runPatchTransport(
   const run = (overrides: NodeJS.ProcessEnv = {}) =>
     dependencies.runRepositoryCommand("git", args, repository, {
       ...options,
+      patchTransport: true,
       environment: { ...environment, ...overrides },
     });
   if (!remotes.some((remote) => remote.startsWith("git://"))) return run();

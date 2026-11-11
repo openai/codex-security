@@ -39,9 +39,8 @@ async function repository(prefix: string) {
   return { root, git };
 }
 
-test("patch cannot run a promisor remote while capturing Git controls", async () => {
-  const { root, git } = await repository("patch-promisor-");
-  const support = await fixtures.create("patch-promisor-control-");
+async function configurePromisorHelper(root: string, support: string) {
+  const git = repositoryGit(root);
   const marker = join(support, "ran");
   const helper = join(root, "promisor.cjs");
   await writeFile(
@@ -58,6 +57,13 @@ test("patch cannot run a promisor remote while capturing Git controls", async ()
     "remote.local-helper.url",
     `ext::${word(process.execPath)} ${word(helper)}`,
   );
+  return marker;
+}
+
+test("patch cannot run a promisor remote while capturing Git controls", async () => {
+  const { root, git } = await repository("patch-promisor-");
+  const support = await fixtures.create("patch-promisor-control-");
+  const marker = await configurePromisorHelper(root, support);
   const tree = git("rev-parse", "HEAD^{tree}");
   await rm(join(root, ".git", "objects", tree.slice(0, 2), tree.slice(2)));
   const environment = { GIT_ALLOW_PROTOCOL: "ext", GIT_NO_LAZY_FETCH: "0" };
@@ -93,6 +99,79 @@ test("patch cannot run a promisor remote while capturing Git controls", async ()
   expect(launches).toBe(0);
   await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
 });
+
+test.each(["snapshot", "copy detection"])(
+  "publication %s cannot fetch a missing unchanged blob",
+  async (stage) => {
+    const { root, git } = await repository("patch-promisor-copy-");
+    const support = await fixtures.create("patch-promisor-copy-control-");
+    const origin = join(support, "origin.git");
+    git("init", "--bare", origin);
+    git("remote", "add", "origin", origin);
+    const marker = await configurePromisorHelper(root, support);
+    const original = Array.from(
+      { length: 80 },
+      (_, i) => `unchanged line ${i}\n`,
+    ).join("");
+    await mkdir(join(root, "excluded"));
+    await writeFile(join(root, "excluded/source.txt"), original);
+    git("add", ".");
+    git("commit", "-m", "Synthetic copy candidate");
+    git("sparse-checkout", "set", "--no-cone", "/*", "!/excluded/");
+    const blob = git("rev-parse", "HEAD:excluded/source.txt");
+    const looseObject = join(
+      root,
+      ".git",
+      "objects",
+      blob.slice(0, 2),
+      blob.slice(2),
+    );
+    const before = git("rev-parse", "HEAD");
+    const environment = {
+      GIT_ALLOW_PROTOCOL: "file:ext",
+      GIT_NO_LAZY_FETCH: "0",
+    };
+    if (stage === "snapshot") await rm(looseObject);
+    let copyDiff: readonly string[] | undefined;
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: root,
+        environment,
+        onCodex: async (_args, output) => {
+          await writeFile(join(root, "copy.txt"), original + "new line\n");
+          output?.stdout.write("Fixed and verified.");
+          return 0;
+        },
+        async onRepositoryCommand(command, args, cwd, options) {
+          if (command !== "git") return args[1] === "list" ? "[]" : "";
+          if (args.includes("--find-copies-harder")) {
+            copyDiff = [...args];
+            // Inject object loss exactly after both snapshot trees have been captured.
+            if (stage === "copy detection") await rm(looseObject);
+          }
+          return runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          });
+        },
+      },
+    );
+    if (stage === "copy detection")
+      expect(copyDiff, outcome.stderr).toBeDefined();
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(outcome.exitCode, outcome.stderr).toBe(2);
+    expect(git("rev-parse", "HEAD")).toBe(before);
+    expect(git("ls-remote", origin)).toBe("");
+    // Without the CLI policy these reads really execute the checkout helper.
+    spawnSync("git", copyDiff ?? ["cat-file", "-p", blob], {
+      cwd: root,
+      env: { ...process.env, ...environment },
+      stdio: "ignore",
+    });
+    expect(await readFile(marker, "utf8")).toBe("executed");
+  },
+);
 
 test.each([true, false])(
   "patch checks a nested worktree's reciprocal registration (matches: %p)",
