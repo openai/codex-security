@@ -347,7 +347,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
 }
 
 test("publication keeps mixed valid and missing selected-path errors before branching", async () => {
-  const { directory, git } = await publicationRepository(fixtures);
+  const { directory, remote, git } = await publicationRepository(fixtures);
   const original = git("rev-parse", "HEAD");
   const index = await readFile(join(directory, ".git", "index"));
   const outcome = await runWorkflow(
@@ -389,6 +389,7 @@ test("publication keeps mixed valid and missing selected-path errors before bran
   expect(
     git("for-each-ref", "--format=%(refname)", "refs/heads/codex-security/"),
   ).toBe("");
+  expect(repositoryGit(remote)("for-each-ref", "refs/heads/")).toBe("");
   expect(await readFile(join(directory, ".git", "index"))).toEqual(index);
 });
 
