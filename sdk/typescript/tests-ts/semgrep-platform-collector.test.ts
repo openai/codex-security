@@ -1638,7 +1638,12 @@ test("CLI emits a replayable report for the requested product", async () => {
     rule_name: "example.rule",
   };
   const cli = createCliTest(main);
-  const code = await cli.runCli([...cliArgs, "--source-repository-url", url], {
+  const flags = cliArgs.map((flag) =>
+    flag
+      .replace("--semgrep-deployment", "--deployment")
+      .replace("--semgrep-ref", "--ref"),
+  );
+  const code = await cli.runCli([...flags, "--source-repository-url", url], {
     ...dependencies({ environment }),
     hostedScannerFetch: async (endpoint) =>
       Response.json(

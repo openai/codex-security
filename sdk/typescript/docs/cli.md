@@ -768,16 +768,18 @@ from the config directory; scope paths resolve from the repository.
 ### Import findings as a saved scan
 
 ```bash
-codex-security scan import --csv /path/to/findings.csv
-codex-security scan import --json /path/to/findings.json --format json
-codex-security scan import --csv /path/to/findings.csv --dry-run
+codex-security scan import /path/to/findings.csv
+codex-security scan import /path/to/findings.json --json
+codex-security scan import /path/to/report --input-format csv --dry-run
 ```
 
 Supply exactly one input. CSV follows the
 [findings template](https://github.com/openai/codex-security/blob/main/examples/findings.csv).
 JSON accepts a complete `codex-security.findings` document or
-`{ "findings": [...] }` matching the findings schema. For this command, `--json`
-selects the input file; use `--format json` for JSON output. The input must be a
+`{ "findings": [...] }` matching the findings schema. The CLI infers the format from a `.csv` or `.json` suffix.
+Use `--input-format csv|json` to override it. Put `--json` after the filename
+to request JSON output. Existing scripts using `--csv FILE` or `--json FILE`
+can continue to select the input that way. The input must be a
 regular file with no symlinks or directory junctions in its path.
 
 Each import creates a completed scan in local history, retains the input under
@@ -1561,7 +1563,7 @@ SARIF compatibility, and the local preview.
 
 ## Import SonarQube Cloud issues
 
-`import sonar --dry-run` writes a private capture and returns its path. Preview
+`import sonar --dry-run` writes a private evidence copy for both live and saved inputs and returns its path. Preview
 that capture for the intended destination before confirming. A Cloud confirmation
 saves the issues locally and publishes them. Use `--full-output` with
 `--format json` or `--format jsonl` for a structured result.
@@ -1774,8 +1776,8 @@ A dedicated login using automatic storage can publish if Codex Security
 recorded the native file fallback. An unverified file can belong to another
 account, so Cloud publication requires an explicit file store for an ambient login.
 
-Use a positional scan directory or repeated `--scan-dir PATH` for artifacts
-outside history. Each must contain one completed sealed scan, not a bulk-run
+Use `publish scan DIR --to cloud` for one directory outside history. For
+multiple directories, repeat `--scan-dir PATH`. Each must contain one completed sealed scan, not a bulk-run
 directory or `results.jsonl`. Do not mix directories with `--scan`.
 Cloud also accepts exported CSV:
 
@@ -1823,7 +1825,7 @@ codex-security publish check /path/to/completed-scan \
   --linear-team TEAM_ID --json
 ```
 
-`publish check` defaults to `--to linear`. It verifies artifacts and recorded publications. With an API key,
+`publish check` verifies scan artifacts and recorded Linear publications. With an API key,
 it also checks authentication and destination access. It does not test issue
 creation; connected-app access is reported as `not-checked`.
 
@@ -2290,6 +2292,10 @@ must already exist.
 
 SARIF is the default format, and `./results.sarif` is the default output path.
 Use `--export-format json` or `--export-format csv` to choose another format.
+An existing default output file is preserved. Pass `--output FILE` to choose
+a filename or explicitly replace it. Use `--output -` to pipe the complete
+artifact. Response filters, token controls, and `--full-output` require a
+command that returns a formatted response.
 To select a saved scan by its ID and export JSON, run:
 
 ```bash

@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock } from "bun:test";
+import { runArtifactExport } from "../src/artifact-export.js";
 import { exportEnvironment, main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import {
@@ -103,30 +104,27 @@ describe("CLI", () => {
         ["sarif", '{"version":"2.1.0"}\n'],
         ["md", "# Synthetic threat model\n"],
       ] as const) {
-        for (const metadata of [[], ["--full-output"], ["--token-count"]]) {
-          const { stdout, stderr, runCli } = createCliTest(main);
+        const { stdout, stderr, runCli } = createCliTest(main);
 
-          const deps = dependencies();
-          deps.createSecurity = mustNotInitializeCodex;
-          deps.exportFindings = async () => Buffer.from(expected);
-          expect(
-            await runCli(
-              [
-                "export",
-                "scan",
-                "--export-format",
-                format,
-                "--output",
-                "-",
-                ...(format === "md" ? ["--artifact", "threat-model"] : []),
-                ...metadata,
-              ],
-              deps,
-            ),
-          ).toBe(0);
-          expect(stdout.text()).toBe(expected);
-          expect(stderr.text()).toBe("");
-        }
+        const deps = dependencies();
+        deps.createSecurity = mustNotInitializeCodex;
+        deps.exportFindings = async () => Buffer.from(expected);
+        expect(
+          await runCli(
+            [
+              "export",
+              "scan",
+              "--export-format",
+              format,
+              "--output",
+              "-",
+              ...(format === "md" ? ["--artifact", "threat-model"] : []),
+            ],
+            deps,
+          ),
+        ).toBe(0);
+        expect(stdout.text()).toBe(expected);
+        expect(stderr.text()).toBe("");
       }
       const failure = dependencies();
       failure.exportFindings = async () => {
@@ -170,6 +168,58 @@ describe("CLI", () => {
       else process.env["XDG_DATA_HOME"] = previousDataHome;
       await rm(dataHome, { recursive: true, force: true });
     }
+  });
+
+  test.each(
+    [
+      ["--full-output"],
+      ["--filter-output", "findings"],
+      ["--token-count"],
+      ["--token-limit", "1"],
+      ["--token-offset", "1"],
+      ["--format", "jsonl"],
+    ].map((flags) => ({ flags })),
+  )(
+    "refuses $flags on raw artifact stdout before exporting",
+    async ({ flags }) => {
+      const cli = createCliTest(main);
+      const deps = dependencies();
+      deps.exportFindings = mock(async () => Buffer.from("unexpected"));
+      expect(
+        await cli.runCli(["export", "scan", "--output", "-", ...flags], deps),
+      ).toBe(2);
+      expect(cli.stdout.text()).toBe("");
+      expect(cli.stderr.text()).toContain(flags[0]!);
+      expect(deps.exportFindings).not.toHaveBeenCalled();
+    },
+  );
+
+  test("atomically preserves the default file and explicitly replaces a requested output", async () => {
+    const directory = await temporaryDirectory("export-no-clobber-");
+    const scan = await copyCompletedScan(directory);
+    const deps = {
+      ...dependencies({ currentDirectory: directory }),
+      exportFindings: runArtifactExport,
+    };
+    const args = ["export", scan, "--export-format", "json"];
+    const [first, second] = await Promise.all([
+      runCapturedCli(main, args, deps),
+      runCapturedCli(main, args, deps),
+    ]);
+    expect([first, second].sort()).toEqual([0, 2]);
+    const path = join(directory, "findings.json");
+    const artifact = await readFile(path, "utf8");
+    await writeFile(path, "my report");
+    const refused = createCliTest(main);
+    expect(await refused.runCli(args, deps)).toBe(2);
+    expect(refused.stderr.text()).toContain(
+      "already exists. Use --output FILE",
+    );
+    expect(await readFile(path, "utf8")).toBe("my report");
+    expect(await runCapturedCli(main, [...args, "--output", path], deps)).toBe(
+      0,
+    );
+    expect(await readFile(path, "utf8")).toBe(artifact);
   });
 
   test("exports the latest completed scan when no directory is provided", async () => {

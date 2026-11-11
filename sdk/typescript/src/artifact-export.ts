@@ -45,6 +45,7 @@ export interface ArtifactExportArguments {
   pythonPath?: string;
   signal?: AbortSignal;
   includeMetadata?: boolean;
+  noClobber?: boolean;
 }
 
 export type ExportArtifactOptions = {
@@ -237,6 +238,7 @@ export async function runArtifactExport(
         ? []
         : ["--source-root", arguments_.sourceRoot]),
       ...(arguments_.includeMetadata ? ["--export-metadata"] : []),
+      ...(arguments_.noClobber ? ["--no-clobber"] : []),
     ],
     {
       pythonPath: arguments_.pythonPath,
