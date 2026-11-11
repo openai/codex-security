@@ -23,6 +23,7 @@ describe("GitLab patch destinations", () => {
         "fork HTTPS",
         "fork SSH",
         "self-managed SSH alias fork",
+        "self-managed IPv6 SSH alias fork",
         "same project",
         "local fetch",
         "different port mirror",
@@ -59,9 +60,11 @@ describe("GitLab patch destinations", () => {
     async ({ mode, resume }) => {
       const { directory, git, remote } = await publicationRepository(fixtures);
       const portCase = mode.includes("port");
-      const alias = mode === "self-managed SSH alias fork";
-      const host =
-        mode === "self-managed fork" || alias || portCase
+      const alias = mode.endsWith("SSH alias fork");
+      const ipv6 = mode === "self-managed IPv6 SSH alias fork";
+      const host = ipv6
+        ? "[2001:db8::1]"
+        : mode === "self-managed fork" || alias || portCase
           ? "gitlab.example.test"
           : "gitlab.com";
       const sshScheme =
@@ -132,7 +135,7 @@ describe("GitLab patch destinations", () => {
       if (sshConfig)
         await writeFile(
           sshConfig,
-          "Host gitlab-work\n  Hostname gitlab.example.test\n",
+          `Host gitlab-work\n  Hostname ${ipv6 ? "2001:0db8:0:0:0:0:0:1" : host}\n`,
         );
       const sourceId = sameProject ? 11 : 22;
       const targetId = localFetch || mirror ? sourceId : 11;

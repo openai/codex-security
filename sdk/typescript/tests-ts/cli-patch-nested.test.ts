@@ -1171,18 +1171,31 @@ describe("patch change tracking", () => {
       },
       onCodex: async (_args, output) => {
         await mkdir(join(nested, "outside"), { recursive: true });
+        await rm(join(nested, "included/app"));
+        await writeFile(join(nested, "included/new"), "included\n");
         await writeFile(join(nested, "outside/edited"), "modified\n");
+        await writeFile(join(nested, "outside/new"), "added\n");
         output!.stdout.write("Fixed child file.");
         return 0;
       },
     });
     expect(run.exitCode, run.stderr).toBe(0);
-    expect(JSON.parse(run.stdout).files).toEqual(["nested/outside/edited"]);
+    expect(JSON.parse(run.stdout).files).toEqual([
+      "nested/included/app",
+      "nested/included/new",
+      "nested/outside/edited",
+      "nested/outside/new",
+    ]);
     expect(nestedTrees.length).toBeGreaterThanOrEqual(2);
     for (const tree of nestedTrees)
       expect(inner("ls-tree", tree, "outside/absent")).toContain(
         "outside/absent",
       );
+    const finalTree = nestedTrees.at(-1)!;
+    expect(inner("ls-tree", finalTree, "included/app")).toBe("");
+    expect(inner("show", finalTree + ":included/new")).toBe("included");
+    expect(inner("show", finalTree + ":outside/edited")).toBe("modified");
+    expect(inner("show", finalTree + ":outside/new")).toBe("added");
   });
 
   test.each(["root", "package"])(

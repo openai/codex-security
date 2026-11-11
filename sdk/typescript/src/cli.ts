@@ -10728,8 +10728,10 @@ async function patchPublicationDestination(
       !isSshPatchRemote(url)
     )
       return url;
-    const effective = await patchSshHostname(url, run, getSshCommand);
-    if (effective.toLowerCase() !== configuredHost) return url;
+    const effective = patchUrlHostname(
+      await patchSshHostname(url, run, getSshCommand),
+    );
+    if (effective !== configuredHost) return url;
     const project = new URL(gitlabPatchRepository(url));
     project.hostname = effective;
     return project.href;
@@ -11997,14 +11999,19 @@ async function publishPatchBranch(
   }
 }
 
-function patchApiHostname(hostname: string): string {
-  const host = hostname
-    .toLowerCase()
-    .replace(/^(?:www|ssh)\.(github\.com)$/u, "$1");
+function patchUrlHostname(hostname: string): string {
+  const host = hostname.toLowerCase();
   const address = host.replace(/^\[|\]$/gu, "");
   return isIP(address) === 6 && !address.includes("%")
     ? new URL(`ssh://[${address}]`).hostname
     : host;
+}
+
+function patchApiHostname(hostname: string): string {
+  return patchUrlHostname(hostname).replace(
+    /^(?:www|ssh)\.(github\.com)$/u,
+    "$1",
+  );
 }
 
 function patchScpRemote(remote: string) {
@@ -13622,8 +13629,7 @@ async function snapshotPatchTree(
         },
       ),
     async (run) => {
-      await run(["add", "--all", ...sourcePathspecs]);
-      const sparse = await run(
+      const sparseSetting = await run(
         [
           "config",
           "--bool",
@@ -13634,7 +13640,11 @@ async function snapshotPatchTree(
         ],
         { environment: { GIT_CONFIG: undefined } },
       );
-      if (sparse.trim() === "true") {
+      const sparse = sparseSetting.trim() === "true";
+      // In a sparse checkout Git refuses a full add if an untracked path
+      // exists outside the cone. Stage new files through the inventory below.
+      await run(["add", sparse ? "--update" : "--all", ...sourcePathspecs]);
+      if (sparse) {
         // A sparse private index must retain absent out-of-cone entries, but
         // also capture tracked or new files the turn materialized outside it.
         const inventory = async (args: readonly string[]) =>

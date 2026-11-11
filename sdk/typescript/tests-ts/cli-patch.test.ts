@@ -1256,7 +1256,7 @@ describe("scan and patch workflow", () => {
         const currentDirectory = join(directory, "current");
         const repository = join(directory, "other", "repository");
         await mkdir(currentDirectory);
-        await mkdir(repository, { recursive: true });
+        await mkdir(join(repository, "src"), { recursive: true });
         const result = resultWithFindings([
           "critical",
           "high",
@@ -1287,19 +1287,25 @@ describe("scan and patch workflow", () => {
           {
             currentDirectory,
             result,
-            onCodex: (args, output) => {
+            onCodex: async (args, output) => {
               invocations.push({
                 args,
                 directory: output?.appServer?.directory,
                 prompt: output?.appServer?.prompt,
               });
-              patched.push(...completePatches(args, output));
+              const findings = completePatches(args, output);
+              for (const finding of findings)
+                await writeFile(
+                  join(repository, finding.locations[0]!.path),
+                  "fixed\n",
+                );
+              patched.push(...findings);
               return 0;
             },
           },
         );
 
-        expect(outcome.exitCode).toBe(0);
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
         expect(patched.map(({ occurrenceId }) => occurrenceId)).toEqual([
           "occ_1",
           "occ_2",
