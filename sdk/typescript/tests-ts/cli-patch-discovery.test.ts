@@ -39,6 +39,61 @@ async function repository(prefix: string) {
   return { root, git };
 }
 
+test("patch cannot run a promisor remote while capturing Git controls", async () => {
+  const { root, git } = await repository("patch-promisor-");
+  const support = await fixtures.create("patch-promisor-control-");
+  const marker = join(support, "ran");
+  const helper = join(root, "promisor.cjs");
+  await writeFile(
+    helper,
+    `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "executed"); process.exit(1);`,
+  );
+  git("config", "extensions.partialClone", "local-helper");
+  git("config", "remote.local-helper.promisor", "true");
+  git("config", "protocol.ext.allow", "always");
+  const word = (value: string) =>
+    value.replaceAll("\\", "/").replaceAll("%", "%%").replaceAll(" ", "% ");
+  git(
+    "config",
+    "remote.local-helper.url",
+    `ext::${word(process.execPath)} ${word(helper)}`,
+  );
+  const tree = git("rev-parse", "HEAD^{tree}");
+  await rm(join(root, ".git", "objects", tree.slice(0, 2), tree.slice(2)));
+  const environment = { GIT_ALLOW_PROTOCOL: "ext", GIT_NO_LAZY_FETCH: "0" };
+  // Verify that this Git and fixture really execute the checkout-selected helper.
+  const probe = spawnSync("git", ["read-tree", "HEAD"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      ...environment,
+      GIT_INDEX_FILE: join(support, "probe-index"),
+    },
+    stdio: "ignore",
+  });
+  expect(probe.status).not.toBe(0);
+  expect(await readFile(marker, "utf8")).toBe("executed");
+  await rm(marker);
+  let launches = 0;
+  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+    currentDirectory: root,
+    environment,
+    onRepositoryCommand(command, args, cwd, options) {
+      return runGitRepositoryCommand(command, args, cwd, {
+        ...options,
+        environment: { ...environment, ...options?.environment },
+      });
+    },
+    onCodex: async () => {
+      launches++;
+      return 0;
+    },
+  });
+  expect(outcome.exitCode).toBe(2);
+  expect(launches).toBe(0);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 test.each([true, false])(
   "patch checks a nested worktree's reciprocal registration (matches: %p)",
   async (matches) => {
