@@ -15,9 +15,10 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { strToU8, zipSync } from "fflate";
@@ -1512,6 +1513,23 @@ test.each([
       postScanPrompt: "Run these exact saved post-scan instructions.\n",
     };
     const f = await interruptedScan("deep", bulk, settings, true);
+    const sourceTools = join(f.root, "source", "bin");
+    const operatorTools = await temporaryDirectory();
+    await mkdir(sourceTools, { recursive: true });
+    const gitMarker = join(f.root, "git-ran");
+    const searchPaths = [sourceTools, operatorTools];
+    if (bulk && process.platform !== "win32") {
+      const sourceGit = join(sourceTools, "git");
+      await writeFile(
+        sourceGit,
+        `#!/bin/sh\nprintf called > "${gitMarker}"\nexit 72\n`,
+        { mode: 0o700 },
+      );
+      const aliases = await temporaryDirectory();
+      await symlink(sourceGit, join(aliases, "git"));
+      searchPaths.unshift(aliases);
+    }
+    f.environment.PATH = [...searchPaths, f.environment.PATH].join(delimiter);
     f.environment.OPENAI_API_KEY = "synthetic-resume-key";
     const ambientHome = join(f.root, "ambient-codex-home");
     f.environment.CODEX_HOME = ambientHome;
@@ -1531,6 +1549,9 @@ test.each([
         : ["scans", "resume", f.scanId, "--json"],
       resumeDependencies(f, (options) => {
         expect(options.config).toMatchObject(selected);
+        const workerPath = options.env?.["PATH"]?.split(delimiter);
+        expect(workerPath).toContain(operatorTools);
+        expect(workerPath?.includes(sourceTools)).toBe(!bulk);
         expect(options.env?.["CODEX_SAFETY_IDENTIFIER"]).toBe(
           settings.safetyIdentifier,
         );
@@ -1613,6 +1634,7 @@ test.each([
         };
       }),
     );
+    expect(await Bun.file(gitMarker).exists()).toBe(false);
     expect(code, stderr.text()).toBe(0);
     expect(prompts, stderr.text()).toHaveLength(2);
     expect(prompts[1]).toBe(settings.postScanPrompt);

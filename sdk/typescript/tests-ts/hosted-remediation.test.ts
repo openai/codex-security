@@ -391,10 +391,15 @@ test.each(["patch", "verify-fix"])(
     const input = new PassThrough();
     const stdout = capture();
     const stderr = capture();
-    const completed = main([command, "--host"], stdout.stream, stderr.stream, {
-      ...dependencies(),
-      recordsInput: input,
-    });
+    const completed = main(
+      [command, "--host=true"],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies(),
+        recordsInput: input,
+      },
+    );
     input.write(
       JSON.stringify({
         jsonrpc: "2.0",
@@ -414,7 +419,6 @@ test.each(["patch", "verify-fix"])(
 );
 
 test.each([
-  { args: ["patch", "--host=true"] },
   { args: ["patch", "--host", "--create-pr"] },
   { args: ["verify-fix", "finding.md", "--host"] },
 ])("hosted remediation rejects mixed arguments $args", async ({ args }) => {

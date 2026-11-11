@@ -2,6 +2,36 @@ import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join } from "node:path";
 import { PluginBootstrapError } from "./errors.js";
+import { campaignExecutable } from "./trusted-executable.js";
+
+export function definedEnvironment(
+  environment: Readonly<NodeJS.ProcessEnv>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+}
+
+/** Bind the native launch after the packaged SDK tools have been added to PATH. */
+export async function nativeCodexLaunch(
+  command: string,
+  inherited?: Record<string, string>,
+) {
+  const environment =
+    inherited && bundledCodexSdkEnvironment(command, inherited);
+  const campaign = campaignExecutable(command, environment ?? process.env);
+  if (!campaign) return { command, environment };
+  const selected = await campaign;
+  return {
+    command: selected.executable,
+    environment: definedEnvironment({
+      ...selected.environment,
+      CODEX_CLI_PATH: selected.executable,
+    }),
+  };
+}
 
 export function bundledCodexSdkEnvironment(
   command: string,

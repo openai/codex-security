@@ -255,7 +255,10 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 
 def connect(
-    *, deferred: bool = False, discovery_roots: tuple[Path, ...] = ()
+    *,
+    deferred: bool = False,
+    discovery_roots: tuple[Path, ...] = (),
+    in_memory: bool = False,
 ) -> sqlite3.Connection:
     """Open the workbench SQLite database and bring its schema up to date.
 
@@ -264,6 +267,7 @@ def connect(
             Retries after lock contention use an immediate transaction.
 
         discovery_roots: Additional local paths for bounded target discovery.
+        in_memory: Keep a fresh profile read entirely in memory.
 
     Returns:
         sqlite3.Connection: A caller-owned connection with named rows, foreign
@@ -280,13 +284,14 @@ def connect(
         "the scanned repository."
     )
     try:
-        create_private_directory(path.parent)
+        if not in_memory:
+            create_private_directory(path.parent)
     except OSError:
         print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
-            connection = sqlite3.connect(path, timeout=5)
+            connection = sqlite3.connect(":memory:" if in_memory else path, timeout=5)
         except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
@@ -299,7 +304,8 @@ def connect(
                 connection, immediate=not deferred or attempt > 0, discovery_roots=discovery_roots
             )
             connection.execute("PRAGMA journal_mode = WAL")
-            path.chmod(0o600)
+            if not in_memory:
+                path.chmod(0o600)
             return connection
         except sqlite3.OperationalError as exc:
             connection.close()
@@ -3337,6 +3343,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                     "update-progress",
                 },
                 discovery_roots=command_targets,
+                in_memory=scan_history.reads_missing_history(args, database_path()),
             )
         ) as connection,
         scoped_git_discovery(

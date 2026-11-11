@@ -1550,6 +1550,7 @@ with ExitStack() as stack:
             "foldedLegacyScopesEqual": originals["scope-upper"] == originals["scope-lower"],
             "currentScopesDistinct": first["scope-upper"] != first["scope-lower"],
             "targetCount": len(first),
+            "expectedMigrations": [version for version, _, _ in MIGRATIONS],
             "migrations": [row["version"] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")],
         }))
 `;
@@ -2011,9 +2012,7 @@ test.each(["migration", "migration-recorded31"])(
     expect(result["foldedLegacyScopesEqual"]).toBe(true);
     expect(result["currentScopesDistinct"]).toBe(true);
     expect(result["targetCount"]).toBe(12);
-    expect(result["migrations"]).toEqual(
-      Array.from({ length: 71 }, (_, index) => index + 1),
-    );
+    expect(result["migrations"]).toEqual(result["expectedMigrations"]);
   },
 );
 

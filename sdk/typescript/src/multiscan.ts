@@ -45,7 +45,7 @@ import {
   readKnowledgeBaseSnapshot,
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
-import { resolveScanPrompts } from "./prompt-files.js";
+import { type DocumentRoots, resolveScanPrompts } from "./prompt-files.js";
 import {
   canonicalConfigPath,
   createWindowsOutputDirectory,
@@ -56,6 +56,9 @@ import {
 } from "./runtime.js";
 import {
   DiffTarget,
+  gitOutput,
+  gitProtectionRoots,
+  nullIfMissingPath,
   UNSUPPORTED_GIT_ENVIRONMENT,
   resolveTargetPath,
   type ScanMode,
@@ -67,7 +70,10 @@ import {
 } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  withProtectedExecutableRoots,
+} from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const CHECKOUT_MARKER = ".git/codex-security-campaign-attempt";
@@ -196,28 +202,29 @@ export async function runMultiscan(
       "Bulk scans do not support diff or working-tree scopes because their checkouts are clean, shallow snapshots. Use repository or path scopes instead.",
     );
   }
-  const repositories: string[] = [];
-  if (
-    [
-      [options.scanPrompt, options.scanPromptFile],
-      [options.validationPrompt, options.validationPromptFile],
-      [options.postScanPrompt, options.postScanPromptFile],
-    ].some(([inline, file]) => inline === undefined && file !== undefined)
-  ) {
-    for (const repository of new Set(tasks.map((task) => task.repository))) {
-      if (!isAbsolute(repository)) continue;
-      try {
-        repositories.push(await realpath(repository));
-      } catch (error) {
-        // Missing sources retain the campaign's per-repository failure behavior.
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
-      }
-    }
-  }
-  // Shared inputs use actual local CSV sources as directory-link boundaries,
-  // not the invocation directory, and are read once before any scan starts.
-  const prompts = await resolveScanPrompts(options, repositories);
+  // Direct input paths need no source discovery. Prompts and knowledge share the result.
+  let pendingRoots: Promise<DocumentRoots> | undefined;
+  const documentRoots = () =>
+    (pendingRoots ??= bulkDocumentRoots(tasks, options.signal));
+  const requestedOutput = resolve(options.outputDir);
+  const localSources = [
+    ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
+  ];
+  const worktrees = await Promise.all(
+    localSources.map((source) => gitProtectionRoots(source, options.signal)),
+  );
+  const executableRoots = (output: string) => [
+    ...localSources,
+    ...worktrees.flat(),
+    join(output, "checkouts"),
+    join(output, "recovery-checkouts"),
+  ];
+  const prompts = await resolveScanPrompts(options, () =>
+    withProtectedExecutableRoots(
+      executableRoots(requestedOutput),
+      documentRoots,
+    ),
+  );
   const resolvedOptions: MultiscanOptions = {
     ...options,
     ...prompts,
@@ -237,7 +244,6 @@ export async function runMultiscan(
   ) {
     throw new Error("Custom validation is not supported for Deep scans.");
   }
-  const requestedOutput = resolve(options.outputDir);
   if (options.recoverScan !== undefined) {
     const manifest = await lstat(join(requestedOutput, "manifest.json")).catch(
       undefinedIfMissingFile,
@@ -262,11 +268,16 @@ export async function runMultiscan(
       );
     })());
   try {
-    const result = await runCampaign(
-      resolvedOptions,
-      tasks,
-      output,
-      resumePluginRoot,
+    const result = await withProtectedExecutableRoots(
+      executableRoots(output),
+      () =>
+        runCampaign(
+          resolvedOptions,
+          tasks,
+          output,
+          resumePluginRoot,
+          documentRoots,
+        ),
     );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
@@ -281,25 +292,68 @@ export async function runMultiscan(
   }
 }
 
+async function bulkDocumentRoots(
+  tasks: readonly MultiscanTask[],
+  signal?: AbortSignal,
+): Promise<DocumentRoots> {
+  const roots: string[] = [];
+  for (const repository of new Set(tasks.map((task) => task.repository))) {
+    if (!isAbsolute(repository)) continue;
+    const source = await realpath(repository).catch(nullIfMissingPath);
+    if (source === null) {
+      // Git also accepts an omitted .git suffix; wholly missing rows fail at checkout.
+      if (await lstat(repository + ".git").catch(nullIfMissingPath))
+        return null;
+      continue;
+    }
+    // Only an ordinary worktree and its own .git directory share one boundary.
+    const marker = await lstat(join(source, ".git")).catch(nullIfMissingPath);
+    if (!marker?.isDirectory()) return null;
+    const layout = await gitOutput(
+      source,
+      [
+        "rev-parse",
+        "--path-format=relative",
+        "--show-toplevel",
+        "--git-common-dir",
+      ],
+      signal,
+      undefined,
+      source,
+      "utf8",
+      process.cwd(),
+    ).catch(() => null);
+    signal?.throwIfAborted();
+    if (layout !== "./\n.git" && layout !== "./\r\n.git") return null;
+    roots.push(source);
+  }
+  return roots;
+}
+
 async function runCampaign(
   options: MultiscanOptions,
   tasks: MultiscanTask[],
   output: string,
   resumePluginRoot: () => Promise<string>,
+  documentRoots: () => Promise<DocumentRoots>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   const knowledgeByMode: MultiscanKnowledge = {};
   const sharedKnowledge = options.knowledgeBasePaths?.length
-    ? readKnowledgeBaseSnapshot(options.knowledgeBasePaths, options.signal)
+    ? readKnowledgeBaseSnapshot(
+        options.knowledgeBasePaths,
+        options.signal,
+        documentRoots,
+      )
     : undefined;
   for (const mode of new Set(tasks.map((task) => task.mode))) {
     try {
       const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
       const snapshot = await (sharedKnowledge ??
         (paths?.length
-          ? readKnowledgeBaseSnapshot(paths, options.signal)
+          ? readKnowledgeBaseSnapshot(paths, options.signal, documentRoots)
           : undefined));
       if (snapshot !== undefined) knowledgeByMode[mode] = { snapshot };
     } catch (error) {
