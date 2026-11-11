@@ -4192,6 +4192,10 @@ export async function main(
               exitCode,
             });
           }
+          if (options.sourceRepositoryUrl !== undefined)
+            writeDiagnostic(
+              "codex-security: warning: Use --source-repository-url only after verifying that every finding belongs to the repository you specify.\n",
+            );
           const controller = new AbortController();
           const removeSignals = listenForAbort(dependencies, controller);
           const structured = formatExplicit && format !== "toon";
