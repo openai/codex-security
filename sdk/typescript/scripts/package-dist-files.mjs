@@ -10,6 +10,7 @@ const distModules = [
   "artifact-export",
   "auth",
   "bulk-scan-discovery",
+  "bundled-plugin",
   "cli",
   "cli-argument",
   "cli-daybreak",
