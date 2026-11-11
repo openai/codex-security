@@ -15,6 +15,7 @@ import {
 import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
 
+import { isUtf8 } from "node:buffer";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { errorMonitor } from "node:events";
@@ -40,6 +41,7 @@ import {
   readlink,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { isIP } from "node:net";
@@ -1611,6 +1613,14 @@ interface PatchRiskAssessment extends PatchRiskReport {
 }
 
 interface CliDependencies {
+  sparsePatchSnapshots?: Map<
+    string,
+    {
+      observed: Map<string, string | undefined>;
+      indexStamp: string | undefined;
+      indexDigest: string;
+    }
+  >;
   createSecurity(
     config: CodexSecurityConfig,
     onDeepScanDiagnostic?: (event: DeepScanDiagnostic) => void,
@@ -3049,6 +3059,7 @@ export async function main(
   let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
+    sparsePatchSnapshots: new Map(),
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
         const appServer = output.appServer;
@@ -13568,6 +13579,36 @@ async function assessPatchRisk(
   }
 }
 
+function sparseIndexEntries(output: string): Map<string, string> {
+  const entries = new Map<string, string>();
+  let previous: { path: string; header: string } | undefined;
+  // Git prints each byte path terminated by NUL, followed by its index metadata.
+  // Keep that metadata opaque. A subsequent tagged stage header starts a new line.
+  const blocks = Buffer.from(output, "base64").toString("latin1").split("\0");
+  for (const [index, block] of blocks.entries()) {
+    const header = /(?:^|\n)([A-Z] [0-7]{6} [0-9a-f]+ [0-3])\t/u.exec(block);
+    if (previous) {
+      const end = header?.index ?? block.length;
+      entries.set(
+        previous.path,
+        previous.header + "\0" + block.slice(0, end).trimEnd(),
+      );
+    }
+    if (!header) {
+      if (index + 1 !== blocks.length)
+        throw new CodexSecurityError(
+          "Cannot read the sparse checkout index entry.",
+        );
+      break;
+    }
+    previous = {
+      header: header[1]!,
+      path: block.slice(header.index + header[0].length),
+    };
+  }
+  return entries;
+}
+
 async function snapshotPatchTree(
   repository: string,
   dependencies: CliDependencies,
@@ -13598,36 +13639,42 @@ async function snapshotPatchTree(
       },
     )
   ).replace(/\n$/u, "");
-  return withPatchGitIndex(
-    (args, options) =>
-      dependencies.runRepositoryCommand(
-        "git",
-        commandRoot === repository ? args : ["-C", repository, ...args],
-        commandRoot,
-        {
-          trim: false,
-          maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
-          encoding: options?.encoding,
-          input: options?.input,
-          // Keep filters within the patch workspace while allowing snapshot outputs.
-          patchSnapshot: [
-            objects,
-            ...(options?.indexFile === undefined
-              ? []
-              : [dirname(options.indexFile)]),
-          ],
-          environment: {
-            ...options?.environment,
-            GIT_LITERAL_PATHSPECS: "0",
-            ...(commandRoot === repository
-              ? {}
-              : { ...NESTED_PATCH_GIT_ENVIRONMENT, GIT_INDEX_FILE: undefined }),
-            ...(options?.indexFile === undefined
-              ? {}
-              : { GIT_INDEX_FILE: options.indexFile }),
-          },
+  const workingIndex: Parameters<typeof withPatchGitIndex>[0] = (
+    args,
+    options,
+  ) =>
+    dependencies.runRepositoryCommand(
+      "git",
+      commandRoot === repository ? args : ["-C", repository, ...args],
+      commandRoot,
+      {
+        trim: false,
+        maxBuffer: options?.indexFile === undefined ? Infinity : undefined,
+        encoding: options?.encoding,
+        input: options?.input,
+        // Keep filters within the patch workspace while allowing snapshot outputs.
+        patchSnapshot: [
+          objects,
+          ...(options?.indexFile === undefined
+            ? []
+            : [dirname(options.indexFile)]),
+        ],
+        environment: {
+          ...options?.environment,
+          GIT_LITERAL_PATHSPECS: "0",
+          // A private add can otherwise refresh a nested checkout's real index.
+          GIT_OPTIONAL_LOCKS: "0",
+          ...(commandRoot === repository
+            ? {}
+            : { ...NESTED_PATCH_GIT_ENVIRONMENT, GIT_INDEX_FILE: undefined }),
+          ...(options?.indexFile === undefined
+            ? {}
+            : { GIT_INDEX_FILE: options.indexFile }),
         },
-      ),
+      },
+    );
+  return withPatchGitIndex(
+    workingIndex,
     async (run) => {
       const sparseSetting = await run(
         [
@@ -13657,8 +13704,11 @@ async function snapshotPatchTree(
             .toString("latin1")
             .split("\0")
             .filter(Boolean);
-        const present = await inventory([
+        const entries = await inventory([
           "ls-files",
+          "-t",
+          "--stage",
+          "--cached",
           "--full-name",
           "--others",
           "--exclude-standard",
@@ -13670,16 +13720,86 @@ async function snapshotPatchTree(
           "--no-relative",
           "--ignore-submodules=all",
         ]);
-        for (let i = 0; i + 1 < tracked.length; i += 2) {
-          // Keep absent sparse entries and let the existing nested checkout
-          // traversal validate gitlinks before reading their working trees.
-          if (
-            !tracked[i]!.startsWith(":160000 ") &&
-            !tracked[i]!.endsWith(" D")
-          )
-            present.push(tracked[i + 1]!);
+        const checkout = `${await realpath(repository)}\0${objects}`;
+        const previous = dependencies.sparsePatchSnapshots?.get(checkout);
+        const indexOutput = await workingIndex(
+          [
+            "-c",
+            "core.sparseCheckout=false",
+            "ls-files",
+            "-t",
+            "--stage",
+            "--debug",
+            "--full-name",
+            "-z",
+            ...sourcePathspecs,
+          ],
+          { encoding: "base64" },
+        );
+        const indexEntries = sparseIndexEntries(indexOutput);
+        const indexDigest = createHash("sha256")
+          .update(indexOutput)
+          .digest("hex");
+        const indexPath = (
+          await workingIndex([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+          ])
+        ).replace(/\n$/u, "");
+        const indexStamp = await stat(indexPath, { bigint: true }).then(
+          (entry) =>
+            `${entry.dev}:${entry.ino}:${entry.mtimeNs}:${entry.ctimeNs}`,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return undefined;
+            throw error;
+          },
+        );
+        const observed = new Set<string>();
+        const toStage = new Set<string>();
+        for (const entry of entries) {
+          if (entry.startsWith("? ")) {
+            const path = entry.slice(2);
+            toStage.add(path);
+            observed.add(path);
+          } else if (entry.startsWith("H ") && !entry.startsWith("H 160000 ")) {
+            observed.add(entry.slice(entry.indexOf("\t") + 1));
+          }
         }
-        if (present.length)
+        for (let i = 0; i + 1 < tracked.length; i += 2) {
+          // Nested checkout traversal validates gitlinks before reading them.
+          if (tracked[i]!.startsWith(":160000 ")) continue;
+          const path = tracked[i + 1]!;
+          if (tracked[i]!.endsWith(" D")) {
+            observed.delete(path);
+            if (!previous?.observed.has(path)) continue;
+            const entry = indexEntries.get(path);
+            // A checkout or sparse reapply can legitimately replace this file
+            // with a skip-worktree entry. Unrelated staged paths do not affect it.
+            if (entry?.startsWith("S ")) {
+              if (previous.observed.get(path) !== entry) continue;
+              // A sparse reapply can rewrite an identical index while removing the
+              // working file. That is indistinguishable from an unrelated rewrite
+              // followed by a real deletion. Require an explicit index decision.
+              if (
+                previous.indexStamp !== indexStamp &&
+                previous.indexDigest === indexDigest
+              ) {
+                const bytes = Buffer.from(path, "latin1");
+                const label = isUtf8(bytes)
+                  ? JSON.stringify(bytes.toString("utf8"))
+                  : `path bytes 0x${bytes.toString("hex")}`;
+                throw new CodexSecurityError(
+                  `Cannot distinguish a sparse checkout reapply from a file deletion for ${label} after the Git index was rewritten. Use git rm --cached --sparse -- <path> to stage an intended deletion, or restore the file before retrying.`,
+                );
+              }
+            }
+          }
+          observed.add(path);
+          toStage.add(path);
+        }
+        if (toStage.size)
           await run(
             [
               "-c",
@@ -13691,11 +13811,24 @@ async function snapshotPatchTree(
             ],
             {
               input: Buffer.from(
-                present.map((path) => ":(top,literal)" + path + "\0").join(""),
+                [...toStage]
+                  .map((path) => ":(top,literal)" + path + "\0")
+                  .join(""),
                 "latin1",
               ),
             },
           );
+        const tree = (await run(["write-tree"])).trim();
+        // Keep unmaterialized index entries until a completed snapshot has
+        // observed the file in this checkout. Its later removal is a real edit.
+        dependencies.sparsePatchSnapshots?.set(checkout, {
+          observed: new Map(
+            [...observed].map((path) => [path, indexEntries.get(path)]),
+          ),
+          indexDigest,
+          indexStamp,
+        });
+        return tree;
       }
       return (await run(["write-tree"])).trim();
     },
