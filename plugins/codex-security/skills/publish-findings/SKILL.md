@@ -15,7 +15,7 @@ Use the same acquisition format for repeated imports. Check the provider's ident
 
 ## Import locally
 
-Use the checkout path with `--repository`. A saved report can be imported locally offline. Use this destination for Tenable One Code Repository captures. [Supported inputs by provider](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#choose-your-scanner)
+Use the checkout path with `--repository`. A saved report can be imported locally offline. Use this destination for Tenable One Code Repository captures and CrowdStrike FCS reports. [Supported inputs by provider](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#choose-your-scanner)
 
 ```sh
 codex-security publish findings /path/to/selected-wiz-findings.json \
@@ -32,6 +32,12 @@ Local records remain unassessed source evidence, separate from `findings list` a
 ## Trivy dependency vulnerabilities
 
 Use `--provider trivy` with a saved schema-v2 repository or filesystem report (JSON or gzip). Preview with a stable project/branch source key and `--trivy-scan-root` relative to the checkout (`.` for the whole checkout). Omit the root only when the report's Git metadata corroborates a remote repository scan. Check the source, package paths and exclusions before importing. Trivy's `fixed` status identifies an available upstream fix. [Trivy import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/trivy.md)
+
+## CrowdStrike FCS IaC findings
+
+Use `--provider crowdstrike` with a saved FCS CLI 4.x `fcs scan iac` JSON report, such as one supplied by the user or a CI artifact from the [FCS GitHub Action](https://github.com/CrowdStrike/fcs-action). For a user-requested new scan, run the installed `fcs` CLI from the directory to import into: `fcs scan iac --path . --report-formats json --output-path /path/to/private/fcs-report`. FCS writes detection paths relative to its working directory. A nonzero exit can mean that detections matched `--fail-on` or that the scan failed; import only the `*-scan-results.json` file that the run reports in `Results saved to file`. If `fcs` is not on `PATH`, do not download or install it, and do not pass Falcon credentials in command arguments. Ask for a saved report, or for the user to install and configure the FCS CLI.
+
+Import with `--to local` and `--repository` set to the scanned directory; it does not need to be a Git checkout. Every detection's file must exist there. Add `--source-repository-url` only for a verified repository URL. It adds typed IaC and secret details, and it must match a fetch remote when the directory is a Git checkout. Use a stable project/branch source key. Image scan reports and Cloud publication are not supported. [CrowdStrike import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/crowdstrike.md)
 
 ## Amazon Inspector repository findings
 
