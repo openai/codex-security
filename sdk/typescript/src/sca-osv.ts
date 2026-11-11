@@ -613,6 +613,8 @@ async function repositoryFiles(
   }
   const files: string[] = [];
   const nestedRepositories: string[] = [];
+  const diagnostics: string[] = [];
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const pending = [repository];
   while (pending.length) {
     signal?.throwIfAborted();
@@ -631,12 +633,41 @@ async function repositoryFiles(
         continue;
       }
     }
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "node_modules") continue;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (installedDependencyDirectory(entry.name, basename(directory)))
-          continue;
+    for (const entry of await readdir(directory, {
+      withFileTypes: true,
+      encoding: "buffer",
+    })) {
+      const bytes = Buffer.from(
+        entry instanceof Uint8Array ? entry : entry.name,
+      );
+      const metadata =
+        entry instanceof Uint8Array
+          ? await lstat(Buffer.concat([Buffer.from(directory + sep), bytes]))
+          : entry;
+      let name: string;
+      try {
+        name = utf8.decode(bytes);
+      } catch {
+        if (
+          metadata.isDirectory() ||
+          primaryScaFormat(bytes.toString("latin1")) !== null ||
+          additionalScaFormat(bytes.toString("latin1")) !== null
+        ) {
+          const prefix = slash(relative(repository, directory));
+          const pathBytes = Buffer.concat([
+            Buffer.from(prefix ? prefix + "/" : ""),
+            bytes,
+          ]);
+          diagnostics.push(
+            `Dependency path bytes ${pathBytes.toString("hex")} cannot be decoded as UTF-8; coverage is incomplete.`,
+          );
+        }
+        continue;
+      }
+      if (name === ".git" || name === "node_modules") continue;
+      const path = join(directory, name);
+      if (metadata.isDirectory()) {
+        if (installedDependencyDirectory(name, basename(directory))) continue;
         pending.push(path);
       } else files.push(relative(repository, path));
     }
@@ -646,7 +677,7 @@ async function repositoryFiles(
     submodules: [],
     nestedRepositories,
     skipWorktree: [],
-    diagnostics: [],
+    diagnostics: diagnostics.sort(),
   };
 }
 

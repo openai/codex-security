@@ -144,10 +144,44 @@ describe("additional SCA input contracts", () => {
     },
   );
 
+  test.each(
+    [
+      undefined,
+      [],
+      "invalid",
+      [null],
+      [{ name: "pypi" }],
+      [null, { name: "pypi", url: "https://pypi.org/simple" }],
+    ].map((sources) => ({
+      sources,
+    })),
+  )(
+    "retains an implicit Pipenv index as unresolved when sources are %p",
+    ({ sources }) => {
+      const result = inspect(
+        JSON.stringify({
+          _meta: { sources },
+          default: { "synthetic-package": { version: "==1.2.3" } },
+        }),
+        "pipenv",
+      );
+      expect(result.references).toEqual([
+        expect.objectContaining({
+          name: "synthetic-package",
+          version: "1.2.3",
+          resolution: expect.stringContaining("url:unresolved"),
+        }),
+      ]);
+    },
+  );
+
   test("counts Pipenv omitted local, unpinned, and custom-category entries", () => {
     const result = inspect(
       JSON.stringify({
-        _meta: { version: 6 },
+        _meta: {
+          version: 6,
+          sources: [{ name: "pypi", url: "https://pypi.org/simple" }],
+        },
         default: {
           registry: { version: "==1.2.3" },
           local: { path: "./local", editable: true },

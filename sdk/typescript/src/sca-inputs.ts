@@ -202,7 +202,9 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
   const metadata = parsed["_meta"];
   const sources =
     record(metadata) && Array.isArray(metadata["sources"])
-      ? metadata["sources"].filter(record)
+      ? metadata["sources"].map((source) =>
+          record(source) ? source : undefined,
+        )
       : [];
   for (const [group, entries] of Object.entries(parsed)) {
     if (group === "_meta") continue;
@@ -225,9 +227,9 @@ function inspectPipenv(content: string, sourcePath: string): InputInspection {
         const source =
           index === null
             ? sources[0]
-            : sources.find((candidate) => candidate["name"] === index);
+            : sources.find((candidate) => candidate?.["name"] === index);
         const url = source === undefined ? null : text(source["url"]);
-        if ((index !== null || source !== undefined) && !isPublicPypiIndex(url))
+        if (!isPublicPypiIndex(url))
           origin = `index:${index ?? text(source?.["name"]) ?? "default"};url:${url ?? "unresolved"}`;
       }
       const omittedCategory =

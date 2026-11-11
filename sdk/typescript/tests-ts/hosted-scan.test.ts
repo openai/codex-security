@@ -1320,6 +1320,21 @@ test("wire cleanup failure retains an uncertain terminal result and reports clea
   }
 });
 
+async function hostedHistory(input: HostedScanInput) {
+  return runWorkbench(
+    {
+      python: pythonExecutable()!,
+      pluginRoot: PLUGIN_ROOT,
+      environment: {
+        PATH: process.env["PATH"],
+        SYSTEMROOT: process.env["SYSTEMROOT"],
+        CODEX_SECURITY_STATE_DIR: input.stateDirectory,
+      },
+    },
+    ["list-scans", "--repository", input.repository],
+  );
+}
+
 test.each([false, true])(
   "stopping after registration retains scan identity before executor dispatch (timeout=%p)",
   async (timedOut) => {
@@ -1347,23 +1362,12 @@ test.each([false, true])(
     expect(executor.run).not.toHaveBeenCalled();
     expect(result.scanId).toBeString();
     expect(result.execution).toBeUndefined();
-    const history = await runWorkbench(
-      {
-        python: pythonExecutable()!,
-        pluginRoot: PLUGIN_ROOT,
-        environment: {
-          PATH: process.env["PATH"],
-          SYSTEMROOT: process.env["SYSTEMROOT"],
-          CODEX_SECURITY_STATE_DIR: input.stateDirectory,
-        },
-      },
-      ["list-scans", "--repository", input.repository],
-    );
+    const history = await hostedHistory(input);
     expect(history["scans"]).toMatchObject([
       {
         scanId: result.scanId,
         scanDir: result.outputDirectory,
-        progress: { status },
+        progress: { status, phase: "preflight" },
         lifecycle: { status },
       },
     ]);
@@ -1460,6 +1464,13 @@ test("a late cancel preserves a previously committed hosted failure", async () =
     status: "failed",
     execution: { status: "failed", message: "Recorded failure" },
   });
+  const history = await hostedHistory(input);
+  expect(history["scans"]).toMatchObject([
+    {
+      scanId: result.scanId,
+      progress: { status: "failed", phase: "threat_model" },
+    },
+  ]);
 });
 
 test.each([
