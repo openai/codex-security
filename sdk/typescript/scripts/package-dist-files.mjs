@@ -34,6 +34,7 @@ const distModules = [
   "external-findings-import",
   "external-findings-read",
   "scanner-import",
+  "armorcode-findings",
   "inspector-findings",
   "continuum-findings",
   "checkmarx-evidence",
