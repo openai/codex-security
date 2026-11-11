@@ -45,7 +45,7 @@ def test_completion_recovers_replaced_deep_worker_threads(
     tmp_path: Path, worker_kind: str, legacy_archive: bool, short_archive: bool
 ) -> None:
     # Compressed variants exercise the bundled Node decoder in the SDK runtime lane.
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     fixture = replace(
         fixture,
         started_at=(fixture.started_at - timedelta(seconds=1)).replace(microsecond=500123),
@@ -247,7 +247,7 @@ def test_completion_recovers_replaced_deep_worker_threads(
 def test_deep_usage_retains_bound_sessions_without_directory_metadata(
     tmp_path: Path, missing: str
 ) -> None:
-    fixture = _start_scan(tmp_path, mode="deep")
+    fixture = _start_scan(tmp_path, mode="deep", dedicated=True)
     fixture.write_parent_rollout([_token_event(fixture.started_at, 10, 3)])
     with sqlite3.connect(Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite") as db:
         db.execute(f"ALTER TABLE threads DROP COLUMN {missing}")
@@ -594,7 +594,15 @@ def test_closed_turn_coverage_survives_later_success(
     started = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
     thread_id = "worker" if worker else "scan-parent"
     parent_id = "scan-parent" if worker else None
-    events = [_event(started, "event_msg", {"type": "task_started", "turn_id": "first"})]
+
+    def start_turn(turn_id):
+        return _event(
+            started,
+            "event_msg",
+            {"type": "task_started", "turn_id": turn_id, "started_at": int(started.timestamp())},
+        )
+
+    events = [start_turn("first")]
     if receipt in {"native", "zero"}:
         events.append(
             _response_event(
@@ -611,7 +619,7 @@ def test_closed_turn_coverage_survives_later_success(
     events.extend(
         [
             _event(started, "event_msg", {"type": terminal, "turn_id": "first"}),
-            _event(started, "event_msg", {"type": "task_started", "turn_id": "second"}),
+            start_turn("second"),
             _response_event(started, thread_id, "second-response", 10, 2, turn_id="second"),
             _event(started, "event_msg", {"type": "task_complete", "turn_id": "second"}),
         ]

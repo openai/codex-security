@@ -49,7 +49,7 @@ test("scan startup failures reach the MCP caller", async (t) => {
       join(root, "scripts/workbench_db.py"),
       `import os, signal, sys, time
 
-def main():
+def main(*, framed_input):
     if sys.argv[1] == "resolve-scan-root":
         print('{"scanRoot": "."}')
         return
