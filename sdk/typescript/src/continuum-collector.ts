@@ -66,19 +66,19 @@ const gitLabIntegration = z.object({
   }),
 });
 
-async function firstRepositoryUrl(
+async function singleRepositoryUrl(
   environment: Record<string, unknown>,
   getIntegration: (id: string) => Promise<Record<string, unknown>>,
 ): Promise<string> {
   const { configuration } = environmentSources.parse(environment);
-  const first =
-    configuration?.codeConfiguration?.sourceConfiguration
-      ?.repositorySources?.[0];
-  if (first === undefined)
+  const repositories =
+    configuration?.codeConfiguration?.sourceConfiguration?.repositorySources ??
+    [];
+  if (repositories.length !== 1)
     throw new CodexSecurityError(
-      "The Continuum environment has no configured Git repository. Select an environment with a GitHub or GitLab repository.",
+      `Continuum collection requires exactly one configured Git repository. This environment has ${repositories.length}.`,
     );
-  const { integrationId, repository } = repositorySource.parse(first);
+  const { integrationId, repository } = repositorySource.parse(repositories[0]);
   const integration = await getIntegration(integrationId);
   const type = integration["integrationType"];
   if (type !== "GITHUB" && type !== "GITLAB")
@@ -139,7 +139,7 @@ export async function collectContinuumIssues(
     return run(["continuum", operation, ...scope, ...awsArgs, ...args]);
   };
   const environmentArgs = ["--environment-id", environmentId];
-  const sourceRepositoryUrl = await firstRepositoryUrl(
+  const sourceRepositoryUrl = await singleRepositoryUrl(
     await request("get-environment", environmentArgs),
     (id) => request("get-integration", ["--integration-id", id]),
   );

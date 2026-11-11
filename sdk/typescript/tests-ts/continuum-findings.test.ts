@@ -142,6 +142,9 @@ test("local issue import keeps all ranges and reprojects them for Cloud publicat
     }),
   ).rejects.toThrow("Continuum export repository does not match");
   const stored = await createAndReplayFinding(fixture);
+  expect(stored.evidence.source_data?.["sourceRepositoryUrl"]).toBe(
+    continuumRepository,
+  );
   expect(stored.evidence.locations).toHaveLength(104);
   const cloud = projectStoredFinding(stored, []);
   expect(cloud).toEqual(normalize(report));

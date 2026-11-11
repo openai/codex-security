@@ -30,12 +30,12 @@ Region. The export needs permissions for `GetEnvironment`, `GetIntegration`,
 [AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html)
 
 Pass the short Continuum environment ID to `codex-security import continuum`.
-An environment without a Git repository, including an S3-only environment,
-fails before the command fetches issues.
-The command records the first configured Git repository as `sourceRepositoryUrl`
-and ignores S3 sources when choosing the repository. It still collects all issue
-pages, issue details, and linked findings across the environment. Before
-publishing, verify that the issues belong to the recorded repository.
+The command requires exactly one configured Git repository and records it as
+`sourceRepositoryUrl`. S3 sources are allowed alongside that repository. An
+environment with zero or multiple Git repositories fails before collection.
+The command collects all issue pages, issue details, and linked findings
+across the environment. Before publishing, verify that the issues belong to
+the recorded repository, especially when S3 sources are present.
 
 Use `--aws-profile PROFILE` to select AWS credentials, including a profile
 that assumes a role in the environment's account. Use `--aws-region REGION`

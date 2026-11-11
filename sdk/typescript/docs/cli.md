@@ -1618,8 +1618,9 @@ SARIF compatibility, and the local preview.
 
 `import continuum ENVIRONMENT_ID --format json` writes one report to standard
 output after collecting every issue page and fetching each issue's linked
-findings. The command requires a configured Git repository and records the
-first one in the report. Collection covers the whole environment. Pass the short
+findings. The command requires exactly one configured Git repository and
+records it in the report. S3 sources are allowed alongside that repository.
+Collection covers the whole environment. Pass the short
 Continuum environment ID. Optional
 `--aws-profile PROFILE` and `--aws-region REGION` override the AWS CLI's
 credential and Region selection. Preview and import the report separately

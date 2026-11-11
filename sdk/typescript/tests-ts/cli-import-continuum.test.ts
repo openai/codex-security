@@ -42,16 +42,16 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
         configuration: {
           codeConfiguration: {
             sourceConfiguration: {
-              s3Sources: [{ integrationId: "archive", codePrefix: "code/" }],
-              repositorySources: [
-                { integrationId: "first", repository },
-                { integrationId: "second", repository: "example/other" },
+              s3Sources: [
+                { integrationId: "archive", codePrefix: "code/" },
+                { integrationId: "archive2", codePrefix: "other/" },
               ],
+              repositorySources: [{ integrationId: "git", repository }],
             },
           },
         },
       };
-    if (args[1] === "get-integration" && args[3] === "first")
+    if (args[1] === "get-integration" && args[3] === "git")
       return provider === "github"
         ? { integrationType: "GITHUB" }
         : {
@@ -83,7 +83,7 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
 }
 
 test.each([false, true])(
-  "import continuum saves one complete report with AWS overrides set to %p",
+  "import continuum binds one Git repository alongside S3 sources with AWS overrides set to %p",
   async (overrides) => {
     const { run, report } = awsFixture();
     const aws = mock(run);
@@ -110,15 +110,7 @@ test.each([false, true])(
     const args = ["--environment-id", "example", ...awsArgs];
     expect(aws.mock.calls).toEqual([
       [["continuum", "get-environment", ...args]],
-      [
-        [
-          "continuum",
-          "get-integration",
-          "--integration-id",
-          "first",
-          ...awsArgs,
-        ],
-      ],
+      [["continuum", "get-integration", "--integration-id", "git", ...awsArgs]],
       [["continuum", "list-code-issues", ...args]],
       [["continuum", "get-code-issue", ...args, "--issue-id", "issue1"]],
       [["continuum", "get-code-finding", ...args, "--finding-id", "one"]],
@@ -143,27 +135,45 @@ test("import continuum resolves the repository association for self-managed GitL
   expect(captured).toEqual(report);
 });
 
-test("import continuum rejects an S3-only environment before listing issues", async () => {
-  const aws = mock(async (_args: string[]) => ({
-    configuration: {
-      codeConfiguration: {
-        sourceConfiguration: {
-          s3Sources: [{ integrationId: "archive", codePrefix: "code/" }],
+test.each([
+  ["an S3-only environment", undefined],
+  [
+    "an environment with multiple Git repositories",
+    [
+      { integrationId: "git", repository: "example/project" },
+      { integrationId: "git", repository: "example/other" },
+    ],
+  ],
+] as const)(
+  "import continuum rejects %s before listing issues",
+  async (_name, repositorySources) => {
+    const aws = mock(async (_args: string[]) => ({
+      configuration: {
+        codeConfiguration: {
+          sourceConfiguration: {
+            s3Sources: [{ integrationId: "archive", codePrefix: "code/" }],
+            repositorySources,
+          },
         },
       },
-    },
-  }));
-  const cli = createCliTest(main);
-  expect(
-    await cli.runCli(command, {
-      ...dependencies(),
-      collectContinuumIssues: (options) => collectContinuumIssues(options, aws),
-    }),
-  ).toBe(2);
-  expect(aws.mock.calls.map(([args]) => args[1])).toEqual(["get-environment"]);
-  expect(cli.stdout.text()).toBe("");
-  expect(cli.stderr.text()).toContain("no configured Git repository");
-});
+    }));
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(command, {
+        ...dependencies(),
+        collectContinuumIssues: (options) =>
+          collectContinuumIssues(options, aws),
+      }),
+    ).toBe(2);
+    expect(aws.mock.calls.map(([args]) => args[1])).toEqual([
+      "get-environment",
+    ]);
+    expect(cli.stdout.text()).toBe("");
+    expect(cli.stderr.text()).toContain(
+      `requires exactly one configured Git repository. This environment has ${repositorySources?.length ?? 0}.`,
+    );
+  },
+);
 test.each([
   ["list-code-issues", "complete Continuum issue list"],
   ["get-integration", "AWS AccessDenied"],
