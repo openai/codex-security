@@ -33,6 +33,12 @@ def collect_one(checkout, directories, **environment):
     )
 
 
+def write_service_model(root):
+    model = root / "continuum/2099-10-23/service-2.json"
+    model.parent.mkdir(parents=True)
+    model.write_text("{}")
+
+
 @pytest.fixture
 def checkout(tmp_path):
     checkout = tmp_path / "source"
@@ -205,6 +211,47 @@ def test_default_settings_linked_into_checkout_are_rejected(
         invoke(["--single-repository"], {})
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("trusted_first", [False, True])
+def test_model_search_path_rejects_checkout_entries(checkout, invoke, monkeypatch, trusted_first):
+    write_service_model(checkout)
+    trusted = checkout.parent / "installed-models"
+    trusted.mkdir()
+    paths = (trusted, checkout) if trusted_first else (checkout,)
+    monkeypatch.setenv("AWS_DATA_PATH", os.pathsep.join(map(str, paths)))
+    with pytest.raises(SystemExit, match="checkout"):
+        invoke(["--single-repository"], {})
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Fixture links service models into the checkout")
+@pytest.mark.parametrize(
+    ("use_default", "linked_entry"),
+    [
+        (False, "."),
+        (True, "continuum"),
+        (False, "continuum/2099-10-23"),
+        (True, "continuum/2099-10-23/service-2.json"),
+    ],
+)
+def test_aws_model_links_into_checkout_are_rejected(
+    tmp_path, checkout, invoke, monkeypatch, use_default, linked_entry
+):
+    write_service_model(checkout)
+    if use_default:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("AWS_DATA_PATH", raising=False)
+        models = tmp_path / ".aws/models"
+    else:
+        models = tmp_path / "installed-models"
+        monkeypatch.setenv("AWS_DATA_PATH", str(models))
+    link = models / linked_entry
+    link.parent.mkdir(parents=True, exist_ok=True)
+    target = checkout / linked_entry
+    link.symlink_to(target, target_is_directory=target.is_dir())
+    with pytest.raises(SystemExit, match="checkout"):
+        invoke(["--single-repository"], {})
+
+
 @pytest.mark.native_macos
 @pytest.mark.skipif(os.name == "nt", reason="Fixture uses Bash scripts and POSIX symlinks")
 def test_aws_and_its_credential_helper_skip_checkout_launchers_and_startup_hooks(tmp_path):
@@ -269,16 +316,20 @@ def test_node_credential_helper_ignores_checkout_preload(tmp_path, checkout):
     helper = tmp_path / "fixture-node-credentials"
     helper.write_text(
         "#!/usr/bin/env node\n"
-        "const { AWS_PROFILE, AWS_REGION, AWS_CONFIG_FILE, HTTPS_PROXY } = process.env;\n"
-        "console.log(JSON.stringify({ AWS_PROFILE, AWS_REGION, AWS_CONFIG_FILE, HTTPS_PROXY }));\n"
+        "const keys = ['AWS_PROFILE', 'AWS_REGION', 'AWS_CONFIG_FILE', 'HTTPS_PROXY', "
+        "'AWS_DATA_PATH'];\n"
+        "console.log(JSON.stringify(Object.fromEntries(keys.map(key => [key, process.env[key]]))));\n"
     )
     helper.chmod(0o755)
     config = tmp_path / "profile"
     config.write_text("[profile synthetic]\ncredential_process = fixture-node-credentials\n")
+    models = tmp_path / "installed-models"
+    write_service_model(models)
     settings = {
         "AWS_PROFILE": "synthetic",
         "AWS_REGION": "us-east-1",
         "AWS_CONFIG_FILE": str(config),
+        "AWS_DATA_PATH": str(models),
         "HTTPS_PROXY": "http://proxy.example.invalid:8080",
     }
     result = collect_one(

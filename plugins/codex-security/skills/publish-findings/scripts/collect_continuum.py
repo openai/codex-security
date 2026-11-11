@@ -40,6 +40,28 @@ HOST_SETTINGS = ACCOUNT_DIRECTORIES | {
 }
 
 
+def checked_model_path(path: Path, source: Path | None, levels: int) -> None:
+    if in_source(path, source) or (source is not None and source.is_relative_to(path.resolve())):
+        raise ValueError(f"Use an AWS model path separate from the selected checkout: {path}")
+    if levels and path.is_dir():
+        # AWS reads global models and service/<version>/*.json[.gz]. Version
+        # names come from the filesystem; even a new version can override AWS.
+        for child in path.iterdir():
+            if child.name.lower().endswith((".json", ".json.gz")) or (
+                levels > 1 and child.is_dir()
+            ):
+                checked_model_path(child, source, levels - 1)
+
+
+def pinned_setting(name: str, path: Path) -> str:
+    # Preserve paths expanded from parent-only variables; the CLI expands the
+    # forwarded value again and splits its model path on the platform separator.
+    value = str(path)
+    if os.path.expandvars(value) != value or (name == "AWS_DATA_PATH" and os.pathsep in value):
+        raise ValueError(f"Use a fully expanded file path for {name}.")
+    return value
+
+
 def aws_environment(source: Path | None, cwd: Path, directories: list[str]) -> dict[str, str]:
     env = {
         name: value
@@ -62,12 +84,19 @@ def aws_environment(source: Path | None, cwd: Path, directories: list[str]) -> d
         if in_source(path, source):
             raise ValueError(f"Use an {name} file outside the selected checkout.")
         if name in env:
-            # Pin the selected location even when it used a parent-only variable.
-            if os.path.expandvars(str(path)) != str(path):
-                raise ValueError(f"Use a fully expanded file path for {name}.")
-            env[name] = str(path)
+            env[name] = pinned_setting(name, path)
     if in_source(cwd / os.path.expanduser("~/.aws/cli/alias"), source):
         raise ValueError("Use an AWS CLI alias file outside the selected checkout.")
+    checked_model_path(cwd / os.path.expanduser("~/.aws/models"), source, 3)
+    if "AWS_DATA_PATH" in env:
+        paths = []
+        for entry in env["AWS_DATA_PATH"].split(os.pathsep):
+            directory = os.path.expanduser(os.path.expandvars(entry))
+            if directory:
+                path = cwd / directory
+                checked_model_path(path, source, 3)
+                paths.append(pinned_setting("AWS_DATA_PATH", path))
+        env["AWS_DATA_PATH"] = os.pathsep.join(paths)
     return env
 
 

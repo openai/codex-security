@@ -35,7 +35,7 @@ the finding, follow its created or duplicate issue ID, and retrieve its
 
 Run the collector from a trusted shell outside the checkout. Set `source_root`
 to the absolute path of the local checkout that owns the finding. Keep your AWS
-config, shared credentials, and CLI aliases outside that checkout. The AWS CLI
+config, shared credentials, CLI aliases, and custom service models outside that checkout. The AWS CLI
 and its helpers receive your AWS settings (including profile and Region), proxy
 and OS account settings, and a `PATH` that excludes the checkout. If a custom
 helper needs other shell variables, use a profile that works with these settings
