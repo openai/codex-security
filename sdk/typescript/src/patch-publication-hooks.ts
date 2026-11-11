@@ -10,6 +10,18 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const [event, ...args] = process.argv.slice(2);
+// HTTP credentials can be a username alone. SSH usernames select the remote
+// account and remain available to validators unless a password is present.
+function withoutUrlCredentials(value) {
+  return value.replace(
+    /((?:https?|ftps?|ssh(?:\+git)?|git(?:\+ssh)?|socks(?:4a?|5h?)?):\/\/)([^/?#\s]+@)/gi,
+    (authority, scheme, userinfo) =>
+      /^(?:https?|ftps?):/i.test(scheme) || userinfo.includes(":") ? scheme : authority,
+  );
+}
+if (event === "pre-push") {
+  for (let i = 0; i < args.length; i++) args[i] = withoutUrlCredentials(args[i]);
+}
 const plan = JSON.parse(
   fs.readFileSync(path.join(__dirname, "plan.json"), "utf8"),
 );
@@ -73,6 +85,8 @@ for (let i = 0; i + 1 < records.length; i += 2) {
   // passed through Git command scope in a checkout-supplied child program.
   if (
     bridge ||
+    withoutUrlCredentials(key) !== key ||
+    withoutUrlCredentials(value) !== value ||
     /^credential\.|^http(?:\..*)?\.(?:extraheader|proxy|cookiefile|sslkey|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
       key,
     )

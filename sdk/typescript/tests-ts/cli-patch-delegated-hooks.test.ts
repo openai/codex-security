@@ -102,7 +102,10 @@ for (const outside of [true, false])
                 HTTPS_PROXY:
                   "http://synthetic:SYNTHETIC_HOOK_PROXY@proxy.invalid",
                 GIT_CONFIG_PARAMETERS:
-                  "'http.extraheader'='Authorization: SYNTHETIC_HOOK_SECRET' 'demo.sentinel'='benign preserved'",
+                  "'http.extraheader'='Authorization: SYNTHETIC_HOOK_SECRET' 'demo.sentinel'='benign preserved' " +
+                  "'url.https://synthetic:SYNTHETIC_HOOK_SECRET@unused.invalid/.insteadof'='https://unused.invalid/old' " +
+                  "'remote.unused.pushurl'='https://SYNTHETIC_HOOK_SECRET@unused.invalid/' " +
+                  "'url.ssh://git@benign.invalid/.insteadof'='ssh://git@old.invalid/'",
               },
             });
           },
@@ -136,6 +139,8 @@ for (const outside of [true, false])
                 "set -eu",
                 'test "$(git config --get demo.sentinel)" = "benign preserved"',
                 "if git config --get http.extraheader >/dev/null; then exit 15; fi",
+                "if git config --list | grep -Fq SYNTHETIC_HOOK_SECRET; then exit 15; fi",
+                'test "$(git config --get url.ssh://git@benign.invalid/.insteadof)" = "ssh://git@old.invalid/"',
                 'case "${HTTPS_PROXY-}" in *SYNTHETIC_HOOK_PROXY*) exit 16;; esac',
                 "printf reached > " + shell(join(allowed, "hook-ran")),
                 ...(outside
@@ -186,9 +191,9 @@ for (const outside of [true, false])
     process.platform === "win32" ? 300000 : 90000,
   );
 
-test(
-  "resumed publication confines the original pre-push hook with the effective operator settings",
-  async () => {
+test.each(["workspace", "read-only", "named"])(
+  "resumed publication confines the original pre-push hook with the effective operator settings: %s",
+  async (selection) => {
     const { directory, remote, git } = await publicationRepository(fixtures);
     const branch = "codex-security/saved-hook";
     git("branch", branch);
@@ -199,22 +204,42 @@ test(
     );
     const home = await fixtures.create("resume-hook-home-");
     const temporary = await fixtures.create("resume-hook-tmp-");
-    const allowed = await fixtures.create("resume-hook-approved-output-");
+    const allowed =
+      selection === "read-only"
+        ? directory
+        : await fixtures.create("resume-hook-approved-output-");
     const denied = join(
-      await fixtures.create("resume-hook-outside-"),
+      selection === "named"
+        ? directory
+        : await fixtures.create("resume-hook-outside-"),
       "marker",
     );
+    const privateFile = join(directory, "synthetic-private");
+    if (selection === "named")
+      await writeFile(privateFile, "private synthetic contents\n");
     await chmod(home, 0o700);
     await writeFile(
       join(home, "config.toml"),
       patchSnapshotWindowsConfig() +
+        (selection === "read-only"
+          ? 'sandbox_mode="read-only"\n'
+          : selection === "named"
+            ? 'default_permissions="qa-hook"\n'
+            : "") +
         '\nmodel_provider="hook-fixture"\n' +
         '[model_providers.hook-fixture]\nname="Synthetic"\nbase_url="http://127.0.0.1:1/v1"\nenv_key="SYNTHETIC_MODEL_ACCESS"\n' +
         "[sandbox_workspace_write]\n" +
         "exclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n" +
         "writable_roots=[" +
         JSON.stringify(allowed) +
-        "]\n",
+        "]\n" +
+        (selection === "named"
+          ? '[permissions.qa-hook]\nextends=":read-only"\nfilesystem={' +
+            JSON.stringify(allowed) +
+            '={ "."="write" },' +
+            JSON.stringify(privateFile) +
+            '={ "."="deny" }}\n'
+          : ""),
     );
     const environment = patchSnapshotEnvironment(temporary, {
       ...process.env,
@@ -232,6 +257,14 @@ test(
         'test "$1" = origin',
         'test -z "${SYNTHETIC_MODEL_ACCESS-}"',
         `grep -F 'refs/heads/${branch}' >/dev/null`,
+        "echo 'Entered synthetic resumed hook' >&2",
+        ...(selection === "named"
+          ? [
+              "if cat " +
+                shell(privateFile) +
+                " >/dev/null 2>&1; then exit 19; fi",
+            ]
+          : []),
         "echo reached > " + shell(join(allowed, "ran")),
         "echo denied > " + shell(denied),
       ].join("\n") + "\n",
@@ -259,9 +292,11 @@ test(
       },
     );
     expect(outcome.exitCode, outcome.stderr).toBe(2);
-    expect(await readFile(join(allowed, "ran"), "utf8"), outcome.stderr).toBe(
-      "reached\n",
-    );
+    expect(outcome.stderr).toContain("Entered synthetic resumed hook");
+    expect(
+      await readFile(join(allowed, "ran"), "utf8").catch(() => null),
+      outcome.stderr,
+    ).toBe(selection === "read-only" ? null : "reached\n");
     expect(await readFile(denied).catch(() => null)).toBeNull();
     expect(repositoryGit(remote)("for-each-ref", "--format=%(refname)")).toBe(
       "",
