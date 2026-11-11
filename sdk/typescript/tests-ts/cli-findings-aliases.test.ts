@@ -54,24 +54,26 @@ with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute("UPDATE scans SET target_inode = ? WHERE id = 'alias'", (serialize_filesystem_identity(alias.stat().st_ino + 1),))
 `;
 
-test("findings list preserves exact saved aliases and rejects their stale ownership", async () => {
-  const root = await temporaryDirectory("findings-alias-boundary-");
-  try {
-    const repository = join(root, "repository");
-    const alias = join(root, "saved-alias");
-    const unsavedAlias = join(root, "unsaved-alias");
-    await mkdir(repository);
-    for (const path of [alias, unsavedAlias]) {
-      await symlink(
-        repository,
-        path,
-        process.platform === "win32" ? "junction" : "dir",
-      );
-    }
-    const python = pythonExecutable();
-    expect(python).not.toBeNull();
-    for (const stale of [false, true]) {
-      const state = join(root, stale ? "stale-state" : "current-state");
+test.each(["current", "stale"] as const)(
+  "findings list preserves exact saved aliases with %s ownership",
+  async (ownership) => {
+    const root = await temporaryDirectory("findings-alias-boundary-");
+    try {
+      const repository = join(root, "repository");
+      const alias = join(root, "saved-alias");
+      const unsavedAlias = join(root, "unsaved-alias");
+      await mkdir(repository);
+      for (const path of [alias, unsavedAlias]) {
+        await symlink(
+          repository,
+          path,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+      }
+      const python = pythonExecutable();
+      expect(python).not.toBeNull();
+      const stale = ownership === "stale";
+      const state = join(root, "state");
       const initialized = runPython(python!, [
         "-c",
         savedAliasFindings,
@@ -79,7 +81,7 @@ test("findings list preserves exact saved aliases and rejects their stale owners
         state,
         repository,
         alias,
-        stale ? "stale" : "current",
+        ownership,
       ]);
       expect(new TextDecoder().decode(initialized.stderr)).toBe("");
       expect(initialized.exitCode).toBe(0);
@@ -148,11 +150,11 @@ test("findings list preserves exact saved aliases and rejects their stale owners
           );
         }
       }
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+  },
+);
 
 test.skipIf(process.platform !== "linux")(
   "findings list distinguishes an undecodable directory name from its replacement spelling",
