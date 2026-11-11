@@ -461,8 +461,9 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       if (!isSelfClosing && localName === "p") append("\n");
     });
     // Word stores drawing positions and relative sizes as character data.
+    // The line break after the XML declaration precedes the document element.
     const appendCharacters = (value: string) => {
-      if (!layout.at(-1)) append(value);
+      if (documentElement && !layout.at(-1)) append(value);
     };
     parser.on("text", (value) => appendCharacters(decodeXml(value)));
     parser.on("cdata", (value) =>
