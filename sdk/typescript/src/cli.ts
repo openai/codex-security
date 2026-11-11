@@ -30,10 +30,8 @@ import {
   writeSync,
 } from "node:fs";
 import {
-  access,
   chmod,
   lstat,
-  mkdir,
   mkdtemp,
   open,
   readFile,
@@ -380,6 +378,7 @@ import {
   type PolicyPrompt,
   type PolicySecurity,
 } from "./security-policy-cli.js";
+import { installManagedHook } from "./cli-hook.js";
 import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { formatSecurityPolicyText as escapeTerminalText } from "./security-policy.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
@@ -397,7 +396,6 @@ import {
   gitMarkerRoot,
   normalizeRepository,
   trustedGitCommand,
-  UNSUPPORTED_GIT_ENVIRONMENT,
   type ScanTarget,
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
@@ -5189,7 +5187,7 @@ export async function main(
         "Review the diff and notes. Edit the draft, then copy only SECURITY.md to the Policy target shown.\n" +
         "Your existing policy stays unchanged until you replace it.\n\n" +
         "Save a draft without answering questions:\n" +
-        "  codex-security policy . --headless --output-dir /path/outside/repository/policy --json",
+        "  codex-security policy . --output-dir /path/outside/repository/policy --json",
       output: z
         .union([z.record(z.string(), z.unknown()), z.string()])
         .optional(),
@@ -5657,7 +5655,7 @@ export async function main(
     .command(createScanCommands())
     .command("install-hook", {
       description:
-        "Install a local pre-commit hook that blocks on scan errors or findings at the selected severity threshold.",
+        "Install a pre-commit hook that scans staged and unstaged working-tree changes and blocks on errors or findings at the selected severity.",
       examples: [
         { args: { repository: "." }, options: { failOnSeverity: "high" } },
       ],
@@ -5697,7 +5695,7 @@ export async function main(
               cwd,
             ),
           );
-          const hook = execFileSync(
+          const hooksDirectory = execFileSync(
             git.executable,
             [
               "-C",
@@ -5705,63 +5703,18 @@ export async function main(
               "rev-parse",
               "--path-format=absolute",
               "--git-path",
-              "hooks/pre-commit",
+              "hooks",
             ],
             { encoding: "utf8", env: git.environment },
           ).trim();
+          const hook = join(hooksDirectory, "pre-commit");
           const command = [
             realpathSync(process.execPath),
             realpathSync(fileURLToPath(import.meta.url)),
           ]
             .map((path) => `'${path.replaceAll("'", `'"'"'`)}'`)
             .join(" ");
-          const invocation = `exec ${command} scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const contents = `#!/bin/sh\nset -eu\nunset ${[...UNSUPPORTED_GIT_ENVIRONMENT].join(" ")}\n${invocation}`;
-          const previousScopedContents = `#!/bin/sh\nset -eu\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE\n${invocation}`;
-          const previousContents = `#!/bin/sh\nset -eu\n${invocation}`;
-          const legacyContents = `#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity ${options.failOnSeverity}\n`;
-          const existing = await readFile(hook, "utf8").catch(() => null);
-          if (
-            existing !== null &&
-            existing !== contents &&
-            existing !== previousScopedContents &&
-            existing !== previousContents &&
-            existing !== legacyContents
-          ) {
-            throw new Error(`A pre-commit hook already exists at ${hook}.`);
-          }
-          if (existing === null) {
-            await mkdir(dirname(hook), { recursive: true });
-            await writeFile(hook, contents, { flag: "wx", mode: 0o755 });
-          } else if (existing !== contents) {
-            await writeFile(hook, contents, { flag: "w" });
-          }
-          if (process.platform !== "win32") {
-            try {
-              await access(hook, constants.X_OK);
-            } catch {
-              const file = await open(
-                hook,
-                constants.O_RDONLY |
-                  constants.O_NOFOLLOW |
-                  constants.O_NONBLOCK,
-              );
-              try {
-                const metadata = await file.stat();
-                if (
-                  !metadata.isFile() ||
-                  (await file.readFile("utf8")) !== contents
-                )
-                  throw new Error(
-                    `Cannot make an unrecognized pre-commit hook executable: ${hook}`,
-                  );
-                await file.chmod((metadata.mode & 0o777) | 0o100);
-              } finally {
-                await file.close();
-              }
-              await access(hook, constants.X_OK);
-            }
-          }
+          await installManagedHook(hook, command, options.failOnSeverity);
           return {
             hook,
             failOnSeverity: options.failOnSeverity,
@@ -6216,7 +6169,9 @@ export async function main(
           planOnly: z
             .boolean()
             .default(false)
-            .describe("Save components.json without starting scans."),
+            .describe(
+              "Save components.json and print a command to run it. Explicit plans work offline.",
+            ),
           headless: z
             .boolean()
             .default(false)
@@ -6420,6 +6375,30 @@ export async function main(
                 );
             },
           });
+          if (options.planOnly) {
+            // A new plan directory contains only components.json. Save subsequent results alongside it.
+            const nextCommand = [
+              "codex-security",
+              "scan-components",
+              repository,
+              "--components-file",
+              result.planPath,
+              "--output-dir",
+              join(dirname(result.planPath), "results"),
+              ...(options.config === undefined
+                ? []
+                : ["--config", options.config]),
+              ...(options.maxCost === undefined
+                ? []
+                : ["--max-cost", String(options.maxCost)]),
+            ]
+              .map(quoteCliPath)
+              .join(" ");
+            errorOutput.write(
+              `Run this plan: ${diagnosticValue(nextCommand)}\n`,
+            );
+            return { ...result, nextCommand };
+          }
           exitCode =
             interruptedExitCode(controller.signal) ??
             (result.failed || result.deduplication?.status === "failed"
@@ -6465,7 +6444,7 @@ export async function main(
           .min(1, "--output-dir must not be empty.")
           .optional()
           .describe(
-            "Resumable results directory; required with a repository CSV.",
+            "Results directory. Required with a CSV and used as the initial directory in the wizard.",
           ),
         knowledgeBase: z
           .array(optionValue("--knowledge-base"))
@@ -6550,11 +6529,6 @@ export async function main(
           let outputDir: string;
           let githubHost: string | undefined;
           if (args.input === undefined) {
-            if (options.outputDir !== undefined) {
-              throw new Error(
-                "--output-dir can only be used with a repository CSV; omit it to choose an output directory interactively.",
-              );
-            }
             const wizard = await runBulkScanWizard(
               dependencies.bulkScan ??
                 createBulkScanDiscoveryDependencies({
@@ -6898,7 +6872,7 @@ export async function main(
           .string()
           .min(1, "A finding must not be empty.")
           .describe(
-            "Finding text, an existing path, or an explicit local file URL (file:///path/to/findings).",
+            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -6981,7 +6955,7 @@ export async function main(
           .min(1, "A finding must not be empty.")
           .optional()
           .describe(
-            "Finding text, a file path or local file URL, or a saved finding identifier.",
+            "Finding text, a local file path or URL, or a saved finding identifier. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -7231,7 +7205,7 @@ export async function main(
           .min(1, "An issue must not be empty.")
           .optional()
           .describe(
-            "Issue text, a file path or local file URL, or a saved finding identifier.",
+            "Issue text, a local file path or URL, or a saved finding identifier. Use text:VALUE to pass path-shaped prose.",
           ),
       }),
       options: z.object({
@@ -10142,6 +10116,15 @@ async function runSkill(
         "Finding or issue inputs must not be empty.",
       );
     }
+    if (input.startsWith("text:")) {
+      const literal = input.slice("text:".length);
+      if (!literal.trim())
+        throw new CodexSecurityError(
+          "Finding or issue inputs must not be empty.",
+        );
+      contents.push(literal);
+      continue;
+    }
     let contentsOrLiteral = input;
     const explicitFile = /^file:\/\//iu.test(input)
       ? new URL(input)
@@ -10174,7 +10157,14 @@ async function runSkill(
       );
       const metadata = await lstat(path, { bigint: true }).catch(
         (error: unknown) => {
-          if (explicitFile) throw error;
+          if (
+            explicitFile ||
+            isAbsolute(input) ||
+            input.startsWith("./") ||
+            input.startsWith("../") ||
+            (process.platform === "win32" && /^\.{1,2}\\/u.test(input))
+          )
+            throw error;
           if (
             typeof error === "object" &&
             error !== null &&

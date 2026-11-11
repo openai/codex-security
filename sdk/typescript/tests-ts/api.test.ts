@@ -831,6 +831,29 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("validates an explicit severity rubric during local preflight", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const rubricPath = join(root, "rubric.md");
+    await mkdir(repository);
+    const { client, prepareRuntime } = localClient(
+      {},
+      { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+    );
+    await expect(
+      client.preflight(repository, { rubricPath }),
+    ).rejects.toThrow();
+    await writeFile(rubricPath, " ");
+    await expect(client.preflight(repository, { rubricPath })).rejects.toThrow(
+      "Rubric must not be blank",
+    );
+    await writeFile(rubricPath, "Require a reachable impact.");
+    await expect(
+      client.preflight(repository, { rubricPath }),
+    ).resolves.toMatchObject({ repository });
+    expect(prepareRuntime).not.toHaveBeenCalled();
+  });
+
   test("validates knowledge-base documents before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

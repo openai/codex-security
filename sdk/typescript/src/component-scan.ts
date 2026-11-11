@@ -35,7 +35,7 @@ import type {
 } from "./cost.js";
 import type { ScanTokenUsage } from "./cost-model.js";
 import { readThreatModelPath } from "./artifact-export.js";
-import { errorMessage } from "./errors.js";
+import { errorMessage, OutputDirectoryNotEmptyError } from "./errors.js";
 import type { Finding } from "./models.js";
 import type { ScanResult } from "./result.js";
 import type { ScanActivity } from "./scan-activity.js";
@@ -155,7 +155,11 @@ export async function runComponentScans(
     throw new Error("Choose exactly one of components or automatic planning.");
   const auth = options.scanOptions?.auth;
   let environment = options.environment;
-  if (auth !== undefined && auth !== "auto") {
+  if (
+    (!options.planOnly || options.auto) &&
+    auth !== undefined &&
+    auth !== "auto"
+  ) {
     const source = environment ?? process.env;
     const configuration = await mergedCodexConfig(
       options.config ?? {},
@@ -190,7 +194,11 @@ export async function runComponentScans(
     basename(repository),
     undefined,
     (path) => requireOutputOutsideRepository(protectedRoot, path),
-  );
+  ).catch((error: unknown) => {
+    if (error instanceof OutputDirectoryNotEmptyError)
+      throw new OutputDirectoryNotEmptyError(error.directory, "component");
+    throw error;
+  });
   const plan = await normalizeComponentPlan(
     repository,
     options.auto

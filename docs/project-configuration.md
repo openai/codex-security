@@ -186,7 +186,7 @@ The resolver maps file keys to the existing SDK options:
 | `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`                                |
 | `scan.deep.stop_after_consecutive_errors` | `stopAfterConsecutiveErrors`          | No flag                                              |
 | `scan.deep.max_discovery_runs`            | `maxDiscoveryRuns`                    | `--max-discovery-runs`                               |
-| `scan.deep.max_time_hours`                | `maxTimeHours`                        | `--max-time-hours`                                   |
+| `scan.deep.max_time_hours`                | `maxTimeHours`                        | Legacy `--max-time-hours` (hours). Prefer `--max-time` (minutes). |
 | `scan.max_time_minutes`                   | `maxTimeMinutes`                      | `--max-time`                                         |
 | `limits.max_cost_usd_per_scan`            | `maxCostUsd`                          | `--max-cost`                                         |
 | `policy.fail_on_severity`                 | `failureSeverity`                     | `--fail-on-severity`                                 |

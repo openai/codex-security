@@ -1735,6 +1735,17 @@ export class CodexSecurity {
       await realpath(tmpdir()),
       "temporary",
     );
+    if (
+      options.rubricPath !== undefined &&
+      options.severityRubric === undefined &&
+      inputs.retryRecipe === undefined &&
+      options.resumeScanId === undefined
+    ) {
+      await readSeverityRubricFile(
+        resolve(expandHome(options.rubricPath)),
+        inputs.protectedRoot,
+      );
+    }
     if (options.knowledgeBasePaths?.length) {
       const knowledgeBase = await prepareKnowledgeBase(
         options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths,

@@ -983,6 +983,12 @@ describe("CLI skill commands", () => {
       const stderr = captureCli(main, "stderr");
       expect(await stderr.run([command, url], deps)).toBe(2);
       expect(stderr.text()).toContain("finding #1.md");
+      for (const path of [file, "./missing.md", "../missing.md"]) {
+        expect(await stderr.run([command, path], deps)).toBe(2);
+        expect(stderr.text()).toContain(
+          path === file ? "finding #1.md" : "missing.md",
+        );
+      }
     }
     const stderr = captureCli(main, "stderr");
     expect(
@@ -993,6 +999,10 @@ describe("CLI skill commands", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("must refer to local files");
     expect(onCodex).not.toHaveBeenCalled();
+    expect(
+      await runCapturedCli(main, ["validate", "text:./missing.md"], deps),
+    ).toBe(0);
+    expect(onCodex.mock.lastCall?.[3]).toContain("./missing.md");
     await writeFile(file, "Finding supplied through a file URL.");
     expect(await runCapturedCli(main, ["validate", url], deps)).toBe(0);
     expect(onCodex.mock.lastCall?.[3]).toContain(
