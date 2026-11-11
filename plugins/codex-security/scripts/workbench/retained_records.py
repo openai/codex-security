@@ -692,10 +692,13 @@ def selected_deadline_sources(scan_dir, scan_id, preserved, workers, selected, s
                     "receiptRefs": resolve_coverage_receipts(scan_dir, row, worker, path),
                 }
                 projected = _project_worker_coverage_row(resolved, owner, "surfaces")
-                if surface_id := saved_surfaces.get(
-                    _digest(_coverage_comparison_row(projected, "surfaces"))
-                ):
-                    surface_ids.add(surface_id)
+                identity = projected["id"]
+                for key in (identity, f"{identity}-{_digest(projected)[:16]}"):
+                    candidate = {**projected, "id": key}
+                    if surface_id := saved_surfaces.get(
+                        _digest(_coverage_comparison_row(candidate, "surfaces"))
+                    ):
+                        surface_ids.add(surface_id)
         source_indexes = {}
         _recover_preserved_worker_source(
             scan_dir, path, scan_id, binding, owner, worker, draft, [], source_indexes

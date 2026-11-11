@@ -615,7 +615,9 @@ def test_count_capped_repair_after_deadline_preserves_original_cutoff(
     assert repaired["completedAt"] == selected_at
 
 
-@pytest.mark.parametrize("checkpoint", ["late", "complete", "sparse", "sparse-normalized"])
+@pytest.mark.parametrize(
+    "checkpoint", ["late", "complete", "sparse", "sparse-normalized", "sparse-collision"]
+)
 def test_evidence_repair_preserves_selected_deadline_findings(
     workbench_api, workbench_db, deadline_scan, checkpoint, monkeypatch
 ):
@@ -637,6 +639,23 @@ def test_evidence_repair_preserves_selected_deadline_findings(
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text("Checkpoint evidence.")
         surface["receiptRefs"] = ["artifacts/proof.md"]
+    earlier_checkpoints = {}
+    if checkpoint == "sparse-collision":
+        earlier = write_checkpoint(
+            output / "checkpoints",
+            saved_draft(
+                scan.scan_id,
+                surfaces=[
+                    {
+                        "id": "entry",
+                        "label": "Independent clean path",
+                        "disposition": "no_issue_found",
+                    }
+                ],
+            ),
+            mtime_ns=100,
+        )
+        earlier_checkpoints[earlier] = earlier.read_bytes()
     draft = saved_draft(scan.scan_id, findings=[worker_finding], surfaces=[surface])
     if checkpoint != "late":
         source = write_checkpoint(output / "checkpoints", draft)
@@ -711,7 +730,9 @@ def test_evidence_repair_preserves_selected_deadline_findings(
     sealed_coverage = read_review_state(workbench_db, scan.scan_dir)
     if sparse:
         selected_surface = next(
-            row for row in coverage["surfaces"] if row.get("workerId") == worker_id
+            row
+            for row in coverage["surfaces"]
+            if row.get("workerId") == worker_id and row["label"] == "Worker review"
         )
         repaired_surface = next(
             row for row in sealed_coverage["surfaces"] if row["id"] == selected_surface["id"]
@@ -725,10 +746,19 @@ def test_evidence_repair_preserves_selected_deadline_findings(
         assert "validation" in deferred["reason"]
         assert completed["warnings"].count(deferred["reason"]) == 1
         assert sealed_coverage["deferred"][:-1] == coverage["deferred"]
+        if checkpoint == "sparse-collision":
+            independent = next(
+                row for row in coverage["surfaces"] if row["label"] == "Independent clean path"
+            )
+            assert independent["disposition"] == "no_issue_found"
+            assert independent["id"] != selected_surface["id"]
+            assert independent in sealed_coverage["surfaces"]
     else:
         assert sealed_coverage["surfaces"] == coverage["surfaces"]
         assert sealed_coverage["deferred"] == coverage["deferred"]
     assert source.read_bytes() == original_checkpoint
+    for earlier, original in earlier_checkpoints.items():
+        assert earlier.read_bytes() == original
 
 
 @pytest.mark.parametrize("sparse_finding", [False, True])
