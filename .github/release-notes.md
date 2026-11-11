@@ -75,6 +75,7 @@
 - add a guide to security skills ([#2586](https://github.com/openai/codex-security/pull/2586))
 - bump node-forge from 1.4.2 to 1.4.3 in /evals/triage-finding ([#2588](https://github.com/openai/codex-security/pull/2588))
 - bump fast-xml-parser from 5.11.1 to 5.12.0 in /evals/triage-finding ([#2587](https://github.com/openai/codex-security/pull/2587))
+- retain shared history across worktree changes ([#456](https://github.com/openai/codex-security/pull/456))
 
 </details>
 
