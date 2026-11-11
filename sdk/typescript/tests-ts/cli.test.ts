@@ -2291,6 +2291,25 @@ describe("CLI", () => {
     expect(stderr.text()).toBe("");
   });
 
+  test("projects nested info settings and other top-level metadata", async () => {
+    const { stdout, runCli } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "info",
+          "--json",
+          "--filter-output",
+          "model,configuration.settings.mode",
+        ],
+        dependencies(),
+      ),
+    ).toBe(0);
+    expect(JSON.parse(stdout.text())).toEqual({
+      model: DEFAULT_SCAN_MODEL_CONFIGURATION.model,
+      configuration: { settings: { mode: "standard" } },
+    });
+  });
+
   test("rejects scan-only filters before running the info command", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);
 

@@ -574,10 +574,36 @@ describe("publish scan to custom", () => {
     },
   );
 
+  test("identifies an invalid custom destination URL in JSON", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.publishScanToCustom = async () => fail("must not publish");
+    expect(
+      await runCli(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          "--to",
+          "custom",
+          "--findings-url",
+          "not-a-url",
+          "--json",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("--findings-url");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Invalid value for --findings-url: Invalid URL",
+      fieldErrors: [{ path: "findingsUrl" }],
+    });
+  });
+
   test.each([
     [["--to", "custom"], "requires --findings-url"],
     [["--to", "custom", "--findings-url", "--dry-run"], "--findings-url"],
-    [["--to", "custom", "--findings-url", "not-a-url"], "URL"],
     [
       [
         "--to",
