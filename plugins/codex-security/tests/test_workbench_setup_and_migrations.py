@@ -1241,6 +1241,8 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
             "log_completed_at": None,
             "windows_resume_output_identity": None,
             "windows_resume_target_identity": None,
+            "target_git_prefix": None,
+            "target_git_identity_json": None,
         }
         for row in before
     ]
