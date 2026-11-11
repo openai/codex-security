@@ -1979,6 +1979,12 @@ export class CodexSecurity {
                 ),
               ),
             );
+      // The Windows sandbox creates directories for missing exact deny paths.
+      if (runtime.configPath !== undefined)
+        await writeCodexConfig(
+          runtime.configPath,
+          scanPreflightCodexConfig(effectiveConfig),
+        );
       const policyFilesystem = policyFilesystemPermissions(
         [
           session.runtimeHome,
