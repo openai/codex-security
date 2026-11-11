@@ -2040,6 +2040,7 @@ export async function runRepositoryCommand(
       const path = join(home, `${profile}.config.toml`);
       const file = await open(path, "wx", 0o600);
       profileFile = path;
+      let contents: string;
       try {
         await file.chmod(0o600);
         await requirePrivateSnapshotProfileFile(path);
@@ -2071,7 +2072,7 @@ export async function runRepositoryCommand(
             },
           };
         }
-        const contents =
+        contents =
           Object.entries({
             ...sandbox.configuration,
             permissions: profiles,
@@ -2081,22 +2082,22 @@ export async function runRepositoryCommand(
             )
             .join("\n") + "\n";
         await file.writeFile(contents);
-        if (profileKey !== undefined && options?.snapshotProfiles) {
-          const entry = await lstat(path, { bigint: true });
-          if (entry.isFile() && entry.ino !== 0n && entry.nlink === 1n) {
-            options.snapshotProfiles.set(profileKey, {
-              name: profile,
-              path,
-              contents,
-              dev: entry.dev,
-              ino: entry.ino,
-              ctimeNs: entry.ctimeNs,
-            });
-            profileFile = undefined;
-          }
-        }
       } finally {
         await file.close();
+      }
+      if (profileKey !== undefined && options?.snapshotProfiles) {
+        const entry = await lstat(path, { bigint: true });
+        if (entry.isFile() && entry.ino !== 0n && entry.nlink === 1n) {
+          options.snapshotProfiles.set(profileKey, {
+            name: profile,
+            path,
+            contents,
+            dev: entry.dev,
+            ino: entry.ino,
+            ctimeNs: entry.ctimeNs,
+          });
+          profileFile = undefined;
+        }
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
