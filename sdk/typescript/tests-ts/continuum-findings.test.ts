@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import { normalizeContinuumFindings } from "../src/continuum-findings.js";
+import { projectStoredFinding } from "../src/stored-finding-projection.js";
 import {
   createAndReplayFinding,
   localReportFixture,
@@ -83,6 +85,88 @@ test("a selected array retains the same evidence as separate GetCodeFinding resp
     /same environment/,
   );
   expect(normalize([first, first]).excluded).toHaveLength(2);
+});
+
+function patchArtifact(artifactId: string, patch: string) {
+  return {
+    artifactId,
+    format: "GIT_DIFF",
+    repositoryName: "project",
+    patchSha256: createHash("sha256").update(patch).digest("hex"),
+    sizeBytes: Buffer.byteLength(patch),
+    patch,
+  };
+}
+
+test("patch captures retain the native finding, exact patch bytes and AWS descriptors", () => {
+  const finding = { ...continuumDetail(), createdIssueId: "oneissue" };
+  const patch = patchArtifact(
+    "firstpatch",
+    "--- a/src/example.ts\n+++ b/src/example.ts\n@@ -1 +1 @@\n-// example\n+// café\n",
+  );
+  const plain = continuumSummary("two");
+  const prior = normalize(finding).findings[0]!;
+  const captured = normalize([{ finding, patches: [patch] }, plain]);
+  expect(captured.excluded).toEqual([]);
+  expect(captured.findings).toEqual([
+    {
+      ...prior,
+      evidence: {
+        ...prior.evidence,
+        source_data: { ...prior.evidence.source_data, patches: [patch] },
+      },
+    },
+    ...normalize(plain).findings,
+  ]);
+  expect(normalize({ finding, patches: [] })).toEqual(normalize(finding));
+});
+
+test("a broken patch capture excludes only its own finding", () => {
+  const detail = continuumDetail();
+  const linked = { ...detail, duplicateOfIssueId: "otherissue" };
+  const patch = patchArtifact("firstpatch", "+ok\n");
+  const plain = continuumSummary("two");
+  for (const broken of [
+    { finding: detail, patches: [patch] },
+    {
+      finding: linked,
+      patches: [{ ...patch, sizeBytes: patch.sizeBytes + 1 }],
+    },
+    { finding: linked, patches: [{ ...patch, patch: "+no\n" }] },
+  ]) {
+    const result = normalize([broken, plain]);
+    expect(result.excluded).toMatchObject([{ position: 1 }]);
+    expect(result.findings).toEqual(normalize(plain).findings);
+  }
+});
+
+test("Cloud publication of a stored capture keeps fitting patches and identifies oversized patch bodies", () => {
+  const finding = { ...continuumDetail(), duplicateOfIssueId: "otherissue" };
+  const big = patchArtifact("bigpatch", "+example\n".repeat(32 * 1024));
+  const small = patchArtifact("smallpatch", "+ok\n");
+  const input = { finding, patches: [big, small] };
+  const local = normalizeContinuumFindings(input, continuumRepository, "local");
+  expect(local.excluded).toEqual([]);
+  const stored = local.findings[0]!;
+  expect(stored.evidence.source_data?.["patches"]).toEqual([big, small]);
+
+  const cloud = normalize(input);
+  expect(cloud.excluded).toEqual([]);
+  const { patch: _, ...descriptor } = big;
+  expect(cloud.findings[0]!.evidence.source_data?.["patches"]).toEqual([
+    { ...descriptor, contentOmitted: "cloud_evidence_limit" },
+    small,
+  ]);
+  expect(
+    projectStoredFinding(
+      {
+        provider: "continuum",
+        sourceFindingId: stored.source_finding_id,
+        evidence: stored.evidence,
+      },
+      [],
+    ).findings,
+  ).toEqual(cloud.findings);
 });
 
 test("preserves dependency and posture evidence without classifying it as a code flaw", () => {
@@ -166,14 +250,9 @@ test("an inferred weakness cannot exclude a Cloud finding at its evidence limit"
     stepsToReproduce: Array<string>(31).fill("x".repeat(8192)).concat(""),
   };
   const original = normalize(finding).findings[0]!.evidence;
-  const bytes = Buffer.byteLength(
-    JSON.stringify({
-      ...original,
-      packages: [],
-      source_updated_at: null,
-      details: { ...original.details, weakness_ids: [] },
-    }),
-  );
+  original.source_updated_at = null;
+  original.details!.weakness_ids = [];
+  const bytes = Buffer.byteLength(JSON.stringify(original));
   finding.stepsToReproduce[31] = "x".repeat(256 * 1024 - bytes);
   const result = normalize(finding);
   expect(result.excluded).toEqual([]);
@@ -243,33 +322,42 @@ test("Cloud projects packages within its limits and retains all AWS package evid
   expect(local.findings[0]!.evidence.packages).toHaveLength(102);
 });
 
-test("a Cloud finding that fits with native packages alone still imports", () => {
-  const finding = {
-    ...continuumSummary(),
-    affectedPackages: [
-      { name: "example", version: "1.0.0", packageManager: "npm" },
-    ],
-    padding: "",
-  };
-  const original = normalize(finding).findings[0]!.evidence;
-  const bytes = Buffer.byteLength(
-    JSON.stringify({ ...original, packages: [], source_updated_at: null }),
-  );
-  finding.padding = "x".repeat(256 * 1024 - bytes);
-  const result = normalize(finding);
-  expect(result.excluded).toEqual([]);
-  expect(result.findings[0]!.evidence.packages).toEqual([]);
-  expect(result.findings[0]!.evidence.source_data?.["finding"]).toEqual(
-    finding,
-  );
-  finding.padding = finding.padding.slice(10);
-  const withTimestamp = normalize(finding);
-  expect(withTimestamp.findings[0]!.evidence).toMatchObject({
-    packages: [],
-    source_updated_at: Date.parse(finding.statusUpdatedAt) / 1000,
-    source_data: { finding },
-  });
-});
+test.each(["plain finding", "patch capture"])(
+  "Cloud imports a %s that fits only without the derived package list",
+  (format) => {
+    const finding = {
+      ...continuumSummary(),
+      createdIssueId: "oneissue",
+      affectedPackages: [
+        { name: "example", version: "1.0.0", packageManager: "npm" },
+      ],
+      padding: "",
+    };
+    const patches = [patchArtifact("firstpatch", "+checkedExample(input)\n")];
+    const report = format === "patch capture" ? { finding, patches } : finding;
+    const base = normalize(report).findings[0]!.evidence;
+    base.packages = [];
+    base.source_updated_at = null;
+    const bytes = Buffer.byteLength(JSON.stringify(base));
+    finding.padding = "x".repeat(256 * 1024 - bytes);
+    const result = normalize(report);
+    expect(result.excluded).toEqual([]);
+    expect(result.findings[0]!.evidence.packages).toEqual([]);
+    expect(result.findings[0]!.evidence.source_data?.["finding"]).toEqual(
+      finding,
+    );
+    expect(result.findings[0]!.evidence.source_data?.["patches"]).toEqual(
+      format === "patch capture" ? patches : undefined,
+    );
+    finding.padding = finding.padding.slice(10);
+    const withTimestamp = normalize(report);
+    expect(withTimestamp.findings[0]!.evidence).toMatchObject({
+      packages: [],
+      source_updated_at: Date.parse(finding.statusUpdatedAt) / 1000,
+      source_data: { finding },
+    });
+  },
+);
 
 test("unsafe paths stay in native evidence without becoming checkout locations", () => {
   const detail = {
@@ -319,7 +407,12 @@ test("local replay enriches one unassessed occurrence when the detailed record a
   try {
     await fixture.writeJson({ items: [continuumSummary()] });
     const previous = await createAndReplayFinding(fixture);
-    await writeFile(fixture.file, gzipSync(JSON.stringify(continuumDetail())));
+    const finding = { ...continuumDetail(), createdIssueId: "oneissue" };
+    const patches = [patchArtifact("firstpatch", "+checkedExample(input)\n")];
+    await writeFile(
+      fixture.file,
+      gzipSync(JSON.stringify({ finding, patches })),
+    );
     const updated = await updateStoredFinding(fixture, previous);
     const normalized = normalize(continuumDetail());
     normalized.findings[0]!.evidence.details!.repository!.url =
@@ -333,6 +426,7 @@ test("local replay enriches one unassessed occurrence when the detailed record a
     ).rejects.toThrow(/repository|remote/i);
     expect(updated.provider).toBe("continuum");
     expect(updated.evidence.details?.scanner_verdict).toBe("TRUE_POSITIVE");
+    expect(updated.evidence.source_data?.["patches"]).toEqual(patches);
     await expect(
       fixture.prepare({
         sourceRepositoryUrl: "https://github.com/example/other",

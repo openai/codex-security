@@ -12,11 +12,11 @@ import {
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import {
+  appendFinding,
   readScannerJson,
   repositoryFilePath,
   scannerSeverity,
   text,
-  appendFinding,
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
@@ -82,7 +82,7 @@ export function tenableSourceRepository(
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
   target: ExternalImportTarget = "local",
-) {
+): ExternalSourceRepository {
   const first =
     target === "cloud" ? input.findings[0]?.evidence.source_data : undefined;
   const header = input.report ?? first;

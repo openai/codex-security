@@ -363,7 +363,14 @@ def test_registration_restores_output_when_checkout_is_replaced_before_commit(
             patch.setattr(workbench_db, "scan_scope_file_count", replace_target)
             if not full_ids:
                 patch.setattr(windows_scan_local_files, "_full_directory_id", lambda *args: None)
-            with pytest.raises(SystemExit, match="target changed while the scan was starting"):
+            # An archived scan already owns the registered target. Its ownership check
+            # detects the replacement before the final Windows resume pin is acquired.
+            rejection = (
+                "no longer matches its recorded security scan history"
+                if archive
+                else "target changed while the scan was starting"
+            )
+            with pytest.raises(SystemExit, match=rejection):
                 register(archive=archive, connection=connection)
         ids = [row[0] for row in connection.execute("SELECT id FROM scans")]
         assert not list(output.parent.glob(f"{output.name}.previous-*"))
@@ -494,7 +501,7 @@ def test_legacy_windows_resume_keeps_populated_output_and_rejects_unbound_empty_
 
 def test_deep_registration_rolls_back_the_retained_child(deep_registration) -> None:
     state, output, register = deep_registration
-    run_workbench(state, "list-scans")
+    run_workbench(state, "database-info")
     with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
         connection.execute(
             "CREATE TRIGGER fail_binding BEFORE UPDATE OF windows_resume_output_identity ON scans "
@@ -592,7 +599,7 @@ def test_resume_cleanup_cannot_remove_an_existing_or_substituted_child(tmp_path:
 
 def test_post_commit_interrupt_keeps_the_registered_resume_directory(deep_registration) -> None:
     state, output, register = deep_registration
-    run_workbench(state, "list-scans")
+    run_workbench(state, "database-info")
 
     class InterruptedCommit(sqlite3.Connection):
         def commit(self):

@@ -465,6 +465,14 @@ export async function readVendorFindings(
   return normalizeFindings(await readFindingInput(path), target);
 }
 
+/** @internal Reopen a native JSON selection with the same rules as a Wiz file. */
+export function normalizeWizJson(
+  payload: unknown,
+  target: ExternalImportTarget,
+) {
+  return normalizeFindings(records(payload), target);
+}
+
 function inventorySources(input: FindingInput, current: VendorFindings) {
   return current.findings.flatMap(({ evidence }) => {
     const repository = evidence.details?.repository;
@@ -480,49 +488,13 @@ function inventorySources(input: FindingInput, current: VendorFindings) {
   });
 }
 
-export async function readLocalWizFindings(path: string) {
-  const input = await readFindingInput(path);
-  const current = normalizeFindings(input, "local");
-  return { current, sourceRepositories: inventorySources(input, current) };
-}
-
-/** @internal Bind resumable publication to vendor evidence and verified repository identity. */
-export async function readVendorFindingsForPublication(
+export async function readWizSelection(
   path: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<{
-  current: VendorFindings;
-  currentIdentity: unknown[];
-  sourceRepositories: ExternalSourceRepository[];
-}> {
+  target: ExternalImportTarget,
+) {
   const input = await readFindingInput(path);
-  const normalized = new WeakSet<VendorFinding>();
-  const current = normalizeFindings(input, target, normalized);
-  const currentIdentity = current.findings.map((finding) => {
-    if (normalized.has(finding)) return finding;
-    const repository = finding.evidence.details?.repository;
-    return {
-      source_finding_id: finding.source_finding_id,
-      evidence: {
-        // Raw vendor records retain every original branch/ref and source field.
-        // Inventory display aliases must not change an outstanding request's identity.
-        source_data: finding.evidence.source_data,
-        repository: repository
-          ? {
-              id: repository.id,
-              // Publication targets use Cloud's GitHub URL semantics. Input
-              // joins above still require provenance for custom-host folding.
-              url: repositoryUrlKey(repository.url).toLowerCase(),
-            }
-          : null,
-      },
-    };
-  });
-  return {
-    current,
-    currentIdentity,
-    sourceRepositories: inventorySources(input, current),
-  };
+  const findings = normalizeFindings(input, target);
+  return { findings, sourceRepositories: inventorySources(input, findings) };
 }
 
 async function readFindingInput(path: string): Promise<FindingInput> {
@@ -591,7 +563,6 @@ export function isWizOccurrence(
 function normalizeFindings(
   input: FindingInput,
   target: ExternalImportTarget,
-  normalized?: WeakSet<VendorFinding>,
 ): VendorFindings {
   const result: VendorFindings = {
     read: input.records.length,
@@ -657,8 +628,6 @@ function normalizeFindings(
       }
       identities.add(finding.source_finding_id);
       result.findings.push(finding);
-      if (item.kind !== "sca_csv" && "source_finding_id" in record)
-        normalized?.add(finding);
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
       result.excluded.push({

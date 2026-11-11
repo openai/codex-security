@@ -10,7 +10,7 @@ import { isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
-  readScannerJson,
+  scannerJsonReader,
   record,
   requiredText,
   stableId,
@@ -512,7 +512,7 @@ export function normalizeVeracodeFindings(
     target,
   );
   const { scope, rows } = readReport(input);
-  const findings = normalizeRecords(
+  return normalizeRecords(
     rows,
     (row) => {
       const details = expandedDetails(findingDetails(row));
@@ -527,7 +527,7 @@ export function normalizeVeracodeFindings(
         severityByScore[integer(details["severity"], "severity")];
       if (!severity)
         throw new Error("Veracode severity must be on the native 0–5 scale.");
-      const evidence = validateExternalEvidence(
+      return validateExternalEvidence(
         {
           title: text(category?.["name"]) ?? text(cwe["name"]) ?? weakness,
           severity,
@@ -549,22 +549,12 @@ export function normalizeVeracodeFindings(
         },
         target,
       );
-      return evidence;
     },
     (row) => occurrenceId(row, scope),
     target,
   );
-  return findings;
 }
 
-export async function readVeracodeFindings(
-  path: string,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeVeracodeFindings(
-    await readScannerJson(path),
-    sourceRepositoryUrl,
-    target,
-  );
-}
+export const readVeracodeFindings = scannerJsonReader(
+  normalizeVeracodeFindings,
+);

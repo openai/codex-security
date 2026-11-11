@@ -536,5 +536,57 @@
     "statements": [
       "ALTER TABLE scans ADD COLUMN windows_resume_target_identity TEXT;"
     ]
+  },
+  {
+    "version": 67,
+    "name": "persist repository identities",
+    "statements": [
+      "ALTER TABLE security_targets\n        ADD COLUMN repository_identity TEXT;",
+      "CREATE INDEX security_targets_by_repository_identity\n        ON security_targets(repository_identity);",
+      "ALTER TABLE scans\n        ADD COLUMN repository_generation TEXT;",
+      "CREATE INDEX scans_by_repository_generation\n        ON scans(repository_generation);",
+      "CREATE INDEX scans_by_target_path\n        ON scans(target_path);",
+      "ALTER TABLE scans\n        ADD COLUMN completion_sequence INTEGER CHECK (completion_sequence >= 1);",
+      "CREATE UNIQUE INDEX scans_completion_sequence\n        ON scans(completion_sequence);",
+      "CREATE TRIGGER scans_assign_inserted_completion_sequence\n        AFTER INSERT ON scans\n        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL\n        BEGIN\n            UPDATE scans\n            SET completion_sequence = (\n                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans\n            )\n            WHERE id = NEW.id AND completion_sequence IS NULL;\n        END;",
+      "CREATE TRIGGER scans_assign_updated_completion_sequence\n        AFTER UPDATE OF status ON scans\n        WHEN NEW.status = 'complete' AND NEW.completion_sequence IS NULL\n        BEGIN\n            UPDATE scans\n            SET completion_sequence = (\n                SELECT COALESCE(MAX(completion_sequence), 0) + 1 FROM scans\n            )\n            WHERE id = NEW.id AND completion_sequence IS NULL;\n        END;"
+    ]
+  },
+  {
+    "version": 68,
+    "name": "stabilize Linux repository generations",
+    "statements": []
+  },
+  {
+    "version": 69,
+    "name": "distinguish unvalidated workspace targets",
+    "statements": [
+      "ALTER TABLE workspaces\n        ADD COLUMN target_path_unvalidated INTEGER NOT NULL DEFAULT 0\n        CHECK (target_path_unvalidated IN (0, 1));"
+    ]
+  },
+  {
+    "version": 70,
+    "name": "retain checkout roots for Git discovery",
+    "statements": [
+      "ALTER TABLE security_targets ADD COLUMN git_checkout_root TEXT;"
+    ]
+  },
+  {
+    "version": 71,
+    "name": "retain rejected workspace checkout boundaries",
+    "statements": [
+      "ALTER TABLE workspaces ADD COLUMN rejected_checkout_roots_json TEXT;"
+    ]
+  },
+  {
+    "version": 72,
+    "name": "retain external finding import selections and provenance",
+    "statements": [
+      "CREATE TABLE external_finding_imports (\n    id TEXT PRIMARY KEY,\n    repository TEXT NOT NULL,\n    created_at TEXT NOT NULL,\n    provider TEXT NOT NULL,\n    source_key TEXT NOT NULL,\n    provenance_json TEXT,\n    selection_json TEXT NOT NULL\n);",
+      "CREATE INDEX external_finding_imports_by_repository ON external_finding_imports (repository, created_at);",
+      "CREATE TABLE external_finding_import_members (\n    import_id TEXT NOT NULL REFERENCES external_finding_imports(id),\n    position INTEGER NOT NULL,\n    finding_id TEXT NOT NULL REFERENCES external_source_reports(id),\n    version INTEGER NOT NULL,\n    PRIMARY KEY (import_id, position)\n) WITHOUT ROWID;",
+      "CREATE INDEX external_finding_members_by_version\nON external_finding_import_members (finding_id, version);",
+      "CREATE TABLE external_finding_publications (\n    finding_id TEXT NOT NULL REFERENCES external_source_reports(id),\n    version INTEGER NOT NULL,\n    cloud_api_url TEXT NOT NULL,\n    account_id TEXT NOT NULL,\n    destination_id TEXT NOT NULL,\n    receipt_id TEXT NOT NULL,\n    outcome TEXT NOT NULL,\n    cloud_finding_id TEXT,\n    created_at TEXT NOT NULL,\n    PRIMARY KEY (finding_id, version, cloud_api_url, account_id, destination_id, receipt_id)\n) WITHOUT ROWID;"
+    ]
   }
 ]

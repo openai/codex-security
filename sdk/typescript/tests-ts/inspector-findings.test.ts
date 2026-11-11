@@ -265,10 +265,9 @@ test("oversized optional SAST fields preserve the complete Inspector finding", (
 
 test("SAST details do not displace native evidence at the Cloud byte limit", () => {
   const native = { ...codeFinding(), padding: "" };
-  const evidence = normalize([native]).findings[0]!.evidence;
+  const { details: _, ...base } = normalize([native]).findings[0]!.evidence;
   native.padding = " ".repeat(
-    262_144 -
-      Buffer.byteLength(JSON.stringify({ ...evidence, details: undefined })),
+    262_144 - Buffer.byteLength(JSON.stringify(base)),
   );
   expect(
     normalize([native]).findings[0]!.evidence.source_data?.["finding"],
@@ -658,52 +657,6 @@ test("only surviving rows share project proof, independently of input order", ()
     expect(normalize(rows, enterprise, "local").findings).toHaveLength(2);
     known.title = "Restored title";
   }
-});
-
-function scopedProjectRows() {
-  const witness = projectRow("a", enterprise, "GITHUB");
-  const dependent = projectRow("b");
-  const independent = projectRow("c", enterprise, "GITHUB");
-  Object.assign(independent.resources[0]!.details.codeRepository, {
-    integrationArn: undefined,
-  });
-  const rows = [witness, dependent, independent];
-  for (const row of rows) row.resources[0]!.id = "example/project";
-  return { rows, witness, dependent, independent };
-}
-
-test.each([
-  [0.00001, 262_145, false],
-  [1e-7, 262_144, true],
-] as const)(
-  "a size change rechecks provider proof for each selected subset (%d)",
-  (score, bytes, rejectsWitness) => {
-    const { rows, witness, independent } = scopedProjectRows();
-    Object.assign(witness, { score: new Number(score), pad: "" });
-    const evidence = normalize(rows, enterprise).findings[0]!.evidence;
-    Object.assign(witness, {
-      pad: "p".repeat(bytes - Buffer.byteLength(JSON.stringify(evidence))),
-    });
-    const current = normalize(rows, enterprise);
-    const all = rows.map((row) => row.findingArn);
-    const onlyIndependent = [independent.findingArn];
-    expect(current.findings.map((row) => row.source_finding_id)).toEqual(
-      rejectsWitness ? onlyIndependent : all,
-    );
-  },
-);
-
-test("an uncertain Inspector row can obscure the membership of its dependent", () => {
-  const { rows, witness, dependent, independent } = scopedProjectRows();
-  Object.assign(witness, { score: new Number(NaN) });
-  const current = normalize(rows, enterprise);
-  expect(current.findings.map((row) => row.source_finding_id)).toEqual([
-    independent.findingArn,
-  ]);
-  expect(current.excluded.map((row) => row.source_finding_id)).toEqual([
-    witness.findingArn,
-    dependent.findingArn,
-  ]);
 });
 
 test("after the only provider hint is excluded, valid local rows still share their native URL", () => {

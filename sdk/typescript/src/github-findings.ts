@@ -331,7 +331,7 @@ function ownData(value: unknown, key: string): unknown {
 function normalizeRecords(
   records: readonly unknown[],
   target: ExternalImportTarget,
-  serializeInput = false,
+  snapshot = false,
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
@@ -342,29 +342,28 @@ function normalizeRecords(
   for (const [index, input] of records.entries()) {
     let exported = input;
     try {
-      // SDK callers can supply a serializer. Use the same record they would save to a file.
-      if (serializeInput) {
-        const source = exportedGitHubRecord(input, index, target);
-        exported = source.record;
-        if (source.invalid) throw source.invalid;
+      if (snapshot) {
+        const capture = exportedGitHubRecord(input, index, target);
+        exported = capture.record;
+        if (capture.invalid) throw capture.invalid;
       }
-      const { source_finding_id: id, evidence } = mapRecord(exported);
-      const validated = validateExternalEvidence(evidence, target);
+      const { source_finding_id: id, evidence: mapped } = mapRecord(exported);
+      const evidence = validateExternalEvidence(mapped, target);
       if (identities.has(id))
         throw new CodexSecurityError(
           `Duplicate source finding id ${JSON.stringify(id)}. Select each GitHub occurrence once.`,
         );
       identities.add(id);
-      result.findings.push({ source_finding_id: id, evidence: validated });
+      result.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
+      const url =
+        snapshot && exported === input
+          ? ownData(input, "url")
+          : asRecord(exported)?.["url"];
       result.excluded.push({
         position: index + 1,
-        source_finding_id: text(
-          serializeInput && exported === input
-            ? ownData(input, "url")
-            : asRecord(exported)?.["url"],
-        ),
+        source_finding_id: text(url),
         reason: errorMessage(error),
       });
     }

@@ -155,7 +155,7 @@ function normalizeEvidenceDetails(
 ): void {
   if (value !== null && typeof value === "object") {
     const fields = value as Record<string, unknown>;
-    // Cloud omits absent optional package and detail fields from readback.
+    // Cloud omits these optional fields when null.
     if (Array.isArray(fields["packages"]))
       for (const value of fields["packages"]) {
         if (
@@ -475,39 +475,35 @@ function serializeImportJson(
   });
 }
 
-// Scanner readers accept SDK objects as well as JSON files. Validate numeric claims
-// in the supplied evidence even if a vendor serializer omits them.
-function validateRawEvidenceNumbers(
+/** Enforce the numeric and depth limits on raw evidence as well as its serialized form. */
+function validateRawEvidence(
   input: unknown,
   target: ExternalImportTarget,
 ): void {
-  if (!input || typeof input !== "object") {
-    if (typeof input === "number") evidenceNumber(input);
-    return;
-  }
-  const pending = [{ value: input, depth: 0 }];
-  const ancestors: object[] = [];
+  if (typeof input === "number") evidenceNumber(input);
+  if (input === null || typeof input !== "object") return;
   const checked = target === "local" ? new WeakSet<object>() : undefined;
+  const ancestors: object[] = [];
+  const pending = [{ value: input, depth: 0 }];
   while (pending.length) {
     const { value, depth } = pending.pop()!;
-    if (target === "cloud" && depth > 20) throw new CloudEvidenceDepthError();
     if (checked?.has(value)) continue;
     checked?.add(value);
     ancestors.length = depth;
     if (ancestors.includes(value)) continue;
     ancestors[depth] = value;
     for (const child of Object.values(value)) {
+      if (target === "cloud" && depth >= 20)
+        throw new CloudEvidenceDepthError();
       if (typeof child === "number") evidenceNumber(child);
       if (child !== null && typeof child === "object") {
         pending.push({ value: child, depth: depth + 1 });
-      } else if (target === "cloud" && depth >= 20) {
-        throw new CloudEvidenceDepthError();
       }
     }
   }
 }
 
-const CLOUD_EVIDENCE_BYTES = 256 * 1024;
+export const CLOUD_EVIDENCE_BYTES = 256 * 1024;
 function checkEvidenceSize(bytes: number): number {
   if (bytes > CLOUD_EVIDENCE_BYTES)
     throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
@@ -528,10 +524,10 @@ export function validateExternalEvidenceJson(
   };
   if (target === "local") {
     serializeImportJson(input, validateNumber);
-    validateRawEvidenceNumbers(input, target);
+    validateRawEvidence(input, target);
     return 0;
   }
-  validateRawEvidenceNumbers(input, target);
+  validateRawEvidence(input, target);
   const text = serializeImportJson(input, validateNumber, true);
   return checkEvidenceSize(
     Buffer.byteLength(text) + additionalCloudBytes + adjustment,

@@ -1,7 +1,6 @@
 import type {
   ExternalFinding,
   ExternalFindings,
-  ExternalPublicationInput,
   ExternalSourceRepository,
 } from "./external-findings.js";
 import { readScannerJson, sarifRunRepositories } from "./scanner-import.js";
@@ -11,7 +10,6 @@ import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
   normalizeSnykFile,
-  readSnykReport,
   emptySnykReportRepositories,
   snykRepositoryUrls,
 } from "./snyk-findings.js";
@@ -35,15 +33,13 @@ import { normalizeContinuumFindings } from "./continuum-findings.js";
 import { readCheckmarxFindings } from "./checkmarx-findings.js";
 import { normalizeInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
-import {
-  readLocalWizFindings,
-  readVendorFindingsForPublication,
-  wizFindingRepository,
-} from "./wiz-findings.js";
+import { readWizSelection, wizFindingRepository } from "./wiz-findings.js";
+import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 
 /** File reader names mapped to the provider stored with each finding. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
+  armorcode: "armorcode",
   snyk: "snyk",
   semgrep: "semgrep",
   trivy: "trivy",
@@ -73,11 +69,9 @@ export interface ExternalFindingsReaderOptions {
   trivyScanRoot?: string;
 }
 
-/** @internal Validated scanner output and source repository claims. */
+/** @internal Normalized file contents and any repository claims supplied by its reader. */
 export interface ReadExternalFindings {
   findings: ExternalFindings;
-  /** Wiz binds publication identity to its raw rows and source repository. */
-  publication?: ExternalPublicationInput;
   sourceRepositories?: ExternalSourceRepository[];
 }
 
@@ -191,7 +185,7 @@ export async function readExternalFindings(
     return { findings, sourceRepositories: [{ url }] };
   }
   if (provider === "snyk") {
-    const input = await readSnykReport(path);
+    const input = await readScannerJson(path);
     const findings = await normalizeSnykFile(input, target, references);
     return { findings, sourceRepositories: snykFileRepositories(input) };
   }
@@ -211,19 +205,25 @@ export async function readExternalFindings(
       sourceRepositories.push({ url: options.sourceRepositoryUrl });
     return { findings, sourceRepositories };
   }
+  if (provider === "armorcode") {
+    const input = await readScannerJson(path);
+    return {
+      findings: normalizeArmorCodeFindings(
+        input,
+        target,
+        options.sourceRepositoryUrl,
+      ),
+    };
+  }
   if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
   if (provider === "wiz") {
-    const wiz =
-      target === "local"
-        ? await readLocalWizFindings(path)
-        : await readVendorFindingsForPublication(path, target);
-    const sourceRepositories = wiz.current.findings.flatMap((finding) =>
+    const wiz = await readWizSelection(path, target);
+    const sourceRepositories = wiz.findings.findings.flatMap((finding) =>
       localFindingRepositories("wiz", finding),
     );
     return {
-      findings: wiz.current,
-      ...("currentIdentity" in wiz && { publication: wiz }),
+      findings: wiz.findings,
       sourceRepositories: [...wiz.sourceRepositories, ...sourceRepositories],
     };
   }

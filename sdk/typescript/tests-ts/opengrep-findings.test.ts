@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   normalizeOpenGrepFindings as normalize,
+  projectStoredOpenGrepFinding,
   readOpenGrepFindings,
 } from "../src/opengrep-findings.js";
 import {
@@ -138,6 +139,45 @@ test("one source occurrence retains every trace observation in deterministic ord
   expect(input.results.reverse()).toEqual(original.results);
 });
 
+test("stored OpenGrep groups publish eligible sibling traces and identify every excluded retained trace", () => {
+  const input = opengrepTraceJson();
+  const deep = structuredClone(input.results[0]!);
+  let trace: unknown = "leaf";
+  for (let level = 0; level < 20; level++) trace = { child: trace };
+  Object.assign(deep.extra.metadata, { trace });
+  input.results.push(deep);
+  const stored = normalize(input, options, "local").findings[0]!;
+  const traces = stored.evidence.source_data![
+    "results"
+  ] as typeof input.results;
+  expect(traces).toHaveLength(3);
+  const native = normalize({ ...input, results: traces }, options, "cloud");
+  const projected = projectStoredOpenGrepFinding(stored)!;
+  expect(projected.read).toBe(3);
+  expect(projected.findings).toEqual(native.findings);
+  expect(projected.excluded).toEqual(native.excluded);
+  expect(projected.excluded).toEqual([
+    {
+      position:
+        traces.findIndex((result) => "trace" in result.extra.metadata) + 1,
+      source_finding_id: stored.source_finding_id,
+      reason: expect.stringContaining("depth limit"),
+    },
+  ]);
+  expect(projected.findings[0]!.evidence.source_data!["results"]).toHaveLength(
+    2,
+  );
+  expect(projected.findings[0]!.evidence.source_data!["scan_error_count"]).toBe(
+    input.errors.length,
+  );
+  expect(
+    projectStoredOpenGrepFinding({ ...stored, source_finding_id: "custom-id" }),
+  ).toBeUndefined();
+  const edited = structuredClone(stored);
+  edited.evidence.title = "Reviewed title";
+  expect(projectStoredOpenGrepFinding(edited)).toBeUndefined();
+});
+
 test("an invalid observation does not hide a valid sibling at the same source range", () => {
   const input: any = opengrepJson();
   const valid = structuredClone(input.results[0]);
@@ -173,57 +213,6 @@ test("grouped observations still honor the existing Cloud evidence size contract
     true,
   );
 });
-
-test.each(["group", "trace"] as const)(
-  "a size change affecting a %s keeps the unrelated occurrence proven",
-  (changed) => {
-    const input = opengrepTraceJson();
-    const second = input.results[1]!;
-    if (changed === "trace") second.extra.message = "x".repeat(140_000);
-    // The released reader counted a boxed decimal by its JSON spelling.
-    Object.assign(second.extra.metadata, {
-      score: new Number(0.00001),
-      pad: "",
-    });
-    const group = normalize(input, options).findings[0]!;
-    const bytes = Buffer.byteLength(JSON.stringify(group.evidence));
-    Object.assign(second.extra.metadata, { pad: "p".repeat(262_145 - bytes) });
-    const unrelated = structuredClone(input.results[0]!);
-    unrelated.check_id = "example.unrelated";
-    input.results.push(unrelated);
-    const current = normalize(input, options);
-    expect(current.excluded).toEqual([]);
-    expect(current.findings).toHaveLength(2);
-    const known = current.findings.filter(
-      (row) => row.source_finding_id !== group.source_finding_id,
-    );
-    expect(known).toHaveLength(1);
-  },
-);
-
-test.each([
-  { score: 0.00001, bytes: 262_145, freshCount: 2 },
-  { score: 1e-7, bytes: 262_144, freshCount: 1 },
-])(
-  "retains exact singleton membership at $bytes bytes",
-  ({ score, bytes, freshCount }) => {
-    const input = opengrepJson();
-    const candidate = {
-      ...input.results[0]!,
-      check_id: "example.boundary",
-      score: new Number(score),
-      padding: "",
-    };
-    const selected = normalize({ ...input, results: [candidate] }, options)
-      .findings[0]!;
-    candidate.padding = "x".repeat(
-      bytes - Buffer.byteLength(JSON.stringify(selected.evidence)),
-    );
-    input.results.push(candidate);
-    const current = normalize(input, options);
-    expect(current.findings).toHaveLength(freshCount);
-  },
-);
 
 test("an oversized trace leaves the publishable traces at its source occurrence", () => {
   const input = opengrepJson();

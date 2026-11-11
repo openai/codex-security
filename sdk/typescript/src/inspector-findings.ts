@@ -638,32 +638,29 @@ export function normalizeInspectorFindings(
     claims: repositoryClaims(finding),
   }));
   checkReportScope(rows, target, projectMap);
-  function checkRetainedScope(result: ExternalFindings) {
-    if (!result.excluded.length || !result.findings.length) return;
-    // Only surviving rows can supply shared provider and host evidence on replay.
-    const skipped = new Set(result.excluded.map((row) => row.position));
-    const retained = rows.filter((row) => !skipped.has(row.position));
-    checkReportScope(retained, target, projectMap, (row, error) => {
-      skipped.add(row.position);
-      result.excluded.push({
-        position: row.position,
-        source_finding_id: identity(record(row.finding, "Inspector finding"))
-          .arn,
-        reason: errorMessage(error),
-      });
-    });
-    result.findings = result.findings.filter(
-      (_, i) => !skipped.has(retained[i]!.position),
-    );
-    result.excluded.sort((a, b) => a.position - b.position);
-  }
-  return normalizeRecords(
+  const result = normalizeRecords(
     rows,
     ({ finding }, id) => evidence(selectedFinding(finding), id, source, target),
     ({ finding }) => identity(record(finding, "Inspector finding")).arn,
     target,
-    { filter: checkRetainedScope },
   );
+  if (!result.excluded.length || !result.findings.length) return result;
+  // Only surviving rows can supply shared provider and host evidence on replay.
+  const skipped = new Set(result.excluded.map((row) => row.position));
+  const retained = rows.filter((row) => !skipped.has(row.position));
+  checkReportScope(retained, target, projectMap, (row, error) => {
+    skipped.add(row.position);
+    result.excluded.push({
+      position: row.position,
+      source_finding_id: identity(record(row.finding, "Inspector finding")).arn,
+      reason: errorMessage(error),
+    });
+  });
+  result.findings = result.findings.filter(
+    (_, i) => !skipped.has(retained[i]!.position),
+  );
+  result.excluded.sort((a, b) => a.position - b.position);
+  return result;
 }
 
 export async function readInspectorFindings(

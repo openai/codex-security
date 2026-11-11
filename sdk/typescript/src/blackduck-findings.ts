@@ -9,7 +9,7 @@ import { canonicalJson, isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
-  readScannerJson,
+  scannerJsonReader,
   record,
   reportableScannerSeverity,
   requiredText,
@@ -357,7 +357,7 @@ function blackDuckPackages(row: Record<string, unknown>) {
             ? decodeURIComponent(purl[3])
             : text(row["componentVersionName"]),
         };
-        // Earlier versions used the origin fallback for owner/repository PURLs.
+        // Retain the origin coordinate if the qualified owner/repository PURL exceeds a Cloud limit.
         return ecosystem === "github" && name.includes("/")
           ? { packages: fallback, enrichment: { packages: [pkg] } }
           : { packages: [pkg] };
@@ -458,14 +458,6 @@ export function normalizeBlackDuckFindings(
   return result;
 }
 
-export async function readBlackDuckFindings(
-  path: string,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeBlackDuckFindings(
-    await readScannerJson(path),
-    sourceRepositoryUrl,
-    target,
-  );
-}
+export const readBlackDuckFindings = scannerJsonReader(
+  normalizeBlackDuckFindings,
+);

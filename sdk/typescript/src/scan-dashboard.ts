@@ -96,6 +96,7 @@ interface ScanDashboardOptions {
   model?: ScanModelConfiguration;
   pricingContext?: ScanPricingContext;
   maxCostUsd?: number;
+  maxTotalCostUsd?: number;
   showCost?: boolean;
   clock: DashboardClock;
   color?: boolean;
@@ -470,6 +471,7 @@ export class ScanDashboard {
         ...this.#options,
         presentation: "scan",
         componentName: receipt.name,
+        maxCostUsd: receipt.maxCostUsd ?? this.#options.maxCostUsd,
       });
       dashboard.setStage(COMPONENT_STATUS.pending);
       dashboard.note(`Scope: ${receipt.paths.join(", ")}`);
@@ -486,6 +488,8 @@ export class ScanDashboard {
     const { dashboard } = component;
     if (receipt.status !== component.receipt.status) {
       if (receipt.status === "started") {
+        if (receipt.maxCostUsd !== undefined)
+          dashboard.#options.maxCostUsd = receipt.maxCostUsd;
         dashboard.#startedAt = this.#options.clock.now();
         dashboard.setStage("Preparing scan");
       } else if (receipt.status !== "pending") {
@@ -1057,7 +1061,9 @@ export class ScanDashboard {
 
   get #showCost(): boolean {
     return (
-      this.#options.showCost === true || this.#options.maxCostUsd !== undefined
+      this.#options.showCost === true ||
+      this.#options.maxCostUsd !== undefined ||
+      this.#options.maxTotalCostUsd !== undefined
     );
   }
 
@@ -1072,11 +1078,20 @@ export class ScanDashboard {
     const costs = this.#components.flatMap(({ dashboard }) =>
       dashboard.#cost === null ? [] : [dashboard.#cost],
     );
-    return wrapActivity(
-      "  COST     ",
-      `${costs.length === 0 ? "waiting for usage" : formatScanCosts(costs)}${this.#components.some(({ dashboard }) => dashboard.#usageCoverage !== "complete") ? " (partial)" : ""} · component scans only`,
-      this.#width(),
+    const partial = this.#components.some(
+      ({ dashboard }) => dashboard.#usageCoverage !== "complete",
     );
+    const lines = [
+      (costs.length ? formatScanCosts(costs) : "waiting for usage") +
+        (partial ? " (partial)" : ""),
+      "component scans only",
+    ];
+    if (this.#options.maxTotalCostUsd !== undefined)
+      lines.push(`${formatUsd(this.#options.maxTotalCostUsd)} total limit`);
+    const perComponent = this.#components[0]?.receipt.maxCostUsd;
+    if (perComponent !== undefined)
+      lines.push(`up to ${formatUsd(perComponent)} per component`);
+    return wrapActivity("  COST     ", lines.join(" · "), this.#width());
   }
 
   #width(): number {

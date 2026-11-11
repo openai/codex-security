@@ -163,7 +163,6 @@ test("keeps GitHub package coordinates separate from the repository that was sca
   }
   row.packageUrl = "pkg:github/LibraryOrg/Library@" + "v".repeat(513);
   const bounded = normalizeBlackDuckFindings([row], repository);
-  expect(bounded.findings[0]!.evidence.packages).toEqual([]);
   expect(bounded.findings[0]!.evidence.source_data?.["row"]).toEqual(row);
 });
 

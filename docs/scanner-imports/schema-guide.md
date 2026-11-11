@@ -24,6 +24,7 @@ which changes can give an occurrence a different ID.
 | Report                                                                                | What identifies one record                                                                                                                                                               |
 | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
+| [ArmorCode](armorcode.md)                                                             | ArmorCode finding ID (`id`) within the source key.                                                                                                                                       |
 | [AWS Continuum](continuum.md)                                                         | Continuum finding ARN. A list summary and a detailed response for that ARN identify the same finding.                                                                                    |
 | [Tenable One](tenable.md)                                                             | Exact Tenable `finding_id`. Keep the same source key for the tenant and Code Repository asset UUID.                                                                                      |
 | [Checkmarx SAST](checkmarx.md)                                                        | Checkmarx One uses the similarity ID and result hash. CxSAST scopes the similarity ID and ordered flow to the project and query.                                                         |
@@ -144,11 +145,20 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Use the same SDK version throughout a pending submission. If the CLI identifies
-a pending request from an older SDK, resume it with the build that created it.
 The CLI reuses approved request IDs and skips batches with receipts. For hosted
 Semgrep and Snyk imports, finish a pending submission before changing the
 evidence for one of its findings. Other findings can proceed independently.
+
+For stored findings, reprepare the interrupted source group with its saved selection
+and review ID. Its checkpoint belongs to the selected checkout and finding versions.
+After a repository reset, the workbench records any acknowledged receipts before
+retiring the old request. Review the new destination before publishing again.
+
+**Upgrading from an earlier import client.** Finish pending Cloud submissions with
+the CLI or SDK build that created their checkpoints. Keep the original input and
+state directory. If the outcome is uncertain, check the private inbox job or
+read back the repository’s source reports to identify the accepted findings
+before preparing a fresh submission. [Verify an import](README.md#verify-the-import)
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

@@ -179,7 +179,7 @@ test.each(["local", "cloud"] as const)(
 );
 
 test.each(["local", "cloud"] as const)(
-  "checks emitted GitHub numbers and uses serialized values on %s",
+  "checks numeric fields in the emitted GitHub JSON on %s",
   (target) => {
     function reason(value: unknown) {
       const row = alertWith({ metric: value });
@@ -224,6 +224,38 @@ test.each(["cloud", "local"] as const)(
     }
   },
 );
+
+test("snapshots each GitHub row once when a shared getter changes", () => {
+  const score = Object.assign(new Number(7), { toJSON: () => 9 });
+  let reads = 0;
+  const shared = {
+    score,
+    get sample() {
+      return ++reads;
+    },
+  };
+  const rows = ["main", "review", "excluded"].map((name) =>
+    alertWith({ shared }, "refs/heads/" + name),
+  );
+  Object.assign(rows[2]!.alert, {
+    extra: { toJSON: () => "retained" },
+    pad: "x".repeat(256 * 1024),
+  });
+  const output = normalizeGitHubCodeScanningAlerts(rows);
+  const fresh = output.findings.map(
+    ({ evidence }) =>
+      (
+        evidence.source_data!["alert"] as {
+          shared: { score: number; sample: number };
+        }
+      ).shared,
+  );
+  expect(fresh).toEqual([
+    { score: 9, sample: 1 },
+    { score: 9, sample: 2 },
+  ]);
+  expect(reads).toBe(3);
+});
 
 test("applies the Cloud byte limit to numbers returned by a vendor serializer", () => {
   const score = Object.assign(new Number(1), { toJSON: () => 123456 });
@@ -597,6 +629,18 @@ test("Cloud rejects over-depth exported GitHub rows before reading shared leaves
     normalizeGitHubCodeScanningAlerts([row], "local").findings,
   ).toHaveLength(1);
   expect(reads).toBe(128);
+});
+
+test("reads non-enumerable entries in a GitHub rule tags array", () => {
+  const row = importedAlert();
+  const tags = Object.defineProperty([], "0", {
+    value: "external/cwe/cwe-089",
+  });
+  Object.assign(row.alert.rule!, { tags });
+  const result = normalizeGitHubCodeScanningAlerts([row]);
+  expect(result.findings[0]?.evidence.details?.weakness_ids).toEqual([
+    "CWE-89",
+  ]);
 });
 
 test("a failed GitHub serializer retains an own URL without reading a URL getter", () => {

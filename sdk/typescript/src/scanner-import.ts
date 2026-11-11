@@ -317,6 +317,14 @@ export function parseJsonOrJsonl(contents: string): unknown {
   }
 }
 
+/** Bind a normalized JSON report reader to the SDK's file entrypoint. */
+export function scannerJsonReader<Options extends unknown[]>(
+  normalize: (report: unknown, ...options: Options) => ExternalFindings,
+) {
+  return async (path: string, ...options: Options): Promise<ExternalFindings> =>
+    normalize(await readScannerJson(path), ...options);
+}
+
 export async function readScannerJson(
   path: string | FileHandle,
   parse: (json: string) => unknown = JSON.parse,
@@ -556,13 +564,13 @@ export function validateSarifRuleReference(
     );
 }
 
-/** Keep a projection failure with its occurrence so later rows can still be imported. */
+/** Append the evidence or its exclusion at the original input position. */
 export function appendFinding(
   result: ExternalFindings,
   position: number,
   id: string,
   project: () => ExternalFinding["evidence"],
-): void {
+) {
   try {
     result.findings.push({ source_finding_id: id, evidence: project() });
   } catch (error) {
@@ -580,10 +588,7 @@ export function normalizeRecords<T>(
   projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
-  options: {
-    report?: ExternalFindings["report"];
-    filter?: (selection: ExternalFindings) => void;
-  } = {},
+  options: Pick<ExternalFindings, "report"> = {},
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
@@ -629,6 +634,5 @@ export function normalizeRecords<T>(
     appendFinding(result, position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
-  options.filter?.(result);
   return result;
 }

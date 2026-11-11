@@ -16,7 +16,10 @@ import {
 import { basename, dirname, join } from "node:path";
 import { prepareSonarImport } from "../src/sonar-import.js";
 import { prepareLocalExternalImport } from "../src/external-findings-import.js";
-import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
+import {
+  prepareNormalizedLocalImport,
+  selectLocalExternalFindings,
+} from "../src/external-findings-local.js";
 import {
   normalizeSonarFindings,
   parseSonarCapture,
@@ -427,8 +430,23 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
     yes: true,
     dryRun: false,
   };
-  expect((await prepareSonarImport(confirm, deps)).cloud).toBeDefined();
+  const prepared = await prepareSonarImport(confirm, deps);
+  expect(prepared.cloud).toBeDefined();
   reportVersion = 1;
+  const changedAfterPreview = await prepared.import();
+  expect(changedAfterPreview.local.counts.created).toBe(1);
+  expect(changedAfterPreview.cloud).toBeUndefined();
+  expect(changedAfterPreview.cloudError).toContain(
+    "Preview the Sonar capture again",
+  );
+  const saved = await selectLocalExternalFindings(
+    {
+      repository: selection.cwd,
+      importId: changedAfterPreview.local.importId!,
+    },
+    deps,
+  );
+  expect(saved.findings.map((row) => row.sourceFindingId)).toEqual(["issue-1"]);
   expect((await prepareSonarImport(confirm, deps)).cloudError).toContain(
     "--to cloud --dry-run",
   );

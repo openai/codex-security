@@ -473,10 +473,16 @@ describe("read-only finding verification", () => {
         expect(
           await runCli(["verify-fix", "--scan", "scan", ...flags], deps),
         ).toBe(2);
-        if (flags.includes("--token-count"))
-          expect(stdout.text()).toMatch(/^\d+\n$/u);
-        else expect(stdout.text()).toContain("[truncated:");
-        expect(stdout.text()).not.toContain(message);
+        const value = JSON.parse(stdout.text());
+        if (flags.includes("--full-output")) {
+          expect(value).toMatchObject({ ok: false, error: { message } });
+        } else if (flags.includes("--token-count")) {
+          expect(typeof value).toBe("number");
+        } else {
+          expect(typeof value).toBe("string");
+          expect(value).toContain("[truncated:");
+          expect(value).not.toContain(message);
+        }
         expect(stderr.text().split(message)).toHaveLength(2);
       }
     },
@@ -734,6 +740,59 @@ describe("read-only finding verification", () => {
     expect((await batches()).map((batch) => batch.length)).toEqual([1, 1]);
     findings[1]!.title += "x".repeat(1024);
     expect(await batches()).toEqual([[findings[0]!], [findings[1]!]]);
+  });
+
+  test("rejects an unfinished output slice before starting a verification", async () => {
+    const cli = createCliTest(main);
+    const deps = dependencies({
+      onCodex: () => {
+        throw new Error("Unexpected verification");
+      },
+    });
+    expect(
+      await cli.runCli(
+        ["verify-fix", "Example", "--filter-output=results[0"],
+        deps,
+      ),
+    ).toBe(2);
+    expect(cli.stderr.text()).toContain(
+      "--filter-output requires matching brackets",
+    );
+  });
+
+  test("formats a verification result before applying output controls", async () => {
+    const result = {
+      id: "finding-1",
+      status: "fixed",
+      evidence: "Synthetic evidence.",
+    };
+    const deps = dependencies({
+      onCodex: (_args, output) => {
+        output?.stdout.write(JSON.stringify({ results: [result] }));
+        return 0;
+      },
+    });
+    const yaml = captureCli(main, "stdout");
+    expect(
+      await yaml.run(
+        [
+          "verify-fix",
+          "Example",
+          "--format=yaml",
+          "--filter-output",
+          "results",
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const { parse } = await import("yaml");
+    expect(parse(yaml.text())).toEqual({ results: [result] });
+
+    const tokens = captureCli(main, "stdout");
+    expect(
+      await tokens.run(["verify-fix", "Example", "--token-count"], deps),
+    ).toBe(0);
+    expect(tokens.text().trim()).toMatch(/^[1-9][0-9]*$/u);
   });
 
   test("reports inconclusive findings without treating them as fixed", async () => {

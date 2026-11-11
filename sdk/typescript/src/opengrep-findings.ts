@@ -1,11 +1,12 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   validateExternalEvidenceJson,
   validateExternalReport,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
-import { canonicalJson } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
 import { errorMessage } from "./errors.js";
-import type { ExternalFindings } from "./external-findings.js";
+import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import {
   messageText,
   nativeResultPath,
@@ -16,7 +17,7 @@ import {
 import {
   appendFinding,
   array,
-  readScannerJson,
+  scannerJsonReader,
   record,
   requiredText,
   stableId,
@@ -28,6 +29,15 @@ export interface OpenGrepImportOptions {
 }
 
 // Occurrences are sorted by ID and can retain traces from nonadjacent input rows.
+const sourcePositions = new WeakMap<
+  ExternalFindings["findings"],
+  ReadonlyMap<string, readonly number[]>
+>();
+
+export function getOpenGrepSourcePositions(findings: unknown) {
+  return Array.isArray(findings) ? sourcePositions.get(findings) : undefined;
+}
+
 /** Import native scanner evidence without assigning a Codex assessment. */
 export function normalizeOpenGrepFindings(
   input: unknown,
@@ -44,19 +54,70 @@ export function normalizeOpenGrepFindings(
   const values = array(results, "OpenGrep results");
   const errors = array(report["errors"], "OpenGrep errors");
   validateExternalReport(report);
+  return projectOpenGrepResults(
+    values,
+    repositoryUrl,
+    version,
+    errors.length,
+    target,
+    report,
+  );
+}
+
+/** Reproject a retained native occurrence without changing SDK- or agent-authored evidence. */
+export function projectStoredOpenGrepFinding(
+  finding: ExternalFinding,
+): ExternalFindings | undefined {
+  const { evidence } = finding;
+  const native = evidence.source_data;
+  const traces = native?.["results"];
+  const context = native?.["report"];
+  const version = isRecord(context) && context["version"];
+  const count = native?.["scan_error_count"];
+  const repositoryUrl = evidence.details?.repository?.url;
+  if (
+    evidence.details?.scanner_origin !== "OpenGrep" ||
+    !repositoryUrl ||
+    !Array.isArray(traces) ||
+    typeof version !== "string" ||
+    typeof count !== "number" ||
+    !Number.isSafeInteger(count) ||
+    count < 0
+  )
+    return undefined;
+  const project = (target: ExternalImportTarget) =>
+    projectOpenGrepResults(traces, repositoryUrl, version, count, target);
+  const local = project("local");
+  if (
+    local.findings.length !== 1 ||
+    local.excluded.length ||
+    !isDeepStrictEqual(local.findings[0], finding)
+  )
+    return undefined;
+  return project("cloud");
+}
+
+function projectOpenGrepResults(
+  values: unknown[],
+  repositoryUrl: string,
+  version: string,
+  scanErrorCount: number,
+  target: ExternalImportTarget,
+  report?: ExternalFindings["report"],
+): ExternalFindings {
   const projection = {
     origin: "OpenGrep",
     repositoryUrl,
     severity: () => "unknown",
     reportContext: { version },
     target,
-    scanErrorCount: errors.length,
+    scanErrorCount,
   };
   const output: ExternalFindings = {
     read: values.length,
     findings: [],
     excluded: [],
-    report: structuredClone(report),
+    ...(report && { report: structuredClone(report) }),
   };
   type Observation = {
     position: number;
@@ -78,7 +139,7 @@ export function normalizeOpenGrepFindings(
       });
     const sourceData = {
       report: { version },
-      scan_error_count: errors.length,
+      scan_error_count: scanErrorCount,
       results,
     };
     // Replacing [] with the same raw results adds the same wire bytes to every candidate.
@@ -181,12 +242,17 @@ export function normalizeOpenGrepFindings(
       exclude(index + 1, id, error);
     }
   }
+  const positions = new Map<string, number[]>();
   for (const [id, observations] of [...groups].sort(([left], [right]) =>
     left < right ? -1 : left > right ? 1 : 0,
   )) {
     if (observations.length === 1) {
       const { position } = observations[0]!;
-      appendFinding(output, position, id, () => projectGroup(observations));
+      appendFinding(output, position, id, () => {
+        const evidence = projectGroup(observations);
+        positions.set(id, [position]);
+        return evidence;
+      });
       continue;
     }
     const ordered = observations
@@ -224,23 +290,20 @@ export function normalizeOpenGrepFindings(
         evidence = projectGroup(retained);
       }
       output.findings.push({ source_finding_id: id, evidence });
+      positions.set(
+        id,
+        retained.map(({ position }) => position),
+      );
     } catch (error) {
       for (const observation of retained)
         exclude(observation.position, id, error);
     }
   }
   output.excluded.sort((left, right) => left.position - right.position);
+  sourcePositions.set(output.findings, positions);
   return output;
 }
 
-export async function readOpenGrepFindings(
-  path: string,
-  options: OpenGrepImportOptions,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeOpenGrepFindings(
-    await readScannerJson(path),
-    options,
-    target,
-  );
-}
+export const readOpenGrepFindings = scannerJsonReader(
+  normalizeOpenGrepFindings,
+);

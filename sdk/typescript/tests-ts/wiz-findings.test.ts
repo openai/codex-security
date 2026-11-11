@@ -18,6 +18,8 @@ import type {
   SourceReport,
 } from "../src/external-import-models.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
+import { prepareLocalExternalImport } from "../src/external-findings-import.js";
+import { localFindingsFixture } from "./external-findings-local-helpers.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import roundtripFixtures from "./fixtures/wiz-details-roundtrip.json" with { type: "json" };
@@ -138,6 +140,63 @@ async function parse(payload: unknown) {
   const { file } = await fixture(payload);
   return readVendorFindings(file);
 }
+
+test.each(["local", "cloud"] as const)(
+  "mixed Wiz reports preserve valid findings alongside unusable inventory rows (%s)",
+  async (target) => {
+    const row = { ...sast, repository: { id: repository.id } };
+    const { file } = await fixture({
+      data: {
+        vulnerabilityFindings: {
+          nodes: [
+            {
+              source_finding_id: "package",
+              evidence: { title: "Package", severity: "low" },
+            },
+          ],
+        },
+        sastFindings: { nodes: [row, row] },
+        versionControlResources: {
+          nodes: ["bad\0name", "good"].map((name) => ({
+            platform: "GITHUB",
+            repository: { ...repository, name, url: repositoryUrl },
+          })),
+        },
+      },
+    });
+    const current = await readVendorFindings(file, target);
+    expect(
+      current.findings.map((finding) => finding.source_finding_id),
+    ).toEqual(["package"]);
+    expect(current.excluded.map((finding) => finding.position)).toEqual([2, 3]);
+    if (target === "local") {
+      await using local = await localFindingsFixture();
+      const prepare = () =>
+        prepareLocalExternalImport(
+          file,
+          {
+            repository: local.repository,
+            sourceKey: "synthetic-project",
+            provider: "wiz",
+          },
+          { environment: local.environment },
+        );
+      const prepared = await prepare();
+      expect(prepared.preview.findings).toEqual(current.findings);
+      expect(prepared.preview.excluded).toEqual(current.excluded);
+      expect((await prepared.import()).counts).toEqual({
+        created: 1,
+        updated: 0,
+        unchanged: 0,
+      });
+      expect((await (await prepare()).import()).counts).toEqual({
+        created: 0,
+        updated: 0,
+        unchanged: 1,
+      });
+    }
+  },
+);
 
 test("SAST maps source range, CWE, scanner verdict, and repository inventory without changing raw evidence", async () => {
   const { file } = await fixture(envelope("sastFindings", [sast]), true);
@@ -429,6 +488,22 @@ test.each([
       locations: [{ path }],
     }),
   ).toThrow("repository-relative paths");
+});
+
+test("external evidence accepts explicit null details", () => {
+  const input = {
+    title: "Legacy evidence",
+    severity: "high",
+    locations: [{ path: "package.json" }],
+    packages: [{ name: "example-package" }],
+  };
+  const plain = validateExternalEvidence(structuredClone(input));
+  const withNull = validateExternalEvidence({
+    ...structuredClone(input),
+    details: null,
+  });
+  expect(withNull).toEqual(plain);
+  expect(withNull).not.toHaveProperty("details");
 });
 
 test("normalized JSONL retains explicit IDs, original evidence, and empty source text", async () => {
@@ -1431,10 +1506,8 @@ test.each(["named collection", "normalized JSONL"])(
     await writeFile(
       runner,
       `
-    import { readVendorFindings, readVendorFindingsForPublication } from "../src/wiz-findings.js";
-    const parsed = process.argv[3] === "normalized JSONL"
-      ? (await readVendorFindingsForPublication(process.argv[2]!)).current
-      : await readVendorFindings(process.argv[2]!);
+    import { readVendorFindings } from "../src/wiz-findings.js";
+    const parsed = await readVendorFindings(process.argv[2]!);
     console.log(JSON.stringify({
       read: parsed.read, ready: parsed.findings.length, excluded: parsed.excluded.length,
       first: parsed.findings[0]?.source_finding_id,
@@ -2127,7 +2200,7 @@ test("GITHUB inventory provenance does not permit a different repository URL", a
   ).rejects.toThrow("conflicting URLs");
 });
 
-test("resume preview is derived from the saved upload evidence", async () => {
+test("resuming a Wiz upload requires the original projected inventory evidence", async () => {
   const payload = {
     data: {
       sastFindings: { nodes: [{ ...sast, repository: { id: repository.id } }] },
@@ -2151,6 +2224,14 @@ test("resume preview is derived from the saved upload evidence", async () => {
   await expect(original.publish()).rejects.toThrow("Readback unavailable");
   payload.data.versionControlResources.nodes[0]!.repository.name =
     "updated-display-name";
+  await writeFile(f.file, JSON.stringify(payload));
+  const changed = await prepareExternalPublication(f.file, f.options, f.deps);
+  expect(changed.preview.resumed).toBe(false);
+  expect(changed.preview.findings).not.toEqual(original.preview.findings);
+  expect(f.posts).toHaveLength(1);
+
+  payload.data.versionControlResources.nodes[0]!.repository.name =
+    "original-display-name";
   await writeFile(f.file, JSON.stringify(payload));
   const resumed = await prepareExternalPublication(f.file, f.options, f.deps);
   expect(resumed.preview.resumed).toBe(true);
