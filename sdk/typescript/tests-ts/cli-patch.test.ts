@@ -9589,6 +9589,8 @@ describe("ordinary patch snapshot context", () => {
       git("config", "user.email", "synthetic@example.test");
       if (operation === "relative-filter")
         git("config", "diff.relative", "true");
+      if (operation === "remove")
+        git("config", "filter.unused.clean", "unreachable-clean-filter");
       await writeFile(join(root, "app.ts"), "unsafe\n");
       await writeFile(join(root, "unrelated.ts"), "original unrelated\n");
       await writeFile(join(directory, "keep.ts"), "component\n");
@@ -10211,6 +10213,8 @@ describe("verified patch caller identity", () => {
     const index = await readFile(join(repository, ".git/index"));
     git("init", "--bare", remote);
     git("remote", "add", "origin", remote);
+    // A configured clean filter triggers input inventory even without matching attributes.
+    git("config", "filter.unused.clean", "unreachable-clean-filter");
     const scan = resultWithFindings(["high"]);
     scan.findings.findings[0]!.locations[0]!.path = "app.ts";
     let modelCalls = 0,

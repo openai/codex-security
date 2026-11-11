@@ -9417,7 +9417,7 @@ async function prepareSavedPatchPublication(
       return match ? [match[1]!] : [];
     }),
   );
-  const filteredInputs = async () => {
+  const filteredInputs = async (current: CliDependencies) => {
     const inputs = new Map<string, string>();
     if (!filterDrivers.size) return inputs;
     const paths = await patchGitRecords(
@@ -9434,7 +9434,7 @@ async function prepareSavedPatchPublication(
         "--deduplicate",
         "-z",
       ],
-      dependencies,
+      current,
     );
     const attrs = await patchGitRecords(
       root,
@@ -9448,7 +9448,7 @@ async function prepareSavedPatchPublication(
         "--stdin",
         "filter",
       ],
-      dependencies,
+      current,
       {
         input: Buffer.from(paths.join("\0"), "latin1"),
       },
@@ -9549,12 +9549,13 @@ async function prepareSavedPatchPublication(
     });
   const capture = async (
     snapshot: () => Promise<string>,
+    current: CliDependencies,
   ): Promise<SavedPatchTrees> => {
     if (!filterDrivers.size) return { tree: await snapshot() };
-    const before = await filteredInputs();
+    const before = await filteredInputs(current);
     verifiedInputs ??= new Map(before);
     const tree = await snapshot();
-    const after = await filteredInputs();
+    const after = await filteredInputs(current);
     const changedDuringCapture = new Set(
       [...before.keys(), ...after.keys()].filter(
         (path) => before.get(path) !== after.get(path),
@@ -9650,7 +9651,9 @@ async function prepareSavedPatchPublication(
     async verifyWorktree(currentTree: () => Promise<string>) {
       const verified = await diff(parent, tree);
       const later = await diff(tree, await currentTree());
-      const inputs = verifiedInputs?.size ? await filteredInputs() : undefined;
+      const inputs = verifiedInputs?.size
+        ? await filteredInputs(dependencies)
+        : undefined;
       if (
         [...verified].some(([path, entry]) => {
           const input = verifiedInputs?.get(path);
@@ -12824,7 +12827,7 @@ async function snapshotGitPatchState(
   }
   const snapshot = () => snapshotPatchTree(repository, dependencies);
   const captured = verified
-    ? await verified.capture(snapshot)
+    ? await verified.capture(snapshot, dependencies)
     : { tree: await snapshot() };
   const { tree } = captured;
   const files = new Map<string, string>();
