@@ -309,8 +309,8 @@ export function listExternalFindings(
        LEFT JOIN (${findingWithProvenance}) f ON f.id = p.id AND f.repository = ?
        ORDER BY p.position`,
       )
-      .iterate(input, repository);
-    const findings = Array.from(rows, (row) => {
+      .all(input, repository);
+    const findings = rows.map((row) => {
       if (row.version !== row.pinned_version)
         throw new Error(
           `Finding ${row.pinned_id} version ${row.pinned_version} is missing or has changed. Review the current selection.`,
