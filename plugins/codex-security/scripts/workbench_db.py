@@ -2465,7 +2465,7 @@ def diff_target_summary(diff_target: dict[str, str]) -> str:
         return "Uncommitted changes"
     if kind == "commit":
         return f"Commit {diff_target['headRevision'][:7]}"
-    return f"{diff_target['baseRevision'][:7]}â€¦{diff_target['headRevision'][:7]}"
+    return f"{diff_target['baseRevision'][:7]}…{diff_target['headRevision'][:7]}"
 
 
 def workspace_state(

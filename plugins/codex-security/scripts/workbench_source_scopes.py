@@ -40,7 +40,7 @@ def expected_target_kinds(scan: sqlite3.Row) -> list[str]:
 
 
 def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
-    """Return the explicit paths in the saved launch recipe, falling back to the scanâ€™s original scope."""
+    """Return the explicit paths in the saved launch recipe, falling back to the scan’s original scope."""
     if "recipe_json" in scan.keys() and scan["recipe_json"] is not None:
         recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
         target = recipe["target"]
