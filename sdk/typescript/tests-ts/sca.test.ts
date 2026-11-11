@@ -173,6 +173,9 @@ async function fixture(
   options: {
     chooseDependencyAuthentication?: DependencyAuthChooser;
     beforeSourceSnapshot?: () => Promise<void>;
+    afterThreadEvent?: (
+      event: "thread.started" | "turn.completed",
+    ) => Promise<void>;
     matched?: boolean;
     turns?: (
       | "completed"
@@ -502,6 +505,8 @@ process.exit(child.status ?? 1);
                           ? "sca-thread"
                           : `sca-thread-${turnNumber}`,
                     };
+                    if (options.afterThreadEvent)
+                      await options.afterThreadEvent("thread.started");
                     if (behavior === "cancelled") {
                       options.controller!.abort("cancel during later triage");
                       throw new Error("interrupted");
@@ -559,6 +564,8 @@ process.exit(child.status ?? 1);
                         reasoning_output_tokens: 0,
                       },
                     };
+                    if (options.afterThreadEvent)
+                      await options.afterThreadEvent("turn.completed");
                   })(),
                 };
               },
@@ -2081,6 +2088,90 @@ test.each(["stable source", "changed source", "user cancellation"] as const)(
     expect(saved.assessments.map((item) => item.status)).toEqual([
       "completed",
       scenario === "stable source" ? "completed" : "cancelled",
+      "cancelled",
+    ]);
+  },
+);
+
+test.each([
+  "active tracking error",
+  "terminal overage",
+  "checkpoint tracking error",
+] as const)(
+  "budget enforcement preserves the dependency turn boundary: %s",
+  async (scenario) => {
+    const fault = new Error("synthetic cost tracking failure");
+    const delivered = Promise.withResolvers<void>();
+    let pollRequested = false;
+    let terminal = false;
+    const waitForPoll = () => {
+      pollRequested = true;
+      return delivered.promise;
+    };
+    const refresh = ScanCostTracker.prototype.refresh;
+    using polls = spyOn(
+      ScanCostTracker.prototype,
+      "refresh",
+    ).mockImplementation(async function (
+      this: ScanCostTracker,
+      polling = false,
+    ) {
+      if (!pollRequested || !polling) return await refresh.call(this, polling);
+      pollRequested = false;
+      try {
+        if (scenario !== "terminal overage") throw fault;
+        // The native usage receipt can become visible before the SDK finishes draining.
+        this.recordUsage(
+          { input_tokens: 1000, output_tokens: 1000 },
+          "sca-thread",
+        );
+        return await refresh.call(this, true);
+      } finally {
+        // Let the background poll deliver its result or error before the fixture advances.
+        setImmediate(delivered.resolve);
+      }
+    });
+    const { client, repository, outputDir, turns } = await fixture({
+      turns: ["completed", "completed"],
+      afterThreadEvent: async (event) => {
+        if (event === "turn.completed") terminal = true;
+        if (
+          (scenario === "active tracking error" &&
+            event === "thread.started") ||
+          (scenario === "terminal overage" && terminal)
+        )
+          await waitForPoll();
+      },
+      beforeSourceSnapshot: async () => {
+        if (scenario === "checkpoint tracking error" && terminal)
+          await waitForPoll();
+      },
+    });
+    await using security = client;
+    const perTurn = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      output_tokens: 1000,
+    })!.estimatedUsd;
+    const operation = security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      maxCostUsd: perTurn * (scenario === "terminal overage" ? 0.5 : 5),
+    });
+    if (scenario === "terminal overage") {
+      await expect(operation).rejects.toBeInstanceOf(
+        ScanCostLimitExceededError,
+      );
+    } else {
+      await expect(operation).rejects.toMatchObject({ cause: fault });
+    }
+    expect(polls).toHaveBeenCalled();
+    expect(turns).toHaveLength(1);
+    const saved: ScaResult = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    );
+    expect(saved.status).toBe("partial");
+    expect(saved.assessments.map((assessment) => assessment.status)).toEqual([
+      scenario === "active tracking error" ? "cancelled" : "completed",
       "cancelled",
     ]);
   },
