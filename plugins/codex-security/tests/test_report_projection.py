@@ -99,7 +99,9 @@ def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> Non
     assert f"Text: {instruction}" in markdown
 
 
-@pytest.mark.parametrize("marker", ["#", "######", "-", "+", "1.", "999999999)", "---", "--"])
+@pytest.mark.parametrize(
+    "marker", ["#", "######", "-", "+", "1.", "999999999)", "---", "--", "-- -", "-- - -"]
+)
 def test_projection_prefixes_bare_block_markers(marker: str) -> None:
     markdown = report_with_finding(remediation=marker)
 
