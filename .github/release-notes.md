@@ -88,5 +88,6 @@
 <!-- Replace each candidate with the affected users and the action they need to take. -->
 
 - preserve physical parent traversal ([#1709](https://github.com/openai/codex-security/pull/1709))
+- make MCP targets and launchers explicit ([#2591](https://github.com/openai/codex-security/pull/2591))
 
 <!-- release-section: upgrades:end -->
