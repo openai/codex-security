@@ -69,13 +69,13 @@ Recover retained checkpoints for the selected stopped scan. Use the host-selecte
 ## scope-binding
 
 ```sh
-'<plugin_dir>/scripts/launch_codex_security_mcp' --helper bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest '<scan_dir>/scan-manifest.json'
+"$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" --helper bind-repo-scopes --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --manifest "$CODEX_SECURITY_SCAN_DIR/scan-manifest.json"
 ```
 
 ## scope-inventory
 
 ```sh
-'<plugin_dir>/scripts/launch_codex_security_mcp' --helper make-repo-scope-input --repo '<repo_root>' --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out '<scan_dir>/scoped-source-input.jsonl'
+"$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" --helper make-repo-scope-input --repo "$CODEX_SECURITY_REPOSITORY" --scopes-file "$CODEX_SECURITY_TARGET_PATHS_FILE" --out "$CODEX_SECURITY_SCAN_DIR/scoped-source-input.jsonl"
 ```
 
 ## tracking-source

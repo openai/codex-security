@@ -3219,7 +3219,12 @@ if __name__ == "__main__":
     expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("scan-results.md");
     expect(prompt).not.toContain("bind-repo-scopes");
-    expect(prompt).not.toContain("CODEX_SECURITY_TARGET_REVISION");
+    expect(codexEnvironment?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      "deadbeef",
+    );
+    expect(prompt).toContain(
+      `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} as scan.target.revision.`,
+    );
     expect(prompt).toContain("CODEX_SECURITY_SCAN_PROGRESS");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,

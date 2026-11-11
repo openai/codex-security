@@ -2508,7 +2508,7 @@ try {
   });
   const historical = await testServer.callSuccessfulTool(92029, {
     name: "get_codex_security_scan_context",
-    arguments: { scanId },
+    arguments: { handoffClaimToken, scanId },
   });
   assert.equal(historical.structuredContent.investigationPolicy, undefined);
   assert.deepEqual(completed.structuredContent.scan.warnings, [

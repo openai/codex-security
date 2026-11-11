@@ -302,11 +302,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
         const generated = await launcher.run(
           powershell,
           "scope-inventory",
-          {
-            "<plugin_dir>": argument(launcher.plugin),
-            "<repo_root>": argument(repository),
-            "<scan_dir>": argument(scanDir),
-          },
+          {},
           undefined,
           workingDirectory,
         );
@@ -325,10 +321,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
         const result = await launcher.run(
           powershell,
           "scope-binding",
-          {
-            "<plugin_dir>": argument(launcher.plugin),
-            "<scan_dir>": argument(scanDir),
-          },
+          {},
           undefined,
           workingDirectory,
         );

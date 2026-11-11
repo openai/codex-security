@@ -95,8 +95,8 @@ $recoveryPython = if ($env:PYTHON) { $env:PYTHON } else { 'python' }
 ## scope-binding
 
 ```powershell
-$env:scopePluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
-$env:scopeScanDir = Convert-Path -LiteralPath '<scan_dir>' -ErrorAction Stop
+$env:scopePluginRoot = Convert-Path -LiteralPath $env:CODEX_SECURITY_PLUGIN_ROOT -ErrorAction Stop
+$env:scopeScanDir = Convert-Path -LiteralPath $env:CODEX_SECURITY_SCAN_DIR -ErrorAction Stop
 $env:scopeTargetPaths = Convert-Path -LiteralPath $env:CODEX_SECURITY_TARGET_PATHS_FILE -ErrorAction Stop
 cmd.exe /d /v:off /s /c '""%scopePluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper bind-repo-scopes --scopes-file "%scopeTargetPaths%" --manifest "%scopeScanDir%\scan-manifest.json""'
 ```
@@ -104,9 +104,9 @@ cmd.exe /d /v:off /s /c '""%scopePluginRoot%\scripts\launch_codex_security_mcp.c
 ## scope-inventory
 
 ```powershell
-$env:scopePluginRoot = Convert-Path -LiteralPath '<plugin_dir>' -ErrorAction Stop
-$env:scopeRepository = Convert-Path -LiteralPath '<repo_root>' -ErrorAction Stop
-$env:scopeScanDir = Convert-Path -LiteralPath '<scan_dir>' -ErrorAction Stop
+$env:scopePluginRoot = Convert-Path -LiteralPath $env:CODEX_SECURITY_PLUGIN_ROOT -ErrorAction Stop
+$env:scopeRepository = Convert-Path -LiteralPath $env:CODEX_SECURITY_REPOSITORY -ErrorAction Stop
+$env:scopeScanDir = Convert-Path -LiteralPath $env:CODEX_SECURITY_SCAN_DIR -ErrorAction Stop
 $env:scopeTargetPaths = Convert-Path -LiteralPath $env:CODEX_SECURITY_TARGET_PATHS_FILE -ErrorAction Stop
 cmd.exe /d /v:off /s /c '""%scopePluginRoot%\scripts\launch_codex_security_mcp.cmd" --helper make-repo-scope-input --repo "%scopeRepository%\." --scopes-file "%scopeTargetPaths%" --out "%scopeScanDir%\scoped-source-input.jsonl""'
 ```
