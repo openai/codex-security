@@ -100,6 +100,7 @@ try {
   assert.equal(deepPreflight.dryRun, true);
   assert.equal(deepPreflight.mode, 'deep');
   assert.equal(deepPreflight.maxTimeHours, 0.25);
+  assert.equal(deepPreflight.maxTimeMinutes, 15);
   assert.deepEqual(deepPreflight.target.paths, ['example.ts']);
 
   // Validate workflow model and cost settings against both the published pin and release candidates.
