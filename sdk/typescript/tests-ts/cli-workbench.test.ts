@@ -1,6 +1,6 @@
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
@@ -45,33 +45,41 @@ describe("CLI workbench", () => {
         alias,
         process.platform === "win32" ? "junction" : "dir",
       );
-      for (const args of [[], [alias]]) {
-        const cli = createCliTest(main, { stdout: format === "text" });
-        const stdout = cli.stdout;
-        const status = await cli.runCli(
-          [
-            "findings",
-            "list",
-            ...args,
-            ...(format === "json" ? ["--json"] : []),
-          ],
-          dependencies({
-            currentDirectory: alias,
-            onWorkbench: (): JsonObject => ({
-              repository,
-              findings: [
-                { title: "Saved finding", severity: { level: "high" } },
-              ],
-              nextOffset: null,
+      const finding = {
+        title: "Saved finding",
+        occurrenceId: "occ_sample_copyable",
+        severity: "high",
+        path: "source.ts:1",
+      };
+      for (const requested of [repository, alias]) {
+        for (const args of [[], [requested]]) {
+          const cli = createCliTest(main, { stdout: format === "text" });
+          const status = await cli.runCli(
+            [
+              "findings",
+              "list",
+              ...args,
+              ...(format === "json" ? ["--json"] : []),
+            ],
+            dependencies({
+              currentDirectory: requested,
+              onWorkbench: (): JsonObject => ({
+                findings: [finding],
+                nextOffset: null,
+              }),
             }),
-          }),
-        );
-        expect(status, cli.stderr.text()).toBe(0);
-        if (format === "json") {
-          expect(JSON.parse(stdout.text()).repository).toBe(alias);
-        } else {
-          expect(stdout.text()).toContain("requested-alias");
-          expect(stdout.text()).toContain("Saved finding");
+          );
+          expect(status, cli.stderr.text()).toBe(0);
+          if (format === "json") {
+            expect(JSON.parse(cli.stdout.text())).toEqual({
+              repository: requested,
+              findings: [finding],
+            });
+          } else {
+            expect(cli.stdout.text()).toContain(basename(requested));
+            expect(cli.stdout.text()).toContain(finding.title);
+            expect(cli.stdout.text()).toContain(finding.occurrenceId);
+          }
         }
       }
     },
@@ -114,6 +122,34 @@ describe("CLI workbench", () => {
     });
   });
 
+  test.each([false, true])(
+    "distinguishes missing repository history from an empty finding list in the terminal (scanned=%j)",
+    async (scanned) => {
+      const repository = resolve("/sample/repository");
+      const historyQueries: Array<readonly string[]> = [];
+      const deps = dependencies({
+        currentDirectory: repository,
+        onWorkbench: (args): JsonObject => {
+          if (args[0] === "list-scans") {
+            historyQueries.push(args);
+            return { scans: scanned ? [{ scanId: "saved" }] : [] };
+          }
+          return { findings: [], nextOffset: null };
+        },
+      });
+      const tty = captureCli(main, "stdout", true);
+      expect(await tty.run(["findings", "list"], deps)).toBe(0);
+      expect(tty.text()).toContain(
+        scanned ? "0 open findings" : `No saved scan for ${repository}`,
+      );
+      const json = captureCli(main, "stdout");
+      expect(await json.run(["findings", "list", "--json"], deps)).toBe(0);
+      expect(JSON.parse(json.text())).toEqual({ repository, findings: [] });
+      expect(historyQueries).toEqual([
+        ["list-scans", "--repository", repository, "--limit", "1"],
+      ]);
+    },
+  );
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
     const stdout = captureCli(main, "stdout");

@@ -34,6 +34,7 @@ import {
   type Stats,
 } from "node:fs";
 import {
+  access,
   chmod,
   cp,
   copyFile,
@@ -1907,6 +1908,51 @@ export function requireOutputOutsideRepositories(
 ): void {
   for (const repository of repositories)
     requireOutputOutsideRepository(repository, outputDirectory, pathKind);
+}
+
+/** Check where the scan will create state and default artifacts without creating them. */
+export async function checkScanStorage(
+  stateDirectory: string,
+  defaultOutputRepository?: string,
+): Promise<void> {
+  try {
+    let root = await canonicalConfigPath(stateDirectory);
+    await requireWritableDirectoryOrParent(root);
+    if (defaultOutputRepository === undefined) return;
+
+    for (const name of ["scans", safePrefix(defaultOutputRepository)]) {
+      root = join(root, name);
+      const metadata = await lstat(root).catch(nullIfMissingFileError);
+      if (metadata !== null && !metadata.isDirectory()) {
+        throw new OutputDirectoryError(
+          `Persistent scan output must use real directories: ${root}`,
+        );
+      }
+    }
+    await requireWritableDirectoryOrParent(root);
+    // New per-scan directories are created beneath this root.
+    await requireSecureOutputAncestry(
+      join(root, `codex-security-${randomUUID()}`),
+    );
+  } catch (error) {
+    throw new OutputDirectoryError(
+      `Cannot use scan state directory ${stateDirectory}. Check CODEX_SECURITY_STATE_DIR: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+async function requireWritableDirectoryOrParent(path: string): Promise<void> {
+  const metadata = await lstat(path).catch(nullIfMissingFileError);
+  if (metadata === null) {
+    const parent = dirname(path);
+    if (parent === path)
+      throw new OutputDirectoryError(`Directory does not exist: ${path}`);
+    return requireWritableDirectoryOrParent(parent);
+  }
+  if (!metadata.isDirectory())
+    throw new OutputDirectoryError(`Expected a directory: ${path}`);
+  await access(path, constants.W_OK | constants.X_OK);
 }
 
 export async function preparePersistentOutputRoot(
