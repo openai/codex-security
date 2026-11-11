@@ -494,6 +494,10 @@ show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
 
+A dry run reports `stateDirectory`, the root for saved scan state. It checks the
+storage location without creating a scan directory. Pass boolean scan options
+as bare flags or use lowercase `=true` or `=false`.
+
 When a cost limit is configured, `scan --dry-run` shows the resolved
 `maxCostUsd` and a `costLimitNote` explaining how the scan measures usage
 against the limit and why in-flight requests can exceed it.
@@ -2419,6 +2423,8 @@ with `--fail-on-severity` set to its original threshold. It recognizes the legac
 `npx` hook and supported earlier templates with matching absolute Node and CLI
 paths. If it refuses to overwrite the verified hook, back it up, remove it and
 reinstall with the same threshold. Restore the backup if installation fails.
+On POSIX, reinstalling a recognized hook restores its owner execute bit if Git
+could not execute it. The installer checks that the resulting hook is executable.
 The installer uses host Git for the selected repository and respects
 `core.hooksPath`.
 
@@ -2446,6 +2452,13 @@ codex-security patch OCCURRENCE_ID
 codex-security patch --scan SCAN_ID --severity high --json
 codex-security patch --scan SCAN_ID --assess-patch-risk --create-pr
 ```
+
+For `validate`, `patch`, and `verify-fix`, an explicit local file URL such as
+`file:///home/reviewer/finding.md` (Windows: `file:///C:/reviews/finding.md`)
+requires the file to exist. A missing file stops the command before the model
+runs. Use `pathToFileURL(absolutePath).href` in Node to encode spaces and
+special characters correctly. Existing plain paths and inline finding text
+keep their original behavior.
 
 Context inputs are optional and can be combined:
 

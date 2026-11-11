@@ -30,6 +30,7 @@ import {
   writeSync,
 } from "node:fs";
 import {
+  access,
   chmod,
   lstat,
   mkdir,
@@ -5394,6 +5395,32 @@ export async function main(
           } else if (existing !== contents) {
             await writeFile(hook, contents, { flag: "w" });
           }
+          if (process.platform !== "win32") {
+            try {
+              await access(hook, constants.X_OK);
+            } catch {
+              const file = await open(
+                hook,
+                constants.O_RDONLY |
+                  constants.O_NOFOLLOW |
+                  constants.O_NONBLOCK,
+              );
+              try {
+                const metadata = await file.stat();
+                if (
+                  !metadata.isFile() ||
+                  (await file.readFile("utf8")) !== contents
+                )
+                  throw new Error(
+                    `Cannot make an unrecognized pre-commit hook executable: ${hook}`,
+                  );
+                await file.chmod((metadata.mode & 0o777) | 0o100);
+              } finally {
+                await file.close();
+              }
+              await access(hook, constants.X_OK);
+            }
+          }
           return {
             hook,
             failOnSeverity: options.failOnSeverity,
@@ -6486,7 +6513,9 @@ export async function main(
         "findings...": z
           .string()
           .min(1, "A finding must not be empty.")
-          .describe("Finding text or a file containing findings."),
+          .describe(
+            "Finding text, an existing path, or an explicit local file URL (file:///path/to/findings).",
+          ),
       }),
       options: z.object({
         records: z
@@ -6561,7 +6590,9 @@ export async function main(
           .string()
           .min(1, "A finding must not be empty.")
           .optional()
-          .describe("Finding text, a file, or a saved finding identifier."),
+          .describe(
+            "Finding text, a file path or local file URL, or a saved finding identifier.",
+          ),
       }),
       options: z.object({
         host: z
@@ -6792,7 +6823,9 @@ export async function main(
           .string()
           .min(1, "An issue must not be empty.")
           .optional()
-          .describe("Issue text, a file, or a saved finding identifier."),
+          .describe(
+            "Issue text, a file path or local file URL, or a saved finding identifier.",
+          ),
       }),
       options: z.object({
         host: z
@@ -7558,6 +7591,14 @@ export async function main(
         }
       }
     }
+    const entry = commands.get(command)!;
+    const selected =
+      "_group" in entry
+        ? subcommand === undefined
+          ? entry.root
+          : entry.commands.get(subcommand)
+        : entry;
+    let lastPositionalIndex = -1;
     for (
       let index = commandIndex + (nestedCommand ? 2 : 1);
       index < argv.length;
@@ -7566,6 +7607,7 @@ export async function main(
       const value = argv[index]!;
       if (!value.startsWith("-")) {
         positionals.push(value);
+        lastPositionalIndex = index;
         continue;
       }
       const equals = value.indexOf("=");
@@ -7574,6 +7616,21 @@ export async function main(
         /[A-Z]/g,
         (letter) => `-${letter.toLowerCase()}`,
       );
+      if (equals >= 0 && selected && "options" in selected) {
+        const name = option
+          .slice(2)
+          .replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+        const shape = selected.options?.shape;
+        const field =
+          shape && Object.hasOwn(shape, name) ? shape[name] : undefined;
+        if (
+          field &&
+          z.toJSONSchema(field, { io: "input" }).type === "boolean" &&
+          !["true", "false"].includes(value.slice(equals + 1))
+        ) {
+          return `Invalid boolean value for ${option}: ${diagnosticValue(value.slice(equals + 1))}. Use ${option}, ${option}=true, or ${option}=false.`;
+        }
+      }
       if (
         equals >= 0 ||
         (!valueOptions.has(canonicalOption) &&
@@ -7610,7 +7667,11 @@ export async function main(
             ? 2
             : 1)
     ) {
-      return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.`;
+      const previous = argv[lastPositionalIndex - 1]?.split("=", 1)[0];
+      const hint = previous?.startsWith("-")
+        ? ` Check the flag ${diagnosticValue(previous)} and whether it takes a value.`
+        : "";
+      return `Unexpected positional argument for ${command}${subcommand === undefined ? "" : ` ${subcommand}`}.${hint}`;
     }
   }
   const firstImportOption = scanImport ? commandIndex + 2 : argv.length;
@@ -9525,6 +9586,14 @@ async function runSkill(
       );
     }
     let contentsOrLiteral = input;
+    const explicitFile = /^file:\/\//iu.test(input)
+      ? new URL(input)
+      : undefined;
+    if (explicitFile?.hostname) {
+      throw new CodexSecurityError(
+        "Finding file URLs must refer to local files.",
+      );
+    }
     const windowsNamespace =
       process.platform === "win32" || input.startsWith("\\");
     const rawDeviceRoot = WINDOWS_LOCAL_DEVICE_ROOT.exec(input)?.[0];
@@ -9542,9 +9611,13 @@ async function runSkill(
         !staysWithinWindowsDeviceRoot(input, rawDeviceRoot) ||
         localDeviceRoot !== normalizedDeviceRoot);
     if (!windowsNetworkPath) {
-      const path = resolveCliPath(directory, input);
+      const path = resolveCliPath(
+        directory,
+        explicitFile ? fileURLToPath(explicitFile) : input,
+      );
       const metadata = await lstat(path, { bigint: true }).catch(
         (error: unknown) => {
+          if (explicitFile) throw error;
           if (
             typeof error === "object" &&
             error !== null &&
