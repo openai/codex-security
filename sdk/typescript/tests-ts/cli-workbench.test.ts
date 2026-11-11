@@ -383,6 +383,7 @@ describe("CLI workbench", () => {
                         findings: [
                           {
                             title: "Saved finding",
+                            occurrenceId: "occ_sample_copyable",
                             severity: "high",
                             path: "source.ts:1",
                           },
@@ -398,6 +399,7 @@ describe("CLI workbench", () => {
               findings: [
                 {
                   title: "Saved finding",
+                  occurrenceId: "occ_sample_copyable",
                   severity: "high",
                   path: "source.ts:1",
                 },
@@ -406,9 +408,35 @@ describe("CLI workbench", () => {
           } else {
             expect(stdout.text()).toContain(basename(requested!));
             expect(stdout.text()).toContain("Saved finding");
+            expect(stdout.text()).toContain("occ_sample_copyable");
           }
         }
       }
+    },
+  );
+  test.each([false, true])(
+    "distinguishes missing repository history from an empty finding list in the terminal (scanned=%j)",
+    async (scanned) => {
+      const repository = resolve("/sample/repository");
+      const deps = dependencies({
+        currentDirectory: repository,
+        onWorkbench: (args): JsonObject =>
+          args[0] === "list-repositories"
+            ? {
+                repositories: scanned
+                  ? [{ targetId: "repo", targetPath: repository }]
+                  : [],
+              }
+            : { findings: [], nextOffset: null },
+      });
+      const tty = captureCli(main, "stdout", true);
+      expect(await tty.run(["findings", "list"], deps)).toBe(0);
+      expect(tty.text()).toContain(
+        scanned ? "0 open findings" : `No saved scan for ${repository}`,
+      );
+      const json = captureCli(main, "stdout");
+      expect(await json.run(["findings", "list", "--json"], deps)).toBe(0);
+      expect(JSON.parse(json.text())).toEqual({ repository, findings: [] });
     },
   );
   test("lists and summarizes open findings for the current repository", async () => {

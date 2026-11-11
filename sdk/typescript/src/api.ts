@@ -263,6 +263,7 @@ import {
   credentialHomeUsesFileStorage,
   codexSecurityCredentialHome,
   codexSecurityHasStoredFileCredentials,
+  checkScanStorage,
   codexSecurityStateDirectory,
   codexExecutableReadPaths,
   copyPluginTree,
@@ -702,6 +703,7 @@ export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   mode: ScanMode;
   knowledgeBasePaths?: string[];
   outputDir: string | null;
+  stateDirectory?: string;
   archiveDir?: string;
   authentication: ScanAuthentication;
   modelProvider?: string;
@@ -1710,10 +1712,19 @@ export class CodexSecurity {
     options: ScanOptions = {},
   ): Promise<ScanPreflight> {
     this.#requireOpen();
-    return await this.#preflightInputs(
-      await this.#prepareLocalInputs(repository, options, options.signal),
+    const inputs = await this.#prepareLocalInputs(
+      repository,
       options,
+      options.signal,
     );
+    await checkScanStorage(
+      inputs.stateDirectory,
+      inputs.outputDir === null &&
+        this.#dependencies.prepareOutputDir === undefined
+        ? basename(inputs.repository)
+        : undefined,
+    );
+    return await this.#preflightInputs(inputs, options);
   }
 
   async #preflightInputs(
@@ -1760,6 +1771,7 @@ export class CodexSecurity {
         ? { knowledgeBasePaths: options.knowledgeBasePaths }
         : {}),
       outputDir: inputs.outputDir,
+      stateDirectory: inputs.stateDirectory,
       ...(archiveDir === null ? {} : { archiveDir }),
       authentication: scanAuthentication(
         this.#dependencies.environment,

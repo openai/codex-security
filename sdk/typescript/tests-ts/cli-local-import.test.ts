@@ -207,6 +207,14 @@ test("CLI imports a vendor report, reads local evidence, and updates the same so
     assessment: { state: "not_assessed" },
     evidence: { severity: "high", source_data: f.record },
   });
+  const terminal = createCliTest(main, { stdout: true });
+  expect(
+    await terminal.runCli([...f.command.slice(0, -2), "--yes"], f.deps),
+  ).toBe(0);
+  expect(terminal.stdout.text()).toContain(
+    `Stored evidence${process.platform === "win32" ? " (PowerShell)" : ""}: codex-security findings imported '${f.repository}'`,
+  );
+
   const repeated = createCliTest(main);
   expect(await repeated.runCli([...f.command, "--yes"], f.deps)).toBe(0);
   expect(JSON.parse(repeated.stdout.text()).counts).toEqual({
