@@ -151,6 +151,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { isGitSsh } from "./git-remote.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
   listLocalExternalFindings,
@@ -10461,8 +10462,7 @@ function isNetworkPatchRemote(remote: string) {
 function isSshPatchRemote(remote: string): boolean {
   return (
     Boolean(isNetworkPatchRemote(remote)) &&
-    (!remote.includes("://") ||
-      ["ssh:", "git+ssh:", "ssh+git:"].includes(new URL(remote).protocol))
+    (!remote.includes("://") || isGitSsh(new URL(remote).protocol))
   );
 }
 
@@ -10706,17 +10706,31 @@ async function runPatchTransport(
       lines.push("gitProxy = " + quote(program + suffix));
     }
     lines.push("gitProxy = none");
-    const system = await dependencies
-      .runRepositoryCommand("git", ["var", "GIT_CONFIG_SYSTEM"], repository, {
-        trim: false,
-      })
-      .catch((error: unknown) => {
-        // Git omits the system path when GIT_CONFIG_NOSYSTEM is active.
-        if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
-          return "";
-        throw error;
-      });
-    for (const file of system.replace(/\n$/u, "").split("\n").filter(Boolean)) {
+    // Include top-level system files once, so Git evaluates their relative and
+    // conditional includes in place, including on versions before Git 2.42.
+    const origins = (
+      await dependencies.runRepositoryCommand(
+        "git",
+        [
+          "config",
+          "--no-includes",
+          "--null",
+          "--show-scope",
+          "--show-origin",
+          "--name-only",
+          "--list",
+        ],
+        repository,
+        { trim: false, environment: { GIT_CONFIG: undefined } },
+      )
+    ).split("\0");
+    const systemFiles = new Set<string>();
+    for (let index = 0; index + 2 < origins.length; index += 3) {
+      const origin = origins[index + 1]!;
+      if (origins[index] === "system" && origin.startsWith("file:"))
+        systemFiles.add(origin.slice(5));
+    }
+    for (const file of systemFiles) {
       const original = isAbsolute(file) ? file : `${directory}${sep}${file}`;
       lines.push("[include]", "path = " + quote(original));
     }
@@ -11609,8 +11623,7 @@ function patchRemoteHost(
   if (remote.includes("://")) {
     const url = new URL(remote);
     // glab removes SSH transport ports when resolving project selectors.
-    const apiPort =
-      includePort && url.protocol !== "ssh:" && url.protocol !== "git+ssh:";
+    const apiPort = includePort && !isGitSsh(url.protocol);
     return (apiPort ? url.host : url.hostname).toLowerCase();
   }
   return patchScpRemote(remote)?.hostname.toLowerCase();

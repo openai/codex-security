@@ -33,6 +33,7 @@ describe("GitLab patch destinations", () => {
         "implicit SSH default port fork",
         "distinct SSH transport ports fork",
         "git+ssh transport port fork",
+        "ssh+git transport port fork",
       ].map((mode) => ({
         mode,
         resume,
@@ -61,6 +62,12 @@ describe("GitLab patch destinations", () => {
         mode === "self-managed fork" || portCase
           ? "gitlab.example.test"
           : "gitlab.com";
+      const sshScheme =
+        mode === "git+ssh transport port fork"
+          ? "git+ssh"
+          : mode === "ssh+git transport port fork"
+            ? "ssh+git"
+            : undefined;
       const explicitDefault = mode.startsWith("explicit");
       const protocol = mode === "explicit HTTP port fork" ? "http" : "https";
       const fetchPort = explicitDefault
@@ -83,12 +90,11 @@ describe("GitLab patch destinations", () => {
             ? `ssh://git@${host}/example/repository.git`
             : mode === "distinct SSH transport ports fork"
               ? `ssh://git@${host}:2222/example/repository.git`
-              : mode === "git+ssh transport port fork"
-                ? `git+ssh://git@${host}:2222/example/repository.git`
+              : sshScheme
+                ? `${sshScheme}://git@${host}:2222/example/repository.git`
                 : `${protocol}://${host}${fetchPort}/example/repository.git`;
       const fork =
-        mode === "explicit SSH default port fork" ||
-        mode === "git+ssh transport port fork"
+        mode === "explicit SSH default port fork" || sshScheme
           ? `git@${host}:synthetic-user/repository.git`
           : mode === "implicit SSH default port fork"
             ? `ssh://git@${host}:22/synthetic-user/repository.git`
@@ -108,8 +114,7 @@ describe("GitLab patch destinations", () => {
                 ? upstream
                 : fork;
       const source =
-        mode === "explicit SSH default port fork" ||
-        mode === "git+ssh transport port fork"
+        mode === "explicit SSH default port fork" || sshScheme
           ? `ssh://git@${host}/synthetic-user/repository.git`
           : mode === "fork credentials"
             ? fork
