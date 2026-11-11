@@ -511,6 +511,13 @@ async function readableGitParent(
   return undefined;
 }
 
+// Older Git versions do not recognize GIT_NO_LAZY_FETCH. An empty protocol
+// allowlist also prevents local object reads from contacting promisor remotes.
+export const PATCH_LOCAL_GIT_ENVIRONMENT = {
+  GIT_NO_LAZY_FETCH: "1",
+  GIT_ALLOW_PROTOCOL: "",
+} as const;
+
 export async function capturePatchGitControls(
   directory: string,
   runGit: RunGit,
@@ -528,15 +535,12 @@ export async function capturePatchGitControls(
   },
   automaticPublication = false,
 ): Promise<PatchGitControls | undefined> {
-  // Control discovery runs before the snapshot sandbox. Missing promisor objects
-  // must fail locally, including on Git versions without GIT_NO_LAZY_FETCH.
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
       ...options,
       environment: {
         ...options?.environment,
-        GIT_NO_LAZY_FETCH: "1",
-        GIT_ALLOW_PROTOCOL: "",
+        ...PATCH_LOCAL_GIT_ENVIRONMENT,
       },
     });
   const runBytes = async (

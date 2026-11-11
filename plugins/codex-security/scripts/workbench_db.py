@@ -141,6 +141,7 @@ from workbench_target import (
     require_scan_target_unchanged,
     restore_directory_junctions,
     scan_target_warning,
+    scoped_regular_file_count,
     worktree_content_digest,
     worktree_content_digest_for_context,
 )
@@ -291,6 +292,17 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
                 raise
             time.sleep(0.05 * (2**attempt))
     raise AssertionError("SQLite retry loop exhausted unexpectedly.")
+
+
+def begin_immediate_with_retry(connection: sqlite3.Connection) -> None:
+    for attempt in range(SQLITE_RETRY_ATTEMPTS):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as exc:
+            if attempt == SQLITE_RETRY_ATTEMPTS - 1 or not sqlite_busy(exc):
+                raise
+            time.sleep(0.05 * (2**attempt))
 
 
 def apply_migrations(connection: sqlite3.Connection, *, immediate: bool = False) -> None:
@@ -1385,6 +1397,7 @@ def complete_scan_locked(
         for kind, filename in ARTIFACTS.items()
     }
     manifest_digest = published_manifest_digest(scan_dir, manifest)
+    reported_count = progress.reported_scope_file_count(_WORKBENCH_DB_CONTEXT, scan)
     if prepare_only:
         connection.execute("BEGIN IMMEDIATE")
         with connection:
@@ -1394,6 +1407,22 @@ def complete_scan_locked(
             )
             if updated.rowcount != 1:
                 raise SystemExit("Only a running scan can be prepared for completion.")
+            if reported_count is not None:
+                connection.execute(
+                    """
+                    UPDATE scan_progress SET scope_file_count = ?, updated_at = ?
+                    WHERE scan_id = (SELECT id FROM scans WHERE id = ? AND scan_dir = ?
+                        AND handoff_status = ? AND handoff_claim_token IS ?)
+                    """,
+                    (
+                        reported_count,
+                        completion_timestamp,
+                        scan_id,
+                        scan["scan_dir"],
+                        scan["handoff_status"],
+                        scan["handoff_claim_token"],
+                    ),
+                )
         context = scan_context(connection, scan["id"])
         context["targetWarnings"] = target_warnings
         return context
@@ -1436,6 +1465,8 @@ def complete_scan_locked(
             connection.commit()
             return scan_context(connection, scan["id"])
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
+        if scan["scan_dir"] != str(scan_dir):
+            reported_count = None
         connection.execute("DELETE FROM scan_artifacts WHERE scan_id = ?", (scan["id"],))
         for kind, path in artifacts.items():
             if path is not None:
@@ -1451,10 +1482,17 @@ def complete_scan_locked(
             UPDATE scan_progress
             SET reportable_findings_count = ?, phase_items_total = ?,
                 phase_items_completed = ?, phase_progress_unit = 'report_artifacts',
-                updated_at = ?
+                scope_file_count = COALESCE(?, scope_file_count), updated_at = ?
             WHERE scan_id = ?
             """,
-            (finding_count, len(artifacts), len(artifacts), timestamp, scan["id"]),
+            (
+                finding_count,
+                len(artifacts),
+                len(artifacts),
+                reported_count,
+                timestamp,
+                scan["id"],
+            ),
         )
         updated = connection.execute(
             """
@@ -1529,11 +1567,13 @@ def register_cli_scan(
         scan_dir = require_cli_scan_directory(repository, args)
     user_context = None
     workflow_id = None
+    hosted = False
     surface = None
     package_version = None
     if args.registration_json_stdin:
         registration = json.load(sys.stdin)
         recipe_json = json.dumps(registration["recipe"], ensure_ascii=False, separators=(",", ":"))
+        hosted = registration.get("hosted") is True
         user_context = registration.get("userContext")
         workflow_id = registration.get("workflowId")
         if registration.get("surface") in ("cli", "sdk"):
@@ -1580,7 +1620,11 @@ def register_cli_scan(
         paths or ["."],
         diff_target_kind=diff_target["kind"] if diff_target is not None else None,
     )
-    scope_file_count = scan_scope_file_count(repository, paths or ["."], diff_target)
+    scope_file_count = (
+        scoped_regular_file_count(repository, paths)
+        if mode == "standard" and len(paths) > 1
+        else scan_scope_file_count(repository, paths or ["."], diff_target)
+    )
     require_working_tree_unchanged(repository, diff_target)
     parent_scan_id = (
         require_uuid(args.parent_scan_id, "parent-scan-id")
@@ -1676,6 +1720,7 @@ def register_cli_scan(
                 surface=surface,
                 package_version=package_version,
                 launch_kind=launch_kind,
+                hosted=hosted,
             )
             connection.execute(
                 "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
@@ -1707,6 +1752,7 @@ def register_cli_scan(
         **({"archivedScanDir": str(archived_scan_dir)} if archived_scan_dir is not None else {}),
         "contract": scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
+        **({"phase": scan["phase"]} if mode == "standard" else {}),
         "scanDir": str(scan_dir),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
@@ -2588,8 +2634,8 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
         ).fetchone()
         if scan is None:
             raise SystemExit("Codex Security scan not found.")
-        progress, _ = scan_progress_result(connection, scan)
-        return {"scan": {"progress": progress}}
+        progress_result, _ = progress.scan_progress_result(connection, scan)
+        return {"scan": {"progress": progress_result}}
     request_id = getattr(args, "request_id", None)
     action_token = getattr(args, "action_token", None)
     if request_id is not None or action_token is not None:
@@ -2698,45 +2744,6 @@ def list_findings(connection: sqlite3.Connection, args: argparse.Namespace) -> d
     }
 
 
-def scan_progress_result(
-    connection: sqlite3.Connection, scan: sqlite3.Row
-) -> tuple[dict[str, Any], str]:
-    independent_reviews = (
-        deep_scan.independent_review_progress(
-            connection, scan["id"], parent_running=scan["status"] == "running"
-        )
-        if scan["mode"] == "deep"
-        else None
-    )
-    progress_result = {
-        "candidates": {"reportable": scan["reportable_findings_count"]},
-        "coverage": {
-            "closedRows": scan["review_items_completed"],
-            "filesTotal": scan["scope_file_count"],
-            "worklistRows": scan["review_items_total"],
-        },
-        "phase": scan["phase"],
-        "phaseProgress": {
-            "completed": scan["phase_items_completed"],
-            "total": scan["phase_items_total"],
-            "unit": scan["phase_progress_unit"],
-        },
-        "preflightProgress": {
-            "completed": scan["preflight_checks_completed"],
-            "total": scan["preflight_checks_total"],
-        },
-        "preflightIssues": json.loads(scan["preflight_issues_json"]),
-        "reviewPass": scan["deep_review_pass"],
-        "status": "canceled" if scan["canceled_at"] else scan["status"],
-        "updatedAt": scan["progress_updated_at"],
-    }
-    review_updated_at = ""
-    if independent_reviews is not None:
-        review_updated_at = str(independent_reviews.pop("updatedAt"))
-        progress_result["independentReviews"] = independent_reviews
-    return progress_result, review_updated_at
-
-
 def scan_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -2793,7 +2800,7 @@ def scan_result(
     }
     finding_count = sum(severity_counts.values())
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
-    progress_result, review_updated_at = scan_progress_result(connection, scan)
+    progress_result, review_updated_at = progress.scan_progress_result(connection, scan)
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )
@@ -2911,15 +2918,7 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
     if not updates:
         return
 
-    # Reads normally avoid writer admission, but legacy details still need a write.
-    for attempt in range(SQLITE_RETRY_ATTEMPTS):
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            break
-        except sqlite3.OperationalError as exc:
-            if attempt == SQLITE_RETRY_ATTEMPTS - 1 or not sqlite_busy(exc):
-                raise
-            time.sleep(0.05 * (2**attempt))
+    begin_immediate_with_retry(connection)
     with connection:
         current = require_scan(connection, scan["id"])
         recorded_digest = current["seal_manifest_digest"]
@@ -3288,7 +3287,7 @@ def require_canonical_scan_directory(scan_dir: Path, *, writable_output: bool = 
     try:
         metadata = scan_dir.lstat()
         resolved = scan_dir.resolve(strict=True)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise SystemExit(
             "Scan directory must be an existing canonical non-symlink directory."
         ) from exc
@@ -3366,7 +3365,8 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
         return
     with closing(
         connect(
-            deferred=args.command in {"get-scan", "read-scan-usage", "list-scans", "database-info"}
+            deferred=args.command
+            in {"get-scan", "read-scan-usage", "list-scans", "database-info", "update-progress"}
         )
     ) as connection:
         remediation_state.require_available(connection, args, require_scan)

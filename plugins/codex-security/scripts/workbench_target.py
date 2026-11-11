@@ -1349,19 +1349,37 @@ def directory_content_digest(
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def directory_snapshot_regular_file_count(target: Path) -> int:
+def directory_snapshot_regular_files(target: Path) -> Iterator[Path]:
     paths = git_directory_snapshot_paths(target)
     if paths is None:
         paths = source_directory_snapshot_paths(target)
-    count = 0
     for path in paths:
         try:
             metadata = path.lstat()
         except OSError as exc:
             raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
         if stat.S_ISREG(metadata.st_mode):
-            count += 1
-    return count
+            yield path
+
+
+def directory_snapshot_regular_file_count(target: Path) -> int:
+    return sum(1 for _ in directory_snapshot_regular_files(target))
+
+
+def scoped_regular_file_count(repository: Path, scopes: list[str]) -> int:
+    # Count directory entries once while retaining explicitly requested ignored files.
+    names: set[str] = set()
+    for scope in scopes:
+        selected = (repository / scope).resolve(strict=True)
+        if not selected.is_relative_to(repository):
+            raise SystemExit("Requested scope must be inside the repository.")
+        if not SOURCE_METADATA_DIRECTORIES.isdisjoint(selected.relative_to(repository).parts):
+            continue
+        if selected.is_file():
+            names.add(selected.as_posix())
+        elif selected.is_dir():
+            names.update(path.as_posix() for path in directory_snapshot_regular_files(selected))
+    return len(names)
 
 
 def copy_directory_excluding(
