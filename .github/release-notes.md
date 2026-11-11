@@ -1,4 +1,4 @@
-<!-- release-version: 0.9.2 -->
+<!-- release-version: 0.10.0 -->
 
 <!-- release-section: highlights:start -->
 
@@ -84,6 +84,8 @@
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+<!-- Replace each candidate with the affected users and the action they need to take. -->
+
+- preserve physical parent traversal ([#1709](https://github.com/openai/codex-security/pull/1709))
 
 <!-- release-section: upgrades:end -->
