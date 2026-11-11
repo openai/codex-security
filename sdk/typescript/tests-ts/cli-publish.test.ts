@@ -726,9 +726,12 @@ describe("publish check", () => {
     expect(stdout.text().trim()).toBe("");
   });
 
-  test.each(["completed-scan", "~/completed-scan"])(
+  test.each([
+    ["completed-scan", DESTINATION_OPTIONS.slice(2)],
+    ["~/completed-scan", DESTINATION_OPTIONS],
+  ] as const)(
     "resolves %s and shared options without invoking publication",
-    async (scanDir) => {
+    async (scanDir, options) => {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       const currentDirectory = join(tmpdir(), "codex-security-check-current");
@@ -781,7 +784,7 @@ describe("publish check", () => {
             "publish",
             "check",
             scanDir,
-            ...DESTINATION_OPTIONS,
+            ...options,
             "--linear-api-key",
             "explicit-key",
             "--linear-assignee",

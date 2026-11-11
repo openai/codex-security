@@ -403,6 +403,7 @@ import {
   CODEX_EXECUTABLE_VERSION,
   CODEX_SDK_VERSION,
   formatUpdateNotice,
+  installUpdate,
   invokedWithNpx,
   updateNoticeEnabled,
   type UpdateNotice,
@@ -588,7 +589,10 @@ function linearApiKeyOption() {
 }
 
 const PUBLICATION_DESTINATION_OPTIONS = z.object({
-  to: z.literal("linear").describe("Publication destination."),
+  to: z
+    .literal("linear")
+    .default("linear")
+    .describe("Publication destination."),
   linearTeam: optionValue("--linear-team")
     .optional()
     .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
@@ -4867,8 +4871,29 @@ export async function main(
     configuration: z.record(z.string(), z.unknown()),
   });
 
+  const inspectionFlags = [
+    "-h",
+    "--help",
+    "--version",
+    "--schema",
+    "--llms",
+    "--llms-full",
+  ];
+  if (
+    argv.includes("--update") &&
+    argv.some((arg) => inspectionFlags.includes(arg))
+  )
+    argv = argv.filter((arg) => arg !== "--update");
   const cliOptions: Cli.create.Options = {
     aliases: ["cs"],
+    // The SDK owns update notices and uses the same installation resolver for
+    // the explicit update action. Avoid Incur's second, global npm updater.
+    update: argv.includes("--update")
+      ? {
+          package: "@openai/codex-security",
+          install: () => installUpdate(dependencies.environment),
+        }
+      : false,
     description: "Find, review, and fix security issues in your code.",
     version: VERSION,
     mcp: {
@@ -7716,15 +7741,7 @@ export async function main(
     argv.length > 0 &&
     argv[0] !== "completions" &&
     !argv.some((argument) =>
-      [
-        "--help",
-        "-h",
-        "--version",
-        "--llms",
-        "--llms-full",
-        "--schema",
-        "--dry-run",
-      ].includes(argument),
+      [...inspectionFlags, "--dry-run", "--update"].includes(argument),
     ) &&
     updateNoticeEnabled(dependencies.environment)
       ? dependencies
