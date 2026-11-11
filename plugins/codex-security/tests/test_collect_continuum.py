@@ -1,6 +1,7 @@
 """Cover source selection and failures at the AWS CLI boundary."""
 
 import json
+import os
 import runpy
 import subprocess
 import sys
@@ -12,15 +13,30 @@ SCRIPT = (
     Path(__file__).resolve().parents[1] / "skills/publish-findings/scripts/collect_continuum.py"
 )
 main = runpy.run_path(str(SCRIPT))["main"]
+AWS_NAME = "aws.exe" if os.name == "nt" else "aws"
+
+
+def arguments(checkout, *scope):
+    identity = ["--environment-id", "env", "--finding-id", "f"]
+    return [str(SCRIPT), "--source-root", str(checkout), *identity, *scope]
 
 
 @pytest.fixture
-def invoke(monkeypatch):
+def invoke(monkeypatch, tmp_path):
+    checkout = tmp_path / "source"
+    checkout.mkdir()
+    for directory in (checkout, tmp_path):
+        executable = directory / AWS_NAME
+        executable.touch()
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (checkout, tmp_path))))
+
     def run(scope, *responses):
         replies = iter(responses)
         calls = []
 
-        def aws(command):
+        def aws(command, **kwargs):
+            assert Path(command[0]) == (tmp_path / AWS_NAME).resolve()
             calls.append(command)
             reply = next(replies)
             if isinstance(reply, Exception):
@@ -28,9 +44,7 @@ def invoke(monkeypatch):
             return json.dumps(reply).encode()
 
         monkeypatch.setattr(subprocess, "check_output", aws)
-        monkeypatch.setattr(
-            sys, "argv", [str(SCRIPT), "--environment-id", "env", "--finding-id", "f", *scope]
-        )
+        monkeypatch.setattr(sys, "argv", arguments(checkout, *scope))
         return main(), calls
 
     return run
@@ -49,6 +63,7 @@ def patch(source=None):
     }
 
 
+@pytest.mark.cross_platform
 def test_collects_only_selected_repository_on_duplicate_issue(invoke, capsys):
     finding = {"duplicateOfIssueId": "original"}
     status, calls = invoke(
@@ -120,3 +135,64 @@ def test_failure_after_first_patch_emits_no_partial_report(invoke, capsys):
     )
     assert status == 254
     assert not capsys.readouterr().out
+
+
+@pytest.mark.cross_platform
+def test_no_installed_aws_never_launches_checkout_executable(tmp_path, monkeypatch):
+    checkout = tmp_path / "source"
+    checkout.mkdir()
+    executable = checkout / AWS_NAME
+    executable.touch()
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(checkout))
+    monkeypatch.setattr(sys, "argv", arguments(checkout, "--single-repository"))
+
+    def unexpected(command, **kwargs):
+        pytest.fail(f"Collector invoked {command[0]} with no installed AWS CLI on PATH")
+
+    monkeypatch.setattr(subprocess, "check_output", unexpected)
+    with pytest.raises(SystemExit, match="(?i)aws"):
+        main()
+
+
+@pytest.mark.cross_platform
+@pytest.mark.skipif(os.name == "nt", reason="Fixture uses POSIX executable scripts and symlinks")
+def test_aws_and_its_credential_helper_skip_checkout_path_entries(tmp_path):
+    checkout = tmp_path / "source"
+    repo_bin = checkout / "bin"
+    repo_bin.mkdir(parents=True)
+    trusted_bin = tmp_path / "installed"
+    helper_bin = tmp_path / "auth-tools"
+    linked_bin = tmp_path / "linked"
+    for directory in (trusted_bin, helper_bin, linked_bin):
+        directory.mkdir()
+
+    def script(path, body):
+        path.write_text("#!/bin/sh\n" + body)
+        path.chmod(0o755)
+
+    marker = tmp_path / "ran-source-tool"
+    for name in ("aws", "fixture-credentials"):
+        script(repo_bin / name, ': > "$SHIM_MARKER"\nexit 9\n')
+    alias = tmp_path / "alias"
+    alias.symlink_to(repo_bin, target_is_directory=True)
+    (linked_bin / "aws").symlink_to(repo_bin / "aws")
+    script(trusted_bin / "aws", "exec fixture-credentials\n")
+    script(helper_bin / "fixture-credentials", """printf '{"profile":"%s"}\\n' "$AWS_PROFILE"\n""")
+    result = subprocess.run(
+        [sys.executable, "-I", *arguments(checkout, "--single-repository")],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": os.pathsep.join(
+                map(str, (repo_bin, alias, linked_bin, trusted_bin, helper_bin))
+            ),
+            "AWS_PROFILE": "synthetic",
+            "SHIM_MARKER": str(marker),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert not marker.exists()
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"profile": "synthetic"}

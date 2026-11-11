@@ -2,19 +2,76 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
+
+# Isolated Python does not put the installed script directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from collector_paths import in_source, source_root  # noqa: E402
 
 
-def aws(operation: str, *arguments: str) -> dict:
-    return json.loads(
-        subprocess.check_output(
-            ["aws", "continuum", operation, *arguments, "--output", "json", "--no-cli-pager"]
+def installed_aws(target: Path) -> tuple[Path, dict[str, str], Path | None]:
+    source = source_root(target)
+    name = "aws.exe" if os.name == "nt" else "aws"
+    executable = None
+    directories = []
+    for entry in os.get_exec_path():
+        if os.name == "nt" and entry.startswith('"') and entry.endswith('"'):
+            entry = entry[1:-1]
+        directory = Path(entry)
+        if not directory.is_absolute():
+            continue
+        try:
+            # Also exclude a host directory whose aws links through the checkout.
+            if in_source(directory / name, source):
+                continue
+            directory = directory.resolve(strict=True)
+            if not directory.is_dir():
+                continue
+            candidate = directory / name
+            if executable is None and candidate.is_file() and os.access(candidate, os.X_OK):
+                resolved = candidate.resolve(strict=True)
+                if os.name == "nt" and resolved.suffix.lower() != ".exe":
+                    continue
+                executable = resolved
+            directories.append(str(directory))
+        except OSError:
+            continue
+    if executable is None:
+        raise ValueError("Could not find an installed AWS CLI outside the selected checkout.")
+
+    # Credential helpers inherit the same lookup boundary, including on Windows
+    # where executable searches can also use the current directory.
+    environment = os.environ.copy()
+    environment["PATH"] = os.pathsep.join(directories)
+    cwd = executable.parent if in_source(Path.cwd(), source) else None
+    return executable, environment, cwd
+
+
+def collect(
+    environment_id: str, finding_id: str, repository_name: str | None, target: Path
+) -> dict:
+    executable, child_env, cwd = installed_aws(target)
+
+    def aws(operation: str, *arguments: str) -> dict:
+        return json.loads(
+            subprocess.check_output(
+                [
+                    str(executable),
+                    "continuum",
+                    operation,
+                    *arguments,
+                    "--output",
+                    "json",
+                    "--no-cli-pager",
+                ],
+                env=child_env,
+                cwd=cwd,
+            )
         )
-    )
 
-
-def collect(environment_id: str, finding_id: str, repository_name: str | None) -> dict:
     environment = ["--environment-id", environment_id]
     finding = aws("get-code-finding", *environment, "--finding-id", finding_id)
     issue_id = finding.get("createdIssueId") or finding.get("duplicateOfIssueId")
@@ -48,6 +105,12 @@ def collect(environment_id: str, finding_id: str, repository_name: str | None) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source-root",
+        type=Path,
+        required=True,
+        help="Absolute path to the selected local checkout to exclude from executable lookup.",
+    )
     parser.add_argument("--environment-id", required=True)
     parser.add_argument("--finding-id", required=True)
     scope = parser.add_mutually_exclusive_group(required=True)
@@ -59,7 +122,9 @@ def main() -> int:
     scope.add_argument("--repository-name", help="Exact Continuum build repository name.")
     args = parser.parse_args()
     try:
-        report = collect(args.environment_id, args.finding_id, args.repository_name)
+        report = collect(
+            args.environment_id, args.finding_id, args.repository_name, args.source_root
+        )
     except subprocess.CalledProcessError as error:
         # The AWS CLI already wrote the diagnostic to stderr.
         return error.returncode

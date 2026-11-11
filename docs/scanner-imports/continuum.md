@@ -6,7 +6,7 @@ saves patches as evidence for review without applying them to your checkout.
 
 ## Quick start
 
-Open the matching checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
+Identify the matching local checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
 repository supplied the scanned code, including the archive for an S3 source.
 For a finding from another scanner, you can also check its repository in that
 scanner. [AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
@@ -33,9 +33,10 @@ the finding, follow its created or duplicate issue ID, and retrieve its
 `continuum:ListCodeIssueArtifacts`, and `continuum:GetCodeIssueArtifact`.
 [AWS issue artifacts](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ListCodeIssueArtifacts.html)
 
-Run the collector from a trusted directory with the installed `aws` on your
-`PATH`. The example uses a global npm installation and an environment you
-verified contains only the selected repository. For a multi-repository
+Run the collector from a trusted directory outside the checkout, using the
+installed AWS CLI and your selected AWS profile and Region. Set `source_root`
+to the absolute path of the local checkout that owns the finding. The example
+uses a global npm installation and a verified single-repository environment. For a multi-repository
 environment, replace `--single-repository` with
 `--repository-name "$AWS_SOURCE_NAME"`. Use the exact source name AWS assigns
 to that repository. One issue can have patches for several sources. In this
@@ -44,11 +45,12 @@ artifact IDs to stderr for review. [AWS patch fields](https://docs.aws.amazon.co
 
 ```sh
 report=
+source_root=/absolute/path/to/checkout
 plugin="$(npm root --global)/@openai/codex-security/_bundled_plugin"
 out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   python3 -I "$plugin/skills/publish-findings/scripts/collect_continuum.py" \
     --environment-id "$ENVIRONMENT_ID" --finding-id "$FINDING_ID" \
-    --single-repository > "$out/continuum.tmp" &&
+    --source-root "$source_root" --single-repository > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
   report="$out/continuum.json"
 ```
@@ -82,8 +84,8 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 
 ### Preview and import
 
-Preview the report with the verified Git URL and a source key for this
-environment and repository.
+From the matching checkout, preview the saved report with the verified Git
+URL and a source key for this environment and repository.
 
 ```sh
 codex-security publish findings "$report" --to local --repository . \
