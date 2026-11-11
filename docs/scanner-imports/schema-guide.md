@@ -143,6 +143,8 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
+For stored findings, reprepare the interrupted source group with its saved selection
+and review ID. Completed groups already have their own receipts.
 
 **Upgrading from an earlier import client.** Finish pending Cloud submissions with
 the CLI or SDK build that created their checkpoints. Keep the original input and

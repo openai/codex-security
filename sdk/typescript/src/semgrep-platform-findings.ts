@@ -892,6 +892,41 @@ function nativeOccurrence(
   return { scope, aliases, repository, row };
 }
 
+/** Reproduce the native Cloud title fallback for an unmodified Platform message title. */
+export function storedSemgrepCloudEvidence(
+  finding: ExternalFinding,
+  references: readonly ExternalSourceRepository[] = [],
+): ExternalFinding["evidence"] | undefined {
+  const { evidence } = finding;
+  if (
+    evidence.title !== evidence.description ||
+    Buffer.byteLength(evidence.title) <= DEFAULT_CLOUD_STRING_BYTES ||
+    !evidence.source_data ||
+    !isSemgrepPlatformEvidence(finding, "semgrep")
+  )
+    return;
+  const { row, scope, aliases, repository } = nativeOccurrence(
+    evidence.source_data,
+    references,
+    "local",
+  );
+  if (sourceId(scope, row) !== finding.source_finding_id) return;
+  const selectable = checkSemgrepPlatformRow(row, scope, aliases, repository);
+  const projectNames =
+    aliases &&
+    projectAliases(scope.project.name, scope.project.url, references);
+  const title = (target: ExternalImportTarget) =>
+    normalizePlatformRows(
+      [{ finding: row, selectable }],
+      scope,
+      target,
+      projectNames,
+    ).findings[0]?.evidence.title;
+  if (title("local") !== evidence.title) return;
+  const cloud = title("cloud");
+  if (cloud && cloud !== evidence.title) return { ...evidence, title: cloud };
+}
+
 /** Recheck the source repository when an SDK caller supplies normalized evidence directly. */
 export function semgrepPlatformFindingRepository(
   finding: ExternalFinding,

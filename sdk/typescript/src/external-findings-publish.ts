@@ -225,7 +225,10 @@ export interface ExternalPublicationPreview extends ExternalFindings {
 
 export interface PreparedExternalPublication {
   preview: ExternalPublicationPreview;
-  publish(): Promise<ExternalPublicationResult>;
+  /** Persist acknowledged repository receipts before retiring their resumable request. */
+  publish(
+    beforeRetire?: (result: ExternalPublicationResult) => Promise<void>,
+  ): Promise<ExternalPublicationResult>;
 }
 
 // Limit read concurrency to avoid one network round trip per finding in series.
@@ -1849,7 +1852,7 @@ async function preparePublicationInput(
   };
   return {
     preview: cloneImportPreview(preview),
-    async publish() {
+    async publish(beforeRetire) {
       progress({ phase: "waiting", completed: 0 });
       const result = (
         acknowledged: FindingImportReceipt[],
@@ -2055,6 +2058,7 @@ async function preparePublicationInput(
             ...completed,
             report: reportForJson(completed.report),
           });
+          await beforeRetire?.(completed);
           await removePending();
           return completed;
         } catch (error) {
