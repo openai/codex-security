@@ -1,8 +1,8 @@
 # Import AWS Continuum code issues and findings
 
-Import Continuum issues to get one Codex Security record per issue ARN. The
-issue supplies the title, synopsis, and severity. Its contributing findings
-supply file paths and line ranges. Saved code finding exports are also supported.
+Import Continuum issues to create one Codex Security record per issue ARN. The
+issue provides exploitability and severity analysis, supporting details, and an
+initial patch when available.
 
 ## Quick start
 
