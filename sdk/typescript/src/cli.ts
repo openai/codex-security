@@ -8060,8 +8060,7 @@ export async function main(
     if (command === undefined && literalArgs.length)
       return "Select a command before --.";
     if (importArgs.error) return importArgs.error;
-    if (frameworkFlags.malformedFilter)
-      return "--filter-output requires matching brackets for array slices.";
+    if (frameworkFlags.argumentError) return frameworkFlags.argumentError;
     if (command === undefined) return frameworkFlags.tokenError;
     if (!entry) {
       if (["skills", "skill", "mcp", "completions"].includes(command))
@@ -8911,7 +8910,7 @@ function parseFrameworkArguments(argv: readonly string[]) {
   let tokenView: TokenView | undefined;
   let tokenError: string | undefined;
   let fullOutput = false;
-  let malformedFilter = false;
+  let argumentError: string | undefined;
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index]!;
     const next = argv[index + 1];
@@ -8936,6 +8935,9 @@ function parseFrameworkArguments(argv: readonly string[]) {
           ? undefined
           : next;
     if (equals < 0 && operand !== undefined) index++;
+    if ((flag === "--filter-output" || flag === "--format") && !operand) {
+      argumentError ??= `Missing value for flag: ${flag}`;
+    }
     if (flag === "--filter-output") {
       filters.push(operand);
       // Incur cannot advance past an unterminated array slice.
@@ -8943,7 +8945,8 @@ function parseFrameworkArguments(argv: readonly string[]) {
         operand !== undefined &&
         !/^(?:[^\[\]]|\[[^\[\]]*\])*$/u.test(operand)
       ) {
-        malformedFilter = true;
+        argumentError ??=
+          "--filter-output requires matching brackets for array slices.";
         continue;
       }
     }
@@ -8977,7 +8980,7 @@ function parseFrameworkArguments(argv: readonly string[]) {
     formats,
     jsonFormat,
     fullOutput,
-    malformedFilter,
+    argumentError,
     filters,
     tokenArguments,
     tokenView,
