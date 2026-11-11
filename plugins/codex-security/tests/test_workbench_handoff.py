@@ -120,6 +120,30 @@ def test_workbench_serializes_concurrent_handoff_delivery(tmp_path: Path) -> Non
     )
 
 
+def test_standard_context_begins_delivered_scan_once_without_checkout_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    saved = create_saved_workspace(state_dir, target, thread_id="owner")
+    scan_id = start_scan_command(state_dir, str(saved["id"]))["results"]["scanId"]
+    claim_token = str(uuid.uuid4())
+    scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
+    delivered = mark_handoff_delivered(state_dir, scan_id, claim_token)
+    assert delivered["results"]["progress"]["phase"] == "preflight"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET target_inode = NULL WHERE id = ?", (scan_id,))
+    inspected = get_scan(state_dir, scan_id)
+    assert inspected["scan"]["progress"]["phase"] == "preflight"
+
+    args = (state_dir, scan_id, claim_token, "--thread-id", "owner", "--return-context")
+    context = mark_handoff_delivered(*args)
+    assert context["scan"]["targetPath"] == str(target)
+    assert context["scan"]["progress"]["phase"] == "threat_model"
+    assert "securityPolicyPaths" not in context
+    assert context["beganStandardReview"] is True
+    assert "beganStandardReview" not in mark_handoff_delivered(*args)
+
+
 def test_deep_handoff_leaves_preflight_progress_to_coordinator(tmp_path: Path) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
@@ -141,6 +165,28 @@ def test_deep_handoff_leaves_preflight_progress_to_coordinator(tmp_path: Path) -
         "completed": 0,
         "total": 0,
     }
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as other_writer:
+        other_writer.execute("BEGIN IMMEDIATE")
+        model_progress = update_progress(
+            state_dir,
+            scan_id,
+            "--model-update",
+            "--phase",
+            "discovery",
+            "--claim-token",
+            claim_token,
+        )
+    assert model_progress == {
+        "deepPreflight": True,
+        "scan": {
+            "scanId": scan_id,
+            "userContext": delivered["results"]["userContext"],
+            "progress": delivered["results"]["progress"],
+        },
+    }
+    rejected = update_progress(state_dir, scan_id, "--model-update", check=False)
+    assert "owned by another continuation" in rejected["stderr"]
 
 
 def test_workbench_upgrade_keeps_preexisting_delivered_continuation_writable(

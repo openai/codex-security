@@ -1,9 +1,12 @@
+import { hash } from "node:crypto";
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import {
+  CLOUD_EVIDENCE_BYTES,
   DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
   validateEnrichedExternalEvidence,
+  validateExternalEvidenceJson,
 } from "./external-import-contract.js";
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
@@ -12,7 +15,7 @@ import {
   awsTimestampSeconds,
   concreteVersion,
   normalizeRecords,
-  readScannerJson,
+  scannerJsonReader,
   record,
   repositoryFilePath,
   requiredText,
@@ -149,8 +152,8 @@ function codeLocations(
   return { locations, code: { end_line: endLine, snippet } };
 }
 
-function reportRows(input: unknown, previous: boolean) {
-  if (Array.isArray(input) && !previous) return { rows: input, summary: false };
+function reportRows(input: unknown) {
+  if (Array.isArray(input)) return { rows: input, summary: false };
   const document = record(input, "Continuum report");
   if (
     Object.hasOwn(document, "nextToken") ||
@@ -159,9 +162,13 @@ function reportRows(input: unknown, previous: boolean) {
     throw new Error(
       "Continuum export has a continuation token; supply the complete paginated CLI output.",
     );
-  if (!("items" in document || "findingArn" in document))
+  if (!(
+    "items" in document ||
+    "findingArn" in document ||
+    "finding" in document
+  ))
     throw new Error(
-      "Expected a Continuum ListCodeFindings or GetCodeFinding response.",
+      "Expected a Continuum ListCodeFindings, GetCodeFinding, or finding with patch artifacts.",
     );
   const summary = "items" in document;
   return {
@@ -170,39 +177,78 @@ function reportRows(input: unknown, previous: boolean) {
   };
 }
 
-function subcategoryCwe(row: Record<string, unknown>) {
-  return /^(CWE-[1-9]\d*):/u.exec(text(row["subCategory"]) ?? "")?.[1];
+function isPatchCapture(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && !("findingArn" in value) && "finding" in value;
 }
 
-/** @internal Match 0.9.x checkpoints for both raw imports and saved SDK output. */
-export function previousContinuumCweProjection(
-  current: ExternalFindings,
-): ExternalFindings {
-  let changed = false;
-  const findings = current.findings.map((finding) => {
-    const { details, source_data } = finding.evidence;
-    const native = source_data?.["finding"];
-    // Remove only the inferred field. Caller edits and all other evidence must
-    // still match the immutable checkpoint before it can be resumed.
-    if (
-      source_data?.["format"] !== format ||
-      !isRecord(native) ||
-      details?.kind !== "sast" ||
-      details.weakness_ids?.length !== 1 ||
-      strings(native["cweIds"]).length ||
-      details.weakness_ids[0] !== subcategoryCwe(native)
-    )
-      return finding;
-    changed = true;
-    return {
-      ...finding,
-      evidence: {
-        ...finding.evidence,
-        details: { ...details, weakness_ids: [] },
-      },
-    };
-  });
-  return changed ? { ...current, findings } : current;
+function readPatch(value: unknown) {
+  const artifact = record(value, "Continuum patch artifact");
+  const patch = requiredText(artifact["patch"], "Continuum patch content");
+  const sizeBytes = Buffer.byteLength(patch);
+  const patchSha256 = hash("sha256", patch);
+  if (
+    artifact["sizeBytes"] !== sizeBytes ||
+    artifact["patchSha256"] !== patchSha256
+  )
+    throw new Error(
+      "Continuum patch content does not match its sizeBytes or patchSha256.",
+    );
+  return {
+    artifactId: requiredText(
+      artifact["artifactId"],
+      "Continuum patch artifact ID",
+    ),
+    patch,
+    patchSha256,
+    sizeBytes,
+    ...(artifact["format"] !== undefined && {
+      format: requiredText(artifact["format"], "Continuum patch format"),
+    }),
+    ...(artifact["repositoryName"] !== undefined && {
+      repositoryName: requiredText(
+        artifact["repositoryName"],
+        "Continuum patch repository",
+      ),
+    }),
+  };
+}
+
+function projectPatches(
+  patches: ReturnType<typeof readPatch>[],
+  target: ExternalImportTarget,
+  project: (artifacts: object[]) => ExternalFinding["evidence"],
+) {
+  if (!patches.length || target === "local") return project(patches);
+  try {
+    return project(patches);
+  } catch {
+    // Complete patches can exceed the Cloud evidence budget.
+  }
+
+  // Reserve each artifact's lookup information, then include whole patches that fit.
+  const marker = { contentOmitted: "cloud_evidence_limit" };
+  const markerBytes = Buffer.byteLength(JSON.stringify(marker));
+  const sizes = patches.map(
+    ({ patch }) => Buffer.byteLength(JSON.stringify({ patch })) - markerBytes,
+  );
+  const projected = patches.map(({ patch, ...descriptor }, index) =>
+    sizes[index]! > 0 ? { ...descriptor, ...marker } : patches[index]!,
+  );
+  const result = project(projected);
+  let remaining =
+    CLOUD_EVIDENCE_BYTES - validateExternalEvidenceJson(result, target);
+  for (const [index, bytes] of sizes.entries()) {
+    if (bytes > 0 && bytes <= remaining) {
+      projected[index] = patches[index]!;
+      remaining -= bytes;
+    }
+  }
+  result.source_data!["patches"] = projected;
+  return result;
+}
+
+function subcategoryCwe(row: Record<string, unknown>) {
+  return /^(CWE-[1-9]\d*):/u.exec(text(row["subCategory"]) ?? "")?.[1];
 }
 
 function statusUpdatedAt(value: unknown) {
@@ -253,23 +299,36 @@ function affectedPackages(
   return [...unique.values()];
 }
 
-function normalize(
+export function normalizeContinuumFindings(
   input: unknown,
   sourceRepositoryUrl: string,
-  target: ExternalImportTarget,
-  previous: boolean,
+  target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repository = declaredScannerRepositoryUrl(
     sourceRepositoryUrl,
     "Continuum",
     target,
   );
-  const { rows, summary } = reportRows(input, previous);
+  const { rows, summary } = reportRows(input);
   const scopes = new Set<string>();
   const output = normalizeRecords(
     rows,
     (value) => {
-      const row = record(value, "Continuum finding");
+      const capture = !summary && isPatchCapture(value) ? value : undefined;
+      const row = record(
+        capture ? capture["finding"] : value,
+        "Continuum finding",
+      );
+      const patches = capture
+        ? array(capture["patches"], "Continuum patches").map(readPatch)
+        : [];
+      if (
+        patches.length &&
+        !(text(row["createdIssueId"]) || text(row["duplicateOfIssueId"]))
+      )
+        throw new Error(
+          "Continuum patches require a finding linked to an issue.",
+        );
       if (
         row["type"] !== "CONTINUUM_CODE_VULN" &&
         row["type"] !== "CUSTOMER_CODE_VULN"
@@ -339,37 +398,42 @@ function normalize(
           finding: structuredClone(row),
         },
       };
-      const updatedAt = previous
-        ? null
-        : statusUpdatedAt(row["statusUpdatedAt"]);
-      const enrichment = previous
-        ? undefined
-        : {
-            packages: affectedPackages(packages, target),
-            source_updated_at: updatedAt,
-          };
+      const updatedAt = statusUpdatedAt(row["statusUpdatedAt"]);
+      const enrichment = {
+        packages: affectedPackages(packages, target),
+        source_updated_at: updatedAt,
+      };
       // Native code findings can identify a CWE only in subCategory.
       const namedCwe =
-        !previous && evidence.details?.weakness_ids.length === 0
+        evidence.details?.weakness_ids.length === 0
           ? subcategoryCwe(row)
           : undefined;
       const inferred = namedCwe
         ? { details: { ...evidence.details, weakness_ids: [namedCwe] } }
         : undefined;
       // Keep previously admissible evidence if an optional projection exceeds the Cloud budget.
-      return validateEnrichedExternalEvidence(
-        evidence,
-        target,
-        inferred ? { ...enrichment, ...inferred } : undefined,
-        enrichment,
-        packages.length && updatedAt !== null
-          ? { source_updated_at: updatedAt }
-          : undefined,
-        inferred,
+      return projectPatches(patches, target, (artifacts) =>
+        validateEnrichedExternalEvidence(
+          artifacts.length
+            ? {
+                ...evidence,
+                source_data: { ...evidence.source_data, patches: artifacts },
+              }
+            : evidence,
+          target,
+          inferred ? { ...enrichment, ...inferred } : undefined,
+          enrichment,
+          packages.length && updatedAt !== null
+            ? { source_updated_at: updatedAt }
+            : undefined,
+          inferred,
+        ),
       );
     },
     (value) => {
-      const { arn, scope } = identity(value);
+      const { arn, scope } = identity(
+        !summary && isPatchCapture(value) ? value["finding"] : value,
+      );
       scopes.add(scope);
       return arn;
     },
@@ -380,31 +444,6 @@ function normalize(
   return output;
 }
 
-export function normalizeContinuumFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalize(input, sourceRepositoryUrl, target, false);
-}
-
-/** @internal Reconstruct the original evidence for an interrupted Cloud request. */
-export function normalizePreviousContinuumFindings(
-  input: unknown,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalize(input, sourceRepositoryUrl, target, true);
-}
-
-export async function readContinuumFindings(
-  path: string,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeContinuumFindings(
-    await readScannerJson(path),
-    sourceRepositoryUrl,
-    target,
-  );
-}
+export const readContinuumFindings = scannerJsonReader(
+  normalizeContinuumFindings,
+);

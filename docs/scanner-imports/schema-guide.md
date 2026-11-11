@@ -24,6 +24,7 @@ which changes can give an occurrence a different ID.
 | Report                                                                                | What identifies one record                                                                                                                                                               |
 | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
+| [ArmorCode](armorcode.md)                                                             | ArmorCode finding ID (`id`) within the source key.                                                                                                                                       |
 | [AWS Continuum](continuum.md)                                                         | Continuum finding ARN. A list summary and a detailed response for that ARN identify the same finding.                                                                                    |
 | [Tenable One](tenable.md)                                                             | Exact Tenable `finding_id`. Keep the same source key for the tenant and Code Repository asset UUID.                                                                                      |
 | [Checkmarx SAST](checkmarx.md)                                                        | Checkmarx One uses the similarity ID and result hash. CxSAST scopes the similarity ID and ordered flow to the project and query.                                                         |
@@ -143,26 +144,18 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Use the same SDK version throughout a submission when possible.
+For stored findings, reprepare the interrupted source group with its saved selection
+and review ID. Its checkpoint belongs to the selected checkout and finding versions.
+After a repository reset, the workbench records any acknowledged receipts before
+retiring the old request. Review the new destination before publishing again.
 
-For hosted Semgrep or Snyk imports, finish any pending request before sending
-updated evidence for the same finding IDs. Selections with distinct
-scanner-issued IDs can proceed independently. If the checkpoint records
-only the source, finish that request before starting another for the same
-source and destination.
-
-**Resuming across SDK versions.** Keep the SDK input that produced the
-checkpoint, including report context and caller-added fields. Serializing it
-as JSON can change the values used to identify the approved request. Retry on
-the original deployment. If the SDK can verify the saved selection, it reuses
-the request IDs and skips batches with receipts. Otherwise it preserves the
-checkpoint and stops before uploading. If it cannot identify the approved
-findings, a new submission for the same source and destination can also be blocked.
-
-After a repository rename, a checkpoint that records only the repository ID
-can still be retried with the original normalized findings and report metadata.
-Omit supplemental repository declarations for that retry. A new declaration
-requires a matching catalog entry or a URL recorded in the approval.
+**Upgrading from an earlier import client.** Finish pending Cloud submissions with
+the CLI or SDK build that created their checkpoints. Keep the original input and
+state directory. If the outcome is uncertain, check the private inbox job or
+read back the repository’s source reports to identify the accepted findings
+before preparing a fresh submission. The current client starts a new approval
+for a submission made with the retired checkpoint format.
+[Verify an import](README.md#verify-the-import)
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

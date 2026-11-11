@@ -12,11 +12,11 @@ import {
   validateExternalEvidence,
 } from "./external-import-contract.js";
 import {
+  appendFinding,
   readScannerJson,
   repositoryFilePath,
   scannerSeverity,
   text,
-  trackReaderSelection,
 } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 
@@ -82,7 +82,7 @@ export function tenableSourceRepository(
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
   target: ExternalImportTarget = "local",
-) {
+): ExternalSourceRepository {
   const first =
     target === "cloud" ? input.findings[0]?.evidence.source_data : undefined;
   const header = input.report ?? first;
@@ -160,7 +160,6 @@ export async function readTenableFindings(
     findings: [],
     excluded: [],
   };
-  const review = trackReaderSelection(result);
   for (const [index, finding] of rows.entries()) {
     if (finding.asset_id !== asset.asset_id)
       throw new Error(
@@ -193,12 +192,12 @@ export async function readTenableFindings(
         target,
       );
     if (target === "cloud")
-      review.append(index + 1, finding.finding_id, evidence);
+      appendFinding(result, index + 1, finding.finding_id, evidence);
     else
       result.findings.push({
         source_finding_id: finding.finding_id,
         evidence: evidence(),
       });
   }
-  return review.finish();
+  return result;
 }

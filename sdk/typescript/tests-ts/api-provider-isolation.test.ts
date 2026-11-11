@@ -1289,7 +1289,10 @@ for await (const line of createInterface({ input: process.stdin })) {
       inputSchema: { type: "object", properties: {} } }] };
   }
   console.log(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }));
+  // Tool enumeration is the last request this fixture serves.
+  if (request.method === "tools/list") break;
 }
+process.stdin.destroy();
 `,
   );
   const manifestPath = join(plugin, ".mcp.json");

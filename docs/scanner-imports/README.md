@@ -3,16 +3,31 @@
 Preview a scanner report with the CLI, then save the findings in the local
 workbench or send a supported report to Codex Security Cloud.
 
+In Codex, ask to import a saved report or fetch selected findings with an
+available CLI, API, or MCP connection. You can publish selected findings from
+the local workbench in a later session using their stored IDs and versions.
+[Walk through acquisition, local import, and publication in Codex](workbench.md)
+
+## Choose your input
+
+| Starting point                 | Command                                                                                                                                                                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Saved vendor report            | `codex-security publish findings FILE --provider PROVIDER --source-key KEY --repository . --to local --dry-run` previews the evidence. Remove `--dry-run` to save it.  |
+| Codex Security findings export | `codex-security scan import FILE` saves findings from a .csv or .json file as a completed scan. Use `--input-format` for other filenames and `--json` for JSON output. |
+| Live provider                  | `codex-security import --help` lists the GitHub, Semgrep, Snyk and Sonar collectors. The Sonar collector can also replay its saved capture.                            |
+
 ## Choose your scanner
 
 The `--provider` value selects the reader for a saved report. To see which
 readers your installed CLI supports, run `codex-security publish findings --help`.
-Each reader supports local and Cloud publication. Cloud acceptance depends on the provider and formats supported by the selected destination.
+The guides cover local and Cloud imports unless a row limits its scope.
+Cloud publication requires a destination that supports the provider and its report format.
 
 | Guide                                                       | `--provider` | Supported input                                                                 |
 | ----------------------------------------------------------- | ------------ | ------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md)                            | `inspector`  | Inspector2 `ListFindings` JSON for one Code Security repository                 |
-| [AWS Continuum](continuum.md)                               | `continuum`  | Summaries or selected code finding details for one verified repository          |
+| [ArmorCode](armorcode.md)                                   | `armorcode`  | Findings API JSON for one repository (local verified, Cloud unverified)         |
+| [AWS Continuum](continuum.md)                               | `continuum`  | Code finding details and available patches, or summaries for one repository     |
 | [Black Duck SCA](blackduck.md)                              | `blackduck`  | BOM-6 vulnerable components for one project version                             |
 | [Checkmarx SAST](checkmarx.md)                              | `checkmarx`  | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |
 | [Endor Labs](endor.md)                                      | `endor`      | Native Finding JSON, or self-contained `endorctl` SARIF with finding UUIDs      |

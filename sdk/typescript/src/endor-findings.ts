@@ -1,4 +1,3 @@
-import { markPreviousCloudProjection } from "./reader-selection.js";
 import {
   type ExternalImportTarget,
   validateEnrichedExternalEvidence,
@@ -101,14 +100,6 @@ function endorListObjects(root: Record<string, unknown>): unknown[] {
   return values;
 }
 
-/** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
-export function normalizeEndorFindings(
-  input: unknown,
-  target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalizeReport(input, target, false);
-}
-
 const reducedReports = new WeakSet<ExternalFindings>();
 
 /** A native upload would ask the worker to reconstruct fields that Cloud could not accept. */
@@ -116,18 +107,10 @@ export function requiresStructuredEndorReport(findings: ExternalFindings) {
   return reducedReports.has(findings);
 }
 
-/** @internal Reproduce the selection from before malware and fully qualified package mapping. */
-export function normalizePreviousEndorFindings(
+/** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
+export function normalizeEndorFindings(
   input: unknown,
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalizeReport(input, target, true);
-}
-
-function normalizeReport(
-  input: unknown,
-  target: ExternalImportTarget,
-  previous: boolean,
 ): ExternalFindings {
   const root = Array.isArray(input) ? null : record(input, "Endor report");
   if (root?.["version"] === "2.1.0" && root["runs"] !== undefined)
@@ -138,7 +121,6 @@ function normalizeReport(
       : Array.isArray(input)
         ? input
         : [input];
-  let changed = false;
   let reduced = false;
   const result = normalizeRecords(
     values,
@@ -148,9 +130,7 @@ function normalizeReport(
       const spec = record(finding["spec"], "Endor spec");
       requiredText(spec["project_uuid"], "Endor project_uuid");
       const bareName = text(spec["target_dependency_name"]);
-      const name =
-        bareName ??
-        (previous ? null : text(spec["target_dependency_package_name"]));
+      const name = bareName ?? text(spec["target_dependency_package_name"]);
       const paths = [
         ...new Set(
           strings(spec["dependency_file_paths"])
@@ -204,7 +184,7 @@ function normalizeReport(
       const vulnerabilityIds = [
         ...new Set([...(advisory ? [advisory] : []), ...aliases]),
       ];
-      const malware = previous ? undefined : asRecord(metadata["malware"]);
+      const malware = asRecord(metadata["malware"]);
       const advisories = new Set([
         ...vulnerabilityIds,
         ...strings([asRecord(malware?.["meta"])?.["name"]]),
@@ -266,9 +246,6 @@ function normalizeReport(
       );
       const acceptedIds = evidence.advisory_ids!.length;
       const acceptedPackages = evidence.packages!.length;
-      changed ||=
-        acceptedIds > vulnerabilityIds.length ||
-        (!bareName && acceptedPackages > 0);
       reduced ||=
         acceptedIds < advisories.size || acceptedPackages < packages.length;
       return evidence;
@@ -280,10 +257,7 @@ function normalizeReport(
       ),
     target,
   );
-  if (target === "cloud") {
-    if (changed) markPreviousCloudProjection(result);
-    if (reduced) reducedReports.add(result);
-  }
+  if (target === "cloud" && reduced) reducedReports.add(result);
   return result;
 }
 
