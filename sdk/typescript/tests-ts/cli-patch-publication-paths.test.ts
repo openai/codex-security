@@ -333,6 +333,7 @@ test.skipIf(process.platform !== "linux").each([false, true])(
     );
     git("add", ".gitmodules");
     git("commit", "-m", "Synthetic deinitialized submodule");
+    git("config", "diff.ignoreSubmodules", "all");
     const alias = join(directory, "src/nested-\ufffd");
     await writeFile(
       join(directory, ".git/info/exclude"),
