@@ -2032,6 +2032,7 @@ describe("CLI", () => {
         "list-scans",
         "--repository",
         "/current/repository",
+        "--prefer-worktree",
         "--status",
         "complete",
         "--limit",

@@ -891,6 +891,25 @@ def test_scan_history_resolves_unique_prefixes_and_rejects_ambiguity(tmp_path: P
     assert get_scan(state_dir, scan["scanId"])["scan"]["scanId"] == scan["scanId"]
 
 
+def test_reading_empty_history_leaves_state_uninitialized(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    for command, key in (
+        ("list-scans", "scans"),
+        ("list-repositories", "repositories"),
+        ("list-global-findings", "findings"),
+    ):
+        assert run_workbench(state_dir, command, "--limit", "2", "--offset", "1") == {
+            key: [],
+            "nextOffset": None,
+            "limit": 2,
+            "offset": 1,
+        }
+    for scan_id, message in (("short", "eight characters"), (str(uuid.uuid4()), "scan not found")):
+        missing = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
+        assert missing["returncode"] != 0 and message in missing["stderr"]
+    assert not state_dir.exists()
+
+
 def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     repository = tmp_path / "repository"
@@ -924,6 +943,19 @@ def test_scan_list_includes_related_git_worktrees_and_clones(tmp_path: Path) -> 
             worktree_scan["scanId"],
             original_scan["scanId"],
         ]
+
+    for target, expected in (
+        (repository, original_scan),
+        (worktree, worktree_scan),
+        (clone, clone_scan),
+    ):
+        nested = target / "nested"
+        nested.mkdir()
+        local = run_workbench(
+            state_dir, "list-scans", "--repository", str(nested), "--prefer-worktree"
+        )
+        assert local["scans"][0]["scanId"] == expected["scanId"]
+        assert [scan["inCurrentWorktree"] for scan in local["scans"]] == [True, False, False]
 
     for offset, expected in enumerate((clone_scan, worktree_scan, original_scan)):
         page = run_workbench(
@@ -1072,7 +1104,7 @@ def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: 
 
     rejected = compare_scan_pair(state_dir, before, after, "--require-matches", check=False)
     assert rejected["returncode"] != 0
-    assert "Run 'codex-security scans match BEFORE AFTER' first" in rejected["stderr"]
+    assert "Run 'codex-security scans compare BEFORE AFTER' first" in rejected["stderr"]
     with sqlite3.connect(database) as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparisons").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)

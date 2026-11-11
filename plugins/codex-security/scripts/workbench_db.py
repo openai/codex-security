@@ -83,6 +83,7 @@ from workbench_constants import (
 from workbench_feedback import get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
+from workbench_scan_history import resolve_scan_id
 from workbench_scan_start import (
     archive_scan,
     insert_running_scan,
@@ -504,29 +505,6 @@ def require_scan(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     if row is None:
         raise SystemExit("Codex Security scan not found.")
     return row
-
-
-def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
-    """Return a canonical UUID or resolve a unique scan ID prefix of at least eight characters.
-
-    Raise SystemExit for a prefix that is too short, ambiguous, or absent from the database.
-    """
-    try:
-        return str(uuid.UUID(scan_id))
-    except ValueError:
-        if len(scan_id) < 8:
-            raise SystemExit("Scan ID prefixes must be at least eight characters.") from None
-        matches = connection.execute(
-            "SELECT id FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
-            (len(scan_id), scan_id.lower()),
-        ).fetchall()
-        if not matches:
-            raise SystemExit("Codex Security scan not found.") from None
-        if len(matches) > 1:
-            raise SystemExit(
-                f'Scan ID prefix "{scan_id}" matches multiple scans; use a longer prefix.'
-            ) from None
-        return matches[0]["id"]
 
 
 def create_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
@@ -3400,6 +3378,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             print(f"sqlite3.OperationalError: {exc}", file=sys.stderr)
             raise SystemExit(73) from None
         print(json.dumps(result, allow_nan=False, sort_keys=True))
+        return
+    if (empty := scan_history.empty_history(args, database_path())) is not None:
+        print(json.dumps(empty))
         return
     with closing(
         connect(

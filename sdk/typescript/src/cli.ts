@@ -477,10 +477,15 @@ const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const MODEL_OPTIONS = modelOptions();
 type ModelCliOptions = z.infer<typeof MODEL_OPTIONS>;
-const MATCHING_MODEL_OPTIONS = modelOptions(
+const MATCHING_OPTIONS = modelOptions(
   "Model for finding matching (default: Codex's configured model).",
   "Matching reasoning effort (default: medium).",
-);
+).extend({
+  force: z
+    .boolean()
+    .default(false)
+    .describe("Recompute saved finding matches."),
+});
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
@@ -2624,12 +2629,16 @@ export async function main(
   const latestScans = async (
     count = 1,
     status: "complete" | "any" = "complete",
-    pythonPath?: string,
-    protectedRoot?: PluginPythonOptions["protectedRoot"],
+    options: {
+      pythonPath?: string;
+      protectedRoot?: PluginPythonOptions["protectedRoot"];
+      preferWorktree?: boolean;
+    } = {},
   ): Promise<SavedScan[] | undefined> => {
     const result = await history(
       workbenchArgs("list-scans", {
         repository: dependencies.currentDirectory(),
+        preferWorktree: options.preferWorktree,
         status: status === "complete" ? "complete" : undefined,
         limit: String(count),
       }),
@@ -2644,11 +2653,31 @@ export async function main(
         }
         return value;
       },
-      pythonPath,
-      protectedRoot,
+      options.pythonPath,
+      options.protectedRoot,
     );
     return result?.["scans"] as SavedScan[] | undefined;
   };
+  type WorktreeScan = SavedScan & {
+    targetPath: string;
+    inCurrentWorktree: boolean;
+  };
+  const preferredScan = async (repository: string, status?: "complete") => {
+    const result = await dependencies.runWorkbench(
+      workbenchArgs("list-scans", {
+        repository,
+        preferWorktree: true,
+        status,
+        limit: 1,
+      }),
+    );
+    return (result["scans"] as WorktreeScan[])[0];
+  };
+  const historyId = z.string().min(1).optional();
+  const resolveHistoryId = async (id: string, status: "complete" | "any") =>
+    id === "latest"
+      ? (await latestScans(1, status, { preferWorktree: true }))?.[0]?.scanId
+      : id;
   type MatchingCliOptions = ModelCliOptions & { force?: boolean };
   const runMatching = async (
     operation: (options: ScanComparisonOptions) => Promise<JsonObject>,
@@ -2869,6 +2898,16 @@ export async function main(
               }
             }
           }
+          if (
+            target === undefined &&
+            repositories.length > 0 &&
+            (await sameFile(requestedRepository, repository))
+          ) {
+            const scan = await preferredScan(requestedRepository);
+            target = repositories.find(
+              (entry) => entry["targetId"] === scan?.["targetId"],
+            );
+          }
           const findings =
             target === undefined
               ? []
@@ -2997,11 +3036,9 @@ export async function main(
       description: "Show the results and saved configuration for a scan.",
       hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Scan ID or unique prefix (default: latest completed)."),
+        scanId: historyId.describe(
+          "Scan ID, unique prefix, or latest (default: latest completed).",
+        ),
       }),
       options: z.object({
         showLinkedFindings: z
@@ -3017,19 +3054,17 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format, options }) {
-        let scanId = args.scanId;
-        if (scanId === undefined) {
-          try {
-            scanId = (await latestScans())?.[0]?.scanId;
-          } catch (error) {
-            if (useDefaultOutput(format)) {
-              errorOutput.write(
-                "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
-              );
-            }
-            throw error;
+      async run({ args: { scanId: requestedId = "latest" }, format, options }) {
+        let scanId;
+        try {
+          scanId = await resolveHistoryId(requestedId, "complete");
+        } catch (error) {
+          if (useDefaultOutput(format)) {
+            errorOutput.write(
+              "Use codex-security scans list to find failed or active scans, then pass a scan ID to scans show and scans logs.\n",
+            );
           }
+          throw error;
         }
         if (scanId === undefined) return;
         return presentHistory(
@@ -3038,7 +3073,7 @@ export async function main(
             await showHistoryNavigation(
               scan as ScanLogSource,
               format,
-              args.scanId === undefined ? "latest completed scan" : undefined,
+              requestedId === "latest" ? "latest completed scan" : undefined,
             );
             return {
               ...(scan as JsonObject),
@@ -3056,13 +3091,9 @@ export async function main(
       description: "Show saved activity for a scan and its workers.",
       hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Scan identifier or unique prefix (default: latest, any status).",
-          ),
+        scanId: historyId.describe(
+          "Scan ID, unique prefix, or latest (default: latest, any status).",
+        ),
       }),
       examples: [
         { args: {}, description: "Show activity from the latest scan." },
@@ -3072,9 +3103,8 @@ export async function main(
         },
       ],
       output: z.record(z.string(), z.unknown()).optional(),
-      async run({ args, format }) {
-        const scanId =
-          args.scanId ?? (await latestScans(1, "any"))?.[0]?.scanId;
+      async run({ args: { scanId: requestedId = "latest" }, format }) {
+        const scanId = await resolveHistoryId(requestedId, "any");
         if (scanId === undefined) return;
         const result = await history(
           ["get-scan", "--scan-id", scanId],
@@ -3083,7 +3113,7 @@ export async function main(
             await showHistoryNavigation(
               scan,
               format,
-              args.scanId === undefined
+              requestedId === "latest"
                 ? "latest scan, including failed and active runs"
                 : undefined,
             );
@@ -3193,7 +3223,7 @@ export async function main(
     })
     .command("rerun", {
       description:
-        "Start a new scan using saved settings and current checkout/context files.",
+        "Start a new scan using saved settings and the current files at its saved checkout.",
       examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
@@ -3202,7 +3232,9 @@ export async function main(
           .string()
           .min(1)
           .optional()
-          .describe("Saved scan identifier (default: latest completed scan)."),
+          .describe(
+            "Saved scan identifier (default: latest completed in this worktree).",
+          ),
       }),
       options: z.object({
         showCost: SHOW_COST_OPTION,
@@ -3235,27 +3267,33 @@ export async function main(
           exitCode = 2;
           throw error;
         }
-        let scanId: string | undefined;
-        try {
-          scanId = args.scanId ?? (await latestScans())?.[0]?.scanId;
-        } catch (error) {
-          const message = errorMessage(error);
-          if (exitCode === 0)
-            errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-          return finishScanCommand(
-            { exitCode: 2, error: message },
-            format,
-            incurError,
-            "SCAN_REPLAY_UNAVAILABLE",
-          );
-        }
-        if (scanId === undefined) return;
         let scanArguments: ScanArguments;
         try {
+          let scanId = args.scanId;
+          let localScan: WorktreeScan | undefined;
+          if (scanId === undefined) {
+            localScan = await preferredScan(
+              dependencies.currentDirectory(),
+              "complete",
+            );
+            if (!localScan)
+              throw new CodexSecurityError(
+                "No completed scans found for the current repository.",
+              );
+            scanId = localScan.scanId;
+            if (!localScan.inCurrentWorktree)
+              throw new CodexSecurityError(
+                `No completed scan in this worktree. Scan ${scanId} used ${localScan.targetPath} (revision ${localScan["targetRevision"] ?? "unknown"}). To rerun there, use codex-security scans rerun ${scanId}.`,
+              );
+          }
           const saved = await dependencies.runWorkbench(
             workbenchArgs("get-scan-recipe", { scanId }),
           );
           const recipe = saved["recipe"];
+          if (localScan && isJsonObject(recipe)) {
+            // A saved recipe may refer to a directory link that now points to another checkout.
+            recipe["repository"] = localScan.targetPath;
+          }
           const parentScanId = saved["scanId"] as string;
           if (
             isJsonObject(recipe) &&
@@ -3322,13 +3360,11 @@ export async function main(
       },
     })
     .command("match", {
-      description: "Match findings by root cause across saved scans.",
-      usage: [
-        { suffix: "BEFORE AFTER [options]" },
-        { suffix: "--all [options]" },
-      ],
+      description:
+        "Match findings across completed scans. Uncached matches can use the model and save decisions.",
+      usage: [{ suffix: "--all [options]" }],
       examples: [{ options: { all: true } }],
-      hint: "Use scans compare for a pair. Match all completed scans with --all; --force recomputes saved matches.",
+      hint: "For a pair, use scans compare BEFORE AFTER. The older scans match BEFORE AFTER spelling also works.",
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3347,15 +3383,16 @@ export async function main(
           .boolean()
           .default(false)
           .describe("Match all completed scans of the current repository."),
-        force: z
-          .boolean()
-          .default(false)
-          .describe("Recompute an existing semantic finding comparison."),
-        ...MATCHING_MODEL_OPTIONS.shape,
+        ...MATCHING_OPTIONS.shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         if (options.all) {
+          if (args.beforeId !== undefined || args.afterId !== undefined) {
+            throw new CodexSecurityError(
+              "scans match --all does not accept scan identifiers.",
+            );
+          }
           return presentHistory(
             await runMatching(
               (matchingOptions) =>
@@ -3366,8 +3403,13 @@ export async function main(
             format,
           );
         }
+        if (args.beforeId === undefined || args.afterId === undefined) {
+          throw new CodexSecurityError(
+            "scans match requires two scan identifiers or --all.",
+          );
+        }
         return presentHistory(
-          await matchScanPair(args.beforeId!, args.afterId!, options),
+          await matchScanPair(args.beforeId, args.afterId, options),
           "compare",
           format,
         );
@@ -3377,6 +3419,11 @@ export async function main(
       description:
         "Compare findings from two scans. Uncached matches can use the model and save matching decisions.",
       examples: [
+        {
+          args: { beforeId: "BEFORE", afterId: "AFTER" },
+          description:
+            "Compare two scans, using the model and saving decisions on a cache miss.",
+        },
         { args: {}, description: "Compare the latest two completed scans." },
       ],
       destructive: true,
@@ -3392,7 +3439,7 @@ export async function main(
           .optional()
           .describe("Later saved scan identifier (default: latest completed)."),
       }),
-      options: MATCHING_MODEL_OPTIONS,
+      options: MATCHING_OPTIONS,
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, format, options }) {
         let { beforeId, afterId } = args;
@@ -6825,12 +6872,10 @@ export async function main(
           if (scanDir === undefined) {
             let scanId = options.scan;
             if (!scanId || scanId === "latest") {
-              const scans = await latestScans(
-                1,
-                "complete",
-                options.python,
+              const scans = await latestScans(1, "complete", {
+                pythonPath: options.python,
                 protectedRoot,
-              );
+              });
               scanId = scans?.[0]?.scanId;
             }
             if (scanId === undefined) return;
@@ -8119,19 +8164,6 @@ export async function main(
       (following !== "status" || positionals.length !== 1)
     ) {
       return "Use login to sign in or login status to inspect authentication.";
-    }
-    if (
-      subcommand === "match" &&
-      !argv.some((value) =>
-        ["--schema", "--llms", "--llms-full"].includes(value),
-      )
-    ) {
-      if (argv.includes("--all") && positionals.length > 0) {
-        return "scans match --all does not accept scan identifiers.";
-      }
-      if (!argv.includes("--all") && positionals.length !== 2) {
-        return "scans match requires two scan identifiers or --all.";
-      }
     }
     if (
       command !== "validate" &&

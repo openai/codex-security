@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import sys
+import uuid
 from collections.abc import Iterable, Iterator
 from functools import cache
 from itertools import chain
@@ -36,6 +37,63 @@ from workbench_target import (
     verified_windows_checkout,
 )
 from workbench_validation import timestamp_key
+
+
+def resolve_scan_id(connection: sqlite3.Connection, scan_id: str) -> str:
+    """Return a canonical UUID or resolve a unique scan ID prefix of at least eight characters.
+
+    Raise SystemExit for a prefix that is too short, ambiguous, or absent from the database.
+    """
+    require_scan_id_length(scan_id)
+    try:
+        return str(uuid.UUID(scan_id))
+    except ValueError:
+        matches = connection.execute(
+            "SELECT id FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
+            (len(scan_id), scan_id.lower()),
+        ).fetchall()
+        if not matches:
+            raise SystemExit("Codex Security scan not found.") from None
+        if len(matches) > 1:
+            raise SystemExit(
+                f'Scan ID prefix "{scan_id}" matches multiple scans; use a longer prefix.'
+            ) from None
+        return matches[0]["id"]
+
+
+def require_scan_id_length(scan_id: str) -> None:
+    if len(scan_id) < 8:
+        raise SystemExit("Scan ID prefixes must be at least eight characters.")
+
+
+def empty_history(args: argparse.Namespace, path: Path) -> dict[str, Any] | None:
+    """Answer history reads without creating the first persistent database."""
+    collections = {
+        "list-scans": "scans",
+        "list-repositories": "repositories",
+        "list-global-findings": "findings",
+    }
+    if args.command not in collections and not (
+        args.command == "get-scan" and not (args.request_id or args.action_token)
+    ):
+        return None
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        if args.command == "get-scan":
+            require_scan_id_length(args.scan_id)
+            raise SystemExit("Codex Security scan not found.") from None
+        empty = {collections[args.command]: []}
+        if args.limit is not None or args.offset:
+            limit = args.limit or FINDINGS_PAGE_MAX
+            if args.command == "list-global-findings":
+                limit = min(limit, FINDINGS_PAGE_MAX)
+            empty.update(limit=limit, offset=args.offset, nextOffset=None)
+        return empty
+    except OSError:
+        # Let the normal connection path report inaccessible history.
+        pass
+    return None
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -412,8 +470,33 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
+    worktree_order = ""
     if args is not None and args.repository:
         repository = Path(args.repository).expanduser().resolve()
+        if args.prefer_worktree:
+            top = git_output(repository, "rev-parse", "--show-toplevel")
+            root = Path(top).resolve() if top else None
+
+            @cache
+            def in_worktree(target_path: str) -> bool:
+                try:
+                    target = Path(target_path).resolve(strict=True)
+                    if target.samefile(repository):
+                        return True
+                    if (
+                        root is None
+                        or not repository.is_relative_to(root)
+                        or not target.is_relative_to(root)
+                    ):
+                        return False
+                    target_root = git_output(target, "rev-parse", "--show-toplevel")
+                    return target_root is not None and root.samefile(target_root)
+                except (OSError, RuntimeError):
+                    return False
+
+            connection.create_function("in_worktree", 1, in_worktree)
+            worktree_order = "in_worktree(scans.target_path) DESC,"
+
         requested_repository = connection.execute(
             """
             SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
@@ -482,7 +565,7 @@ def list_scans(
         f"""
         {SCAN_SUMMARY_QUERY}
         {where}
-        ORDER BY
+        ORDER BY {worktree_order}
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
             MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
             julianday(upper(scans.started_at)) DESC,
@@ -491,7 +574,11 @@ def list_scans(
         """,
         values,
     ).fetchall()
-    result = {"scans": [scan_summary(row) for row in rows[:limit]]}
+    scans = [scan_summary(row) for row in rows[:limit]]
+    if worktree_order:
+        for scan in scans:
+            scan["inCurrentWorktree"] = in_worktree(scan["targetPath"])
+    result = {"scans": scans}
     if limit is not None:
         result.update(
             {
@@ -732,7 +819,7 @@ def compare_scans(
                 f"'codex-security scans compare {after['id']} {before['id']}'."
             )
         raise SystemExit(
-            "No saved matches for these scans. Run 'codex-security scans match BEFORE AFTER' first."
+            "No saved matches for these scans. Run 'codex-security scans compare BEFORE AFTER' first."
         )
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)

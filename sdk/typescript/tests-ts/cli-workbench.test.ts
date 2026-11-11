@@ -373,6 +373,49 @@ describe("CLI workbench", () => {
       expect(JSON.parse(json.text())).toEqual({ repository, findings: [] });
     },
   );
+  test.each([true, false])(
+    "findings from a subdirectory prefer the local worktree (scanned=%j)",
+    async (local) => {
+      await using root = await scopedTemporaryDirectory("finding-nested-");
+      const repository = root.path;
+      const nested = join(repository, "src");
+      await mkdir(nested);
+      const calls: string[] = [];
+      const stdout = captureCli(main, "stdout");
+      expect(
+        await stdout.run(
+          ["findings", "list", "--json"],
+          dependencies({
+            currentDirectory: nested,
+            onWorkbench: (args): JsonObject => {
+              calls.push(args[0]!);
+              if (args[0] === "list-repositories")
+                return {
+                  repositories: [
+                    { targetPath: repository, targetId: "local" },
+                    {
+                      targetPath: join(repository, "..", "clone"),
+                      targetId: "related",
+                    },
+                  ],
+                };
+              if (args.includes("--prefer-worktree"))
+                return { scans: [{ targetId: local ? "local" : "related" }] };
+              return { findings: [{ title: args[2]! }], nextOffset: null };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout.text())).toEqual({
+        repository: nested,
+        findings: [{ title: local ? "local" : "related" }],
+      });
+      expect(calls.filter((command) => command === "list-scans")).toHaveLength(
+        1,
+      );
+    },
+  );
+
   test("lists and summarizes open findings for the current repository", async () => {
     const repository = resolve("/current/repository");
     const stdout = captureCli(main, "stdout");
@@ -690,7 +733,14 @@ describe("CLI workbench", () => {
     const latest = captureCli(main, "stdout");
     expect(await latest.run(["scans", "logs", "--json"], deps)).toBe(0);
     expect(calls).toEqual([
-      ["list-scans", "--repository", "/current/repository", "--limit", "1"],
+      [
+        "list-scans",
+        "--repository",
+        "/current/repository",
+        "--prefer-worktree",
+        "--limit",
+        "1",
+      ],
       ["get-scan", "--scan-id", "scan-1"],
     ]);
     expect(latest.text()).toContain("SYNTHETIC_KEY");
@@ -1147,7 +1197,7 @@ describe("CLI workbench", () => {
 
     expect(
       await stdout.run(
-        ["scans", "match", "--all", "--force", "--json"],
+        ["scans", "match", "--all=true", "--force", "--json"],
         dependencies({
           onWorkbench: (args, input): JsonObject => {
             calls.push(args);
@@ -1480,7 +1530,12 @@ describe("CLI workbench", () => {
       expect(
         await runCapturedCli(
           main,
-          ["scans", "match", "before", "after", ...(force ? ["--force"] : [])],
+          [
+            "scans",
+            ...(force
+              ? ["compare", "before", "after", "--force"]
+              : ["match", "before", "after", "--all=false"]),
+          ],
           dependencies({
             onWorkbench: (args, input): JsonObject => {
               calls.push(args);
@@ -1527,7 +1582,8 @@ describe("CLI workbench", () => {
       ["scans", "match", "before"],
       ["scans", "match", "--all", "before"],
       ["scans", "match", "before", "after", "--all"],
-      ["scans", "compare", "before", "after", "--force"],
+      ["scans", "match", "before", "after", "--all=true"],
+      ["scans", "match", "--all=false"],
     ]) {
       const onWorkbench = mock<() => {}>().mockReturnValue({});
       expect(
@@ -1572,6 +1628,31 @@ describe("CLI workbench", () => {
     },
   );
 
+  test("requires an explicit ID before rerunning another worktree's recipe", async () => {
+    const cli = createCliTest(main);
+    const onWorkbench = mock((args: readonly string[]): JsonObject => {
+      expect(args[0]).toBe("list-scans");
+      return {
+        scans: [
+          {
+            scanId: "sibling-id",
+            targetPath: "/sibling",
+            targetRevision: "abc123",
+            inCurrentWorktree: false,
+          },
+        ],
+      };
+    });
+    expect(
+      await cli.runCli(["scans", "rerun"], dependencies({ onWorkbench })),
+    ).toBe(2);
+    expect(onWorkbench).toHaveBeenCalledTimes(1);
+    expect(cli.stderr.text()).toContain("/sibling (revision abc123)");
+    expect(cli.stderr.text()).toContain(
+      "codex-security scans rerun sibling-id",
+    );
+  });
+
   test("reruns the latest completed scan by default", async () => {
     let parentScanId: unknown;
     let maxTimeMinutes: unknown;
@@ -1581,17 +1662,26 @@ describe("CLI workbench", () => {
         main,
         ["scans", "rerun"],
         dependencies({
-          onTurn: (_repository, options) => {
+          onTurn: (repository, options) => {
+            expect(repository).toBe("/current/repository");
             parentScanId = options.parentScanId;
             maxTimeMinutes = options.maxTimeMinutes;
           },
           onWorkbench: (args): JsonObject =>
-            args[0] === "list-scans"
-              ? { scans: [{ scanId: "latest-scan" }] }
+            args.includes("--prefer-worktree")
+              ? {
+                  scans: [
+                    {
+                      scanId: "latest-scan",
+                      targetPath: "/current/repository",
+                      inCurrentWorktree: true,
+                    },
+                  ],
+                }
               : {
                   scanId: "latest-scan",
                   recipe: {
-                    repository: "/current/repository",
+                    repository: "/old-alias",
                     target: { kind: "repository", paths: [] },
                     mode: "standard",
                     maxTimeMinutes: 15,
