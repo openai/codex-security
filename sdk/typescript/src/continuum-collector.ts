@@ -52,7 +52,10 @@ const environmentSources = z.object({
       codeConfiguration: z
         .object({
           sourceConfiguration: z
-            .object({ repositorySources: z.array(z.unknown()).optional() })
+            .object({
+              repositorySources: z.array(z.unknown()).optional(),
+              s3Sources: z.array(z.unknown()).optional(),
+            })
             .optional(),
         })
         .optional(),
@@ -69,14 +72,13 @@ const gitLabIntegration = z.object({
   }),
 });
 
-async function singleRepositoryUrl(
+async function singleRepositorySource(
   environment: Record<string, unknown>,
   getIntegration: (id: string) => Promise<Record<string, unknown>>,
-): Promise<string> {
+) {
   const { configuration } = environmentSources.parse(environment);
-  const repositories =
-    configuration?.codeConfiguration?.sourceConfiguration?.repositorySources ??
-    [];
+  const sources = configuration?.codeConfiguration?.sourceConfiguration;
+  const repositories = sources?.repositorySources ?? [];
   if (repositories.length !== 1)
     throw new CodexSecurityError(
       `Continuum collection requires exactly one configured Git repository. This environment has ${repositories.length}.`,
@@ -92,10 +94,14 @@ async function singleRepositoryUrl(
     type === "GITHUB"
       ? "https://github.com"
       : gitLabIntegration.parse(integration).providerDetails.gitlab.instanceUrl;
-  return declaredScannerRepositoryUrl(
-    `${base.replace(/\/$/u, "")}/${repository}`,
-    "Continuum",
-  );
+  return {
+    url: declaredScannerRepositoryUrl(
+      `${base.replace(/\/$/u, "")}/${repository}`,
+      "Continuum",
+    ),
+    // Mixed environments do not identify the Git source by the patch's AWS source name.
+    includePatches: !sources?.s3Sources?.length,
+  };
 }
 
 async function awsCommand({
@@ -142,10 +148,11 @@ export async function collectContinuumIssues(
     return run(["continuum", operation, ...scope, ...awsArgs, ...args]);
   };
   const environmentArgs = ["--environment-id", environmentId];
-  const sourceRepositoryUrl = await singleRepositoryUrl(
-    await request("get-environment", environmentArgs),
-    (id) => request("get-integration", ["--integration-id", id]),
-  );
+  const { url: sourceRepositoryUrl, includePatches } =
+    await singleRepositorySource(
+      await request("get-environment", environmentArgs),
+      (id) => request("get-integration", ["--integration-id", id]),
+    );
 
   // Let the AWS CLI assemble every page. A continuation token means the
   // capture is incomplete and cannot be published as the environment's report.
@@ -204,30 +211,31 @@ export async function collectContinuumIssues(
       }
       findings.push(finding);
     }
-    const evidenceArtifacts: Record<string, unknown>[] = [];
+    const issueArtifacts: Record<string, unknown>[] = [];
     if (issue["evidenceAvailability"] !== "NONE") {
       const issueArgs = ["--issue-id", selected.id];
       const artifacts = await request(
         "list-code-issue-artifacts",
         environmentArgs,
         ...issueArgs,
-        "--artifact-type",
-        "EVIDENCE",
+        ...(includePatches ? [] : ["--artifact-type", "EVIDENCE"]),
       );
       if (
         Object.hasOwn(artifacts, "nextToken") ||
         Object.hasOwn(artifacts, "NextToken")
       )
         throw new CodexSecurityError(
-          "Expected a complete Continuum issue evidence list.",
+          "Expected a complete Continuum issue artifact list.",
         );
       for (const item of array(
         artifacts["items"],
         "Continuum issue artifacts",
       )) {
-        const artifactId = continuumId.parse(
-          record(item, "Continuum issue artifact summary")["artifactId"],
-        );
+        const summary = record(item, "Continuum issue artifact summary");
+        const type = summary["artifactType"];
+        if (type !== "EVIDENCE" && !(includePatches && type === "PATCH"))
+          continue;
+        const artifactId = continuumId.parse(summary["artifactId"]);
         const artifact = await request(
           "get-code-issue-artifact",
           environmentArgs,
@@ -237,16 +245,16 @@ export async function collectContinuumIssues(
         );
         if (
           artifact["artifactId"] !== artifactId ||
-          artifact["artifactType"] !== "EVIDENCE"
+          artifact["artifactType"] !== type
         )
           throw new CodexSecurityError(
-            `Unexpected Continuum evidence artifact ${artifactId} for issue ${selected.id}.`,
+            `Unexpected Continuum artifact ${artifactId} for issue ${selected.id}.`,
           );
-        evidenceArtifacts.push(artifact);
+        issueArtifacts.push(artifact);
       }
     }
     issues.push({
-      issue: { ...issue, artifacts: evidenceArtifacts },
+      issue: { ...issue, artifacts: issueArtifacts },
       findings,
     });
   }

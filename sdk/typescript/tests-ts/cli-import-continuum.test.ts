@@ -8,15 +8,22 @@ import {
   continuumEvidenceArtifact,
   continuumIssueExport,
   continuumRepository,
+  patchArtifact,
 } from "./support/continuum-import-fixtures.js";
 
 const command = ["import", "continuum", "example", "--format", "json"];
 
-function awsFixture(provider: "github" | "gitlab" = "github") {
+function awsFixture(provider: "github" | "gitlab" = "github", s3 = true) {
   const report = continuumIssueExport();
   const { issue: rawIssue, findings } = report.issues[0]!;
   const issue = { ...rawIssue, evidenceAvailability: "AVAILABLE" };
   const artifact = continuumEvidenceArtifact(issue.issueId);
+  const patch = patchArtifact("patch1", "+// example\n");
+  const patchResponse = {
+    artifactId: patch.artifactId,
+    artifactType: "PATCH",
+    body: { patch },
+  };
   const [shared, first] = findings;
   const secondIssue = {
     ...issue,
@@ -46,10 +53,12 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
         configuration: {
           codeConfiguration: {
             sourceConfiguration: {
-              s3Sources: [
-                { integrationId: "archive", codePrefix: "code/" },
-                { integrationId: "archive2", codePrefix: "other/" },
-              ],
+              s3Sources: s3
+                ? [
+                    { integrationId: "archive", codePrefix: "code/" },
+                    { integrationId: "archive2", codePrefix: "other/" },
+                  ]
+                : [],
               repositorySources: [{ integrationId: "git", repository }],
             },
           },
@@ -72,9 +81,16 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
             artifactId: artifact.artifactId,
             artifactType: artifact.artifactType,
           },
+          ...(!args.includes("--artifact-type")
+            ? [
+                { artifactId: patch.artifactId, artifactType: "PATCH" },
+                { artifactId: "decision1", artifactType: "DECISION" },
+              ]
+            : []),
         ],
       };
-    if (args[1] === "get-code-issue-artifact") return artifact;
+    if (args[1] === "get-code-issue-artifact")
+      return args.at(-1) === patch.artifactId ? patchResponse : artifact;
     const id = args.at(-1);
     const detail =
       args[1] === "get-code-issue" && id
@@ -90,7 +106,10 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
       sourceRepositoryUrl,
       issues: [
         {
-          issue: { ...issue, artifacts: [artifact] },
+          issue: {
+            ...issue,
+            artifacts: [artifact, ...(!s3 ? [patchResponse] : [])],
+          },
           findings: [first!, shared!],
         },
         { issue: { ...secondIssue, artifacts: [] }, findings: [shared!] },
@@ -173,6 +192,32 @@ test.each([false, true])(
   },
 );
 
+test("import continuum captures AWS patch and evidence artifacts for a Git-only environment", async () => {
+  const { run, report } = awsFixture("github", false);
+  const aws = mock(run);
+  const captured = await collectContinuumIssues(
+    { environmentId: "example", cwd: ".", environment: {} },
+    aws,
+  );
+  expect(captured).toEqual(report);
+  expect(aws.mock.calls.some(([args]) => args.includes("decision1"))).toBe(
+    false,
+  );
+  expect(normalizeContinuumFindings(captured)).toMatchObject({
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: captured.issues[0]!.issue["issueArn"],
+        evidence: {
+          details: { scanner_verdict: "EXPLOITABLE" },
+          source_data: { patches: [patchArtifact("patch1", "+// example\n")] },
+        },
+      },
+      { source_finding_id: captured.issues[1]!.issue["issueArn"] },
+    ],
+  });
+});
+
 test("import continuum resolves the repository association for self-managed GitLab", async () => {
   const { run, report } = awsFixture("gitlab");
   const captured = await collectContinuumIssues(
@@ -225,7 +270,7 @@ test.each([
   ["list-code-issues", "complete Continuum issue list"],
   ["get-integration", "AWS AccessDenied"],
   ["get-code-finding", "AWS AccessDenied"],
-  ["list-code-issue-artifacts", "complete Continuum issue evidence list"],
+  ["list-code-issue-artifacts", "complete Continuum issue artifact list"],
   ["get-code-issue-artifact", "AWS AccessDenied"],
 ] as const)(
   "import continuum leaves JSON output empty on a %s failure",

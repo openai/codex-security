@@ -11,9 +11,9 @@ repository supplied the scanned code, including the archive for an S3 source.
 For a finding from another scanner, you can also check its repository in that
 scanner. [AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
 
-**Saved report.** Set `report` to a saved issue export, a native finding detail
-response, an array of finding detail responses, or a complete finding list
-response with its `items` array. Then [preview the report](#preview-and-import).
+**Saved report.** Set `report` to a saved issue export, a finding capture with
+patches, a native finding detail, an array of captures or details, or a complete
+finding list. Then [preview the report](#preview-and-import).
 
 ```sh
 report=/private/path/continuum.json
@@ -35,9 +35,11 @@ The command requires exactly one configured Git repository and records it as
 `sourceRepositoryUrl`. S3 sources are allowed alongside that repository. An
 environment with zero or multiple Git repositories fails before collection.
 The command collects all issue pages, issue details, linked findings, and
-`EVIDENCE` attachments across the environment. Before publishing, verify that
-the issues belong to the recorded repository, especially when S3 sources are
-present.
+`EVIDENCE` attachments across the environment. It also collects `PATCH`
+artifacts when Git is the only source. If the environment includes S3 sources,
+use the [selected-finding collector](#collect-a-finding-with-patches) and the
+exact AWS source name to capture patches for the Git repository. Before
+publishing, verify that the issues belong to the recorded repository.
 
 Use `--aws-profile PROFILE` to select AWS credentials, including a profile
 that assumes a role in the environment's account. Use `--aws-region REGION`
@@ -96,8 +98,10 @@ finding's snippet and end line. When the issue summary is empty, the first
 linked mitigation in issue order supplies remediation instructions. Validation
 is stored alongside each contributing finding in `evidence.source_data.findings`.
 
-The export keeps the original AWS `EVIDENCE` responses in
-`issues[].issue.artifacts`. Publication reads that array and stores the
+The export keeps the original AWS `EVIDENCE` and selected `PATCH` responses
+in `issues[].issue.artifacts`. The importer checks patch SHA-256 and byte count
+and keeps matching patches under the same issue ARN in
+`evidence.source_data.patches`. Publication reads that array and stores the
 structured signals in `evidence.source_data.evidence_artifacts`. The
 observation's `details.scanner_verdict` uses the AWS exploitability verdict for
 signals whose subject is the issue. Conflicting issue-level verdicts appear as
@@ -219,12 +223,13 @@ oversized bodies with `contentOmitted: "cloud_evidence_limit"`.
 
 From the checkout you want to fix, set `finding` to the path of a
 single-finding collector capture. To use a local workbench record instead,
-select its evidence by the finding ARN and the source key used at import.
+select its evidence by the issue or finding ARN and the source key used at
+import.
 
 ```sh
 out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   codex-security findings imported . --format json > "$out/imported.json" &&
-  jq -e --arg arn "$FINDING_ARN" --arg key "$SOURCE_KEY" \
+  jq -e --arg arn "$SOURCE_ARN" --arg key "$SOURCE_KEY" \
     '.findings[] | select(.provider == "continuum" and .sourceKey == $key and .sourceFindingId == $arn) | .evidence' \
     "$out/imported.json" > "$out/finding.json" &&
   finding="$out/finding.json"

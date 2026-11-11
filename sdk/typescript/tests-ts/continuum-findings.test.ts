@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
@@ -16,6 +15,7 @@ import {
   continuumIssueExport,
   continuumRepository,
   continuumSummary,
+  patchArtifact,
 } from "./support/continuum-import-fixtures.js";
 
 const normalize = (input: unknown) =>
@@ -272,13 +272,22 @@ test("an issue with linked dependency evidence retains its package and line rang
 
 test("local Continuum issue import keeps evidence and reprojects ranges for Cloud publication", async () => {
   const input = continuumIssueExport();
+  const small = patchArtifact("smallpatch", "+// café\n");
+  const big = patchArtifact("bigpatch", "x".repeat(270_000));
   const report = {
     ...input,
     issues: input.issues.map((row) => ({
       ...row,
       issue: {
         ...row.issue,
-        artifacts: [continuumEvidenceArtifact(row.issue.issueId)],
+        artifacts: [
+          continuumEvidenceArtifact(row.issue.issueId),
+          ...[big, small].map((patch) => ({
+            artifactId: patch.artifactId,
+            artifactType: "PATCH",
+            body: { patch },
+          })),
+        ],
       },
     })),
   };
@@ -321,9 +330,21 @@ test("local Continuum issue import keeps evidence and reprojects ranges for Clou
   const cloud = projectStoredFinding(stored, []);
   expect(cloud).toEqual(normalize(report));
   expect(cloud.findings[0]?.evidence.locations).toHaveLength(100);
-  expect(cloud.findings[0]?.evidence.source_data).toEqual(
-    stored.evidence.source_data,
-  );
+  expect(stored.evidence.source_data?.["patches"]).toEqual([big, small]);
+  const { patch: _, ...descriptor } = big;
+  expect(cloud.findings[0]?.evidence).toMatchObject({
+    details: {
+      scanner_verdict: "EXPLOITABLE",
+      code: { snippet: detailed.vulnerableCode },
+    },
+    source_data: {
+      evidence_artifacts: [continuumEvidenceArtifact(row.issue.issueId)],
+      patches: [
+        { ...descriptor, contentOmitted: "cloud_evidence_limit" },
+        small,
+      ],
+    },
+  });
 
   const normalized = normalize(report);
   normalized.findings[0]!.evidence.details!.repository!.url =
@@ -410,17 +431,6 @@ test("a selected array retains the same evidence as separate GetCodeFinding resp
   );
   expect(normalize([first, first]).excluded).toHaveLength(2);
 });
-
-function patchArtifact(artifactId: string, patch: string) {
-  return {
-    artifactId,
-    format: "GIT_DIFF",
-    repositoryName: "project",
-    patchSha256: createHash("sha256").update(patch).digest("hex"),
-    sizeBytes: Buffer.byteLength(patch),
-    patch,
-  };
-}
 
 test("patch captures retain the native finding, exact patch bytes and AWS descriptors", () => {
   const finding = { ...continuumDetail(), createdIssueId: "oneissue" };

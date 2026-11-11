@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export const continuumRepository = "https://github.com/example/project";
 
 export function continuumSummary(findingId = "one", environmentId = "example") {
@@ -121,5 +123,16 @@ export function continuumEvidenceArtifact(
         ],
       },
     },
+  };
+}
+
+export function patchArtifact(artifactId: string, patch: string) {
+  return {
+    artifactId,
+    format: "GIT_DIFF",
+    repositoryName: "project",
+    patchSha256: createHash("sha256").update(patch).digest("hex"),
+    sizeBytes: Buffer.byteLength(patch),
+    patch,
   };
 }

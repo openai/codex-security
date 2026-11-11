@@ -7,6 +7,7 @@ import {
   type ExternalImportTarget,
   repositoryUrlKey,
   validateEnrichedExternalEvidence,
+  validateExternalEvidence,
   validateExternalEvidenceJson,
 } from "./external-import-contract.js";
 import type { ImportedPackage, Provider } from "./external-import-models.js";
@@ -394,39 +395,36 @@ function issueFindingEvidence(
   };
 }
 
-function issueEvidenceArtifacts(value: unknown) {
-  return array(value ?? [], "Continuum issue evidence artifacts").flatMap(
-    (item) => {
-      const artifact = record(item, "Continuum issue evidence artifact");
-      const body = artifact["body"];
-      if (artifact["artifactType"] !== "EVIDENCE" || !isRecord(body)) return [];
-      const projection = body["prevalidationSignals"];
-      if (!isRecord(projection)) return [];
-      const signals = array(
-        projection["signals"] ?? [],
-        "Continuum evidence signals",
-      ).map((signal) => record(signal, "Continuum evidence signal"));
-      return [
-        {
-          artifactId: requiredText(
-            artifact["artifactId"],
-            "Continuum evidence artifact ID",
-          ),
-          artifactType: artifact["artifactType"],
-          ...(artifact["createdAt"] != null && {
-            createdAt: artifact["createdAt"],
-          }),
-          ...(artifact["mediaType"] != null && {
-            mediaType: artifact["mediaType"],
-          }),
-          ...(artifact["producer"] != null && {
-            producer: artifact["producer"],
-          }),
-          body: { prevalidationSignals: { ...projection, signals } },
-        },
-      ];
-    },
-  );
+function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
+  return artifacts.flatMap((artifact) => {
+    const body = artifact["body"];
+    if (artifact["artifactType"] !== "EVIDENCE" || !isRecord(body)) return [];
+    const projection = body["prevalidationSignals"];
+    if (!isRecord(projection)) return [];
+    const signals = array(
+      projection["signals"] ?? [],
+      "Continuum evidence signals",
+    ).map((signal) => record(signal, "Continuum evidence signal"));
+    return [
+      {
+        artifactId: requiredText(
+          artifact["artifactId"],
+          "Continuum evidence artifact ID",
+        ),
+        artifactType: artifact["artifactType"],
+        ...(artifact["createdAt"] != null && {
+          createdAt: artifact["createdAt"],
+        }),
+        ...(artifact["mediaType"] != null && {
+          mediaType: artifact["mediaType"],
+        }),
+        ...(artifact["producer"] != null && {
+          producer: artifact["producer"],
+        }),
+        body: { prevalidationSignals: { ...projection, signals } },
+      },
+    ];
+  });
 }
 
 function normalizeContinuumIssues(
@@ -446,9 +444,20 @@ function normalizeContinuumIssues(
       const row = record(value, "Continuum issue record");
       const { artifacts, ...issue } = record(row["issue"], "Continuum issue");
       const { arn, id, scope } = issueIdentity(issue);
-      const evidenceArtifacts = issueEvidenceArtifacts(
-        artifacts ?? row["evidenceArtifacts"],
-      );
+      const issueArtifacts = array(
+        artifacts ?? row["evidenceArtifacts"] ?? [],
+        "Continuum issue artifacts",
+      ).map((artifact) => record(artifact, "Continuum issue artifact"));
+      const evidenceArtifacts = issueEvidenceArtifacts(issueArtifacts);
+      const patches = issueArtifacts
+        .filter((artifact) => artifact["artifactType"] === "PATCH")
+        .map((artifact) => {
+          const body = record(artifact["body"], "Continuum patch body");
+          return readPatch({
+            ...record(body["patch"], "Continuum patch"),
+            artifactId: artifact["artifactId"],
+          });
+        });
       const verdicts = new Set<string>();
       for (const artifact of evidenceArtifacts) {
         for (const signal of artifact.body.prevalidationSignals.signals) {
@@ -542,7 +551,7 @@ function normalizeContinuumIssues(
           return verdict ? { ...finding, validation: { verdict } } : finding;
         },
       );
-      return validateEnrichedExternalEvidence(
+      const evidence = validateEnrichedExternalEvidence(
         {
           title: requiredText(issue["name"], "Continuum issue name"),
           severity: text(issue["severity"])?.toLowerCase() ?? "unknown",
@@ -585,6 +594,14 @@ function normalizeContinuumIssues(
         dependencyEvidence ? { ...details, ...dependencyEvidence } : undefined,
         details,
         dependencyEvidence,
+      );
+      if (!patches.length) return evidence;
+      // Fit optional patch bodies after selecting the scanner evidence to retain.
+      return projectPatches(patches, target, (patches) =>
+        validateExternalEvidence(
+          { ...evidence, source_data: { ...evidence.source_data, patches } },
+          target,
+        ),
       );
     },
     (value) => {
