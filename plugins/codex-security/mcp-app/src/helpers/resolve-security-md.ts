@@ -9,10 +9,19 @@ import {
   type Stats,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, sep, win32 } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+  win32,
+} from "node:path";
 import { parseArgs } from "node:util";
 import { unixBinding, windowsBinding } from "../native";
 import { windowsFileSystem } from "../../../native/windows-files.mjs";
+import { decodeGitPath, git } from "./inventory-git";
 import {
   decodePosixBytes,
   encodePosixPath,
@@ -317,6 +326,73 @@ function readPolicy(path: Buffer, displayedPath: Buffer): string {
   }
 }
 
+function policySection(source: string, content: string): string[] {
+  // Match Python's whitespace-only guidance without discarding a UTF-8 BOM.
+  if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(content)) return [];
+  const section = `## SECURITY.md source: ${asciiJson(source)}\n\n${content}`;
+  return [section.endsWith("\n") ? section : section + "\n"];
+}
+
+async function revisionGuidance(
+  repo: string,
+  revision: string,
+  scope: string | undefined,
+  posixHome: string | undefined,
+): Promise<string> {
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(revision))
+    throw new Error("the policy revision must be a full Git commit ID");
+  const root = resolve(expandHome(repo, posixHome));
+  const paths: string[] = [];
+  if (scope !== undefined) {
+    // Use the reviewed path as spelled, including files deleted from the worktree.
+    // Its ancestors in the base tree determine policy even if HEAD replaces one with a link.
+    const path = relative(root, resolve(root, expandHome(scope, posixHome)));
+    if (isAbsolute(path) || path === ".." || path.startsWith(".." + sep))
+      throw new Error("scan scope is outside the scan root");
+    paths.push("SECURITY.md");
+    let prefix = "";
+    for (const name of path.split(sep).filter(Boolean)) {
+      prefix += name + "/";
+      paths.push(prefix + "SECURITY.md");
+    }
+  }
+  async function readGit(args: string[]) {
+    const result = await git(root, ["--no-replace-objects", ...args]);
+    if (result.status !== 0)
+      throw new Error(
+        `could not read SECURITY.md at ${revision}: ${result.stderr.trim() || "Git unavailable"}`,
+      );
+    return result.stdout;
+  }
+  const tree = await readGit([
+    "ls-tree",
+    "-rz",
+    revision + "^{commit}",
+    "--",
+    ...paths,
+  ]);
+  const blobs = new Map<string, string>();
+  for (const record of decodeGitPath(tree).split("\0")) {
+    const match = /^100(?:644|755) blob ([0-9a-f]+)\t([\s\S]+)$/u.exec(record);
+    if (match && match[2]!.split("/").at(-1) === "SECURITY.md")
+      blobs.set(match[2]!, match[1]!);
+  }
+  if (scope === undefined)
+    return `[${[...blobs.keys()].sort().map(asciiJson).join(", ")}]\n`;
+  const sections = [];
+  for (const path of paths) {
+    const oid = blobs.get(path);
+    if (oid === undefined) continue;
+    const data = await readGit(["cat-file", "blob", oid]);
+    try {
+      sections.push(...policySection(path, decodeUtf8(data)));
+    } catch {
+      throw new Error(`SECURITY.md is not valid UTF-8: ${path}`);
+    }
+  }
+  return sections.join("\n");
+}
+
 function resolveSecurityMd(
   repo: string,
   scope: string,
@@ -367,27 +443,24 @@ function resolveSecurityMd(
     const resolvedPolicy = resolvedPath(policy);
     inside(resolvedPolicy, root, "SECURITY.md");
     const content = readPolicy(resolvedPolicy, policy);
-    // Match Python's whitespace-only guidance without discarding a UTF-8 BOM.
-    if (/^[\p{White_Space}\u001c-\u001f]*$/u.test(content)) continue;
     const source = decodePath(inside(policy, root, "SECURITY.md"))
       .split(sep)
       .join("/");
-    let section = `## SECURITY.md source: ${asciiJson(source)}\n\n${content}`;
-    if (!section.endsWith("\n")) section += "\n";
-    sections.push(section);
+    sections.push(...policySection(source, content));
   }
   return sections.join("\n");
 }
 
-export function resolveSecurityMdCommand(
+export async function resolveSecurityMdCommand(
   args: string[],
   posixHome = process.env.HOME,
-): number {
+): Promise<number> {
   try {
     const { values } = parseArgs({
       args,
       options: {
         repo: { type: "string" },
+        revision: { type: "string" },
         list: { type: "boolean" },
         scope: { type: "string" },
         out: { type: "string", default: "-" },
@@ -397,7 +470,7 @@ export function resolveSecurityMdCommand(
     if (values.help) {
       console.log(
         "Concatenate the SECURITY.md files that apply to a scan path.\n\n" +
-          "Usage: launch_codex_security_mcp[.cmd] --helper resolve-security-md --repo PATH [--list | --scope PATH] [--out PATH]\n\n" +
+          "Usage: launch_codex_security_mcp[.cmd] --helper resolve-security-md --repo PATH [--revision COMMIT] [--list | --scope PATH] [--out PATH]\n\n" +
           "--out PATH  output path, or - for stdout (default: -)",
       );
       return 0;
@@ -410,9 +483,20 @@ export function resolveSecurityMdCommand(
       throw new Error("--scope is required unless --list is specified");
     }
     const repo = parsedPath(values.repo);
-    const guidance = values.list
-      ? `[${listSecurityMd(repo, posixHome).map(asciiJson).join(", ")}]\n`
-      : resolveSecurityMd(repo, parsedPath(values.scope!), posixHome);
+    const boundRevision = process.env.CODEX_SECURITY_POLICY_BASE;
+    if (
+      boundRevision !== undefined &&
+      values.revision !== undefined &&
+      values.revision !== boundRevision
+    )
+      throw new Error("policy revision differs from the scan's bound base");
+    const revision = boundRevision ?? values.revision;
+    const guidance =
+      revision !== undefined
+        ? await revisionGuidance(repo, revision, values.scope, posixHome)
+        : values.list
+          ? `[${listSecurityMd(repo, posixHome).map(asciiJson).join(", ")}]\n`
+          : resolveSecurityMd(repo, parsedPath(values.scope!), posixHome);
     const outputPath = parsedPath(values.out);
     if (outputPath === "-") {
       process.stdout.write(Buffer.from(guidance, "utf8"));
