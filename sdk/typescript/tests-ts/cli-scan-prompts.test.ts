@@ -2,6 +2,7 @@ import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
+import type { JsonObject } from "../src/config.js";
 import { dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -260,4 +261,61 @@ describe("CLI scan prompts", () => {
       ),
     ).toBe(2);
   });
+});
+
+test("history repair loads implicit rerun prompts from the current checkout", async () => {
+  await using temp = await scopedTemporaryDirectory(
+    "codex-security-rerun-current-",
+  );
+  const root = temp.path;
+  const removed = join(root, "removed-checkout");
+  await writeFile(
+    join(root, "validation.md"),
+    "Validate the current synthetic checkout.\n",
+  );
+  const onTurn = mock<(repository: string, options: unknown) => void>();
+  const deps = dependencies({
+    currentDirectory: root,
+    onTurn,
+    onWorkbench: (args): JsonObject =>
+      args[0] === "list-scans"
+        ? { scans: [{ scanId: "saved" }] }
+        : {
+            scanId: "saved",
+            recipe: {
+              repository: removed,
+              target: { kind: "repository", paths: [] },
+              mode: "standard",
+              config: {},
+              validationMode: "custom",
+            },
+          },
+  });
+  expect(
+    await runCapturedCli(
+      main,
+      ["scans", "rerun", "--validation-prompt-file", "validation.md", "--json"],
+      deps,
+    ),
+  ).toBe(0);
+  expect(onTurn.mock.lastCall?.[0]).toBe(root);
+  expect(onTurn.mock.lastCall?.[1]).toMatchObject({
+    validationPrompt: "Validate the current synthetic checkout.\n",
+  });
+  const runs = onTurn.mock.calls.length;
+  expect(
+    await runCapturedCli(
+      main,
+      [
+        "scans",
+        "rerun",
+        "saved",
+        "--validation-prompt-file",
+        "validation.md",
+        "--json",
+      ],
+      deps,
+    ),
+  ).toBe(2);
+  expect(onTurn.mock.calls.length).toBe(runs);
 });
