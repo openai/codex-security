@@ -170,24 +170,32 @@ test.skipIf(process.platform !== "linux")(
     await symlink(rawPath, requested);
     expect(await realpath(requested)).toBe(replacement);
     const python = pythonExecutable()!;
-    for (const savedMatch of [false, true]) {
-      const savedAlias = join(temp.path, `saved-${savedMatch}`);
-      const state = join(temp.path, `state-${savedMatch}`);
-      await symlink(savedMatch ? rawPath : replacement, savedAlias);
+    for (const [savedMatch, removed] of [
+      [false, false],
+      [true, false],
+      [false, true],
+    ] as const) {
+      const savedAlias = join(temp.path, `saved-${savedMatch}-${removed}`);
+      const state = join(temp.path, `state-${savedMatch}-${removed}`);
+      const stored = removed ? join(replacement, "removed") : replacement;
+      const selected = removed ? join(requested, "removed") : requested;
+      if (removed) await mkdir(stored);
+      await symlink(savedMatch ? rawPath : stored, savedAlias);
       const setup = runPython(python, [
         "-c",
         savedAliasFindings,
         join(PLUGIN_ROOT, "scripts"),
         state,
-        replacement,
+        stored,
         savedAlias,
         "current",
       ]);
       expect(setup.exitCode, new TextDecoder().decode(setup.stderr)).toBe(0);
+      if (removed) await rm(stored, { recursive: true });
       const stdout = capture();
       const stderr = capture();
       const status = await main(
-        ["findings", "list", requested, "--json"],
+        ["findings", "list", selected, "--json"],
         stdout.stream,
         stderr.stream,
         dependencies({ onWorkbench: workbenchCommand(python, state) }),

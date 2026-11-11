@@ -156,6 +156,8 @@ If Codex Security reports that the refresh token was already used, run
 `codex-security logout`, then `codex-security login`. If your Codex CLI or app
 reports that error, sign out and sign back in there.
 
+Use `codex-security login status --json` in automation. Its stdout reports `authenticated`, the effective authentication `method`, and the environment variable name when an API key takes precedence. Native diagnostics go to stderr. The command keeps the exit status of the human-readable status check.
+
 For other refresh errors, check `codex-security login status`. Retry if the
 sign-in recently changed. Otherwise run `codex-security logout`, then
 `codex-security login`.
@@ -1402,6 +1404,12 @@ require a new output directory. Version 1 manifests also require a new directory
 because their original knowledge inputs and direct overrides cannot be verified.
 Worker and retry counts can change when resuming.
 
+On POSIX, local repository paths retain `..` components in the campaign manifest
+so distinct symlink traversals remain distinct sources. Older campaigns may have
+recorded a normalized absolute path instead. Use that recorded path to resume the
+previously selected source; it can differ from the physical target selected by
+the original traversal. Use a new output directory to scan the corrected target.
+
 ### Recovering failed or interrupted bulk scans
 
 Use the original CSV, output directory, and options:
@@ -1744,7 +1752,10 @@ The provider guide describes [package JSON and CSV](https://github.com/openai/co
 
 ### Publish completed scans
 
-Preview selected completed scans before uploading:
+The public `publish scan --help` menu describes Linear and custom publication
+from saved scans. The CSV input below belongs to Cloud publication.
+The following workflow is available to installations with Cloud publication access.
+Preview selected completed scans locally before uploading them.
 
 ```bash
 codex-security publish scan --to cloud --dry-run --json
@@ -2746,8 +2757,9 @@ retain exit codes `130` and `143` without a result.
 
 ## Command discovery and integrations
 
-Use `--llms` for the command manifest, `scan --schema --format json` for its
-schema, and `completions bash|zsh|fish` for shell completions. Scan output supports
+Start with `codex-security --help` for the task groups and shared output and agent options. Each command’s help shows its inputs and supported output formats. Use `import --help` to choose between a live collector, a saved scanner report, and a Codex Security CSV or JSON export.
+
+Use `--llms` for the command manifest, `--llms-full` for argument details, and `scan --schema --format json` for the scan schema. The manifests and shell completion include `scan import` alongside the ordinary `scan [repository]` command. Generate completions with `completions bash|fish|nushell|zsh`. Scan output supports
 `--format toon|json|yaml|jsonl` and `--full-output`. The existing `--format`,
 `--filter-output`, `--token-limit`, and `--token-offset` options accept either
 `--option value` or `--option=value`.
@@ -2778,6 +2790,53 @@ the client where it was registered.
 
 For local findings storage, deduplication, and custom endpoints, see the
 [findings guide](findings-service.md).
+
+### Shell completions
+
+The generated scripts register both `codex-security` and `cs`. Choose your shell
+and open a new session after saving the setup.
+
+**Bash.** Add this to `~/.bashrc` with Bash 4.4 or later:
+
+```bash
+source <(codex-security completions bash)
+```
+
+**Zsh.** In `~/.zshrc`, load the generated script after your completion system
+calls `compinit`. If you initialize completions yourself, use:
+
+```zsh
+autoload -Uz compinit
+compinit
+source <(codex-security completions zsh)
+```
+
+**Fish.** Add this line to `~/.config/fish/config.fish`:
+
+```fish
+codex-security completions fish | source
+```
+
+**Nushell.** Save the generated closures alongside `config.nu`:
+
+```nu
+codex-security completions nushell | save --force ($nu.default-config-dir | path join codex-security-completions.nu)
+```
+
+In `config.nu`, source the file and dispatch the two names to their completers:
+
+```nu
+source codex-security-completions.nu
+let previous_completer = $env.config.completions.external.completer?
+$env.config.completions.external.enable = true
+$env.config.completions.external.completer = {|spans|
+  match $spans.0 {
+    "codex-security" => { do $_incur_complete_codex_security $spans }
+    "cs" => { do $_incur_complete_cs $spans }
+    _ => { if $previous_completer != null { do $previous_completer $spans } }
+  }
+}
+```
 
 ### Hosted Standard scan
 

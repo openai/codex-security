@@ -118,10 +118,11 @@ describe("CLI scan prompts", () => {
       }
     }
 
-    for (const [directory, target] of [
-      [repository, "."],
-      [physicalRepository, repositoryAlias],
-      [repositoryAlias, physicalRepository],
+    for (const [directory, target, input] of [
+      [repository, ".", join("..", "external", "external-prompt.md")],
+      [repository, ".", external],
+      [physicalRepository, repositoryAlias, external],
+      [repositoryAlias, physicalRepository, external],
     ] as const) {
       let selected: unknown;
       expect(
@@ -130,7 +131,7 @@ describe("CLI scan prompts", () => {
           [
             "scan",
             target,
-            ...promptFlags.flatMap((flag) => [flag, external]),
+            ...promptFlags.flatMap((flag) => [flag, input]),
             "--json",
           ],
           dependencies({

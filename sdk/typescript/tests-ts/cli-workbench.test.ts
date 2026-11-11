@@ -30,6 +30,58 @@ import {
 } from "./support/cli-run.js";
 
 describe("CLI workbench", () => {
+  test("findings list resolves parent paths after the checkout is removed", async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "finding-removed-checkout-",
+    );
+    const root = temp.path;
+    const repository = join(root, "repository");
+    const directory = join(root, "tools");
+    await mkdir(repository);
+    await mkdir(directory);
+    await rm(repository, { recursive: true });
+    const requests: [string, string][] = [
+      [repository, repository],
+      ["../repository", repository],
+    ];
+    if (process.platform !== "win32") {
+      const moved = join(root, "moved");
+      await mkdir(join(moved, "child"), { recursive: true });
+      await symlink(join(moved, "child"), join(directory, "link"));
+      await symlink(root, join(moved, "archive"));
+      requests.push([
+        "link/../archive/repository",
+        join(moved, "archive", "repository"),
+      ]);
+    }
+    for (const [requested, displayed] of requests) {
+      const calls: Array<readonly string[]> = [];
+      const stdout = captureCli(main, "stdout");
+      expect(
+        await stdout.run(
+          ["findings", "list", requested, "--json"],
+          dependencies({
+            currentDirectory: directory,
+            onWorkbench: (args): JsonObject => {
+              calls.push(args);
+              return {
+                findings: [{ title: "Saved finding" }],
+                nextOffset: null,
+              };
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(calls).toEqual([
+        ["list-global-findings", "--repository", displayed, "--status", "open"],
+      ]);
+      expect(JSON.parse(stdout.text())).toEqual({
+        repository: displayed,
+        findings: [{ title: "Saved finding" }],
+      });
+    }
+  });
+
   test.each(["json", "text"])(
     "findings list retains requested aliases after history delegation in %s output",
     async (format) => {
