@@ -1,7 +1,17 @@
 import type { AgentType, McpServerConfig } from "add-mcp";
-import { SyncMcp } from "incur";
-import { lstat, realpath, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { splitCommand } from "./command-words.js";
+import { isRecord } from "./record.js";
 import { isWithin } from "./trusted-executable.js";
 
 // These CLI aliases are accepted by add-mcp in addition to its exported agent IDs.
@@ -23,18 +33,66 @@ const agentAliases: Readonly<Record<string, AgentType>> = {
   "pi-agent": "pi",
 };
 
-function mcpServerConfig(launch: string): McpServerConfig {
-  const value = launch.trim();
+type Launcher = {
+  command?: string | undefined;
+  exec?: string | undefined;
+  package?: string | undefined;
+  arg?: string[] | undefined;
+};
+
+function mcpServerConfig(
+  options: Launcher,
+  defaultCommand: string,
+): McpServerConfig {
+  const { command, exec, package: pkg, arg = [] } = options;
+  if ([command, exec, pkg].filter((value) => value !== undefined).length > 1)
+    throw new Error("Choose one of --exec, --package or --command.");
+  if (exec !== undefined) return { command: exec, args: arg };
+  if (pkg !== undefined)
+    return { command: "npx", args: ["--yes", "--", pkg, ...arg] };
+  if (arg.length) throw new Error("Use --arg with --exec or --package.");
+  const value = (command ?? defaultCommand).trim();
   if (!value) throw new Error("--command requires a launcher.");
   if (/^https?:\/\//u.test(value)) return { url: value, type: "http" };
-  // Preserve add-mcp's handling of literal executable paths, command lines,
-  // and bare npm package specifiers.
-  if (/^(?:\/|~(?:\/|$)|\.{1,2}\/|[A-Za-z]:[\\/]|\\\\)/u.test(value))
+  // Preserve an existing literal path with spaces. Otherwise a path starts
+  // a command line and can be followed by positional arguments or flags.
+  const isPath = /^(?:\/|~(?:\/|$)|\.{1,2}\/|[A-Za-z]:[\\/]|\\\\)/u.test(value);
+  const argsAt = isPath ? value.search(/\s/u) : 0;
+  if (argsAt === -1 || (isPath && existsSync(value)))
     return { command: value, args: [] };
-  const [command, ...args] = value.split(" ");
-  return args.length
-    ? { command: command!, args }
-    : { command: "npx", args: ["-y", value] };
+  const words = value.slice(argsAt).trim();
+  // Quotes group launcher words. Keep backslashes literal, including in
+  // unquoted Windows paths that occur alongside a quoted argument.
+  const tokens = splitCommand(words, "literal");
+  if (!tokens?.length)
+    throw new Error(
+      "Invalid --command quoting. Use --exec and --arg for literal values.",
+    );
+  return isPath
+    ? { command: value.slice(0, argsAt), args: tokens }
+    : { command: tokens[0]!, args: tokens.slice(1) };
+}
+
+async function ampSettings(
+  path: string,
+  cliName: string,
+  config: McpServerConfig,
+) {
+  const text = await readFile(path, "utf8").catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return "{}";
+    },
+  );
+  const settings: unknown = JSON.parse(text);
+  if (!isRecord(settings) || !isRecord(settings["amp.mcpServers"] ?? {}))
+    throw new Error(`Invalid Amp settings in ${path}.`);
+  const servers = (settings["amp.mcpServers"] ?? {}) as Record<string, unknown>;
+  settings["amp.mcpServers"] = {
+    ...servers,
+    [cliName]: config.url ? { url: config.url } : config,
+  };
+  return JSON.stringify(settings, null, 2) + "\n";
 }
 
 async function checkProjectConfig(root: string, file: string) {
@@ -61,10 +119,17 @@ async function checkProjectConfig(root: string, file: string) {
 
 export async function registerMcp(
   cliName: string,
-  command: string,
-  requested: string[],
+  options: Launcher & {
+    agent?: string[] | undefined;
+    all?: boolean | undefined;
+  },
+  defaultCommand: string,
   local: boolean,
-): Promise<SyncMcp.register.Result> {
+) {
+  const requested = options.agent ?? [];
+  const config = mcpServerConfig(options, defaultCommand);
+  if (options.all && requested.length)
+    throw new Error("Choose --all or --agent NAME.");
   // Import from the SDK installation. Never resolve or launch a package manager
   // or installer from the project being configured.
   const {
@@ -77,10 +142,16 @@ export async function registerMcp(
   const cwd = await realpath(process.cwd());
   const all = getAgentTypes();
   const targets = new Set<AgentType>();
+  const ampDir = join(homedir(), ".config", "amp");
+  let amp = false;
   if (requested.length) {
     for (const target of requested) {
-      if (target === "amp") continue;
       const key = target.toLowerCase();
+      if (key === "amp") {
+        if (local) throw new Error("Amp supports only --scope user.");
+        amp = true;
+        continue;
+      }
       const type =
         all.find((type) => type === key) ??
         (Object.hasOwn(agentAliases, key) ? agentAliases[key] : undefined);
@@ -91,15 +162,31 @@ export async function registerMcp(
       targets.add(type);
     }
   } else {
-    const detected = local
-      ? detectProjectAgents(cwd)
-      : await detectGlobalAgents();
-    for (const type of detected.length
-      ? detected
-      : all.filter((type) => !local || agents[type].localConfigPath))
-      targets.add(type);
+    const candidates = new Set(
+      options.all
+        ? all
+        : local
+          ? detectProjectAgents(cwd)
+          : await detectGlobalAgents(),
+    );
+    // add-mcp detects ~/.codex even when its writer uses a custom CODEX_HOME.
+    if (!local && !options.all && process.env["CODEX_HOME"]) {
+      if (existsSync(dirname(agents.codex.configPath))) candidates.add("codex");
+      else candidates.delete("codex");
+    }
+    for (const type of candidates) {
+      if (
+        (!local || agents[type].localConfigPath) &&
+        agents[type].supportedTransports.includes(config.type ?? "stdio")
+      )
+        targets.add(type);
+    }
+    amp = !local && (options.all === true || existsSync(ampDir));
+    if (!targets.size && !amp)
+      throw new Error(
+        `No compatible MCP clients detected in ${local ? "project" : "user"} scope. Select --agent NAME or use --all to register every compatible client in this scope.`,
+      );
   }
-  const config = mcpServerConfig(command);
   for (const type of targets) {
     const agent = agents[type];
     if (!agent.supportedTransports.includes(config.type ?? "stdio"))
@@ -117,6 +204,10 @@ export async function registerMcp(
       await checkProjectConfig(cwd, path);
     }
   }
+  const ampPath = join(ampDir, "settings.json");
+  const settings = amp
+    ? await ampSettings(ampPath, cliName, config)
+    : undefined;
   const installed = [];
   for (const type of targets) {
     const result = upsertServer(type, cliName, config, { local, cwd });
@@ -124,14 +215,18 @@ export async function registerMcp(
       throw new Error(`${agents[type].displayName}: ${result.error}`);
     installed.push(agents[type].displayName);
   }
-  if (!local && (!requested.length || requested.includes("amp"))) {
-    // With Amp as the sole target Incur writes its settings directly.
-    const amp = await SyncMcp.register(cliName, { agents: ["amp"], command });
-    if (requested.includes("amp") && !amp.agents.length)
-      throw new Error(
-        "The Amp settings file could not be updated. Check its JSON and retry.",
-      );
-    installed.push(...amp.agents);
+  if (settings !== undefined) {
+    await mkdir(ampDir, { recursive: true });
+    await writeFile(ampPath, settings, { mode: 0o600 });
+    installed.push("Amp");
   }
+  const command =
+    options.command ??
+    (config.url ||
+      [config.command!, ...(config.args ?? [])]
+        .map((word) =>
+          word && !/\s|["']/u.test(word) ? word : JSON.stringify(word),
+        )
+        .join(" "));
   return { command, agents: installed };
 }
