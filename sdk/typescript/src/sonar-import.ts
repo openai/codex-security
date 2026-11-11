@@ -10,9 +10,9 @@ import {
   prepareLocalImport,
 } from "./external-findings-local.js";
 import { prepareStoredFindingsPublication } from "./stored-findings-publication.js";
-import { cloudReviewDigest } from "./external-publication-review.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import {
+  cloudReviewDigest,
   ExternalPublicationError,
   externalPublicationStateDirectory,
   prepareNormalizedExternalPublication,

@@ -483,6 +483,7 @@ async function fixture(
     catalogHeaders: {} as Record<string, string>,
     sourceLookups: [] as string[],
     postBudget: Infinity,
+    conflictingFindingId: undefined as string | undefined,
     finalError: false,
   };
   const destination = () => ({
@@ -575,6 +576,17 @@ async function fixture(
           return json(response, { error: { message: "Slow down" } }, 429);
         }
         state.postBudget--;
+        if (
+          state.conflictingFindingId &&
+          request.items.some(
+            (item) => item.source_finding_id === state.conflictingFindingId,
+          )
+        )
+          return json(
+            response,
+            { error: { message: "stale expected version" } },
+            409,
+          );
         if (request.repository.reset_marker !== state.marker)
           return json(
             response,
@@ -866,47 +878,61 @@ test.each([0, 1])(
   },
 );
 
-test("stored publication retries a failed SQLite receipt write without another upload", async () => {
-  const cloud = await fixture();
-  await using local = await storedPublicationFixture(cloud);
-  const imported = await local.store("wiz", {
-    read: 1,
-    findings: [localFinding("recover")],
-    excluded: [],
-  });
-  const { repository } = local;
-  const [group] = (
-    await local.prepare({ repository, importId: imported.importId! })
-  ).groups;
-  using database = new Database(
-    join(local.stateDirectory, "workbench.sqlite3"),
-  );
-  database.exec(`CREATE TRIGGER reject_receipts BEFORE INSERT ON external_finding_publications
-    BEGIN SELECT RAISE(ABORT, 'receipt write interrupted'); END`);
-  await expect(group!.publish(group!.reviewId)).rejects.toThrow(
-    /receipt write interrupted/,
-  );
-  expect(cloud.posts).toHaveLength(1);
-  expect(
-    await listLocalFindingPublications({ repository }, local.deps),
-  ).toEqual([]);
-  database.exec("DROP TRIGGER reject_receipts");
+test.each(["complete", "conflict"])(
+  "stored publication recovers SQLite receipts before retiring a %s submission",
+  async (finish) => {
+    const cloud = await fixture();
+    const rows = Array.from(
+      { length: finish === "conflict" ? 101 : 1 },
+      (_, i) => localFinding("row-" + i),
+    );
+    if (finish === "conflict") cloud.state.conflictingFindingId = "row-100";
+    await using local = await storedPublicationFixture(cloud);
+    const imported = await local.store("wiz", {
+      read: rows.length,
+      findings: rows,
+      excluded: [],
+    });
+    const { repository } = local;
+    const [group] = (
+      await local.prepare({ repository, importId: imported.importId! })
+    ).groups;
+    using database = new Database(
+      join(local.stateDirectory, "workbench.sqlite3"),
+    );
+    database.exec(`CREATE TRIGGER reject_receipts BEFORE INSERT ON external_finding_publications
+      BEGIN SELECT RAISE(ABORT, 'receipt write interrupted'); END`);
+    await expect(group!.publish(group!.reviewId)).rejects.toThrow(
+      /receipt write interrupted/,
+    );
+    expect(cloud.receipts.size).toBe(1);
+    const [originalReceiptId] = cloud.receipts.keys();
+    expect(
+      await listLocalFindingPublications({ repository }, local.deps),
+    ).toEqual([]);
+    database.exec("DROP TRIGGER reject_receipts");
+    cloud.state.conflictingFindingId = undefined;
 
-  const [retry] = (await local.prepare(group!.selection)).groups;
-  expect(retry!.reviewId).toBe(group!.reviewId);
-  const result = await retry!.publish(group!.reviewId);
-  expect(result.status).toBe("complete");
-  expect(cloud.posts).toHaveLength(1);
-  expect(
-    await listLocalFindingPublications({ repository }, local.deps),
-  ).toMatchObject([
-    {
-      id: imported.findings[0]!.id,
-      receiptId: result.receipts[0]!.id,
-      outcome: "created",
-    },
-  ]);
-});
+    const [retry] = (await local.prepare(group!.selection)).groups;
+    expect(retry!.reviewId).toBe(group!.reviewId);
+    const result = await retry!.publish(group!.reviewId);
+    expect(result.status).toBe("complete");
+    const firstBatch = cloud.posts[0]!;
+    expect(cloud.posts.filter((body) => body === firstBatch)).toHaveLength(1);
+    const links = await listLocalFindingPublications(
+      { repository },
+      local.deps,
+    );
+    expect(links).toHaveLength(rows.length);
+    expect(links).toContainEqual(
+      expect.objectContaining({
+        id: imported.findings[0]!.id,
+        receiptId: originalReceiptId,
+        outcome: "created",
+      }),
+    );
+  },
+);
 
 test("stored findings recover a private inbox upload and retain its job receipt", async () => {
   const { f, inbox, deps, uploads, jobs } = await privateUploadFixture(

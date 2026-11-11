@@ -60,7 +60,6 @@ const distModules = [
   "trivy-findings",
   "trivy-import",
   "external-findings-publish",
-  "external-publication-review",
   "stored-finding-projection",
   "stored-findings-publication",
   "private-finding-import",

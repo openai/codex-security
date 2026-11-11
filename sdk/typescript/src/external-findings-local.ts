@@ -152,7 +152,7 @@ export interface StoredExternalImport {
   count: number;
 }
 
-interface LocalFindingReceipt {
+export interface LocalFindingReceipt {
   id: string;
   version: number;
   receiptId: string;

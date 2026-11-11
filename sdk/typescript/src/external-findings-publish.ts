@@ -223,6 +223,37 @@ export interface ExternalPublicationPreview extends ExternalFindings {
   };
 }
 
+/** Bind reviewed evidence to its account, repository, connector and destination version. */
+export function cloudReviewDigest(
+  preview: ExternalPublicationPreview,
+  checkout: string,
+  findings?: readonly { id: string; version: number }[],
+) {
+  return hash(
+    "sha256",
+    canonicalJson({
+      checkout,
+      api: preview.cloudApiUrl,
+      account: preview.accountId,
+      repository: preview.destination.id,
+      connector: preview.destination.repo_connector_id,
+      url: preview.destination.url,
+      reset: preview.destination.reset_marker,
+      source: preview.source,
+      privateImport: preview.privateImport,
+      ...(findings && { findings, excluded: preview.excluded }),
+      items: preview.requests.flatMap((request) =>
+        request.items.map((item) => [
+          item.source_finding_id,
+          item.expected_version,
+          request.repository.environment_id,
+          item.evidence,
+        ]),
+      ),
+    }),
+  );
+}
+
 export interface PreparedExternalPublication {
   preview: ExternalPublicationPreview;
   /** Persist acknowledged repository receipts before retiring their resumable request. */
@@ -2063,8 +2094,14 @@ async function preparePublicationInput(
           return completed;
         } catch (error) {
           if (error instanceof CloudImportError && error.status === 409) {
-            await removePending();
-            pending = undefined;
+            try {
+              await beforeRetire?.(result(acknowledged, verified));
+              await removePending();
+              pending = undefined;
+            } catch (recordError) {
+              // Keep acknowledged batches resumable when their receipts are not durable.
+              error = recordError;
+            }
           }
           const message = `${error instanceof Error ? error.message : String(error)} ${error instanceof CloudImportError && error.status === 409 ? "The old submission was retired. Rediscover and approve a fresh publication." : pending ? `Repeat the same command to resume the saved request. Saved submission: ${pendingPath}` : "No resumable request was saved. Correct the error and review the input before retrying."}`;
           throw new ExternalPublicationError(

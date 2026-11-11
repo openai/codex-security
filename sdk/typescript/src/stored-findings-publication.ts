@@ -7,10 +7,12 @@ import {
   recordExternalFindingPublications,
   selectLocalExternalFindings,
   type LocalExternalFindingSelection,
+  type LocalFindingReceipt,
   type LocalExternalImportDependencies,
   type StoredExternalFinding,
 } from "./external-findings-local.js";
 import {
+  cloudReviewDigest,
   ExternalPublicationError,
   prepareNormalizedExternalPublication,
   type ExternalPublicationDependencies,
@@ -24,7 +26,6 @@ import {
   type ExternalFindings,
   type ExternalSourceRepository,
 } from "./external-findings.js";
-import { cloudReviewDigest } from "./external-publication-review.js";
 import { projectStoredFinding } from "./stored-finding-projection.js";
 
 type Dependencies = ExternalPublicationDependencies &
@@ -109,10 +110,6 @@ function cloudSelection(
   return selected;
 }
 
-type ReceiptLink = Parameters<
-  typeof recordExternalFindingPublications
->[0]["entries"][number];
-
 function receiptRecorder(
   preview: ExternalPublicationPreview,
   rows: StoredExternalFinding[],
@@ -142,7 +139,7 @@ function receiptRecorder(
     destinationId: preview.destination.id,
   };
   return async (result: ExternalPublicationResult) => {
-    const entries: ReceiptLink[] = [];
+    const entries: LocalFindingReceipt[] = [];
     const job = result.privateJob;
     // The private inbox provides job totals, with no per-item outcomes.
     if (
