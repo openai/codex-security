@@ -8076,7 +8076,11 @@ export async function main(
       !following.startsWith("-") &&
       !subcommand
     )
-      return `Unknown command ${diagnosticValue(command + " " + following)}. Use codex-security ${command} --help.`;
+      // Discovery otherwise widens an unknown path to its parent. Execution
+      // already reports unknown verbs with Incur's spelling suggestions.
+      return inspection
+        ? `Unknown command ${diagnosticValue(command + " " + following)}. Use codex-security ${command} --help.`
+        : undefined;
     if (protocolFlag && !inspection) {
       const negative = "--no-" + protocolFlag.slice(2);
       const flags = argv.filter(

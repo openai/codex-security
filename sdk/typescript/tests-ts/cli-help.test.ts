@@ -335,9 +335,28 @@ describe("CLI help", () => {
         await main(args, stdout.stream, stderr.stream, dependencies()),
       ).toBe(2);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toMatch(/Unknown command|Unexpected positional/);
+      expect(stderr.text()).toMatch(
+        /Unknown command|not a command|Unexpected positional/,
+      );
     },
   );
+
+  test.each([
+    ["scans", "shwo", "show"],
+    ["mcp", "doctr", "doctor"],
+    ["skills", "lsit", "list"],
+  ])("preserves suggested verbs for %s %s", async (group, typo, verb) => {
+    const stderr = capture();
+    expect(
+      await main(
+        [group, typo],
+        capture().stream,
+        stderr.stream,
+        dependencies(),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(`Did you mean '${verb}'?`);
+  });
 
   test("uses the completion shell schema without generating a script", async () => {
     const schema = JSON.parse(
