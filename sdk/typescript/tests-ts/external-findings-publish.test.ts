@@ -11217,12 +11217,24 @@ test("publication rejects malformed options without writing findings", async () 
     ).toBe(2);
     expect(cli.stderr.text()).toContain("Missing value for flag");
   }
+  const missingGlobal = createCliTest(main);
+  expect(
+    await missingGlobal.runCli(
+      ["--filter-output", "--token-limit", ...f.command],
+      f.cliDeps,
+    ),
+  ).toBe(2);
+  expect(missingGlobal.stderr.text()).toContain(
+    "Missing value for flag: --filter-output",
+  );
   const extraArguments = createCliTest(main);
   expect(
     await extraArguments.runCli(
       [
         "--filter-output",
+        "status",
         "--token-limit",
+        "5",
         ...f.command,
         "--yes",
         "extra-1",
