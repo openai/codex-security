@@ -1628,6 +1628,58 @@ test("Tenable SDK retry publishes the approved file selection with the native oc
   });
 });
 
+test("stored Tenable publication verifies the catalog and publishes the selected local version", async () => {
+  const url = tenableReport.repository_url;
+  const cloud = await fixture(tenableReport, url);
+  await using local = await storedPublicationFixture(cloud);
+  const { repository, deps } = local;
+  const imported = await prepareLocalExternalImport(
+    cloud.file,
+    { ...tenableOptions, repository },
+    deps,
+  );
+  await imported.import();
+  const [row] = await listLocalExternalFindings({ repository }, deps);
+  const selection = {
+    repository,
+    findings: [{ id: row!.id, version: row!.version }],
+  };
+  const file = await prepareExternalPublication(
+    cloud.file,
+    tenableOptions,
+    cloud.deps,
+  );
+  await rm(cloud.file);
+
+  cloud.state.repositoryUrl = "https://github.com/example/another";
+  await expect(local.prepare(selection)).rejects.toThrow(/repository/i);
+  expect(cloud.posts).toHaveLength(0);
+  cloud.state.repositoryUrl = url;
+  const { groups } = await local.prepare(selection);
+  const group = groups[0]!;
+  expect(group.preview.findings).toEqual(file.preview.findings);
+  expect((await group.publish(group.reviewId)).verified).toBe(1);
+  const record = cloud.reports.get("00017")!;
+  expect(record).toMatchObject({
+    source_finding_id: "00017",
+    evidence: {
+      source_data: {
+        asset: tenableReport.asset,
+        finding: tenableReport.findings[0],
+      },
+    },
+  });
+  expect(
+    await listLocalFindingPublications({ repository }, deps),
+  ).toMatchObject([
+    {
+      ...selection.findings[0],
+      outcome: "created",
+      cloudFindingId: record.canonical_finding_id,
+    },
+  ]);
+});
+
 test("Tenable verifies the catalog repository and retained SDK identity before uploading", async () => {
   const url = tenableReport.repository_url;
   const otherUrl = "https://github.com/example/another";
