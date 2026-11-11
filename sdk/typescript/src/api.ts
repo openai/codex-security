@@ -1738,6 +1738,7 @@ export class CodexSecurity {
       "temporary",
     );
     if (
+      this.#dependencies.hostedScan === undefined &&
       options.rubricPath !== undefined &&
       options.severityRubric === undefined &&
       inputs.retryRecipe === undefined &&

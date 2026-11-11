@@ -2507,7 +2507,7 @@ For `validate`, `patch`, and `verify-fix`, an explicit local file URL such as
 `file:///home/reviewer/finding.md` (Windows: `file:///C:/reviews/finding.md`)
 requires the file to exist. A missing file stops the command before the model
 runs. Use `pathToFileURL(absolutePath).href` in Node to encode spaces and
-special characters correctly. Absolute paths and paths starting with `./` or `../`
+special characters correctly. Absolute paths and paths starting with `~/`, `./`, or `../`
 also require an existing file. Use `text:/path is exposed` to pass path-shaped
 prose verbatim, or `text:text:example` for a finding that starts with `text:`.
 

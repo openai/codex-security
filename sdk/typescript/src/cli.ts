@@ -5709,7 +5709,7 @@ export async function main(
               "hooks",
             ],
             { encoding: "utf8", env: git.environment },
-          ).trim();
+          ).replace(/\r?\n$/u, "");
           const hook = join(hooksDirectory, "pre-commit");
           const command = [
             realpathSync(process.execPath),
@@ -8846,8 +8846,13 @@ function cliOptionTokens(options: Record<string, unknown>): string[] {
     if (value === undefined) continue;
     const flag = cliOptionFlag(key);
     for (const item of Array.isArray(value) ? value : [value]) {
-      tokens.push(item === false ? `${flag}=false` : flag);
-      if (typeof item !== "boolean") tokens.push(quoteCliPath(String(item)));
+      if (typeof item === "boolean") {
+        tokens.push(item ? flag : `${flag}=false`);
+      } else if (String(item).startsWith("-")) {
+        tokens.push(quoteCliPath(`${flag}=${item}`));
+      } else {
+        tokens.push(flag, quoteCliPath(String(item)));
+      }
     }
   }
   return tokens;
@@ -10235,7 +10240,7 @@ async function runSkill(
         (error: unknown) => {
           if (
             explicitFile ||
-            isAbsolute(input) ||
+            isAbsolute(expandHome(input)) ||
             input.startsWith("./") ||
             input.startsWith("../") ||
             (process.platform === "win32" && /^\.{1,2}\\/u.test(input))

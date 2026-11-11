@@ -3,6 +3,7 @@ import { parseJsonLines } from "./support/json.js";
 import { writeFileSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -1327,10 +1328,14 @@ describe("CLI", () => {
         "A pre-commit hook already exists",
       );
       expect(await readFile(hook, "utf8")).toBe(customHook);
+      const other = join(root, "other-hook");
+      await writeFile(other, trustedHook);
+      await rm(hook);
+      await link(other, hook);
+      expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
+      expect(await readFile(other, "utf8")).toBe(trustedHook);
+      await rm(hook);
       if (process.platform !== "win32") {
-        const other = join(root, "other-hook");
-        await writeFile(other, trustedHook);
-        await rm(hook);
         await symlink(other, hook);
         expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
         expect(await readFile(other, "utf8")).toBe(trustedHook);

@@ -983,7 +983,12 @@ describe("CLI skill commands", () => {
       const stderr = captureCli(main, "stderr");
       expect(await stderr.run([command, url], deps)).toBe(2);
       expect(stderr.text()).toContain("finding #1.md");
-      for (const path of [file, "./missing.md", "../missing.md"]) {
+      for (const path of [
+        file,
+        "./missing.md",
+        "../missing.md",
+        "~/missing.md",
+      ]) {
         expect(await stderr.run([command, path], deps)).toBe(2);
         expect(stderr.text()).toContain(
           path === file ? "finding #1.md" : "missing.md",

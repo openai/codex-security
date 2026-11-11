@@ -1975,6 +1975,7 @@ test.each(["auto", "explicit", "file"])(
               "--auth",
               "api-key",
               "--workers=2",
+              "--max-total-cost=3",
               "--max-cost",
               "1.5",
               "--codex",
@@ -2003,6 +2004,7 @@ test.each(["auto", "explicit", "file"])(
       expect(plan.nextCommand).toContain("--auth api-key");
       expect(plan.nextCommand).toContain("--workers 2");
       expect(plan.nextCommand).toContain("--max-cost 1.5");
+      expect(plan.nextCommand).toContain("--max-total-cost 3");
       expect(plan.nextCommandNote).toContain("--codex");
       expect(result.stdout + result.stderr).not.toContain("synthetic-header");
     }
