@@ -72,6 +72,7 @@
 - inspect integration commands before installation ([#2582](https://github.com/openai/codex-security/pull/2582))
 - make command help and discovery reflect runnable workflows ([#2584](https://github.com/openai/codex-security/pull/2584))
 - make project setup and authentication easier to inspect ([#2581](https://github.com/openai/codex-security/pull/2581))
+- add a guide to security skills ([#2586](https://github.com/openai/codex-security/pull/2586))
 
 </details>
 
