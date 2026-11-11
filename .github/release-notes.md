@@ -84,6 +84,7 @@
 - resolve saved scans in the current worktree ([#2590](https://github.com/openai/codex-security/pull/2590))
 - resolve document links against selected sources ([#2430](https://github.com/openai/codex-security/pull/2430))
 - resolve command paths and isolate standalone actions ([#2596](https://github.com/openai/codex-security/pull/2596))
+- update install-action to v2.90.1 ([#2599](https://github.com/openai/codex-security/pull/2599))
 
 </details>
 
