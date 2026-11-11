@@ -31,6 +31,7 @@ test.each(["issue", "saved"] as const)(
   "publishes a materialized tracked file outside the sparse checkout for a %s patch",
   async (mode) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
+    git("config", "core.autocrlf", "true");
     const outside = join(directory, "outside");
     const file = join(outside, "finding.ts");
     await mkdir(outside);
@@ -43,8 +44,14 @@ test.each(["issue", "saved"] as const)(
       "S outside/finding.ts",
     );
     await expect(readFile(file)).rejects.toMatchObject({ code: "ENOENT" });
-    await mkdir(outside, { recursive: true });
-    await writeFile(file, "original\n");
+    git(
+      "checkout-index",
+      "--index",
+      "--ignore-skip-worktree-bits",
+      "--",
+      "outside/finding.ts",
+    );
+    expect(git("--no-optional-locks", "status", "--porcelain")).toBe("");
     const selection =
       mode === "issue" ? ["Synthetic issue"] : ["--scan", "scan-1"];
     const result = await runWorkflow(

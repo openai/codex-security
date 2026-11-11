@@ -1240,8 +1240,7 @@ describe("patch change tracking", () => {
       git("commit", "-am", "Replacement");
       git("switch", "main");
       git("sparse-checkout", "set", "--cone", "inside");
-      await mkdir(join(root, "outside"), { recursive: true });
-      await writeFile(join(root, path), "original\n");
+      git("checkout-index", "--ignore-skip-worktree-bits", "--", path);
       // Keep the materialized file's stat data in its skipped index entry.
       // A clean reapply can then remove the file without changing that entry.
       git(
