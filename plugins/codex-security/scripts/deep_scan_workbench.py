@@ -855,6 +855,7 @@ def begin_deep_scan_for_target(
                 with connection:
                     selected = terminal_deep_scan_for_target_snapshot(connection, *terminal_lookup)
                     if selected is not None and selected["id"] == terminal_id:
+                        require_scan_checkout_owner(connection, selected)
                         run = require_deep_scan_run(connection, terminal_id)
                         if selected_evidence_repair_required(selected, run):
                             connection.execute(

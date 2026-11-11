@@ -7,6 +7,7 @@ import json
 import os
 import runpy
 import sqlite3
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -1675,6 +1676,82 @@ def test_target_continuation_reuses_terminal_coordinator_across_threads(
         assert connection.execute(
             "SELECT deep_scan_owner_thread_id FROM scans WHERE id = ?", (scan_id,)
         ).fetchone() == ("thread-before-continuation",)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("replace_checkout", [False, True])
+def test_terminal_evidence_repair_rechecks_checkout_after_acquiring_completion_lock(
+    tmp_path, monkeypatch, workbench_api, capsys, replace_checkout
+):
+    state, target = empty_target_paths(tmp_path)
+    home, outputs = tmp_path / "home", tmp_path / "scans"
+    source = target / "source.py"
+    source.write_text("print(1)\n")
+    first = begin_target_scan(state, home, target, outputs, thread_id="first-owner")["deepScan"]
+    scan_id, scan_dir = first["scanId"], Path(first["scanDir"])
+    mark_deep_coordinator_succeeded(state, scan_id, scan_dir)
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path=source.name, coverage_mode="deep_repository"
+    )
+    # This legacy result was selected before evidence was required and still awaits sealing.
+    findings_path = scan_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    del findings["findings"][0]["validation"]
+    findings_path.write_text(json.dumps(findings))
+    database = state / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET manifest_path = ? WHERE scan_id = ?",
+            (str(scan_dir / "scan-manifest.json"), scan_id),
+        )
+
+    real_lock = workbench_api["scan_completion_lock"]
+
+    @contextmanager
+    def completion_lock(selected):
+        assert selected == scan_id
+        with real_lock(selected):
+            if replace_checkout:
+                target.rename(tmp_path / "original")
+                target.mkdir()
+                source.write_text("print(1)\n")
+            yield
+
+    main = workbench_api["main"]
+    monkeypatch.setattr(workbench_api["deep_scan"], "_dependencies", None)
+    monkeypatch.setitem(main.__globals__, "scan_completion_lock", completion_lock)
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "workbench_db",
+            "begin-deep-scan",
+            "--thread-id",
+            "next-owner",
+            "--target-path",
+            str(target),
+            "--scan-root",
+            str(outputs),
+            "--scope",
+            ".",
+            "--join-only",
+        ],
+    )
+    with open(os.devnull) as stdin:
+        monkeypatch.setattr(sys, "stdin", stdin)
+        if replace_checkout:
+            with pytest.raises(SystemExit, match="no longer matches"):
+                main()
+        else:
+            main()
+            assert json.loads(capsys.readouterr().out)["startDisposition"] == "joined"
+    with sqlite3.connect(database) as connection:
+        owner = connection.execute(
+            "SELECT deep_scan_owner_thread_id FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0]
+    assert owner == ("first-owner" if replace_checkout else "next-owner")
 
 
 def test_target_continuation_does_not_reuse_a_different_snapshot(
