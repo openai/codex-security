@@ -971,14 +971,9 @@ def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) 
                 "updated-thread",
             )
             backfilled = pool.submit(run_workbench, state_dir, "get-scan", "--scan-id", scan_id)
-            assert started.result(timeout=15)["startDisposition"] == "created"
-            assert updated.result(timeout=15)["threadId"] == "updated-thread"
-            assert (
-                backfilled.result(timeout=15)["scan"]["findings"][0]["attackPath"]["impact"][
-                    "level"
-                ]
-                == "high"
-            )
+        assert started.result()["startDisposition"] == "created"
+        assert updated.result()["threadId"] == "updated-thread"
+        assert backfilled.result()["scan"]["findings"][0]["attackPath"]["impact"]["level"] == "high"
     finally:
         release.cancel()
         release.join()
