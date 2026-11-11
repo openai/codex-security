@@ -208,13 +208,16 @@ printf '%s' "$PATH"
       encoding: "utf8",
     });
 
-  const standalone = run(["--stdio"]);
-  assert.equal(standalone.status, 0, standalone.stderr);
-  assert.equal(standalone.stdout, `${repo}:${fallback}`);
-
-  const sdk = {
+  const plugin = {
     CODEX_SECURITY_PLUGIN_ROOT: path.dirname(path.dirname(launcher)),
   };
+  for (const environment of [{}, plugin]) {
+    const standalone = run(["--stdio"], environment);
+    assert.equal(standalone.status, 0, standalone.stderr);
+    assert.equal(standalone.stdout, `${repo}:${fallback}`);
+  }
+
+  const sdk = { ...plugin, _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: "" };
   assert.equal(run(["--stdio"], sdk).status, 127);
   for (const args of [["--stdio"], ["--helper", "probe"]]) {
     for (const selection of [
@@ -325,7 +328,7 @@ test(
       fixtureLauncher,
       source.replace(systemPaths, '"$FIXTURE_SYSTEM_NODE"'),
     );
-    const run = (candidate: string) =>
+    const run = (candidate: string, inspected?: string) =>
       spawnSync("/bin/sh", [fixtureLauncher, "--helper", "database-info"], {
         cwd: root,
         encoding: "utf8",
@@ -336,6 +339,12 @@ test(
           NODE_DEBUG: "module",
           CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
           FIXTURE_SYSTEM_NODE: candidate,
+          ...(inspected === undefined
+            ? {}
+            : {
+                CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+                _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: inspected,
+              }),
         },
       });
     const linked = run(systemLink);
@@ -346,6 +355,12 @@ test(
     const missing = run(path.join(root, "missing-node"));
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /node:sqlite/);
+    const excluded = run(systemLink, "");
+    assert.notEqual(excluded.status, 0);
+    assert.match(excluded.stderr, /node:sqlite/);
+    const selected = run(systemLink, path.dirname(systemLink));
+    assert.equal(selected.status, 0, selected.stderr);
+    assert.deepEqual(JSON.parse(selected.stdout), JSON.parse(linked.stdout));
     assert.equal(existsSync(marker), false);
   },
 );
