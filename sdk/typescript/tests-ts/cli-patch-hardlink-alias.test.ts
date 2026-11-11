@@ -21,12 +21,16 @@ afterEach(fixtures.cleanup);
 for (const mode of [
   "exact spelling",
   "native spelling",
+  "precomposed Git spelling",
+  "a case-only Windows rename",
   "unresolved spelling",
   "other file",
   "other parent",
   "native lookup failure",
 ] as const) {
-  test(`publishes only the reported hardlink with ${mode}`, async () => {
+  const retainedCase = mode === "a case-only Windows rename";
+  const run = test.skipIf(retainedCase && process.platform !== "win32");
+  run(`publishes only the reported hardlink with ${mode}`, async () => {
     if (
       runTestInSubprocess(
         fileURLToPath(import.meta.url),
@@ -35,32 +39,46 @@ for (const mode of [
     )
       return;
     const { directory, git } = await publicationRepository(fixtures);
-    await writeFile(join(directory, "README"), "original\n");
-    await link(join(directory, "README"), join(directory, "alias-7"));
+    const precomposed = mode === "precomposed Git spelling";
+    const storedName = precomposed ? "caf\u00e9.ts" : "README";
+    const nativeName = precomposed ? "cafe\u0301.ts" : storedName;
+    if (precomposed) git("config", "core.precomposeUnicode", "true");
+    await writeFile(join(directory, storedName), "original\n");
+    await link(join(directory, storedName), join(directory, "alias-7"));
     await writeFile(join(directory, "other"), "unrelated\n");
     git("add", ".");
     git("commit", "-m", "Synthetic hardlink baseline");
+    if (retainedCase) {
+      git("config", "core.ignoreCase", "true");
+      fs.renameSync(join(directory, storedName), join(directory, "case-hop"));
+      fs.renameSync(join(directory, "case-hop"), join(directory, "readme"));
+    }
     expect(git("status", "--porcelain")).toBe("");
     const head = git("rev-parse", "HEAD");
     const index = git("write-tree");
-    const stored = fs.lstatSync(join(directory, "README"), { bigint: true });
+    const stored = fs.lstatSync(join(directory, storedName), { bigint: true });
     const linked = fs.lstatSync(join(directory, "alias-7"), { bigint: true });
     expect(linked.dev).toBe(stored.dev);
     expect(linked.ino).toBe(stored.ino);
-    const reported = mode === "exact spelling" ? "README" : "readme";
+    const reported = precomposed
+      ? nativeName
+      : mode === "exact spelling"
+        ? storedName
+        : "readme";
     const originalStat = fs.lstatSync;
+    const originalList = fs.readdirSync;
     const originalRealpath = fs.realpathSync.native;
     let nativeLookups = 0;
     const lookup = (path: fs.PathLike, options?: fs.StatOptions) => {
       const text = Buffer.isBuffer(path) ? path.toString() : String(path);
       return originalStat(
-        text === join(directory, "readme") ? join(directory, "README") : path,
+        text === join(directory, reported) ? join(directory, storedName) : path,
         options,
       );
     };
     const native = ((path: fs.PathLike, options?: fs.EncodingOption) => {
       const text = Buffer.isBuffer(path) ? path.toString() : String(path);
-      if (text !== join(directory, "readme"))
+      if (text !== join(directory, precomposed ? storedName : "readme"))
         return originalRealpath(path, options);
       nativeLookups++;
       if (mode === "native lookup failure")
@@ -77,15 +95,29 @@ for (const mode of [
             ? join(directory, "other")
             : mode === "other parent"
               ? join(directory, "src", "README")
-              : join(directory, "README");
+              : join(directory, nativeName);
       return Buffer.from(resolved);
     }) as typeof fs.realpathSync.native;
-    mock.module("node:fs", () => ({
-      ...fs,
-      default: fs,
-      lstatSync: lookup,
-      realpathSync: Object.assign(fs.realpathSync.bind(fs), { native }),
-    }));
+    if (!retainedCase)
+      mock.module("node:fs", () => ({
+        ...fs,
+        default: fs,
+        lstatSync: lookup,
+        ...(precomposed && {
+          // Simulate a volume enumerating NFD while the Git tree stores NFC.
+          readdirSync(path: fs.PathLike, options: { encoding: "buffer" }) {
+            const names = originalList(path, options);
+            if (String(path) !== directory || options?.encoding !== "buffer")
+              return names;
+            return names.map((name) =>
+              name.equals(Buffer.from(storedName))
+                ? Buffer.from(nativeName)
+                : name,
+            );
+          },
+        }),
+        realpathSync: Object.assign(fs.realpathSync.bind(fs), { native }),
+      }));
     const publicationCommands: string[] = [];
     let forgeCalls = 0;
     try {
@@ -102,7 +134,17 @@ for (const mode of [
               const operation = args[0] === "-C" ? args[2] : args[0];
               if (["switch", "commit", "push"].includes(operation ?? ""))
                 publicationCommands.push(operation!);
-              return runGitRepositoryCommand(command, args, cwd, options);
+              // macOS Git precomposes literal pathspec arguments before lookup.
+              const separator = args.indexOf("--");
+              const gitArgs =
+                precomposed &&
+                separator >= 0 &&
+                args.includes("--literal-pathspecs")
+                  ? args.map((arg, i) =>
+                      i > separator && arg === nativeName ? storedName : arg,
+                    )
+                  : args;
+              return runGitRepositoryCommand(command, gitArgs, cwd, options);
             }
             forgeCalls++;
             return args[1] === "list"
@@ -110,14 +152,19 @@ for (const mode of [
               : "https://github.example.test/example/repository/pull/1";
           },
           onCodex: async (_args, output) => {
-            await writeFile(join(directory, "README"), "fixed\n");
+            await writeFile(join(directory, storedName), "fixed\n");
+            if (precomposed || retainedCase)
+              await writeFile(join(directory, "other"), "second edit\n");
             output?.stdout.write(
               JSON.stringify({
                 patches: [
                   {
                     occurrenceId: "occ_1",
                     status: "verified",
-                    files: [reported],
+                    files:
+                      precomposed || retainedCase
+                        ? [reported, "other"]
+                        : [reported],
                     verification: "Synthetic regression passed.",
                   },
                 ],
@@ -127,13 +174,22 @@ for (const mode of [
           },
         },
       );
-      expect(await readFile(join(directory, "README"), "utf8")).toBe("fixed\n");
+      expect(await readFile(join(directory, storedName), "utf8")).toBe(
+        "fixed\n",
+      );
       expect(await readFile(join(directory, "alias-7"), "utf8")).toBe(
         "fixed\n",
       );
-      if (mode === "exact spelling" || mode === "native spelling") {
+      if (
+        mode === "exact spelling" ||
+        mode === "native spelling" ||
+        precomposed ||
+        retainedCase
+      ) {
         expect(outcome.exitCode, outcome.stderr).toBe(0);
-        expect(git("show", "HEAD:README")).toBe("fixed");
+        expect(git("show", `HEAD:${storedName}`)).toBe("fixed");
+        if (precomposed || retainedCase)
+          expect(git("show", "HEAD:other")).toBe("second edit");
         expect(git("show", "HEAD:alias-7")).toBe("original");
         expect(git("ls-remote", "origin")).toContain(git("rev-parse", "HEAD"));
         if (mode === "exact spelling") expect(nativeLookups).toBe(0);
