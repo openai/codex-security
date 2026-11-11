@@ -108,14 +108,6 @@ test.each(["%23", "%3F"])(
       });
       expect(semgrepPlatformFindingRepository(row, "semgrep")).toBe(native.url);
     }
-    const legacy = normalizeSemgrepPlatformFindings({
-      ...report,
-      format: "semgrep-platform-findings/v1",
-      project: native,
-      findings: rows,
-    });
-    expect(legacy.excluded.map((item) => item.position)).toEqual([2]);
-    expect(legacy.findings).toEqual([batch.findings[0]!]);
   },
 );
 
@@ -148,14 +140,9 @@ test("a supplied empty repository URL remains bulk-only on capture and replay", 
       format: "semgrep-platform-selection/v1",
     }),
   ).toThrow(/repository/);
-  for (const input of [
-    bulk,
-    { ...bulk, format: "semgrep-platform-findings/v1", findings: [row] },
-  ]) {
-    const [finding] = normalizeSemgrepPlatformFindings(input).findings;
-    expect(finding!.evidence.source_data?.["format"]).toBe(bulk.format);
-    expect(semgrepPlatformFindingRepository(finding!, "semgrep")).toBe(url);
-  }
+  const [finding] = normalizeSemgrepPlatformFindings(bulk).findings;
+  expect(finding!.evidence.source_data?.["format"]).toBe(bulk.format);
+  expect(semgrepPlatformFindingRepository(finding!, "semgrep")).toBe(url);
 });
 
 test("an opaque bulk finding ID still requires the original native occurrence ID", async () => {
@@ -485,7 +472,7 @@ test("a normalized Platform report binds native rows even when both projects hav
   expect((await prepare(batch)).preview.findings).toHaveLength(2);
 });
 
-test("a marked Platform report requires scope for caller-managed partial v1 findings", async () => {
+test("a marked Platform report requires scope for caller-managed partial native findings", async () => {
   const native = {
     id: 9,
     rule_name: "example.rule",
@@ -495,11 +482,12 @@ test("a marked Platform report requires scope for caller-managed partial v1 find
   };
   const report = normalizeSemgrepPlatformFindings({
     ...options,
-    project,
+    project: { ...project, id: String(project.id) },
     product: "sast",
-    format: "semgrep-platform-findings/v1",
+    format: "semgrep-platform-findings/v2",
+    repositoryAliases: [],
     findingCount: 1,
-    findings: [native],
+    findings: [JSON.stringify(native)],
   });
   const partial = structuredClone(report.findings[0]!);
   partial.source_finding_id = "caller-managed";
@@ -569,77 +557,6 @@ test("a marked Platform report requires scope for caller-managed partial v1 find
     };
     expect((await marked(migrated)).preview.findings[1]).toEqual(migrated);
   }
-});
-
-test("a v1 normalized report binds its object rows and empty results to the declared checkout", async () => {
-  const source = { provider: "semgrep" as const, sourceKey: "example/topic" };
-  await using fixture = await localReportFixture("v1.json", source, {
-    remote: url,
-  });
-  const prepare = (
-    input: Parameters<typeof prepareNormalizedLocalImport>[0],
-    provider: "semgrep" | "wiz" = "semgrep",
-  ) =>
-    prepareNormalizedLocalImport(
-      input,
-      { ...source, provider, repository: fixture.repository },
-      { environment: fixture.environment },
-    );
-
-  const native = { id: 9, rule_name: "example.rule" };
-  const scope = {
-    deployment: options.deployment,
-    ref: options.ref,
-    project,
-    product: "sast",
-    format: "semgrep-platform-findings/v1",
-  };
-  const projected = normalizeSemgrepPlatformFindings({
-    ...scope,
-    findingCount: 1,
-    findings: [native],
-  }).findings[0]!;
-  projected.evidence.source_data = { ...scope, finding: native };
-  // This is the envelope returned by the v1 reader, including when it accepted no rows.
-  const legacy = {
-    sourceRepositoryUrl: url,
-    read: 1,
-    findings: [projected],
-    excluded: [],
-  };
-  const other = "https://github.com/example/fork";
-  expect((await prepare(legacy)).preview.findings).toHaveLength(1);
-  const rowOnly = { ...legacy, sourceRepositoryUrl: undefined };
-  expect((await prepare(rowOnly)).preview.findings).toHaveLength(1);
-  for (const findings of [[projected], []]) {
-    const wrong = {
-      ...legacy,
-      read: findings.length,
-      findings,
-      sourceRepositoryUrl: other,
-    };
-    await expect(prepare(wrong)).rejects.toThrow(/repository|remote/i);
-  }
-  const ordinary = structuredClone(projected);
-  ordinary.source_finding_id = "generic";
-  delete ordinary.evidence.source_data;
-  const foreign = structuredClone(ordinary);
-  foreign.evidence.details!.repository!.url = other;
-  await expect(
-    prepare({ ...legacy, read: 2, findings: [projected, foreign] }),
-  ).rejects.toThrow(/report repository/i);
-  expect(
-    (await prepare({ ...legacy, findings: [ordinary] }, "wiz")).preview
-      .findings,
-  ).toHaveLength(1);
-  const sarif = normalizeSemgrepFindings(
-    semgrepSarif(),
-    { sourceRepositoryUrl: url },
-    "local",
-  );
-  expect(
-    (await prepare({ ...legacy, ...sarif })).preview.findings,
-  ).toHaveLength(1);
 });
 
 test("hosted repository comparison accepts an opaque Git remote alias", () => {
@@ -860,35 +777,19 @@ async function checkProjectMapping(raw: string | null) {
   expect(saved.nativeProjectUrl).toBe(raw ?? undefined);
   expect(saved.ref).toBe(options.ref);
   expect(saved).toMatchObject({ sourceRepositoryUrl: url });
-  const legacy = {
-    deployment: options.deployment,
-    ref: options.ref,
-    sourceRepositoryUrl: url,
-    product: "sast",
-    findingCount: 1,
-    format: "semgrep-platform-findings/v1",
-    project: { ...saved.project, url: raw },
-    findings: [row],
-  };
   await using fixture = await localReportFixture(
     "semgrep.json",
     { provider: "semgrep", sourceKey: "example/topic" },
     { remote: url },
   );
-  for (const report of [saved, legacy]) {
-    await fixture.writeJson(report);
-    const prepared = await fixture.prepare();
-    expect(prepared.preview.findings[0]?.evidence).toMatchObject({
-      severity: raw ? "unknown" : "informational",
-      details: { repository: { url: resolved } },
-      source_data: { project: { url: raw }, sourceRepositoryUrl: url },
-    });
-    expect((await prepared.import()).counts).toEqual(
-      report === saved
-        ? { created: 1, updated: 0, unchanged: 0 }
-        : { created: 0, updated: 0, unchanged: 1 },
-    );
-  }
+  await fixture.writeJson(saved);
+  const prepared = await fixture.prepare();
+  expect(prepared.preview.findings[0]?.evidence).toMatchObject({
+    severity: raw ? "unknown" : "informational",
+    details: { repository: { url: resolved } },
+    source_data: { project: { url: raw }, sourceRepositoryUrl: url },
+  });
+  expect((await prepared.import()).counts.created).toBe(1);
   if (raw)
     expect(() =>
       normalizeSemgrepFindings(
@@ -997,7 +898,7 @@ test("replays a direct occurrence with a collector-style SSH project binding", (
   );
 });
 
-test("matches GitHub project-path aliases across casing in collected, v1 and normalized rows", async () => {
+test("matches GitHub project-path aliases across casing in collected and normalized rows", async () => {
   const name = "semgrep-logical/Prod";
   const native = {
     name,
@@ -1025,12 +926,6 @@ test("matches GitHub project-path aliases across casing in collected, v1 and nor
   }
   const saved = await collect(native.url);
   expect(saved.repositoryAliases).toEqual([row.repository.name]);
-  const { repositoryAliases: _aliases, ...v1 } = saved;
-  const legacy = {
-    ...v1,
-    format: "semgrep-platform-findings/v1",
-    findings: [row],
-  };
   // The Semgrep project label and any witnessed display label retain their original casing.
   const named = (name: string) => ({ ...row, repository: { name } });
   const exact = await collect(native.url, [named("Prod")]);
@@ -1070,31 +965,27 @@ test("matches GitHub project-path aliases across casing in collected, v1 and nor
   }
   const custom = "https://git.example.test/Example/Service";
   await expect(collect(custom)).rejects.toThrow(/repository/);
-  for (const report of [saved, legacy]) {
-    const finding = normalizeSemgrepFindings(report, {}, "local").findings[0]!;
-    expect(semgrepPlatformFindingRepository(finding, "semgrep")).toBe(
-      native.url,
-    );
-    expect(
-      finding.evidence.source_data?.["repositoryWitnessJson"],
-    ).toBeUndefined();
-    const mapped = { ...report, project: { ...report.project, url: custom } };
-    expect(() => normalizeSemgrepFindings(mapped, {}, "local")).toThrow(
-      /repository/,
-    );
-    const options = {
-      sourceRepositories: [{ url: custom, platform: "github" as const }],
-    };
-    const verified = normalizeSemgrepFindings(mapped, options, "local")
-      .findings[0]!;
-    expect(
-      semgrepPlatformFindingRepository(
-        verified,
-        "semgrep",
-        options.sourceRepositories,
-      ),
-    ).toBe(custom);
-  }
+  const finding = normalizeSemgrepFindings(saved, {}, "local").findings[0]!;
+  expect(semgrepPlatformFindingRepository(finding, "semgrep")).toBe(native.url);
+  expect(
+    finding.evidence.source_data?.["repositoryWitnessJson"],
+  ).toBeUndefined();
+  const mapped = { ...saved, project: { ...saved.project, url: custom } };
+  expect(() => normalizeSemgrepFindings(mapped, {}, "local")).toThrow(
+    /repository/,
+  );
+  const mapping = {
+    sourceRepositories: [{ url: custom, platform: "github" as const }],
+  };
+  const verified = normalizeSemgrepFindings(mapped, mapping, "local")
+    .findings[0]!;
+  expect(
+    semgrepPlatformFindingRepository(
+      verified,
+      "semgrep",
+      mapping.sourceRepositories,
+    ),
+  ).toBe(custom);
 });
 
 test("a URL-less SAST row uses its Git path for selection and keeps other verified labels in the full report", () => {
@@ -1246,22 +1137,13 @@ test("blank display names replay when a native ID or URL binds the repository", 
     responses(new Response(page)),
   );
   expect(saved.repositoryAliases).toEqual([]);
-  const { repositoryAliases: _aliases, ...legacy } = saved;
-  const prior = {
-    ...legacy,
-    format: "semgrep-platform-findings/v1",
-    findings,
-    project,
-  };
-  for (const report of [saved, prior]) {
-    const normalized = normalizeSemgrepFindings(report, {}, "local");
-    expect(normalized.excluded).toEqual([]);
-    expect(
-      normalized.findings.map((row) =>
-        semgrepPlatformFindingRepository(row, "semgrep"),
-      ),
-    ).toEqual([url, url, url]);
-  }
+  const normalized = normalizeSemgrepFindings(saved, {}, "local");
+  expect(normalized.excluded).toEqual([]);
+  expect(
+    normalized.findings.map((row) =>
+      semgrepPlatformFindingRepository(row, "semgrep"),
+    ),
+  ).toEqual([url, url, url]);
   const selected = {
     ...options,
     projectResponse: JSON.stringify({ project }),
@@ -1733,133 +1615,6 @@ test("CLI checks the token and its origin before fetching", async () => {
     expect(cli.stdout.text() + cli.stderr.text()).toContain(diagnostic);
   }
   expect(fetch).not.toHaveBeenCalled();
-});
-
-test("saved v1 findings keep exact source IDs and original JSON numeric types on local replay", async () => {
-  const ids = ["9007199254740992", "9007199254740993"];
-  const tokens = [ids[0]!, "9.007199254740993e15"];
-  const row = {
-    rule: { name: "example.rule" },
-    ref: options.ref,
-    repository: { name: "service" },
-  };
-  const v1 = {
-    format: "semgrep-platform-findings/v1",
-    deployment: options.deployment,
-    project: { name: project.name, id: ids[1], url: null },
-    sourceRepositoryUrl: url,
-    ref: options.ref,
-    product: "sast",
-    findingCount: 2,
-    findings: tokens.map((id) => ({
-      ...row,
-      id,
-      vendor: { score: ["1.00000000000000001"], label: id },
-    })),
-    numericFields: {
-      project: { id: ids[1] },
-      findings: Object.fromEntries(
-        tokens.map((id, i) => [
-          i,
-          { id, vendor: { score: { 0: "1.00000000000000001" } } },
-        ]),
-      ),
-    },
-  };
-  await using fixture = await localReportFixture(
-    "semgrep.json",
-    {
-      provider: "semgrep",
-      sourceKey: "example/topic",
-    },
-    { remote: url },
-  );
-  await fixture.writeJson(v1);
-  const prepared = await fixture.prepare();
-  const { preview } = prepared;
-  expect(preview.excluded).toEqual([]);
-  const numericRows = ids.map(
-    (id) =>
-      `{"id":${id},"rule":{"name":"example.rule"},"ref":"${options.ref}","repository":{"url":"${url}"}}`,
-  );
-  const selection = selectSemgrepPlatformFindings({
-    deployment: options.deployment,
-    ref: options.ref,
-    projectResponse: `{"project":{"name":"${project.name}","id":${ids[1]},"url":"${url}"}}`,
-    findingsResponses: [`{"findings":[${numericRows.join(",")}]}`],
-    findingIds: ids,
-  });
-  const selected = normalizeSemgrepFindings(
-    selection,
-    { sourceRepositoryUrl: url },
-    "local",
-  );
-  const sourceIds = (rows: typeof preview.findings) =>
-    rows.map((row) => row.source_finding_id);
-  expect(new Set(sourceIds(preview.findings)).size).toBe(2);
-  expect(sourceIds(preview.findings)).toEqual(sourceIds(selected.findings));
-  for (const [i, finding] of preview.findings.entries()) {
-    const raw = finding.evidence.source_data?.["semgrepPlatformFindingJson"];
-    expect(raw).toContain(`"id":${ids[i]}`);
-    expect(raw).toContain('"score":[1.00000000000000001]');
-    expect(raw).toContain(`"label":"${tokens[i]}"`);
-  }
-  expect((await prepared.import()).counts).toEqual({
-    created: 2,
-    updated: 0,
-    unchanged: 0,
-  });
-  expect((await (await fixture.prepare()).import()).counts).toEqual({
-    created: 0,
-    updated: 0,
-    unchanged: 2,
-  });
-  const v2 = {
-    ...v1,
-    format: "semgrep-platform-findings/v2",
-    repositoryAliases: ["service"],
-    findings: ids.map(
-      (id, i) =>
-        `{"id":${id},"rule":{"name":"example.rule"},"ref":"${options.ref}","repository":{"name":"service"},"vendor":{"score":[1.00000000000000001],"label":"${tokens[i]}"}}`,
-    ),
-  };
-  for (const equivalent of [v2, v1]) {
-    await fixture.writeJson(equivalent);
-    expect((await (await fixture.prepare()).import()).counts).toEqual({
-      created: 0,
-      updated: 0,
-      unchanged: 2,
-    });
-  }
-  await fixture.writeJson({
-    ...v1,
-    numericFields: { findings: { 0: { id: ids[1] } } },
-  });
-  await expect(fixture.prepare()).rejects.toThrow(/exact scanner number/);
-  await fixture.writeJson({
-    ...v1,
-    findings: v1.findings.map((row) => ({
-      ...row,
-      repository: { name: "other" },
-    })),
-  });
-  await expect(fixture.prepare()).rejects.toThrow(/repository/);
-  await fixture.writeJson({
-    ...v1,
-    project: { ...v1.project, url: "https://github.com/other/service" },
-  });
-  await expect(fixture.prepare()).rejects.toThrow(/repository/);
-  expect(() =>
-    normalizeSemgrepFindings(
-      {
-        ...v1,
-        project: { ...v1.project, url: "git@git.example.test:team/service" },
-        sourceRepositoryUrl: "https://git.example.test/team/service",
-      },
-      {},
-      "local",
-    ),
-  ).toThrow(/HTTP\(S\) repository/);
 });
 
 test("a verified alias remains replayable with or without a reader platform hint", async () => {

@@ -1,5 +1,5 @@
+import { resolve } from "node:path";
 import {
-  semgrepLegacyRepositoryWitnesses,
   semgrepPlatformFindingBinding,
   semgrepPlatformReportScope,
   semgrepPlatformRepositoryReference,
@@ -90,7 +90,8 @@ import {
   bundledPluginRoot,
   canonicalConfigPath,
   canonicalizeModelSafePath,
-  expandHome,
+  resolveInputPath,
+  resolveParentTraversal,
   requireOutputOutsideRepositories,
   runWorkbench,
   workbenchEnvironment,
@@ -671,16 +672,36 @@ async function localContext(
   const environment = workbenchEnvironment(
     dependencies.environment ?? process.env,
   );
-  const path = expandHome(selectedRepository, environment);
+  const requested = resolveInputPath(
+    selectedRepository,
+    process.cwd(),
+    environment,
+  );
+  const path = await abortable(
+    () => resolveParentTraversal(requested),
+    dependencies.signal,
+  );
   const repository =
     mode === "read"
       ? await abortable(() => canonicalConfigPath(path), dependencies.signal)
       : await normalizeRepository(path, dependencies.signal);
+  const lexicalPath = resolve(requested);
+  const lexicalRepository =
+    lexicalPath === resolve(path)
+      ? repository
+      : await abortable(
+          () => canonicalConfigPath(lexicalPath),
+          dependencies.signal,
+        );
   const protectedRoot = [
     ...new Set([
       repository,
+      ...(mode === "read" ? [lexicalRepository] : []),
       ...(await abortable(
-        () => commandGitProtectionRoots(path, environment, dependencies.signal),
+        () =>
+          commandGitProtectionRoots(path, environment, dependencies.signal, {
+            requestedPaths: [lexicalPath, lexicalRepository],
+          }),
         dependencies.signal,
       )),
     ]),
@@ -695,6 +716,7 @@ async function localContext(
   );
   return {
     repository,
+    selectedPath: path,
     options: {
       pluginRoot: await abortable(
         () => bundledPluginRoot(),
@@ -750,7 +772,12 @@ export async function prepareLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const parsedSources = distinctSourceRepositories(parsedInput);
-  const current = snapshotNormalizedFindings(input, checkStoredNumber);
+  const current = snapshotNormalizedFindings(
+    input,
+    checkStoredNumber,
+    "local",
+    options.provider,
+  );
   if (
     options.provider !== "tenable" &&
     (current.report?.["format"] === tenableReportFormat ||
@@ -762,17 +789,6 @@ export async function prepareLocalImport(
       "Retained Tenable evidence requires the tenable provider.",
     );
   checkTrivyReportProvider(options.provider, current.report);
-  // The JSON snapshot omits inherited or non-enumerable SDK reader properties.
-  if (!("snykRestContext" in current) && "snykRestContext" in input)
-    current.snykRestContext = structuredClone(input.snykRestContext);
-  if (options.provider === "snyk" || current.snykRestContext !== undefined) {
-    for (const key of [
-      "sourceRepositoryUrl",
-      "sourceRepositoryPlatform",
-    ] as const)
-      if (key in input && !(key in current))
-        Object.assign(current, { [key]: structuredClone(input[key]) });
-  }
   let dependabotSource: string | undefined;
   const identities = new Set<string>();
   for (const finding of current.findings) {
@@ -952,11 +968,6 @@ export async function prepareLocalImport(
   if (semgrepPlatformRepositoryUrl)
     addSemgrepSource(semgrepPlatformRepositoryUrl);
   const known = new Set<string>(parsedSources.map(({ url }) => url));
-  const legacyWitnesses = semgrepLegacyRepositoryWitnesses(
-    current.findings,
-    options.provider,
-    readerSources,
-  );
   const hasPlatformEvidence =
     options.provider === "semgrep" &&
     (semgrepReportScope !== undefined ||
@@ -974,7 +985,6 @@ export async function prepareLocalImport(
       finding,
       options.provider,
       readerSources,
-      legacyWitnesses,
       semgrepReportScope,
       [retained, ...native, ...sarif],
     );
@@ -1438,9 +1448,16 @@ export async function listLocalExternalFindings(
   selection: { repository: string; id?: string },
   dependencies: LocalExternalImportDependencies = {},
 ): Promise<StoredExternalFinding[]> {
+  return (await readLocalExternalFindings(selection, dependencies)).findings;
+}
+
+export async function readLocalExternalFindings(
+  selection: { repository: string; id?: string },
+  dependencies: LocalExternalImportDependencies,
+) {
   dependencies.signal?.throwIfAborted();
   if (selection.id !== undefined) requireIdentity(selection.id, "Finding id");
-  const { repository, options } = await localContext(
+  const { repository, selectedPath, options } = await localContext(
     selection.repository,
     dependencies,
     "read",
@@ -1453,5 +1470,8 @@ export async function listLocalExternalFindings(
       JSON.stringify({ repository, id: selection.id }),
     );
   }, dependencies.signal);
-  return result["findings"] as unknown as StoredExternalFinding[];
+  return {
+    repository: selectedPath,
+    findings: result["findings"] as unknown as StoredExternalFinding[],
+  };
 }

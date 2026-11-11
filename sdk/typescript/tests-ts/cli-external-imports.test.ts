@@ -36,15 +36,20 @@ test.each(
 
 test("a legacy disabled setting still allows reading imported findings", async () => {
   const cli = createCliTest(main);
-  const listLocalExternalFindings = mock(async () => []);
+  const readLocalExternalFindings = mock(
+    async ({ repository }: { repository: string }) => ({
+      repository,
+      findings: [],
+    }),
+  );
   const code = await cli.runCli(["findings", "imported", ".", "--json"], {
     ...dependencies({
       environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0" },
     }),
-    listLocalExternalFindings,
+    readLocalExternalFindings,
   });
   expect(code).toBe(0);
-  expect(listLocalExternalFindings).toHaveBeenCalledTimes(1);
+  expect(readLocalExternalFindings).toHaveBeenCalledTimes(1);
   expect(JSON.parse(cli.stdout.text()).findings).toEqual([]);
 });
 

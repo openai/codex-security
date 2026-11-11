@@ -7,10 +7,11 @@ import {
   readdir,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
@@ -26,6 +27,7 @@ import {
   type SecurityClient,
   type MultiscanOptions,
   createMultiscanFixtures,
+  git,
   repository,
   completedScan,
   customPlugin,
@@ -39,7 +41,88 @@ const { fixture, repositoryFixture, cleanup } = createMultiscanFixtures();
 
 afterEach(cleanup);
 
+const testPosix = test.skipIf(process.platform === "win32");
+
 describe("multiscan", () => {
+  test("divides an invocation budget across pending repositories and retries", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision
+first,${source.path},${source.revision}
+second,${source.path},${source.revision}
+`,
+    );
+    const limits: number[] = [];
+    const bothStarted = Promise.withResolvers<void>();
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_checkout, scan = {}) => {
+          limits.push(scan.maxCostUsd!);
+          expect(scan.skipFindingMatching).toBe(true);
+          expect(scan.ownerSuggestions).toBe(false);
+          if (scan.outputDir!.endsWith("attempt-1")) {
+            if (limits.length === 2) bothStarted.resolve();
+            await bothStarted.promise;
+            throw new Error("Retry this repository");
+          }
+          return completedScan(scan.outputDir!);
+        }),
+        {
+          maxCostUsd: 12,
+          maxTotalCostUsd: 8,
+          workers: 2,
+          maxAttempts: 2,
+          scanOptionsByMode: { standard: { ownerSuggestions: true } },
+        },
+      ),
+    );
+    expect(summary).toMatchObject({ completed: 2, failed: 0 });
+    expect(limits).toEqual([2, 2, 2, 2]);
+  });
+
+  test("charges observed overruns before dispatching queued repository attempts", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    const rows = ["first", "second", "third"].map(
+      (id) => `${id},${source.path},${source.revision}`,
+    );
+    await writeFile(
+      paths.input,
+      ["id,repository,revision", ...rows].join("\n"),
+    );
+    const limits: number[] = [];
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repo, scan = {}) => {
+          limits.push(scan.maxCostUsd!);
+          const estimatedUsd = limits.length === 1 ? 5 : 2;
+          throw new ScanCostLimitExceededError(
+            scan.maxCostUsd!,
+            {
+              model: "gpt-5.6-sol",
+              inputTokens: 10,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 10,
+              estimatedUsd,
+            },
+            scan.outputDir!,
+          );
+        }),
+        { workers: 1, maxAttempts: 1, maxTotalCostUsd: 6 },
+      ),
+    );
+    expect(limits).toEqual([2, 1]);
+    expect(summary).toMatchObject({ failed: 3 });
+    expect((await results(summary.resultsPath)).at(-1)?.["error"]).toContain(
+      "invocation cost limit is exhausted",
+    );
+  });
+
   test("prepares shared prompt files once while missing sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
@@ -71,6 +154,56 @@ describe("multiscan", () => {
     ]);
   });
 
+  test("checks linked bulk documents against the selected Git layout", async () => {
+    const { paths, source } = await repositoryFixture("source");
+    const settings = options(paths, client(completeRun), { maxAttempts: 1 });
+    const direct = join(await filesystem.realpath(paths.root), "policy.md");
+    await writeFile(direct, "External document.");
+    const docs = join(source.path, "docs");
+    await filesystem.symlink(paths.root, docs, "junction");
+    const linked = join(docs, "policy.md");
+
+    const { resultsPath } = await runMultiscan({
+      ...settings,
+      knowledgeBasePaths: [linked],
+    });
+    expect(await results(resultsPath)).toMatchObject([
+      {
+        status: "failed",
+        error: expect.stringContaining("repository directory links"),
+      },
+    ]);
+
+    const requireCanonical = async (repository: string) => {
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrow,${repository},${source.revision}\n`,
+      );
+      await expect(
+        runMultiscan({ ...settings, scanPromptFile: linked }),
+      ).rejects.toThrow("canonical path");
+    };
+
+    const gitfile = join(source.path, "target.ref");
+    await writeFile(
+      gitfile,
+      `gitdir: ${git(source.path, "rev-parse", "--absolute-git-dir")}\n`,
+    );
+    await requireCanonical(gitfile);
+    const directRun = await runMultiscan({
+      ...settings,
+      outputDir: join(paths.root, "direct-run"),
+      knowledgeBasePaths: [direct],
+    });
+    expect(directRun.completed).toBe(1);
+
+    const archive = join(paths.root, "archive");
+    git(paths.root, "clone", "--bare", source.path, archive + ".git");
+    await requireCanonical(archive);
+    git(source.path, "config", "core.worktree", paths.root);
+    await requireCanonical(source.path);
+  });
+
   test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(
     "rejects unsupported bulk diff scopes before preparing a campaign: %j",
     async (target) => {
@@ -95,6 +228,205 @@ describe("multiscan", () => {
       await expect(access(paths.output)).rejects.toMatchObject({
         code: "ENOENT",
       });
+    },
+  );
+
+  testPosix.each(["repository", "inventory"])(
+    "clones the physical repository through a %s symlink parent traversal",
+    async (selection) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "physical/repository");
+      await repository(paths.root, "entry/repository");
+      await mkdir(join(paths.root, "physical", "child"));
+      await symlink(
+        join(paths.root, "physical", "child"),
+        join(paths.root, "entry", "link"),
+      );
+      const input =
+        selection === "inventory"
+          ? `${paths.root}/entry/link/../repositories.csv`
+          : paths.input;
+      await writeFile(
+        selection === "inventory"
+          ? join(paths.root, "physical", "repositories.csv")
+          : input,
+        `id,repository,revision\nphysical,${selection === "inventory" ? "repository" : "entry/link/../repository"},${source.revision}\n`,
+      );
+      let scanned = false;
+      const summary = await runMultiscan(
+        options(
+          { ...paths, input },
+          client(async (checkout, scanOptions = {}) => {
+            expect(
+              await readFile(join(checkout, "src", "app.ts"), "utf8"),
+            ).toBe(await readFile(join(source.path, "src", "app.ts"), "utf8"));
+            scanned = true;
+            return completedScan(scanOptions.outputDir!);
+          }),
+        ),
+      );
+      expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
+      expect(scanned).toBe(true);
+    },
+  );
+
+  testPosix.each([
+    ["repository", "../source"],
+    ["repository ancestor", "../source/src/.."],
+    ["terminal alias", "../alias"],
+    ["ancestor alias", "../alias/src/.."],
+  ])(
+    "resumes the recorded %s source without changing traversal spelling",
+    async (selection, relativePath) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "source");
+      const alias = join(paths.root, "alias");
+      await symlink(source.path, alias);
+      const input = join(paths.root, "inventory", "repositories.csv");
+      await mkdir(dirname(input));
+      const original = selection.startsWith("repository") ? source.path : alias;
+      const inventory = (path: string) =>
+        `id,repository,revision\nresume,${path},${source.revision}\n`;
+      await writeFile(input, inventory(original));
+      const security = client(mock(completeRun));
+      const settings = options({ ...paths, input }, security);
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = await readFile(manifestPath, "utf8");
+      expect(JSON.parse(manifest).tasks[0].repository).toBe(original);
+
+      await writeFile(input, inventory(relativePath));
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "Multiscan manifest does not match existing output directory.",
+      );
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      await writeFile(input, inventory(original));
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      await rm(source.path, { recursive: true });
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      expect(security.run).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  testPosix.each([
+    ["traversal", "entry/first/../repository", "entry/second/../repository"],
+    ["recorded path", "entry/repository", "entry/first/../repository"],
+  ])(
+    "rejects changing a %s source at the same revision",
+    async (_selection, original, changed) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "first/repository");
+      await mkdir(join(paths.root, "first", "child"));
+      await mkdir(join(paths.root, "second", "child"), { recursive: true });
+      await mkdir(join(paths.root, "entry"));
+      for (const destination of ["second/repository", "entry/repository"]) {
+        git(paths.root, "clone", "--quiet", "--", source.path, destination);
+        expect(git(join(paths.root, destination), "rev-parse", "HEAD")).toBe(
+          source.revision,
+        );
+      }
+      for (const name of ["first", "second"]) {
+        await symlink(
+          join(paths.root, name, "child"),
+          join(paths.root, "entry", name),
+        );
+      }
+      const inventory = (path: string) =>
+        `id,repository,revision\nresume,${path},${source.revision}\n`;
+      await writeFile(paths.input, inventory(original));
+      const security = client(mock(completeRun));
+      const settings = options(paths, security);
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = await readFile(manifestPath, "utf8");
+      await writeFile(paths.input, inventory(changed));
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "Multiscan manifest does not match existing output directory.",
+      );
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      expect(security.run).toHaveBeenCalledTimes(1);
+
+      await rm(
+        original === "entry/repository"
+          ? join(paths.root, "entry", "repository")
+          : source.path,
+        { recursive: true },
+      );
+      expect(
+        await runMultiscan({
+          ...settings,
+          outputDir: join(paths.root, "new-results"),
+        }),
+      ).toMatchObject({ completed: 1, failed: 0, skipped: 0 });
+      expect(security.run).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  testPosix.each(["link", "target"])(
+    "resumes a completed campaign after its traversal %s disappears",
+    async (removed) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "physical/repository");
+      const target = join(paths.root, "physical", "child");
+      const link = join(paths.root, "entry", "link");
+      await mkdir(target);
+      await mkdir(dirname(link));
+      await symlink(target, link);
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nresume,entry/link/../repository,${source.revision}\n`,
+      );
+      const security = client(mock(completeRun));
+      const settings = options(paths, security);
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+      });
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = await readFile(manifestPath, "utf8");
+      await rm(removed === "link" ? link : target, { recursive: true });
+      expect(await runMultiscan(settings)).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 1,
+      });
+      expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+      expect(security.run).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  testPosix.each(["missing", "file", "file-link"])(
+    "does not collapse a %s parent component into another repository",
+    async (component) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "entry/repository");
+      const file = join(paths.root, "entry", "file");
+      await writeFile(file, "Synthetic file.\n");
+      await symlink(file, join(paths.root, "entry", "file-link"));
+      await writeFile(
+        paths.input,
+        `id,repository,revision\ninvalid,entry/${component}/../repository,${source.revision}\n`,
+      );
+      const security = client(mock(completeRun));
+      expect(
+        await runMultiscan(options(paths, security, { maxAttempts: 1 })),
+      ).toMatchObject({ completed: 0, failed: 1 });
+      expect(security.run).not.toHaveBeenCalled();
     },
   );
 

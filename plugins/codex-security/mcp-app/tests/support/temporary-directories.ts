@@ -5,7 +5,7 @@ import { join } from "node:path";
 export function createTemporaryDirectories(
   canonicalize = false,
   removeDirectory = (root: string) =>
-    rm(root, { recursive: true, force: true }),
+    rm(root, { recursive: true, force: true, maxRetries: 10 }),
 ) {
   const roots: string[] = [];
   return {

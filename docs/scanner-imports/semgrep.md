@@ -446,7 +446,7 @@ when the project has no repository URL. The report records that mapping in
 For SSH projects, the report stores the original address in `nativeProjectUrl` and the resolved HTTP(S) address in `project.url`.
 It records any supplied mapping separately. Save the complete output from a successful
 command. The importer checks the recorded finding count and repository/ref
-claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
+claims. It retains each original finding as JSON text so large IDs survive replay.
 
 A finding that identifies its repository only by name can use the project name,
 the Git URL path, or the final path component of either. For any other name,
@@ -483,18 +483,14 @@ and advisory IDs when Semgrep supplies them. With the same source key, importing
 selection reports them as unchanged when switching between a selection and a full collection.
 See the [Semgrep Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 
-When replaying v1 exports whose findings were stored as objects, the first
-replay converts the stored finding to JSON text and increments its version.
-Its local and source IDs stay the same.
+For an older `semgrep-platform-findings/v1` export, rerun `cs import semgrep`
+with the selected deployment, project, product and ref to collect a current export.
+Check its IDs and scope before saving or publishing it.
 
 ## Replay saved Platform findings
 
 Semgrep's native signed 64-bit finding IDs match across file and SDK imports.
-For synthetic IDs above that range, repeat the original workflow and preserve
-the ID's spelling and JSON type. A saved selection keeps its literal ref,
-including older short refs. For a row without a URL but with a matching
-project ID and ref, saved files also accept the complete percent-encoded
-repository path. New selections require the decoded path.
+Keep the original spelling and JSON type of each selected ID and the full Git ref in the saved capture.
 
 **Repository mapping.** Local preview compares the project URL with the checkout's
 named fetch URLs. For an IP address, use its canonical spelling, such as
@@ -513,14 +509,8 @@ evidence unchanged. Use a separate source key for CLI scans.
 **Normalized SDK records.** Keep each generated `source_finding_id` with its
 native row and original deployment, project, ref and product. If you assign
 your own opaque ID, retain that scope in a marked Platform batch. The SDK checks
-the serialized native row when present. In legacy v1 `source_data.finding`,
-repository fields, `ref` (even `null`), recognized `product` or `issue_type`,
-and non-null `found_dependency` or `vulnerability_identifier` can establish
-scope. Put unrelated metadata under a different key, such as
-`source_data.ticket`, or submit it in a batch without a Platform marker.
+the serialized native row. Keep unrelated metadata in a separate field.
 
 **Cloud retries.** Cloud checks the original project's repository, including
-for Supply Chain findings without a typed repository field. New approvals
-retain the collection scope of caller-managed rows. Older approvals check
-the repository and the scope retained in their evidence. Retry the original
-input with the same account and destination. [Retry a Cloud submission](schema-guide.md#retry-a-cloud-submission).
+for Supply Chain findings without a typed repository field. Retry the original
+selection with the same account and destination. [Retry a Cloud submission](schema-guide.md#retry-a-cloud-submission).

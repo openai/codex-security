@@ -1,4 +1,7 @@
 import { Cli, Completions, Help, SyncSkills, z } from "incur";
+import { statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { registerMcp } from "./cli-mcp.js";
 
@@ -10,10 +13,23 @@ const depth = z
   .nonnegative()
   .optional()
   .describe("Grouping depth for generated skill files (default: 1).");
+const scope = z
+  .enum(["project", "user"])
+  .optional()
+  .describe("Installation scope (default: user).");
 const noGlobal = z
   .boolean()
   .optional()
-  .describe("Install to the current project instead of the user profile.");
+  .describe("Compatibility spelling for --scope project.");
+function projectScope(options: {
+  scope?: "project" | "user" | undefined;
+  noGlobal?: boolean | undefined;
+}) {
+  if (options.noGlobal && options.scope === "user")
+    throw new Error("--scope user conflicts with --no-global.");
+  return options.noGlobal === true || options.scope === "project";
+}
+
 const descriptions = {
   skills:
     "Manage generated CLI command guidance. The Codex Security plugin provides scan and remediation workflows.",
@@ -44,6 +60,11 @@ const outputOptions = {
 const options = {
   ...outputOptions,
   depth: string,
+  scope: string,
+  all: boolean,
+  exec: string,
+  package: string,
+  arg: { ...string, multiple: true },
   "no-global": boolean,
   command: { ...string, short: "c" },
   agent: { ...string, multiple: true },
@@ -81,18 +102,20 @@ function integrationGroups(
     .command("add", {
       description:
         "Install generated CLI command guidance in the user profile or current project.",
-      options: z.object({ depth, noGlobal }),
-      async run({ options: { depth, noGlobal } }) {
+      options: z.object({ depth, scope, noGlobal }),
+      async run({ options }) {
+        const { depth } = options;
+        const local = projectScope(options);
         if (plain)
           return builtin([
             "skills",
             "add",
-            ...(noGlobal ? ["--no-global"] : []),
+            ...(local ? ["--no-global"] : []),
             ...(depth === undefined ? [] : ["--depth", String(depth)]),
           ]);
         const result = await SyncSkills.sync(cliName, commands, {
           depth,
-          global: !noGlobal,
+          global: !local,
           description: cliOptions.description,
         });
         return {
@@ -107,14 +130,38 @@ function integrationGroups(
         "List generated CLI guidance for one grouping depth. Use the same depth as skills add to check an installation.",
       options: z.object({ depth }),
       async run({ options: { depth } }) {
-        if (plain) {
-          cliOptions.sync = { ...(cliOptions.sync || {}), depth };
-          return `Skill grouping depth: ${depth ?? 1}\n${await builtin(["skills", "list"])}`;
-        }
-        return SyncSkills.list(cliName, commands, {
+        const entries = await SyncSkills.list(cliName, commands, {
           depth,
           description: cliOptions.description,
         });
+        const roots = { project: process.cwd(), user: homedir() };
+        const skills = entries.map((skill) => {
+          const locations = Object.entries(roots).flatMap(([scope, root]) => {
+            const path = join(
+              root,
+              ".agents",
+              "skills",
+              skill.name,
+              "SKILL.md",
+            );
+            return statSync(path, { throwIfNoEntry: false })?.isFile()
+              ? [{ scope, path }]
+              : [];
+          });
+          return { ...skill, installed: locations.length > 0, locations };
+        });
+        if (!plain) return skills;
+        return [
+          `Skill grouping depth: ${depth ?? 1}`,
+          ...skills.map(({ name, installed, description, locations }) =>
+            [
+              `  ${installed ? "✓" : "✗"} ${name}  ${description ?? ""}`,
+              ...locations.map(({ scope, path }) => `    ${scope}: ${path}`),
+            ].join("\n"),
+          ),
+          "",
+          `${skills.length} skill${skills.length === 1 ? "" : "s"} (${skills.filter((skill) => skill.installed).length} installed)`,
+        ].join("\n");
       },
     });
   const mcp = Cli.create(prefix + "mcp", {
@@ -128,32 +175,49 @@ function integrationGroups(
     })
     .command("add", {
       description:
-        "Register this CLI’s read-only info tool with an agent. Registers in the user profile by default; Amp supports only user registration.",
+        "Register the read-only info tool with detected clients. Use --agent NAME or --all when no clients are detected. Amp supports user scope only.",
       options: z.object({
         agent: z
           .array(z.string().min(1))
           .optional()
           .describe("Target a specific agent. Repeat to select more agents."),
+        all: z
+          .boolean()
+          .optional()
+          .describe("Register all compatible clients in the selected scope."),
+        exec: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Literal executable name or path."),
+        package: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Run this npm package with npx."),
+        arg: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Literal argument to --exec or --package. Repeat in order. Use --arg=VALUE for flags.",
+          ),
         command: z
           .string()
           .min(1)
           .optional()
-          .describe("Override the command agents will run."),
+          .describe(
+            "Launcher command line or HTTP(S) URL. For literal arguments use --exec and --arg.",
+          ),
+        scope,
         noGlobal,
       }),
       alias: { command: "c" },
       async run({ options }) {
-        const agents = [...new Set(options.agent)];
-        if (options.noGlobal && agents.includes("amp"))
-          throw new Error(
-            "The MCP installer can register Amp only in the user profile. For a project installation, select a project-capable client with --no-global --agent NAME.",
-          );
-        const launch = options.command ?? cliOptions.mcp!.command!;
         const result = await registerMcp(
           cliName,
-          launch,
-          agents,
-          options.noGlobal === true,
+          options,
+          cliOptions.mcp!.command!,
+          projectScope(options),
         );
         if (plain)
           return [

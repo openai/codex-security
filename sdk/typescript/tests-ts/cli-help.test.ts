@@ -101,6 +101,14 @@ describe("CLI help", () => {
     expect(text).toContain("<command> --help");
   });
 
+  test.each(["bulk-scan", "scan-components"])(
+    "labels %s cost limits in USD",
+    async (command) => {
+      const text = await help([command, "--help"]);
+      expect(option(text, "--max-total-cost")).toContain("<usd>");
+    },
+  );
+
   test("shows semantic values, repeatable inputs, choices, and scan defaults", async () => {
     const text = await help(["scan", "--help"]);
     expect(text).toContain("Usage: codex-security scan [repository]");
