@@ -141,15 +141,23 @@ export async function crowdstrikeCheckout(
       evidence.details?.repository?.url,
       scan && gitScanRepository(scan),
     );
-    const { file_sha256 } = record(data["detection"], "CrowdStrike detection");
-    for (const { path } of evidence.locations ?? []) {
-      const file = repositoryFilePath(path);
-      if (!file)
-        throw new CodexSecurityError(
-          "CrowdStrike finding locations must be checkout-relative files.",
-        );
-      files.set(file, (files.get(file) ?? new Set()).add(file_sha256));
-    }
+    // Check the retained detection's file, and that the shown location is the same.
+    const detection = record(data["detection"], "CrowdStrike detection");
+    const file = detectionPath(detection, scan);
+    const [location, ...others] = evidence.locations ?? [];
+    if (
+      !location ||
+      others.length > 0 ||
+      location.path !== file ||
+      (location.line ?? null) !== detectionLine(detection)
+    )
+      throw new CodexSecurityError(
+        "CrowdStrike finding locations must match the native detection file and line.",
+      );
+    files.set(
+      file,
+      (files.get(file) ?? new Set()).add(detection["file_sha256"]),
+    );
   }
   const urls = claims
     .filter((claim) => claim != null)

@@ -504,6 +504,33 @@ test("imports check the checkout files and repository claims, even for empty sel
   }
 });
 
+test("replayed findings keep the location of their native detection", async () => {
+  await using fixture = await checkout();
+  await fixture.writeJson(single);
+  const { preview } = await fixture.prepare();
+  const location = { path: "infra/net/main.tf", line: 7 };
+  // infra/provider.tf has the same content, so only the location check stops it.
+  for (const locations of [
+    [],
+    undefined,
+    [{ ...location, path: "infra/provider.tf" }],
+    [{ ...location, line: 8 }],
+    [location, location],
+  ]) {
+    const replay = structuredClone(preview);
+    replay.findings[0]!.evidence.locations = locations;
+    await expect(fixture.prepareNormalized(replay)).rejects.toThrow(
+      /locations must match the native detection/u,
+    );
+  }
+  await rm(join(fixture.repository, "infra", "net", "main.tf"));
+  const cleared = structuredClone(preview);
+  cleared.findings[0]!.evidence.locations = [];
+  await expect(fixture.prepareNormalized(cleared)).rejects.toThrow(
+    /locations must match the native detection/u,
+  );
+});
+
 test("Cloud rejects local CrowdStrike findings before file access or credential lookup", async () => {
   await using fixture = await checkout();
   const options = { ...source, repository: fixture.repository };

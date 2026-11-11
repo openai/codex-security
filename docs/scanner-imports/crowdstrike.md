@@ -87,7 +87,7 @@ This shortened report has one detection. The reader keeps its file and line as t
 - With a repository URL, `details.kind` is `secret` for the Secret Management rule category and `iac` for all others. `details.configuration.actual` is the FCS `reason`, and `details.configuration.expected` is its `recommendation`. FCS names the attribute that holds a secret, not its value.
 - A detection in a local Terraform module points to the module file. FCS also reports a copy at the module call, and both are imported.
 - A detection in a registry or Git module names the calling file. Its location is the call line from `module_remediation`, or no line if FCS does not state one.
-- `evidence.source_data` keeps the FCS version, the native rule without its detection list, and the one detection. For a `git::` scan, it also keeps the scanned URL without `?ref=`.
+- `evidence.source_data` keeps the FCS version, the native rule without its detection list, and the one detection. For a `git::` scan, it also keeps the scanned URL without `?ref=`. A saved preview imports only if each finding's location matches its retained detection.
 
 ## Repeat an import
 
