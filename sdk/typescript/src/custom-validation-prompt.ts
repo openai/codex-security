@@ -22,6 +22,7 @@ const SOURCES = {
     "99cfcbbaa9d5b0450881ec752a116888b05b7fe21ea7af28fd22d088882dcd46",
   ],
   "skills/security-diff-scan/SKILL.md": [
+    "0ec82562b667daa8d19e1a6ecb550bdead7f4f7ef83d2a63d91e750f24f0e4d5",
     "09232fd5d96cfed2a5bdccd176c09b7e9ca53ebd7ac136d283bec884fde94b0d",
   ],
 };
