@@ -105,6 +105,7 @@ export async function remediationPrompt(
             ? 'Use "verified" only when static evidence establishes that the original attack path is closed and legitimate behavior is preserved. '
             : 'Use "verified" only after the original issue no longer reproduces and relevant checks pass. ') +
           "Preserve unrelated local changes.",
+        'For a blocked result, use "reason" to say whether this attempt changed any files, what stopped the fix, and what needs to happen next. If a required change is outside the writable repository or path, identify the change and where it belongs when known. If additional access or an owner action is needed, state it before suggesting another attempt.',
       );
     }
   }
