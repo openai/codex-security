@@ -753,7 +753,12 @@ function windowsAceAllowsAncestorReplacement(
 ): boolean {
   if (inheritanceFlags.has("IO")) return false;
   if (/^0x[\da-f]+$/iu.test(rights)) {
-    return (BigInt(rights) & 0x100d0040n) !== 0n;
+    // Write-distinctive bits of the abbreviations below: GENERIC_ALL,
+    // GENERIC_WRITE, WRITE_OWNER, WRITE_DAC, DELETE, FILE_DELETE_CHILD,
+    // FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA and
+    // FILE_WRITE_ATTRIBUTES. READ_CONTROL and SYNCHRONIZE are excluded
+    // because read-only grants carry them too.
+    return (BigInt(rights) & 0x500d0156n) !== 0n;
   }
   // Rights tokens stay aligned to pairs of UTF-16 code units.
   for (const [right] of rights.matchAll(/[\s\S]{2}/g)) {
