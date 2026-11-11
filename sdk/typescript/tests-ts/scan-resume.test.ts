@@ -1456,6 +1456,51 @@ test.each(["complete", "partial", "unpriced"] as const)(
   },
 );
 
+test.skipIf(process.platform === "win32")(
+  "sealed SDK recovery rejects PATH Python in a saved configuration checkout before probing it",
+  async () => {
+    const checkout = await temporaryDirectory();
+    gitText(["-C", checkout, "init", "-q"]);
+    const source = join(checkout, "settings", "model.toml");
+    const bin = join(checkout, "tools");
+    await mkdir(dirname(source));
+    await mkdir(bin);
+    await writeFile(source, "# synthetic model settings\n");
+    const python = join(bin, "python3");
+    await writeFile(python, '#!/bin/sh\nprintf probed > "$0.ran"\nexit 23\n', {
+      mode: 0o700,
+    });
+
+    const f = await interruptedScan("deep", false, {
+      executableSourcePaths: [source],
+    });
+    await sealWithOriginalPlugin(f);
+    await rm(f.repository, { recursive: true });
+    f.environment.PATH = bin;
+    const client = resumeDependencies(f, () =>
+      fail("Unexpected model launch"),
+    ).createSecurity({
+      pythonPath: "python3",
+      executableSourcePaths: [source],
+    });
+    try {
+      await expect(
+        client.run(f.repository, {
+          mode: "deep",
+          resumeScanId: f.scanId,
+          outputDir: f.scanDir,
+          requireSealedResume: true,
+        }),
+      ).rejects.toThrow("interpreter is unavailable or unusable");
+      await expect(stat(python + ".ran")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await client.close();
+    }
+  },
+);
+
 test("sealed SDK resume accepts the canonical target of a saved repository alias", async () => {
   const f = await interruptedScan("deep", false, {
     recipeRepositoryAlias: true,
