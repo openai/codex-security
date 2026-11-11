@@ -2654,7 +2654,7 @@ def test_portable_identity_decodes_git_line_protocol_without_changing_path_bytes
 @pytest.mark.parametrize("reopen", (False, True))
 def test_portable_identity_history_lookup_uses_indexes(tmp_path: Path, reopen: bool) -> None:
     state = tmp_path / "state"
-    run_workbench(state, "list-repositories")
+    run_workbench(state, "database-info")
     if reopen:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute("DROP INDEX IF EXISTS scans_by_target_path")
