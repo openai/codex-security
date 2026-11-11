@@ -18,6 +18,7 @@ const distModules = [
   "cli-scan-logs-json",
   "patch-byte-path",
   "patch-git-controls",
+  "patch-publication-hooks",
   "cli-signals",
   "classify-severity",
   "classify-severity-records",
