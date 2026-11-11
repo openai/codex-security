@@ -736,26 +736,22 @@ def _rule_location_identities(
     connection: sqlite3.Connection, findings: dict[str, sqlite3.Row]
 ) -> dict[tuple[str, str, int, int, str], list[str]]:
     identities: dict[tuple[str, str, int, int, str], list[str]] = {}
-    located: set[str] = set()
-    for row in _rows_for_ids(
+    locations = _rows_for_ids(
         connection,
         """
         SELECT occurrences.id AS occurrence_id, occurrences.finding_id,
             findings.rule_id, findings.identity_instance, locations.relative_path,
-            locations.start_line, locations.end_line
+            locations.start_line, locations.end_line, locations.role
         FROM finding_occurrences AS occurrences
         JOIN findings ON findings.id = occurrences.finding_id
         JOIN finding_locations AS locations ON locations.occurrence_id = occurrences.id
         WHERE occurrences.id IN (SELECT value FROM json_each(?))
-        ORDER BY occurrences.id,
-            CASE WHEN locations.role = 'root_control' THEN 0 ELSE 1 END,
-            locations.sort_order
+        ORDER BY occurrences.id, locations.sort_order
         """,
         (row["id"] for row in findings.values()),
-    ):
-        if row["occurrence_id"] in located:
-            continue
-        located.add(row["occurrence_id"])
+    )
+    for occurrence_id, sites in groupby(locations, lambda row: row["occurrence_id"]):
+        row = min(sites, key=lambda site: _COMPARISON_LOCATION_RANK.get(site["role"], 2))
         key = (
             row["rule_id"],
             row["relative_path"],
@@ -763,7 +759,7 @@ def _rule_location_identities(
             row["end_line"],
             row["identity_instance"] or "",
         )
-        identities.setdefault(key, []).append(row["occurrence_id"])
+        identities.setdefault(key, []).append(occurrence_id)
     return identities
 
 

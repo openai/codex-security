@@ -655,3 +655,32 @@ def test_equivalent_finding_groups_keep_occurrence_ids(workbench_db, workbench_a
         "occurrence-after",
     )
     assert finding["status"] == "persisting"
+
+
+@pytest.mark.parametrize("control_role", ["expected_control", "concrete_implementation"])
+def test_shared_source_does_not_merge_different_controls(
+    workbench_db, workbench_api, tmp_path, control_role
+):
+    for scan_id, path, line in [
+        ("scan-before", "extract.py", 41),
+        ("scan-after", "preview.py", 66),
+    ]:
+        add_scan(workbench_db, scan_id, tmp_path, target_id="checkout")
+        add_occurrence(workbench_db, scan_id, scan_id)
+        workbench_db.executemany(
+            "INSERT INTO finding_locations "
+            "(occurrence_id, relative_path, start_line, end_line, role, sort_order) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (scan_id, "request.py", 2, 2, "source", 0),
+                (scan_id, path, line, line, control_role, 1),
+            ],
+        )
+    workbench_db.execute("UPDATE scans SET target_snapshot_digest = 'unchanged'")
+    compared = workbench_api["scan_history"].compare_scans(
+        workbench_db,
+        Namespace(before_scan_id="scan-before", after_scan_id="scan-after"),
+        require_scan=workbench_api["require_scan"],
+        read_coverage=lambda _: {},
+    )
+    assert sorted(finding["status"] for finding in compared["findings"]) == ["new", "unknown"]
