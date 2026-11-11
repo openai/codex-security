@@ -985,7 +985,9 @@ def _codex_state_database(worker_codex_home: Path | None = None) -> Path | None:
     same_home = worker_codex_home is None or codex_home.resolve() == current_home.resolve()
     configured_database = os.environ.get("CODEX_STATE_DB", "") if same_home else ""
     if configured_database.strip():
-        path = Path(configured_database).expanduser()
+        path = Path(configured_database)
+        if path.parts[:1] == ("~",):
+            path = path.expanduser()
         return path.resolve() if path.is_file() and os.access(path, os.R_OK) else None
 
     configured_sqlite_home = os.environ.get("CODEX_SQLITE_HOME", "") if same_home else ""
