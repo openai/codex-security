@@ -121,6 +121,7 @@ import {
 } from "./support/inspector-import-fixtures.js";
 import {
   continuumDetail,
+  continuumEvidenceArtifact,
   continuumIssueExport,
   continuumRepository,
 } from "./support/continuum-import-fixtures.js";
@@ -3702,12 +3703,30 @@ test("Continuum Cloud publication preserves issue identity and linked source ran
   expect(f.reports.has(issue.issueArn)).toBe(true);
 });
 
-test("a Continuum private upload carries one observation with its code and linked validation", async () => {
+test("a Continuum private upload keeps every structured signal and reports conflicting issue verdicts", async () => {
+  const input = continuumIssueExport();
+  const { issue } = input.issues[0]!;
+  const evidence = [
+    continuumEvidenceArtifact(issue.issueId),
+    continuumEvidenceArtifact(issue.issueArn, "NOT_EXPLOITABLE", "evidence2"),
+  ];
   const report = {
-    ...continuumIssueExport(),
+    ...input,
     sourceRepositoryUrl: continuumRepository,
+    issues: [
+      {
+        ...input.issues[0]!,
+        evidenceArtifacts: [
+          ...evidence,
+          {
+            artifactType: "EVIDENCE",
+            artifactId: "narrative",
+            body: { raw: "Example narrative" },
+          },
+        ],
+      },
+    ],
   };
-  const { issue } = report.issues[0]!;
   const linked = continuumDetail();
   const { inbox, uploads, jobs, prepareFile } = await privateUploadFixture(
     report,
@@ -3739,6 +3758,7 @@ test("a Continuum private upload carries one observation with its code and linke
           ],
           details: {
             source_status: issue.status,
+            scanner_verdict: "MIXED",
             remediation_instructions: issue.summary,
             code: { snippet: linked.vulnerableCode },
           },
@@ -3754,6 +3774,9 @@ test("a Continuum private upload carries one observation with its code and linke
     ],
   });
   expect(payload.findings).toHaveLength(1);
+  expect(payload.findings[0].evidence.source_data.evidence_artifacts).toEqual(
+    evidence,
+  );
   inbox.recoverUpload = true;
   expect((await (await prepareFile()).publish()).counts.created).toBe(1);
   expect(uploads).toHaveLength(1);

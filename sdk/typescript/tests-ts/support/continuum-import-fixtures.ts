@@ -81,3 +81,45 @@ export function continuumIssueExport() {
     ],
   };
 }
+
+export function continuumEvidenceArtifact(
+  subjectRef: string,
+  verdict = "EXPLOITABLE",
+  artifactId = "evidence1",
+) {
+  return {
+    artifactId,
+    artifactType: "EVIDENCE",
+    createdAt: "2026-01-02T00:02:00Z",
+    mediaType: "application/json",
+    producer: { agent: "ExamplePrioritization" },
+    body: {
+      prevalidationSignals: {
+        producedBy: "ExamplePrioritization",
+        signals: [
+          {
+            subjectRef,
+            dimension: "EXPLOITABILITY",
+            exploitability: {
+              verdict,
+              sourceValidationArtifactId: "validation1",
+            },
+            producerId: "ExampleValidator",
+            confidence: 0.82,
+          },
+          {
+            subjectRef,
+            dimension: "LIKELIHOOD_ASSESSMENT",
+            computed: { likelihoodBand: "MODERATE", barriers: 2 },
+          },
+          {
+            subjectRef,
+            dimension: "IMPACT_ASSESSMENT",
+            conclusion: "Example impact assessment",
+            computed: { impactBand: "LOW" },
+          },
+        ],
+      },
+    },
+  };
+}

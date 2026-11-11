@@ -394,6 +394,41 @@ function issueFindingEvidence(
   };
 }
 
+function issueEvidenceArtifacts(value: unknown) {
+  return array(value ?? [], "Continuum issue evidence artifacts").flatMap(
+    (item) => {
+      const artifact = record(item, "Continuum issue evidence artifact");
+      const body = artifact["body"];
+      if (artifact["artifactType"] !== "EVIDENCE" || !isRecord(body)) return [];
+      const projection = body["prevalidationSignals"];
+      if (!isRecord(projection)) return [];
+      const signals = array(
+        projection["signals"] ?? [],
+        "Continuum evidence signals",
+      ).map((signal) => record(signal, "Continuum evidence signal"));
+      return [
+        {
+          artifactId: requiredText(
+            artifact["artifactId"],
+            "Continuum evidence artifact ID",
+          ),
+          artifactType: artifact["artifactType"],
+          ...(artifact["createdAt"] != null && {
+            createdAt: artifact["createdAt"],
+          }),
+          ...(artifact["mediaType"] != null && {
+            mediaType: artifact["mediaType"],
+          }),
+          ...(artifact["producer"] != null && {
+            producer: artifact["producer"],
+          }),
+          body: { prevalidationSignals: { ...projection, signals } },
+        },
+      ];
+    },
+  );
+}
+
 function normalizeContinuumIssues(
   document: Record<string, unknown>,
   repository: string,
@@ -410,7 +445,26 @@ function normalizeContinuumIssues(
     (value) => {
       const row = record(value, "Continuum issue record");
       const issue = record(row["issue"], "Continuum issue");
-      const { scope } = issueIdentity(issue);
+      const { arn, id, scope } = issueIdentity(issue);
+      const evidenceArtifacts = issueEvidenceArtifacts(
+        row["evidenceArtifacts"],
+      );
+      const verdicts = new Set<string>();
+      for (const artifact of evidenceArtifacts) {
+        for (const signal of artifact.body.prevalidationSignals.signals) {
+          const subject = signal["subjectRef"];
+          const exploitability = signal["exploitability"];
+          if (
+            signal["dimension"] !== "EXPLOITABILITY" ||
+            (subject !== id && subject !== arn) ||
+            !isRecord(exploitability)
+          )
+            continue;
+          const verdict = text(exploitability["verdict"]);
+          if (verdict) verdicts.add(verdict);
+        }
+      }
+      const scannerVerdict = verdicts.size > 1 ? "MIXED" : [...verdicts][0];
       const linked = linkedIssueFindings(row["findings"], issue, scope);
       const findings = linked.map((finding) =>
         issueFindingEvidence(finding, true),
@@ -439,7 +493,7 @@ function normalizeContinuumIssues(
         "Continuum issue synopsis",
       );
       const details =
-        posture || locations[0]?.line == null
+        posture || (!scannerVerdict && locations[0]?.line == null)
           ? undefined
           : {
               details: {
@@ -447,6 +501,7 @@ function normalizeContinuumIssues(
                 ...(dependency && { advisory: { source: "repository" } }),
                 repository: { url: repository },
                 source_status: status,
+                ...(scannerVerdict && { scanner_verdict: scannerVerdict }),
                 remediation_instructions: text(issue["summary"]),
                 code: { ...code, snippet: null },
               },
@@ -473,6 +528,9 @@ function normalizeContinuumIssues(
         sourceRepositoryUrl: repository,
         environmentId,
         issue,
+        ...(evidenceArtifacts.length && {
+          evidence_artifacts: evidenceArtifacts,
+        }),
       };
       const compactSource = structuredClone({
         ...source,
@@ -498,6 +556,14 @@ function normalizeContinuumIssues(
             statusUpdatedAt(issue["updatedAt"]) ??
             statusUpdatedAt(issue["statusUpdatedAt"]),
           source_data: compactSource,
+          ...(scannerVerdict &&
+            details && {
+              details: {
+                ...details.details,
+                remediation_instructions: null,
+                code: null,
+              },
+            }),
         },
         target,
         {

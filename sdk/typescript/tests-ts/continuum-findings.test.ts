@@ -12,6 +12,7 @@ import {
 } from "./external-findings-local-helpers.js";
 import {
   continuumDetail,
+  continuumEvidenceArtifact,
   continuumIssueExport,
   continuumRepository,
   continuumSummary,
@@ -127,9 +128,16 @@ test("oversized Continuum validation preserves the Cloud issue and its structure
     },
   };
   const issue = { ...row.issue, summary: undefined };
+  const artifact = continuumEvidenceArtifact(issue.issueArn);
   const input = {
     ...report,
-    issues: [{ issue, findings: [row.findings[0], large] }],
+    issues: [
+      {
+        issue,
+        findings: [row.findings[0], large],
+        evidenceArtifacts: [artifact],
+      },
+    ],
   };
   const cloud = normalize(input);
   expect(cloud.excluded).toEqual([]);
@@ -139,9 +147,11 @@ test("oversized Continuum validation preserves the Cloud issue and its structure
       evidence: {
         details: {
           remediation_instructions: first.mitigation,
+          scanner_verdict: "EXPLOITABLE",
           code: { snippet: first.vulnerableCode },
         },
         source_data: {
+          evidence_artifacts: [artifact],
           findings: [
             {
               findingId: first.findingId,
@@ -157,6 +167,61 @@ test("oversized Continuum validation preserves the Cloud issue and its structure
   expect(local.findings[0]?.evidence.source_data).toMatchObject({
     findings: [{ validation: large.validation }, { findingId: "two" }],
   });
+});
+
+test("Continuum evidence retains finding-scoped signals separately from the issue verdict", () => {
+  const report = continuumIssueExport();
+  const row = report.issues[0]!;
+  const findingEvidence = continuumEvidenceArtifact(
+    "one",
+    "NOT_EXPLOITABLE",
+    "evidence2",
+  );
+  const issueEvidence = continuumEvidenceArtifact(row.issue.issueId);
+  const result = normalize({
+    ...report,
+    issues: [{ ...row, evidenceArtifacts: [issueEvidence, findingEvidence] }],
+  });
+  expect(result.excluded).toEqual([]);
+  expect(result.findings).toHaveLength(1);
+  expect(result.findings[0]?.evidence.details?.scanner_verdict).toBe(
+    "EXPLOITABLE",
+  );
+  expect(
+    result.findings[0]?.evidence.source_data?.["evidence_artifacts"],
+  ).toEqual([issueEvidence, findingEvidence]);
+});
+
+test("Continuum evidence that exceeds the Cloud limit is excluded without dropping signals", () => {
+  const report = continuumIssueExport();
+  const row = report.issues[0]!;
+  const artifact = continuumEvidenceArtifact(row.issue.issueId);
+  artifact.body.prevalidationSignals.signals = Array.from(
+    { length: 40 },
+    () => ({
+      subjectRef: row.issue.issueId,
+      dimension: "IMPACT_ASSESSMENT",
+      conclusion: "x".repeat(8192),
+      computed: { impactBand: "LOW" },
+    }),
+  );
+  const input = {
+    ...report,
+    issues: [{ ...row, evidenceArtifacts: [artifact] }],
+  };
+  expect(normalize(input)).toMatchObject({
+    findings: [],
+    excluded: [
+      {
+        source_finding_id: row.issue.issueArn,
+        reason: "Evidence exceeds the Cloud limit of 256 KiB.",
+      },
+    ],
+  });
+  const local = normalizeContinuumFindings(input, continuumRepository, "local");
+  expect(
+    local.findings[0]?.evidence.source_data?.["evidence_artifacts"],
+  ).toEqual([artifact]);
 });
 
 test("excludes a Continuum issue with missing, duplicate, or foreign linked findings", () => {
@@ -205,8 +270,15 @@ test("an issue with linked dependency evidence retains its package and line rang
   });
 });
 
-test("local issue import keeps all ranges and reprojects them for Cloud publication", async () => {
-  const report = continuumIssueExport();
+test("local Continuum issue import keeps evidence and reprojects ranges for Cloud publication", async () => {
+  const input = continuumIssueExport();
+  const report = {
+    ...input,
+    issues: input.issues.map((row) => ({
+      ...row,
+      evidenceArtifacts: [continuumEvidenceArtifact(row.issue.issueId)],
+    })),
+  };
   const row = report.issues[0]!;
   const detailed = {
     ...continuumDetail(),

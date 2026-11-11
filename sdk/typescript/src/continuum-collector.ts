@@ -28,7 +28,11 @@ export const continuumIssueExport = z.object({
   environmentId: continuumEnvironmentId,
   sourceRepositoryUrl: z.string(),
   issues: z.array(
-    z.object({ issue: nativeRecord, findings: z.array(nativeRecord) }),
+    z.object({
+      issue: nativeRecord,
+      findings: z.array(nativeRecord),
+      evidenceArtifacts: z.array(nativeRecord).optional(),
+    }),
   ),
 });
 
@@ -201,7 +205,48 @@ export async function collectContinuumIssues(
       }
       findings.push(finding);
     }
-    issues.push({ issue, findings });
+    const evidenceArtifacts: Record<string, unknown>[] = [];
+    if (issue["evidenceAvailability"] !== "NONE") {
+      const issueArgs = ["--issue-id", selected.id];
+      const artifacts = await request(
+        "list-code-issue-artifacts",
+        environmentArgs,
+        ...issueArgs,
+        "--artifact-type",
+        "EVIDENCE",
+      );
+      if (
+        Object.hasOwn(artifacts, "nextToken") ||
+        Object.hasOwn(artifacts, "NextToken")
+      )
+        throw new CodexSecurityError(
+          "Expected a complete Continuum issue evidence list.",
+        );
+      for (const item of array(
+        artifacts["items"],
+        "Continuum issue artifacts",
+      )) {
+        const artifactId = continuumId.parse(
+          record(item, "Continuum issue artifact summary")["artifactId"],
+        );
+        const artifact = await request(
+          "get-code-issue-artifact",
+          environmentArgs,
+          ...issueArgs,
+          "--artifact-id",
+          artifactId,
+        );
+        if (
+          artifact["artifactId"] !== artifactId ||
+          artifact["artifactType"] !== "EVIDENCE"
+        )
+          throw new CodexSecurityError(
+            `Unexpected Continuum evidence artifact ${artifactId} for issue ${selected.id}.`,
+          );
+        evidenceArtifacts.push(artifact);
+      }
+    }
+    issues.push({ issue, findings, evidenceArtifacts });
   }
   signal?.throwIfAborted();
   return {

@@ -26,16 +26,18 @@ report=/private/path/continuum.json
 
 Use AWS CLI v2.38.5 or later and sign in to the environment's AWS account and
 Region. The export needs permissions for `GetEnvironment`, `GetIntegration`,
-`ListCodeIssues`, `GetCodeIssue`, and `GetCodeFinding`.
+`ListCodeIssues`, `GetCodeIssue`, `GetCodeFinding`, `ListCodeIssueArtifacts`,
+and `GetCodeIssueArtifact`.
 [AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html)
 
 Pass the short Continuum environment ID to `codex-security import continuum`.
 The command requires exactly one configured Git repository and records it as
 `sourceRepositoryUrl`. S3 sources are allowed alongside that repository. An
 environment with zero or multiple Git repositories fails before collection.
-The command collects all issue pages, issue details, and linked findings
-across the environment. Before publishing, verify that the issues belong to
-the recorded repository, especially when S3 sources are present.
+The command collects all issue pages, issue details, linked findings, and
+`EVIDENCE` attachments across the environment. Before publishing, verify that
+the issues belong to the recorded repository, especially when S3 sources are
+present.
 
 Use `--aws-profile PROFILE` to select AWS credentials, including a profile
 that assumes a role in the environment's account. Use `--aws-region REGION`
@@ -94,12 +96,20 @@ finding's snippet and end line. When the issue summary is empty, the first
 linked mitigation in issue order supplies remediation instructions. Validation
 is stored alongside each contributing finding in `evidence.source_data.findings`.
 
+Publication stores the structured signals from each `EVIDENCE` attachment in
+`evidence.source_data.evidence_artifacts`. The original export also retains
+unstructured evidence attachments. The observation's `details.scanner_verdict`
+uses the AWS exploitability verdict for signals whose subject is the issue.
+Conflicting issue-level verdicts appear as `MIXED`.
+
 In Cloud, up to 100 locations are navigable. If the full linked evidence exceeds
 the Cloud record size limit, publication tries to keep each linked finding's
-verdict with the snippet and remediation. The original export retains the
-complete linked findings. Use the same source key when repeating an issue
-import. Issue imports use `updatedAt` when available and fall back to
-`statusUpdatedAt`. Previous imports keyed by finding ARN remain separate records.
+verdict with the snippet and remediation. A record whose issue signals still
+exceed the Cloud limit is reported as an exclusion. The original export retains
+the complete linked findings and evidence attachments. Use the same source key
+when repeating an issue import. Issue imports use `updatedAt` when available and
+fall back to `statusUpdatedAt`. Previous imports keyed by finding ARN remain
+separate records.
 
 Finding summaries and details use the finding ARN. In the local workbench,
 importing a detail response under the same source key updates the existing

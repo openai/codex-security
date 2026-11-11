@@ -5,6 +5,7 @@ import { normalizeContinuumFindings } from "../src/continuum-findings.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import {
+  continuumEvidenceArtifact,
   continuumIssueExport,
   continuumRepository,
 } from "./support/continuum-import-fixtures.js";
@@ -13,13 +14,16 @@ const command = ["import", "continuum", "example", "--format", "json"];
 
 function awsFixture(provider: "github" | "gitlab" = "github") {
   const report = continuumIssueExport();
-  const { issue, findings } = report.issues[0]!;
+  const { issue: rawIssue, findings } = report.issues[0]!;
+  const issue = { ...rawIssue, evidenceAvailability: "AVAILABLE" };
+  const artifact = continuumEvidenceArtifact(issue.issueId);
   const [shared, first] = findings;
   const secondIssue = {
     ...issue,
     issueId: "issue2",
     issueArn: issue.issueArn.replace(/issue1$/u, "issue2"),
     findingIds: [shared!.findingId],
+    evidenceAvailability: "NONE",
   };
   const list = {
     items: [issue, secondIssue].map(({ issueId, issueArn }) => ({
@@ -61,6 +65,16 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
             },
           };
     if (args[1] === "list-code-issues") return list;
+    if (args[1] === "list-code-issue-artifacts")
+      return {
+        items: [
+          {
+            artifactId: artifact.artifactId,
+            artifactType: artifact.artifactType,
+          },
+        ],
+      };
+    if (args[1] === "get-code-issue-artifact") return artifact;
     const id = args.at(-1);
     const detail =
       args[1] === "get-code-issue" && id
@@ -75,8 +89,8 @@ function awsFixture(provider: "github" | "gitlab" = "github") {
       ...report,
       sourceRepositoryUrl,
       issues: [
-        { issue, findings: [first!, shared!] },
-        { issue: secondIssue, findings: [shared!] },
+        { issue, findings: [first!, shared!], evidenceArtifacts: [artifact] },
+        { issue: secondIssue, findings: [shared!], evidenceArtifacts: [] },
       ],
     },
   };
@@ -115,14 +129,41 @@ test.each([false, true])(
       [["continuum", "get-code-issue", ...args, "--issue-id", "issue1"]],
       [["continuum", "get-code-finding", ...args, "--finding-id", "one"]],
       [["continuum", "get-code-finding", ...args, "--finding-id", "two"]],
+      [
+        [
+          "continuum",
+          "list-code-issue-artifacts",
+          ...args,
+          "--issue-id",
+          "issue1",
+          "--artifact-type",
+          "EVIDENCE",
+        ],
+      ],
+      [
+        [
+          "continuum",
+          "get-code-issue-artifact",
+          ...args,
+          "--issue-id",
+          "issue1",
+          "--artifact-id",
+          "evidence1",
+        ],
+      ],
       [["continuum", "get-code-issue", ...args, "--issue-id", "issue2"]],
     ]);
     const captured = JSON.parse(cli.stdout.text());
     expect(captured).toEqual(report);
-    expect(normalizeContinuumFindings(captured)).toMatchObject({
-      read: 2,
-      excluded: [],
+    const normalized = normalizeContinuumFindings(captured);
+    expect(normalized).toMatchObject({ read: 2, excluded: [] });
+    expect(normalized.findings[0]?.evidence).toMatchObject({
+      details: { scanner_verdict: "EXPLOITABLE" },
+      source_data: { evidence_artifacts: report.issues[0]!.evidenceArtifacts },
     });
+    expect(
+      normalized.findings[1]?.evidence.details?.scanner_verdict ?? null,
+    ).toBeNull();
   },
 );
 
@@ -178,6 +219,8 @@ test.each([
   ["list-code-issues", "complete Continuum issue list"],
   ["get-integration", "AWS AccessDenied"],
   ["get-code-finding", "AWS AccessDenied"],
+  ["list-code-issue-artifacts", "complete Continuum issue evidence list"],
+  ["get-code-issue-artifact", "AWS AccessDenied"],
 ] as const)(
   "import continuum leaves JSON output empty on a %s failure",
   async (operation, error) => {
@@ -189,7 +232,10 @@ test.each([
         collectContinuumIssues: (options) =>
           collectContinuumIssues(options, async (args) => {
             if (args[1] !== operation) return run(args);
-            if (operation === "list-code-issues")
+            if (
+              operation === "list-code-issues" ||
+              operation === "list-code-issue-artifacts"
+            )
               return { ...(await run(args)), NextToken: "next" };
             throw new Error(error);
           }),

@@ -81,7 +81,13 @@ function* nativeReaders(
         {
           format: continuumIssueFormat,
           environmentId: data["environmentId"],
-          issues: [{ issue: data["issue"], findings: data["findings"] }],
+          issues: [
+            {
+              issue: data["issue"],
+              findings: data["findings"],
+              evidenceArtifacts: data["evidence_artifacts"],
+            },
+          ],
         },
         url,
         target,
