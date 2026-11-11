@@ -250,7 +250,10 @@ import {
 } from "./version.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import { readSavedScanLifecycle } from "./saved-scan-bootstrap.js";
-import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
+import {
+  bundledCodexSdkEnvironment,
+  definedEnvironment,
+} from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
@@ -275,6 +278,8 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  SDK_NODE_SEARCH_PATH,
+  sdkNodeSearchPath,
   environmentWithGit,
   pluginMetadata,
   planOutputArchive,
@@ -320,6 +325,7 @@ import {
 } from "./targets.js";
 import { startHeadDriftMonitor } from "./target-drift.js";
 import {
+  campaignExecutable,
   inspectTrustedExecutable,
   isWithin,
   type InspectedExecutable,
@@ -357,6 +363,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  toolRoots: readonly string[];
   pricingContext?: ScanPricingContext;
   safetyIdentifier?: string;
   runtime: PreparedRuntime;
@@ -2414,10 +2421,11 @@ export class CodexSecurity {
         ),
       };
       const hosted = this.#dependencies.hostedScan !== undefined;
-      for (const root of [
+      session.toolRoots = [
         (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
         ...(knowledgeBase?.protectedRoots ?? []),
-      ]) {
+      ];
+      for (const root of session.toolRoots) {
         git = await inspectTrustedExecutable("git", git.environment, root);
         if (this.#dependencies.hostedScan !== undefined) {
           // Match the hosted MCP launchers' PATH-based tool lookups.
@@ -4738,15 +4746,20 @@ export class CodexSecurity {
       pluginVersion: session.runtime.plugin.version,
       providerFamily: requestContext.metadata["codex_security_provider"],
     });
+    const pluginPaths = {
+      ...runtimePaths,
+      [SDK_NODE_SEARCH_PATH]:
+        process.platform === "win32"
+          ? undefined
+          : await sdkNodeSearchPath(session.toolRoots),
+    };
     const hosted = this.#dependencies.hostedScan;
     if (hosted !== undefined) {
       const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
-      const environment = {
-        ...definedEnvironment(
-          environmentWithGit(session.runtime.environment, git),
-        ),
-        ...runtimePaths,
-      };
+      const environment = definedEnvironment({
+        ...environmentWithGit(session.runtime.environment, git),
+        ...pluginPaths,
+      });
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
@@ -4878,7 +4891,7 @@ export class CodexSecurity {
       ),
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
-      ...runtimePaths,
+      ...pluginPaths,
     };
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
@@ -4942,6 +4955,22 @@ export class CodexSecurity {
         codexPathOverride,
         sdkEnvironment,
       );
+    }
+    const executable = codexPathOverride ?? environment["CODEX_CLI_PATH"]!;
+    const campaign = campaignExecutable(executable, () =>
+      codexPathOverride === undefined
+        ? bundledCodexSdkEnvironment(executable, sdkEnvironment)
+        : sdkEnvironment,
+    );
+    if (campaign) {
+      const selected = await campaign;
+      // Pin the SDK launch so it cannot prepend its unfiltered bundled tools again.
+      codexPathOverride = selected.executable;
+      environment["CODEX_CLI_PATH"] = selected.executable;
+      sdkEnvironment = definedEnvironment({
+        ...selected.environment,
+        CODEX_CLI_PATH: selected.executable,
+      });
     }
     const codexOptions: CodexOptions & { nativeProfile?: string } = {
       ...(codexPathOverride === undefined
@@ -5022,6 +5051,7 @@ export class CodexSecurity {
         signal,
       });
       return {
+        toolRoots: protectedRoots,
         runtime,
         runtimeHome,
         effectiveConfig,
@@ -5237,6 +5267,7 @@ export class CodexSecurity {
       return {
         runtime,
         safetyIdentifier: options.safetyIdentifier,
+        toolRoots: protectedRoots,
         runtimeHome,
         effectiveConfig,
         preflightConfig,
@@ -7707,16 +7738,7 @@ function standaloneFindingForPrompt(finding: string | object): string {
   return jsonForPrompt(finding);
 }
 
-/** @internal */
-export function definedEnvironment(
-  environment: ProcessEnvironment,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
-}
+export { definedEnvironment };
 
 function withoutCodexHome(
   environment: ProcessEnvironment,

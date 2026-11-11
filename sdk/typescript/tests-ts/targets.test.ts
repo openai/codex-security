@@ -1044,3 +1044,20 @@ test("executable protection retains lexical and canonical checkout roots", async
     expect.arrayContaining([lexical, canonical]),
   );
 });
+
+test("executable protection follows native parent traversal before finding Git roots", async () => {
+  const stored = await repository("stored");
+  const physical = await repository("physical");
+  const link = join(stored, "child");
+  await symlink(
+    join(physical, "src"),
+    link,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const expected = process.platform === "win32" ? [stored] : [physical, stored];
+  for (const suffix of [".git", "missing/child"]) {
+    expect((await gitProtectionRoots(`${link}/../${suffix}`)).sort()).toEqual(
+      expected.toSorted(),
+    );
+  }
+});
