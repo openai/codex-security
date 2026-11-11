@@ -12525,7 +12525,13 @@ async function createPatchPullRequest(
     indexCommand(true),
     (stage) =>
       stage(
-        ["--literal-pathspecs", "add", "--dry-run", ...stageArguments],
+        [
+          "--literal-pathspecs",
+          "add",
+          "--dry-run",
+          "--sparse",
+          ...stageArguments,
+        ],
         stageInput,
       ),
     indexSelection,

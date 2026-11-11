@@ -1695,6 +1695,7 @@ export async function capturePatchGitControls(
             "--null",
             "--show-scope",
             "--show-origin",
+            "--default=",
             "--get",
             "lfs.storage",
           ]).catch((error: unknown) => {
@@ -1732,7 +1733,10 @@ export async function capturePatchGitControls(
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        const userSelected = await userSelectedConfig(scope, origin, checkout);
+        // Git reports a supplied default as command-line configuration. Only an
+        // actual nonempty setting can authorize a cache outside this checkout.
+        const userSelected =
+          !!value && (await userSelectedConfig(scope, origin, checkout));
         pendingStoragePaths.push({ path: lfs, userSelected });
       }
       let tracked: Buffer;
