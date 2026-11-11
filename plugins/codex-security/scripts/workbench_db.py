@@ -1219,6 +1219,10 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
         with os.fdopen(inventory_descriptor, "rb") as source:
             lines = re.split(r"\r?\n", source.read().decode("utf-8"))
             in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
+    except (ContractError, OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"Canonical Deep Scan in-scope inventory is invalid: {exc}") from exc
+
+    try:
         descriptor = open_scan_local_file_descriptor(
             scan_dir,
             ledger.relative_to(scan_dir).as_posix(),

@@ -501,6 +501,19 @@ def test_budget_exhaustion_rejects_invalid_candidate_ledger(tmp_path: Path) -> N
     assert "contains an invalid candidate" in str(rejected["stderr"])
 
 
+def test_budget_exhaustion_reports_an_unreadable_inventory(tmp_path: Path) -> None:
+    state_dir, _, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
+    inventory = scan_dir / "artifacts" / "02_discovery" / "in_scope_files.txt"
+    inventory.write_bytes(b"app.py\n\xff\n")
+
+    rejected = complete_budget_scan(state_dir, scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    stderr = str(rejected["stderr"])
+    assert "in-scope inventory is invalid" in stderr
+    assert "candidate ledger is invalid" not in stderr
+
+
 @pytest.mark.parametrize(
     ("path", "error"),
     [
