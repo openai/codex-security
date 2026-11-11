@@ -40,6 +40,78 @@ const { fixture, repositoryFixture, cleanup } = createMultiscanFixtures();
 afterEach(cleanup);
 
 describe("multiscan", () => {
+  test("divides an invocation budget across pending repositories and retries", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision
+first,${source.path},${source.revision}
+second,${source.path},${source.revision}
+`,
+    );
+    const limits: number[] = [];
+    const bothStarted = Promise.withResolvers<void>();
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_checkout, scan = {}) => {
+          limits.push(scan.maxCostUsd!);
+          expect(scan.skipFindingMatching).toBe(true);
+          if (scan.outputDir!.endsWith("attempt-1")) {
+            if (limits.length === 2) bothStarted.resolve();
+            await bothStarted.promise;
+            throw new Error("Retry this repository");
+          }
+          return completedScan(scan.outputDir!);
+        }),
+        { maxCostUsd: 12, maxTotalCostUsd: 8, workers: 2, maxAttempts: 2 },
+      ),
+    );
+    expect(summary).toMatchObject({ completed: 2, failed: 0 });
+    expect(limits).toEqual([2, 2, 2, 2]);
+  });
+
+  test("charges observed overruns before dispatching queued repository attempts", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    const rows = ["first", "second", "third"].map(
+      (id) => `${id},${source.path},${source.revision}`,
+    );
+    await writeFile(
+      paths.input,
+      ["id,repository,revision", ...rows].join("\n"),
+    );
+    const limits: number[] = [];
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repo, scan = {}) => {
+          limits.push(scan.maxCostUsd!);
+          const estimatedUsd = limits.length === 1 ? 5 : 2;
+          throw new ScanCostLimitExceededError(
+            scan.maxCostUsd!,
+            {
+              model: "gpt-5.6-sol",
+              inputTokens: 10,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 10,
+              estimatedUsd,
+            },
+            scan.outputDir!,
+          );
+        }),
+        { workers: 1, maxAttempts: 1, maxTotalCostUsd: 6 },
+      ),
+    );
+    expect(limits).toEqual([2, 1]);
+    expect(summary).toMatchObject({ failed: 3 });
+    expect((await results(summary.resultsPath)).at(-1)?.["error"]).toContain(
+      "invocation cost limit is exhausted",
+    );
+  });
+
   test("prepares shared prompt files once while missing sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
