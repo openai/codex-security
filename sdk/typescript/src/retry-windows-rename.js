@@ -1,7 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 /**
- * Windows can temporarily deny a directory rename while a descendant is open.
+ * Windows can temporarily deny a rename while a file or descendant is open.
  * @param {() => Promise<void>} operation
  * @param {() => Promise<void>} [rollback]
  * @param {AbortSignal} [signal]
