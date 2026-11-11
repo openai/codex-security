@@ -152,17 +152,13 @@ The SDK's `collectSnykIssues` defaults to Open Source and returns the same repor
 Passing the configured `SNYK_TOKEN` explicitly retains its configured regional
 API origin. Pass independently verified `sourceRepositories` in its
 dependencies when a private repository uses an SSH target. The offline reader
-`readSnykFindings(path, "local")` accepts `snyk-rest-issues/v1` and
-`snyk-rest-issues/v2` reports from Snyk REST API version `2026-03-25`.
-The collector writes v2 and preserves the original project and issue evidence.
-For open Snyk Code issues from an SCM integration, both versions import
-repository-relative paths from open coordinates. V2 also imports each
-coordinate's reported start line when available. V2 keeps URI and SSH addresses
-in the original evidence and uses only repository file paths for code locations
-and package manifests. For resolved issues, closed
-coordinates, and projects monitored through the CLI or API, read the original
-location from `evidence.source_data.issue` in v1 or from the JSON text in
-`evidence.source_data.issueJson` in v2.
+`readSnykFindings(path, "local")` accepts the collector's `snyk-rest-issues/v2`
+report for Snyk REST API version `2026-03-25`. Run the collector again to replace
+an archived v1 export. The report preserves the original project and issue
+evidence. Open Snyk Code issues from an SCM integration import repository file
+paths and reported start lines. For resolved issues, closed coordinates, and
+CLI- or API-monitored projects, read the original location from
+`evidence.source_data.issueJson`.
 
 Use the same source key on later imports. The issue key within the API
 origin, organization, project and product identifies the finding. Replaying the
@@ -179,11 +175,6 @@ the monitored project for a row that retains only its original issue. The Cloud
 preview includes the verified project and any captured target in the evidence it
 will publish.
 
-For a v1 row, keep `source_data.issue` and the original `source_data.numericFields`
-when present. If you trim the metadata, keep its matching entries for every
-`issue`, `project`, and `target` object you retain. V1 uses those entries to
-distinguish exact numbers from strings with the same spelling. For a v2 row,
-keep `source_data.issueJson`.
 The local workbench stores the verified project and target with that issue,
 so the stored row can be imported again. All selected issues must share the
 report’s API region, organization, project and product. Keep SCM-integrated

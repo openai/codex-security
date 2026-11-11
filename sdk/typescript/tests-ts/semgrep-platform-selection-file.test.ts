@@ -141,34 +141,6 @@ test("Semgrep message titles stay intact by default and fall back above 512 Clou
   });
 });
 
-test.each(["", ".0", "e0"])(
-  "an archived selection keeps its original occurrence ID for an integer token with suffix %s",
-  (suffix) => {
-    const finding =
-      '{"id":1000000000000000000001,"ref":"refs/heads/release","rule":{"name":"example.rule"},"repository":{"id":1000000000000000000002,"url":"https://github.com/example/project"}}'.replace(
-        "1000000000000000000001,",
-        "1000000000000000000001" + suffix + ",",
-      );
-    const archived = {
-      ...selectedRepository(url, url),
-      project: { ...project, id: "1000000000000000000002" },
-      findings: [finding],
-    };
-    const row = normalizeSemgrepFindings(
-      archived,
-      { sourceRepositoryUrl: url },
-      "local",
-    ).findings[0]!;
-    expect(row.source_finding_id).toBe(
-      "semgrep-platform:702c8f5d11896dc0316d2cc74426c02af20b6292374c3e08b0cf7e717c6fce4a",
-    );
-    expect(row.evidence.title).toBe("example.rule");
-    expect(row.evidence.source_data![rawFindingKey]).toContain(
-      '"id":1000000000000000000001',
-    );
-  },
-);
-
 test("two selected Platform SAST IDs from separate pages replay unchanged in SQLite", async () => {
   const report = selection([
     page("8"),
@@ -1101,11 +1073,13 @@ test("direct SDK imports respect the native source even with a caller-selected I
   expect(prepared.preview.findings[0]!.source_finding_id).toBe("chosen-id");
 
   const genericOptions = { ...options, provider: "wiz" as const };
+  const currentFormat = row.evidence.source_data!["format"];
   delete row.evidence.source_data!["format"];
   await expect(
     prepareNormalizedLocalImport(normalized, genericOptions, deps),
   ).rejects.toThrow("semgrep provider");
   const data = row.evidence.source_data!;
+  data["format"] = currentFormat;
   const original = data[rawFindingKey] as string;
   data[rawFindingKey] = JSON.stringify({
     ...JSON.parse(original),

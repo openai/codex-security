@@ -98,5 +98,6 @@
 
 - preserve physical parent traversal ([#1709](https://github.com/openai/codex-security/pull/1709))
 - make MCP targets and launchers explicit ([#2591](https://github.com/openai/codex-security/pull/2591))
+- retire historical reader formats and Cloud checkpoints ([#2602](https://github.com/openai/codex-security/pull/2602))
 
 <!-- release-section: upgrades:end -->
