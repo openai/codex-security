@@ -5,6 +5,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseToml } from "smol-toml";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { assertFlagPair, nativeConfigOverrides } from "./assertions.ts";
 import { trustedParentSandbox } from "./support/fake-codex-fixture.ts";
@@ -17,7 +18,9 @@ export async function testLargeScopeTransport({
   workerRequest,
   restoreEnv,
 }: {
-  fakeCodexFixture: () => Promise<{ root: string; executablePath: string }>;
+  fakeCodexFixture: (
+    profile: null,
+  ) => Promise<{ root: string; executablePath: string }>;
   captureDeepScanExecutionSettings: typeof import("../src/deep-scan/recovery-settings.js").captureDeepScanExecutionSettings;
   workerRequest: (
     promptPath: string,
@@ -56,7 +59,7 @@ export async function testLargeScopeTransport({
   ];
   const saved = names.map((name) => [name, process.env[name]] as const);
   const originalSpawn = childProcess.spawn;
-  const fixture = await fakeCodexFixture();
+  const fixture = await fakeCodexFixture(null);
   const scanIds = [randomUUID(), randomUUID()];
   try {
     process.env.CODEX_CLI_PATH = process.execPath;
@@ -64,6 +67,8 @@ export async function testLargeScopeTransport({
     delete process.env.CODEX_SECURITY_CONFIG_PATH;
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
     await mkdir(path.join(fixture.root, "sessions"));
+    const pluginRoot = path.join(fixture.root, "current-plugin");
+    await mkdir(pluginRoot);
     for (const index of [0, 1]) {
       await writeFile(
         path.join(fixture.root, "sessions", `parent-${index}.jsonl`),
@@ -133,6 +138,14 @@ export async function testLargeScopeTransport({
               (_, row) =>
                 `scan-${index}/background jobs/café-${row}-${"a".repeat(110)}`,
             );
+            const currentSandbox =
+              index === 0
+                ? {
+                    ...trustedParentSandbox,
+                    pluginReadRoot: pluginRoot,
+                    sourceReadRoot: fixture.root,
+                  }
+                : trustedParentSandbox;
             const run = {
               scanId,
               scanDir: workerRoot,
@@ -149,16 +162,23 @@ export async function testLargeScopeTransport({
               },
               executionSettings: {
                 version: 1,
-                settings: await captureDeepScanExecutionSettings(
-                  {
-                    usageOwner: {
-                      threadId: `scope-parent-${index}`,
-                      turnId: "original-turn",
-                      startedAt: "2026-01-01T00:01:00Z",
+                settings: {
+                  ...(await captureDeepScanExecutionSettings(
+                    {
+                      usageOwner: {
+                        threadId: `scope-parent-${index}`,
+                        turnId: "original-turn",
+                        startedAt: "2026-01-01T00:01:00Z",
+                      },
                     },
+                    trustedParentSandbox,
+                  )),
+                  parentSandbox: {
+                    ...trustedParentSandbox,
+                    pluginReadRoot: path.join(fixture.root, "previous-plugin"),
+                    sourceReadRoot: path.join(fixture.root, "previous-source"),
                   },
-                  trustedParentSandbox,
-                ),
+                },
               },
             };
             const captured = startDeepScanEngine({
@@ -166,9 +186,9 @@ export async function testLargeScopeTransport({
               store: {},
               registry: {},
               runWorkbench: async () => ({}),
-              pluginRoot: fixture.root,
+              pluginRoot,
               pythonCommand: process.env.PYTHON || "python3",
-              parentSandbox: trustedParentSandbox,
+              parentSandbox: currentSandbox,
               threadId: `scope-parent-${index}`,
               parentTurn: {
                 threadId: `scope-parent-${index}`,
@@ -187,6 +207,31 @@ export async function testLargeScopeTransport({
               }),
             );
             const invocation = await readJson(output, "invocation.json");
+            const permissions = nativeConfigOverrides(invocation.argv).find(
+              (value) =>
+                value.startsWith(
+                  "permissions.codex_security_deep_scan_worker=",
+                ),
+            );
+            assert.ok(permissions);
+            assert.deepEqual(
+              JSON.parse(JSON.stringify(parseToml(permissions).permissions)),
+              {
+                codex_security_deep_scan_worker: {
+                  extends: ":read-only",
+                  filesystem: {
+                    ":root": "read",
+                    ...(index === 0
+                      ? {
+                          [pluginRoot]: { ".": "read" },
+                          [fixture.root]: { ".": "read" },
+                        }
+                      : {}),
+                  },
+                  network: { enabled: false },
+                },
+              },
+            );
             assertFlagPair(
               invocation.argv,
               "--cyber-access-program",

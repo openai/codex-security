@@ -415,6 +415,13 @@ export function restoredDeepScanWorkerSettings(
       ? {}
       : { runtimeSettings: { config: {} } }),
     parentSandbox: {
+      // Only the current parent can grant named read access to a worker.
+      ...(currentParentSandbox.pluginReadRoot === undefined
+        ? {}
+        : { pluginReadRoot: currentParentSandbox.pluginReadRoot }),
+      ...(currentParentSandbox.sourceReadRoot === undefined
+        ? {}
+        : { sourceReadRoot: currentParentSandbox.sourceReadRoot }),
       filesystemDenies: [
         ...new Set([
           ...(originalSandbox?.filesystemDenies ?? []),
