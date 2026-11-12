@@ -3260,6 +3260,85 @@ test("a Semgrep selection with distinct submitted and native IDs remains indepen
   expect(f.posts).toHaveLength(1);
 });
 
+test("a pending Semgrep request reserves only findings accepted by the repository", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const sourceRepositories = [{ url, platform: "gitlab" as const }];
+  const capture = selectedSemgrepReport(
+    { name: "Team/Project", url },
+    {
+      rule_name: "example.rule",
+      repository: { url: "git@scm.example.test:Team/Project.git" },
+    },
+    sourceRepositories,
+  );
+  const high = capture.findings[0]!;
+  const low = JSON.stringify({ ...JSON.parse(high), id: 24, severity: "low" });
+  const f = await hostedFixture("semgrep", capture, url);
+  const normalize = (...findings: string[]) =>
+    normalizeSemgrepFindings(
+      { ...capture, findingCount: findings.length, findings },
+      { sourceRepositories },
+      "cloud",
+    );
+  const [accepted, excluded] = normalize(high, low).findings;
+  const prepare = (...findings: string[]) => {
+    const input = normalize(...findings);
+    for (const row of input.findings)
+      if (row.source_finding_id === accepted!.source_finding_id)
+        row.source_finding_id = "caller-ticket";
+    return prepareNormalizedExternalPublication(
+      input,
+      { ...options, provider: "semgrep" },
+      { ...f.deps, sourceRepositories },
+    );
+  };
+  const severityHeader = "Codex-Security-Repository-Import-Severities";
+  f.state.catalogHeaders[severityHeader] = "high";
+  const original = await prepare(high, low);
+  const requests = original.preview.requests;
+  expect(requests[0]!.items.map((row) => row.evidence.severity)).toEqual([
+    "high",
+  ]);
+  const path = await f.loseResponse(original);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  expect(saved.requests[0].items[0].source_finding_id).toBe("caller-ticket");
+  expect(saved.nativeIds).toEqual([accepted!.source_finding_id]);
+  // Older checkpoints also recorded native IDs for rows excluded by severity.
+  saved.nativeIds.push(excluded!.source_finding_id);
+  await writeFile(path, JSON.stringify(saved));
+
+  f.state.catalogHeaders[severityHeader] = "low";
+  const changedHigh = JSON.stringify({
+    ...JSON.parse(high),
+    rule_name: "updated.rule",
+  });
+  const filtered = await prepare(changedHigh, low);
+  expect(filtered.preview.findings.map((row) => row.evidence.severity)).toEqual(
+    ["low"],
+  );
+  f.state.catalogHeaders[severityHeader] = "high,low";
+  const independent = await prepare(low);
+  expect((await independent.publish()).verified).toBe(1);
+  expect(JSON.parse(f.posts[1]!).items[0].evidence.severity).toBe("low");
+  // A new reader sees the same occurrence through HTTPS, with a different caller ID.
+  const httpsReport = selectedSemgrepReport(
+    { name: "Team/Project", url },
+    { rule_name: "updated.rule" },
+  );
+  const updated = normalizeSemgrepFindings(httpsReport, {}, "cloud");
+  expect(updated.findings[0]!.source_finding_id).toBe(
+    accepted!.source_finding_id,
+  );
+  updated.findings[0]!.source_finding_id = "another-ticket";
+  await expect(f.prepareNormalized(updated)).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
+  const retry = await prepare(high, low);
+  expect(retry.preview.requests).toEqual(requests);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts[2]).toBe(f.posts[0]);
+});
+
 test.each(["semgrep", "snyk"] as const)(
   "%s holds an overlapping native update until the initial request is recovered",
   async (provider) => {

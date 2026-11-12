@@ -81,6 +81,7 @@ import {
   semgrepPlatformFindingBinding,
   semgrepPlatformRepositoryReference,
   semgrepPlatformReportScope,
+  submittedSemgrepPlatformId,
 } from "./semgrep-platform-findings.js";
 import {
   hostedRepositoryUrlKey,
@@ -960,7 +961,7 @@ function hostedPublicationFindings(
   provider: Provider,
   destination: ImportRepository,
   readerSources: readonly ExternalSourceRepository[],
-  nativeIds: Set<string>,
+  nativeIdsByFinding: Map<string, string>,
 ): ExternalFindings {
   if (provider === "snyk") {
     const first = current.findings.find(isSnykRestFinding);
@@ -979,7 +980,10 @@ function hostedPublicationFindings(
         current.sourceRepositoryPlatform,
       ),
       (finding, source) => {
-        nativeIds.add(finding.source_finding_id);
+        nativeIdsByFinding.set(
+          finding.source_finding_id,
+          finding.source_finding_id,
+        );
         finding.evidence.source_data = source;
       },
     );
@@ -1016,7 +1020,8 @@ function hostedPublicationFindings(
       undefined,
       "cloud",
     );
-    if (binding?.nativeId) nativeIds.add(binding.nativeId);
+    if (binding?.nativeId)
+      nativeIdsByFinding.set(finding.source_finding_id, binding.nativeId);
     return binding?.sourceData &&
       (original ||
         (data?.["format"] === semgrepPlatformFormat &&
@@ -1295,13 +1300,13 @@ async function preparePublicationInput(
   const source = { provider: options.provider, source_key: options.sourceKey };
   const sourceReportsPath = sourcePath(destination);
   const hosted = options.provider === "snyk" || options.provider === "semgrep";
-  const nativeIds = new Set<string>();
+  const nativeIdsByFinding = new Map<string, string>();
   const parsed = hostedPublicationFindings(
     report,
     options.provider,
     destination,
     readerSources,
-    nativeIds,
+    nativeIdsByFinding,
   );
   const key = hash(
     "sha256",
@@ -1431,9 +1436,24 @@ async function preparePublicationInput(
         source,
       ]),
     );
-  const submittedIds = new Set(
-    parsed.findings.map((row) => row.source_finding_id),
+  await validatePreparedOutputDir(state, undefined, true).catch(
+    nullIfMissingFile,
   );
+  const saved = await readPending();
+  const usePrivateImport = importScope === "workspace";
+  // The original selection and request bytes govern a retry even if discovery changes.
+  const severities = saved ? saved.repositorySeverities : repositorySeverities;
+  const direct = usePrivateImport
+    ? parsed
+    : repositorySelection(parsed, severities, resolved.sourcePositions);
+  const submittedIds = new Set(
+    direct.findings.map((row) => row.source_finding_id),
+  );
+  const nativeIds = new Set<string>();
+  for (const id of submittedIds) {
+    const native = nativeIdsByFinding.get(id);
+    if (native) nativeIds.add(native);
+  }
   const overlaps = (id: string) => submittedIds.has(id) || nativeIds.has(id);
   const partialSemgrep =
     options.provider === "semgrep" &&
@@ -1474,6 +1494,20 @@ async function preparePublicationInput(
               prior.semgrepPartialScopeDigest === undefined)))
       )
         continue;
+      const checkSemgrepAliases =
+        source.provider === "semgrep" &&
+        Array.isArray(prior.nativeIds) &&
+        prior.nativeIds.some(overlaps);
+      function overlapsSubmittedItem(
+        item: FindingImportRequest["items"][number],
+      ) {
+        if (overlaps(item.source_finding_id)) return true;
+        if (!checkSemgrepAliases) return false;
+        // Older checkpoints could list aliases for excluded rows. Match the native
+        // occurrence from the approved request before reserving a caller-supplied ID.
+        const nativeId = submittedSemgrepPlatformId(item);
+        return nativeId !== undefined && overlaps(nativeId);
+      }
       if (
         prior.requests.some(
           (batch: FindingImportRequest) =>
@@ -1483,9 +1517,7 @@ async function preparePublicationInput(
             batch.source?.provider === source.provider &&
             batch.source.source_key === source.source_key &&
             Array.isArray(batch.items) &&
-            (batch.items.some((item) => overlaps(item.source_finding_id)) ||
-              (Array.isArray(prior.nativeIds) &&
-                prior.nativeIds.some(overlaps))),
+            batch.items.some(overlapsSubmittedItem),
         )
       )
         throw new CodexSecurityError(
@@ -1511,10 +1543,6 @@ async function preparePublicationInput(
         verified: result.verified,
       };
   }
-  await validatePreparedOutputDir(state, undefined, true).catch(
-    nullIfMissingFile,
-  );
-  const saved = await readPending();
   if (!saved) await checkPendingSource();
   if (saved && wasReset(saved)) {
     await underPublishLock(async () => {
@@ -1551,7 +1579,6 @@ async function preparePublicationInput(
   const readPrivate = async () =>
     parsePrivateCheckpoint(await readOptionalFile(privatePath));
   const privateSaved = await readPrivate();
-  const usePrivateImport = importScope === "workspace";
   if (
     !usePrivateImport &&
     importMedia === "application/json" &&
@@ -2066,13 +2093,6 @@ async function preparePublicationInput(
     });
   }
 
-  // The original selection and request bytes govern a retry even if discovery changes.
-  const severities = saved ? saved.repositorySeverities : repositorySeverities;
-  const direct = repositorySelection(
-    parsed,
-    severities,
-    resolved.sourcePositions,
-  );
   if (!direct.findings.length) throw new NoPublishableFindingsError(direct);
   let requests = saved?.requests;
   if (!requests) {
