@@ -111,11 +111,21 @@ describe("trusted executable resolution", () => {
       // One checkout starts missing, the other replaces a link to a trusted tool.
       await symlink("/bin/sh", join(first, "tool"));
       await symlink(join(firstAlias, "tool"), join(tools, "git"));
+      const bothInspected = Promise.withResolvers<void>();
+      let pendingInspections = 2;
       const environments = await Promise.all(
         [first, second].map((root) =>
           withProtectedExecutableRoots([root], async () => {
             const input = { PATH: tools };
-            const command = await inspectTrustedExecutable("git", input, []);
+            // Capture both PATHs before either checkout changes a shared link target.
+            const command = await inspectTrustedExecutable(
+              "git",
+              input,
+              [],
+            ).finally(() => {
+              if (--pendingInspections === 0) bothInspected.resolve();
+            });
+            await bothInspected.promise;
             const path = command.environment["PATH"]!;
             if (root === first) {
               expect(command.executable).toBeNull();
