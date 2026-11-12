@@ -102,7 +102,9 @@ for (const [format, report] of [
     );
     expect({ code, stderr: cli.stderr.text() }).toEqual({
       code: 0,
-      stderr: "",
+      stderr: expect.stringContaining(
+        "codex-security: warning: Use --source-repository-url",
+      ),
     });
     expect(JSON.parse(cli.stdout.text())).toMatchObject({
       dryRun: true,

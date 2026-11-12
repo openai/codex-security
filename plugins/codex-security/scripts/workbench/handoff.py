@@ -38,9 +38,8 @@ def require_tokenless_scan_owner(
             "SELECT thread_id FROM workspaces WHERE id = ?", (scan["workspace_id"],)
         ).fetchone()[0]
     if owner is None:
-        # Only a completed import is intentionally ownerless among registered scans.
         completed_import = scan["launch_kind"] == "import" and scan["status"] == "complete"
-        if scan["recipe_json"] is not None and not completed_import:
+        if not completed_import:
             raise SystemExit("This scan is awaiting its owning Codex thread.")
     elif owner != model_thread_id:
         raise SystemExit("This scan requires its owning Codex thread.")
@@ -231,30 +230,61 @@ def mark_handoff_delivered(
                 raise SystemExit(
                     "Codex Security handoff delivery is owned by another continuation."
                 )
-            connection.commit()
-            return wb.workspace_state(connection, scan["workspace_id"])
-        updated = connection.execute(
-            """
-            UPDATE scans
-            SET handoff_status = 'delivered', handoff_claimed_at = NULL,
-                updated_at = ?
-            WHERE id = ? AND handoff_status = 'pending'
-                AND handoff_claim_token = ?
-            """,
-            (timestamp, scan["id"], claim_token),
-        )
-        if updated.rowcount != 1:
-            raise SystemExit("Codex Security handoff delivery could not be recorded.")
-        if scan["mode"] != "deep":
-            connection.execute(
+        else:
+            updated = connection.execute(
                 """
-                UPDATE scan_progress
-                SET phase_items_total = 0, phase_items_completed = 0,
-                    phase_progress_unit = 'checks',
-                    preflight_checks_total = 0, preflight_checks_completed = 0,
+                UPDATE scans
+                SET handoff_status = 'delivered', handoff_claimed_at = NULL,
                     updated_at = ?
-                WHERE scan_id = ?
+                WHERE id = ? AND handoff_status = 'pending'
+                    AND handoff_claim_token = ?
                 """,
-                (timestamp, scan["id"]),
+                (timestamp, scan["id"], claim_token),
             )
-    return wb.workspace_state(connection, scan["workspace_id"])
+            if updated.rowcount != 1:
+                raise SystemExit("Codex Security handoff delivery could not be recorded.")
+            if scan["mode"] != "deep":
+                connection.execute(
+                    """
+                    UPDATE scan_progress
+                    SET phase_items_total = 0, phase_items_completed = 0,
+                        phase_progress_unit = 'checks',
+                        preflight_checks_total = 0, preflight_checks_completed = 0,
+                        updated_at = ?
+                    WHERE scan_id = ?
+                    """,
+                    (timestamp, scan["id"]),
+                )
+        began_review = (
+            args.return_context
+            and thread_id is not None
+            and args.occurrence_id is None
+            and scan["mode"] == "standard"
+            and scan["status"] == "running"
+            and scan["canceled_at"] is None
+            and scan["phase"] == "preflight"
+        )
+        if began_review:
+            connection.execute(
+                "UPDATE scans SET phase = 'threat_model', updated_at = ? WHERE id = ?",
+                (timestamp, scan_id),
+            )
+            connection.execute(
+                """UPDATE scan_progress SET phase_items_total = 0, phase_items_completed = 0,
+                   phase_progress_unit = NULL, updated_at = ? WHERE scan_id = ?""",
+                (timestamp, scan_id),
+            )
+    if not args.return_context:
+        return wb.workspace_state(connection, scan["workspace_id"])
+    context = wb.get_scan(
+        connection,
+        argparse.Namespace(
+            scan_id=scan_id,
+            occurrence_id=args.occurrence_id,
+            model_thread_id=thread_id or "",
+            context_claim_token=claim_token,
+        ),
+    )
+    if began_review:
+        context["beganStandardReview"] = True
+    return context
