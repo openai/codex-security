@@ -21,7 +21,8 @@ proof file. Both modes should return 401 for an anonymous request, 200 for
 Alice's own invoice, and `server_stopped: true`. In the default vulnerable mode,
 Alice can read Bob's invoice with 200, so `cross_account_read` is true and the
 finding is reportable. In repaired mode, the ownership check returns 403, so
-`cross_account_read` is false and the same claim is suppressed. The `mode` field
+`cross_account_read` is false. This standalone control shows the evidence that
+would support suppression. The scan below validates only the vulnerable mode. The `mode` field
 in each proof identifies which control was exercised. These tests run without
 model access or sign-in.
 
