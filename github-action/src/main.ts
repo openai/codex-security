@@ -66,7 +66,7 @@ export async function runAction(actionRoot: string, overrides: Partial<Dependenc
   core.setOutput('report-status', 'failed');
   core.setOutput('sarif-upload-ready', 'false');
   try {
-    inputs = parseInputs(name => core.getInput(name), process.env.GITHUB_WORKSPACE ?? '');
+    inputs = parseInputs(name => core.getInput(name, {trimWhitespace: false}), process.env.GITHUB_WORKSPACE ?? '');
     const credentials = scanCredentials(inputs.provider, process.env);
     const event = await context();
     target = await resolveTarget(inputs, event);
