@@ -3797,25 +3797,24 @@ export class CodexSecurity {
         ? await recoverSelectedCompletion()
         : null;
       tracker.beginParentTurn(resumeThreadId !== undefined);
-      const events = async function* (this: CodexSecurity) {
-        if (savedCompletion) return;
-        if (directDeepScan) {
-          yield* (this.#dependencies.runDeepScan ?? runDeepScan)({
-            onDiagnostic: this.#onDeepScanDiagnostic,
-            codexOptions,
-            preflightCommand:
-              await this.#providerPreflightCommand(effectiveConfig),
-            // Host imports must use the stable install URL. The engine receives
-            // the scan's shell-visible plugin through codexOptions.env.
-            pluginRoot: runtime.plugin.pluginRoot,
-            repository: repo,
-            scanDir,
-            scanId,
-            prompt,
-            signal,
-          });
-        } else yield* (await thread.runStreamed(prompt, turnOptions)).events;
-      }.call(this);
+      const events = savedCompletion
+        ? (async function* () {})()
+        : directDeepScan
+          ? (this.#dependencies.runDeepScan ?? runDeepScan)({
+              onDiagnostic: this.#onDeepScanDiagnostic,
+              codexOptions,
+              preflightCommand:
+                await this.#providerPreflightCommand(effectiveConfig),
+              // Host imports must use the stable install URL. The engine receives
+              // the scan's shell-visible plugin through codexOptions.env.
+              pluginRoot: runtime.plugin.pluginRoot,
+              repository: repo,
+              scanDir,
+              scanId,
+              prompt,
+              signal,
+            })
+          : (await thread.runStreamed(prompt, turnOptions)).events;
       scanTurnStatus = savedCompletion ? "completed" : "in_progress";
       checkOpen();
 
