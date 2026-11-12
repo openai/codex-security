@@ -1,5 +1,6 @@
 /dist/
 /_bundled_plugin/
+/.plugin-build-*/
 /node_modules
 /coverage/
 /reports/

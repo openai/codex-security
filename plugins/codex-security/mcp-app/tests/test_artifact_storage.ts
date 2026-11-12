@@ -365,18 +365,33 @@ try {
     content,
   );
 
-  await client.close();
-  client = await connect({
-    CODEX_SECURITY_SCAN_ROOT: path.join(stateAlias, "missing", "scans"),
-  });
-  const relocated = await save({
-    targetPath: repository,
-    storage: "persistent",
-  });
-  assert.ok(
-    relocated.directory.startsWith(
-      path.join(stateRoot, "missing", "scans") + path.sep,
-    ),
+  const rootName = process.platform === "win32" ? "scans" : "scans ";
+  for (const [configured, expected] of [
+    [
+      path.join(stateAlias, "missing", rootName),
+      path.join(stateRoot, "missing", rootName),
+    ],
+    [
+      ` ${path.join(stateAlias, "padded", "scans")} `,
+      path.join(stateRoot, "padded", "scans"),
+    ],
+  ]) {
+    await client.close();
+    client = await connect({ CODEX_SECURITY_SCAN_ROOT: configured });
+    const relocated = await save({
+      targetPath: repository,
+      storage: "persistent",
+    });
+    assert.ok(relocated.directory.startsWith(expected + path.sep));
+  }
+  if (process.platform !== "win32")
+    await assert.rejects(stat(path.join(stateRoot, "missing", "scans")), {
+      code: "ENOENT",
+    });
+  assert.equal(
+    (await read({ ...identity, storage: "persistent", path: relativePath }))
+      .content,
+    content,
   );
 
   const linkedScanRoot = path.join(fixture, "linked-scans");
