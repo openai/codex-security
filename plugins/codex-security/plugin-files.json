@@ -147,6 +147,7 @@
     "skills/publish-findings/references/checkmarx-import.md",
     "skills/publish-findings/references/wiz-import.md",
     "skills/publish-findings/scripts/collect_checkmarx.py",
+    "skills/publish-findings/scripts/collector_paths.py",
     "skills/resolve-dependency-alert/SKILL.md",
     "skills/resolve-dependency-alert/agents/openai.yaml",
     "skills/security-diff-scan/SKILL.md",

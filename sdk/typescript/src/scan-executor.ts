@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { severityRubricSnapshotSchema } from "./classify-severity-records.js";
 import {
+  CodexConnectionError,
   CodexSecurityError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
@@ -144,7 +145,9 @@ export function hostedScanFailureStatus(
   if (status === "acceptance_unknown") return status;
   if (signal?.aborted)
     return explicitlyCanceled(signal) ? "canceled" : "failed";
-  return status === "canceled" || error instanceof ScanInterruptedError
+  return status === "canceled" ||
+    (error instanceof ScanInterruptedError &&
+      !(error.cause instanceof CodexConnectionError))
     ? "canceled"
     : "failed";
 }
