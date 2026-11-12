@@ -411,7 +411,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         localName === "delInstrText" ||
         localName === "moveFrom" ||
         (localName === "sdtContent" && placeholders.at(-1)) ||
-        hiddenRuns.at(-1)
+        // Field markers still delimit visible instructions and results across runs.
+        (hiddenRuns.at(-1) && localName !== "fldChar")
       ) {
         ignoredDepth++;
         return;

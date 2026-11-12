@@ -554,6 +554,17 @@ describe("scan knowledge bases", () => {
       ),
     );
     await writeFile(
+      join(root, "hidden-field-markers.docx"),
+      docxBody(
+        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>' +
+          "<w:r><w:instrText>AUTHOR</w:instrText></w:r>" +
+          '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>' +
+          "<w:r><w:t>Policy owner</w:t></w:r>" +
+          '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>' +
+          "<w:r><w:t>.</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
       join(root, "field-code.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
@@ -577,6 +588,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
     expect(documents).toContain("Rotate keys. Audit weekly.\n");
+    expect(documents).toContain("Policy owner.\n");
     expect(documents).toContain("Owner: \nData: Confidential\n");
   });
 
