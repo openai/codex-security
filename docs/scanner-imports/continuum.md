@@ -35,8 +35,8 @@ The command requires exactly one configured Git repository and records it as
 `sourceRepositoryUrl`. S3 sources are allowed alongside that repository. An
 environment with zero or multiple Git repositories fails before collection.
 The command collects all issue pages, issue details, linked findings, and
-`EVIDENCE` attachments across the environment. It also collects `PATCH`
-artifacts when Git is the only source. If the environment includes S3 sources,
+`EVIDENCE` and `VALIDATION_EVIDENCE` attachments across the environment.
+It also collects `PATCH` artifacts when Git is the only source. If the environment includes S3 sources,
 use the [selected-finding collector](#collect-a-finding-with-patches) and the
 exact AWS source name to capture patches for the Git repository. Before
 publishing, verify that the issues belong to the recorded repository.
@@ -100,19 +100,21 @@ finding's snippet and end line. When the issue summary is empty, the first
 linked mitigation in issue order supplies remediation instructions. Validation
 is stored alongside each contributing finding in `evidence.source_data.findings`.
 
-The export keeps the original AWS `EVIDENCE` and selected `PATCH` responses
-in `issues[].issue.artifacts`. The importer checks patch SHA-256 and byte count
-and keeps matching patches under the same issue ARN in
-`evidence.source_data.patches`. Publication reads that array and stores the
-structured signals in `evidence.source_data.evidence_artifacts`. The
+The export keeps the AWS artifact responses in `issues[].issue.artifacts`.
+The importer checks patch SHA-256 and byte count and stores matching patches
+in `evidence.source_data.patches`. Each entry in `evidence.source_data.evidence_artifacts`
+retains its artifact ID and type. `EVIDENCE` carries `body.prevalidationSignals`.
+`VALIDATION_EVIDENCE` carries `body.validationEvidence`, including source
+analysis, flow verdicts, or executed proof when supplied. If AWS returns the
+validation artifact as `body.raw`, the importer preserves it in that form. The
 observation's `details.scanner_verdict` uses the AWS exploitability verdict for
 signals whose subject is the issue. Conflicting issue-level verdicts appear as
 `MIXED`.
 
 In Cloud, up to 100 locations are navigable. If the full linked evidence exceeds
 the Cloud record size limit, publication tries to keep each linked finding's
-verdict with the snippet and remediation. A record whose issue signals still
-exceed the Cloud limit is reported as an exclusion. The original export retains
+verdict with the snippet and remediation. A record whose issue evidence still
+exceeds the Cloud limit is reported as an exclusion. The original export retains
 the complete linked findings and evidence attachments. Use the same source key
 when repeating an issue import. Issue imports use `updatedAt` when available and
 fall back to `statusUpdatedAt`. Previous imports keyed by finding ARN remain
@@ -221,12 +223,10 @@ The local import retains exact patch bytes and artifact descriptors in
 `evidence.source_data.patches`. Cloud retains the descriptors and marks
 oversized bodies with `contentOmitted: "cloud_evidence_limit"`.
 
-### Patch and verify one finding
+## Use imported evidence in the matching checkout
 
-From the checkout you want to fix, set `finding` to the path of a
-single-finding collector capture. To use a local workbench record instead,
-select its evidence by the issue or finding ARN and the source key used at
-import.
+Set `SOURCE_ARN` to the imported issue or finding ARN and `SOURCE_KEY` to the
+key used at import. Select that record's evidence for the next step.
 
 ```sh
 out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
@@ -239,17 +239,41 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 
 ```mermaid
 flowchart LR
-    A[Continuum finding] --> C[Collector capture]
-    B[Linked issue PATCH artifacts] --> C
+    A[Continuum finding and linked patches] --> C[Selected finding capture]
     C --> F[One finding file]
     C --> I[Import to local workbench]
+    E[Issue export with validation evidence and eligible patches] --> I
     I -->|Select stored evidence| F
+    F --> S[Attack-path scoring]
     F --> B0[validate on original checkout]
     F --> P[patch in writable checkout]
     P -->|Resulting diff| V[verify-fix on edited checkout]
     F --> V
 ```
 
+### Score an imported issue
+
+From the matching checkout with the Codex Security plugin enabled, pass the
+selected issue to the standalone attack-path skill. It can use observations
+in the AWS artifacts to establish or rule out reachability for the affected
+flow.
+
+```sh
+codex exec --ephemeral -s read-only \
+  "Use \$codex-security:attack-path-analysis to score the imported issue at $finding"
+```
+
+To rescore a matching finding in an existing Codex Security scan, use the
+same evidence file as context for that finding.
+
+```sh
+codex-security classify-severity --scan "$SCAN_ID" --finding-id "$CODEX_FINDING_ID" \
+  --knowledge-base "$finding"
+```
+
+### Patch and verify one finding
+
+Use the selected evidence file or set `finding` to a single-finding collector capture.
 `validate` assesses the original checkout. When an AWS patch is available,
 `patch` starts from that diff and adapts it to the current code as needed.
 

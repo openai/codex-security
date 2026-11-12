@@ -124,6 +124,7 @@ import {
   continuumEvidenceArtifact,
   continuumIssueExport,
   continuumRepository,
+  continuumValidationArtifact,
 } from "./support/continuum-import-fixtures.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
@@ -3708,6 +3709,12 @@ test("a Continuum private upload keeps every structured signal and reports confl
   const { issue } = input.issues[0]!;
   const evidence = [
     continuumEvidenceArtifact(issue.issueId),
+    continuumValidationArtifact(),
+    {
+      artifactId: "rawvalidation",
+      artifactType: "VALIDATION_EVIDENCE",
+      body: { raw: "Example validation text" },
+    },
     continuumEvidenceArtifact(issue.issueArn, "NOT_EXPLOITABLE", "evidence2"),
   ];
   const report = {

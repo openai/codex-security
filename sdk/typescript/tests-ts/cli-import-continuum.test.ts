@@ -12,6 +12,7 @@ import {
   continuumEvidenceArtifact,
   continuumIssueExport,
   continuumRepository,
+  continuumValidationArtifact,
   patchArtifact,
 } from "./support/continuum-import-fixtures.js";
 
@@ -139,6 +140,7 @@ function awsFixture(provider: "github" | "gitlab" = "github", s3 = true) {
   const { issue: rawIssue, findings } = report.issues[0]!;
   const issue = { ...rawIssue, evidenceAvailability: "AVAILABLE" };
   const artifact = continuumEvidenceArtifact(issue.issueId);
+  const validation = continuumValidationArtifact();
   const patch = patchArtifact("patch1", "+// example\n");
   const patchResponse = {
     artifactId: patch.artifactId,
@@ -202,16 +204,20 @@ function awsFixture(provider: "github" | "gitlab" = "github", s3 = true) {
             artifactId: artifact.artifactId,
             artifactType: artifact.artifactType,
           },
-          ...(!args.includes("--artifact-type")
-            ? [
-                { artifactId: patch.artifactId, artifactType: "PATCH" },
-                { artifactId: "decision1", artifactType: "DECISION" },
-              ]
-            : []),
+          {
+            artifactId: validation.artifactId,
+            artifactType: validation.artifactType,
+          },
+          { artifactId: patch.artifactId, artifactType: "PATCH" },
+          { artifactId: "decision1", artifactType: "DECISION" },
         ],
       };
-    if (args[1] === "get-code-issue-artifact")
-      return args.at(-1) === patch.artifactId ? patchResponse : artifact;
+    if (args[1] === "get-code-issue-artifact") {
+      const response = [artifact, validation, patchResponse].find(
+        (item) => item.artifactId === args.at(-1),
+      );
+      if (response) return response;
+    }
     const id = args.at(-1);
     const detail =
       args[1] === "get-code-issue" && id
@@ -229,7 +235,7 @@ function awsFixture(provider: "github" | "gitlab" = "github", s3 = true) {
         {
           issue: {
             ...issue,
-            artifacts: [artifact, ...(!s3 ? [patchResponse] : [])],
+            artifacts: [artifact, validation, ...(!s3 ? [patchResponse] : [])],
           },
           findings: [first!, shared!],
         },
@@ -279,8 +285,6 @@ test.each([false, true])(
           ...args,
           "--issue-id",
           "issue1",
-          "--artifact-type",
-          "EVIDENCE",
         ],
       ],
       [
@@ -292,6 +296,17 @@ test.each([false, true])(
           "issue1",
           "--artifact-id",
           "evidence1",
+        ],
+      ],
+      [
+        [
+          "continuum",
+          "get-code-issue-artifact",
+          ...args,
+          "--issue-id",
+          "issue1",
+          "--artifact-id",
+          "validation1",
         ],
       ],
       [["continuum", "get-code-issue", ...args, "--issue-id", "issue2"]],

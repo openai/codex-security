@@ -1618,9 +1618,10 @@ SARIF compatibility, and the local preview.
 
 `import continuum ENVIRONMENT_ID --format json` writes one report to standard
 output after collecting every issue page and fetching each issue's linked
-findings. Install AWS CLI v2.38.5 or later outside the checkout. The command
-requires exactly one configured Git repository and records it in the report.
-It collects patches when Git is the only source.
+findings, prevalidation signals (`EVIDENCE`), and validation results
+(`VALIDATION_EVIDENCE`). Install AWS CLI v2.38.5 or later outside the checkout.
+The command requires exactly one configured Git repository and records it in the
+report. It collects patches when Git is the only source.
 S3 sources are allowed alongside that repository.
 Collection covers the whole environment. Pass the short
 Continuum environment ID. Optional

@@ -126,6 +126,36 @@ export function continuumEvidenceArtifact(
   };
 }
 
+export function continuumValidationArtifact() {
+  return {
+    artifactId: "validation1",
+    artifactType: "VALIDATION_EVIDENCE",
+    createdAt: "2026-01-02T00:02:00Z",
+    mediaType: "application/json",
+    producer: { agent: "ExampleValidator" },
+    body: {
+      validationEvidence: {
+        exploitable: "EXPLOITABLE",
+        terminalStatus: "COMPLETED",
+        flowVerdicts: [{ flowId: "flow1", verdict: "CONFIRMED" }],
+        attackFlowsConfirmed: ["flow1"],
+        exploitArtifact: {
+          payload: "GET /records HTTP/1.1",
+          httpMethod: "GET",
+          targetUrl: "https://example.invalid/records",
+          responseStatus: 200,
+          responseSnippet: '{"record":"example"}',
+          effect: "DATA_LEAKED",
+        },
+        perFindingResults: [
+          { findingId: "one", exploitable: "EXPLOITABLE" },
+          { findingId: "two", exploitable: "UNCERTAIN" },
+        ],
+      },
+    },
+  };
+}
+
 export function patchArtifact(artifactId: string, patch: string) {
   return {
     artifactId,

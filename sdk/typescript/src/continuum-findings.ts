@@ -395,16 +395,27 @@ function issueFindingEvidence(
   };
 }
 
+function issueEvidenceBody(artifact: Record<string, unknown>) {
+  const body = artifact["body"];
+  if (!isRecord(body)) return;
+  if (artifact["artifactType"] === "VALIDATION_EVIDENCE") {
+    if (isRecord(body["validationEvidence"]))
+      return { validationEvidence: body["validationEvidence"] };
+    if (typeof body["raw"] === "string") return { raw: body["raw"] };
+  }
+  const projection = body["prevalidationSignals"];
+  if (artifact["artifactType"] !== "EVIDENCE" || !isRecord(projection)) return;
+  const signals = array(
+    projection["signals"] ?? [],
+    "Continuum evidence signals",
+  ).map((signal) => record(signal, "Continuum evidence signal"));
+  return { prevalidationSignals: { ...projection, signals } };
+}
+
 function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
   return artifacts.flatMap((artifact) => {
-    const body = artifact["body"];
-    if (artifact["artifactType"] !== "EVIDENCE" || !isRecord(body)) return [];
-    const projection = body["prevalidationSignals"];
-    if (!isRecord(projection)) return [];
-    const signals = array(
-      projection["signals"] ?? [],
-      "Continuum evidence signals",
-    ).map((signal) => record(signal, "Continuum evidence signal"));
+    const body = issueEvidenceBody(artifact);
+    if (!body) return [];
     return [
       {
         artifactId: requiredText(
@@ -421,7 +432,7 @@ function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
         ...(artifact["producer"] != null && {
           producer: artifact["producer"],
         }),
-        body: { prevalidationSignals: { ...projection, signals } },
+        body,
       },
     ];
   });
@@ -460,7 +471,8 @@ function normalizeContinuumIssues(
         });
       const verdicts = new Set<string>();
       for (const artifact of evidenceArtifacts) {
-        for (const signal of artifact.body.prevalidationSignals.signals) {
+        for (const signal of artifact.body.prevalidationSignals?.signals ??
+          []) {
           const subject = signal["subjectRef"];
           const exploitability = signal["exploitability"];
           if (

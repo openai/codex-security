@@ -212,7 +212,6 @@ export async function collectContinuumIssues(
         "list-code-issue-artifacts",
         environmentArgs,
         ...issueArgs,
-        ...(includePatches ? [] : ["--artifact-type", "EVIDENCE"]),
       );
       if (
         Object.hasOwn(artifacts, "nextToken") ||
@@ -227,7 +226,11 @@ export async function collectContinuumIssues(
       )) {
         const summary = record(item, "Continuum issue artifact summary");
         const type = summary["artifactType"];
-        if (type !== "EVIDENCE" && !(includePatches && type === "PATCH"))
+        if (
+          type !== "EVIDENCE" &&
+          type !== "VALIDATION_EVIDENCE" &&
+          !(includePatches && type === "PATCH")
+        )
           continue;
         const artifactId = continuumId.parse(summary["artifactId"]);
         const artifact = await request(

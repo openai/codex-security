@@ -15,6 +15,7 @@ import {
   continuumIssueExport,
   continuumRepository,
   continuumSummary,
+  continuumValidationArtifact,
   patchArtifact,
 } from "./support/continuum-import-fixtures.js";
 
@@ -282,6 +283,7 @@ test("local Continuum issue import keeps evidence and reprojects ranges for Clou
         ...row.issue,
         artifacts: [
           continuumEvidenceArtifact(row.issue.issueId),
+          continuumValidationArtifact(),
           ...[big, small].map((patch) => ({
             artifactId: patch.artifactId,
             artifactType: "PATCH",
@@ -338,7 +340,10 @@ test("local Continuum issue import keeps evidence and reprojects ranges for Clou
       code: { snippet: detailed.vulnerableCode },
     },
     source_data: {
-      evidence_artifacts: [continuumEvidenceArtifact(row.issue.issueId)],
+      evidence_artifacts: [
+        continuumEvidenceArtifact(row.issue.issueId),
+        continuumValidationArtifact(),
+      ],
       patches: [
         { ...descriptor, contentOmitted: "cloud_evidence_limit" },
         small,
