@@ -11,7 +11,7 @@ import uuid
 from contextlib import closing
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 from urllib.parse import quote, unquote
 
 import pytest
@@ -146,7 +146,8 @@ def test_inspection_access_failure_preserves_fallback_tag(
     inspection, monkeypatch, message, tagged
 ) -> None:
     publication, payload, validated = inspection
-    path = Mock()
+    path = MagicMock(spec=Path)
+    path.__fspath__.return_value = "workbench.sqlite3"
     path.stat.side_effect = PermissionError("synthetic access failure")
     error = sqlite3.OperationalError(message)
     monkeypatch.setattr(publication, "os", SimpleNamespace(name="posix"))
