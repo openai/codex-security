@@ -7,6 +7,9 @@ import { bundledSeverityRubric } from "../src/severity-rubric.js";
 import { mockWorkbench, TestClient } from "./support/api-client.js";
 import { codexFactory, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { useTestPython } from "./support/python.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -28,7 +31,7 @@ for (const mode of ["standard", "deep"] as const) {
         CODEX_SECURITY_ENABLE_REMOTE_SEVERITY_RUBRIC:
           source === "bundled" ? undefined : "1",
       };
-      const python = Bun.which("python3") ?? Bun.which("python");
+      const python = pythonExecutable();
       if (!python) throw new Error("Python is required for this test.");
       const markdown = `Use this synthetic ${source} policy.`;
       const rubricPath = join(root, "policy.md");

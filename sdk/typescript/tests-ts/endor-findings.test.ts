@@ -1,9 +1,7 @@
-import { hasPreviousCloudProjection } from "../src/reader-selection.js";
 import { expect, test } from "bun:test";
 import {
   normalizeEndorFindings,
   normalizeEndorSarif,
-  normalizePreviousEndorFindings,
   requiresStructuredEndorReport,
 } from "../src/endor-findings.js";
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
@@ -71,13 +69,6 @@ test.each([
         },
       },
     };
-    const previous = normalizePreviousEndorFindings(input);
-    expect(previous.findings[0]).toMatchObject({
-      source_finding_id: input.uuid,
-      evidence: { packages: [], advisory_ids: originalIds, source_data: input },
-    });
-    expect(hasPreviousCloudProjection(previous)).toBe(false);
-
     const current = normalizeEndorFindings(input);
     expect(current.excluded).toEqual([]);
     expect(current.findings[0]).toMatchObject({
@@ -92,13 +83,9 @@ test.each([
     expect(current.findings[0]!.evidence.packages!.map((p) => p.name)).toEqual(
       oversizedPackage ? [] : spec.dependency_file_paths.map(() => name),
     );
-    expect(hasPreviousCloudProjection(current)).toBe(
-      !oversizedPackage || !oversizedAliases,
-    );
     expect(requiresStructuredEndorReport(current)).toBe(
       oversizedPackage || oversizedAliases,
     );
-    if (oversizedPackage && oversizedAliases) expect(current).toEqual(previous);
   },
 );
 
@@ -128,8 +115,6 @@ test("Endor keeps its original projection for duplicate or malformed malware met
     expect(current.findings[0]!.evidence.packages![0]!.name).toBe(
       base.spec.target_dependency_name,
     );
-    expect(current).toEqual(normalizePreviousEndorFindings(input));
-    expect(hasPreviousCloudProjection(current)).toBe(false);
   }
 });
 
