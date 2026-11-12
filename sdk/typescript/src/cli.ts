@@ -4671,7 +4671,7 @@ export async function main(
         },
       ],
       description:
-        "Read all AWS Continuum issues or collect one finding with its repository's patches.",
+        "Read all AWS Continuum issues or collect one finding with its matching validation evidence and patches.",
       hint: "Requires AWS CLI v2.38.5 or later installed outside the checkout. Bulk collection requires exactly one Git repository and allows S3 sources. For one finding, pass --finding-id and --source-root. The CLI checks for one Git repository and no S3 sources when --repository-name is omitted. Save --format json output for publish findings --provider continuum.",
       destructive: false,
       args: z.object({ environmentId: continuumEnvironmentId }),

@@ -639,26 +639,101 @@ test("retains status timestamps without inventing an update time from other AWS 
   );
 });
 
-test("Cloud projects packages within its limits and retains all AWS package evidence", () => {
+test("Cloud reprojects packages and retains selected finding validation without a patch", () => {
   const valid = Array.from({ length: 101 }, (_, i) => ({
     name: `package-${i}`,
   }));
   const finding = {
     ...continuumSummary(),
+    createdIssueId: "issue1",
     affectedPackages: [{ name: "界".repeat(200) }, ...valid],
   };
-  const cloud = normalize(finding);
+  const artifact = {
+    ...continuumValidationArtifact(),
+    body: {
+      validationEvidence: {
+        exploitable: "EXPLOITABLE",
+        sourceAnalysis: { summary: "Example proof" },
+      },
+    },
+  };
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const validationIssue = {
+    issueId,
+    issueArn,
+    findingIds: [finding.findingId],
+  };
+  const evidenceArtifacts = [
+    artifact,
+    { ...artifact, artifactId: "validation2", body: { raw: "Example proof" } },
+  ];
+  const report = { finding, evidenceArtifacts, validationIssue };
+  const cloud = normalize(report);
   expect(cloud.excluded).toEqual([]);
   expect(cloud.findings[0]!.evidence.packages?.map((pkg) => pkg.name)).toEqual(
     valid.slice(0, 100).map((pkg) => pkg.name),
   );
   expect(cloud.findings[0]!.evidence.source_data?.["finding"]).toEqual(finding);
   const local = normalizeContinuumFindings(
-    finding,
+    report,
     continuumRepository,
     "local",
   );
-  expect(local.findings[0]!.evidence.packages).toHaveLength(102);
+  const stored = local.findings[0]!;
+  expect(stored.evidence.packages).toHaveLength(102);
+  for (const evidence of [stored.evidence, cloud.findings[0]!.evidence]) {
+    expect(evidence.source_data?.["evidence_artifacts"]).toEqual(
+      evidenceArtifacts,
+    );
+    expect(evidence.source_data?.["validation_issue"]).toEqual(validationIssue);
+  }
+  expect(
+    projectStoredFinding(
+      {
+        provider: "continuum",
+        sourceFindingId: stored.source_finding_id,
+        evidence: stored.evidence,
+      },
+      [],
+    ).findings,
+  ).toEqual(cloud.findings);
+});
+
+test("a selected capture keeps its patches and omits issue-wide proof without a matching single-finding issue", () => {
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const finding = { ...continuumDetail(), duplicateOfIssueId: issueId };
+  const report = { finding, patches: [patchArtifact("firstpatch", "+ok\n")] };
+  const expected = normalizeContinuumFindings(
+    report,
+    continuumRepository,
+    "local",
+  );
+  expect(expected.excluded).toEqual([]);
+  expect(expected.findings[0]!.evidence.source_data?.["patches"]).toEqual(
+    report.patches,
+  );
+  const artifact = continuumValidationArtifact();
+  const evidenceArtifacts = [
+    { ...artifact, body: { validationEvidence: { exploitable: "UNCERTAIN" } } },
+    { ...artifact, artifactId: "validation2", body: { raw: "Example proof" } },
+  ];
+  const single = { issueArn, issueId, findingIds: [finding.findingId] };
+  for (const validationIssue of [
+    undefined,
+    {
+      ...single,
+      issueId: "other",
+      issueArn: issueArn.replace(issueId, "other"),
+    },
+    { ...single, issueArn: issueArn.replace("us-east-1", "us-west-2") },
+    { ...single, findingIds: ["two"] },
+    { ...single, findingIds: [finding.findingId, "two"] },
+  ]) {
+    const capture = { ...report, evidenceArtifacts, validationIssue };
+    expect(
+      normalizeContinuumFindings(capture, continuumRepository, "local"),
+    ).toEqual(expected);
+  }
 });
 
 test.each(["plain finding", "patch capture"])(
@@ -748,9 +823,12 @@ test("local replay enriches one unassessed occurrence when the detailed record a
     const previous = await createAndReplayFinding(fixture);
     const finding = { ...continuumDetail(), createdIssueId: "oneissue" };
     const patches = [patchArtifact("firstpatch", "+checkedExample(input)\n")];
+    const artifact = continuumValidationArtifact();
     await writeFile(
       fixture.file,
-      gzipSync(JSON.stringify({ finding, patches })),
+      gzipSync(
+        JSON.stringify({ finding, patches, evidenceArtifacts: [artifact] }),
+      ),
     );
     const updated = await updateStoredFinding(fixture, previous);
     const normalized = normalize(continuumDetail());
@@ -766,6 +844,19 @@ test("local replay enriches one unassessed occurrence when the detailed record a
     expect(updated.provider).toBe("continuum");
     expect(updated.evidence.details?.scanner_verdict).toBe("TRUE_POSITIVE");
     expect(updated.evidence.source_data?.["patches"]).toEqual(patches);
+    expect(updated.evidence.source_data?.["evidence_artifacts"]).toEqual([
+      {
+        ...artifact,
+        body: {
+          validationEvidence: {
+            exploitable: "EXPLOITABLE",
+            perFindingResults: [
+              { findingId: finding.findingId, exploitable: "EXPLOITABLE" },
+            ],
+          },
+        },
+      },
+    ]);
     await expect(
       fixture.prepare({
         sourceRepositoryUrl: "https://github.com/example/other",

@@ -1630,12 +1630,14 @@ credential and Region selection. Preview and import the report separately
 with `publish findings FILE --provider continuum`. Pass
 `--source-repository-url URL` when the report has no saved repository URL.
 
-For one finding and its generated patches, add `--finding-id FINDING_ID` and
+For one finding, its matching validation evidence, and its generated patches, add `--finding-id FINDING_ID` and
 `--source-root CHECKOUT` with the absolute checkout path. The CLI uses
 `GetEnvironment` to verify that the environment has exactly one Git repository
 and no S3 sources before including unnamed patches. Pass
 `--repository-name AWS_SOURCE_NAME` for other environments to keep patches
-with that exact AWS source name. This mode accepts the same AWS profile and
+with that exact AWS source name. Validation is matched by AWS finding ID. When a
+validation artifact has no per-finding breakdown, the CLI uses `GetCodeIssue` to
+check that the issue covers just the selected finding. This mode accepts the same AWS profile and
 Region overrides and writes the finding-based JSON format for `publish findings`.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 

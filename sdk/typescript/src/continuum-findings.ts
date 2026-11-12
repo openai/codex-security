@@ -17,6 +17,7 @@ import {
   awsTimestampSeconds,
   concreteVersion,
   normalizeRecords,
+  optionalArray,
   scannerJsonReader,
   record,
   repositoryFilePath,
@@ -195,7 +196,7 @@ function reportRows(input: unknown) {
     "finding" in document
   ))
     throw new Error(
-      "Expected a Continuum ListCodeFindings, GetCodeFinding, or finding with patch artifacts.",
+      "Expected a Continuum ListCodeFindings, GetCodeFinding, or finding with artifacts.",
     );
   const summary = "items" in document;
   return {
@@ -204,7 +205,7 @@ function reportRows(input: unknown) {
   };
 }
 
-function isPatchCapture(value: unknown): value is Record<string, unknown> {
+function isFindingCapture(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && !("findingArn" in value) && "finding" in value;
 }
 
@@ -412,29 +413,72 @@ function issueEvidenceBody(artifact: Record<string, unknown>) {
   return { prevalidationSignals: { ...projection, signals } };
 }
 
+function issueEvidenceDescriptor(artifact: Record<string, unknown>) {
+  return {
+    artifactId: requiredText(
+      artifact["artifactId"],
+      "Continuum evidence artifact ID",
+    ),
+    artifactType: artifact["artifactType"],
+    ...(artifact["createdAt"] != null && { createdAt: artifact["createdAt"] }),
+    ...(artifact["mediaType"] != null && { mediaType: artifact["mediaType"] }),
+    ...(artifact["producer"] != null && { producer: artifact["producer"] }),
+  };
+}
+
+export function singleFindingValidationIssue(
+  issue: unknown,
+  issueId: unknown,
+  finding: ReturnType<typeof findingIdentity>,
+) {
+  if (!isRecord(issue) || typeof issueId !== "string") return null;
+  const arn = `${finding.scope}/code-issues/${issueId}`;
+  const ids = issue["findingIds"];
+  if (
+    issue["issueArn"] !== arn ||
+    issue["issueId"] !== issueId ||
+    !Array.isArray(ids) ||
+    ids.length !== 1 ||
+    ids[0] !== finding.id
+  )
+    return null;
+  return { issueArn: arn, issueId, findingIds: [finding.id] };
+}
+
+export function selectFindingValidationArtifact(
+  artifact: Record<string, unknown>,
+  findingId: unknown,
+) {
+  if (artifact["artifactType"] !== "VALIDATION_EVIDENCE") return;
+  const body = issueEvidenceBody(artifact);
+  if (!body) return;
+  const results = body.validationEvidence?.["perFindingResults"];
+  if (results === undefined) return { scope: "issue", artifact };
+  // A bundle's top-level proof can belong to a different finding.
+  const matches = array(results, "Continuum per-finding results")
+    .map((value) => record(value, "Continuum per-finding result"))
+    .filter((result) => result["findingId"] === findingId);
+  if (matches.length === 0) return;
+  return {
+    scope: "finding",
+    artifact: {
+      ...issueEvidenceDescriptor(artifact),
+      body: {
+        validationEvidence: {
+          ...(matches.length === 1 && {
+            exploitable: matches[0]!["exploitable"],
+          }),
+          perFindingResults: matches,
+        },
+      },
+    },
+  };
+}
+
 function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
   return artifacts.flatMap((artifact) => {
     const body = issueEvidenceBody(artifact);
-    if (!body) return [];
-    return [
-      {
-        artifactId: requiredText(
-          artifact["artifactId"],
-          "Continuum evidence artifact ID",
-        ),
-        artifactType: artifact["artifactType"],
-        ...(artifact["createdAt"] != null && {
-          createdAt: artifact["createdAt"],
-        }),
-        ...(artifact["mediaType"] != null && {
-          mediaType: artifact["mediaType"],
-        }),
-        ...(artifact["producer"] != null && {
-          producer: artifact["producer"],
-        }),
-        body,
-      },
-    ];
+    return body ? [{ ...issueEvidenceDescriptor(artifact), body }] : [];
   });
 }
 
@@ -676,20 +720,43 @@ export function normalizeContinuumFindings(
   const output = normalizeRecords(
     rows,
     (value) => {
-      const capture = !summary && isPatchCapture(value) ? value : undefined;
+      const capture = !summary && isFindingCapture(value) ? value : undefined;
       const row = record(
         capture ? capture["finding"] : value,
         "Continuum finding",
       );
-      const patches = capture
-        ? array(capture["patches"], "Continuum patches").map(readPatch)
-        : [];
-      if (
-        patches.length &&
-        !(text(row["createdIssueId"]) || text(row["duplicateOfIssueId"]))
-      )
+      const patches = optionalArray(
+        capture?.["patches"],
+        "Continuum patches",
+      ).map(readPatch);
+      const linkedIssue =
+        text(row["createdIssueId"]) ?? text(row["duplicateOfIssueId"]);
+      let validationIssue:
+        ReturnType<typeof singleFindingValidationIssue> | undefined;
+      const evidenceArtifacts = issueEvidenceArtifacts(
+        optionalArray(
+          capture?.["evidenceArtifacts"],
+          "Continuum evidence artifacts",
+        ).flatMap((value) => {
+          const selected = selectFindingValidationArtifact(
+            record(value, "Continuum validation artifact"),
+            row["findingId"],
+          );
+          if (!selected) return [];
+          if (selected.scope === "issue") {
+            validationIssue ??= singleFindingValidationIssue(
+              capture?.["validationIssue"],
+              linkedIssue,
+              findingIdentity(row),
+            );
+            if (!validationIssue) return [];
+          }
+          return [selected.artifact];
+        }),
+      );
+      if ((patches.length || evidenceArtifacts.length) && !linkedIssue)
         throw new Error(
-          "Continuum patches require a finding linked to an issue.",
+          `Continuum ${patches.length ? "patches" : "validation artifacts"} require a finding linked to an issue.`,
         );
       if (
         row["type"] !== "CONTINUUM_CODE_VULN" &&
@@ -757,6 +824,10 @@ export function normalizeContinuumFindings(
           format,
           sourceRepositoryUrl: repository,
           finding: structuredClone(row),
+          ...(validationIssue && { validation_issue: validationIssue }),
+          ...(evidenceArtifacts.length && {
+            evidence_artifacts: structuredClone(evidenceArtifacts),
+          }),
         },
       };
       const updatedAt = statusUpdatedAt(row["statusUpdatedAt"]);
@@ -793,7 +864,7 @@ export function normalizeContinuumFindings(
     },
     (value) => {
       const { arn, scope } = findingIdentity(
-        !summary && isPatchCapture(value) ? value["finding"] : value,
+        !summary && isFindingCapture(value) ? value["finding"] : value,
       );
       scopes.add(scope);
       return arn;
