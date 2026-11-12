@@ -1,6 +1,10 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { environmentEntry } from "./auth.js";
+import { bundledPluginRoot } from "./bundled-plugin.js";
 import {
   continuumIssueFormat,
   findingIdentity,
@@ -10,7 +14,7 @@ import { CodexSecurityError } from "./errors.js";
 import { localGitProtectionRoots } from "./local-git-metadata.js";
 import { array, record } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import { isWithin, resolveTrustedExecutable } from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const continuumId = z
@@ -104,21 +108,74 @@ async function singleRepositorySource(
   };
 }
 
+const awsLaunch = z.object({
+  executable: z.string(),
+  cwd: z.string(),
+  forward: z.array(z.string()),
+  paths: z.record(z.string(), z.string()),
+});
+
 async function awsCommand({
   cwd,
   environment,
   signal,
 }: ContinuumCollectionOptions): Promise<AwsCommand> {
   const roots = await localGitProtectionRoots(cwd, environment, signal);
-  const aws = await resolveTrustedExecutable("aws", environment, roots);
-  if (!aws)
-    throw new CodexSecurityError(
-      "Install AWS CLI v2.38.5 or later outside the checkout and sign in to the Continuum account.",
+  const candidates =
+    process.platform === "win32"
+      ? ["python", "python3"]
+      : ["python3", "python"];
+  let python: string | undefined;
+  for (const candidate of candidates) {
+    const installed = await resolveTrustedExecutable(
+      candidate,
+      environment,
+      roots,
     );
+    if (!installed) continue;
+    const executable = await realpath(installed.executable);
+    if (roots.some((root) => isWithin(root, executable))) continue;
+    python = executable;
+    break;
+  }
+  if (!python)
+    throw new CodexSecurityError(
+      "Install Python 3.10 or later outside the checkout to import Continuum issues.",
+    );
+
+  const helper = join(
+    await bundledPluginRoot(),
+    "skills",
+    "publish-findings",
+    "scripts",
+    "prepare_continuum_aws.py",
+  );
+  const prepare = execFile(python, ["-I", "-S", "-X", "utf8", helper], {
+    cwd: dirname(python),
+    env: {
+      PATH: dirname(python),
+      SystemRoot: environmentEntry(environment, "SystemRoot"),
+      WINDIR: environmentEntry(environment, "WINDIR"),
+    },
+    signal,
+    windowsHide: true,
+  });
+  // The execFile result carries any startup or validation failure.
+  prepare.child.stdin?.on("error", () => {});
+  prepare.child.stdin?.end(
+    JSON.stringify({ cwd, environment, protectedRoots: roots }),
+  );
+  const aws = awsLaunch.parse(JSON.parse((await prepare).stdout));
+  const awsEnvironment = {
+    ...Object.fromEntries(
+      aws.forward.map((name) => [name, environmentEntry(environment, name)]),
+    ),
+    ...aws.paths,
+  };
   return async (args) => {
     const command = execFile(aws.executable, args, {
-      cwd,
-      env: aws.environment,
+      cwd: aws.cwd,
+      env: awsEnvironment,
       signal,
       maxBuffer: Infinity,
       windowsHide: true,

@@ -4658,7 +4658,7 @@ export async function main(
       examples: [{ args: { environmentId: "abc123" } }],
       description:
         "Read all AWS Continuum issues, linked findings, evidence, and available Git-only patches.",
-      hint: "Requires exactly one configured Git repository, AWS CLI v2.38.5 or later, and Continuum read permissions. S3 sources are allowed alongside the Git repository. Save the complete --format json output for publish findings --provider continuum.",
+      hint: "Requires exactly one configured Git repository, Continuum read permissions, and AWS CLI v2.38.5 and Python 3.10 or later installed outside the checkout. S3 sources are allowed alongside the Git repository. Save the complete --format json output for publish findings --provider continuum.",
       destructive: false,
       args: z.object({ environmentId: continuumEnvironmentId }),
       options: z.object({

@@ -24,8 +24,8 @@ report=/private/path/continuum.json
 
 ### Export issues from an environment
 
-Use AWS CLI v2.38.5 or later and sign in to the environment's AWS account and
-Region. The export needs permissions for `GetEnvironment`, `GetIntegration`,
+Use AWS CLI v2.38.5 or later and Python 3.10 or later installed outside the
+checkout. Sign in to the environment's AWS account and Region. The export needs permissions for `GetEnvironment`, `GetIntegration`,
 `ListCodeIssues`, `GetCodeIssue`, `GetCodeFinding`, `ListCodeIssueArtifacts`,
 and `GetCodeIssueArtifact`.
 [AWS Continuum permissions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_continuum.html)
@@ -44,7 +44,9 @@ publishing, verify that the issues belong to the recorded repository.
 Use `--aws-profile PROFILE` to select AWS credentials, including a profile
 that assumes a role in the environment's account. Use `--aws-region REGION`
 to select the environment's Region. When omitted, the AWS CLI uses its usual
-credential and Region settings.
+credential and Region settings. Keep AWS profiles, aliases, and custom models
+outside the checkout. The CLI uses the same AWS launch checks as the
+selected-finding collector.
 
 ```sh
 report=

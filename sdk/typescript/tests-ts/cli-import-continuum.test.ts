@@ -1,9 +1,12 @@
 import { expect, mock, test } from "bun:test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import { main } from "../src/cli.js";
 import { collectContinuumIssues } from "../src/continuum-collector.js";
 import { normalizeContinuumFindings } from "../src/continuum-findings.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import {
   continuumEvidenceArtifact,
   continuumIssueExport,
@@ -12,6 +15,40 @@ import {
 } from "./support/continuum-import-fixtures.js";
 
 const command = ["import", "continuum", "example", "--format", "json"];
+
+test.skipIf(process.platform === "win32")(
+  "launches AWS outside the checkout with vetted settings",
+  async () => {
+    await using fixture = await scopedTemporaryDirectory("continuum-aws-");
+    const cwd = join(fixture.path, "checkout");
+    const tools = join(fixture.path, "tools");
+    const observed = join(fixture.path, "observed");
+    await mkdir(cwd);
+    await mkdir(tools);
+    await writeFile(
+      join(tools, "aws"),
+      [
+        "#!/bin/sh",
+        'printf \'%s\\n\' "$PWD" "$AWS_REGION" "$UNRELATED_SETTING" > "$AWS_TEST_OBSERVED"',
+        "printf '{}\\n'",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const environment = {
+      PATH: [tools, process.env["PATH"]].filter(Boolean).join(delimiter),
+      HOME: fixture.path,
+      AWS_REGION: "us-east-1",
+      AWS_TEST_OBSERVED: observed,
+      UNRELATED_SETTING: "ignore me",
+    };
+    await expect(
+      collectContinuumIssues({ environmentId: "example", cwd, environment }),
+    ).rejects.toThrow("requires exactly one configured Git repository");
+    expect(await readFile(observed, "utf8")).toBe(`${tools}\nus-east-1\n\n`);
+  },
+);
 
 function awsFixture(provider: "github" | "gitlab" = "github", s3 = true) {
   const report = continuumIssueExport();
