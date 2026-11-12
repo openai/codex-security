@@ -412,12 +412,13 @@ test("Cloud confirmation verifies the retained evidence, account and assigned en
               ]
             : [],
       };
-      return Response.json(
-        page,
-        repositories
-          ? { headers: { "Codex-Security-Import-Scope": "personal" } }
-          : undefined,
-      );
+      return Response.json(page, {
+        headers: {
+          "Content-Type":
+            "application/vnd.openai.codex-security.scanner-imports.v1+json",
+          ...(repositories && { "Codex-Security-Import-Scope": "personal" }),
+        },
+      });
     },
   };
   const preview = await prepareSonarImport(selection, deps);

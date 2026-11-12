@@ -1673,9 +1673,14 @@ checks the current sign-in without changing credential storage.
 
 ### Review the Cloud destination
 
-Run the command with `--dry-run --format json`. Check `accountId`,
-`cloudApiUrl`, `destination` and `source.source_key`. Compare `findings` and
-`excluded` with the records you meant to import.
+Run the command with `--dry-run --format json`. The CLI checks what your Cloud
+deployment supports. A personal account publishes to an authorized repository.
+A workspace member can import to their private inbox when the deployment
+supports that scanner. Older deployments support Wiz, Endor and Snyk repository
+imports and the private-inbox providers they advertise.
+
+Check `accountId`, `cloudApiUrl`, `destination` and `source.source_key`. Compare
+`findings` and `excluded` with the records you meant to import.
 
 - **Private findings inbox.** If the preview includes `privateImport`, the
   report goes to your inbox. The repository and connector identify the

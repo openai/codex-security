@@ -39,7 +39,11 @@ function cloudCatalog(environment: NodeJS.ProcessEnv, repositoryUrl: string) {
         ],
       };
       return Response.json(page, {
-        headers: { "Codex-Security-Import-Scope": "personal" },
+        headers: {
+          "Content-Type":
+            "application/vnd.openai.codex-security.scanner-imports.v1+json",
+          "Codex-Security-Import-Scope": "personal",
+        },
       });
     },
   };

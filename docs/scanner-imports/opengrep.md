@@ -54,7 +54,9 @@ record. [Imported evidence](schema-guide.md)
 The title is the rule ID and the description is the rule's message. The reader
 groups traces at the same occurrence and keeps snippets, ignored state and
 fingerprints when present. OpenGrep levels such as `ERROR` describe rule
-matches, so the vulnerability severity is `unknown`. Local and Cloud imports retain unscored findings.
+matches, so the vulnerability severity is `unknown`. Local imports retain
+unscored findings. For Cloud, check the preview’s exclusions if the destination
+requires a reported severity.
 
 ## Diagnostics and coverage
 

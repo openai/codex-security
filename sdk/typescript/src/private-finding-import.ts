@@ -7,6 +7,10 @@ import {
   requiresStructuredEndorReport,
 } from "./endor-findings.js";
 import type { ExternalFinding } from "./external-findings.js";
+import {
+  SCANNER_IMPORT_MEDIA_TYPE,
+  importResponseMediaType,
+} from "./external-import-contract.js";
 import type { ImportSource } from "./external-import-models.js";
 import { canonicalJson, isRecord } from "./record.js";
 import { normalizeWizJson } from "./wiz-findings.js";
@@ -18,6 +22,20 @@ const privateFormat = z.enum([
   "wiz.vulnerability_json.v1",
 ]);
 export type PrivateImportFormat = z.infer<typeof privateFormat>;
+
+const jobVersion = z.union([z.literal(2), z.literal(3)]);
+export type PrivateJobVersion = z.infer<typeof jobVersion>;
+export const privateJobVersions: Partial<
+  Record<ImportSource["provider"], PrivateJobVersion>
+> = {
+  inspector: 2,
+  continuum: 2,
+  blackduck: 3,
+  checkmarx: 3,
+  sonar: 3,
+  trivy: 3,
+  veracode: 3,
+};
 const fileId = z.string().regex(/^aifile_[0-9a-f]{32}$/u);
 const contextSchema = z.object({
   object: z.literal("security.finding_import_context"),
@@ -223,6 +241,7 @@ const checkpointSchema = z.object({
   repository: z.object({ id: z.string(), repo_connector_id: z.string() }),
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
+  jobApiVersion: jobVersion.optional(),
   approvedRepositoryUrl: z.string(),
   approvedRepositoryPlatform: z.literal("other").optional(),
   fileId: fileId.optional(),
@@ -315,7 +334,11 @@ export function privateImportClient(
   fetch: (url: string, options: RequestInit) => Promise<Response>,
   signal?: AbortSignal,
 ) {
-  async function request(path: string, body?: FormData | string) {
+  async function request(
+    path: string,
+    body?: FormData | string,
+    mediaType = "application/json",
+  ) {
     const timeout = AbortSignal.timeout(body === undefined ? 30_000 : 60_000);
     const response = await fetch(`${base}${path}`, {
       method: body === undefined ? "GET" : "POST",
@@ -324,10 +347,8 @@ export function privateImportClient(
       headers: {
         Authorization: `Bearer ${credentials.access_token}`,
         "ChatGPT-Account-ID": credentials.account_id,
-        Accept: "application/json",
-        ...(typeof body === "string"
-          ? { "Content-Type": "application/json" }
-          : {}),
+        Accept: mediaType,
+        ...(typeof body === "string" ? { "Content-Type": mediaType } : {}),
       },
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
@@ -348,6 +369,13 @@ export function privateImportClient(
         message,
       );
     }
+    if (
+      mediaType === SCANNER_IMPORT_MEDIA_TYPE &&
+      importResponseMediaType(response) !== SCANNER_IMPORT_MEDIA_TYPE
+    )
+      throw new CodexSecurityError(
+        "Cloud returned an unexpected media type for the private import job.",
+      );
     return response;
   }
   return {
@@ -409,13 +437,23 @@ export function privateImportClient(
         source: ImportSource;
         repository: { id: string; repo_connector_id: string };
         jobId?: string;
+        apiVersion: "current" | 1 | PrivateJobVersion;
       },
       accepted: (id: string) => Promise<void>,
     ) {
-      const jobs = "/finding-imports/jobs";
+      const { apiVersion } = input;
+      const prefix =
+        apiVersion === 2 || apiVersion === 3 ? `/v${apiVersion}` : "";
+      const jobs = prefix + "/finding-imports/jobs";
+      const mediaType =
+        apiVersion === "current"
+          ? SCANNER_IMPORT_MEDIA_TYPE
+          : "application/json";
+      const readJob = (id: string) =>
+        request(`${jobs}/${id}`, undefined, mediaType);
       let id = input.jobId;
       let response = id
-        ? await request(`${jobs}/${id}`)
+        ? await readJob(id)
         : await request(
             jobs,
             JSON.stringify({
@@ -435,6 +473,7 @@ export function privateImportClient(
                 },
               ],
             }),
+            mediaType,
           );
       for (;;) {
         const job = jobSchema.parse(await response.json());
@@ -462,7 +501,7 @@ export function privateImportClient(
           undefined,
           { signal },
         );
-        response = await request(`${jobs}/${id}`);
+        response = await readJob(id);
       }
     },
   };

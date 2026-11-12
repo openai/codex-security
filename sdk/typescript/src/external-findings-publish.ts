@@ -16,6 +16,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { isProxy } from "node:util/types";
 import {
   privateImportClient,
+  privateJobVersions,
+  type PrivateJobVersion,
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
@@ -116,6 +118,8 @@ import {
 } from "./external-findings.js";
 import {
   canonicalNumber,
+  SCANNER_IMPORT_MEDIA_TYPE,
+  importResponseMediaType,
   cloudRepositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
@@ -1131,8 +1135,18 @@ async function preparePublicationInput(
     (() => readCloudCredentials(environment, dependencies.signal))
   )();
   let canStartJob = false;
+  const legacyRepository = ["wiz", "endor", "snyk"].includes(options.provider);
+  const legacyUnversionedJob =
+    legacyRepository ||
+    options.provider === "github" ||
+    options.provider === "semgrep";
   let repositorySeverities: string[] | undefined;
   let importScope: "personal" | "workspace" | undefined;
+  let importMedia: string | undefined;
+  const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
+  const providerJobVersion = privateJobVersions[options.provider];
+  const requestedJobVersion = String(providerJobVersion ?? 2);
+  let legacyJobVersion: PrivateJobVersion | undefined;
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1141,6 +1155,9 @@ async function preparePublicationInput(
     // Allow upload and response transport around the server's publication budget.
     const timeout = AbortSignal.timeout(body ? 60_000 : 30_000);
     const repositoryCatalog = endpoint.startsWith("/repositories?");
+    const accept = repositoryCatalog
+      ? `${SCANNER_IMPORT_MEDIA_TYPE}, application/json;q=0.9`
+      : (importMedia ?? SCANNER_IMPORT_MEDIA_TYPE);
     const response = await (dependencies.fetch ?? globalThis.fetch)(
       `${cloudApiUrl}${endpoint}`,
       {
@@ -1148,8 +1165,9 @@ async function preparePublicationInput(
         headers: {
           Authorization: `Bearer ${credentials.access_token}`,
           "ChatGPT-Account-ID": credentials.account_id,
-          Accept: "application/json",
-          ...(body ? { "Content-Type": "application/json" } : {}),
+          Accept: accept,
+          ...(repositoryCatalog && { [jobVersionHeader]: requestedJobVersion }),
+          ...(body ? { "Content-Type": accept } : {}),
         },
         ...(body ? { body: JSON.stringify(body) } : {}),
         redirect: "error",
@@ -1183,19 +1201,48 @@ async function preparePublicationInput(
       repositorySeverities = advertised(
         "Codex-Security-Repository-Import-Severities",
       );
-      canStartJob =
-        advertised("Codex-Security-Private-Import-Providers")?.includes(
-          options.provider,
-        ) ?? false;
-      const scope = response.headers.get("Codex-Security-Import-Scope");
+      const privateProviders = advertised(
+        "Codex-Security-Private-Import-Providers",
+      );
+      const media = importResponseMediaType(response);
+      const declaredScope = response.headers.get("Codex-Security-Import-Scope");
+      let scope = declaredScope;
+      if (media === "application/json") {
+        // Released catalogs advertise private providers only for workspace accounts.
+        if (privateProviders) scope = "workspace";
+        else if (repositorySeverities?.some(Boolean)) scope = "personal";
+        else scope = null;
+        if (declaredScope !== null && declaredScope !== scope) scope = null;
+      }
       if (
+        (media !== SCANNER_IMPORT_MEDIA_TYPE && media !== "application/json") ||
         (scope !== "personal" && scope !== "workspace") ||
-        (importScope !== undefined && scope !== importScope)
+        (importScope !== undefined &&
+          (scope !== importScope || media !== importMedia))
       )
         throw new CodexSecurityError(
-          "Cloud returned an invalid import scope for this account.",
+          "Cloud returned an invalid import scope or representation for this account.",
         );
       importScope = scope;
+      importMedia = media;
+      legacyJobVersion =
+        response.headers.get(jobVersionHeader) === requestedJobVersion
+          ? providerJobVersion
+          : undefined;
+      canStartJob = privateProviders?.includes(options.provider) ?? false;
+      if (
+        media === "application/json" &&
+        !legacyUnversionedJob &&
+        !legacyJobVersion
+      )
+        canStartJob = false;
+    } else if (
+      importMedia === SCANNER_IMPORT_MEDIA_TYPE &&
+      importResponseMediaType(response) !== importMedia
+    ) {
+      throw new CodexSecurityError(
+        "Cloud returned a different scanner import representation. Retry the approved selection.",
+      );
     }
     return response.json();
   }
@@ -1502,11 +1549,27 @@ async function preparePublicationInput(
     parsePrivateCheckpoint(await readOptionalFile(privatePath));
   const privateSaved = await readPrivate();
   const usePrivateImport = importScope === "workspace";
+  if (
+    !usePrivateImport &&
+    importMedia === "application/json" &&
+    !legacyRepository
+  )
+    throw new CodexSecurityError(
+      "Repository import is unavailable for this provider on this Cloud deployment.",
+    );
   if ((usePrivateImport && saved) || (!usePrivateImport && privateSaved))
     throw new CodexSecurityError(
       "The saved import belongs to a different Cloud destination. Use the account and scope shown in its preview.",
     );
-  if (usePrivateImport && !canStartJob && !privateSaved)
+  if (
+    usePrivateImport &&
+    !canStartJob &&
+    (!privateSaved ||
+      (importMedia === "application/json" &&
+        !legacyUnversionedJob &&
+        !privateSaved.jobApiVersion &&
+        !legacyJobVersion))
+  )
     throw new CodexSecurityError(
       "Private findings import is unavailable for this account or provider.",
     );
@@ -1889,18 +1952,29 @@ async function preparePublicationInput(
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          const checkpoint = active ?? {
-            ...binding,
-            approvedRepositoryUrl: destination.url,
-            approvedRepositoryPlatform:
-              hostedSource?.github === false ? ("other" as const) : undefined,
-            uploadRequestId: randomUUID(),
-            jobRequestId: randomUUID(),
-            fileId: undefined,
-            jobId: undefined,
-            receipt: undefined,
-            previousReceipt: retrying ? stored?.receipt : undefined,
-          };
+          const negotiatedLegacyJobVersion =
+            importMedia === "application/json" ? legacyJobVersion : undefined;
+          const checkpoint = active
+            ? {
+                ...active,
+                jobApiVersion:
+                  active.jobApiVersion ?? negotiatedLegacyJobVersion,
+              }
+            : {
+                ...binding,
+                approvedRepositoryUrl: destination.url,
+                approvedRepositoryPlatform:
+                  hostedSource?.github === false
+                    ? ("other" as const)
+                    : undefined,
+                uploadRequestId: randomUUID(),
+                jobRequestId: randomUUID(),
+                jobApiVersion: negotiatedLegacyJobVersion,
+                fileId: undefined,
+                jobId: undefined,
+                receipt: undefined,
+                previousReceipt: retrying ? stored?.receipt : undefined,
+              };
           const result: ExternalPublicationResult = {
             cloudApiUrl: preview.cloudApiUrl,
             status: "interrupted",
@@ -1941,7 +2015,8 @@ async function preparePublicationInput(
             const savedReceipt =
               checkpoint.receipt ?? checkpoint.previousReceipt;
             if (savedReceipt) acknowledge(savedReceipt);
-            if (!active) await writeAtomicJson(privatePath, checkpoint);
+            if (!active || active.jobApiVersion !== checkpoint.jobApiVersion)
+              await writeAtomicJson(privatePath, checkpoint);
             if (!checkpoint.fileId) {
               progress({ phase: "uploading", completed: 0 });
               checkpoint.fileId = await client.upload({
@@ -1962,6 +2037,10 @@ async function preparePublicationInput(
                 source,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
+                apiVersion:
+                  importMedia === SCANNER_IMPORT_MEDIA_TYPE
+                    ? "current"
+                    : (checkpoint.jobApiVersion ?? 1),
               },
               async (id) => {
                 checkpoint.jobId = id;

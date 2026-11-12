@@ -148,6 +148,9 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
+const scannerMediaType =
+  "application/vnd.openai.codex-security.scanner-imports.v1+json";
+const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
 const scopeHeader = "Codex-Security-Import-Scope";
 const providerHeader = "Codex-Security-Private-Import-Providers";
 const options = {
@@ -531,6 +534,7 @@ async function fixture(
     brokenReadback: false,
     throttle: false,
     catalogReads: 0,
+    catalogMediaType: scannerMediaType,
     catalogHeaders: { [scopeHeader]: "personal" } as Record<string, string>,
     sourceLookups: [] as string[],
     postBudget: Infinity,
@@ -547,7 +551,9 @@ async function fixture(
     import_environment_id: state.environmentId,
   });
   function json(response: ServerResponse, value: unknown, status = 200) {
-    response.writeHead(status, { "Content-Type": "application/json" });
+    if (!response.hasHeader("Content-Type"))
+      response.setHeader("Content-Type", "application/json");
+    response.writeHead(status);
     response.end(JSON.stringify(value));
   }
   const server = createServer(async (incoming, response) => {
@@ -557,6 +563,10 @@ async function fixture(
       const url = new URL(incoming.url!, "http://localhost");
       if (url.pathname.endsWith("/repositories")) {
         state.catalogReads++;
+        expect(incoming.headers.accept).toBe(
+          scannerMediaType + ", application/json;q=0.9",
+        );
+        response.setHeader("Content-Type", state.catalogMediaType);
         for (const [name, value] of Object.entries(state.catalogHeaders))
           response.setHeader(name, value);
         return json(response, {
@@ -566,6 +576,10 @@ async function fixture(
           next: null,
         });
       }
+      expect(incoming.headers.accept).toBe(state.catalogMediaType);
+      if (incoming.method === "POST")
+        expect(incoming.headers["content-type"]).toBe(state.catalogMediaType);
+      response.setHeader("Content-Type", state.catalogMediaType);
       if (url.pathname.endsWith("/source_reports")) {
         const id = url.searchParams.get("source_finding_id")!;
         state.sourceLookups.push(id);
@@ -1189,7 +1203,7 @@ test.each([
             mode === "manifest change" ? "different.json" : `./${path}`;
           if (mode === "raw change")
             report.evidence.source_data.original_path = `./${path}`;
-          return Response.json(report);
+          return Response.json(report, { headers: response.headers });
         },
       });
     const first = await prepare();
@@ -1590,6 +1604,7 @@ async function privateUploadFixture(
         jobs.push(job);
         return Response.json(
           privateJobReceipt(job, "import_" + "b".repeat(32)),
+          { headers: { "Content-Type": scannerMediaType } },
         );
       }
       if (pathname.endsWith("/finding-imports/files")) {
@@ -5917,9 +5932,7 @@ test.each([false, true])(
         if (init.method !== "POST" || !response.ok) return response;
         const receipt = (await response.json()) as FindingImportReceipt;
         receipt.results.reverse();
-        return new Response(JSON.stringify(receipt), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return Response.json(receipt, { headers: response.headers });
       },
     };
     let prepared = await prepareExternalPublication(f.file, options, deps);
@@ -5960,9 +5973,7 @@ test.each(["duplicate", "missing", "unexpected"])(
         if (invalid === "missing") receipt.results.pop();
         if (invalid === "unexpected")
           receipt.results[0]!.client_id = "unexpected-client";
-        return new Response(JSON.stringify(receipt), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return Response.json(receipt, { headers: response.headers });
       },
     };
     await expect(
@@ -6114,10 +6125,13 @@ test.each([
     fetch: async (url, init) => {
       const response = await f.deps.fetch(url, init);
       if (new URL(url).pathname.includes("/source_reports/")) {
-        return Response.json({
-          ...(await response.json()),
-          [field]: value,
-        });
+        return Response.json(
+          {
+            ...(await response.json()),
+            [field]: value,
+          },
+          { headers: response.headers },
+        );
       }
       return response;
     },
@@ -6378,6 +6392,64 @@ test("interrupted CLI output preserves acknowledged batches and resumes only unf
   expect(f.posts[2]).toBe(f.posts[1]);
 });
 
+test("an unexpected import response preserves the approved request for retry", async () => {
+  const f = await fixture();
+  let dropMediaType = true;
+  const prepare = () =>
+    prepareExternalPublication(f.file, options, {
+      ...f.deps,
+      async fetch(url, init) {
+        const response = await f.deps.fetch(url, init);
+        if (init.method !== "POST" || !dropMediaType) return response;
+        dropMediaType = false;
+        return new Response(response.body, {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+  const first = await prepare();
+  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.requests).toEqual(first.preview.requests);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  expect(f.receipts.size).toBe(1);
+});
+
+test("an unexpected private job response retries the same uploaded file and job request", async () => {
+  const { f, deps, inbox, uploads, jobs } = await privateUploadFixture(
+    [normalized()],
+    "wiz",
+  );
+  inbox.interruptUpload = false;
+  let dropMediaType = true;
+  const prepare = () =>
+    prepareExternalPublication(f.file, options, {
+      ...deps,
+      async fetch(url, init) {
+        const response = await deps.fetch(url, init);
+        if (
+          !new URL(url).pathname.endsWith("/finding-imports/jobs") ||
+          !dropMediaType
+        )
+          return response;
+        dropMediaType = false;
+        return new Response(response.body, {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+  const first = await prepare();
+  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).privateJob?.status).toBe("completed");
+  expect(uploads).toHaveLength(1);
+  expect(jobs).toEqual([jobs[0], jobs[0]]);
+  expect(f.posts).toHaveLength(0);
+});
+
 test("readback retry preserves acknowledged findings and scanner diagnostics", async () => {
   const input = opengrepJson();
   const f = await fixture(input);
@@ -6417,51 +6489,61 @@ test("readback retry preserves acknowledged findings and scanner diagnostics", a
   expect(f.posts).toHaveLength(1);
 });
 
-test("discovery rejects a changed account scope across repository pages", async () => {
-  const f = await fixture(blackDuckBomReport());
-  const repository = `${f.destination().url}.git`;
-  const queries: URLSearchParams[] = [];
-  const prepared = prepareExternalPublication(
-    f.file,
-    {
-      ...options,
-      repository,
-      provider: "blackduck",
-      sourceRepositoryUrl: f.destination().url,
-    },
-    {
-      ...f.deps,
-      fetch: async (input, init) => {
-        const url = new URL(input);
-        if (!url.pathname.endsWith("/repositories"))
-          return f.deps.fetch(input, init);
-        queries.push(url.searchParams);
-        const first = queries.length === 1;
-        return Response.json(
-          {
-            object: "page",
-            data: first ? [] : [f.destination()],
-            has_more: first,
-            next: first ? "next-page" : null,
-          },
-          {
-            headers: { [scopeHeader]: first ? "workspace" : "personal" },
-          },
-        );
+test.each(["scope", "media type"] as const)(
+  "discovery rejects a changed %s across repository pages",
+  async (change) => {
+    const f = await fixture(blackDuckBomReport());
+    const repository = `${f.destination().url}.git`;
+    const queries: URLSearchParams[] = [];
+    const prepared = prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        repository,
+        provider: "blackduck",
+        sourceRepositoryUrl: f.destination().url,
       },
-    },
-  );
-  await expect(prepared).rejects.toThrow(/scope/iu);
-  expect(queries.map((query) => query.get("repository"))).toEqual([
-    repository,
-    repository,
-  ]);
-  expect(queries.map((query) => query.get("page"))).toEqual([
-    null,
-    "next-page",
-  ]);
-  expect(f.posts).toHaveLength(0);
-});
+      {
+        ...f.deps,
+        fetch: async (input, init) => {
+          const url = new URL(input);
+          if (!url.pathname.endsWith("/repositories"))
+            return f.deps.fetch(input, init);
+          queries.push(url.searchParams);
+          const first = queries.length === 1;
+          return Response.json(
+            {
+              object: "page",
+              data: first ? [] : [f.destination()],
+              has_more: first,
+              next: first ? "next-page" : null,
+            },
+            {
+              headers: {
+                [scopeHeader]:
+                  change === "scope" && first ? "workspace" : "personal",
+                "Content-Type":
+                  change === "media type" && !first
+                    ? "application/json"
+                    : scannerMediaType,
+              },
+            },
+          );
+        },
+      },
+    );
+    await expect(prepared).rejects.toThrow(/scope|contract|discovery/iu);
+    expect(queries.map((query) => query.get("repository"))).toEqual([
+      repository,
+      repository,
+    ]);
+    expect(queries.map((query) => query.get("page"))).toEqual([
+      null,
+      "next-page",
+    ]);
+    expect(f.posts).toHaveLength(0);
+  },
+);
 
 test("repository URLs and IDs share the same resumable destination", async () => {
   const f = await fixture();
@@ -9167,6 +9249,86 @@ test.each(scannerReports)(
   },
 );
 
+test.each(["wiz", "endor", "snyk"] as const)(
+  "the released personal Cloud API still accepts %s",
+  async (provider) => {
+    const f = await fixture(readerReports[provider], exampleRepository);
+    f.state.catalogMediaType = "application/json";
+    f.state.catalogHeaders = {
+      "Codex-Security-Repository-Import-Severities":
+        "critical,high,medium,low,informational",
+    };
+    const prepared = await prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider,
+        sourceRepositoryUrl: exampleRepository,
+      },
+      f.deps,
+    );
+    expect((await prepared.publish()).verified).toBe(1);
+    expect(f.posts).toHaveLength(1);
+  },
+);
+
+test.each([
+  ["unrecognized catalog", "application/json", {}],
+  [
+    "scope without a negotiated contract",
+    "application/json",
+    { [scopeHeader]: "personal" },
+  ],
+  ["unrecognized media type", "text/html", { [scopeHeader]: "personal" }],
+  [
+    "unadvertised workspace provider",
+    "application/json",
+    { [providerHeader]: "snyk" },
+  ],
+  [
+    "missing private job version",
+    "application/json",
+    { [providerHeader]: "continuum" },
+  ],
+  [
+    "wrong private job version",
+    "application/json",
+    { [providerHeader]: "continuum", [jobVersionHeader]: "3" },
+  ],
+  [
+    "unsupported personal provider",
+    "application/json",
+    { "Codex-Security-Repository-Import-Severities": "high" },
+  ],
+] as [string, string, Record<string, string>][])(
+  "Continuum rejects %s before transferring evidence",
+  async (_, mediaType, headers) => {
+    const f = await fixture(readerReports.continuum, exampleRepository);
+    f.state.catalogMediaType = mediaType;
+    f.state.catalogHeaders = headers;
+    const paths: string[] = [];
+    await expect(
+      prepareExternalPublication(
+        f.file,
+        {
+          ...options,
+          provider: "continuum",
+          sourceRepositoryUrl: exampleRepository,
+        },
+        {
+          ...f.deps,
+          fetch(url, init) {
+            paths.push(new URL(url).pathname);
+            return f.deps.fetch(url, init);
+          },
+        },
+      ),
+    ).rejects.toThrow(/Cloud|unavailable|scope|provider|contract|catalog/i);
+    expect(paths).toEqual(["/backend-api/aardvark/external/repositories"]);
+    expect(f.posts).toHaveLength(0);
+  },
+);
+
 test.each([
   {
     provider: "continuum",
@@ -9221,7 +9383,8 @@ test.each([
     let unavailable = false;
     let terminal: "completed" | "failed" | "cancelled" = "completed";
     let advertised = false;
-    const jobsPath = "/finding-imports/jobs";
+    let jobsPath = "/finding-imports/jobs";
+    let jobMediaType = scannerMediaType;
     let canCreate = true;
     let reportCount = 1;
     const uploadedReports: { id: string; bytes: string }[] = [];
@@ -9256,9 +9419,26 @@ test.each([
           const response = await f.deps.fetch(url, init);
           const headers = new Headers(response.headers);
           if (advertised) headers.set(providerHeader, provider);
+          if (
+            "jobApiVersion" in scenario &&
+            f.state.catalogMediaType === "application/json"
+          ) {
+            if (!advertised) headers.set(providerHeader, "wiz");
+            expect(new Headers(init.headers).get(jobVersionHeader)).toBe(
+              String(scenario.jobApiVersion),
+            );
+          }
           return new Response(response.body, { headers });
         }
         if (path.startsWith("/external/")) return f.deps.fetch(url, init);
+        const sendsJob = path === jobsPath || path.startsWith(jobsPath + "/");
+        const headers = new Headers(init.headers);
+        expect(headers.get("Accept")).toBe(
+          sendsJob ? jobMediaType : "application/json",
+        );
+        expect(headers.get("Content-Type")).toBe(
+          sendsJob && init.method === "POST" ? jobMediaType : null,
+        );
         if (path === "/finding-imports/context")
           return privateInboxContext(contextVersion, formats, canCreate);
         if (path === "/finding-imports/files") {
@@ -9300,7 +9480,9 @@ test.each([
               terminal === "completed"
                 ? "import_" + "d".repeat(32)
                 : "import_" + "c".repeat(32);
-            return Response.json(job(terminal));
+            return Response.json(job(terminal), {
+              headers: { "Content-Type": jobMediaType },
+            });
           }
           if (jobRequest) expect(body.request_id).toBe(jobRequest);
           jobRequest = body.request_id;
@@ -9309,19 +9491,32 @@ test.each([
             throw new Error("lost job response");
           }
           return Response.json(job("queued"), {
-            headers: { "Retry-After": "0" },
+            headers: { "Retry-After": "0", "Content-Type": jobMediaType },
           });
         }
         if (path === `${jobsPath}/${jobId}`)
           return unavailable
             ? new Response(null, { status: 503 })
-            : Response.json(job(terminal));
+            : Response.json(job(terminal), {
+                headers: { "Content-Type": jobMediaType },
+              });
         throw new Error("Unexpected route: " + path);
       },
     };
     const prepare = () => prepareExternalPublication(f.file, settings, deps);
     const repositoryPreview = await prepare();
-    f.state.catalogHeaders[scopeHeader] = "workspace";
+    function legacyWorkspace(version: 2 | 3) {
+      f.state.catalogMediaType = "application/json";
+      f.state.catalogHeaders = {
+        [jobVersionHeader]: String(version),
+        "Codex-Security-Repository-Import-Severities":
+          "critical,high,medium,low,informational",
+      };
+      jobsPath = `/v${version}/finding-imports/jobs`;
+      jobMediaType = "application/json";
+    }
+    if (provider === "continuum") legacyWorkspace(scenario.jobApiVersion);
+    else f.state.catalogHeaders[scopeHeader] = "workspace";
     f.state.environmentId = null;
     advertised = true;
     const original = await prepare();
@@ -9379,24 +9574,34 @@ test.each([
       );
       await writeFile(checkpointPath, JSON.stringify(saved));
     }
-    advertised = false;
+    if (provider === "blackduck") {
+      expect(saved.jobApiVersion).toBeUndefined();
+      legacyWorkspace(scenario.jobApiVersion);
+      delete f.state.catalogHeaders[jobVersionHeader];
+      const before = [...calls];
+      await expect(prepare()).rejects.toThrow(/unavailable/i);
+      expect(calls.slice(before.length)).toEqual([
+        "GET /external/repositories",
+      ]);
+      f.state.catalogHeaders[jobVersionHeader] = String(scenario.jobApiVersion);
+    } else {
+      if (provider === "continuum")
+        expect(saved.jobApiVersion).toBe(scenario.jobApiVersion);
+      advertised = false;
+    }
     const resumed = await prepare();
     expect(resumed.preview.resumed).toBe(true);
     expect(resumed.preview.privateImport?.sha256).toBe(saved.sha256);
     await expect(resumed.publish()).rejects.toThrow("lost job response");
     expect(jobRequest).toBe(saved.jobRequestId);
     expect(calls.at(-1)).toBe(`POST ${jobsPath}`);
-    // Earlier clients recorded the versioned route for both pending and accepted jobs.
-    async function restoreVersionedCheckpoint() {
-      if (!("jobApiVersion" in scenario)) return;
-      const current = JSON.parse(await readFile(checkpointPath, "utf8"));
-      expect(current.fileId).toBe(fileId);
-      expect(current.jobRequestId).toBe(saved.jobRequestId);
-      current.jobApiVersion = scenario.jobApiVersion;
-      delete current.receipt;
-      await writeFile(checkpointPath, JSON.stringify(current));
+    if ("jobApiVersion" in scenario) {
+      expect(
+        JSON.parse(await readFile(checkpointPath, "utf8")).jobApiVersion,
+      ).toBe(scenario.jobApiVersion);
+      delete f.state.catalogHeaders[jobVersionHeader];
+      advertised = false;
     }
-    await restoreVersionedCheckpoint();
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
     expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
@@ -9405,7 +9610,19 @@ test.each([
     expect(uploadedReports).toHaveLength(1);
     canCreate = false;
     advertised = false;
-    await restoreVersionedCheckpoint();
+    if ("jobApiVersion" in scenario) {
+      const previousCalls = calls.length;
+      expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
+      expect(
+        calls.slice(previousCalls).filter((call) => call.startsWith("POST")),
+      ).toEqual([]);
+      expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
+      // The expanded job endpoint can recover the same accepted legacy job.
+      f.state.catalogMediaType = scannerMediaType;
+      f.state.catalogHeaders = { [scopeHeader]: "workspace" };
+      jobsPath = "/finding-imports/jobs";
+      jobMediaType = scannerMediaType;
+    }
     const acceptedCalls = calls.length;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
     expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
@@ -9436,6 +9653,8 @@ test.each([
     canCreate = true;
     loseResponses = false;
     expectedFormat = "security.findings.v1";
+    jobsPath = "/finding-imports/jobs";
+    jobMediaType = scannerMediaType;
     terminal = provider === "wiz" ? "cancelled" : "failed";
     if ("rename" in scenario) {
       await expect(prepare()).rejects.toThrow("does not match");
