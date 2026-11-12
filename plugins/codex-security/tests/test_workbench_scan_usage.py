@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -328,7 +330,7 @@ def _state_graph(
 ) -> None:
     sqlite_home = Path(environment["CODEX_SQLITE_HOME"])
     sqlite_home.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(sqlite_home / "state_5.sqlite") as connection:
+    with closing(sqlite3.connect(sqlite_home / "state_5.sqlite")) as connection, connection:
         connection.execute(
             "CREATE TABLE threads "
             "(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, cwd TEXT, created_at INTEGER)"
@@ -1305,6 +1307,44 @@ def test_usage_finds_state_database_in_configured_home(
     monkeypatch.setenv(home_variable, configured_home)
 
     assert scan_usage._codex_state_database() == database.resolve()
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("spelling", "filename"),
+    [
+        ("leading-relative", " usage.sqlite"),
+        (
+            "trailing-absolute",
+            "usage.sqlite\N{NO-BREAK SPACE}" if sys.platform == "win32" else "usage.sqlite ",
+        ),
+    ]
+    + ([] if sys.platform == "win32" else [("literal-tilde", "~synthetic-usage.sqlite")])
+    + ([("filesystem-bytes", b"usage-\xff?#%.sqlite")] if sys.platform == "linux" else []),
+)
+def test_completion_reads_the_literal_usage_database(
+    tmp_path: Path, spelling: str, filename: str | bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _start_scan(tmp_path)
+    counted = fixture.started_at + timedelta(microseconds=1)
+    fixture.write_parent_rollout([_token_event(counted, 18, 2)])
+    original = Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
+    selected = tmp_path / os.fsdecode(filename)
+    original.rename(selected)
+
+    neighbor = tmp_path / "neighbor"
+    neighbor.mkdir()
+    other_rollout = _rollout(neighbor, "scan-parent", [_token_event(counted, 96, 2)])
+    _state_graph(fixture.environment, {"scan-parent": other_rollout}, [])
+    original.rename(tmp_path / "usage.sqlite")
+    monkeypatch.chdir(tmp_path)
+    fixture.environment["CODEX_STATE_DB"] = (
+        str(selected) if spelling == "trailing-absolute" else selected.name
+    )
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+    assert usage["coverage"] == "complete"
+    assert usage["totalTokens"] == 20
 
 
 def test_completion_reports_unavailable_without_fabricating_zero(tmp_path: Path) -> None:

@@ -1,9 +1,11 @@
+import refusalMessages from "./codex-refusal-messages.json" with { type: "json" };
 import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout, stage = "pair-review"] =
   process.argv.slice(2);
+
 const transportStatus = /^transport-(?:request|turn)-(\d+)$/.exec(
   scenario,
 )?.[1];
@@ -32,6 +34,16 @@ const turnFailures = {
     message: "Safety policy: request refused because the service timed out",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 504 } },
   },
+
+  "determiner-service-error": {
+    message:
+      "Safety policy: this request is refused because the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "sentence-service-error": {
+    message: "Safety policy: request refused. Service unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
   "policy-turn-code": {
     message: "Request blocked.",
     codexErrorInfo: "cyberPolicy",
@@ -58,6 +70,41 @@ const turnFailures = {
   },
   "server-error": {
     message: "Provider temporarily unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "service-unavailable": {
+    message: "Connection refused: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "network-request-error": {
+    message: "Network request refused: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "http-request-error": {
+    message: "HTTP request blocked: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-network-error": {
+    message:
+      "Failed to contact safety policy: request refused by upstream with 503",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-because-error": {
+    message:
+      "Safety policy: request refused because the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-as-error": {
+    message:
+      "Safety policy: request refused as the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-service-error": {
+    message: "Safety policy: request refused: service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-upstream-error": {
+    message: "Safety policy: request refused by upstream with 503",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
   "connection-error": {
@@ -127,6 +174,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     if (
       [
         "request-error",
+        "sentence-service-request-error",
         "credential-error",
         "policy-request",
         "policy-request-code",
@@ -137,17 +185,25 @@ for await (const line of createInterface({ input: process.stdin })) {
         error: {
           code: -32000,
           message:
-            scenario === "policy-request-code"
-              ? "Request blocked."
-              : scenario === "policy-request"
-                ? "Request rejected: cyber_policy."
-                : scenario === "credential-error"
-                  ? "Authentication failed: Bearer synthetic-review-key"
-                  : "Authentication required",
+            scenario === "sentence-service-request-error"
+              ? "Safety policy: request refused. Service unavailable."
+              : scenario === "policy-request-code"
+                ? "Request blocked."
+                : scenario === "policy-request"
+                  ? "Request rejected: cyber_policy."
+                  : scenario === "credential-error"
+                    ? "Authentication failed: Bearer synthetic-review-key"
+                    : "Authentication required",
           data:
-            scenario === "policy-request-code"
-              ? { codexErrorInfo: "cyberPolicy" }
-              : "Synthetic private response data",
+            scenario === "sentence-service-request-error"
+              ? {
+                  codexErrorInfo: {
+                    httpConnectionFailed: { httpStatusCode: 503 },
+                  },
+                }
+              : scenario === "policy-request-code"
+                ? { codexErrorInfo: "cyberPolicy" }
+                : "Synthetic private response data",
         },
       });
       continue;
@@ -278,20 +334,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     } else if (
       scenario === "text-only" ||
       scenario === "service-timeout-text" ||
-      scenario === "refusal-text" ||
-      scenario === "policy-causal-refusal-text" ||
-      scenario === "policy-refusal-text" ||
-      scenario === "policy-first-refusal-text" ||
-      scenario === "policy-colon-refusal-text" ||
-      scenario === "policy-review-text" ||
-      scenario === "policy-suffix-explanation-text" ||
-      scenario === "policy-colon-explanation-text" ||
-      scenario === "policy-harmful-content-text" ||
-      scenario === "policy-bare-harmful-content-text" ||
-      scenario === "policy-restrictions-text" ||
-      scenario === "policy-bare-restrictions-text" ||
-      scenario === "policy-service-impact-text" ||
-      scenario === "policy-multiline-explanation-text" ||
+      Object.hasOwn(refusalMessages, scenario) ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -309,36 +352,7 @@ for await (const line of createInterface({ input: process.stdin })) {
             text:
               scenario === "service-timeout-text"
                 ? "Safety policy: request refused because the service timed out"
-                : scenario === "policy-multiline-explanation-text"
-                  ? "Safety policy: this request is refused.\nI can offer a defensive alternative."
-                  : scenario === "policy-restrictions-text"
-                    ? "Safety policy: this request is refused due to policy restrictions."
-                    : scenario === "policy-bare-restrictions-text"
-                      ? "Safety policy: request refused due to policy restrictions."
-                      : scenario === "policy-service-impact-text"
-                        ? "Safety policy: this request is refused because it would make the service unavailable."
-                        : scenario === "policy-harmful-content-text"
-                          ? "Safety policy: this request is refused due to harmful content."
-                          : scenario === "policy-bare-harmful-content-text"
-                            ? "Safety policy: request refused due to harmful content."
-                            : scenario === "policy-review-text"
-                              ? "Review refused: safety policy."
-                              : scenario === "policy-suffix-explanation-text"
-                                ? "Request refused: safety policy. I can offer a defensive alternative."
-                                : scenario === "policy-colon-refusal-text"
-                                  ? "Request refused: safety policy."
-                                  : scenario === "policy-colon-explanation-text"
-                                    ? "Safety policy: request refused due to disallowed content."
-                                    : scenario === "refusal-text"
-                                      ? "I'm sorry, but I can't assist with that request."
-                                      : scenario === "policy-first-refusal-text"
-                                        ? "Cybersecurity policy: this request is refused."
-                                        : scenario ===
-                                            "policy-causal-refusal-text"
-                                          ? "This request was refused because it violates the safety policy."
-                                          : scenario === "policy-refusal-text"
-                                            ? "This request was refused because of the safety policy."
-                                            : '{"decision":"SAME"}',
+                : (refusalMessages[scenario] ?? '{"decision":"SAME"}'),
           },
         },
       });

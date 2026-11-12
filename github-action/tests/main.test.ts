@@ -300,7 +300,7 @@ test('Deep scans forward their budget and publish completed reports with cleanup
   const result = await app.run();
   assertAttribution(result.args, 'openai');
   assert.equal(result.args[result.args.indexOf('--mode') + 1], 'deep');
-  assert.equal(result.args[result.args.indexOf('--max-time-hours') + 1], '1.5');
+  assert.equal(result.args[result.args.indexOf('--max-time') + 1], '90');
   assert.equal(result.exitCode, 0); assert.equal(result.cleanups, 1);
   assert.equal(result.outputs['scan-status'], 'completed');
   assert.equal(result.outputs['policy-status'], 'passed');
@@ -653,6 +653,31 @@ test('disabled summary leaves requested artifact upload and scan outcome intact'
   const result = await app.run();
   assert.equal(result.exitCode, 0); assert.equal(upload.mock.callCount(), 1); assert.equal(result.summary, '');
   assert.equal(result.outputs['report-status'], 'ready');
+});
+
+test('Action path input preserves leading and trailing filename spaces', async t => {
+  const app = await harness(t);
+  app.setInput('dry-run', 'true');
+  const requested = [' leading.txt', '  ', 'trailing.txt '];
+  const decoys = ['leading.txt', 'trailing.txt'];
+  for (const filename of [...requested, ...decoys])
+    await writeFile(join(app.repository, filename), filename);
+  app.git('add', '.'); app.git('commit', '-qm', 'Literal filename fixtures');
+  process.env.GITHUB_SHA = app.git('rev-parse', 'HEAD');
+  app.setInput('paths', requested.join('\r\n'));
+  const result = await app.run();
+  assert.equal(result.exitCode, 0, result.logs);
+  assert.deepEqual(result.args.filter(arg => arg.startsWith('--path=')),
+    requested.map(path => '--path=./' + path));
+});
+
+for (const path of ['slash\\name.txt', '\tname.txt\t']) test('Action rejects an unsupported scan path before setup: ' + JSON.stringify(path), async t => {
+  const app = await harness(t);
+  app.setInput('paths', path);
+  const result = await app.run();
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.setups, 0);
+  assert.match(result.logs, /backslashes or control characters/u);
 });
 
 test('scope conflict fails without runtime setup', async (t) => {

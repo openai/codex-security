@@ -15,6 +15,8 @@ export type DeepWorkerParentSandbox = {
   readonly literalFilesystemDenies?: readonly string[];
   /** Windows needs the parent's named read root for the selected plugin. */
   readonly pluginReadRoot?: string;
+  /** Preserve the selected source's named read root for Windows ACL setup. */
+  readonly sourceReadRoot?: string;
   readonly globScanMaxDepth?: number;
 };
 
@@ -23,6 +25,9 @@ export function resolveDeepWorkerParentSandbox(
   extra: unknown,
   pluginRoot = process.platform === "win32"
     ? process.env.CODEX_SECURITY_PLUGIN_ROOT
+    : undefined,
+  sourceRoot = process.platform === "win32"
+    ? process.env.CODEX_SECURITY_REPOSITORY
     : undefined,
 ): DeepWorkerParentSandbox {
   const state = trustedSandboxState(extra);
@@ -57,6 +62,7 @@ export function resolveDeepWorkerParentSandbox(
   const filesystemDenies: string[] = [];
   const literalFilesystemDenies: string[] = [];
   let pluginReadRoot: string | undefined;
+  let sourceReadRoot: string | undefined;
   for (const value of filesystem.entries) {
     const entry = record(value);
     if (!entry || !isKnownFilesystemAccess(entry.access)) {
@@ -103,14 +109,23 @@ export function resolveDeepWorkerParentSandbox(
           );
         }
         literalFilesystemDenies.push(path.path);
-      } else if (
-        entry.access === "read" &&
-        pluginRoot !== undefined &&
-        isAbsolute(path.path) &&
-        relative(toNamespacedPath(path.path), toNamespacedPath(pluginRoot)) ===
-          ""
-      ) {
-        pluginReadRoot = path.path;
+      } else if (entry.access === "read" && isAbsolute(path.path)) {
+        if (
+          pluginRoot !== undefined &&
+          relative(
+            toNamespacedPath(path.path),
+            toNamespacedPath(pluginRoot),
+          ) === ""
+        )
+          pluginReadRoot = path.path;
+        if (
+          sourceRoot !== undefined &&
+          relative(
+            toNamespacedPath(path.path),
+            toNamespacedPath(sourceRoot),
+          ) === ""
+        )
+          sourceReadRoot = path.path;
       }
     } else if (path.type === "glob_pattern") {
       if (!isNonEmptyString(path.pattern)) {
@@ -150,6 +165,7 @@ export function resolveDeepWorkerParentSandbox(
   return {
     filesystemDenies,
     ...(pluginReadRoot === undefined ? {} : { pluginReadRoot }),
+    ...(sourceReadRoot === undefined ? {} : { sourceReadRoot }),
     ...(literalFilesystemDenies.length ? { literalFilesystemDenies } : {}),
     ...(globScanMaxDepth !== undefined ? { globScanMaxDepth } : {}),
   };

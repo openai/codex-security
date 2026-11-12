@@ -302,6 +302,14 @@ describe("CodexSecurity policy API", () => {
           filesystem: {
             [process.platform === "win32" ? ":root" : ":minimal"]: "read",
             ":workspace_roots": "read",
+            ...(process.platform === "win32"
+              ? Object.fromEntries(
+                  f.threads[0]!.additionalDirectories!.map((path) => [
+                    path,
+                    { ".": "read" },
+                  ]),
+                )
+              : {}),
             ...Object.fromEntries(
               readPaths.map((path) => [path, { ".": "read" }]),
             ),

@@ -108,6 +108,7 @@ import {
   logoutCredentialHome,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
+  sdkNodeSearchPath,
   windowsCredentialAncestorAclScript,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
@@ -1002,6 +1003,8 @@ describe("plugin runtime preparation", () => {
       await mkdir(join(selected, "mcp"));
       await writeFile(join(home, "config.toml"), "[features]\nplugins=true\n");
       const declaredRoot = interpreter.endsWith("with root");
+      const declaresNodeSearchPath = interpreter.startsWith("shell");
+      const nodeSearchPath = join(root, "fallback node");
       const argumentsAfterEntry = [
         "--stdio",
         "synthetic ! % & argument",
@@ -1016,6 +1019,9 @@ describe("plugin runtime preparation", () => {
             env_vars: [
               "CODEX_HOME",
               "CODEX_MCP_NODE_PATH",
+              ...(declaresNodeSearchPath
+                ? ["_CODEX_SECURITY_SDK_NODE_SEARCH_PATH"]
+                : []),
               ...(declaredRoot ? ["CODEX_SECURITY_PLUGIN_ROOT"] : []),
             ],
             startup_timeout_sec: 20,
@@ -1047,7 +1053,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1], nodeSearchPath: process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1104,6 +1110,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         SystemRoot: process.env["SystemRoot"],
         PATHEXT: process.env["PATHEXT"],
         CODEX_MCP_NODE_PATH: process.execPath,
+        _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: nodeSearchPath,
       };
       const command = resolveCodexCommand({});
       const installed = await bootstrapPlugin(home, selected, {
@@ -1125,12 +1132,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         cwd: mcp.mcpServers["codex-security"].cwd,
         startup_timeout_sec:
           mcp.mcpServers["codex-security"].startup_timeout_sec,
-        env_vars: declaredRoot
-          ? mcp.mcpServers["codex-security"].env_vars
-          : [
-              ...mcp.mcpServers["codex-security"].env_vars,
-              "CODEX_SECURITY_PLUGIN_ROOT",
-            ],
+        env_vars: [
+          ...mcp.mcpServers["codex-security"].env_vars,
+          ...(declaredRoot ? [] : ["CODEX_SECURITY_PLUGIN_ROOT"]),
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         JSON.parse(await readFile(join(selected, ".mcp.json"), "utf8")),
@@ -1156,6 +1162,11 @@ for await (const line of createInterface({ input: process.stdin })) {
               ...environment,
               CODEX_HOME: home,
               CODEX_SQLITE_HOME: sqliteHome,
+              CODEX_SECURITY_REPOSITORY: join(
+                root,
+                pluginRoot === second ? "second source" : "first source",
+              ),
+              SYNTHETIC_UNDECLARED_VALUE: "ambient fixture",
               ...(pluginRoot === undefined
                 ? {}
                 : { CODEX_SECURITY_PLUGIN_ROOT: pluginRoot }),
@@ -1218,7 +1229,14 @@ for await (const line of createInterface({ input: process.stdin })) {
           tools: { probe: { description: expect.any(String) } },
         });
         const details = server.tools.probe._meta.launch;
+        expect(details.nodeSearchPath).toBe(
+          declaresNodeSearchPath ? nodeSearchPath : undefined,
+        );
         expect(details.pluginRoot).toBe(await realpath(pluginRoot));
+        expect(details.repository).toBe(
+          join(root, pluginRoot === second ? "second source" : "first source"),
+        );
+        expect(details.ambient).toBeUndefined();
         expect(details.args).toEqual(argumentsAfterEntry);
         expect(details.cwd).toBe(
           process.platform === "win32"
@@ -1863,6 +1881,38 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
   });
 
+  test.skipIf(process.platform !== "win32")(
+    "extracts plugin ZIPs across Windows temporary directory path limits",
+    async () => {
+      const root = await temporaryDirectory();
+      const archive = join(root, "plugin.zip");
+      const manifest = ".codex-plugin/plugin.json";
+      const data = JSON.stringify({ name: "codex-security", version: "1.2.3" });
+      await writeFile(
+        archive,
+        zipSync({ [`release/${manifest}`]: strToU8(data) }),
+      );
+      const templateLength = join(root, ".codex-security-plugin-XXXXXX").length;
+      using createStaging = spyOn(fsPromises, "mkdtemp");
+      for (const length of [247, 248, 259, 260, 280]) {
+        const padding = Math.max(1, length - templateLength - 1);
+        const parent = join(root, "p".repeat(padding));
+        const destination = join(parent, `extracted-${length}`);
+        const plugin = await extractPluginZip(archive, destination);
+        expect(createStaging).toHaveBeenLastCalledWith(
+          win32.toNamespacedPath(join(parent, ".codex-security-plugin-")),
+        );
+        expect(plugin).toBe(join(destination, "release"));
+        expect(await readFile(join(plugin, manifest), "utf8")).toBe(data);
+        expect(
+          (await readdir(parent)).some((entry) =>
+            entry.startsWith(".codex-security-plugin-"),
+          ),
+        ).toBe(false);
+      }
+    },
+  );
+
   test("rejects a ZIP entry with an invalid CRC-32", async () => {
     const root = await temporaryDirectory();
     const archive = join(root, "invalid-crc.zip");
@@ -2292,7 +2342,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         command: "./scripts/launch_codex_security_mcp_sdk",
         args: ["--stdio", "synthetic argument"],
         cwd: ".",
-        env_vars: ["CODEX_HOME", "CODEX_SECURITY_PLUGIN_ROOT"],
+        env_vars: [
+          "CODEX_HOME",
+          "CODEX_SECURITY_PLUGIN_ROOT",
+          "CODEX_SECURITY_REPOSITORY",
+        ],
       });
       expect(
         (await stat(join(staged, "scripts", "launch_codex_security_mcp")))
@@ -3153,6 +3207,18 @@ for await (const line of createInterface({ input: process.stdin })) {
     },
   );
 
+  test.skipIf(process.platform === "win32")(
+    "filters SDK Node fallback directories against the scan source",
+    async () => {
+      const systemBin = await realpath("/usr/bin");
+      expect((await sdkNodeSearchPath([])).split(":")).toContain(systemBin);
+      expect((await sdkNodeSearchPath([systemBin])).split(":")).not.toContain(
+        systemBin,
+      );
+      expect(await sdkNodeSearchPath(["/"])).toBe("");
+    },
+  );
+
   test("replaces unspawnable Windows Codex shims with the bundled executable", () => {
     const fallback = resolveCodexCommand({});
 
@@ -3360,23 +3426,30 @@ describe("runtime directories and plugin Python boundary", () => {
       let stickyParent = shared;
       await mkdir(stickyParent, { mode: 0o1777 });
       await chmod(stickyParent, 0o1777);
-      if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
+      try {
         if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
+        const stateDirectory = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
+        await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+        const home = await prepareCodexSecurityCredentialHome({
+          CODEX_SECURITY_STATE_DIR: stateDirectory,
+        });
+        await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
+        await expect(
+          requireSecureOutputAncestry(home),
+        ).resolves.toBeUndefined();
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
       }
-      const stateDirectory = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      if (stickyParent !== shared) temporaryDirectories.track(stateDirectory);
-      await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-      const home = await prepareCodexSecurityCredentialHome({
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      });
-      await expect(requireSecureCredentialHome(home)).resolves.toBeDefined();
-      await expect(requireSecureOutputAncestry(home)).resolves.toBeUndefined();
     },
   );
 
@@ -6329,6 +6402,7 @@ describe("runtime directories and plugin Python boundary", () => {
           ),
         ),
       );
+      const beforeCompletion = (await readdir(scanDir)).sort();
       const missing = requiredDrafts.filter(
         (filename) => !present.some((candidate) => candidate === filename),
       );
@@ -6344,7 +6418,7 @@ describe("runtime directories and plugin Python boundary", () => {
           ", ",
         )}. Check that the scan agent can run shell commands and write to the scan directory before retrying.`,
       );
-      expect((await readdir(scanDir)).sort()).toEqual([...present].sort());
+      expect((await readdir(scanDir)).sort()).toEqual(beforeCompletion);
       const stored = await runWorkbench(workbenchOptions, [
         "get-scan",
         "--scan-id",
@@ -6508,25 +6582,30 @@ describe("runtime directories and plugin Python boundary", () => {
       const shared = join(root, "shared");
       await mkdir(shared, { mode: 0o1777 });
       await chmod(shared, 0o1777);
-      // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
-      // chmod; fall back to the process temp root when it is already sticky.
-      let stickyParent = shared;
-      if (((await lstat(shared)).mode & 0o1000) === 0) {
-        stickyParent = await realpath(tmpdir());
-        if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
-          return;
+      try {
+        // Some filesystems (notably user dirs on macOS APFS) ignore sticky on
+        // chmod; fall back to the process temp root when it is already sticky.
+        let stickyParent = shared;
+        if (((await lstat(shared)).mode & 0o1000) === 0) {
+          stickyParent = await realpath(tmpdir());
+          if (((await lstat(stickyParent)).mode & 0o1000) === 0) {
+            return;
+          }
         }
-      }
-      const output = join(
-        stickyParent,
-        `codex-security-sticky-${process.pid}-${Date.now()}`,
-      );
-      if (stickyParent !== shared) temporaryDirectories.track(output);
+        const output = join(
+          stickyParent,
+          `codex-security-sticky-${process.pid}-${Date.now()}`,
+        );
+        if (stickyParent !== shared) temporaryDirectories.track(output);
 
-      await expect(
-        requireSecureOutputAncestry(output),
-      ).resolves.toBeUndefined();
-      expect(await prepareOutputDir(output, "repo")).toBe(output);
+        await expect(
+          requireSecureOutputAncestry(output),
+        ).resolves.toBeUndefined();
+        expect(await prepareOutputDir(output, "repo")).toBe(output);
+      } finally {
+        // Restore this fixture's parent before recursive cleanup on macOS.
+        await chmod(shared, 0o700);
+      }
     },
   );
 
@@ -6965,6 +7044,61 @@ describe("runtime directories and plugin Python boundary", () => {
       }
     }
   });
+
+  testPosix(
+    "discovers Python outside explicit targets from a filesystem-root working directory",
+    async () => {
+      if (
+        runTestInSubprocess(
+          fileURLToPath(import.meta.url),
+          "discovers Python outside explicit targets from a filesystem-root working directory",
+          {},
+          "/",
+        )
+      )
+        return;
+      const target = await temporaryDirectory();
+      const tools = await temporaryDirectory();
+      const system = pythonWithLauncher();
+      expect(system).not.toBeNull();
+      const name = "fixture-python";
+      await symlink(system!, join(tools, name));
+      await symlink(system!, join(target, name));
+      const alias = join(tools, "root-directory");
+      await symlink("/", alias, "dir");
+      expect(process.cwd()).toBe("/");
+      const environment = { PATH: [target, tools].join(":"), PYTHON: name };
+      for (const caller of ["/", alias]) {
+        const selected = await resolvePluginPython({
+          currentDirectory: caller,
+          protectedRoot: target,
+          environment,
+        });
+        expect(selected).toBe(join(tools, name));
+      }
+      await expect(
+        resolvePluginPython({
+          currentDirectory: `/${basename(target)}-missing/..`,
+          protectedRoot: target,
+          environment,
+        }),
+      ).rejects.toThrow("unavailable");
+      await expect(resolvePluginPython({ environment })).rejects.toThrow(
+        "unavailable",
+      );
+      for (const protectedRoot of [[], "/"]) {
+        await expect(
+          resolvePluginPython({ protectedRoot, environment }),
+        ).rejects.toThrow("unavailable");
+      }
+      await expect(
+        resolvePluginPython({
+          protectedRoot: target,
+          environment: { PATH: target, PYTHON: name },
+        }),
+      ).rejects.toThrow("unavailable");
+    },
+  );
 
   testPosix(
     "preserves literal executable override names and accepts padding",
@@ -7646,3 +7780,58 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 });
+
+test.each([
+  ["legacy", false],
+  ["current", true],
+] as const)(
+  "lists automatic matching pairs with a %s custom plugin",
+  async (_kind, supportsFocus) => {
+    const root = await temporaryDirectory();
+    const pluginRoot = join(root, "custom-matching-plugin");
+    const scripts = join(pluginRoot, "scripts");
+    await mkdir(scripts, { recursive: true });
+    await writeFile(
+      join(scripts, "workbench_db.py"),
+      [
+        "import argparse, json, os, sys",
+        "from pathlib import Path",
+        "with Path(__file__).with_name('calls').open('a') as calls: calls.write(json.dumps(sys.argv[1:]) + '\\n')",
+        "parser = argparse.ArgumentParser()",
+        "command = parser.add_subparsers(dest='command', required=True).add_parser('list-unmatched-scan-pairs')",
+        "command.add_argument('--repository', required=True)",
+        ...(supportsFocus ? ["command.add_argument('--after-scan-id')"] : []),
+        "args = parser.parse_args()",
+        "if os.environ.get('FAIL_LIST'): sys.exit('Synthetic matching database failure')",
+        "print(json.dumps({'batches': [{'afterScanId': 'current'}]}))",
+      ].join("\n"),
+    );
+    const options = {
+      python: await resolvePluginPython(),
+      pluginRoot,
+      environment: { PATH: process.env["PATH"] },
+    };
+    const args = [
+      "list-unmatched-scan-pairs",
+      "--repository",
+      root,
+      "--after-scan-id",
+      "current",
+    ];
+    expect(await runWorkbench(options, args)).toEqual({
+      batches: [{ afterScanId: "current" }],
+    });
+    const calls = (await readFile(join(scripts, "calls"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(calls).toEqual(supportsFocus ? [args] : [args, args.slice(0, -2)]);
+    expect(args.slice(-2)).toEqual(["--after-scan-id", "current"]);
+    await expect(
+      runWorkbench(
+        { ...options, environment: { ...options.environment, FAIL_LIST: "1" } },
+        args,
+      ),
+    ).rejects.toThrow("Synthetic matching database failure");
+  },
+);

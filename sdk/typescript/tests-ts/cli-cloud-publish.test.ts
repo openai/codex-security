@@ -74,13 +74,13 @@ async function savedScansFixture() {
 }
 
 describe("publish scan to Cloud", () => {
-  test("documents the findings CSV option", async () => {
+  test("reserves CSV publication for the documented internal destination", async () => {
     const stdout = captureCli(main, "stdout");
     expect(
       await stdout.run(["publish", "scan", "--help"], dependencies()),
     ).toBe(0);
-    expect(stdout.text()).toContain("--csv <file>");
-    expect(stdout.text()).toContain("Findings CSV");
+    expect(stdout.text()).not.toContain("--csv");
+    expect(stdout.text()).not.toContain("Findings CSV");
   });
 
   test("preserves native CSV read and decode failures in CLI output", async () => {
