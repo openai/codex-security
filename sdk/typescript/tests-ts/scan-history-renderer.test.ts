@@ -98,7 +98,7 @@ describe("scan history renderer", () => {
     expect(text).toContain("0 → 2");
   });
 
-  test("orders severity totals from critical to informational", () => {
+  test("orders severity totals and escapes labels in saved history", () => {
     const text = renderScanHistory(
       {
         scanId: "synthetic-scan",
@@ -106,6 +106,7 @@ describe("scan history renderer", () => {
         progress: { status: "complete" },
         findings: [],
         severityCounts: {
+          ["fu\u001b[2Jture"]: 6,
           low: 4,
           informational: 5,
           medium: 3,
@@ -116,6 +117,8 @@ describe("scan history renderer", () => {
       "show",
       { color: false },
     );
+    expect(text).not.toContain("\u001b[2J");
+    expect(text).toContain("6 FUTURE");
     expect(text).toMatch(
       /1 CRITICAL.*2 HIGH.*3 MEDIUM.*4 LOW.*5 INFORMATIONAL/,
     );

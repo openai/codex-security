@@ -19,6 +19,18 @@ on:
       artifact-id:
         description: Artifact ID of the verified universal native payload.
         value: ${{ jobs.prepare.outputs.artifact-id || jobs.bundle.outputs.artifact-id }}
+      darwin-arm64-artifact-id:
+        description: Artifact ID of the verified macOS arm64 build.
+        value: ${{ jobs.unix.outputs.darwin-arm64-artifact-id }}
+      darwin-arm64-sha256:
+        description: SHA-256 of the addon of the verified macOS arm64 build.
+        value: ${{ jobs.unix.outputs.darwin-arm64-sha256 }}
+      darwin-x64-artifact-id:
+        description: Artifact ID of the verified macOS x64 build.
+        value: ${{ jobs.unix.outputs.darwin-x64-artifact-id }}
+      darwin-x64-sha256:
+        description: SHA-256 of the addon of the verified macOS x64 build.
+        value: ${{ jobs.unix.outputs.darwin-x64-sha256 }}
   workflow_dispatch:
 
 permissions:
