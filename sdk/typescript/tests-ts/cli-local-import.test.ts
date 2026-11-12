@@ -129,6 +129,9 @@ test.each(["local", "cloud"])(
     await writeFile(f.file, JSON.stringify({ ...input, errors: [], paths }));
     const clean = createCliTest(main);
     expect(await clean.runCli(command, f.deps)).toBe(0);
+    expect(clean.stderr.text()).toBe(
+      "codex-security: warning: Use --source-repository-url only after verifying that every finding belongs to the repository you specify.\n",
+    );
     expect(JSON.parse(clean.stdout.text())).toMatchObject({
       read: 0,
       ready: 0,
