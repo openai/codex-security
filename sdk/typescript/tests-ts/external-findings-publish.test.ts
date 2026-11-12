@@ -1835,6 +1835,48 @@ test("Tenable private imports require structured support and upload only the app
   expect(f.posts).toHaveLength(0);
 });
 
+test("a legacy workspace catalog can advertise Tenable job version 3", async () => {
+  const { f, deps, inbox, uploads, fileId } = await privateUploadFixture(
+    tenableReport,
+    "tenable",
+    tenableReport.repository_url,
+  );
+  f.state.catalogMediaType = "application/json";
+  f.state.catalogHeaders = {
+    [providerHeader]: "tenable",
+    [jobVersionHeader]: "2",
+  };
+  inbox.interruptUpload = false;
+  const jobs: string[] = [];
+  const prepare = () =>
+    prepareExternalPublication(f.file, tenableOptions, {
+      ...deps,
+      fetch(url, init) {
+        const { pathname } = new URL(url);
+        if (pathname.endsWith("/external/repositories"))
+          expect(new Headers(init.headers).get(jobVersionHeader)).toBe("3");
+        if (pathname.endsWith("/finding-imports/jobs")) {
+          jobs.push(pathname);
+          const job = JSON.parse(String(init.body));
+          expect(job).toMatchObject(
+            privateJobFields("tenable", fileId, "security.findings.v1"),
+          );
+          return Promise.resolve(
+            Response.json(privateJobReceipt(job, "import_" + "b".repeat(32))),
+          );
+        }
+        return deps.fetch(url, init);
+      },
+    });
+  await expect(prepare()).rejects.toThrow(/unavailable/i);
+  expect(uploads).toHaveLength(0);
+  f.state.catalogHeaders[jobVersionHeader] = "3";
+  const prepared = await prepare();
+  expect((await prepared.publish()).status).toBe("complete");
+  expect(uploads).toHaveLength(1);
+  expect(jobs).toEqual(["/backend-api/aardvark/v3/finding-imports/jobs"]);
+});
+
 test("a throttled private upload reports the retry interval and resumes the same request", async () => {
   const { f, deps, inbox, jobs } = await privateUploadFixture(
     tenableReport,

@@ -33,6 +33,7 @@ export const privateJobVersions: Partial<
   blackduck: 3,
   checkmarx: 3,
   sonar: 3,
+  tenable: 3,
   trivy: 3,
   veracode: 3,
 };
