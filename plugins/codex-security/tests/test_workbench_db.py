@@ -3194,6 +3194,21 @@ def test_patch_digest_accepts_file_becoming_read_only(tmp_path: Path, monkeypatc
 
 
 @pytest.mark.cross_platform
+def test_truncated_patch_preview_keeps_whole_characters(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    # The preview byte limit falls inside the 5,322nd three-byte character.
+    patch = b"diff --git a/README.md b/README.md\n+" + "\u20ac".encode() * 6000 + b"\n"
+    (tmp_path / "remediation.patch").write_bytes(patch)
+    digest = f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    preview, _ = namespace["patch_artifact_preview"](tmp_path, "remediation.patch", digest)
+    assert preview == (
+        "diff --git a/README.md b/README.md\n+"
+        + "\u20ac" * 5321
+        + "\n... patch preview truncated ..."
+    )
+
+
+@pytest.mark.cross_platform
 def test_large_patch_preview_preserves_digest_checks(
     tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
