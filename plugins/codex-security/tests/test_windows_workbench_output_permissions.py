@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
+import io
+import json
 import os
+import sqlite3
 import string
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
+from workbench_test_support import run_workbench, scan_command
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import windows_scan_local_files  # noqa: E402
 import workbench_db  # noqa: E402
+from filesystem_identity import serialize_filesystem_identity  # noqa: E402
 from workbench import storage  # noqa: E402
 
 pytestmark = [
@@ -31,6 +39,585 @@ def grant(path: Path, rights: str) -> None:
 
 def make_junction(path: Path, target: Path) -> None:
     subprocess.run(["cmd", "/c", "mklink", "/J", str(path), str(target)], check=True)
+
+
+@pytest.fixture
+def deep_registration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "source.py").write_text("# synthetic source\n")
+    output = tmp_path / "output"
+    output.mkdir()
+    state = tmp_path / "state"
+    recipe = {
+        "config": {},
+        "repository": str(repository),
+        "target": {"kind": "repository", "paths": []},
+    }
+
+    def register(mode="deep", *, archive=False, connection=None, **options):
+        arguments = [
+            "register-cli-scan",
+            "--repository",
+            str(repository),
+            "--scan-dir",
+            str(output),
+            "--recipe-json",
+            json.dumps({**recipe, "mode": mode}),
+        ]
+        if archive:
+            arguments.append("--archive-existing")
+        if connection is None:
+            return run_workbench(state, *arguments, **options)
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "argv", ["workbench", *arguments])
+            return workbench_db.register_cli_scan(
+                connection, workbench_db.parse_args("test workbench")
+            )
+
+    return state, output, register
+
+
+def test_resume_distinguishes_a_changed_checkout_from_different_stat_widths(
+    deep_registration,
+) -> None:
+    state, output, register = deep_registration
+    target = output.parent / "repository"
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+        (stored,) = connection.execute(
+            "SELECT windows_resume_target_identity FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()
+        volume, file_id = json.loads(stored)
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (
+                volume & 0xFFFFFFFF,
+                serialize_filesystem_identity(file_id & 0xFFFFFFFFFFFFFFFF),
+                scan_id,
+            ),
+        )
+        connection.commit()
+        assert scan_command(state, "get-cli-scan-resume", scan_id)["threadId"] == "original-thread"
+
+        connection.execute(
+            "UPDATE scans SET windows_resume_target_identity = ? WHERE id = ?",
+            (json.dumps([volume ^ (1 << 32), file_id]), scan_id),
+        )
+        connection.commit()
+        refused = scan_command(state, "get-cli-scan-resume", scan_id, check=False)
+        assert (
+            refused["returncode"] != 0
+            and "checkout is missing or was replaced" in refused["stderr"]
+        )
+
+        connection.execute(
+            "UPDATE scans SET windows_resume_target_identity = ? WHERE id = ?", (stored, scan_id)
+        )
+        connection.commit()
+    previous = target.with_name("previous checkout")
+    target.rename(previous)
+    target.mkdir()
+    (target / "source.py").write_bytes((previous / "source.py").read_bytes())
+    replacement = scan_command(state, "get-cli-scan-resume", scan_id, check=False)
+    assert (
+        replacement["returncode"] != 0
+        and "checkout is missing or was replaced" in replacement["stderr"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("tag", "source_allowed"),
+    [(0x9000001A, True), (0x80000017, True), (0xA0000003, False), (0xA000000C, False)],
+    ids=["cloud-files", "wof", "junction", "symlink"],
+)
+def test_checkout_pins_distinguish_name_surrogates_from_provider_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tag: int, source_allowed: bool
+) -> None:
+    windows = windows_scan_local_files
+    provider = tmp_path / "provider"
+    repository = provider / "repository"
+    repository.mkdir(parents=True)
+    attrs = windows._attributes
+
+    def provider_attributes(handle):
+        info = attrs(handle)
+        if windows._final_path(handle) == windows._extended_path(provider):
+            info.FileAttributes |= windows._FILE_ATTRIBUTE_REPARSE_POINT
+            info.ReparseTag = tag
+        return info
+
+    monkeypatch.setattr(windows, "_attributes", provider_attributes)
+    if source_allowed:
+        with windows.pinned_resume_checkout(repository) as identity:
+            assert identity is not None
+            with pytest.raises(PermissionError):
+                provider.rename(tmp_path / "moved")
+    else:
+        with pytest.raises(OSError, match="reparse"):
+            with windows.pinned_resume_checkout(repository):
+                pytest.fail("a redirecting ancestor was followed")
+    with pytest.raises(OSError, match="reparse"):
+        windows.require_windows_output_path(repository)
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["stored-native-id", "legacy-full-id"])
+def test_high_windows_file_id_survives_resume_validation_and_remediation(
+    deep_registration,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy: bool,
+) -> None:
+    import workbench_target
+
+    state, output, register = deep_registration
+    target = output.parent / "repository"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    monkeypatch.setenv("CODEX_HOME", str(state.parent / "home"))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO()))
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    read_identity = windows_scan_local_files._full_directory_id
+    high_bits = 1 << 96
+
+    def read_wide_identity(handle, path):
+        identity = read_identity(handle, path)
+        if path == target:
+            return identity[0], identity[1] | high_bits
+        return identity
+
+    monkeypatch.setattr(windows_scan_local_files, "_full_directory_id", read_wide_identity)
+    with closing(workbench_db.connect()) as connection:
+        with windows_scan_local_files.pinned_resume_checkout(target) as native:
+            assert native is not None and native[1] != target.stat().st_ino
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ?, windows_resume_target_identity = ? WHERE id = ?",
+            (
+                *map(serialize_filesystem_identity, native),
+                None if legacy else json.dumps(native),
+                scan_id,
+            ),
+        )
+        connection.commit()
+        row = workbench_db.require_scan(connection, scan_id)
+        monkeypatch.setattr(sys, "argv", ["workbench", "get-cli-scan-resume", "--scan-id", scan_id])
+        workbench_db.main()
+        assert json.loads(capsys.readouterr().out)["threadId"] == "original-thread"
+        monkeypatch.setattr(
+            sys, "argv", ["workbench", "get-scan", "--scan-id", scan_id, "--check-target"]
+        )
+        directory_digest = workbench_target.directory_content_digest
+
+        def digest_while_pinned(directory, **options):
+            with pytest.raises(PermissionError):
+                directory.rename(directory.with_name("different checkout"))
+            return directory_digest(directory, **options)
+
+        monkeypatch.setattr(workbench_target, "directory_content_digest", digest_while_pinned)
+        workbench_db.main()
+        assert json.loads(capsys.readouterr().out)["scan"]["scanId"] == scan_id
+        assert workbench_db.remediation_checkout_snapshot(row) == (
+            row["target_revision"],
+            row["target_snapshot_digest"],
+        )
+        connection.execute("UPDATE scans SET status='complete' WHERE id=?", (scan_id,))
+        if not legacy:
+            # A matching legacy stat tuple must never override a differing stored full ID.
+            info = target.stat()
+            connection.execute(
+                "UPDATE scans SET target_device=?, target_inode=? WHERE id=?",
+                (
+                    serialize_filesystem_identity(info.st_dev),
+                    serialize_filesystem_identity(info.st_ino),
+                    scan_id,
+                ),
+            )
+        connection.commit()
+        row = workbench_db.require_scan(connection, scan_id)
+        assert workbench_db.remediation_availability(row) == (True, None)
+        high_bits = 1 << 97
+        with pytest.raises(SystemExit):
+            workbench_db.main()
+        with pytest.raises(SystemExit):
+            workbench_db.remediation_checkout_snapshot(row)
+        assert not workbench_db.remediation_availability(row)[0]
+
+
+def test_history_remains_available_if_a_legacy_checkout_moves_after_the_revision_read(
+    deep_registration, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state, output, register = deep_registration
+    target = output.parent / "repository"
+    moved = target.with_name("moved checkout")
+    scan_id = register()["scanId"]
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    monkeypatch.setenv("CODEX_HOME", str(state.parent / "home"))
+    monkeypatch.setattr(sys, "argv", ["workbench", "get-scan", "--scan-id", scan_id])
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO()))
+    info = target.stat()
+    with closing(workbench_db.connect()) as connection, connection:
+        connection.execute(
+            "UPDATE scans SET status='complete', windows_resume_target_identity=NULL, "
+            "target_device=?, target_inode=? WHERE id=?",
+            (*map(serialize_filesystem_identity, (info.st_dev, info.st_ino)), scan_id),
+        )
+    git_revision = workbench_db.git_revision
+
+    def revision_before_move(directory: Path) -> str:
+        revision = git_revision(directory)
+        if directory == target and not moved.exists():
+            target.rename(moved)
+        return revision
+
+    with monkeypatch.context() as patch:
+        patch.setattr(workbench_db, "git_revision", revision_before_move)
+        workbench_db.main()
+    result = json.loads(capsys.readouterr().out)["scan"]
+    assert moved.is_dir() and result["scanId"] == scan_id
+    assert result["remediationAvailable"] is False
+    assert "Cannot verify the original Windows checkout" in result["remediationUnavailableReason"]
+    moved.rename(target)
+    workbench_db.main()
+    assert json.loads(capsys.readouterr().out)["scan"]["remediationAvailable"] is True
+
+
+def test_legacy_checkout_keeps_exact_stat_matches_and_requires_full_native_proof(
+    deep_registration, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state, output, register = deep_registration
+    target = output.parent / "repository"
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+        connection.row_factory = sqlite3.Row
+        (stored,) = connection.execute(
+            "SELECT windows_resume_target_identity FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()
+        volume, file_id = json.loads(stored)
+        connection.execute(
+            "UPDATE scans SET windows_resume_target_identity = NULL WHERE id = ?", (scan_id,)
+        )
+        row = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                windows_scan_local_files,
+                "pinned_resume_checkout",
+                lambda _: pytest.fail(
+                    "An exact legacy match unexpectedly required a native witness"
+                ),
+            )
+            assert workbench_db.scan_history._windows_resume_checkout(row) == target
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (
+                serialize_filesystem_identity(volume),
+                serialize_filesystem_identity(file_id),
+                scan_id,
+            ),
+        )
+        connection.commit()
+        assert scan_command(state, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+
+        narrowed = (volume & 0xFFFFFFFF, file_id & 0xFFFFFFFFFFFFFFFF)
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (*map(serialize_filesystem_identity, narrowed), scan_id),
+        )
+        connection.commit()
+        metadata = target.stat()
+        if narrowed == (metadata.st_dev, metadata.st_ino):
+            assert scan_command(state, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+        else:
+            refused = scan_command(state, "get-cli-scan-resume", scan_id, check=False)
+            assert refused["returncode"] != 0 and f"scans rerun {scan_id}" in refused["stderr"]
+
+
+@pytest.mark.parametrize("archive", [False, True], ids=["fresh", "archive-existing"])
+@pytest.mark.parametrize("full_ids", [True, False], ids=["native-id", "stat-only"])
+def test_registration_restores_output_when_checkout_is_replaced_before_commit(
+    deep_registration, monkeypatch: pytest.MonkeyPatch, archive: bool, full_ids: bool
+) -> None:
+    state, output, register = deep_registration
+    target = output.parent / "repository"
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    previous_file = output / "previous result"
+    with closing(workbench_db.connect()) as connection:
+        previous_id = None
+        if archive:
+            previous_id = register("standard", connection=connection)["scanId"]
+            connection.execute("UPDATE scans SET status = 'failed' WHERE id = ?", (previous_id,))
+            connection.commit()
+            previous_file.write_bytes(b"previous result")
+        count_files = workbench_db.scan_scope_file_count
+
+        def replace_target(*args):
+            count = count_files(*args)
+            original = target.with_name("original checkout")
+            target.rename(original)
+            target.mkdir()
+            (target / "source.py").write_bytes((original / "source.py").read_bytes())
+            return count
+
+        with monkeypatch.context() as patch:
+            patch.setattr(workbench_db, "scan_scope_file_count", replace_target)
+            if not full_ids:
+                patch.setattr(windows_scan_local_files, "_full_directory_id", lambda *args: None)
+            # An archived scan already owns the registered target. Its ownership check
+            # detects the replacement before the final Windows resume pin is acquired.
+            rejection = (
+                "no longer matches its recorded security scan history"
+                if archive
+                else "target changed while the scan was starting"
+            )
+            with pytest.raises(SystemExit, match=rejection):
+                register(archive=archive, connection=connection)
+        ids = [row[0] for row in connection.execute("SELECT id FROM scans")]
+        assert not list(output.parent.glob(f"{output.name}.previous-*"))
+        if archive:
+            assert ids == [previous_id]
+            assert previous_file.read_bytes() == b"previous result"
+        else:
+            assert ids == [] and list(output.iterdir()) == []
+
+
+@pytest.mark.parametrize("legacy_ids", [False, True], ids=["full-file-id", "legacy-file-index"])
+def test_deep_resume_reads_both_pinned_directory_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy_ids: bool
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    child = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    lstat = Path.lstat
+
+    def directory_entry_stat(path: Path) -> os.stat_result:
+        if path not in (output, child):
+            return lstat(path)
+        # Windows directory enumeration can supply attributes without a file index.
+        with os.scandir(path.parent) as entries:
+            entry = next(entry for entry in entries if entry.name == path.name)
+            return entry.stat(follow_symlinks=False)
+
+    monkeypatch.setattr(Path, "lstat", directory_entry_stat)
+    if legacy_ids:
+        get_info = windows_scan_local_files._GetFileInformationByHandleEx
+
+        def without_file_id(handle, info_class, *arguments):
+            if info_class == windows_scan_local_files._FILE_ID_INFO_CLASS:
+                ctypes.set_last_error(50)  # ERROR_NOT_SUPPORTED.
+                return False
+            return get_info(handle, info_class, *arguments)
+
+        monkeypatch.setattr(
+            windows_scan_local_files, "_GetFileInformationByHandleEx", without_file_id
+        )
+
+    with windows_scan_local_files.create_deep_resume_output(output, lambda: False) as saved:
+        assert output.lstat().st_ino == child.lstat().st_ino == 0
+        root_volume, root_id, child_volume, child_id = saved
+        assert root_volume == child_volume
+        assert root_id and child_id and root_id != child_id
+    assert windows_scan_local_files.deep_resume_output_identity(output) == saved
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "replaced root",
+        "replaced child",
+        "different recorded volume",
+        "missing child",
+        "deletable child",
+        "delete child right",
+    ],
+)
+def test_deep_resume_requires_the_registered_protected_directories(
+    deep_registration, tmp_path: Path, change: str
+) -> None:
+    state, output, register = deep_registration
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    assert list(output.iterdir()) == [retained]
+    assert list(retained.iterdir()) == []
+    grant(output, "(OI)(CI)M")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["threadId"] == "original-thread"
+
+    if change == "replaced root":
+        previous = tmp_path / "original root"
+        output.rename(previous)
+        output.mkdir()
+        (previous / retained.name).rename(retained)
+    elif change == "replaced child":
+        retained.rename(tmp_path / "original child")
+        windows_scan_local_files.create_private_directory(
+            retained, exist_ok=False, scan_output=True
+        )
+    elif change == "different recorded volume":
+        identity = windows_scan_local_files.deep_resume_output_identity(output)
+        identity[0] ^= 1 << 32  # The low 32 bits and both file IDs still match.
+        with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+            connection.execute(
+                "UPDATE scans SET windows_resume_output_identity = ? WHERE id = ?",
+                (json.dumps(identity), scan_id),
+            )
+    elif change == "missing child":
+        retained.rmdir()
+    elif change == "deletable child":
+        grant(retained, "(DE)")
+    else:
+        grant(output, "(DC)")
+
+    # Even a populated replacement cannot downgrade a recorded binding to legacy recovery.
+    (output / "checkpoint.json").write_text("{}")
+    rejected = scan_command(state, "get-cli-scan-resume", scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "Windows" in rejected["stderr"]
+    assert (output / "checkpoint.json").read_text() == "{}"
+
+
+def test_legacy_windows_resume_keeps_populated_output_and_rejects_unbound_empty_output(
+    deep_registration,
+) -> None:
+    state, output, register = deep_registration
+    scan_id = register()["scanId"]
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+        connection.execute(
+            "UPDATE scans SET windows_resume_output_identity = NULL WHERE id = ?", (scan_id,)
+        )
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    # Neither a private directory nor a lookalike retained child proves legacy ownership.
+    for has_guard in (True, False):
+        if not has_guard:
+            retained.rmdir()
+            grant(output, "(OI)(CI)M")
+        rejected = scan_command(state, "get-cli-scan-resume", scan_id, check=False)
+        assert rejected["returncode"] != 0
+        assert f"scans rerun {scan_id}" in rejected["stderr"]
+    (output / "checkpoint.json").write_text("{}")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["scanDir"] == str(output)
+
+
+def test_deep_registration_rolls_back_the_retained_child(deep_registration) -> None:
+    state, output, register = deep_registration
+    run_workbench(state, "database-info")
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+        connection.execute(
+            "CREATE TRIGGER fail_binding BEFORE UPDATE OF windows_resume_output_identity ON scans "
+            "BEGIN SELECT RAISE(ABORT, 'synthetic registration failure'); END"
+        )
+    assert "synthetic registration failure" in register(check=False)["stderr"]
+    assert list(output.iterdir()) == []
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection, connection:
+        assert connection.execute("SELECT count(*) FROM scans").fetchone()[0] == 0
+        connection.execute("DROP TRIGGER fail_binding")
+    with ThreadPoolExecutor(max_workers=2) as retries:
+        outcomes = [retries.submit(register, check=False) for _ in range(2)]
+        assert sorted(outcome.result()["returncode"] for outcome in outcomes) == [0, 1]
+    with closing(sqlite3.connect(state / "workbench.sqlite3")) as connection:
+        [(scan_id,)] = connection.execute("SELECT id FROM scans").fetchall()
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+
+
+@pytest.mark.parametrize("archive", [False, True], ids=["fresh", "archive-existing"])
+def test_resume_verification_failure_rolls_back_the_created_handle(
+    deep_registration, monkeypatch: pytest.MonkeyPatch, archive: bool
+) -> None:
+    state, output, register = deep_registration
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    previous_file = output / "previous result"
+
+    with closing(workbench_db.connect()) as connection:
+        old_id = None
+        previous_identity = None
+        if archive:
+            old_id = register("standard", connection=connection)["scanId"]
+            previous_identity = windows_scan_local_files.deep_resume_output_identity(output)
+            connection.execute("UPDATE scans SET status = 'failed' WHERE id = ?", (old_id,))
+            connection.commit()
+            previous_file.write_bytes(b"original result")
+        original_grants = windows_scan_local_files._output_directory_grants
+
+        def competing_reader(handle, path, **options):
+            if path == retained and "expected_descriptor" in options:
+                # The original handle is already held when verification starts.
+                # Propagate the real sharing error to interrupt this registration.
+                contender = windows_scan_local_files._create_file(
+                    retained,
+                    access=windows_scan_local_files._FILE_TRAVERSE,
+                    share=0,
+                    disposition=windows_scan_local_files._OPEN_EXISTING,
+                    flags=windows_scan_local_files._FILE_FLAG_BACKUP_SEMANTICS
+                    | windows_scan_local_files._FILE_FLAG_OPEN_REPARSE_POINT,
+                )
+                with contender:
+                    pytest.fail("An exclusive reader opened the tentative resume directory")
+            return original_grants(handle, path, **options)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(windows_scan_local_files, "_output_directory_grants", competing_reader)
+            with pytest.raises(OSError) as failure:
+                register(archive=archive, connection=connection)
+        assert (getattr(failure.value, "winerror", None) or failure.value.errno) == 32
+        assert not list(output.parent.glob(f"{output.name}.previous-*"))
+        rows = connection.execute("SELECT id, scan_dir FROM scans").fetchall()
+        if archive:
+            assert windows_scan_local_files.deep_resume_output_identity(output) == previous_identity
+            assert [tuple(row) for row in rows] == [(old_id, str(output))]
+            assert previous_file.read_bytes() == b"original result"
+        else:
+            assert not retained.exists()
+            assert rows == []
+            assert list(output.iterdir()) == []
+        assert register(archive=archive, connection=connection)["scanDir"] == str(output)
+
+
+def test_resume_cleanup_cannot_remove_an_existing_or_substituted_child(tmp_path: Path) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    retained = output / windows_scan_local_files.DEEP_RESUME_DIRECTORY
+    original = tmp_path / "another directory"
+    original.mkdir()
+    sentinel = original / "keep"
+    sentinel.write_bytes(b"owned by another operation")
+    original.rename(retained)
+    with (
+        pytest.raises(FileExistsError),
+        windows_scan_local_files.create_deep_resume_output(output, lambda: False),
+    ):
+        pytest.fail("An existing child was adopted")
+    retained.rename(original)
+    with (
+        pytest.raises(PermissionError) as failure,
+        windows_scan_local_files.create_deep_resume_output(output, lambda: False),
+    ):
+        retained.rename(tmp_path / "moved")
+    assert failure.value.winerror == 32
+    assert not retained.exists()
+    assert sentinel.read_bytes() == b"owned by another operation"
+
+
+def test_post_commit_interrupt_keeps_the_registered_resume_directory(deep_registration) -> None:
+    state, output, register = deep_registration
+    run_workbench(state, "database-info")
+
+    class InterruptedCommit(sqlite3.Connection):
+        def commit(self):
+            super().commit()
+            raise KeyboardInterrupt
+
+    with closing(
+        sqlite3.connect(state / "workbench.sqlite3", factory=InterruptedCommit)
+    ) as connection:
+        connection.row_factory = sqlite3.Row
+        with pytest.raises(KeyboardInterrupt):
+            register(connection=connection)
+        [(scan_id,)] = connection.execute("SELECT id FROM scans").fetchall()
+    scan_command(state, "set-scan-thread", scan_id, "--thread-id", "original-thread")
+    assert scan_command(state, "get-cli-scan-resume", scan_id)["scanDir"] == str(output)
 
 
 def test_missing_output_drive_reports_a_filesystem_error() -> None:

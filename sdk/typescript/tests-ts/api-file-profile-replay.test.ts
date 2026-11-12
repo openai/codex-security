@@ -30,8 +30,10 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 import { rejecting } from "./support/errors.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "file-profile-replay-",
@@ -61,6 +63,7 @@ test.serial.each([
   "early",
   "precommit",
   "rejected",
+  "rejected-endpoint",
   "postcommit",
   "unavailable-receipt",
   "success",
@@ -146,6 +149,7 @@ test.serial.each([
                 `    with socket.create_connection(('127.0.0.1', ${address.port})) as connection:`,
                 "        connection.sendall(b'ready')",
                 "        connection.recv(1)",
+                "    raise SystemExit('Synthetic registration reply lost')",
                 "def controlled(*args, **kwargs):",
                 ...(boundary === "precommit" ? ["    pause()"] : []),
                 "    result = original(*args, **kwargs)",
@@ -165,12 +169,19 @@ test.serial.each([
             async ([socket]) => {
               const [message] = await once(socket, "data", readinessOptions);
               expect(String(message)).toBe("ready");
+              return socket;
             },
           )
         : undefined;
       let submitted: JsonObject | undefined;
       client = new TestClient(
-        { pluginPath: pluginRoot, codexOverrides: explicit },
+        {
+          pluginPath: pluginRoot,
+          codexOverrides:
+            boundary === "rejected-endpoint"
+              ? { openai_base_url: "https://explicit.example.test/v1" }
+              : explicit,
+        },
         {
           environment,
           resolvePluginPython: async () => python,
@@ -183,7 +194,7 @@ test.serial.each([
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan") {
               submitted = JSON.parse(input!).recipe;
-              if (boundary === "rejected")
+              if (boundary === "rejected" || boundary === "rejected-endpoint")
                 args = [
                   ...args,
                   "--parent-scan-id",
@@ -207,13 +218,15 @@ test.serial.each([
         .run(repository, { signal: controller.signal })
         .catch((error: unknown) => error);
       if (ready !== undefined) {
-        await Promise.race([
+        const socket = await Promise.race([
           ready,
           operation.then((error) => {
             throw error;
           }),
         ]);
         controller.abort();
+        // Windows lets registration finish once it starts changing the output.
+        socket.end();
       }
       const failure = await operation;
       expect(failure).toBeInstanceOf(Error);
@@ -235,6 +248,10 @@ test.serial.each([
       ].includes(boundary);
       expect(scans).toHaveLength(committed ? 1 : 0);
       if (!committed) {
+        if (boundary === "rejected-endpoint")
+          expect(submitted?.["providerProfile"]).toMatchObject({
+            home: "managed",
+          });
         const names = await readdir(
           codexSecurityCredentialHome(environment),
         ).catch((error: NodeJS.ErrnoException) => {
@@ -336,7 +353,22 @@ test.each(
     for (const path of [repository, home, runtimeHome, scanDir])
       await mkdir(path, { mode: 0o700 });
     const profilePath = join(home, "review.config.toml");
+    const ambientAuth = {
+      cli_auth_credentials_store: "file",
+      forced_login_method: "chatgpt",
+      forced_chatgpt_workspace_id: "synthetic-ambient-workspace",
+    };
+    await writeFile(join(home, "config.toml"), stringify(ambientAuth));
+    const authOverrides: JsonObject =
+      skills === "explicit"
+        ? {
+            cli_auth_credentials_store: "ephemeral",
+            forced_login_method: "api",
+            forced_chatgpt_workspace_id: "synthetic-explicit-workspace",
+          }
+        : {};
     const fileProfile = (version: string) => ({
+      openai_base_url: `https://${version}.example.test/v1`,
       model: version === "first" ? "initial-model" : "updated-model",
       model_reasoning_effort: version === "first" ? "low" : "high",
       analytics: { enabled: true },
@@ -358,6 +390,7 @@ test.each(
     });
     await writeFile(profilePath, stringify(fileProfile("first")));
     const explicit: JsonObject = {
+      ...authOverrides,
       profile: "review",
       analytics: { enabled: false },
       shell_environment_policy: {
@@ -371,6 +404,9 @@ test.each(
       model_catalog_json: "../caller-catalog.json",
       features: { view_image: false, shell_tool: false },
     };
+    const explicitEndpoint =
+      skills === "explicit" ? "https://caller.example.test/v1" : undefined;
+    if (explicitEndpoint) explicit["openai_base_url"] = explicitEndpoint;
     if (skills !== "inherited")
       explicit["skills"] =
         skills === "null"
@@ -434,6 +470,9 @@ test.each(
         await mergedCodexConfig({ codexOverrides: replay }, home),
       );
       expect(restored).toMatchObject({
+        ...ambientAuth,
+        ...authOverrides,
+        openai_base_url: explicitEndpoint ?? "https://reloaded.example.test/v1",
         model: "updated-model",
         model_reasoning_effort: "high",
         analytics: { enabled: false },
@@ -484,6 +523,7 @@ test.each(
         `${profile["name"]}.config.json`,
       );
       const saved = JSON.parse(await readFile(privatePath, "utf8"));
+      expect(saved["openai_base_url"]).toBe(explicitEndpoint);
       expect(saved).not.toHaveProperty("model_catalog_json");
       expect(saved).not.toHaveProperty("features.shell_tool");
       expect(saved).toHaveProperty("model_instructions_file", null);

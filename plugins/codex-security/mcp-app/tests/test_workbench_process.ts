@@ -21,10 +21,20 @@ interface WorkbenchModule {
   ): Promise<Record<string, unknown>>;
 }
 
-const { executeWorkbench, runWorkbench } = await loadWorkbenchProcess();
+const { executeWorkbench, runWorkbench, workbenchTimeout } =
+  await loadWorkbenchProcess();
 const { workbenchArgs } = await importSource(
   path.join(import.meta.dirname, "../src/workbench-arguments.ts"),
 );
+await test("token-bearing context reads share the get-scan timeout", () => {
+  assert.equal(workbenchTimeout(["mark-handoff-delivered"]), 30_000);
+  assert.equal(workbenchTimeout(["get-scan"]), 300_000);
+  assert.equal(
+    workbenchTimeout(["mark-handoff-delivered", "--return-context"]),
+    300_000,
+  );
+});
+
 async function userSitePython(): Promise<string> {
   // A caller's virtualenv may intentionally disable user-site imports.
   const { stdout } = await promisify(execFile)(fixturePython, [
@@ -57,15 +67,14 @@ await test("local Python helpers omit the MiniMax key while the host keeps it", 
   const previous = process.env[key];
   t.after(() => restoreEnv(key, previous));
   process.env[key] = "fixture-model-key";
-  const python = process.env.PYTHON?.trim() || "python3";
   const check =
     'import os\nif any(k.upper() == "MINIMAX_API_KEY" for k in os.environ):\n    raise SystemExit("unexpected MiniMax key")';
   const execute = await fixtureWorkbench(
     root,
     `${check}\ndef main(): print("{}")\n`,
   );
-  await execute(python, ["list-scans"]);
-  await runPythonWithInput(python, ["-c", check], "", "fixture helper");
+  await execute(fixturePython, ["list-scans"]);
+  await runPythonWithInput(fixturePython, ["-c", check], "", "fixture helper");
   assert.equal(process.env[key], "fixture-model-key");
 });
 
