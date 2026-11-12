@@ -107,6 +107,9 @@ async function assertWorkerReplay(
           selected = deepMerge(selected, parse(argv[++index]!) as JsonObject);
       for (const key of [
         "analytics",
+        "cli_auth_credentials_store",
+        "forced_login_method",
+        "forced_chatgpt_workspace_id",
         "openai_base_url",
         "shell_environment_policy",
         "otel",

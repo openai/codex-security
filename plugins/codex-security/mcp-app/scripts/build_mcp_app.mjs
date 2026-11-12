@@ -1,13 +1,49 @@
 #!/usr/bin/env node
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { build } from "esbuild";
 import { buildNativeWrappers } from "./build_native_wrappers.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+
+async function runAppBuild() {
+  const options = { cwd: root, stdio: "inherit" };
+  const binDirectory = join("node_modules", ".bin");
+  if (process.platform !== "win32" || join(root, binDirectory).length < 260) {
+    execFileSync(process.execPath, ["--run", "build"], options);
+    return;
+  }
+  if (process.versions.bun) {
+    // Bun reserves `build` for its bundler unless `run` is explicit.
+    execFileSync(process.execPath, ["run", "build"], options);
+    return;
+  }
+
+  // Node's Windows task runner can skip a long package.json or .bin directory
+  // and select an ancestor's script or compiler.
+  const manifest = join(root, "package.json");
+  const { scripts } = JSON.parse(await readFile(manifest, "utf8"));
+  const bins = [];
+  for (let dir = root; dir !== dirname(dir); dir = dirname(dir)) {
+    const bin = join(dir, binDirectory);
+    if (statSync(bin, { throwIfNoEntry: false })?.isDirectory()) bins.push(bin);
+  }
+  const env = { ...process.env };
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path");
+  if (pathKey !== undefined)
+    env[pathKey] = [...bins, env[pathKey]].join(delimiter);
+  execSync(scripts.build, {
+    ...options,
+    env: {
+      ...env,
+      NODE_RUN_SCRIPT_NAME: "build",
+      NODE_RUN_PACKAGE_JSON_PATH: manifest,
+    },
+  });
+}
 
 export async function buildMcpApp({ output, native = "universal" }) {
   if (native !== "universal" && native !== "host") {
@@ -38,10 +74,7 @@ export async function buildMcpApp({ output, native = "universal" }) {
     throw new Error(`Unsupported native target: ${hostTarget}.`);
   }
 
-  execFileSync(process.execPath, ["--run", "build"], {
-    cwd: root,
-    stdio: "inherit",
-  });
+  await runAppBuild();
   await rm(mcpDir, { recursive: true, force: true });
   await mkdir(mcpDir, { recursive: true });
   // A standalone plugin can live on a UNC share. End Node's package lookup
