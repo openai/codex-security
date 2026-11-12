@@ -789,11 +789,6 @@
     "darwin": 34.5,
     "win32": 103.9
   },
-  "patch-publication.test.ts": {
-    "linux": 0.1,
-    "darwin": 0.3,
-    "win32": 0.7
-  },
   "patch-risk-contract.test.ts": {
     "linux": 22.2,
     "darwin": 23.8,

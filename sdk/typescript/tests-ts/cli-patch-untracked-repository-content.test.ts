@@ -15,6 +15,72 @@ import {
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
+for (const copied of [false, true]) {
+  test(`preserves staged-only content during publication, copied: ${copied}`, async () => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    const file = join(directory, "unrelated.txt");
+    const baseline = "Committed fixture baseline\n";
+    const marker = "Synthetic staged-only content\n";
+    await writeFile(file, baseline);
+    git("add", "--", "unrelated.txt");
+    git("commit", "-m", "Add independent fixture file");
+    await writeFile(file, marker);
+    git("add", "--", "unrelated.txt");
+    await writeFile(file, baseline);
+    const head = git("rev-parse", "HEAD");
+    let pushes = 0;
+    const result = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onCodex: async (_args, output) => {
+          await writeFile(
+            join(directory, "selected.txt"),
+            copied ? marker : "Independent change\n",
+          );
+          output!.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: ["selected.txt"],
+                  verification: "Synthetic verification.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command === "git") {
+            if (args.includes("push")) {
+              pushes++;
+              if (copied)
+                throw new Error("Unexpected publication of staged content");
+            }
+            return runGitRepositoryCommand(command, args, cwd, options);
+          }
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        },
+      },
+    );
+    expect(git("show", ":unrelated.txt")).toBe(marker.trim());
+    expect(await readFile(file, "utf8")).toBe(baseline);
+    expect(pushes).toBe(copied ? 0 : 1);
+    expect(result.exitCode, result.stderr).toBe(copied ? 2 : 0);
+    if (copied) {
+      expect(result.stderr).toContain("pre-existing staged content");
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(repositoryGit(remote)("for-each-ref")).toBe("");
+    }
+  });
+}
+
 for (const kind of [
   "untracked",
   "ignored",

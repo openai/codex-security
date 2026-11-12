@@ -11191,6 +11191,7 @@ interface PatchPublication {
   ignoredFiles: Set<string>;
   ignoredDigests: Set<string>;
   nestedRepositoryDigests: Set<string>;
+  stagedBlobs: Set<string>;
   tree: string;
   root: string;
 }
@@ -12196,6 +12197,30 @@ async function preparePatchPublication(
     nestedRepositoryPaths,
     signal,
   );
+  const stagedBlobs = new Set<string>();
+  if (dirtyFiles.size) {
+    // The operator's index can contain bytes absent from both HEAD and the
+    // worktree. Keep the original object IDs before any patch turns run.
+    const staged = await patchGitRecords(
+      root,
+      [
+        "diff",
+        "--cached",
+        "--raw",
+        "--no-abbrev",
+        "--no-renames",
+        "--diff-filter=AMT",
+        "-z",
+        parent,
+        "--",
+      ],
+      dependencies,
+    );
+    for (let i = 0; i + 1 < staged.length; i += 2) {
+      const [, mode, previous, object] = staged[i]!.split(" ");
+      if (mode !== "160000" && previous !== object) stagedBlobs.add(object!);
+    }
+  }
   return {
     branch,
     parent,
@@ -12204,6 +12229,7 @@ async function preparePatchPublication(
     ignoredDigests,
     hostFilterSettings: gitControls?.hostFilterSettings,
     nestedRepositoryDigests,
+    stagedBlobs,
     sshCommand,
     proxyBindings,
     tree,
@@ -12874,10 +12900,10 @@ async function createPatchPullRequest(
       `Cannot publish files with uncommitted changes before patching: ${dirty.map(patchPathText).join(", ")}. Local edits and patches were kept; review and publish them separately.`,
     );
   }
-  if (
-    publication.ignoredDigests.size ||
-    publication.nestedRepositoryDigests.size
-  ) {
+  const checkFileDigests =
+    publication.ignoredDigests.size > 0 ||
+    publication.nestedRepositoryDigests.size > 0;
+  if (checkFileDigests || publication.stagedBlobs.size) {
     const changed = await patchGitRecords(
       root,
       [
@@ -12904,11 +12930,13 @@ async function createPatchPullRequest(
         )
       )
         continue;
-      const digest = await hashPublicationFile(root, path);
+      const digest = checkFileDigests
+        ? await hashPublicationFile(root, path)
+        : undefined;
       const [, mode, , object] = changed[index]!.split(" ");
       // Publication reuses captured blobs, even if assessment changed live files.
       let capturedDigest: string | undefined;
-      if (mode === "100644" || mode === "100755") {
+      if (checkFileDigests && (mode === "100644" || mode === "100755")) {
         const captured = createHash("sha256");
         await dependencies.runRepositoryCommand(
           "git",
@@ -12925,11 +12953,13 @@ async function createPatchPullRequest(
       const matches = (digests: Set<string>) =>
         (digest !== undefined && digests.has(digest)) ||
         (capturedDigest !== undefined && digests.has(capturedDigest));
-      const source = matches(publication.ignoredDigests)
-        ? "ignored"
-        : matches(publication.nestedRepositoryDigests)
-          ? "nested repository"
-          : undefined;
+      const source = publication.stagedBlobs.has(object!)
+        ? "staged"
+        : matches(publication.ignoredDigests)
+          ? "ignored"
+          : matches(publication.nestedRepositoryDigests)
+            ? "nested repository"
+            : undefined;
       if (source !== undefined)
         throw new CodexSecurityError(
           `Cannot automatically publish ${patchPathText(local)}: it matches pre-existing ${source} content. Local edits and patches were kept; review and publish them separately.`,
