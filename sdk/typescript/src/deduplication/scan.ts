@@ -12,7 +12,10 @@ import {
   resolveCompletedScan,
   type SavedScanDependencies,
 } from "../saved-scan.js";
-import { savedScanWorkbench } from "../saved-scan-bootstrap.js";
+import {
+  savedScanWorkbench,
+  type SavedToolDiscovery,
+} from "../saved-scan-bootstrap.js";
 import { CodexReviewRunner, reviewSqliteHome } from "./codex-review.js";
 import { mkdir } from "node:fs/promises";
 import { isWithin } from "../trusted-executable.js";
@@ -84,6 +87,8 @@ export interface DeduplicateScanDirectoryOptions extends DeduplicateScanOptions 
 
 export interface DeduplicateScanResult extends DeduplicationResult {
   scanId: string;
+  /** One finding from this scan for each entry in uniqueFindingIds, in the same order. */
+  scanRepresentativeFindingIds: string[];
 }
 
 /** Review a saved scan against embedding candidates and persist accepted duplicate groups. */
@@ -166,6 +171,7 @@ export async function deduplicateScanInternal(
       : dependencies,
     pluginRoot,
     false,
+    bootstrap?.nodeDiscovery,
   );
 }
 
@@ -177,6 +183,7 @@ async function deduplicateResolvedScan(
   dependencies: DeduplicateScanDependencies,
   pluginRoot: string,
   bindRepository: boolean,
+  nodeDiscovery?: SavedToolDiscovery,
 ): Promise<DeduplicateScanResult> {
   const environment = dependencies.environment ?? process.env;
   if (options.embedding !== undefined && options.findingsUrl !== undefined)
@@ -211,6 +218,7 @@ async function deduplicateResolvedScan(
           workbench,
           options.embedding,
           options.onEmbeddingUsage,
+          nodeDiscovery,
         )
       : undefined;
   const client =
@@ -259,6 +267,25 @@ async function deduplicateResolvedScan(
           runWorkbench: workbench,
         },
       );
+  }
+  const selectedFindingIds = new Set(
+    contract.findings.findings.map((finding) => finding.findingId),
+  );
+  function scanResult(result: DeduplicationResult): DeduplicateScanResult {
+    // Groups are already ranked by severity and then by finding ID.
+    const representatives = new Map<string, string>();
+    for (const group of result.duplicateGroups) {
+      const representative = group.find((id) => selectedFindingIds.has(id));
+      if (representative !== undefined)
+        representatives.set(group[0]!, representative);
+    }
+    return {
+      ...result,
+      scanId,
+      scanRepresentativeFindingIds: result.uniqueFindingIds.map(
+        (id) => representatives.get(id) ?? id,
+      ),
+    };
   }
   const dedupe = async (): Promise<DeduplicateScanResult> => {
     if (local) {
@@ -348,9 +375,6 @@ async function deduplicateResolvedScan(
           options.onDiagnostic,
         )
       : undefined;
-    const selectedFindingIds = new Set(
-      contract.findings.findings.map((finding) => finding.findingId),
-    );
     const sourceRepositories = new Map<Finding, readonly string[]>();
     const sourceSnapshots = new Map<Finding, FindingSourceSnapshot>();
     const deduplicator = new FindingDeduplicator(
@@ -408,7 +432,7 @@ async function deduplicateResolvedScan(
     const reviewed = await deduplicator.run([...selectedFindingIds]);
     await checkpoints?.assertSourceUnchanged();
     options.signal?.throwIfAborted();
-    const result: DeduplicateScanResult = { scanId, ...reviewed };
+    const result = scanResult(reviewed);
     await workflow?.prepareDedupe(result, {
       groups: result.duplicateGroups,
       ...(local
@@ -429,7 +453,10 @@ async function deduplicateResolvedScan(
     ? await workflow.run("dedupe", dedupe)
     : await dedupe();
   options.signal?.throwIfAborted();
-  return result;
+  // Completed workflows and pending receipts from older releases omit this field.
+  return result.scanRepresentativeFindingIds === undefined
+    ? scanResult(result)
+    : result;
 }
 
 async function modelConfigurationForReview(
