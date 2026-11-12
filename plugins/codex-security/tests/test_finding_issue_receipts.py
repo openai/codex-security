@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import uuid
 from contextlib import closing
 from pathlib import Path, PureWindowsPath
@@ -292,6 +293,18 @@ def test_inaccessible_state_preserves_sqlite_open_error(tmp_path: Path, action: 
         assert "sqlite3.OperationalError: unable to open database file" in result["stderr"]
     finally:
         state.chmod(0o700)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux filename bytes")
+def test_inspects_recorded_receipt_in_state_path_with_non_utf8_bytes(tmp_path: Path) -> None:
+    state = tmp_path / os.fsdecode(b"state-\xff?#%")
+    scan_dir, validated = source(tmp_path)
+    receipt = receipt_for(validated)
+    issues(state, scan_dir, "record", receipts=[receipt])
+    assert (
+        issues(state, scan_dir, "inspect")["receipts"][0]["issueIdentifier"]
+        == receipt["issueIdentifier"]
+    )
 
 
 @pytest.mark.parametrize("project", [None, "project-example"])
