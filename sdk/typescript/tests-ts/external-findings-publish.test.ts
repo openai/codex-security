@@ -123,7 +123,10 @@ import {
 } from "./support/inspector-import-fixtures.js";
 import {
   continuumDetail,
+  continuumEvidenceArtifact,
+  continuumIssueExport,
   continuumRepository,
+  continuumValidationArtifact,
 } from "./support/continuum-import-fixtures.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
@@ -1536,6 +1539,12 @@ async function privateUploadFixture(
   const f = await fixture(raw, repositoryUrl);
   const settings = { ...options, provider };
   f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = provider;
+  const jobsPath =
+    provider === "continuum"
+      ? "/v2/finding-imports/jobs"
+      : "/finding-imports/jobs";
+  if (provider === "continuum")
+    f.state.catalogHeaders["Codex-Security-Private-Import-Job-Version"] = "2";
   const inbox = {
     version: "original-inbox",
     formats: ["security.findings.v1"],
@@ -1559,7 +1568,7 @@ async function privateUploadFixture(
           ? Response.json(privateFileMetadata(fileId, prior.bytes))
           : new Response(null, { status: 404 });
       }
-      if (pathname.endsWith("/finding-imports/jobs")) {
+      if (pathname.endsWith(jobsPath)) {
         expect(init.method).toBe("POST");
         const job = JSON.parse(String(init.body));
         jobs.push(job);
@@ -3882,6 +3891,139 @@ test("Continuum Cloud publication checks repository and provider and replays an 
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+});
+
+test("Continuum Cloud publication preserves issue identity and linked source ranges", async () => {
+  const report = {
+    ...continuumIssueExport(),
+    sourceRepositoryUrl: continuumRepository,
+  };
+  const { issue } = report.issues[0]!;
+  const f = await fixture(report, continuumRepository);
+  const selected = {
+    ...options,
+    provider: "continuum" as const,
+    sourceKey: "continuum/example/project",
+  };
+  const other = await fixture(report, "https://github.com/example/other");
+  await expect(
+    prepareExternalPublication(other.file, selected, other.deps),
+  ).rejects.toThrow("does not match the selected Cloud repository");
+  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  expect(prepared.preview.requests[0]?.items).toMatchObject([
+    {
+      source_finding_id: issue.issueArn,
+      evidence: {
+        locations: [
+          { path: "src/example.ts", line: 3 },
+          { path: "src/other.ts", line: 12 },
+          { path: "src/second.ts", line: 20 },
+        ],
+        details: {
+          remediation_instructions: issue.summary,
+          code: { end_line: 5, snippet: "readExample(input)" },
+        },
+        source_data: {
+          issue,
+          findings: [
+            { findingId: "one", validation: { verdict: "TRUE_POSITIVE" } },
+            { findingId: "two", lineNumber: 20, endLine: 24 },
+          ],
+        },
+      },
+    },
+  ]);
+  expect((await prepared.publish()).verified).toBe(1);
+  expect(f.reports.has(issue.issueArn)).toBe(true);
+});
+
+test("a Continuum private upload keeps every structured signal and reports conflicting issue verdicts", async () => {
+  const input = continuumIssueExport();
+  const { issue } = input.issues[0]!;
+  const evidence = [
+    continuumEvidenceArtifact(issue.issueId),
+    continuumValidationArtifact(),
+    {
+      artifactId: "rawvalidation",
+      artifactType: "VALIDATION_EVIDENCE",
+      body: { raw: "Example validation text" },
+    },
+    continuumEvidenceArtifact(issue.issueArn, "NOT_EXPLOITABLE", "evidence2"),
+  ];
+  const report = {
+    ...input,
+    sourceRepositoryUrl: continuumRepository,
+    issues: [
+      {
+        ...input.issues[0]!,
+        issue: {
+          ...issue,
+          artifacts: [
+            ...evidence,
+            {
+              artifactType: "EVIDENCE",
+              artifactId: "narrative",
+              body: { raw: "Example narrative" },
+            },
+          ],
+        },
+      },
+    ],
+  };
+  const linked = continuumDetail();
+  const { inbox, uploads, jobs, prepareFile } = await privateUploadFixture(
+    report,
+    "continuum",
+    continuumRepository,
+  );
+  const prepared = await prepareFile();
+  await expect(prepared.publish()).rejects.toThrow(
+    "Interrupted private upload",
+  );
+  expect(uploads).toHaveLength(1);
+  const payload = JSON.parse(uploads[0]!.bytes);
+  expect(payload).toMatchObject({
+    format: "security.findings.v1",
+    findings: [
+      {
+        source_finding_id: issue.issueArn,
+        evidence: {
+          title: issue.name,
+          severity: "high",
+          locations: [
+            {
+              path: linked.filePath,
+              start_line: linked.lineNumber,
+              end_line: linked.endLine,
+            },
+            { path: "src/other.ts", start_line: 12 },
+            { path: "src/second.ts", start_line: 20 },
+          ],
+          details: {
+            source_status: issue.status,
+            scanner_verdict: "MIXED",
+            remediation_instructions: issue.summary,
+            code: { snippet: linked.vulnerableCode },
+          },
+          source_data: {
+            issue,
+            findings: [
+              { findingId: linked.findingId, validation: linked.validation },
+              { findingId: "two" },
+            ],
+          },
+        },
+      },
+    ],
+  });
+  expect(payload.findings).toHaveLength(1);
+  expect(payload.findings[0].evidence.source_data.evidence_artifacts).toEqual(
+    evidence,
+  );
+  inbox.recoverUpload = true;
+  expect((await (await prepareFile()).publish()).counts.created).toBe(1);
+  expect(uploads).toHaveLength(1);
+  expect(jobs).toHaveLength(1);
 });
 
 test("Inspector publication checks its source and reuses the finding ARN", async () => {

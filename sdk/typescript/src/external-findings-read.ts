@@ -245,9 +245,18 @@ export async function readExternalFindings(
         ),
     };
   }
+  if (provider === "continuum") {
+    const findings = normalizeContinuumFindings(input, url, target);
+    const binding = findings.report?.["sourceRepositoryUrl"];
+    return {
+      findings,
+      sourceRepositories: [
+        { url: typeof binding === "string" ? binding : url },
+      ],
+    };
+  }
   const normalize = {
     inspector: normalizeInspectorFindings,
-    continuum: normalizeContinuumFindings,
     blackduck: normalizeBlackDuckFindings,
     veracode: normalizeVeracodeFindings,
   }[provider];

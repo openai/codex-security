@@ -690,7 +690,10 @@ export async function prepareExternalPublication(
   } else {
     const parsed = await readExternalFindings(path, settings);
     input = normalizedPublicationInput(parsed.findings, provider);
-    if (provider === "endor")
+    if (
+      provider === "endor" ||
+      (provider === "continuum" && parsed.findings.report)
+    )
       fileRepositories = () => parsed.sourceRepositories ?? [];
   }
   return preparePublicationInput(

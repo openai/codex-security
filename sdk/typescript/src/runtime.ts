@@ -1352,6 +1352,39 @@ export function sqliteDatabaseOpener(
   };
 }
 
+function sqliteBusy(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["errcode"] === 5 || error["code"] === "SQLITE_BUSY")
+  );
+}
+
+export async function acquireScanExecutionLock(
+  stateDirectory: string,
+  scanDirectory: string,
+): Promise<() => void> {
+  const directory = join(stateDirectory, "scan-locks");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await requirePrivateDirectory(await stat(directory), directory, "scan locks");
+  const identity = createHash("sha256").update(scanDirectory).digest("hex");
+  const path = join(directory, `${identity}.sqlite3`);
+  const database = sqliteDatabaseOpener()(path);
+  try {
+    if (process.platform !== "win32") await chmod(path, 0o600);
+    database.exec("PRAGMA busy_timeout = 0");
+    database.exec("BEGIN EXCLUSIVE");
+  } catch (error) {
+    database.close();
+    if (sqliteBusy(error)) {
+      throw new CodexSecurityError(
+        "This scan is already running in another CLI or SDK call.",
+      );
+    }
+    throw error;
+  }
+  return () => database.close();
+}
+
 export async function withCredentialHomeLock<T>(
   codexHome: string,
   operation: () => Promise<T>,
@@ -1429,10 +1462,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
         try {
           database.exec("BEGIN EXCLUSIVE");
         } catch (error) {
-          if (
-            !isRecord(error) ||
-            (error["errcode"] !== 5 && error["code"] !== "SQLITE_BUSY")
-          ) {
+          if (!sqliteBusy(error)) {
             throw error;
           }
           await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
