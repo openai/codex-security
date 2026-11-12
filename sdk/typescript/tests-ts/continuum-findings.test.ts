@@ -571,6 +571,70 @@ test.each([87_300, 90_000])(
   },
 );
 
+test("adding oversized validation preserves a fitting proof when its patch body competes for Cloud space", () => {
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const finding = { ...continuumDetail(), createdIssueId: issueId };
+  const validationIssue = {
+    issueId,
+    issueArn,
+    findingIds: [finding.findingId],
+  };
+  const { body: _, ...descriptor } = continuumValidationArtifact();
+  const large = { ...descriptor, body: { raw: "x".repeat(270_000) } };
+  const medium = {
+    ...descriptor,
+    artifactId: "matchingproof",
+    body: { raw: "v".repeat(120_000) },
+  };
+  const patch = patchArtifact("matchingpatch", `+${"p".repeat(180_000)}\n`);
+  const { patch: _diff, ...patchDescriptor } = patch;
+  const marker = { contentOmitted: "cloud_evidence_limit" };
+
+  for (const [evidenceArtifacts, expected] of [
+    [[medium], [medium]],
+    [
+      [large, medium],
+      [{ ...descriptor, ...marker }, medium],
+    ],
+  ] as const) {
+    const report = {
+      finding,
+      validationIssue,
+      evidenceArtifacts,
+      patches: [patch],
+    };
+    const local = normalizeContinuumFindings(
+      report,
+      continuumRepository,
+      "local",
+    );
+    expect(local.excluded).toEqual([]);
+    const stored = local.findings[0]!;
+    expect(stored.evidence.source_data?.["evidence_artifacts"]).toEqual(
+      evidenceArtifacts,
+    );
+    expect(stored.evidence.source_data?.["patches"]).toEqual([patch]);
+
+    const cloud = normalize(report);
+    expect(cloud.excluded).toEqual([]);
+    expect(cloud.findings[0]!.evidence.source_data).toEqual({
+      ...stored.evidence.source_data,
+      evidence_artifacts: expected,
+      patches: [{ ...patchDescriptor, ...marker }],
+    });
+    expect(
+      projectStoredFinding(
+        {
+          provider: "continuum",
+          sourceFindingId: stored.source_finding_id,
+          evidence: stored.evidence,
+        },
+        [],
+      ).findings,
+    ).toEqual(cloud.findings);
+  }
+});
+
 test("preserves dependency and posture evidence without classifying it as a code flaw", () => {
   const summary = continuumSummary();
   const pkg = {

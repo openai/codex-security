@@ -234,8 +234,9 @@ Publish this report with `publish findings --provider continuum` and the verifie
 Attack-path scoring reads the imported validation artifacts from
 `evidence.source_data.evidence_artifacts`. Matching patches are in
 `evidence.source_data.patches`. Local imports keep the full validation and
-patch bodies. When a body exceeds the Cloud evidence budget, its descriptor
-keeps the artifact ID and records `contentOmitted: "cloud_evidence_limit"`.
+patch bodies. Cloud keeps the validation bodies that fit, then uses the
+remaining space for patches. Each omitted body's descriptor keeps the
+artifact ID and records `contentOmitted: "cloud_evidence_limit"`.
 
 ## Use imported evidence in the matching checkout
 
