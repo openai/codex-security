@@ -1,3 +1,4 @@
+import { accessSync, constants, statSync } from "node:fs";
 import { win32 } from "node:path";
 
 export function executablePathForSpawn(command: string): string {
@@ -8,4 +9,39 @@ export function executablePathForSpawn(command: string): string {
   return root === "\\" || root === "/"
     ? command
     : win32.toNamespacedPath(command);
+}
+
+export function isExecutableFile(value: string): boolean {
+  try {
+    if (!statSync(value).isFile()) return false;
+    accessSync(value, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isExplicitPathWithTrailingWhitespace(
+  value: string,
+  platform: NodeJS.Platform,
+): boolean {
+  // Bare names keep their usual PATH precedence. Leading padding can change the path's root.
+  return (
+    platform !== "win32" &&
+    value.includes("/") &&
+    value.trimStart() === value &&
+    value.trimEnd() !== value
+  );
+}
+
+export function configuredExecutableValue(
+  value: string | undefined,
+  platform: NodeJS.Platform,
+  literalIsExecutable: (value: string) => boolean,
+): string | undefined {
+  return value &&
+    isExplicitPathWithTrailingWhitespace(value, platform) &&
+    literalIsExecutable(value)
+    ? value
+    : value?.trim();
 }
