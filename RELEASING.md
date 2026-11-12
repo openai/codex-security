@@ -359,10 +359,11 @@ Historical releases whose source predates `action.yml` skip Action publication
 and still run the exact-version installation checks. The workflow does not add
 Action code from a later commit to an older CLI release.
 
-After npm accepts a publication, its registry can take several minutes to expose
-the version. GitHub publication waits up to ten minutes for that version to
-become available before verifying its archive and signed provenance. Other
-registry errors fail immediately.
+After npm accepts a release, its publish-time scan can delay installation.
+GitHub publication retries a missing version every 30 seconds for up to
+30 minutes. Once the version is available, it verifies the archive and signed
+provenance. Other registry errors fail immediately. If the wait expires,
+[retry GitHub publication](#recover-or-repair-a-release) when the version is available.
 
 `node-release` generates the npm plugin payload from the canonical source under
 `plugins/codex-security/` during `prepack`. The generated

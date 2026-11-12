@@ -76,7 +76,7 @@ def require_diff_target(
     if kind == "working_tree":
         base = resolve_git_commit(target, base_revision or "HEAD", "Working-tree base")
         head = resolve_git_commit(target, head_revision or current_head, "Working-tree HEAD")
-        current_digest = worktree_content_digest(target)
+        current_digest = worktree_content_digest(target, expected_digest=content_digest)
         if base != current_head or head != current_head:
             raise SystemExit(
                 "Repository HEAD changed after these working-tree changes were selected. "
