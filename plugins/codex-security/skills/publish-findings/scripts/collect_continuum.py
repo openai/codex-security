@@ -13,41 +13,15 @@ from collector_paths import in_source, source_root  # noqa: E402
 
 # Credential helpers may use any interpreter. Forward AWS and host settings
 # explicitly so a helper cannot inherit language-specific startup hooks.
-ACCOUNT_DIRECTORIES = {"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"}
-HOST_SETTINGS = ACCOUNT_DIRECTORIES | {
-    "ALL_PROXY",
-    "CURL_CA_BUNDLE",
-    "HOMEDRIVE",
-    "HOMEPATH",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "LANG",
-    "LANGUAGE",
-    "LOGNAME",
-    "NO_PROXY",
-    "REQUESTS_CA_BUNDLE",
-    "SSH_AUTH_SOCK",
-    "SSL_CERT_DIR",
-    "SSL_CERT_FILE",
-    "SYSTEMROOT",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-    "TZ",
-    "USER",
-    "USERNAME",
-    "WINDIR",
-}
+SETTINGS = json.loads(
+    Path(__file__).with_name("continuum_aws_settings.json").read_text(encoding="utf-8")
+)
+ACCOUNT_DIRECTORIES = set(SETTINGS["accountDirectories"])
+HOST_SETTINGS = ACCOUNT_DIRECTORIES | set(SETTINGS["hostSettings"])
 
 
-def in_sources(path: Path, sources: tuple[Path, ...]) -> bool:
-    return any(in_source(path, source) for source in sources)
-
-
-def checked_model_path(path: Path, sources: tuple[Path, ...], levels: int) -> None:
-    if in_sources(path, sources) or any(
-        source.is_relative_to(path.resolve()) for source in sources
-    ):
+def checked_model_path(path: Path, source: Path | None, levels: int) -> None:
+    if in_source(path, source) or (source is not None and source.is_relative_to(path.resolve())):
         raise ValueError(f"Use an AWS model path separate from the selected checkout: {path}")
     if levels and path.is_dir():
         # AWS reads global models and service/<version>/*.json[.gz]. Version
@@ -56,7 +30,7 @@ def checked_model_path(path: Path, sources: tuple[Path, ...], levels: int) -> No
             if child.name.lower().endswith((".json", ".json.gz")) or (
                 levels > 1 and child.is_dir()
             ):
-                checked_model_path(child, sources, levels - 1)
+                checked_model_path(child, source, levels - 1)
 
 
 def pinned_setting(name: str, path: Path) -> str:
@@ -68,7 +42,7 @@ def pinned_setting(name: str, path: Path) -> str:
     return value
 
 
-def aws_environment(sources: tuple[Path, ...], cwd: Path, directories: list[str]) -> dict[str, str]:
+def aws_environment(source: Path | None, cwd: Path, directories: list[str]) -> dict[str, str]:
     env = {
         name: value
         for name, value in os.environ.items()
@@ -78,7 +52,7 @@ def aws_environment(sources: tuple[Path, ...], cwd: Path, directories: list[str]
     for name in ACCOUNT_DIRECTORIES:
         if env.get(name):
             path = cwd / env[name]
-            if in_sources(path, sources):
+            if in_source(path, source):
                 raise ValueError(f"Use an account {name} directory outside the selected checkout.")
             env[name] = str(path)
 
@@ -90,33 +64,27 @@ def aws_environment(sources: tuple[Path, ...], cwd: Path, directories: list[str]
     ):
         filename = os.path.expanduser(os.path.expandvars(env.get(name, default)))
         path = cwd / filename
-        if in_sources(path, sources):
+        if in_source(path, source):
             raise ValueError(f"Use an {name} file outside the selected checkout.")
         if name in env:
             env[name] = pinned_setting(name, path)
-    if in_sources(cwd / os.path.expanduser("~/.aws/cli/alias"), sources):
+    if in_source(cwd / os.path.expanduser("~/.aws/cli/alias"), source):
         raise ValueError("Use an AWS CLI alias file outside the selected checkout.")
-    checked_model_path(cwd / os.path.expanduser("~/.aws/models"), sources, 3)
+    checked_model_path(cwd / os.path.expanduser("~/.aws/models"), source, 3)
     if "AWS_DATA_PATH" in env:
         paths = []
         for entry in env["AWS_DATA_PATH"].split(os.pathsep):
             directory = os.path.expanduser(os.path.expandvars(entry))
             if directory:
                 path = cwd / directory
-                checked_model_path(path, sources, 3)
+                checked_model_path(path, source, 3)
                 paths.append(pinned_setting("AWS_DATA_PATH", path))
         env["AWS_DATA_PATH"] = os.pathsep.join(paths)
     return env
 
 
-def installed_aws(
-    target: Path,
-    *,
-    caller_cwd: Path | None = None,
-    protected_roots: tuple[Path, ...] = (),
-) -> tuple[Path, dict[str, str], Path]:
+def installed_aws(target: Path) -> tuple[Path, dict[str, str], Path]:
     source = source_root(target)
-    sources = tuple(dict.fromkeys((*((source,) if source else ()), *protected_roots)))
     name = "aws.exe" if os.name == "nt" else "aws"
     executable = None
     directories = []
@@ -128,7 +96,7 @@ def installed_aws(
             continue
         try:
             # Also exclude a host directory whose aws links through the checkout.
-            if in_sources(directory / name, sources):
+            if in_source(directory / name, source):
                 continue
             directory = directory.resolve(strict=True)
             if not directory.is_dir():
@@ -147,10 +115,9 @@ def installed_aws(
 
     # Credential helpers inherit the same lookup boundary, including on Windows
     # where executable searches can also use the current directory.
-    caller = caller_cwd if caller_cwd is not None else Path.cwd()
-    cwd = executable.parent if in_sources(caller, sources) else caller
-    # Resolve explicitly configured paths in the caller's original context.
-    return executable, aws_environment(sources, caller, directories), cwd
+    caller = Path.cwd()
+    cwd = executable.parent if in_source(caller, source) else caller
+    return executable, aws_environment(source, caller, directories), cwd
 
 
 def collect(

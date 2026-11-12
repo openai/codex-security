@@ -149,7 +149,7 @@
     "skills/publish-findings/scripts/collect_checkmarx.py",
     "skills/publish-findings/scripts/collect_continuum.py",
     "skills/publish-findings/scripts/collector_paths.py",
-    "skills/publish-findings/scripts/prepare_continuum_aws.py",
+    "skills/publish-findings/scripts/continuum_aws_settings.json",
     "skills/resolve-dependency-alert/SKILL.md",
     "skills/resolve-dependency-alert/agents/openai.yaml",
     "skills/security-diff-scan/SKILL.md",

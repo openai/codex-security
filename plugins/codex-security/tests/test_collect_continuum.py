@@ -14,7 +14,6 @@ import pytest
 SCRIPT = (
     Path(__file__).resolve().parents[1] / "skills/publish-findings/scripts/collect_continuum.py"
 )
-PREPARE_SCRIPT = SCRIPT.with_name("prepare_continuum_aws.py")
 main = runpy.run_path(str(SCRIPT))["main"]
 AWS_NAME = "aws.exe" if os.name == "nt" else "aws"
 
@@ -74,50 +73,6 @@ def invoke(monkeypatch, tmp_path, checkout):
         return main(), calls
 
     return run
-
-
-@pytest.mark.cross_platform
-def test_prepares_aws_outside_checkout_with_only_approved_settings(tmp_path, checkout):
-    executable = tmp_path / AWS_NAME
-    executable.touch(mode=0o755)
-    environment = {
-        "PATH": os.pathsep.join(map(str, (checkout, tmp_path))),
-        "HOME": str(tmp_path),
-        "USERPROFILE": str(tmp_path),
-        "AWS_REGION": "us-east-1",
-        "AWS_ACCESS_KEY_ID": "synthetic-test-value",
-        "UNRELATED_SETTING": "ignored",
-    }
-
-    def prepare(**settings):
-        return subprocess.run(
-            [sys.executable, "-I", "-S", "-X", "utf8", str(PREPARE_SCRIPT)],
-            cwd=tmp_path,
-            input=json.dumps(
-                {
-                    "cwd": str(checkout),
-                    "protectedRoots": [str(checkout)],
-                    "environment": {**environment, **settings},
-                }
-            ),
-            capture_output=True,
-            text=True,
-        )
-
-    result = prepare()
-    assert result.returncode == 0, result.stderr
-    assert "synthetic-test-value" not in result.stdout
-    launch = json.loads(result.stdout)
-    assert Path(launch["executable"]) == executable.resolve()
-    assert Path(launch["cwd"]) == tmp_path.resolve()
-    assert launch["forward"] == ["AWS_ACCESS_KEY_ID", "AWS_REGION"]
-    assert launch["paths"]["PATH"] == str(tmp_path.resolve())
-
-    (checkout / "profile").write_text("[default]\n")
-    blocked = prepare(AWS_CONFIG_FILE="profile")
-    assert blocked.returncode != 0
-    assert blocked.stdout == ""
-    assert "AWS_CONFIG_FILE file outside the selected checkout" in blocked.stderr
 
 
 def patch(source=None):
@@ -230,6 +185,15 @@ def test_checkout_credential_process_file_is_rejected(checkout, invoke, monkeypa
     config.write_text("[default]\ncredential_process = checkout-command\n")
     monkeypatch.setenv(setting, str(config))
     with pytest.raises(SystemExit, match="checkout"):
+        invoke(["--single-repository"], {})
+
+
+@pytest.mark.cross_platform
+def test_checkout_relative_profile_is_rejected(checkout, invoke, monkeypatch):
+    monkeypatch.chdir(checkout)
+    (checkout / "profile").write_text("[default]\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "profile")
+    with pytest.raises(SystemExit, match="AWS_CONFIG_FILE file outside the selected checkout"):
         invoke(["--single-repository"], {})
 
 

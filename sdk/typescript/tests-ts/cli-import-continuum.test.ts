@@ -1,7 +1,8 @@
 import { expect, mock, test } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { main } from "../src/cli.js";
+import { prepareContinuumAws } from "../src/continuum-aws.js";
 import { collectContinuumIssues } from "../src/continuum-collector.js";
 import { normalizeContinuumFindings } from "../src/continuum-findings.js";
 import { dependencies } from "./cli-fixtures.js";
@@ -17,7 +18,7 @@ import {
 const command = ["import", "continuum", "example", "--format", "json"];
 
 test.skipIf(process.platform === "win32")(
-  "launches AWS outside the checkout with vetted settings",
+  "launches AWS outside the checkout with vetted settings and no Python on PATH",
   async () => {
     await using fixture = await scopedTemporaryDirectory("continuum-aws-");
     const cwd = join(fixture.path, "checkout");
@@ -37,7 +38,7 @@ test.skipIf(process.platform === "win32")(
     );
 
     const environment = {
-      PATH: [tools, process.env["PATH"]].filter(Boolean).join(delimiter),
+      PATH: tools,
       HOME: fixture.path,
       AWS_REGION: "us-east-1",
       AWS_TEST_OBSERVED: observed,
@@ -47,6 +48,89 @@ test.skipIf(process.platform === "win32")(
       collectContinuumIssues({ environmentId: "example", cwd, environment }),
     ).rejects.toThrow("requires exactly one configured Git repository");
     expect(await readFile(observed, "utf8")).toBe(`${tools}\nus-east-1\n\n`);
+  },
+);
+
+async function awsSettingsFixture(root: string) {
+  const cwd = join(root, "checkout");
+  const tools = join(root, "tools");
+  const home = join(root, "home");
+  await mkdir(cwd);
+  await mkdir(tools);
+  await mkdir(home);
+  const executable = join(
+    tools,
+    process.platform === "win32" ? "aws.exe" : "aws",
+  );
+  await writeFile(executable, "", { mode: 0o755 });
+  return {
+    cwd,
+    tools,
+    home,
+    executable,
+    environment: {
+      PATH: [cwd, tools].join(delimiter),
+      HOME: home,
+      USERPROFILE: home,
+    },
+  };
+}
+
+test("pins trusted AWS profile paths and rejects checkout-relative settings", async () => {
+  await using fixture = await scopedTemporaryDirectory("continuum-settings-");
+  const { cwd, tools, home, executable, environment } =
+    await awsSettingsFixture(fixture.path);
+  const config = join(home, "config");
+  const launch = await prepareContinuumAws(cwd, {
+    ...environment,
+    AWS_CONFIG_FILE:
+      process.platform === "win32"
+        ? "%CONTINUUM_TEST_CONFIG%"
+        : "$CONTINUUM_TEST_CONFIG",
+    CONTINUUM_TEST_CONFIG: config,
+  });
+  expect(launch.executable).toBe(executable);
+  expect(launch.cwd).toBe(tools);
+  expect(launch.environment["PATH"]).toBe(tools);
+  expect(launch.environment["AWS_CONFIG_FILE"]).toBe(config);
+  expect(launch.environment["CONTINUUM_TEST_CONFIG"]).toBeUndefined();
+
+  await expect(
+    prepareContinuumAws(cwd, {
+      ...environment,
+      AWS_SHARED_CREDENTIALS_FILE: "credentials",
+    }),
+  ).rejects.toThrow(
+    "Use an AWS_SHARED_CREDENTIALS_FILE file outside the selected checkout.",
+  );
+});
+
+test.skipIf(process.platform === "win32")(
+  "rejects aliases and custom AWS models linked from the checkout",
+  async () => {
+    await using fixture = await scopedTemporaryDirectory("continuum-settings-");
+    const { cwd, home, environment } = await awsSettingsFixture(fixture.path);
+    const settings = join(cwd, "settings");
+    await writeFile(settings, "{}");
+    const models = join(home, "models");
+    const version = join(models, "example", "2020-01-01");
+    await mkdir(version, { recursive: true });
+    await symlink(settings, join(version, "service-2.json"));
+    await expect(
+      prepareContinuumAws(cwd, {
+        ...environment,
+        AWS_DATA_PATH: models,
+      }),
+    ).rejects.toThrow(
+      "Use an AWS model path separate from the selected checkout",
+    );
+
+    const aliases = join(home, ".aws", "cli");
+    await mkdir(aliases, { recursive: true });
+    await symlink(settings, join(aliases, "alias"));
+    await expect(prepareContinuumAws(cwd, environment)).rejects.toThrow(
+      "Use an AWS CLI alias file outside the selected checkout.",
+    );
   },
 );
 
