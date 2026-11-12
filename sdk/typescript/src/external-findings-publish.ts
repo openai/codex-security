@@ -1543,6 +1543,14 @@ async function preparePublicationInput(
         verified: result.verified,
       };
   }
+  const privatePath = join(state, `${key}.private-import.json`);
+  const readPrivate = async () =>
+    parsePrivateCheckpoint(await readOptionalFile(privatePath));
+  const privateSaved = await readPrivate();
+  if ((usePrivateImport && saved) || (!usePrivateImport && privateSaved))
+    throw new CodexSecurityError(
+      "The saved import belongs to a different Cloud destination. Use the account and scope shown in its preview.",
+    );
   if (!saved) await checkPendingSource();
   if (saved && wasReset(saved)) {
     await underPublishLock(async () => {
@@ -1575,10 +1583,6 @@ async function preparePublicationInput(
     );
 
   // Existing repository submissions keep their original request bodies and receipts.
-  const privatePath = join(state, `${key}.private-import.json`);
-  const readPrivate = async () =>
-    parsePrivateCheckpoint(await readOptionalFile(privatePath));
-  const privateSaved = await readPrivate();
   if (
     !usePrivateImport &&
     importMedia === "application/json" &&
@@ -1586,10 +1590,6 @@ async function preparePublicationInput(
   )
     throw new CodexSecurityError(
       "Repository import is unavailable for this provider on this Cloud deployment.",
-    );
-  if ((usePrivateImport && saved) || (!usePrivateImport && privateSaved))
-    throw new CodexSecurityError(
-      "The saved import belongs to a different Cloud destination. Use the account and scope shown in its preview.",
     );
   if (
     usePrivateImport &&

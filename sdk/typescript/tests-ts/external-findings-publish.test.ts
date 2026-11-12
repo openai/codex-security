@@ -10250,3 +10250,43 @@ test("the CLI publishes the selected Tenable occurrence", async () => {
     source_key: "tenant/code-repository",
   });
 });
+
+test("a changed account scope cannot consume the stored receipt of a reset repository", async () => {
+  const cloud = await fixture();
+  await using local = await storedPublicationFixture(cloud);
+  const { repository, deps } = local;
+  const imported = await local.store("wiz", {
+    read: 1,
+    findings: [localFinding("retained")],
+    excluded: [],
+  });
+  const selection = { repository, importId: imported.importId! };
+  const [group] = (await local.prepare(selection)).groups;
+  using db = new Database(join(local.stateDirectory, "workbench.sqlite3"));
+  db.exec(`CREATE TRIGGER reject_receipts BEFORE INSERT ON external_finding_publications
+    BEGIN SELECT RAISE(ABORT, 'receipt write interrupted'); END`);
+  await expect(group!.publish(group!.reviewId)).rejects.toThrow(
+    /receipt write interrupted/,
+  );
+  db.exec("DROP TRIGGER reject_receipts");
+  expect(await listLocalFindingPublications({ repository }, deps)).toEqual([]);
+  cloud.state.marker = "generation-2";
+  cloud.state.catalogHeaders = {
+    [scopeHeader]: "workspace",
+    [providerHeader]: "wiz",
+  };
+  await expect(local.prepare(selection)).rejects.toThrow(
+    /different Cloud destination/,
+  );
+  expect(await listLocalFindingPublications({ repository }, deps)).toEqual([]);
+  cloud.state.catalogHeaders = { [scopeHeader]: "personal" };
+  await expect(local.prepare(selection)).rejects.toThrow(/reset/);
+  expect(await listLocalFindingPublications({ repository }, deps)).toEqual([
+    expect.objectContaining({
+      id: imported.findings[0]!.id,
+      version: 1,
+      outcome: "created",
+    }),
+  ]);
+  expect(cloud.posts).toHaveLength(1);
+});
