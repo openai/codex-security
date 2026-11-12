@@ -646,6 +646,39 @@ describe("CodexSecurity orchestration", () => {
     expect(existsSync(dedicatedHome)).toBe(true);
   });
 
+  test.each(["auto", "keyring"] as const)(
+    "does not seed a stale ambient file when the %s store may hold a different login",
+    async (store) => {
+      const root = await temporaryDirectory();
+      const ambient = join(root, "ambient");
+      const managed = join(root, "managed");
+      await mkdir(ambient, { mode: 0o700 });
+      await mkdir(managed, { mode: 0o700 });
+      await writeFile(
+        join(ambient, "auth.json"),
+        '{"token":"synthetic-ambient"}',
+        { mode: 0o600 },
+      );
+      const config = `cli_auth_credentials_store = "${store}"\n`;
+      await writeFile(join(managed, "config.toml"), config);
+      await setCodexSecurityCredentialLogout(managed, false);
+      expect(await initialCredentialsAvailable({}, ambient, managed)).toBe(
+        false,
+      );
+      expect(existsSync(join(managed, "auth.json"))).toBe(false);
+      // An explicitly file-backed destination must also check the source's active store.
+      await writeFile(
+        join(managed, "config.toml"),
+        'cli_auth_credentials_store = "file"',
+      );
+      await writeFile(join(ambient, "config.toml"), config);
+      expect(await initialCredentialsAvailable({}, ambient, managed)).toBe(
+        false,
+      );
+      expect(existsSync(join(managed, "auth.json"))).toBe(false);
+    },
+  );
+
   test("does not reimport ambient credentials after an explicit logout", async () => {
     const root = await temporaryDirectory();
     const ambientHome = join(root, "ambient-home");
