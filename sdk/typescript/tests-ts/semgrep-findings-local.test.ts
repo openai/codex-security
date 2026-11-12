@@ -89,7 +89,7 @@ test("a marked Platform report accepts the Semgrep and OpenGrep readers' ordinar
     const input = {
       ...ordinary,
       ...options,
-      sourceFormat: "semgrep-platform-findings/v1",
+      sourceFormat: "semgrep-platform-findings/v2",
       semgrepPlatformScope: {
         deployment: "example",
         projectId: "14",

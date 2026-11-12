@@ -381,31 +381,6 @@ export function normalizeTrivyFindings(
   scanRoot?: string,
 ): ExternalFindings {
   const locationLimit = target === "cloud" ? cloudLocationLimit : Infinity;
-  return normalizeReport(input, target, scanRoot, locationLimit);
-}
-
-/** @internal Only a finding at the Cloud location limit can have a different prior selection. */
-export function needsPreviousTrivyProjection({ findings }: ExternalFindings) {
-  return findings.some(
-    ({ evidence }) => evidence.locations?.length === cloudLocationLimit,
-  );
-}
-
-/** @internal Reconstruct the original selection for an interrupted Cloud request. */
-export function normalizePreviousTrivyFindings(
-  input: unknown,
-  target: ExternalImportTarget = "cloud",
-  scanRoot?: string,
-): ExternalFindings {
-  return normalizeReport(input, target, scanRoot, Infinity);
-}
-
-function normalizeReport(
-  input: unknown,
-  target: ExternalImportTarget,
-  scanRoot: string | undefined,
-  locationLimit: number,
-): ExternalFindings {
   const document = record(input, "Trivy report");
   if (document["SchemaVersion"] !== 2)
     throw new Error(

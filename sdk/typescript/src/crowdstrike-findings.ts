@@ -113,7 +113,7 @@ export async function crowdstrikeCheckout(
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
   repository: string,
-): Promise<{ url: string; platform?: string } | undefined> {
+): Promise<ExternalSourceRepository | undefined> {
   if (input.report?.["format"] !== crowdstrikeReportFormat)
     throw new CodexSecurityError(
       "CrowdStrike imports require a report from the crowdstrike reader.",
