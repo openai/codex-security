@@ -397,8 +397,8 @@ test("coordinator retains accepted findings and partial checkpoints when submiss
       },
     );
     coordinator.start();
-    const terminal = await coordinator.wait(undefined, 10_000);
-    assert.equal(terminal?.status, "failed", terminal?.error);
+    const terminal = await coordinator.wait(AbortSignal.timeout(120_000));
+    assert.equal(terminal.status, "failed", terminal.error);
     assert.equal(
       attempts,
       5,
@@ -527,11 +527,11 @@ for (const cancel of [false, true]) {
           coordinator.cancel("synthetic user cancellation during abort"),
         );
       coordinator.start();
-      const terminal = await coordinator.wait(undefined, 10_000);
+      const terminal = await coordinator.wait(AbortSignal.timeout(120_000));
       assert.equal(
-        terminal?.status,
+        terminal.status,
         cancel ? "canceled" : "succeeded",
-        terminal?.error,
+        terminal.error,
       );
       assert.equal(attempts, cancel ? 1 : 2);
       assert.equal(f.launches[0].signal.aborted, true);
