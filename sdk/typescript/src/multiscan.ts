@@ -130,7 +130,8 @@ export interface MultiscanOptions extends ScanPromptSettings {
     scanDir: string,
     prompts: ScanPromptSettings &
       Pick<ScanOptions, "onMeasurement" | "onTelemetry"> & {
-        maxTotalCostShareUsd?: number;
+        /** Reserve budget only when resuming execution of a saved scan. */
+        reserveResumeBudget?: () => number;
         knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
         /** @internal Preserve correlation when the resumed SDK has no saved binding. */
         telemetryContext?: { operationId: string; parentAttemptId?: string };
@@ -564,12 +565,19 @@ async function runCampaign(
         };
         let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
+        const reserveBudget = (costPool: BatchCostPool) => {
+          try {
+            reservation ??= costPool.reserve(budget.maxCostUsd);
+            return reservation.maxCostUsd;
+          } catch (error) {
+            exhaustedBudget = true;
+            throw error;
+          }
+        };
         let requiresRecovery = false;
         let knowledgeBaseFailure = false;
         let checkoutOccupied = false;
         try {
-          reservation = pool?.reserve(budget.maxCostUsd);
-          const maxCostUsd = reservation?.maxCostUsd ?? budget.maxCostUsd;
           await ensureOutputDirectory(artifactRoot);
           let result:
             | (Pick<ScanResult, "manifest" | "cost" | "findings"> &
@@ -605,7 +613,6 @@ async function runCampaign(
                 repository: task.id,
                 attempt,
                 status: "started",
-                maxCostUsd,
               });
               if (knowledge?.failure !== undefined) {
                 knowledgeBaseFailure = true;
@@ -613,9 +620,9 @@ async function runCampaign(
               }
               result = await options.recoverScan(scanDir, {
                 ...options,
-                ...(options.maxTotalCostUsd === undefined
+                ...(pool === undefined
                   ? {}
-                  : { maxTotalCostShareUsd: maxCostUsd }),
+                  : { reserveResumeBudget: () => reserveBudget(pool) }),
                 knowledgeBaseSnapshot: knowledge?.snapshot,
                 ...observers,
                 ...(operationId === undefined
@@ -628,6 +635,8 @@ async function runCampaign(
           if (result === undefined) {
             if (options.recoverScan !== undefined) attempt = nextAttempt();
             scanDir = join(artifactRoot, `attempt-${attempt}`);
+            const maxCostUsd =
+              pool === undefined ? budget.maxCostUsd : reserveBudget(pool);
             notifyProgress(options, {
               repository: task.id,
               attempt,
@@ -747,7 +756,6 @@ async function runCampaign(
           // Recovery retains its resumable attempt and checkout; SDK telemetry records cancellation.
           if (options.signal?.aborted && options.recoverScan !== undefined)
             options.signal.throwIfAborted();
-          if (pool && !reservation) exhaustedBudget = true;
           if (error instanceof ScanCostLimitExceededError) {
             cost = error.cost;
             reservation?.record(cost);

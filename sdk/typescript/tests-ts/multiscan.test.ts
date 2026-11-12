@@ -123,6 +123,73 @@ second,${source.path},${source.revision}
     );
   });
 
+  test("recovers completed results after the invocation budget runs out", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    const ids = ["overrun", "sealed", "pending"];
+    await writeFile(
+      paths.input,
+      [
+        "id,repository,revision",
+        ...ids.map((id) => `${id},${source.path},${source.revision}`),
+      ].join("\n"),
+    );
+    const attempts = mock<SecurityClient["run"]>(async (_repo, scan = {}) => {
+      throw new ScanCostLimitExceededError(
+        scan.maxCostUsd!,
+        {
+          model: "gpt-5.6-sol",
+          inputTokens: 10,
+          cachedInputTokens: 0,
+          cacheWriteInputTokens: 0,
+          outputTokens: 10,
+          estimatedUsd: 5,
+        },
+        scan.outputDir!,
+      );
+    });
+    const campaign = options(paths, client(attempts), {
+      maxAttempts: 1,
+      maxTotalCostUsd: 4,
+    });
+    await expect(
+      runMultiscan({
+        ...campaign,
+        createSecurity() {
+          throw new Error("Interrupted before recording results");
+        },
+      }),
+    ).rejects.toThrow("Interrupted before recording results");
+
+    for (const id of ids) {
+      await mkdir(join(paths.output, "artifacts", id, "attempt-1"), {
+        recursive: true,
+      });
+    }
+    const sealedDir = join(paths.output, "artifacts", "sealed", "attempt-1");
+    const sealed = await completedScan(sealedDir);
+    const summary = await runMultiscan({
+      ...campaign,
+      recoverScan: async (scanDir) =>
+        scanDir === sealedDir
+          ? { ...sealed, alreadyCompleted: true }
+          : undefined,
+    });
+
+    expect(summary).toMatchObject({ completed: 1, failed: 2 });
+    expect(attempts).toHaveBeenCalledTimes(1);
+    expect(await results(summary.resultsPath)).toMatchObject([
+      { id: "overrun", attempt: 2, status: "failed" },
+      { id: "sealed", attempt: 1, status: "completed" },
+      {
+        id: "pending",
+        attempt: 2,
+        status: "failed",
+        error: expect.stringContaining("invocation cost limit is exhausted"),
+      },
+    ]);
+  });
+
   test("prepares shared prompt files once while missing sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
