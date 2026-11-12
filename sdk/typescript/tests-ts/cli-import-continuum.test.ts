@@ -591,6 +591,96 @@ test("import continuum captures one finding and only patches for the named AWS s
   });
 });
 
+test("import continuum includes an unnamed patch after verifying a Git-only environment", async () => {
+  await using fixture = await scopedTemporaryDirectory("continuum-finding-");
+  const { run } = awsFixture("github", false);
+  const finding = { ...continuumDetail(), createdIssueId: "issue1" };
+  const { repositoryName: _name, ...patch } = patchArtifact(
+    "unnamed",
+    "+// example\n",
+  );
+  const aws = mock(async (args: string[]) => {
+    switch (args[1]) {
+      case "get-environment":
+        return run(args);
+      case "get-code-finding":
+        return finding;
+      case "list-code-issue-artifacts":
+        return { items: [{ artifactId: patch.artifactId }] };
+      case "get-code-issue-artifact":
+        return {
+          artifactId: patch.artifactId,
+          artifactType: "PATCH",
+          body: { patch },
+        };
+      default:
+        throw new Error("Unexpected AWS request");
+    }
+  });
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [...command, "--finding-id", "one", "--source-root", fixture.path],
+      {
+        ...dependencies(),
+        collectContinuumFinding: (options) =>
+          collectContinuumFinding(options, aws),
+      },
+    ),
+  ).toBe(0);
+  expect(aws.mock.calls.map(([args]) => args[1])).toEqual([
+    "get-environment",
+    "get-code-finding",
+    "list-code-issue-artifacts",
+    "get-code-issue-artifact",
+  ]);
+  expect(cli.stderr.text()).toBe("");
+  expect(JSON.parse(cli.stdout.text())).toEqual({ finding, patches: [patch] });
+});
+
+test.each([
+  ["one Git repository and S3", ["example/project"], true],
+  ["multiple Git repositories", ["example/project", "example/other"], false],
+  ["only S3", [], true],
+  ["no sources", [], false],
+] as const)(
+  "import continuum requires a repository name for an environment with %s",
+  async (_label, repositories, s3) => {
+    await using fixture = await scopedTemporaryDirectory("continuum-finding-");
+    const aws = mock(async (_args: string[]) => ({
+      configuration: {
+        codeConfiguration: {
+          sourceConfiguration: {
+            repositorySources: repositories.map((repository) => ({
+              integrationId: "git",
+              repository,
+            })),
+            ...(s3 && {
+              s3Sources: [{ integrationId: "archive", codePrefix: "code/" }],
+            }),
+          },
+        },
+      },
+    }));
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(
+        [...command, "--finding-id", "one", "--source-root", fixture.path],
+        {
+          ...dependencies(),
+          collectContinuumFinding: (options) =>
+            collectContinuumFinding(options, aws),
+        },
+      ),
+    ).toBe(2);
+    expect(aws.mock.calls.map(([args]) => args[1])).toEqual([
+      "get-environment",
+    ]);
+    expect(cli.stdout.text()).toBe("");
+    expect(cli.stderr.text()).toContain("Pass --repository-name");
+  },
+);
+
 test.each([false, true])(
   "import continuum preserves native finding JSON without patches (linked issue: %p)",
   async (linked) => {
@@ -611,7 +701,8 @@ test.each([false, true])(
           "one",
           "--source-root",
           fixture.path,
-          "--single-repository",
+          "--repository-name",
+          "project",
         ],
         {
           ...dependencies(),
@@ -636,28 +727,14 @@ test("import continuum rejects inconsistent finding options before collecting", 
   const root = ["--source-root", fixture.path];
   for (const [args, message] of [
     [root, "require --finding-id"],
-    [["--finding-id", "one", "--single-repository"], "requires --source-root"],
-    [["--finding-id", "one", ...root], "requires exactly one"],
+    [["--finding-id", "one"], "requires --source-root"],
     [
-      [
-        "--finding-id",
-        "one",
-        ...root,
-        "--single-repository",
-        "--repository-name",
-        "project",
-      ],
-      "requires exactly one",
+      ["--finding-id", "one", "--source-root", "relative"],
+      "must be an absolute path",
     ],
     [
-      [
-        "--finding-id",
-        "one",
-        "--source-root",
-        "relative",
-        "--single-repository",
-      ],
-      "must be an absolute path",
+      ["--finding-id", "one", ...root, "--single-repository"],
+      "--single-repository",
     ],
   ] as const) {
     const cli = createCliTest(main);
@@ -688,7 +765,8 @@ test.each(["incomplete list", "artifact read failure"])(
           "one",
           "--source-root",
           fixture.path,
-          "--single-repository",
+          "--repository-name",
+          "project",
         ],
         {
           ...dependencies(),

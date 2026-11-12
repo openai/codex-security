@@ -4671,7 +4671,7 @@ export async function main(
       ],
       description:
         "Read all AWS Continuum issues or collect one finding with its repository's patches.",
-      hint: "Requires AWS CLI v2.38.5 or later installed outside the checkout. Bulk collection requires exactly one Git repository and allows S3 sources. For one finding, pass --finding-id, --source-root, and either --repository-name or --single-repository. Save --format json output for publish findings --provider continuum.",
+      hint: "Requires AWS CLI v2.38.5 or later installed outside the checkout. Bulk collection requires exactly one Git repository and allows S3 sources. For one finding, pass --finding-id and --source-root. The CLI checks for one Git repository and no S3 sources when --repository-name is omitted. Save --format json output for publish findings --provider continuum.",
       destructive: false,
       args: z.object({ environmentId: continuumEnvironmentId }),
       options: z
@@ -4698,39 +4698,23 @@ export async function main(
           repositoryName: optionValue("--repository-name")
             .optional()
             .describe(
-              "Exact AWS source name for the selected finding's repository.",
-            ),
-          singleRepository: z
-            .boolean()
-            .default(false)
-            .describe(
-              "The environment was verified to contain only the selected repository.",
+              "Exact AWS source name for the selected finding's repository. Required unless the environment has one Git repository and no S3 sources.",
             ),
         })
         .refine(
           (options) =>
             options.findingId !== undefined ||
             (options.sourceRoot === undefined &&
-              options.repositoryName === undefined &&
-              !options.singleRepository),
+              options.repositoryName === undefined),
           {
             message:
-              "--source-root, --repository-name, and --single-repository require --finding-id.",
+              "--source-root and --repository-name require --finding-id.",
           },
         )
         .refine(
           (options) =>
             options.findingId === undefined || options.sourceRoot !== undefined,
           { message: "--finding-id requires --source-root." },
-        )
-        .refine(
-          (options) =>
-            options.findingId === undefined ||
-            (options.repositoryName !== undefined) !== options.singleRepository,
-          {
-            message:
-              "--finding-id requires exactly one of --repository-name or --single-repository.",
-          },
         ),
       output: continuumImportOutput.optional(),
       run: ({ args, options, error, format }) => {

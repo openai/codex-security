@@ -194,11 +194,14 @@ Pass the absolute path of the local checkout that owns the finding as
 the same AWS launch checks and accepts the same `--aws-profile` and
 `--aws-region` overrides as the bulk export.
 
-Use `--single-repository` only for an environment verified to contain just
-the selected repository. For a mixed-source or multi-repository environment,
-use `--repository-name "$AWS_SOURCE_NAME"`. Use the exact source name AWS
-assigns to that repository. The collector skips patches without a repository
-name in this mode and prints their artifact IDs to stderr.
+Omit `--repository-name` when the environment contains exactly one Git
+repository and no S3 sources. The CLI verifies this with
+`continuum:GetEnvironment` before collecting the finding and can then include
+patches that have no repository name.
+
+For other environments, pass `--repository-name "$AWS_SOURCE_NAME"` with
+the exact source name AWS assigns to the repository. The collector keeps
+patches with that exact name and prints the IDs of unnamed patches to stderr.
 [AWS patch fields](https://docs.aws.amazon.com/continuum/latest/APIReference/API_PatchBody.html)
 
 ```sh
@@ -206,7 +209,7 @@ report=
 source_root=/absolute/path/to/checkout
 out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   codex-security import continuum "$ENVIRONMENT_ID" --finding-id "$FINDING_ID" \
-    --source-root "$source_root" --single-repository --format json > "$out/continuum.tmp" &&
+    --source-root "$source_root" --format json > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
   report="$out/continuum.json"
 ```

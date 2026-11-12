@@ -81,13 +81,20 @@ const gitLabIntegration = z.object({
   }),
 });
 
+function configuredSources(environment: Record<string, unknown>) {
+  const { configuration } = environmentSources.parse(environment);
+  const sources = configuration?.codeConfiguration?.sourceConfiguration;
+  return {
+    repositories: sources?.repositorySources ?? [],
+    s3Sources: sources?.s3Sources ?? [],
+  };
+}
+
 async function singleRepositorySource(
   environment: Record<string, unknown>,
   getIntegration: (id: string) => Promise<Record<string, unknown>>,
 ) {
-  const { configuration } = environmentSources.parse(environment);
-  const sources = configuration?.codeConfiguration?.sourceConfiguration;
-  const repositories = sources?.repositorySources ?? [];
+  const { repositories, s3Sources } = configuredSources(environment);
   if (repositories.length !== 1)
     throw new CodexSecurityError(
       `Continuum collection requires exactly one configured Git repository. This environment has ${repositories.length}.`,
@@ -109,7 +116,7 @@ async function singleRepositorySource(
       "Continuum",
     ),
     // Mixed environments do not identify the Git source by the patch's AWS source name.
-    includePatches: !sources?.s3Sources?.length,
+    includePatches: s3Sources.length === 0,
   };
 }
 
@@ -201,6 +208,20 @@ export async function collectContinuumFinding(
   const { environmentId, findingId, repositoryName, warn, signal } = options;
   const request = await continuumRequests(options, runAws);
   const scope = ["--environment-id", environmentId];
+  if (repositoryName === undefined) {
+    const { repositories, s3Sources } = configuredSources(
+      await request("get-environment", scope),
+    );
+    if (
+      repositories.length !== 1 ||
+      s3Sources.length !== 0 ||
+      !repositorySource.safeParse(repositories[0]).success
+    )
+      throw new CodexSecurityError(
+        "Pass --repository-name with the exact AWS source name. Omitting it requires exactly one configured Git repository and no S3 sources.",
+      );
+  }
+
   const finding = await request(
     "get-code-finding",
     scope,
