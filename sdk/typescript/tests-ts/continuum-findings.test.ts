@@ -635,6 +635,75 @@ test("adding oversized validation preserves a fitting proof when its patch body 
   }
 });
 
+test("validation descriptors cannot exclude a selected finding and patches that already fit Cloud", () => {
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const finding = {
+    ...continuumDetail(),
+    createdIssueId: issueId,
+    stepsToReproduce: Array<string>(31).fill("x".repeat(8192)).concat(""),
+  };
+  const validationIssue = {
+    issueId,
+    issueArn,
+    findingIds: [finding.findingId],
+  };
+  const evidenceArtifacts = [
+    { ...continuumValidationArtifact(), body: { raw: "Validation trace" } },
+  ];
+  const large = patchArtifact("largepatch", `+${"p".repeat(270_000)}\n`);
+  const { patch: _, ...descriptor } = large;
+  const small = patchArtifact("smallpatch", "+checked\n");
+  const patches = [large, small];
+  const initial = normalize({ finding, patches }).findings[0]!.evidence;
+  const remaining = 256 * 1024 - Buffer.byteLength(JSON.stringify(initial));
+  finding.stepsToReproduce[31] = "x".repeat(remaining);
+  const baseline = normalize({ finding, patches });
+  expect(baseline.findings[0]!.evidence.source_data?.["patches"]).toEqual([
+    { ...descriptor, contentOmitted: "cloud_evidence_limit" },
+    small,
+  ]);
+
+  const oversized = {
+    ...finding,
+    stepsToReproduce: [...finding.stepsToReproduce, "x".repeat(8192)],
+  };
+  const excluded = normalize({ finding: oversized, patches });
+  expect(excluded.excluded).toMatchObject([
+    { reason: "Evidence exceeds the Cloud limit of 256 KiB." },
+  ]);
+  for (const [native, expected] of [
+    [finding, baseline],
+    [oversized, excluded],
+  ] as const) {
+    const report = {
+      finding: native,
+      validationIssue,
+      evidenceArtifacts,
+      patches,
+    };
+    expect(normalize(report)).toEqual(expected);
+    const local = normalizeContinuumFindings(
+      report,
+      continuumRepository,
+      "local",
+    );
+    const stored = local.findings[0]!;
+    expect(stored.evidence.source_data?.["evidence_artifacts"]).toEqual(
+      evidenceArtifacts,
+    );
+    expect(
+      projectStoredFinding(
+        {
+          provider: "continuum",
+          sourceFindingId: stored.source_finding_id,
+          evidence: stored.evidence,
+        },
+        [],
+      ),
+    ).toEqual(expected);
+  }
+});
+
 test("preserves dependency and posture evidence without classifying it as a code flaw", () => {
   const summary = continuumSummary();
   const pkg = {

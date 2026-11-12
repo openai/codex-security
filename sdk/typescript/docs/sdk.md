@@ -780,7 +780,8 @@ when the patch contents exceed the evidence budget. Available patches are in
 `evidence.source_data.patches`. Single-finding captures provide their matching
 validation artifacts in `evidence.source_data.evidence_artifacts`. The local
 projection retains each validation body, and Cloud marks omitted bodies with
-the same `contentOmitted` value.
+the same `contentOmitted` value. When even the validation descriptors exceed
+the budget, Cloud omits them and preserves the finding and its fitting patches.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.

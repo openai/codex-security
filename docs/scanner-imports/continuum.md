@@ -236,7 +236,9 @@ Attack-path scoring reads the imported validation artifacts from
 `evidence.source_data.patches`. Local imports keep the full validation and
 patch bodies. Cloud keeps the validation bodies that fit, then uses the
 remaining space for patches. Each omitted body's descriptor keeps the
-artifact ID and records `contentOmitted: "cloud_evidence_limit"`.
+artifact ID and records `contentOmitted: "cloud_evidence_limit"`. If the
+validation descriptors themselves exceed the remaining space, Cloud publishes
+the finding with its usual patch projection and omits the validation metadata.
 
 ## Use imported evidence in the matching checkout
 

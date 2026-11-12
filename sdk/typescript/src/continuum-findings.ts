@@ -288,7 +288,22 @@ function projectArtifactBodies(
       compact.push({ ...descriptor, ...marker });
     }
   }
-  const result = project(projected);
+  let result: ExternalFinding["evidence"];
+  try {
+    result = project(projected);
+  } catch (error) {
+    if (
+      !(error instanceof CloudEvidenceSizeError) ||
+      !artifacts.evidence_artifacts?.length
+    )
+      throw error;
+    // Even the validation descriptors exceed the budget. Retry the original finding and patches.
+    return projectArtifactBodies(
+      artifacts.patches ? { patches: artifacts.patches } : {},
+      target,
+      project,
+    );
+  }
   let remaining =
     CLOUD_EVIDENCE_BYTES - validateExternalEvidenceJson(result, target);
   for (const { compact, index, bytes, artifact } of omitted) {
@@ -852,7 +867,6 @@ export function normalizeContinuumFindings(
           format,
           sourceRepositoryUrl: repository,
           finding: structuredClone(row),
-          ...(validationIssue && { validation_issue: validationIssue }),
         },
       };
       const updatedAt = statusUpdatedAt(row["statusUpdatedAt"]);
@@ -881,7 +895,14 @@ export function normalizeContinuumFindings(
           validateEnrichedExternalEvidence(
             {
               ...evidence,
-              source_data: { ...evidence.source_data, ...artifacts },
+              source_data: {
+                ...evidence.source_data,
+                ...(validationIssue &&
+                  artifacts.evidence_artifacts?.length && {
+                    validation_issue: validationIssue,
+                  }),
+                ...artifacts,
+              },
             },
             target,
             inferred ? { ...enrichment, ...inferred } : undefined,
