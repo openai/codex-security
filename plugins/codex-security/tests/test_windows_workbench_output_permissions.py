@@ -532,8 +532,10 @@ def test_resume_verification_failure_rolls_back_the_created_handle(
 
     with closing(workbench_db.connect()) as connection:
         old_id = None
+        previous_identity = None
         if archive:
             old_id = register("standard", connection=connection)["scanId"]
+            previous_identity = windows_scan_local_files.deep_resume_output_identity(output)
             connection.execute("UPDATE scans SET status = 'failed' WHERE id = ?", (old_id,))
             connection.commit()
             previous_file.write_bytes(b"original result")
@@ -560,13 +562,14 @@ def test_resume_verification_failure_rolls_back_the_created_handle(
             with pytest.raises(OSError) as failure:
                 register(archive=archive, connection=connection)
         assert (getattr(failure.value, "winerror", None) or failure.value.errno) == 32
-        assert not retained.exists()
         assert not list(output.parent.glob(f"{output.name}.previous-*"))
         rows = connection.execute("SELECT id, scan_dir FROM scans").fetchall()
         if archive:
+            assert windows_scan_local_files.deep_resume_output_identity(output) == previous_identity
             assert [tuple(row) for row in rows] == [(old_id, str(output))]
             assert previous_file.read_bytes() == b"original result"
         else:
+            assert not retained.exists()
             assert rows == []
             assert list(output.iterdir()) == []
         assert register(archive=archive, connection=connection)["scanDir"] == str(output)
