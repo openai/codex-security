@@ -11423,7 +11423,8 @@ async function patchPublicationDestination(
 
 function isNetworkPatchRemote(remote: string) {
   return (
-    !isAbsolute(remote) &&
+    // Git for Windows also treats drive-relative paths such as C:repo as local.
+    !parse(remote).root &&
     !win32.isAbsolute(remote) &&
     !remote.startsWith("file://") &&
     patchRemoteHost(remote)
