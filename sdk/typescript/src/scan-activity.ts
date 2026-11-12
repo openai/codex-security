@@ -427,7 +427,7 @@ function windowsActivityRoot(path: string): string {
     .replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
 }
 
-function repositoryPathMatcher(repository: string, literal = false) {
+function repositoryPathMatcher(repository: string, literal: boolean) {
   const root = windowsActivityRoot(repository);
   const normalize = (path: string) =>
     literal && !root ? path : path.replaceAll("\\", "/");
@@ -486,12 +486,13 @@ function commandRepositoryPaths(
   shell: unknown,
 ): string[] {
   const posixShell = typeof shell === "string" && POSIX_SHELL.test(shell);
+  const posixPaths = posixShell && windowsActivityRoot(repository) === "";
   const paths = new Set<string>();
   const roots = [
     "$CODEX_SECURITY_REPOSITORY",
     "${CODEX_SECURITY_REPOSITORY}",
     repository,
-  ].map((root) => repositoryPathMatcher(root));
+  ].map((root) => repositoryPathMatcher(root, posixPaths));
   for (const token of command.match(posixShell ? POSIX_TOKEN : SHELL_TOKEN) ??
     []) {
     let value = token;
@@ -501,10 +502,12 @@ function commandRepositoryPaths(
         ? first
         : undefined;
     const hasQuote = /['"]/u.test(token);
-    const posixLiteral = posixShell && (hasQuote || /\\[ \t]/u.test(token));
+    const hasEscape = posixPaths
+      ? token.includes("\\")
+      : /\\[ \t]/u.test(token);
+    const posixLiteral = posixShell && (hasQuote || hasEscape);
     if (posixLiteral) {
-      // Unquoted paths with escaped blanks only support blank escapes.
-      if (!hasQuote && /\\(?![ \t])/u.test(token)) continue;
+      if (!posixPaths && !hasQuote && /\\(?![ \t])/u.test(token)) continue;
       // A single-quoted or backslash-escaped dollar sign is literal.
       const variable =
         /^"?(\$(?:CODEX_SECURITY_REPOSITORY|\{CODEX_SECURITY_REPOSITORY\}))/u.exec(
@@ -517,7 +520,7 @@ function commandRepositoryPaths(
       value = (variable ?? "") + literal;
     } else if (quote) value = value.slice(1, -1);
     const raw = posixLiteral ? value : value.replaceAll('\\"', '"');
-    value = raw.replaceAll("\\", "/");
+    value = posixPaths ? raw : raw.replaceAll("\\", "/");
     if (process.platform === "win32" && quote !== "'") {
       value = value.replace(
         /^\$(?:env:CODEX_SECURITY_REPOSITORY|\{env:CODEX_SECURITY_REPOSITORY\})\//iu,
@@ -553,16 +556,16 @@ function argumentRepositoryPaths(value: unknown, repository: string): string[] {
 function operandRepositoryPaths(
   candidates: unknown[],
   repository: string,
-  literal = false,
+  skipRoot = false,
 ): string[] {
   const paths = new Set<string>();
-  const relativeTo = repositoryPathMatcher(repository, literal);
+  const relativeTo = repositoryPathMatcher(repository, true);
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
     const path = relativeTo(candidate);
     if (
       path !== null &&
-      (!literal || path !== "") &&
+      (!skipRoot || path !== "") &&
       !path.split("/").includes("..")
     )
       paths.add(path);

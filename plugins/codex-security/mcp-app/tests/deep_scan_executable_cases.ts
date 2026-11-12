@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync, promises as fs } from "node:fs";
 import childProcess, { type SpawnOptions } from "node:child_process";
 import {
   copyFile,
@@ -7,6 +8,7 @@ import {
   realpath,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -64,6 +66,8 @@ export async function testExecutorExecutablePinning({
     await testExecutorPinsCodexExecutableAcrossWorkers();
     await testExecutorRejectsChangedPinnedExecutable();
     await testExecutorRejectsReplacementAfterPreflight();
+    await testExecutorPinCancellation();
+    await testConcurrentPinCancellation();
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
@@ -177,6 +181,35 @@ export async function testExecutorExecutablePinning({
       () => new CodexSdkWorkerExecutor({ parentSandbox }),
     );
     try {
+      const configuredPaths = fixtures.map((fixture) => fixture.executablePath);
+      if (process.platform !== "win32") {
+        const alias = path.join(
+          fixtures[0]!.root,
+          "codex with trailing space ",
+        );
+        await symlink(fixtures[0]!.executablePath, alias);
+        configuredPaths[0] = alias;
+        const other = fixtures[1]!.executablePath;
+        const bare = path.basename(other) + " ";
+        await symlink(
+          fixtures[0]!.executablePath,
+          path.join(fixtures[0]!.root, bare),
+        );
+        assert.equal(
+          resolveCodexPath(
+            {
+              PATH: [path.dirname(other), fixtures[0]!.root].join(
+                path.delimiter,
+              ),
+              CODEX_CLI_PATH: bare,
+            },
+            process.platform,
+            process.arch,
+            fixtures[0]!.root,
+          ),
+          other,
+        );
+      }
       for (const fixture of fixtures) {
         await writeFile(
           path.join(fixture.root, "prompt.md"),
@@ -188,7 +221,7 @@ export async function testExecutorExecutablePinning({
         await Promise.all(
           fixtures.map((fixture, index) => {
             process.env.CODEX_CLI_PATH =
-              fixtures[firstLaunch ? index : 1 - index]!.executablePath;
+              configuredPaths[firstLaunch ? index : 1 - index]!;
             process.env.FAKE_CODEX_MARKER = fixture.markerPath;
             return runTurn(
               executors[index]!,
@@ -300,6 +333,121 @@ export async function testExecutorExecutablePinning({
       }
     } finally {
       restoreEnv("FAKE_CODEX_REPLACE_AFTER_PREFLIGHT", previousReplace);
+    }
+  }
+
+  async function testExecutorPinCancellation() {
+    for (const phase of ["binding", "after-preflight"]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(promptPath, "fixture executable pin cancellation\n");
+        const controller = new AbortController();
+        const reason = { message: "synthetic worker cancellation", phase };
+        const originalStat = fs.stat;
+        fs.stat = (async (...args: Parameters<typeof fs.stat>) => {
+          const result = await originalStat(...args);
+          if (
+            args[0] === fixture.executablePath &&
+            (phase === "binding" || existsSync(fixture.preflightMarkerPath))
+          ) {
+            controller.abort(reason);
+          }
+          return result;
+        }) as typeof fs.stat;
+        try {
+          await assert.rejects(
+            new CodexSdkWorkerExecutor({ parentSandbox }).run(
+              workerRequest(promptPath, workingDirectory, {
+                signal: controller.signal,
+              }),
+            ),
+            (error) => error === reason,
+          );
+        } finally {
+          fs.stat = originalStat;
+        }
+        assert.equal(
+          existsSync(fixture.preflightMarkerPath),
+          phase === "after-preflight",
+        );
+        assert.equal(existsSync(fixture.markerPath), false);
+      });
+    }
+  }
+
+  async function testConcurrentPinCancellation() {
+    for (const canceled of ["owner", "waiter"]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(
+          promptPath,
+          "fixture shared executable pin cancellation\n",
+        );
+        const owner = new AbortController();
+        const waiter = new AbortController();
+        const reason = new Error(`synthetic ${canceled} cancellation`);
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const waiting = Promise.withResolvers<void>();
+        const originalStat = fs.stat;
+        const originalAdd = waiter.signal.addEventListener;
+        let held = false;
+        fs.stat = (async (...args: Parameters<typeof fs.stat>) => {
+          const result = await originalStat(...args);
+          if (args[0] === fixture.executablePath && !held) {
+            held = true;
+            entered.resolve();
+            await release.promise;
+          }
+          return result;
+        }) as typeof fs.stat;
+        waiter.signal.addEventListener = function (
+          ...args: Parameters<AbortSignal["addEventListener"]>
+        ) {
+          const result = originalAdd.apply(this, args);
+          if (args[0] === "abort") waiting.resolve();
+          return result;
+        };
+        const executor = new CodexSdkWorkerExecutor({ parentSandbox });
+        const first = executor.run(
+          workerRequest(promptPath, workingDirectory, { signal: owner.signal }),
+        );
+        let second: ReturnType<typeof executor.run> | undefined;
+        try {
+          await entered.promise;
+          second = executor.run(
+            workerRequest(promptPath, workingDirectory, {
+              signal: waiter.signal,
+            }),
+          );
+          const completed = Promise.allSettled([first, second]);
+          await waiting.promise;
+          (canceled === "owner" ? owner : waiter).abort(reason);
+          release.resolve();
+          const results = await completed;
+          const rejected = results[canceled === "owner" ? 0 : 1]!;
+          const fulfilled = results[canceled === "owner" ? 1 : 0]!;
+          assert.equal(rejected.status, "rejected");
+          if (rejected.status === "rejected")
+            assert.equal(rejected.reason, reason);
+          assert.equal(fulfilled.status, "fulfilled");
+          if (fulfilled.status === "fulfilled")
+            assert.equal(fulfilled.value.threadId, "fixture-thread-id");
+          // A successful pin survives its original caller's later cancellation.
+          (canceled === "owner" ? waiter : owner).abort(
+            new Error("fixture completed"),
+          );
+          const next = await executor.run(
+            workerRequest(promptPath, workingDirectory),
+          );
+          assert.equal(next.threadId, "fixture-thread-id");
+        } finally {
+          release.resolve();
+          owner.abort(reason);
+          waiter.abort(reason);
+          fs.stat = originalStat;
+          waiter.signal.addEventListener = originalAdd;
+          await Promise.allSettled([first, ...(second ? [second] : [])]);
+        }
+      });
     }
   }
 
