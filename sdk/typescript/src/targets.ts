@@ -12,9 +12,10 @@ import {
   abortable,
   throwIfAborted,
   nullIfMissingPath,
-} from "#plugin-shared/checkout/git";
+} from "./shared/checkout/git.js";
 export {
   UNSUPPORTED_GIT_ENVIRONMENT,
+  documentSourceRoot,
   normalizeRepository,
   resolveRepositoryPath,
   resolveTargetPath,
@@ -30,7 +31,7 @@ export {
   abortable,
   nullIfMissingFile,
   nullIfMissingPath,
-} from "#plugin-shared/checkout/git";
+} from "./shared/checkout/git.js";
 import { isNonEmptyString } from "./value.js";
 import { execFile as execFileCallback } from "node:child_process";
 import type { Stats } from "node:fs";

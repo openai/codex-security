@@ -222,6 +222,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     list_scans.add_argument("--status", choices=("running", "complete", "failed", "canceled"))
     list_scans.add_argument("--mode", choices=MODES)
     list_scans.add_argument("--repository")
+    list_scans.add_argument(
+        "--prefer-worktree", action="store_true", help="List scans from this checkout first."
+    )
     list_scans.add_argument("--scan-root")
     list_scans.add_argument("--offset", type=non_negative_int, default=0)
     list_scans.add_argument("--limit", type=positive_int)
@@ -253,6 +256,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     set_scan_thread = subparsers.add_parser("set-scan-thread")
     set_scan_thread.add_argument("--scan-id", required=True)
     set_scan_thread.add_argument("--thread-id", required=True)
+    set_scan_thread.add_argument("--time-budget-started-at")
 
     set_scan_cost_limit = add_command("set-scan-cost-limit", "--scan-id")
     set_scan_cost_limit.add_argument("--max-cost-usd", required=True, type=float)

@@ -485,12 +485,36 @@ export async function gitOutput(
   );
 }
 
+function unavailableGitMarkerPath(
+  error: unknown,
+  search: "nearest" | "outermost",
+): boolean {
+  const { code } = error as NodeJS.ErrnoException;
+  return (
+    code === "ENOENT" ||
+    code === "ENOTDIR" ||
+    (search === "outermost" &&
+      ["EACCES", "EPERM", "ELOOP", "ENAMETOOLONG"].includes(code ?? ""))
+  );
+}
+
+/** Bound repository-supplied document links to the selected checkout or directory. */
+export async function documentSourceRoot(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (
+    (await gitMarkerRoot(repository, signal, "nearest")) ??
+    (await realpath(repository))
+  );
+}
+
 export async function gitMarkerRoot(
   repository: string,
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let candidate = resolve(repository);
+  let candidate = resolveTargetPath(repository);
   let current: string;
   while (true) {
     try {
@@ -502,11 +526,7 @@ export async function gitMarkerRoot(
     } catch (error) {
       // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
       throwIfAborted(signal);
-      const code = (error as NodeJS.ErrnoException).code;
-      if (
-        search !== "outermost" ||
-        !["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(code ?? "")
-      )
+      if (search !== "outermost" || !unavailableGitMarkerPath(error, search))
         throw error;
       const parent = dirname(candidate);
       if (parent === candidate) throw error;
@@ -530,14 +550,7 @@ export async function walkGitMarkers(
       root = current;
     } catch (error) {
       throwIfAborted(signal);
-      const code = (error as NodeJS.ErrnoException).code;
-      if (
-        code !== "ENOENT" &&
-        code !== "ENOTDIR" &&
-        (search !== "outermost" ||
-          !["EACCES", "EPERM", "ELOOP"].includes(code ?? ""))
-      )
-        throw error;
+      if (!unavailableGitMarkerPath(error, search)) throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;

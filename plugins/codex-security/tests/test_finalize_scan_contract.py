@@ -106,7 +106,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
         with (
             mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
-            mock.patch.object(FINALIZER.subprocess, "run", side_effect=verify) as helper,
+            mock.patch.object(subprocess, "run", side_effect=verify) as helper,
         ):
             first = FINALIZER._prepare_scan_finalization(
                 self.scan_dir, owner_repository=self.scan_dir
@@ -146,7 +146,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
         with (
             mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
-            mock.patch.object(FINALIZER.subprocess, "run", side_effect=verify),
+            mock.patch.object(subprocess, "run", side_effect=verify),
         ):
             prepared = FINALIZER._prepare_scan_finalization(
                 self.scan_dir, owner_repository=self.scan_dir
@@ -173,7 +173,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         with (
             mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
             mock.patch.object(
-                FINALIZER.subprocess,
+                subprocess,
                 "run",
                 side_effect=subprocess.TimeoutExpired("node", 10, output=partial),
             ),
@@ -191,7 +191,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         with (
             mock.patch.dict(os.environ, {"CODEX_MCP_NODE_PATH": "node"}),
             mock.patch.object(
-                FINALIZER.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+                subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
             ),
         ):
             FINALIZER._record_owner_results(

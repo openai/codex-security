@@ -119,6 +119,8 @@ from workbench_source_scopes import (
     expected_coverage_mode,
     expected_target_kinds,
     public_scan_recipe,
+    requested_finding_scope,
+    requested_scan_file_paths,
     requested_scan_paths,
     safe_source_path,
 )
@@ -255,7 +257,10 @@ def release_completion_file_lock(descriptor: int) -> None:
 
 
 def connect(
-    *, deferred: bool = False, discovery_roots: tuple[Path, ...] = ()
+    *,
+    deferred: bool = False,
+    discovery_roots: tuple[Path, ...] = (),
+    in_memory: bool = False,
 ) -> sqlite3.Connection:
     """Open the workbench SQLite database and bring its schema up to date.
 
@@ -264,6 +269,7 @@ def connect(
             Retries after lock contention use an immediate transaction.
 
         discovery_roots: Additional local paths for bounded target discovery.
+        in_memory: Keep a fresh profile read entirely in memory.
 
     Returns:
         sqlite3.Connection: A caller-owned connection with named rows, foreign
@@ -280,13 +286,14 @@ def connect(
         "the scanned repository."
     )
     try:
-        create_private_directory(path.parent)
+        if not in_memory:
+            create_private_directory(path.parent)
     except OSError:
         print(guidance, file=sys.stderr)
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
-            connection = sqlite3.connect(path, timeout=5)
+            connection = sqlite3.connect(":memory:" if in_memory else path, timeout=5)
         except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
@@ -299,7 +306,8 @@ def connect(
                 connection, immediate=not deferred or attempt > 0, discovery_roots=discovery_roots
             )
             connection.execute("PRAGMA journal_mode = WAL")
-            path.chmod(0o600)
+            if not in_memory:
+                path.chmod(0o600)
             return connection
         except sqlite3.OperationalError as exc:
             connection.close()
@@ -335,21 +343,6 @@ def apply_migrations(
         immediate=immediate,
         discovery_roots=discovery_roots,
     )
-
-
-def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
-    # Older scans did not record path kinds. Retain their lexical scope semantics
-    # rather than infer the original target from a possibly changed checkout.
-    if scan["recipe_json"] is None:
-        return []
-    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-    return recipe.get("scopeFilePaths", [])
-
-
-def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
-    """Return requested paths paired with whether the stored recipe identified each one as a file."""
-    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
-    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
@@ -1579,12 +1572,7 @@ def register_cli_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Register a CLI scan and its selected target before execution begins.
-
-    Record the launch recipe and target identity with the new scan. When reusing
-    an output directory, coordinate archiving with registration so previous results
-    can still be located. Return the scan ID, contract, and target metadata.
-    """
+    """Register the scan recipe and target identity, archiving any previous output atomically."""
     # A selected plugin may replace __main__ while delegating to this workbench.
     before_output_change = before_archive or getattr(
         sys, "_codex_security_before_output_change", None
@@ -1792,6 +1780,11 @@ def register_cli_scan(
         "contract": scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
         **({"phase": scan["phase"]} if mode == "standard" else {}),
+        **(
+            {"canSaveTimeBudgetStart": True}
+            if "maxTimeMinutes" in recipe and mode in {"standard", "diff"}
+            else {}
+        ),
         "scanDir": str(scan_dir),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
@@ -1804,8 +1797,11 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
     scan = require_scan(connection, args.scan_id)
     with connection:
         connection.execute(
-            "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
-            (args.thread_id, now(), scan["id"]),
+            """UPDATE scans SET continuation_thread_id = ?1, updated_at = ?2,
+               recipe_json = CASE WHEN ?3 IS NULL THEN recipe_json
+                   ELSE json_insert(recipe_json, '$.timeBudgetStartedAt', ?3) END
+               WHERE id = ?4""",
+            (args.thread_id, now(), getattr(args, "time_budget_started_at", None), scan["id"]),
         )
     return {"scanId": scan["id"], "threadId": args.thread_id}
 
@@ -3390,6 +3386,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                     "update-progress",
                 },
                 discovery_roots=command_targets,
+                in_memory=scan_history.reads_missing_history(args, database_path()),
             )
         ) as connection,
         scoped_git_discovery(

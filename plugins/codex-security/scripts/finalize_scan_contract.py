@@ -16,7 +16,6 @@ import os
 import re
 import stat
 import struct
-import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -34,6 +33,7 @@ from legacy_findings import (
     _legacy_sealed_findings_for_validation,
     _normalize_legacy_string_list_fields,
 )
+from owner_results import read_owner_results
 from posix_scan_local_files import (
     descriptor_relative_writes_available as _descriptor_relative_writes_available,
 )
@@ -2978,7 +2978,14 @@ def _is_sealed_artifact(scan_dir: Path, relative_output: str, artifact_paths: li
     return False
 
 
-def write_export_output(scan_dir: Path, output: Path, export_format: str, contents: bytes) -> None:
+def write_export_output(
+    scan_dir: Path,
+    output: Path,
+    export_format: str,
+    contents: bytes,
+    *,
+    replace_existing: bool = True,
+) -> None:
     output_paths = {**EXPORT_PATHS, "md": THREAT_MODEL_EXPORT_PATH}
     if export_format not in output_paths:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -3009,6 +3016,7 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
                 output.name,
                 contents,
                 external_name=True,
+                replace_existing=replace_existing,
                 owner_read_write=export_format == "md",
             )
             return
@@ -3033,7 +3041,11 @@ def write_export_output(scan_dir: Path, output: Path, export_format: str, conten
             f"{export_format.upper()} output path cannot overwrite a sealed scan artifact"
         )
     write_scan_local_bytes(
-        scan_dir, relative_output, contents, owner_read_write=export_format == "md"
+        scan_dir,
+        relative_output,
+        contents,
+        owner_read_write=export_format == "md",
+        replace_existing=replace_existing,
     )
 
 
@@ -3092,26 +3104,7 @@ def _record_owner_results(
         return
     try:
         revision = target["revision"]
-        helper = Path(__file__).resolve().parents[1] / "mcp" / "scan-owners.mjs"
-        result = None
-        try:
-            result = subprocess.run(
-                [os.environ["CODEX_MCP_NODE_PATH"], str(helper), str(repository), revision],
-                input=json.dumps(findings),
-                capture_output=True,
-                encoding="utf-8",
-                timeout=10,
-                check=False,
-            )
-            output = result.stdout
-            if result.returncode:
-                warnings.append(
-                    f"Optional owner verification stopped: {result.stderr.strip() or result.returncode}"
-                )
-        except subprocess.TimeoutExpired as error:
-            # TimeoutExpired carries bytes even when subprocess.run uses text mode.
-            output = (error.stdout or b"").decode("utf-8", errors="replace")
-            warnings.append("Optional owner verification timed out")
+        output, complete = read_owner_results(findings, repository, revision, warnings)
         by_occurrence = {finding["occurrenceId"]: finding for finding in findings}
         *records, tail = output.split("\n")
         for line in records:
@@ -3137,7 +3130,7 @@ def _record_owner_results(
             hint["suggestions"] = item["suggestions"]
         if tail:
             raise ValueError("Incomplete owner result")
-        if by_occurrence and result is not None and result.returncode == 0:
+        if by_occurrence and complete:
             warnings.append(f"Owner verifier omitted results for {len(by_occurrence)} findings")
     except Exception as error:
         warnings.append(f"Optional owner suggestions could not be completed: {error}")
@@ -3443,6 +3436,7 @@ def main() -> int:
     parser.add_argument("--export-format", choices=[*sorted(EXPORT_PATHS), "md"])
     parser.add_argument("--avit-template", type=Path)
     parser.add_argument("--export-output", type=Path)
+    parser.add_argument("--no-clobber", action="store_true")
     parser.add_argument("--export-metadata", action="store_true")
     parser.add_argument("--describe-threat-model", action="store_true")
     parser.add_argument("--write-threat-model", action="store_true")
@@ -3504,7 +3498,20 @@ def main() -> int:
             if args.export_output is None:
                 sys.stdout.buffer.write(contents)
             else:
-                write_export_output(args.scan_dir, args.export_output, args.export_format, contents)
+                try:
+                    write_export_output(
+                        args.scan_dir,
+                        args.export_output,
+                        args.export_format,
+                        contents,
+                        replace_existing=not args.no_clobber,
+                    )
+                except FileExistsError:
+                    if not args.no_clobber:
+                        raise
+                    raise ContractError(
+                        f"{args.export_output} already exists. Use --output FILE to choose or replace a file."
+                    ) from None
                 if args.export_metadata:
                     sys.stdout.buffer.write(
                         _json_bytes({**description, "path": str(args.export_output.absolute())})

@@ -38,7 +38,16 @@ import {
   type ThreadEvent,
   type ThreadOptions,
 } from "@openai/codex-sdk";
-import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import {
   AuthenticationRequiredError,
@@ -86,6 +95,7 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import {
   copyCompletedScan,
   copyCredentialTestPlugin,
@@ -271,6 +281,16 @@ const unauthenticatedRuntime = (
   }));
 
 describe("CodexSecurity orchestration", () => {
+  // The cross-process lock has its own tests. Its Windows ACL check starts PowerShell.
+  let restoreScanLock: () => void;
+  beforeAll(() => {
+    const lock = spyOn(runtime, "acquireScanExecutionLock").mockResolvedValue(
+      () => {},
+    );
+    restoreScanLock = () => lock.mockRestore();
+  });
+  afterAll(() => restoreScanLock());
+
   test.each([false, true])(
     "workbench usage uses the managed home with an explicit database override: %p",
     async (overrideDatabase) => {
@@ -457,6 +477,8 @@ describe("CodexSecurity orchestration", () => {
       "sqlite3.OperationalError: unable to open database file\nwith closing(connect()) as connection:",
       "Could not save the Codex Security scan: database connection failed",
       "Codex Security workbench: permission denied",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      "ENOENT: could not open /synthetic/timed.out/result.json",
     ]) {
       expect(classifyConnectionFailure(message)).toBe("unknown");
     }
@@ -470,6 +492,44 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test.each([
+    ["invalid.api.key", "unauthorized"],
+    ["token.expired", "unauthorized"],
+    ["expired.token", "unauthorized"],
+    ["model.access", "forbidden"],
+    ["model.not.found", "forbidden"],
+  ] as const)(
+    "bounds diagnostic code %s without matching endpoint components",
+    (code, classification) => {
+      for (const detail of [
+        code,
+        `${code}: synthetic provider detail`,
+        `error: '${code}'`,
+        `${code}.`,
+        JSON.stringify({ error: { message: `${code}.` } }),
+        `error=${code}`,
+        `error sending request for url (https://example.test/v1) ${code}`,
+      ])
+        expect(classifyConnectionFailure(new Error(detail))).toBe(
+          classification,
+        );
+      for (const url of [
+        `https://${code}.example/v1`,
+        `https://example.test/${code}/v1`,
+        `https://example.test/${code}`,
+        `https://example.test/v1?error=${code}`,
+        `https://example.test/v1?${code}=synthetic`,
+        `https://example.test/v1#${code}`,
+        `https://example.test/v1#error=${code}`,
+      ])
+        expect(
+          classifyConnectionFailure(
+            new Error(`error sending request for url (${url})`),
+          ),
+        ).toBe("network_error");
+    },
+  );
+
+  test.each([
     ["HTTP 403 ExpiredTokenException", "unauthorized"],
     ["HTTP 403 UnrecognizedClientException", "unauthorized"],
     ["HTTP 400 IncompleteSignature", "unauthorized"],
@@ -478,8 +538,19 @@ describe("CodexSecurity orchestration", () => {
     ["HTTP 401 NotAuthorized", "forbidden"],
     ["OptInRequired", "forbidden"],
     ["ThrottlingException", "rate_limited"],
+    [
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "unauthorized",
+    ],
+    ["Provider configured in config.toml returned 403 Forbidden", "forbidden"],
+    [
+      "Provider configured in config.toml returned 429 Too Many Requests",
+      "rate_limited",
+    ],
+    ["Provider configured in config.toml returned ECONNRESET", "network_error"],
+    ["Provider configured in config.toml timed out", "timeout"],
   ] as const)(
-    "classifies Bedrock error %s as %s",
+    "classifies provider error %s as %s",
     (message, classification) => {
       expect(classifyConnectionFailure(new Error(message))).toBe(
         classification,
@@ -869,6 +940,29 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
+  test("validates an explicit severity rubric during local preflight", async () => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const rubricPath = join(root, "rubric.md");
+    await mkdir(repository);
+    const { client, prepareRuntime } = localClient(
+      {},
+      { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+    );
+    await expect(
+      client.preflight(repository, { rubricPath }),
+    ).rejects.toThrow();
+    await writeFile(rubricPath, " ");
+    await expect(client.preflight(repository, { rubricPath })).rejects.toThrow(
+      "Rubric must not be blank",
+    );
+    await writeFile(rubricPath, "Require a reachable impact.");
+    await expect(
+      client.preflight(repository, { rubricPath }),
+    ).resolves.toMatchObject({ repository });
+    expect(prepareRuntime).not.toHaveBeenCalled();
+  });
+
   test("validates knowledge-base documents before initializing the runtime", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");
@@ -898,6 +992,12 @@ describe("CodexSecurity orchestration", () => {
         "Knowledge base directory contains no supported documents",
       ],
     ];
+    const redirected = join(repository, "documents");
+    await symlink(root, redirected, "junction");
+    invalidDocuments.push([
+      join(redirected, "context.json"),
+      "repository directory links",
+    ]);
     if (process.platform !== "win32") {
       const linkedDocument = join(root, "linked.md");
       await symlink(knowledgeBase, linkedDocument);
@@ -1187,6 +1287,7 @@ describe("CodexSecurity orchestration", () => {
       const environment = {
         OPENAI_API_KEY: "synthetic-openai-key",
         [competingApiKey]: "synthetic-competing-provider-key",
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
         [apiKey]: `synthetic-${provider}-key`,
       };
       const client = new TestClient(
@@ -18300,13 +18401,7 @@ if __name__ == "__main__":
         },
       })),
       resolveCodexCommand: () => ({ command: executable }),
-      resolvePluginPython: async () => {
-        Object.defineProperty(process, "platform", {
-          value: "win32",
-          configurable: true,
-        });
-        return "/managed/python";
-      },
+      resolvePluginPython: async () => "/managed/python",
       prepareOutputDir: async () => scanDir,
       repositoryRevision: async () => "deadbeef",
       createCodex: (options) => ({
@@ -18324,9 +18419,16 @@ if __name__ == "__main__":
       }),
     });
     try {
-      await expect(client.run(repository)).rejects.toThrow(
-        "child environment captured",
-      );
+      await expect(
+        client.run(repository, {
+          onOutputDirReady() {
+            Object.defineProperty(process, "platform", {
+              value: "win32",
+              configurable: true,
+            });
+          },
+        }),
+      ).rejects.toThrow("child environment captured");
       expect(childPath?.split(delimiter)).toEqual([
         bundledTools,
         inheritedTools,
@@ -18336,6 +18438,61 @@ if __name__ == "__main__":
       await client.close();
     }
   });
+
+  test.skipIf(process.platform === "win32")(
+    "rejects campaign Codex launches through a selected source interpreter",
+    async () => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const interpreter = join(root, "interpreter");
+      await symlink("/bin/sh", join(repository, "shell"));
+      await symlink(join(repository, "shell"), interpreter);
+      const executable = join(root, "codex");
+      const marker = join(root, "launched");
+      await writeFile(
+        executable,
+        `#!${interpreter}\nprintf ran > "${marker}"\n`,
+        { mode: 0o700 },
+      );
+      const tools = join(root, "tools");
+      await mkdir(tools);
+      await symlink(Bun.which("git")!, join(tools, "git"));
+      const environment = {
+        OPENAI_API_KEY: "ambient-key",
+        CODEX_CLI_PATH: executable,
+        PATH: tools,
+      };
+      const createCodex = mock(completedCodex(root));
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        environment,
+        prepareRuntime: runtimePreparer(codexHome, () => ({
+          environment: { ...environment, CODEX_HOME: codexHome },
+        })),
+        createCodex,
+      });
+      try {
+        await withProtectedExecutableRoots([repository], async () => {
+          const refused = `trusted PATH: ${executable}`;
+          const timeout = spyOn(AbortSignal, "timeout");
+          try {
+            await expect(
+              runtime.probeCodexSandbox({ command: executable }, environment),
+            ).rejects.toThrow(refused);
+            expect(timeout).not.toHaveBeenCalled();
+          } finally {
+            timeout.mockRestore();
+          }
+          await expect(client.run(repository)).rejects.toThrow(refused);
+        });
+        expect(existsSync(marker)).toBe(false);
+        expect(createCodex).not.toHaveBeenCalled();
+        await runtime.probeCodexSandbox({ command: executable }, environment);
+        expect(existsSync(marker)).toBe(true);
+      } finally {
+        await client.close();
+      }
+    },
+  );
 
   test.each(["native", "shim"])(
     "uses one spawnable Codex executable for scans and nested workers (%s)",
@@ -18404,6 +18561,7 @@ if __name__ == "__main__":
     "missing tools",
     "non-directory tools",
     "blank override",
+    "bulk campaign",
   ])("preserves default SDK bundled tools for %s", async (scenario) => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const executable = join(
@@ -18415,7 +18573,7 @@ if __name__ == "__main__":
     );
     const toolsDirectory = join(dirname(dirname(executable)), "codex-path");
     const otherTools = join(root, "other tools");
-    const pathEnvironment: Record<string, string> =
+    let pathEnvironment: Record<string, string> =
       scenario === "no PATH"
         ? {}
         : scenario === "mixed-case alias"
@@ -18434,7 +18592,10 @@ if __name__ == "__main__":
       mkdir(otherTools),
       mkdir(dirname(executable), { recursive: true }),
     ]);
-    await writeFile(executable, "synthetic executable; never launched\n");
+    if (scenario === "bulk campaign") pathEnvironment = { PATH: otherTools };
+    await writeFile(executable, "synthetic executable; never launched\n", {
+      mode: 0o700,
+    });
     const hasTools =
       scenario !== "missing tools" && scenario !== "non-directory tools";
     if (hasTools) await mkdir(toolsDirectory);
@@ -18460,12 +18621,20 @@ if __name__ == "__main__":
       createCodex,
     });
     try {
-      await client.run(repository);
+      if (scenario === "bulk campaign") {
+        await withProtectedExecutableRoots([repository], () =>
+          client.run(repository),
+        );
+      } else {
+        await client.run(repository);
+      }
       const options = createCodex.mock.lastCall?.[0] ?? null;
       expect(options?.codexPathOverride).toBe(
         process.platform === "win32"
           ? win32.toNamespacedPath(executable)
-          : undefined,
+          : scenario === "bulk campaign"
+            ? executable
+            : undefined,
       );
       expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
       const pathValues = Object.fromEntries(

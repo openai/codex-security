@@ -39,7 +39,11 @@ import {
 import { main } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { normalizeTarget } from "../src/targets.js";
-import { runWorkbench } from "../src/runtime.js";
+import {
+  runWorkbench,
+  SDK_NODE_SEARCH_PATH,
+  sdkNodeSearchPath,
+} from "../src/runtime.js";
 import { readSavedScanLifecycle } from "../src/saved-scan-bootstrap.js";
 import { useTestPython } from "./support/python.js";
 import { git } from "./git-fixture.js";
@@ -563,6 +567,11 @@ test("hosted execution preserves inspected runtime tool paths", async () => {
     for (const directory of executableAliases)
       expect(paths).not.toContain(directory);
     expect(paths).toContain(trustedTools);
+    expect(environment[SDK_NODE_SEARCH_PATH]).toBe(
+      process.platform === "win32"
+        ? undefined
+        : await sdkNodeSearchPath([input.repository]),
+    );
     expect(isAbsolute(environment["CODEX_SECURITY_GIT"] ?? "")).toBe(true);
     expect(isAbsolute(environment["PYTHON"] ?? "")).toBe(true);
   } finally {
@@ -844,7 +853,7 @@ test.each(["valid", "tampered"] as const)(
         : { ...severityRubric, markdown: severityRubric.markdown.trimEnd() };
     const input = new PassThrough();
     const output = capture();
-    const run = main(["scan", "--host"], output.stream, capture().stream, {
+    const run = main(["scan", "--host=true"], output.stream, capture().stream, {
       ...dependencies(),
       recordsInput: input,
     });
@@ -896,7 +905,6 @@ test.each([
 );
 
 test.each([
-  { args: ["scan", "--host=true"] },
   { args: ["scan", "--host", "--path", "service-a"] },
   { args: ["scan", ".", "--host"] },
 ])("host mode rejects unsupported combinations %p", async ({ args }) => {
@@ -907,6 +915,19 @@ test.each([
   );
   expect(stdout.text()).toBe("");
   expect(stderr.text()).toContain("--host must be used alone");
+});
+
+test("--host=false leaves a scan preview in CLI mode", async () => {
+  const stdout = capture();
+  expect(
+    await main(
+      ["scan", ".", "--host=false", "--dry-run", "--json"],
+      stdout.stream,
+      capture().stream,
+      dependencies(),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text()).dryRun).toBe(true);
 });
 
 test.each([false, true])(

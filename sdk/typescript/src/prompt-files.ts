@@ -1,15 +1,23 @@
 import { constants, type BigIntStats } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
-import { basename, dirname, join, relative } from "node:path";
+import { lstat, open, readlink, realpath } from "node:fs/promises";
+import {
+  basename,
+  dirname,
+  format,
+  isAbsolute,
+  join,
+  parse,
+  sep,
+} from "node:path";
 import { sameCheckedFileDevice } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
-import {
-  resolveInputPath,
-  resolveParentTraversal,
-  validateDirectoryLinks,
-} from "./runtime.js";
-import { relativePathIsOutside as isOutsidePath } from "./targets.js";
+import { resolveInputPath, resolveParentTraversal } from "./runtime.js";
+import { isWithin } from "./trusted-executable.js";
 import type { ScanPromptSettings } from "./scan-settings.js";
+
+/** Canonical source directories, or null when a checkout cannot be verified. */
+export type DocumentRoots = readonly string[] | null;
+export type DocumentRootSource = DocumentRoots | (() => Promise<DocumentRoots>);
 
 type ResolvedScanPrompts = Pick<
   ScanPromptSettings,
@@ -23,7 +31,7 @@ type ResolvedScanPrompts = Pick<
 /** Resolve selected files once; an inline SDK prompt overrides its file. */
 export async function resolveScanPrompts(
   options: ScanPromptSettings,
-  repository: string | readonly string[],
+  repository: string | DocumentRootSource,
   directory = process.cwd(),
 ): Promise<ResolvedScanPrompts> {
   const read = async (inline: string | undefined, file: string | undefined) =>
@@ -63,37 +71,71 @@ export async function resolveScanPrompts(
   };
 }
 
+/** A selected source cannot use a directory link to supply a document outside it. */
+export async function checkDocumentPath(
+  path: string,
+  canonical: string,
+  source: DocumentRootSource,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (path === canonical) return;
+  const roots = typeof source === "function" ? await source() : source;
+  const outside = roots?.filter((root) => !isWithin(root, canonical));
+  if (outside?.length === 0) return;
+
+  const directories = new Set([dirname(path)]);
+  for (const directory of directories) {
+    const parsed = parse(directory);
+    if (!parsed.base) continue;
+    directories.add(parsed.dir);
+    signal?.throwIfAborted();
+    // A trailing slash would make lstat follow the link. Keep any raw "..".
+    const entry = format(parsed);
+    if (!(await lstat(entry)).isSymbolicLink()) continue;
+    if (!outside) {
+      throw new CodexSecurityError(
+        "Select the document by its canonical path when the source checkout is unknown.",
+      );
+    }
+    const owner = await realpath(await resolveParentTraversal(parsed.dir));
+    if (outside.some((root) => isWithin(root, owner))) {
+      throw new CodexSecurityError(
+        `Input files must not follow repository directory links outside the selected repository: ${entry}`,
+      );
+    }
+    // An external alias can point through a directory link inside a checkout.
+    const target = await readlink(entry);
+    directories.add(isAbsolute(target) ? target : `${owner}${sep}${target}`);
+  }
+}
+
 export async function readRegularInputFile(
   path: string,
-  repository: string | readonly string[],
+  repository: string | DocumentRootSource,
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
   }
-  const canonicalParent = await realpath(
-    await resolveParentTraversal(dirname(path)),
+  const canonical = join(
+    await realpath(await resolveParentTraversal(dirname(path))),
+    basename(path),
   );
-  const repositories =
-    typeof repository === "string" ? [repository] : repository;
-  for (const repository of repositories) {
-    const canonicalRepository = await realpath(
-      await resolveParentTraversal(repository),
-    );
-    if (isOutsidePath(relative(canonicalRepository, canonicalParent))) {
-      await validateDirectoryLinks(path, (link) => {
-        if (!isOutsidePath(relative(canonicalRepository, link))) {
-          throw new CodexSecurityError(
-            "Input files must not follow repository directory links outside the selected repository.",
-          );
-        }
-      });
-    }
-  }
-  const canonicalPath = join(canonicalParent, basename(path));
+  const roots = typeof repository === "string" ? [repository] : repository;
+  await checkDocumentPath(
+    path,
+    canonical,
+    Array.isArray(roots)
+      ? await Promise.all(
+          roots.map(async (root: string) =>
+            realpath(await resolveParentTraversal(root)),
+          ),
+        )
+      : roots,
+  );
   const file = await open(
-    canonicalPath,
+    canonical,
     constants.O_RDONLY |
       (constants.O_NOFOLLOW ?? 0) |
       (constants.O_NONBLOCK ?? 0),
@@ -104,7 +146,7 @@ export async function readRegularInputFile(
       !opened.isFile() ||
       !(await sameCheckedFileDevice(
         file,
-        { path: canonicalPath, metadata: selected },
+        { path: canonical, metadata: selected },
         opened,
       ))
     ) {
