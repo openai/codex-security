@@ -724,8 +724,8 @@ Choose the next step from the recorded reason:
   start a new scan with the intended scope, including for plugin scans without
   a recipe. Retained findings can still be reviewed, but absence of findings
   from a stopped run is inconclusive.
-- **A Deep Scan was interrupted and is still recorded as `running`:** it may
-  support [resume](#resuming-an-interrupted-deep-scan) with the original checkout,
+- **A Standard or Deep Scan was interrupted and is still recorded as `running`:** it may
+  support [resume](#resuming-an-interrupted-scan) with the original checkout,
   artifacts, and session. Completed, failed, and canceled scans cannot resume.
 
 For example, after identifying an omitted API directory:
@@ -956,7 +956,7 @@ behavior are unchanged.
 
 The SDK setting is `maxTimeMinutes`; project files use `scan.max_time_minutes`.
 Each launched scan or rerun gets its own allowance after setup, and reconnects
-do not reset it. Standard scans still do not support resume. For batch and
+do not reset it. [Resumed Standard scans](#resuming-an-interrupted-scan) keep the original deadline. For batch and
 component scans, the project setting applies separately to each scan attempt,
 not to planning, result matching, or the total campaign.
 
@@ -2151,7 +2151,7 @@ in the workbench, without changing sealed report timestamps.
 | `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.                            |
 | `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                                       |
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active.                       |
-| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                                               |
+| `scans resume SCAN_ID`                                | Continue an interrupted Standard or Deep Scan.                                   |
 | `scans rerun [SCAN_ID]`                               | Rerun a saved recipe in its checkout.                                            |
 | `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees. |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                                 |
@@ -2247,7 +2247,7 @@ work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder
 reads concatenated frames and reports truncated streams as collection errors.
 
-### Resuming an interrupted Deep Scan
+### Resuming an interrupted scan
 
 ```bash
 codex-security scans list --scan-root /path/to/security-scans
@@ -2255,7 +2255,7 @@ codex-security scans resume SCAN_ID
 ```
 
 The terminal list shows the full scan ID and labels the last activity of a
-`running` scan after 24 hours without an update. For a Deep Scan with a saved
+`running` scan after 24 hours without an update. For a Standard or Deep Scan with a saved
 launch recipe and its original session, it also shows the resume command to use after interruption.
 
 The scan must still be `running`, with its original checkout, output directory,
@@ -2267,15 +2267,22 @@ output. It lets the workbench verify the original output even before the first
 checkpoint. If an older scan stopped with an empty output, start a new scan with
 `codex-security scans rerun SCAN_ID`.
 
-New Windows Deep Scans also record the checkout's native volume and file ID
+New Windows Standard and Deep Scans also record the checkout's native volume and file ID
 when the filesystem supplies them. Validation and remediation verify the same
 checkout identity. An older scan can resume across Python
 versions when its saved checkout identity can be verified. If the workbench
 cannot verify it, resume with the Python runtime that started the scan or use
 `codex-security scans rerun SCAN_ID` to start a new scan.
 
-Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
-settings/instructions. Knowledge-bearing scans save their extracted documents in
+Resume keeps the scan ID, saved settings and instructions, completed workers, artifacts,
+and accumulated cost. A Standard scan continues in its original Codex session with
+the same `--max-cost` limit and `--max-time` deadline. Only one CLI or SDK call
+can run it at a time. If the connection fails after the session is saved, the CLI
+prints the resume command. Work since the last checkpoint may need to be repeated.
+Use `scans rerun` for canceled or failed scans, including authentication failures.
+For custom validation, rerun with the original validation instructions.
+
+Knowledge-bearing scans save their extracted documents in
 the private `.scan-knowledge.json` continuation file beside the scan artifacts.
 Resume verifies and uses that snapshot even if the original files changed or were
 deleted. Preserve it with the scan directory; canonical reports do not embed its
