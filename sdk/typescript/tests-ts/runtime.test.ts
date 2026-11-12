@@ -4927,6 +4927,17 @@ describe("runtime directories and plugin Python boundary", () => {
       ).toEqual(abbreviated);
     }
 
+    // Individual append and attribute bits in FW do not confer FW on their own.
+    for (const mask of ["0x4", "0x10", "0x100", "0x114"]) {
+      expect(
+        inspectWindowsCredentialAcl(
+          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;${mask};;;WD)`,
+          user,
+          { scope: "ancestor" },
+        ).untrustedPrincipals,
+      ).toEqual([]);
+    }
+
     // Composite grants Windows renders as hex rather than an abbreviation.
     for (const mask of ["0x1201bf", "0x1301bf", "0x00000006", "0x40000001"]) {
       expect(
