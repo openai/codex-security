@@ -781,9 +781,14 @@ Omit `issueKeys` to collect the project's open security issues. An empty list is
 If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
 to check the Sonar binding before fetching issues.
 
-For AWS Continuum code findings, use `readContinuumFindings(path, sourceRepositoryUrl)`
-with a saved list or detail response, or `normalizeContinuumFindings(input, sourceRepositoryUrl)`
-with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
+For AWS Continuum, pass a collector capture, native detail, array of selected
+details or captures, or complete list response to `readContinuumFindings` (file
+path) or `normalizeContinuumFindings` (parsed JSON). The second argument is
+the verified Git repository URL. Pass `"local"` as the third argument to retain
+full patch contents locally. The default Cloud projection records
+`contentOmitted: "cloud_evidence_limit"` on patches whose contents exceed the
+finding evidence budget. Read the native finding at `evidence.source_data.finding`
+and its available patches at `evidence.source_data.patches`.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use

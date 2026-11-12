@@ -260,7 +260,7 @@ export function renderScanHistory(
       ) {
         lines.push(`    ${dim(`Last activity: ${clean(updatedAt)}`)}`);
         if (
-          scan["mode"] === "deep" &&
+          (scan["mode"] === "deep" || scan["mode"] === "standard") &&
           scan["recipeAvailable"] === true &&
           scan["handoffStatus"] === "delivered" &&
           scan["continuationThreadId"]

@@ -447,6 +447,12 @@ def collect_scan_usage(
                 owner_turn_id=owner_turn_id,
                 model_usage=models,
                 completed_turn_id=completed_turn_id if session.thread_id == thread_id else None,
+                resume_owner=(
+                    scan["mode"] == "standard"
+                    and "recipe_json" in scan.keys()
+                    and scan["recipe_json"] is not None
+                    and session.thread_id == scan["continuation_thread_id"]
+                ),
                 is_scan_owner=(
                     scan["mode"] == "deep"
                     and session.thread_id == scan["deep_scan_owner_thread_id"]
@@ -603,6 +609,7 @@ def _read_rollout_copies_usage(
     model_usage: dict[str | None, dict[str, int]],
     completed_turn_id: str | None = None,
     is_scan_owner: bool = False,
+    resume_owner: bool = False,
 ) -> RolloutUsage:
     readings = []
     for session in copies:
@@ -618,6 +625,7 @@ def _read_rollout_copies_usage(
                 accepted_response_ids=response_ids,
                 completed_turn_id=completed_turn_id,
                 is_scan_owner=is_scan_owner,
+                resume_owner=resume_owner,
             )
         except (OSError, UnicodeError, ValueError):
             continue
@@ -1308,6 +1316,7 @@ def _read_rollout_usage(
     accepted_response_ids: set[str] | None = None,
     completed_turn_id: str | None = None,
     is_scan_owner: bool = False,
+    resume_owner: bool = False,
 ) -> RolloutUsage:
     result = RolloutUsage(_empty_token_usage(), set(), None, {})
     total = result.tokens
@@ -1329,6 +1338,7 @@ def _read_rollout_usage(
     started_turns: set[str] = set()
     open_turns: set[str] = set()
     closed_turns: set[str] = set()
+    failed_turns: set[str] = set()
     measured_turns: set[str] = set()
     observed_response_usage = _empty_token_usage()
     current_response_usage_observed = False
@@ -1556,6 +1566,8 @@ def _read_rollout_usage(
                     if timestamp >= started_at:
                         if terminal_turn_id in started_turns:
                             closed_turns.add(terminal_turn_id)
+                            if payload.get("type") == "task_complete" and payload.get("error"):
+                                failed_turns.add(terminal_turn_id)
                         if payload.get("type") == "turn_aborted":
                             warnings.add("turn_interrupted")
             if (
@@ -1667,6 +1679,19 @@ def _read_rollout_usage(
                     model = None
                 _add_token_usage(total, usage)
                 _add_token_usage(local_models.setdefault(model, _empty_token_usage()), usage)
+                if (
+                    resume_owner
+                    and receipt_turn_id == current_turn_id
+                    and current_turn_id in started_turns
+                    and (open_turns - {current_turn_id} or failed_turns)
+                ):
+                    # Matching thread totals account for turns left open or failed before resume.
+                    cumulative = _usage_counts(payload.get("thread_token_usage"))
+                    if cumulative is not None and all(
+                        cumulative[key] == total[key] for key in TOKEN_FIELDS.values()
+                    ):
+                        open_turns.intersection_update({current_turn_id})
+                        closed_turns.difference_update(failed_turns - {current_turn_id})
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue

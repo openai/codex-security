@@ -140,8 +140,8 @@ def cli_scan_resume(
 ) -> dict[str, Any]:
 
     scan = scan_with_progress(connection, scan["id"])
-    if scan["mode"] != "deep" or scan["recipe_json"] is None:
-        raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
+    if scan["mode"] not in {"standard", "deep"} or scan["recipe_json"] is None:
+        raise SystemExit("Resume requires a Standard or Deep Scan with a saved CLI launch recipe.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
         raise SystemExit(
             "Resume requires a running scan; completed, failed, and canceled scans cannot resume."

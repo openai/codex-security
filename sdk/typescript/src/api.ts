@@ -189,6 +189,7 @@ import {
 } from "./custom-validation-prompt.js";
 import {
   AuthenticationRequiredError,
+  CodexConnectionError,
   CodexSecurityError,
   ConfigurationError,
   InvalidTargetError,
@@ -272,6 +273,7 @@ import {
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
+  acquireScanExecutionLock,
   withCredentialHomeLock,
   writeCredentialHomeConfig,
   bootstrapPlugin,
@@ -2247,6 +2249,7 @@ export class CodexSecurity {
     let latestMeasurement: Readonly<ScanUsageMeasurement> | null = null;
     let notifiedLimit: number | undefined;
     let scanDir = "";
+    let releaseStandardScan: (() => void) | undefined;
     let targetPathsFile: string | null = null;
     let stagedPluginRoot: string | undefined;
     let stagedPluginDirectory: string | undefined;
@@ -2494,6 +2497,16 @@ export class CodexSecurity {
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
+      if (
+        !hosted &&
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        releaseStandardScan = await acquireScanExecutionLock(
+          stateDirectory,
+          scanDir,
+        );
+      }
       if (!options.archiveExisting && options.resumeScanId === undefined) {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
@@ -3028,6 +3041,7 @@ export class CodexSecurity {
       // The registered recipe now owns the private snapshot, including after completion.
       savedProviderProfile = undefined;
       const registeredScanId = registration["scanId"];
+      let timeBudgetStartedAt: string | undefined;
       const resumeThreadId =
         options.resumeScanId === undefined
           ? undefined
@@ -3047,6 +3061,10 @@ export class CodexSecurity {
             "The workbench returned mismatched scan resume context.",
           );
         }
+        const originalStart =
+          savedRecipe["timeBudgetStartedAt"] ?? registration["startedAt"];
+        if (typeof originalStart === "string")
+          timeBudgetStartedAt = originalStart;
         if (registration["finalizationSelected"] !== true) {
           const savedSession = await findScanSession(
             runtime.codexHome,
@@ -3553,7 +3571,9 @@ export class CodexSecurity {
       }
       if (options.resumeScanId !== undefined) {
         prompt +=
-          "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan.";
+          mode === "deep"
+            ? "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan."
+            : "\nContinue this Standard scan from the saved scan-manifest.json, findings.json, and review checkpoints in its output directory. Keep existing evidence, validation decisions, finding IDs, and surface IDs. Finish outstanding work and finalize the same scan.";
       }
       if (
         falsePositiveExamples.length > 0 &&
@@ -3731,13 +3751,14 @@ export class CodexSecurity {
           runtime.plugin.pluginRoot,
         );
         checkOpen();
-        prompt += `\n\n${renderScanTimeBudgetPolicy(
-          timePolicy,
-          scanTimeBudget(
-            options.maxTimeMinutes,
-            (this.#dependencies.now ?? Date.now)(),
-          ),
-        )}`;
+        const timing = scanTimeBudget(
+          options.maxTimeMinutes,
+          timeBudgetStartedAt === undefined
+            ? (this.#dependencies.now ?? Date.now)()
+            : Date.parse(timeBudgetStartedAt),
+        );
+        timeBudgetStartedAt = timing.startedAt;
+        prompt += `\n\n${renderScanTimeBudgetPolicy(timePolicy, timing)}`;
       }
       const recoverSelectedCompletion = async () => {
         const threadId = observedScanThreadId ?? thread.id;
@@ -3847,7 +3868,13 @@ export class CodexSecurity {
           try {
             await workbench(
               workbenchOptions,
-              workbenchArgs("set-scan-thread", { scanId, threadId }),
+              workbenchArgs("set-scan-thread", {
+                scanId,
+                threadId,
+                ...(registration["canSaveTimeBudgetStart"] === true && {
+                  timeBudgetStartedAt,
+                }),
+              }),
             );
           } catch (error) {
             notifyObserver(
@@ -4440,6 +4467,32 @@ export class CodexSecurity {
           );
         }
       }
+      if (
+        activeScan !== null &&
+        releaseStandardScan !== undefined &&
+        !signal.aborted &&
+        options.validationPrompt === undefined &&
+        scanTurnStatus !== null &&
+        terminalTurnStatus !== "completed" &&
+        failure instanceof CodexConnectionError
+      ) {
+        const saved = await workbench(
+          { ...activeScan.options, signal: undefined },
+          workbenchArgs("get-cli-scan-resume", {
+            scanId: activeScan.id,
+            allowUnavailable: true,
+          }),
+        ).catch(() => null);
+        if (saved?.["scanId"] === activeScan.id) {
+          failure = new ScanInterruptedError(
+            `${errorMessage(failure)}\nResume when connected: codex-security scans resume ${activeScan.id}`,
+            scanDir,
+            { cause: failure },
+          );
+          activeScan = null;
+          runPostScan = null;
+        }
+      }
       const callerCanceledDeepScan =
         activeScan?.mode === "deep" && options.signal?.aborted;
       if (activeScan !== null && callerCanceledDeepScan) {
@@ -4460,7 +4513,9 @@ export class CodexSecurity {
       if (
         activeScan !== null &&
         !callerCanceledDeepScan &&
-        ((options.resumeScanId === undefined && !selectedDeepFinalization) ||
+        (((options.resumeScanId === undefined ||
+          releaseStandardScan !== undefined) &&
+          !selectedDeepFinalization) ||
           (selectedDeepFinalization &&
             !options.signal?.aborted &&
             (failure instanceof ScanCostLimitExceededError ||
@@ -4548,6 +4603,7 @@ export class CodexSecurity {
         warnCleanupFailed(options, error);
       }
       observeSettledScan(options, activeScan);
+      releaseStandardScan?.();
     }
   }
 
@@ -5881,7 +5937,7 @@ export class CodexSecurity {
   ): Promise<LocalScanInputs> {
     if (
       options.resumeScanId !== undefined &&
-      (options.mode !== "deep" ||
+      ((options.mode !== "deep" && options.mode !== "standard") ||
         !options.outputDir ||
         options.archiveExisting ||
         options.parentScanId !== undefined ||
@@ -5889,7 +5945,7 @@ export class CodexSecurity {
         options.mock)
     ) {
       throw new CodexSecurityError(
-        "Resume requires the original Deep Scan output directory without archive, rerun, or workflow options.",
+        "Resume requires the original Standard or Deep Scan output directory without archive, rerun, or workflow options.",
       );
     }
     if (
@@ -6359,6 +6415,10 @@ export async function runScanEvents(
         }));
       const { status, threadId, lastStreamError } = turn;
       if (status !== "completed") {
+        if (lastStreamError !== null) {
+          const error = codexTurnError(lastStreamError);
+          if (error instanceof CodexConnectionError) throw error;
+        }
         throw new IncompleteScanError(
           lastStreamError ??
             "Codex Security event stream ended before the turn completed.",
@@ -6491,6 +6551,13 @@ export async function runScanEvents(
   }
 }
 
+function codexTurnError(error: unknown): CodexSecurityError {
+  const classification = classifyConnectionFailure(error);
+  return classification === "network_error" || classification === "timeout"
+    ? new CodexConnectionError(errorMessage(error), { cause: error })
+    : new CodexSecurityError(errorMessage(error), { cause: error });
+}
+
 async function readCodexTurn(options: {
   thread: Pick<CodexThreadLike, "id">;
   events: AsyncGenerator<ScanEvent>;
@@ -6503,12 +6570,22 @@ async function readCodexTurn(options: {
   usage: unknown;
   lastStreamError: string | null;
 }> {
+  async function* transportEvents() {
+    try {
+      yield* options.events;
+    } catch (error) {
+      const failure = codexTurnError(error);
+      if (failure instanceof CodexConnectionError) throw failure;
+      throw error;
+    }
+  }
   return readCodexSessionTurn({
     ...options,
-    onEvent: async (event) => {
+    events: transportEvents(),
+    onEvent: async (event: ScanEvent) => {
       await options.onEvent?.(event);
       if (event.type === "turn.failed") {
-        throw new CodexSecurityError(turnFailureMessage(event["error"]));
+        throw codexTurnError(turnFailureMessage(event["error"]));
       }
       if (event.type === "error" && typeof event["message"] === "string") {
         const message = event["message"];
@@ -6521,8 +6598,7 @@ async function readCodexTurn(options: {
         }
         const reconnect = reconnectAttempt(message);
         if (reconnect !== null) options.onReconnect?.(message, reconnect);
-        else if (!waitingForNetwork(message))
-          throw new CodexSecurityError(message);
+        else if (!waitingForNetwork(message)) throw codexTurnError(message);
       }
     },
   });

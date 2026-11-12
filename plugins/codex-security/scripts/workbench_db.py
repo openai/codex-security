@@ -1582,12 +1582,7 @@ def register_cli_scan(
     *,
     before_archive: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Register a CLI scan and its selected target before execution begins.
-
-    Record the launch recipe and target identity with the new scan. When reusing
-    an output directory, coordinate archiving with registration so previous results
-    can still be located. Return the scan ID, contract, and target metadata.
-    """
+    """Register the scan recipe and target identity, archiving any previous output atomically."""
     # A selected plugin may replace __main__ while delegating to this workbench.
     before_output_change = before_archive or getattr(
         sys, "_codex_security_before_output_change", None
@@ -1795,6 +1790,11 @@ def register_cli_scan(
         "contract": scan_contract(scan),
         "lifecycle": json.loads(scan["lifecycle_json"]),
         **({"phase": scan["phase"]} if mode == "standard" else {}),
+        **(
+            {"canSaveTimeBudgetStart": True}
+            if "maxTimeMinutes" in recipe and mode in {"standard", "diff"}
+            else {}
+        ),
         "scanDir": str(scan_dir),
         "scanId": scan_id,
         "scopeFileCount": scope_file_count,
@@ -1807,8 +1807,11 @@ def set_scan_thread(connection: sqlite3.Connection, args: argparse.Namespace) ->
     scan = require_scan(connection, args.scan_id)
     with connection:
         connection.execute(
-            "UPDATE scans SET continuation_thread_id = ?, updated_at = ? WHERE id = ?",
-            (args.thread_id, now(), scan["id"]),
+            """UPDATE scans SET continuation_thread_id = ?1, updated_at = ?2,
+               recipe_json = CASE WHEN ?3 IS NULL THEN recipe_json
+                   ELSE json_insert(recipe_json, '$.timeBudgetStartedAt', ?3) END
+               WHERE id = ?4""",
+            (args.thread_id, now(), getattr(args, "time_budget_started_at", None), scan["id"]),
         )
     return {"scanId": scan["id"], "threadId": args.thread_id}
 

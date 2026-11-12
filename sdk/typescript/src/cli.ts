@@ -3123,11 +3123,12 @@ export async function main(
       },
     })
     .command("resume", {
-      description: "Resume an interrupted Deep Scan in its original session.",
+      description:
+        "Resume an interrupted Standard or Deep Scan in its original session.",
       examples: [{ args: { scanId: "SCAN_ID" } }],
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       args: z.object({
-        scanId: z.string().min(1).describe("Interrupted Deep Scan identifier."),
+        scanId: z.string().min(1).describe("Interrupted scan identifier."),
       }),
       options: z.object({
         showCost: SHOW_COST_OPTION,
