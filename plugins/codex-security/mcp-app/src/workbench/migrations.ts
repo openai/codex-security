@@ -14,7 +14,11 @@ export interface Migration {
   statements: readonly string[];
 }
 
-export const migrations: readonly Migration[] = history;
+// Python owns the repository-dependent migrations 67–71. Migration 72 only uses
+// the external source tables that both workbench runtimes already maintain.
+export const migrations: readonly Migration[] = history.filter(
+  (item) => item.version <= 66 || item.version === 72,
+);
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;
 
@@ -130,9 +134,16 @@ export function stableTargetId(path: string): string {
 }
 
 function backfillTargets(database: DatabaseSync): void {
+  const validatedWorkspace = columns(database, "workspaces").has(
+    "target_path_unvalidated",
+  )
+    ? " AND target_path_unvalidated = 0"
+    : "";
   const targets = database
     .prepare(
-      "SELECT target_path FROM workspaces WHERE target_path IS NOT NULL UNION SELECT target_path FROM scans",
+      "SELECT target_path FROM workspaces WHERE target_path IS NOT NULL" +
+        validatedWorkspace +
+        " UNION SELECT target_path FROM scans",
     )
     .all();
   const lookup = database.prepare(
@@ -152,7 +163,8 @@ function backfillTargets(database: DatabaseSync): void {
     for (const table of ["workspaces", "scans"]) {
       database
         .prepare(
-          `UPDATE ${table} SET target_id = ? WHERE target_path = ? AND target_id IS NULL`,
+          `UPDATE ${table} SET target_id = ? WHERE target_path = ? AND target_id IS NULL` +
+            (table === "workspaces" ? validatedWorkspace : ""),
         )
         .run(id, path);
     }

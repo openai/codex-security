@@ -27,6 +27,7 @@ import {
   writeThreatModel,
 } from "../src/artifact-export.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import { PYTHON } from "./support/security-policy.js";
 
 const caseProbe = await mkdtemp(join(tmpdir(), "codex-security-case-probe-"));
@@ -198,6 +199,41 @@ describe("offline artifact export", () => {
           );
         }
       } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "uses the campaign PATH when launching the artifact helper through a Python wrapper",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "codex-security-export-"));
+      const source = join(root, "source");
+      const tools = join(root, "tools");
+      const python = join(tools, "python-wrapper");
+      const previous = process.env["PATH"];
+      try {
+        await mkdir(source);
+        await mkdir(tools);
+        await symlink(PYTHON, join(tools, "artifact-python"));
+        await writeFile(python, '#!/bin/sh\nexec artifact-python "$@"\n', {
+          mode: 0o700,
+        });
+        await writeFile(
+          join(source, "artifact-python"),
+          "#!/bin/sh\nexit 72\n",
+          {
+            mode: 0o700,
+          },
+        );
+        process.env["PATH"] = [source, tools, previous].join(delimiter);
+        const result = await withProtectedExecutableRoots([source], () =>
+          runArtifactHelper(["--help"], { pythonPath: python }),
+        );
+        expect(result.stdout).toContain("--describe-threat-model");
+      } finally {
+        if (previous === undefined) delete process.env["PATH"];
+        else process.env["PATH"] = previous;
         await rm(root, { recursive: true, force: true });
       }
     },
