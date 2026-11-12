@@ -138,9 +138,11 @@ import {
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
 import {
+  collectContinuumFinding,
   collectContinuumIssues,
   continuumEnvironmentId,
-  continuumIssueExport,
+  continuumFindingId,
+  continuumImportOutput,
 } from "./continuum-collector.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
@@ -1494,6 +1496,7 @@ interface CliDependencies {
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
   collectContinuumIssues?: typeof collectContinuumIssues;
+  collectContinuumFinding?: typeof collectContinuumFinding;
   collectSonarIssues?: typeof collectSonarIssues;
   prepareLocalExternalImport?: typeof prepareLocalExternalImport;
   readLocalExternalFindings?: typeof readLocalExternalFindings;
@@ -4655,36 +4658,112 @@ export async function main(
   }
   imports
     .command("continuum", {
-      examples: [{ args: { environmentId: "abc123" } }],
+      examples: [
+        { args: { environmentId: "abc123" } },
+        {
+          args: { environmentId: "abc123" },
+          options: {
+            findingId: "def456",
+            sourceRoot: "/absolute/path/to/checkout",
+            repositoryName: "example/project",
+          },
+        },
+      ],
       description:
-        "Read all AWS Continuum issues, linked findings, evidence, and available Git-only patches.",
-      hint: "Requires exactly one configured Git repository, Continuum read permissions, and AWS CLI v2.38.5 or later installed outside the checkout. S3 sources are allowed alongside the Git repository. Save the complete --format json output for publish findings --provider continuum.",
+        "Read all AWS Continuum issues or collect one finding with its repository's patches.",
+      hint: "Requires AWS CLI v2.38.5 or later installed outside the checkout. Bulk collection requires exactly one Git repository and allows S3 sources. For one finding, pass --finding-id, --source-root, and either --repository-name or --single-repository. Save --format json output for publish findings --provider continuum.",
       destructive: false,
       args: z.object({ environmentId: continuumEnvironmentId }),
-      options: z.object({
-        awsProfile: optionValue("--aws-profile")
-          .optional()
-          .describe(
-            "AWS CLI profile (default: use the AWS CLI's configured credentials).",
-          ),
-        awsRegion: optionValue("--aws-region")
-          .optional()
-          .describe(
-            "AWS Region (default: use the AWS CLI's configured Region).",
-          ),
-      }),
-      output: continuumIssueExport.optional(),
+      options: z
+        .object({
+          awsProfile: optionValue("--aws-profile")
+            .optional()
+            .describe(
+              "AWS CLI profile (default: use the AWS CLI's configured credentials).",
+            ),
+          awsRegion: optionValue("--aws-region")
+            .optional()
+            .describe(
+              "AWS Region (default: use the AWS CLI's configured Region).",
+            ),
+          findingId: continuumFindingId.optional(),
+          sourceRoot: optionValue("--source-root")
+            .refine(isAbsolute, {
+              message: "--source-root must be an absolute path.",
+            })
+            .optional()
+            .describe(
+              "Absolute path of the selected checkout for --finding-id.",
+            ),
+          repositoryName: optionValue("--repository-name")
+            .optional()
+            .describe(
+              "Exact AWS source name for the selected finding's repository.",
+            ),
+          singleRepository: z
+            .boolean()
+            .default(false)
+            .describe(
+              "The environment was verified to contain only the selected repository.",
+            ),
+        })
+        .refine(
+          (options) =>
+            options.findingId !== undefined ||
+            (options.sourceRoot === undefined &&
+              options.repositoryName === undefined &&
+              !options.singleRepository),
+          {
+            message:
+              "--source-root, --repository-name, and --single-repository require --finding-id.",
+          },
+        )
+        .refine(
+          (options) =>
+            options.findingId === undefined || options.sourceRoot !== undefined,
+          { message: "--finding-id requires --source-root." },
+        )
+        .refine(
+          (options) =>
+            options.findingId === undefined ||
+            (options.repositoryName !== undefined) !== options.singleRepository,
+          {
+            message:
+              "--finding-id requires exactly one of --repository-name or --single-repository.",
+          },
+        ),
+      output: continuumImportOutput.optional(),
       run: ({ args, options, error, format }) => {
         setTerminalOutputFormat(format);
-        return collectHostedFindings("Continuum", error, (signal) =>
-          (dependencies.collectContinuumIssues ?? collectContinuumIssues)({
-            environmentId: args.environmentId,
-            profile: options.awsProfile,
-            region: options.awsRegion,
-            cwd: dependencies.currentDirectory(),
-            environment: dependencies.environment,
-            signal,
-          }),
+        return collectHostedFindings<Record<string, unknown>>(
+          "Continuum",
+          error,
+          (signal) => {
+            const selection = {
+              environmentId: args.environmentId,
+              profile: options.awsProfile,
+              region: options.awsRegion,
+              cwd: dependencies.currentDirectory(),
+              environment: dependencies.environment,
+              signal,
+            };
+            if (options.findingId === undefined)
+              return (
+                dependencies.collectContinuumIssues ?? collectContinuumIssues
+              )(selection);
+            return (
+              dependencies.collectContinuumFinding ?? collectContinuumFinding
+            )({
+              ...selection,
+              findingId: options.findingId,
+              sourceRoot: options.sourceRoot!,
+              repositoryName: options.repositoryName,
+              warn: (message) =>
+                errorOutput.write(
+                  `codex-security: ${escapeTerminalText(message)}\n`,
+                ),
+            });
+          },
         );
       },
     })

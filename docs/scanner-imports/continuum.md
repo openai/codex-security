@@ -182,42 +182,40 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 
 ### Collect a finding with patches
 
-Set `FINDING_ID` to the verified
-finding ID. The bundled Python 3.10+ collector uses your signed-in AWS CLI to read
-the finding, follow its created or duplicate issue ID, and retrieve its
-`PATCH` artifacts. Its IAM permissions are `continuum:GetCodeFinding`,
-`continuum:ListCodeIssueArtifacts`, and `continuum:GetCodeIssueArtifact`.
+Pass the verified short finding ID to `import continuum --finding-id`. The CLI
+uses your signed-in AWS CLI to read the finding, follow its created or duplicate
+issue ID, and retrieve its `PATCH` artifacts. This mode needs
+`continuum:GetCodeFinding`, `continuum:ListCodeIssueArtifacts`, and
+`continuum:GetCodeIssueArtifact`.
 [AWS issue artifacts](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ListCodeIssueArtifacts.html)
 
-Run the collector from a trusted shell outside the checkout. Set `source_root`
-to the absolute path of the local checkout that owns the finding. Keep your AWS
-config, shared credentials, CLI aliases, and custom service models outside that checkout. The AWS CLI
-and its helpers receive your AWS settings (including profile and Region), proxy
-and OS account settings, and a `PATH` that excludes the checkout. If a custom
-helper needs other shell variables, use a profile that works with these settings
-or import a saved report.
+Pass the absolute path of the local checkout that owns the finding as
+`--source-root`, including when you run from another directory. The CLI applies
+the same AWS launch checks and accepts the same `--aws-profile` and
+`--aws-region` overrides as the bulk export.
 
-The example uses a global npm installation and a verified single-repository
-environment. For a multi-repository environment, replace `--single-repository` with
-`--repository-name "$AWS_SOURCE_NAME"`. Use the exact source name AWS assigns
-to that repository. One issue can have patches for several sources. In this
-mode the collector skips patches without a repository name and prints their
-artifact IDs to stderr for review. [AWS patch fields](https://docs.aws.amazon.com/continuum/latest/APIReference/API_PatchBody.html)
+Use `--single-repository` only for an environment verified to contain just
+the selected repository. For a mixed-source or multi-repository environment,
+use `--repository-name "$AWS_SOURCE_NAME"`. Use the exact source name AWS
+assigns to that repository. The collector skips patches without a repository
+name in this mode and prints their artifact IDs to stderr.
+[AWS patch fields](https://docs.aws.amazon.com/continuum/latest/APIReference/API_PatchBody.html)
 
 ```sh
 report=
 source_root=/absolute/path/to/checkout
-plugin="$(npm root --global)/@openai/codex-security/_bundled_plugin"
 out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
-  python3 -I "$plugin/skills/publish-findings/scripts/collect_continuum.py" \
-    --environment-id "$ENVIRONMENT_ID" --finding-id "$FINDING_ID" \
-    --source-root "$source_root" --single-repository > "$out/continuum.tmp" &&
+  codex-security import continuum "$ENVIRONMENT_ID" --finding-id "$FINDING_ID" \
+    --source-root "$source_root" --single-repository --format json > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
   report="$out/continuum.json"
 ```
 
 If the finding has no linked issue or no matching patches, the collector saves
 the native finding detail. If an AWS read fails, retry the export before import.
+
+Publish this report with `publish findings --provider continuum` and the verified
+`--source-repository-url`. The record is identified by the finding ARN.
 
 The local import retains exact patch bytes and artifact descriptors in
 `evidence.source_data.patches`. Cloud retains the descriptors and marks

@@ -1,10 +1,9 @@
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { environmentEntry } from "./auth.js";
-import { bundledPluginRoot } from "./bundled-plugin.js";
 import { CodexSecurityError } from "./errors.js";
-import { localGitProtectionRoots } from "./local-git-metadata.js";
+import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import {
   isWithin,
   resolveTrustedExecutable,
@@ -12,6 +11,38 @@ import {
 } from "./trusted-executable.js";
 
 const windows = process.platform === "win32";
+const accountDirectories = [
+  "APPDATA",
+  "HOME",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+  "XDG_CONFIG_HOME",
+];
+const hostSettings = new Set([
+  ...accountDirectories,
+  "ALL_PROXY",
+  "CURL_CA_BUNDLE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "LANG",
+  "LANGUAGE",
+  "LOGNAME",
+  "NO_PROXY",
+  "REQUESTS_CA_BUNDLE",
+  "SSH_AUTH_SOCK",
+  "SSL_CERT_DIR",
+  "SSL_CERT_FILE",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "TZ",
+  "USER",
+  "USERNAME",
+  "WINDIR",
+]);
 
 function expandVariables(path: string, environment: NodeJS.ProcessEnv): string {
   // AWS uses Python's platform-specific expandvars for configuration paths.
@@ -100,25 +131,28 @@ export async function prepareContinuumAws(
   cwd: string,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
+  sourceRoot?: string,
 ) {
   const caller = await realpath(cwd);
+  const source = sourceRoot ?? cwd;
+  if (
+    sourceRoot !== undefined &&
+    (!isAbsolute(sourceRoot) ||
+      !(await stat(sourceRoot).catch(missingPath))?.isDirectory())
+  )
+    throw new CodexSecurityError(
+      "Select an existing absolute directory with --source-root.",
+    );
   const roots = [
     ...new Set([
-      resolve(cwd),
-      caller,
-      ...(await localGitProtectionRoots(cwd, environment, signal)),
+      resolve(source),
+      source === cwd ? caller : await realpath(source),
+      ...(await commandGitProtectionRoots(source, environment, signal, {
+        cwd,
+      })),
     ]),
   ];
   const resolvePath = await trustedHostPathResolver(caller, roots);
-  const settings = JSON.parse(
-    await readFile(
-      join(
-        await bundledPluginRoot(),
-        "skills/publish-findings/scripts/continuum_aws_settings.json",
-      ),
-      "utf8",
-    ),
-  ) as { accountDirectories: string[]; hostSettings: string[] };
 
   const name = windows ? "aws.exe" : "aws";
   const directories: string[] = [];
@@ -146,10 +180,6 @@ export async function prepareContinuumAws(
     );
 
   // Credential helpers can use any interpreter. Only forward AWS and host settings.
-  const hostSettings = new Set([
-    ...settings.accountDirectories,
-    ...settings.hostSettings,
-  ]);
   const child: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(environment)) {
     const key = windows ? name.toUpperCase() : name;
@@ -172,7 +202,7 @@ export async function prepareContinuumAws(
     return safe;
   }
 
-  for (const name of settings.accountDirectories) {
+  for (const name of accountDirectories) {
     const path = child[name];
     if (path)
       child[name] = trustedSetting(path, `an account ${name} directory`);

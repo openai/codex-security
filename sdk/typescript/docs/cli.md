@@ -1629,6 +1629,13 @@ Continuum environment ID. Optional
 credential and Region selection. Preview and import the report separately
 with `publish findings FILE --provider continuum`. Pass
 `--source-repository-url URL` when the report has no saved repository URL.
+
+For one finding and its generated patches, add `--finding-id FINDING_ID`,
+`--source-root CHECKOUT` with the absolute checkout path, and either
+`--repository-name AWS_SOURCE_NAME` or `--single-repository` for an environment
+verified to contain only the selected repository. This mode accepts the same AWS
+profile and Region overrides and writes the finding-based JSON format for
+`publish findings`.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
 ## Import SonarQube Cloud issues

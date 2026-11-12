@@ -6,6 +6,7 @@ import {
   continuumIssueFormat,
   findingIdentity,
   issueIdentity,
+  readPatch,
 } from "./continuum-findings.js";
 import { CodexSecurityError } from "./errors.js";
 import { array, record } from "./scanner-import.js";
@@ -21,8 +22,11 @@ const continuumId = z
 export const continuumEnvironmentId = continuumId.describe(
   "Short Continuum environment ID.",
 );
+export const continuumFindingId = continuumId.describe(
+  "Short Continuum finding ID.",
+);
 const nativeRecord = z.record(z.string(), z.unknown());
-export const continuumIssueExport = z.object({
+const continuumIssueExport = z.object({
   format: z.literal(continuumIssueFormat),
   environmentId: continuumEnvironmentId,
   sourceRepositoryUrl: z.string(),
@@ -34,11 +38,17 @@ export const continuumIssueExport = z.object({
   ),
 });
 
+export const continuumImportOutput = z.union([
+  continuumIssueExport,
+  nativeRecord,
+]);
+
 interface ContinuumCollectionOptions {
   environmentId: string;
   profile?: string;
   region?: string;
   cwd: string;
+  sourceRoot?: string;
   environment: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }
@@ -107,8 +117,9 @@ async function awsCommand({
   cwd,
   environment,
   signal,
+  sourceRoot,
 }: ContinuumCollectionOptions): Promise<AwsCommand> {
-  const aws = await prepareContinuumAws(cwd, environment, signal);
+  const aws = await prepareContinuumAws(cwd, environment, signal, sourceRoot);
   return async (args) => {
     const command = execFile(aws.executable, args, {
       cwd: aws.cwd,
@@ -123,11 +134,11 @@ async function awsCommand({
   };
 }
 
-export async function collectContinuumIssues(
+async function continuumRequests(
   options: ContinuumCollectionOptions,
   runAws?: AwsCommand,
-): Promise<z.infer<typeof continuumIssueExport>> {
-  const { environmentId, profile, region, signal } = options;
+) {
+  const { profile, region, signal } = options;
   signal?.throwIfAborted();
   const run = runAws ?? (await awsCommand(options));
   const awsArgs = [
@@ -137,10 +148,127 @@ export async function collectContinuumIssues(
     ...(profile === undefined ? [] : ["--profile", profile]),
     ...(region === undefined ? [] : ["--region", region]),
   ];
-  const request = (operation: string, scope: string[], ...args: string[]) => {
+  return (operation: string, scope: string[], ...args: string[]) => {
     signal?.throwIfAborted();
     return run(["continuum", operation, ...scope, ...awsArgs, ...args]);
   };
+}
+
+type ContinuumRequest = Awaited<ReturnType<typeof continuumRequests>>;
+
+async function getIssueArtifact(
+  request: ContinuumRequest,
+  scope: string[],
+  issueId: string,
+  artifactId: string,
+  artifactType: string,
+) {
+  const artifact = await request(
+    "get-code-issue-artifact",
+    scope,
+    "--issue-id",
+    issueId,
+    "--artifact-id",
+    artifactId,
+  );
+  if (
+    artifact["artifactId"] !== artifactId ||
+    artifact["artifactType"] !== artifactType
+  )
+    throw new CodexSecurityError(
+      `Unexpected Continuum artifact ${artifactId} for issue ${issueId}.`,
+    );
+  return artifact;
+}
+
+function requireCompleteList(response: Record<string, unknown>, name: string) {
+  if (
+    Object.hasOwn(response, "nextToken") ||
+    Object.hasOwn(response, "NextToken")
+  )
+    throw new CodexSecurityError(`Expected a complete Continuum ${name} list.`);
+}
+
+export async function collectContinuumFinding(
+  options: ContinuumCollectionOptions & {
+    findingId: string;
+    sourceRoot: string;
+    repositoryName?: string;
+    warn?: (message: string) => void;
+  },
+  runAws?: AwsCommand,
+): Promise<Record<string, unknown>> {
+  const { environmentId, findingId, repositoryName, warn, signal } = options;
+  const request = await continuumRequests(options, runAws);
+  const scope = ["--environment-id", environmentId];
+  const finding = await request(
+    "get-code-finding",
+    scope,
+    "--finding-id",
+    findingId,
+  );
+  const identity = findingIdentity(finding);
+  if (finding["environmentId"] !== environmentId || identity.id !== findingId)
+    throw new CodexSecurityError(
+      `Unexpected detail for Continuum finding ${findingId}.`,
+    );
+
+  const linkedIssue =
+    finding["createdIssueId"] || finding["duplicateOfIssueId"];
+  if (!linkedIssue) return finding;
+  const issueId = continuumId.parse(linkedIssue);
+  const list = await request(
+    "list-code-issue-artifacts",
+    scope,
+    "--issue-id",
+    issueId,
+    "--artifact-type",
+    "PATCH",
+  );
+  requireCompleteList(list, "issue artifact");
+  const artifactIds = array(list["items"], "Continuum issue artifacts")
+    .map((item) =>
+      continuumId.parse(
+        record(item, "Continuum issue artifact summary")["artifactId"],
+      ),
+    )
+    .sort();
+  const patches = [];
+  for (const artifactId of artifactIds) {
+    const artifact = await getIssueArtifact(
+      request,
+      scope,
+      issueId,
+      artifactId,
+      "PATCH",
+    );
+    const body = record(artifact["body"], "Continuum artifact body");
+    const patch = record(
+      body["patch"],
+      `Continuum artifact ${artifactId} patch body`,
+    );
+    if (
+      repositoryName !== undefined &&
+      patch["repositoryName"] !== repositoryName
+    ) {
+      if (!patch["repositoryName"])
+        warn?.(
+          `Skipped Continuum patch ${artifactId}: AWS did not identify its repository.`,
+        );
+      continue;
+    }
+    patches.push(readPatch({ ...patch, artifactId }));
+  }
+  signal?.throwIfAborted();
+  return patches.length ? { finding, patches } : finding;
+}
+
+export async function collectContinuumIssues(
+  options: ContinuumCollectionOptions,
+  runAws?: AwsCommand,
+): Promise<z.infer<typeof continuumIssueExport>> {
+  const { environmentId, signal } = options;
+  const request = await continuumRequests(options, runAws);
   const environmentArgs = ["--environment-id", environmentId];
   const { url: sourceRepositoryUrl, includePatches } =
     await singleRepositorySource(
@@ -151,8 +279,7 @@ export async function collectContinuumIssues(
   // Let the AWS CLI assemble every page. A continuation token means the
   // capture is incomplete and cannot be published as the environment's report.
   const list = await request("list-code-issues", environmentArgs);
-  if (Object.hasOwn(list, "nextToken") || Object.hasOwn(list, "NextToken"))
-    throw new CodexSecurityError("Expected a complete Continuum issue list.");
+  requireCompleteList(list, "issue");
 
   const issues: z.infer<typeof continuumIssueExport>["issues"] = [];
   const seenIssues = new Set<string>();
@@ -213,13 +340,7 @@ export async function collectContinuumIssues(
         environmentArgs,
         ...issueArgs,
       );
-      if (
-        Object.hasOwn(artifacts, "nextToken") ||
-        Object.hasOwn(artifacts, "NextToken")
-      )
-        throw new CodexSecurityError(
-          "Expected a complete Continuum issue artifact list.",
-        );
+      requireCompleteList(artifacts, "issue artifact");
       for (const item of array(
         artifacts["items"],
         "Continuum issue artifacts",
@@ -233,21 +354,15 @@ export async function collectContinuumIssues(
         )
           continue;
         const artifactId = continuumId.parse(summary["artifactId"]);
-        const artifact = await request(
-          "get-code-issue-artifact",
-          environmentArgs,
-          ...issueArgs,
-          "--artifact-id",
-          artifactId,
+        issueArtifacts.push(
+          await getIssueArtifact(
+            request,
+            environmentArgs,
+            selected.id,
+            artifactId,
+            type,
+          ),
         );
-        if (
-          artifact["artifactId"] !== artifactId ||
-          artifact["artifactType"] !== type
-        )
-          throw new CodexSecurityError(
-            `Unexpected Continuum artifact ${artifactId} for issue ${selected.id}.`,
-          );
-        issueArtifacts.push(artifact);
       }
     }
     issues.push({

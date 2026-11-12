@@ -1,14 +1,18 @@
 import { expect, mock, test } from "bun:test";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { main } from "../src/cli.js";
 import { prepareContinuumAws } from "../src/continuum-aws.js";
-import { collectContinuumIssues } from "../src/continuum-collector.js";
+import {
+  collectContinuumFinding,
+  collectContinuumIssues,
+} from "../src/continuum-collector.js";
 import { normalizeContinuumFindings } from "../src/continuum-findings.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import {
+  continuumDetail,
   continuumEvidenceArtifact,
   continuumIssueExport,
   continuumRepository,
@@ -103,6 +107,41 @@ test("pins trusted AWS profile paths and rejects checkout-relative settings", as
     }),
   ).rejects.toThrow(
     "Use an AWS_SHARED_CREDENTIALS_FILE file outside the selected checkout.",
+  );
+});
+
+test("protects the selected checkout when AWS starts from another directory", async () => {
+  await using fixture = await scopedTemporaryDirectory("continuum-settings-");
+  const {
+    cwd: sourceRoot,
+    home: cwd,
+    tools,
+    executable,
+    environment,
+  } = await awsSettingsFixture(fixture.path);
+  await writeFile(join(sourceRoot, basename(executable)), "", { mode: 0o755 });
+
+  const launch = await prepareContinuumAws(
+    cwd,
+    environment,
+    undefined,
+    sourceRoot,
+  );
+  expect(launch.executable).toBe(executable);
+  expect(launch.cwd).toBe(tools);
+  expect(launch.environment["PATH"]).toBe(tools);
+  await expect(
+    prepareContinuumAws(
+      cwd,
+      {
+        ...environment,
+        AWS_CONFIG_FILE: join(sourceRoot, "profile"),
+      },
+      undefined,
+      sourceRoot,
+    ),
+  ).rejects.toThrow(
+    "Use an AWS_CONFIG_FILE file outside the selected checkout.",
   );
 });
 
@@ -445,3 +484,241 @@ test("import continuum rejects an environment ARN before invoking AWS", async ()
   ).not.toBe(0);
   expect(collect).not.toHaveBeenCalled();
 });
+
+test("import continuum captures one finding and only patches for the named AWS source", async () => {
+  await using fixture = await scopedTemporaryDirectory("continuum-finding-");
+  const finding = { ...continuumDetail(), duplicateOfIssueId: "issue1" };
+  const matching = patchArtifact("match", "+// example\n");
+  const other = {
+    ...patchArtifact("other", "+// other\n"),
+    repositoryName: "archive",
+  };
+  const { repositoryName: _name, ...unnamed } = patchArtifact(
+    "unnamed",
+    "+// unnamed\n",
+  );
+  const patches = [unnamed, other, matching];
+  const aws = mock(async (args: string[]) => {
+    switch (args[1]) {
+      case "get-code-finding":
+        return finding;
+      case "list-code-issue-artifacts":
+        return { items: patches.map(({ artifactId }) => ({ artifactId })) };
+      case "get-code-issue-artifact": {
+        const { artifactId, ...patch } = patches.find(
+          (patch) => patch.artifactId === args.at(-1),
+        )!;
+        return { artifactId, artifactType: "PATCH", body: { patch } };
+      }
+      default:
+        throw new Error("Unexpected AWS request");
+    }
+  });
+  const cli = createCliTest(main);
+  expect(
+    await cli.runCli(
+      [
+        ...command,
+        "--finding-id",
+        "one",
+        "--source-root",
+        fixture.path,
+        "--repository-name",
+        "project",
+        "--aws-profile",
+        "example role",
+        "--aws-region",
+        "us-east-1",
+      ],
+      {
+        ...dependencies(),
+        collectContinuumFinding: (options) => {
+          expect(options.sourceRoot).toBe(fixture.path);
+          return collectContinuumFinding(options, aws);
+        },
+      },
+    ),
+  ).toBe(0);
+
+  const scope = [
+    "--environment-id",
+    "example",
+    "--output",
+    "json",
+    "--no-cli-pager",
+    "--profile",
+    "example role",
+    "--region",
+    "us-east-1",
+  ];
+  expect(aws.mock.calls.map(([args]) => args)).toEqual([
+    ["continuum", "get-code-finding", ...scope, "--finding-id", "one"],
+    [
+      "continuum",
+      "list-code-issue-artifacts",
+      ...scope,
+      "--issue-id",
+      "issue1",
+      "--artifact-type",
+      "PATCH",
+    ],
+    ...["match", "other", "unnamed"].map((id) => [
+      "continuum",
+      "get-code-issue-artifact",
+      ...scope,
+      "--issue-id",
+      "issue1",
+      "--artifact-id",
+      id,
+    ]),
+  ]);
+  expect(cli.stderr.text()).toContain(
+    "Skipped Continuum patch unnamed: AWS did not identify its repository.",
+  );
+  const capture = JSON.parse(cli.stdout.text());
+  expect(capture).toEqual({ finding, patches: [matching] });
+  expect(
+    normalizeContinuumFindings(capture, continuumRepository),
+  ).toMatchObject({
+    read: 1,
+    excluded: [],
+    findings: [
+      {
+        source_finding_id: finding.findingArn,
+        evidence: { source_data: { patches: [matching] } },
+      },
+    ],
+  });
+});
+
+test.each([false, true])(
+  "import continuum preserves native finding JSON without patches (linked issue: %p)",
+  async (linked) => {
+    await using fixture = await scopedTemporaryDirectory("continuum-finding-");
+    const finding = {
+      ...continuumDetail(),
+      ...(linked ? { createdIssueId: "issue1" } : {}),
+    };
+    const cli = createCliTest(main);
+    const aws = mock(async (args: string[]) =>
+      args[1] === "get-code-finding" ? finding : { items: [] },
+    );
+    expect(
+      await cli.runCli(
+        [
+          ...command,
+          "--finding-id",
+          "one",
+          "--source-root",
+          fixture.path,
+          "--single-repository",
+        ],
+        {
+          ...dependencies(),
+          collectContinuumFinding: (options) =>
+            collectContinuumFinding(options, aws),
+        },
+      ),
+    ).toBe(0);
+    expect(JSON.parse(cli.stdout.text())).toEqual(finding);
+    expect(aws.mock.calls.map(([args]) => args[1])).toEqual(
+      linked
+        ? ["get-code-finding", "list-code-issue-artifacts"]
+        : ["get-code-finding"],
+    );
+  },
+);
+
+test("import continuum rejects inconsistent finding options before collecting", async () => {
+  await using fixture = await scopedTemporaryDirectory("continuum-finding-");
+  const bulk = mock(collectContinuumIssues);
+  const selected = mock(collectContinuumFinding);
+  const root = ["--source-root", fixture.path];
+  for (const [args, message] of [
+    [root, "require --finding-id"],
+    [["--finding-id", "one", "--single-repository"], "requires --source-root"],
+    [["--finding-id", "one", ...root], "requires exactly one"],
+    [
+      [
+        "--finding-id",
+        "one",
+        ...root,
+        "--single-repository",
+        "--repository-name",
+        "project",
+      ],
+      "requires exactly one",
+    ],
+    [
+      [
+        "--finding-id",
+        "one",
+        "--source-root",
+        "relative",
+        "--single-repository",
+      ],
+      "must be an absolute path",
+    ],
+  ] as const) {
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli([...command, ...args], {
+        ...dependencies(),
+        collectContinuumIssues: bulk,
+        collectContinuumFinding: selected,
+      }),
+    ).not.toBe(0);
+    expect(cli.stderr.text()).toContain(message);
+  }
+  expect(bulk).not.toHaveBeenCalled();
+  expect(selected).not.toHaveBeenCalled();
+});
+
+test.each(["incomplete list", "artifact read failure"])(
+  "import continuum emits no partial finding capture on %s",
+  async (failure) => {
+    await using fixture = await scopedTemporaryDirectory("continuum-finding-");
+    const cli = createCliTest(main);
+    const patch = patchArtifact("one", "+// example\n");
+    expect(
+      await cli.runCli(
+        [
+          ...command,
+          "--finding-id",
+          "one",
+          "--source-root",
+          fixture.path,
+          "--single-repository",
+        ],
+        {
+          ...dependencies(),
+          collectContinuumFinding: (options) =>
+            collectContinuumFinding(options, async (args) => {
+              if (args[1] === "get-code-finding")
+                return { ...continuumDetail(), createdIssueId: "issue1" };
+              if (args[1] === "list-code-issue-artifacts")
+                return {
+                  items: [{ artifactId: "one" }, { artifactId: "two" }],
+                  ...(failure === "incomplete list"
+                    ? { nextToken: "next" }
+                    : {}),
+                };
+              if (args.at(-1) === "one")
+                return {
+                  artifactId: "one",
+                  artifactType: "PATCH",
+                  body: { patch },
+                };
+              throw new Error("AWS AccessDenied");
+            }),
+        },
+      ),
+    ).toBe(2);
+    expect(cli.stdout.text()).toBe("");
+    expect(cli.stderr.text()).toContain(
+      failure === "incomplete list"
+        ? "Expected a complete Continuum issue artifact list"
+        : "AWS AccessDenied",
+    );
+  },
+);

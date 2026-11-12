@@ -208,7 +208,7 @@ function isPatchCapture(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && !("findingArn" in value) && "finding" in value;
 }
 
-function readPatch(value: unknown) {
+export function readPatch(value: unknown) {
   const artifact = record(value, "Continuum patch artifact");
   const patch = requiredText(artifact["patch"], "Continuum patch content");
   const sizeBytes = Buffer.byteLength(patch);
