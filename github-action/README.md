@@ -547,6 +547,9 @@ whose registry setup provides `NPM_CONFIG_USERCONFIG` or `NODE_EXTRA_CA_CERTS`, 
 used only by the pinned `npm ci` installation; the npm configuration and CA path
 are not forwarded to the CLI or its scan workers. Lifecycle scripts remain disabled
 and the committed runtime lockfile remains authoritative.
+Use a runner-managed npm config that can authenticate with the installer’s isolated
+environment. A config that relies on an ambient `NPM_TOKEN` will need an alternative
+credential setup because the installer does not inherit that variable.
 See [inference providers](#inference-providers) for the environment variables
 to pass to the scan step.
 Temporary runtime files are removed after the job; reports remain available to
