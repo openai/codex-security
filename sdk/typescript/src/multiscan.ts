@@ -57,6 +57,7 @@ import {
 import {
   DiffTarget,
   gitOutput,
+  gitProtectionRoots,
   nullIfMissingPath,
   UNSUPPORTED_GIT_ENVIRONMENT,
   resolveTargetPath,
@@ -69,7 +70,10 @@ import {
 } from "./scan-settings.js";
 import { workflowDigest } from "./finding-workflow.js";
 import type { ScanResult } from "./result.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  withProtectedExecutableRoots,
+} from "./trusted-executable.js";
 
 const execFile = promisify(execFileCallback);
 const CHECKOUT_MARKER = ".git/codex-security-campaign-attempt";
@@ -202,7 +206,25 @@ export async function runMultiscan(
   let pendingRoots: Promise<DocumentRoots> | undefined;
   const documentRoots = () =>
     (pendingRoots ??= bulkDocumentRoots(tasks, options.signal));
-  const prompts = await resolveScanPrompts(options, documentRoots);
+  const requestedOutput = resolve(options.outputDir);
+  const localSources = [
+    ...new Set(tasks.map((task) => task.repository).filter(isAbsolute)),
+  ];
+  const worktrees = await Promise.all(
+    localSources.map((source) => gitProtectionRoots(source, options.signal)),
+  );
+  const executableRoots = (output: string) => [
+    ...localSources,
+    ...worktrees.flat(),
+    join(output, "checkouts"),
+    join(output, "recovery-checkouts"),
+  ];
+  const prompts = await resolveScanPrompts(options, () =>
+    withProtectedExecutableRoots(
+      executableRoots(requestedOutput),
+      documentRoots,
+    ),
+  );
   const resolvedOptions: MultiscanOptions = {
     ...options,
     ...prompts,
@@ -222,7 +244,6 @@ export async function runMultiscan(
   ) {
     throw new Error("Custom validation is not supported for Deep scans.");
   }
-  const requestedOutput = resolve(options.outputDir);
   if (options.recoverScan !== undefined) {
     const manifest = await lstat(join(requestedOutput, "manifest.json")).catch(
       undefinedIfMissingFile,
@@ -247,12 +268,16 @@ export async function runMultiscan(
       );
     })());
   try {
-    const result = await runCampaign(
-      resolvedOptions,
-      tasks,
-      output,
-      resumePluginRoot,
-      documentRoots,
+    const result = await withProtectedExecutableRoots(
+      executableRoots(output),
+      () =>
+        runCampaign(
+          resolvedOptions,
+          tasks,
+          output,
+          resumePluginRoot,
+          documentRoots,
+        ),
     );
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
