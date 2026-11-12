@@ -32,7 +32,7 @@ export function cloudFindingsUrl(
     throw new CodexSecurityError(
       "CODEX_SECURITY_CLOUD_WEB_URL must be an HTTP(S) Cloud app URL without credentials.",
     );
-  url.hash = `/repositories/${encodeURIComponent(repositoryId)}/findings`;
+  url.hash = `/repositories/${encodeURIComponent(repositoryId)}/findings?source=imported`;
   return url.href;
 }
 

@@ -21,6 +21,7 @@ import {
 import { endorFinding, endorSarif } from "./support/endor-import-fixtures.js";
 import { sonarGitTestEnvironment } from "./support/sonar-import-fixtures.js";
 import { normalizeEndorFindings } from "../src/endor-findings.js";
+import { normalizeOpenGrepFindings } from "../src/opengrep-findings.js";
 import { normalizeArmorCodeFindings } from "../src/armorcode-findings.js";
 import { createServer, type ServerResponse } from "node:http";
 import { execFile } from "node:child_process";
@@ -36,7 +37,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
@@ -52,6 +53,7 @@ import {
   type NormalizedExternalPublicationOptions,
   type PreparedExternalPublication,
 } from "../src/external-findings-publish.js";
+import { canonicalJson } from "../src/record.js";
 import {
   normalizeSemgrepPlatformFindings,
   selectSemgrepPlatformFindings,
@@ -72,11 +74,17 @@ import {
   normalizeGitHubCodeScanningAlerts,
   readGitHubFindings,
 } from "../src/github-findings.js";
-import { privateReport } from "../src/private-finding-import.js";
+import {
+  privateReport,
+  selectPrivateReport,
+} from "../src/private-finding-import.js";
 import { readTenableFindings } from "../src/tenable-findings.js";
 import { tenableReport } from "./support/tenable-import-fixtures.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import { normalizeOpenGrepFindings } from "../src/opengrep-findings.js";
+import {
+  EXTERNAL_FINDINGS_READERS,
+  type ExternalFindingsReader,
+} from "../src/external-findings-read.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -116,7 +124,6 @@ import {
   prepareStoredFindingsPublication,
 } from "../src/index.js";
 import {
-  inspectorCodeFinding,
   inspectorReport,
   inspectorPackageFinding,
   inspectorRepositoryUrl,
@@ -127,6 +134,7 @@ import {
   continuumIssueExport,
   continuumRepository,
   continuumValidationArtifact,
+  patchArtifact,
 } from "./support/continuum-import-fixtures.js";
 import { normalizeBlackDuckFindings } from "../src/blackduck-findings.js";
 import { normalizeVeracodeFindings } from "../src/veracode-findings.js";
@@ -144,6 +152,11 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
+const scannerMediaType =
+  "application/vnd.openai.codex-security.scanner-imports.v1+json";
+const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
+const scopeHeader = "Codex-Security-Import-Scope";
+const providerHeader = "Codex-Security-Private-Import-Providers";
 const options = {
   repository: "repo-example",
   provider: "wiz" as const,
@@ -525,7 +538,8 @@ async function fixture(
     brokenReadback: false,
     throttle: false,
     catalogReads: 0,
-    catalogHeaders: {} as Record<string, string>,
+    catalogMediaType: scannerMediaType,
+    catalogHeaders: { [scopeHeader]: "personal" } as Record<string, string>,
     sourceLookups: [] as string[],
     postBudget: Infinity,
     conflictingFindingId: undefined as string | undefined,
@@ -541,7 +555,9 @@ async function fixture(
     import_environment_id: state.environmentId,
   });
   function json(response: ServerResponse, value: unknown, status = 200) {
-    response.writeHead(status, { "Content-Type": "application/json" });
+    if (!response.hasHeader("Content-Type"))
+      response.setHeader("Content-Type", "application/json");
+    response.writeHead(status);
     response.end(JSON.stringify(value));
   }
   const server = createServer(async (incoming, response) => {
@@ -551,6 +567,10 @@ async function fixture(
       const url = new URL(incoming.url!, "http://localhost");
       if (url.pathname.endsWith("/repositories")) {
         state.catalogReads++;
+        expect(incoming.headers.accept).toBe(
+          scannerMediaType + ", application/json;q=0.9",
+        );
+        response.setHeader("Content-Type", state.catalogMediaType);
         for (const [name, value] of Object.entries(state.catalogHeaders))
           response.setHeader(name, value);
         return json(response, {
@@ -560,6 +580,10 @@ async function fixture(
           next: null,
         });
       }
+      expect(incoming.headers.accept).toBe(state.catalogMediaType);
+      if (incoming.method === "POST")
+        expect(incoming.headers["content-type"]).toBe(state.catalogMediaType);
+      response.setHeader("Content-Type", state.catalogMediaType);
       if (url.pathname.endsWith("/source_reports")) {
         const id = url.searchParams.get("source_finding_id")!;
         state.sourceLookups.push(id);
@@ -774,16 +798,6 @@ async function fixture(
     deps,
     cliDeps,
     command,
-    async writeCheckpoint(filename: string, checkpoint: unknown) {
-      const directory = join(
-        environment.CODEX_SECURITY_STATE_DIR,
-        "external-finding-publications",
-      );
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      const path = join(directory, filename);
-      await writeFile(path, JSON.stringify(checkpoint), { mode: 0o600 });
-      return path;
-    },
     async loseResponse(prepared: PreparedExternalPublication) {
       state.loseResponse = true;
       const failure: unknown = await prepared
@@ -1138,7 +1152,8 @@ test.each([true, false])(
     if (advertised)
       expect(first.preview.excluded[0]?.reason).toContain('severity "unknown"');
     await f.loseResponse(first);
-    f.state.catalogHeaders = advertised ? {} : { [header]: severities };
+    if (advertised) delete f.state.catalogHeaders[header];
+    else f.state.catalogHeaders[header] = severities;
     const retry = await prepare();
     expect(retry.preview.resumed).toBe(true);
     expect(retry.preview.requests).toEqual(first.preview.requests);
@@ -1192,7 +1207,7 @@ test.each([
             mode === "manifest change" ? "different.json" : `./${path}`;
           if (mode === "raw change")
             report.evidence.source_data.original_path = `./${path}`;
-          return Response.json(report);
+          return Response.json(report, { headers: response.headers });
         },
       });
     const first = await prepare();
@@ -1211,12 +1226,33 @@ test.each([
   },
 );
 
+test.each([
+  ["missing", {}],
+  ["unknown", { [scopeHeader]: "organization" }],
+  [
+    "disabled workspace provider",
+    { [scopeHeader]: "workspace", [providerHeader]: "snyk" },
+  ],
+] as [string, Record<string, string>][])(
+  "discovery rejects %s without using the repository publisher",
+  async (_, headers) => {
+    const f = await fixture();
+    f.state.catalogHeaders = headers;
+    await expect(
+      prepareExternalPublication(f.file, options, f.deps),
+    ).rejects.toThrow(/scope|unavailable/iu);
+    expect(f.state.sourceLookups).toEqual([]);
+    expect(f.posts).toEqual([]);
+  },
+);
+
 test("repository severity restrictions exclude unsupported rows before lookups; private imports retain them", async () => {
   const { f, prepareFile } = await privateUploadFixture(
     [normalized("unreported", "unknown")],
     "wiz",
   );
   f.state.catalogHeaders = {
+    [scopeHeader]: "personal",
     "Codex-Security-Repository-Import-Severities": "high",
   };
   await expect(prepareFile()).rejects.toMatchObject({
@@ -1228,7 +1264,8 @@ test("repository severity restrictions exclude unsupported rows before lookups; 
   });
   expect(f.state.catalogReads).toBe(1);
   expect(f.state.sourceLookups).toEqual([]);
-  f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = "wiz";
+  f.state.catalogHeaders[scopeHeader] = "workspace";
+  f.state.catalogHeaders[providerHeader] = "wiz";
   const { preview } = await prepareFile();
   expect(preview.privateImport).toBeDefined();
   expect(preview.findings.map(({ evidence }) => evidence.severity)).toEqual([
@@ -1538,13 +1575,10 @@ async function privateUploadFixture(
 ) {
   const f = await fixture(raw, repositoryUrl);
   const settings = { ...options, provider };
-  f.state.catalogHeaders["Codex-Security-Private-Import-Providers"] = provider;
-  const jobsPath =
-    provider === "continuum"
-      ? "/v2/finding-imports/jobs"
-      : "/finding-imports/jobs";
-  if (provider === "continuum")
-    f.state.catalogHeaders["Codex-Security-Private-Import-Job-Version"] = "2";
+  f.state.catalogHeaders = {
+    [scopeHeader]: "workspace",
+    [providerHeader]: provider,
+  };
   const inbox = {
     version: "original-inbox",
     formats: ["security.findings.v1"],
@@ -1568,12 +1602,13 @@ async function privateUploadFixture(
           ? Response.json(privateFileMetadata(fileId, prior.bytes))
           : new Response(null, { status: 404 });
       }
-      if (pathname.endsWith(jobsPath)) {
+      if (pathname === "/backend-api/aardvark/finding-imports/jobs") {
         expect(init.method).toBe("POST");
         const job = JSON.parse(String(init.body));
         jobs.push(job);
         return Response.json(
           privateJobReceipt(job, "import_" + "b".repeat(32)),
+          { headers: { "Content-Type": scannerMediaType } },
         );
       }
       if (pathname.endsWith("/finding-imports/files")) {
@@ -1798,6 +1833,80 @@ test("Tenable private imports require structured support and upload only the app
     privateJobFields("tenable", fileId, "security.findings.v1"),
   );
   expect(f.posts).toHaveLength(0);
+});
+
+test("a legacy workspace catalog can advertise Tenable job version 3", async () => {
+  const { f, deps, inbox, uploads, fileId } = await privateUploadFixture(
+    tenableReport,
+    "tenable",
+    tenableReport.repository_url,
+  );
+  f.state.catalogMediaType = "application/json";
+  f.state.catalogHeaders = {
+    [providerHeader]: "tenable",
+    [jobVersionHeader]: "2",
+  };
+  inbox.interruptUpload = false;
+  const jobs: string[] = [];
+  const prepare = () =>
+    prepareExternalPublication(f.file, tenableOptions, {
+      ...deps,
+      fetch(url, init) {
+        const { pathname } = new URL(url);
+        if (pathname.endsWith("/external/repositories"))
+          expect(new Headers(init.headers).get(jobVersionHeader)).toBe("3");
+        if (pathname.endsWith("/finding-imports/jobs")) {
+          jobs.push(pathname);
+          const job = JSON.parse(String(init.body));
+          expect(job).toMatchObject(
+            privateJobFields("tenable", fileId, "security.findings.v1"),
+          );
+          return Promise.resolve(
+            Response.json(privateJobReceipt(job, "import_" + "b".repeat(32))),
+          );
+        }
+        return deps.fetch(url, init);
+      },
+    });
+  await expect(prepare()).rejects.toThrow(/unavailable/i);
+  expect(uploads).toHaveLength(0);
+  f.state.catalogHeaders[jobVersionHeader] = "3";
+  const prepared = await prepare();
+  expect((await prepared.publish()).status).toBe("complete");
+  expect(uploads).toHaveLength(1);
+  expect(jobs).toEqual(["/backend-api/aardvark/v3/finding-imports/jobs"]);
+});
+
+test("a throttled private upload reports the retry interval and resumes the same request", async () => {
+  const { f, deps, inbox, jobs } = await privateUploadFixture(
+    tenableReport,
+    "tenable",
+    tenableReport.repository_url,
+  );
+  inbox.interruptUpload = false;
+  const uploadIds: string[] = [];
+  const prepare = () =>
+    prepareExternalPublication(f.file, tenableOptions, {
+      ...deps,
+      fetch: async (url, init) => {
+        if (new URL(url).pathname.endsWith("/finding-imports/files")) {
+          uploadIds.push(String((init.body as FormData).get("request_id")));
+          if (uploadIds.length === 1)
+            return Response.json(
+              { error: { code: "rate_limit_exceeded", message: "Slow down." } },
+              { status: 429, headers: { "Retry-After": "17" } },
+            );
+        }
+        return deps.fetch(url, init);
+      },
+    });
+  const first = await prepare();
+  await expect(first.publish()).rejects.toThrow("Slow down. Retry-After: 17.");
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).privateJob?.status).toBe("completed");
+  expect(uploadIds).toEqual([expect.any(String), uploadIds[0]]);
+  expect(jobs).toHaveLength(1);
 });
 
 test("a Snyk private upload resumes after a rename and still checks supplemental SDK repository claims", async () => {
@@ -2308,11 +2417,11 @@ test.each(["sast", "sca"])(
     const inbox = await privateUploadFixture(unscored, "semgrep", url);
     const headers = inbox.f.state.catalogHeaders;
     headers["Codex-Security-Repository-Import-Severities"] = "high";
-    delete headers["Codex-Security-Private-Import-Providers"];
+    headers[scopeHeader] = "personal";
     await expect(inbox.prepareFile()).rejects.toMatchObject({
       selection: { findings: [], excluded: [{ position: 1 }] },
     });
-    headers["Codex-Security-Private-Import-Providers"] = "semgrep";
+    headers[scopeHeader] = "workspace";
     const privatePreview = (await inbox.prepareFile()).preview;
     expect(privatePreview.privateImport?.format).toBe("security.findings.v1");
     expect(privatePreview.findings[0]!.evidence.severity).toBe("unknown");
@@ -2355,11 +2464,17 @@ test("a saved selection with Guardian evidence cannot resume under another provi
   const prepare = () => prepareExternalPublication(f.file, options, f.deps);
   const path = await f.loseResponse(await prepare());
   const saved = JSON.parse(await readFile(path, "utf8"));
-  const { evidence } = saved.requests[0].items[0];
+  const { source_finding_id, evidence } = saved.requests[0].items[0];
   evidence.source_data = { format: "semgrep-guardian-selection/v1" };
+  saved.evidenceDigest = hash(
+    "sha256",
+    canonicalJson([{ source_finding_id, evidence }]),
+  );
   const bytes = JSON.stringify(saved);
   await writeFile(path, bytes);
-  await expect(prepare()).rejects.toThrow(/semgrep provider/);
+  await expect(prepare()).rejects.toThrow(
+    /semgrep provider|Saved import evidence/,
+  );
   expect(f.posts).toHaveLength(1);
   expect(await readFile(path, "utf8")).toBe(bytes);
 });
@@ -2503,6 +2618,52 @@ test("Cloud binds newly approved marked ticket context to its deployment", async
   await retry.publish();
   expect(f.posts[1]).toBe(f.posts[0]);
 });
+
+test.each([true, false])(
+  "a new Semgrep reader mapping rechecks the original saved SCA row (exact case %s)",
+  async (exact) => {
+    const url = "https://scm.example.test/Team/Project";
+    const report = {
+      format: semgrepPlatformFormat,
+      deployment: "example",
+      project: { id: "14", name: "Team/Project", url },
+      product: "sca",
+      ref: "refs/heads/topic",
+      repositoryAliases: [],
+      findingCount: 1,
+      findings: [
+        JSON.stringify({
+          id: 23,
+          rule_name: "sample.rule",
+          repository: { url: exact ? url : url.toLowerCase() },
+        }),
+      ],
+    };
+    const input = normalizeSemgrepFindings(
+      report,
+      { sourceRepositories: [{ url, platform: "github" }] },
+      "cloud",
+    );
+    const f = await hostedFixture("semgrep", report, url);
+    const strict = () =>
+      prepareNormalizedExternalPublication(
+        input,
+        { ...options, provider: "semgrep" },
+        {
+          ...f.deps,
+          sourceRepositories: [{ url, platform: "gitlab" }],
+        },
+      );
+    if (!exact) await expect(strict()).rejects.toThrow(/repository/iu);
+    const pending = await f.loseResponse(await f.prepareNormalized(input));
+    const approved = await readFile(pending, "utf8");
+    if (exact) expect((await strict()).preview.resumed).toBe(true);
+    else await expect(strict()).rejects.toThrow(/repository/iu);
+    expect(await readFile(pending, "utf8")).toBe(approved);
+    await (await f.prepareNormalized(input)).publish();
+    expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  },
+);
 
 test("marked Semgrep rows require their provider while unmarked Wiz records can publish", async () => {
   const url = "https://github.com/example/project";
@@ -2740,19 +2901,56 @@ test("Semgrep Cloud validates a normalized report's monitored scope on import an
   expect((await retry.publish()).verified).toBe(1);
   expect(f.posts[1]).toBe(f.posts[0]);
 
-  const projectTicket = (title: string) =>
+  const projected = (title: string, scoped = true) =>
     f.prepareNormalized({
-      ...normalized,
-      semgrepPlatformScope,
+      ...(scoped
+        ? { ...normalized, semgrepPlatformScope }
+        : { read: 1, excluded: [] }),
       findings: [
         { source_finding_id: "ticket", evidence: { title, severity: "high" } },
       ],
     });
-  const original = await projectTicket("Initial title");
-  await f.loseResponse(original);
-  expect((await projectTicket("New title")).preview.resumed).toBe(false);
-  const again = await projectTicket("Initial title");
-  expect(again.preview.requests).toEqual(original.preview.requests);
+  await f.loseResponse(await projected("Initial title"));
+  await expect(projected("New title")).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
+  await expect(projected("New title", false)).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
+});
+
+test("Semgrep checks an alias witness before excluding it from the Cloud preview", async () => {
+  const url = "https://scm.example.test/Org/Project";
+  const report = (witnessUrl: string) => ({
+    format: semgrepPlatformFormat,
+    deployment: "example",
+    project: { id: "14", name: "Org/Project", url },
+    product: "sast",
+    ref: "refs/heads/topic",
+    findingCount: 2,
+    repositoryAliases: ["display"],
+    findings: [
+      JSON.stringify({
+        id: 11,
+        rule_name: "sample.rule",
+        repository: { name: "display" },
+      }),
+      JSON.stringify({
+        id: 12,
+        rule_name: "x".repeat(513),
+        repository: { name: "display", url: witnessUrl },
+      }),
+    ],
+  });
+  const f = await hostedFixture("semgrep", report(url), url);
+  const matching = await f.prepareFile();
+  expect(matching.preview.findings).toHaveLength(1);
+  expect(matching.preview.excluded).toHaveLength(1);
+  const wrong = report("https://scm.example.test:443/Org/Project");
+  expect(normalizeSemgrepFindings(wrong, {}, "local").findings).toHaveLength(2);
+  await writeFile(f.file, JSON.stringify(wrong));
+  await expect(f.prepareFile()).rejects.toThrow(/repository/i);
+  expect(f.posts).toHaveLength(0);
 });
 
 test("Semgrep Supply Chain binds package evidence to its case-sensitive source project", async () => {
@@ -2882,8 +3080,13 @@ test("a Snyk retry adopts case sensitivity when the operator publishes", async (
     });
   const alias = () =>
     f.prepareNormalized({ ...bare, sourceRepositoryUrl: url.toLowerCase() });
-  const initial = await strict();
+  const initial = await f.prepareNormalized(bare);
   await f.loseResponse(initial);
+  const strictRetry = await strict();
+  const aliasRetry = await alias();
+  expect(f.posts).toHaveLength(1);
+  await f.loseResponse(aliasRetry);
+  await f.loseResponse(strictRetry);
   await expect(alias()).rejects.toThrow(/does not match/);
 
   f.state.repositoryUrl = "https://scm.example.test/Team/Renamed";
@@ -2900,7 +3103,7 @@ test("a Snyk retry adopts case sensitivity when the operator publishes", async (
     initial.preview.requests,
   );
   await retry.publish();
-  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  expect(f.posts).toEqual(Array(4).fill(f.posts[0]));
 });
 
 test("Snyk Code accepts equivalent URL escapes and still rejects a foreign typed row", async () => {
@@ -3068,6 +3271,200 @@ test("a private Snyk GitHub project uses its authenticated catalog alias", async
   await expect(f.prepareFile()).rejects.toThrow(/repository/i);
   expect(f.posts).toHaveLength(0);
 });
+
+test("a Semgrep selection with distinct submitted and native IDs remains independent", async () => {
+  const url = "https://github.com/example/project";
+  const capture = selectedSemgrepReport(
+    { name: "example/project", url },
+    { rule_name: "example.rule" },
+  );
+  const f = await hostedFixture("semgrep", capture, url);
+  const prepare = (nativeId: number, submittedId: string) => {
+    const findings = capture.findings.map((row) =>
+      JSON.stringify({ ...JSON.parse(row), id: nativeId }),
+    );
+    const input = normalizeSemgrepFindings(
+      { ...capture, findings },
+      {},
+      "cloud",
+    );
+    input.findings[0]!.source_finding_id = submittedId;
+    return f.prepareNormalized(input);
+  };
+  await f.loseResponse(await prepare(23, "first-ticket"));
+  await expect(prepare(23, "another-ticket")).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
+  await expect(prepare(24, "first-ticket")).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
+  expect((await prepare(24, "another-ticket")).preview.resumed).toBe(false);
+  expect(f.posts).toHaveLength(1);
+});
+
+test("a pending Semgrep request reserves only findings accepted by the repository", async () => {
+  const url = "https://scm.example.test/Team/Project";
+  const sourceRepositories = [{ url, platform: "gitlab" as const }];
+  const capture = selectedSemgrepReport(
+    { name: "Team/Project", url },
+    {
+      rule_name: "example.rule",
+      repository: { url: "git@scm.example.test:Team/Project.git" },
+    },
+    sourceRepositories,
+  );
+  const high = capture.findings[0]!;
+  const low = JSON.stringify({ ...JSON.parse(high), id: 24, severity: "low" });
+  const f = await hostedFixture("semgrep", capture, url);
+  const normalize = (...findings: string[]) =>
+    normalizeSemgrepFindings(
+      { ...capture, findingCount: findings.length, findings },
+      { sourceRepositories },
+      "cloud",
+    );
+  const [accepted, excluded] = normalize(high, low).findings;
+  const prepare = (...findings: string[]) => {
+    const input = normalize(...findings);
+    for (const row of input.findings)
+      if (row.source_finding_id === accepted!.source_finding_id)
+        row.source_finding_id = "caller-ticket";
+    return prepareNormalizedExternalPublication(
+      input,
+      { ...options, provider: "semgrep" },
+      { ...f.deps, sourceRepositories },
+    );
+  };
+  const severityHeader = "Codex-Security-Repository-Import-Severities";
+  f.state.catalogHeaders[severityHeader] = "high";
+  const original = await prepare(high, low);
+  const requests = original.preview.requests;
+  expect(requests[0]!.items.map((row) => row.evidence.severity)).toEqual([
+    "high",
+  ]);
+  const path = await f.loseResponse(original);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  expect(saved.requests[0].items[0].source_finding_id).toBe("caller-ticket");
+  expect(saved.nativeIds).toEqual([accepted!.source_finding_id]);
+  // Older checkpoints also recorded native IDs for rows excluded by severity.
+  saved.nativeIds.push(excluded!.source_finding_id);
+  await writeFile(path, JSON.stringify(saved));
+
+  f.state.catalogHeaders[severityHeader] = "low";
+  const changedHigh = JSON.stringify({
+    ...JSON.parse(high),
+    rule_name: "updated.rule",
+  });
+  const filtered = await prepare(changedHigh, low);
+  expect(filtered.preview.findings.map((row) => row.evidence.severity)).toEqual(
+    ["low"],
+  );
+  f.state.catalogHeaders[severityHeader] = "high,low";
+  const independent = await prepare(low);
+  expect((await independent.publish()).verified).toBe(1);
+  expect(JSON.parse(f.posts[1]!).items[0].evidence.severity).toBe("low");
+  // A new reader sees the same occurrence through HTTPS, with a different caller ID.
+  const httpsReport = selectedSemgrepReport(
+    { name: "Team/Project", url },
+    { rule_name: "updated.rule" },
+  );
+  const updated = normalizeSemgrepFindings(httpsReport, {}, "cloud");
+  expect(updated.findings[0]!.source_finding_id).toBe(
+    accepted!.source_finding_id,
+  );
+  updated.findings[0]!.source_finding_id = "another-ticket";
+  await expect(f.prepareNormalized(updated)).rejects.toThrow(
+    "pending hosted Cloud request",
+  );
+  const retry = await prepare(high, low);
+  expect(retry.preview.requests).toEqual(requests);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts[2]).toBe(f.posts[0]);
+});
+
+test.each(["semgrep", "snyk"] as const)(
+  "%s holds an overlapping native update until the initial request is recovered",
+  async (provider) => {
+    const url = "https://github.com/example/project";
+    const report =
+      provider === "semgrep"
+        ? selectedSemgrepReport(
+            { name: "example/project", url },
+            { rule_name: "example.rule" },
+          )
+        : snykRestFixture("open-source", { sourceRepositoryUrl: url });
+    const f = await hostedFixture(provider, report, url);
+    const first = await f.prepareFile();
+    const original = {
+      findings: first.preview.findings,
+      read: first.preview.findings.length,
+      excluded: [],
+      sourceRepositoryUrl: url,
+      report: { capture: "example" },
+    };
+    if (provider === "semgrep")
+      original.findings[0]!.source_finding_id = "caller-selected";
+    const changed = structuredClone(original);
+    changed.findings[0]!.evidence.title += " updated";
+    const stale = await f.prepareNormalized(changed);
+    f.state.marker = "next-generation";
+    const challenger = await f.prepareNormalized(changed);
+    const winner = await f.prepareNormalized(original);
+    const observer = observeLockContention();
+    const rename = fs.rename;
+    let competing: Promise<unknown> | undefined;
+    const install = spyOn(fs, "rename").mockImplementationOnce(
+      async (...args) => {
+        // Start the other publisher after the winner's pending scan and before its atomic rename.
+        competing = challenger.publish().catch((error: unknown) => error);
+        const first = await Promise.race([
+          observer.contended.then(() => "locked"),
+          competing.then(() => "completed"),
+        ]);
+        expect(first).toBe("locked");
+        return rename(...args);
+      },
+    );
+    let pending: string;
+    try {
+      pending = await f.loseResponse(winner);
+      expect(String(await competing)).toContain("pending hosted Cloud request");
+    } finally {
+      install.mockRestore();
+      observer.restore();
+    }
+    const bytes = await readFile(pending, "utf8");
+    if (provider === "semgrep") {
+      const projected = structuredClone(changed);
+      delete projected.findings[0]!.evidence.source_data;
+      await expect(f.prepareNormalized(projected)).rejects.toThrow(
+        "pending hosted Cloud request",
+      );
+    }
+    await expect(stale.publish()).rejects.toThrow(
+      "pending hosted Cloud request",
+    );
+
+    await expect(f.prepareFile()).rejects.toThrow(
+      "pending hosted Cloud request",
+    );
+    await expect(f.prepareNormalized(changed)).rejects.toThrow(
+      "pending hosted Cloud request",
+    );
+    expect(await readFile(pending, "utf8")).toBe(bytes);
+    expect(f.posts).toHaveLength(1);
+    const captured = await f.prepareNormalized(original);
+    const completed = await (await f.prepareNormalized(original)).publish();
+    expect(f.posts[1]).toBe(f.posts[0]);
+    const newer = await f.loseResponse(await f.prepareNormalized(changed));
+    const approved = await readFile(newer, "utf8");
+    expect(await captured.publish()).toEqual(completed);
+    expect(f.posts).toHaveLength(3);
+    expect(await readFile(newer, "utf8")).toBe(approved);
+    expect(
+      (await (await f.prepareNormalized(changed)).publish()).counts.updated,
+    ).toBe(1);
+  },
+);
 
 function sonarCapture(repositoryUrl: string) {
   return {
@@ -3244,12 +3641,12 @@ test("Sonar replays the selected evidence locally and to Cloud without signing i
   });
   expect(posted.items[0].source_finding_id).toBe("issue-1");
   const repository = f.destination();
-  const reportsPath = `/external/v2/repository_connectors/${repository.repo_connector_id}/repositories/${repository.id}/source_reports`;
+  const reportsPath = `/external/repository_connectors/${repository.repo_connector_id}/repositories/${repository.id}/source_reports`;
   expect(paths).toEqual(
     new Set([
       "/external/repositories",
       reportsPath,
-      "/external/v2/finding_imports",
+      "/external/finding_imports",
       `${reportsPath}/${f.reports.get("issue-1")!.id}`,
     ]),
   );
@@ -3306,16 +3703,16 @@ test("normalized Sonar publication checks retained bindings on preview and retry
   };
   const selection = { read: 2, findings: [finding, named], excluded: [] };
   const prepare = (findings = selection.findings) =>
-    prepareNormalizedFixture(
+    prepareNormalized(
       f,
       { ...selection, findings, report: { ...context, branch: "main" } },
       selected,
     );
+  await expect(prepareNormalized(f, selection, selected)).rejects.toThrow(
+    "without a ref",
+  );
   await expect(
-    prepareNormalizedFixture(f, selection, selected),
-  ).rejects.toThrow("without a ref");
-  await expect(
-    prepareNormalizedFixture(
+    prepareNormalized(
       f,
       {
         ...rows,
@@ -3331,7 +3728,7 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     ),
   ).rejects.toThrow("retained Sonar branch");
   await expect(
-    prepareNormalizedFixture(
+    prepareNormalized(
       f,
       { ...rows, report: { ...context, repositoryUrl: foreign } },
       selected,
@@ -3342,7 +3739,7 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     "resume the saved request",
   );
   await expect(
-    prepareNormalizedFixture(
+    prepareNormalized(
       f,
       { ...selection, report: { ...context, branch: "other" } },
       selected,
@@ -3893,6 +4290,11 @@ test("Continuum Cloud publication checks repository and provider and replays an 
   expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
 });
 
+const continuumPatch = patchArtifact(
+  "firstpatch",
+  "--- a/parser.ts\n+++ b/parser.ts\n@@ -1 +1 @@\n-parse(input);\n+parse(checked(input));\n",
+);
+
 test("Continuum Cloud publication preserves issue identity and linked source ranges", async () => {
   const report = {
     ...continuumIssueExport(),
@@ -3961,6 +4363,11 @@ test("a Continuum private upload keeps every structured signal and reports confl
           artifacts: [
             ...evidence,
             {
+              artifactType: "PATCH",
+              artifactId: continuumPatch.artifactId,
+              body: { patch: continuumPatch },
+            },
+            {
               artifactType: "EVIDENCE",
               artifactId: "narrative",
               body: { raw: "Example narrative" },
@@ -4007,6 +4414,7 @@ test("a Continuum private upload keeps every structured signal and reports confl
           },
           source_data: {
             issue,
+            patches: [continuumPatch],
             findings: [
               { findingId: linked.findingId, validation: linked.validation },
               { findingId: "two" },
@@ -4092,6 +4500,11 @@ test.each(["Inspector", "Trivy"] as const)(
     if (!(error instanceof ExternalPublicationError)) throw error;
     expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
 
+    // Older checkpoints can contain the original requests without their input projection.
+    const path = error.result.savedSubmission!;
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    delete saved.inputProjection;
+    await writeFile(path, JSON.stringify(saved));
     const retry = await prepare();
     expect(retry.preview.resumed).toBe(true);
     expect((await retry.publish()).verified).toBe(1);
@@ -4184,7 +4597,7 @@ test("publishing an Inspector retry adopts its project map without changing the 
     "Supply the verified Inspector project binding",
   );
   await expect(withoutMap.publish()).rejects.toThrow(
-    "Another publication prepared this input",
+    "Supply the verified Inspector project binding",
   );
   expect((await (await prepare(mappedOptions)).publish()).verified).toBe(1);
   expect(f.posts).toEqual([body, body, body]);
@@ -4224,7 +4637,9 @@ test.each(["inspector", "sonar"] as const)(
 );
 
 const exampleRepository = "https://github.com/example/project";
-test("publishes a filtered numeric Veracode CWE that the previous reader rejected", async () => {
+const nativeSemgrep = semgrepJson();
+
+test("publishes a filtered numeric Veracode CWE", async () => {
   const raw = veracodeMixedPolicyPage();
   raw._links.self.href += "&cwe=79";
   const f = await fixture(raw, exampleRepository);
@@ -4725,7 +5140,7 @@ test.each(["human", "json"])(
       expect(result.status).toBe("partial");
       expect(result.counts.created).toBe(1);
       expect(result.cloudUrl).toBe(
-        `https://chatgpt.com/mcp-app/connector_openai_defense_factory/open_defense_factory#/repositories/${options.repository}/findings`,
+        `https://chatgpt.com/mcp-app/connector_openai_defense_factory/open_defense_factory#/repositories/${options.repository}/findings?source=imported`,
       );
     } else {
       expect(cli.stdout.text()).toContain(
@@ -5786,9 +6201,7 @@ test.each([false, true])(
         if (init.method !== "POST" || !response.ok) return response;
         const receipt = (await response.json()) as FindingImportReceipt;
         receipt.results.reverse();
-        return new Response(JSON.stringify(receipt), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return Response.json(receipt, { headers: response.headers });
       },
     };
     let prepared = await prepareExternalPublication(f.file, options, deps);
@@ -5829,9 +6242,7 @@ test.each(["duplicate", "missing", "unexpected"])(
         if (invalid === "missing") receipt.results.pop();
         if (invalid === "unexpected")
           receipt.results[0]!.client_id = "unexpected-client";
-        return new Response(JSON.stringify(receipt), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return Response.json(receipt, { headers: response.headers });
       },
     };
     await expect(
@@ -5983,10 +6394,13 @@ test.each([
     fetch: async (url, init) => {
       const response = await f.deps.fetch(url, init);
       if (new URL(url).pathname.includes("/source_reports/")) {
-        return Response.json({
-          ...(await response.json()),
-          [field]: value,
-        });
+        return Response.json(
+          {
+            ...(await response.json()),
+            [field]: value,
+          },
+          { headers: response.headers },
+        );
       }
       return response;
     },
@@ -6247,6 +6661,64 @@ test("interrupted CLI output preserves acknowledged batches and resumes only unf
   expect(f.posts[2]).toBe(f.posts[1]);
 });
 
+test("an unexpected import response preserves the approved request for retry", async () => {
+  const f = await fixture();
+  let dropMediaType = true;
+  const prepare = () =>
+    prepareExternalPublication(f.file, options, {
+      ...f.deps,
+      async fetch(url, init) {
+        const response = await f.deps.fetch(url, init);
+        if (init.method !== "POST" || !dropMediaType) return response;
+        dropMediaType = false;
+        return new Response(response.body, {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+  const first = await prepare();
+  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect(retry.preview.requests).toEqual(first.preview.requests);
+  expect((await retry.publish()).verified).toBe(1);
+  expect(f.posts).toEqual([f.posts[0]!, f.posts[0]!]);
+  expect(f.receipts.size).toBe(1);
+});
+
+test("an unexpected private job response retries the same uploaded file and job request", async () => {
+  const { f, deps, inbox, uploads, jobs } = await privateUploadFixture(
+    [normalized()],
+    "wiz",
+  );
+  inbox.interruptUpload = false;
+  let dropMediaType = true;
+  const prepare = () =>
+    prepareExternalPublication(f.file, options, {
+      ...deps,
+      async fetch(url, init) {
+        const response = await deps.fetch(url, init);
+        if (
+          !new URL(url).pathname.endsWith("/finding-imports/jobs") ||
+          !dropMediaType
+        )
+          return response;
+        dropMediaType = false;
+        return new Response(response.body, {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+  const first = await prepare();
+  await expect(first.publish()).rejects.toThrow(/representation|media type/i);
+  const retry = await prepare();
+  expect(retry.preview.resumed).toBe(true);
+  expect((await retry.publish()).privateJob?.status).toBe("completed");
+  expect(uploads).toHaveLength(1);
+  expect(jobs).toEqual([jobs[0], jobs[0]]);
+  expect(f.posts).toHaveLength(0);
+});
+
 test("readback retry preserves acknowledged findings and scanner diagnostics", async () => {
   const input = opengrepJson();
   const f = await fixture(input);
@@ -6286,57 +6758,61 @@ test("readback retry preserves acknowledged findings and scanner diagnostics", a
   expect(f.posts).toHaveLength(1);
 });
 
-test("each discovery page requests the repository and refreshes its private import capabilities", async () => {
-  const f = await fixture(blackDuckBomReport());
-  const repository = `${f.destination().url}.git`;
-  const queries: URLSearchParams[] = [];
-  const prepared = await prepareExternalPublication(
-    f.file,
-    {
-      ...options,
-      repository,
-      provider: "blackduck",
-      sourceRepositoryUrl: f.destination().url,
-    },
-    {
-      ...f.deps,
-      fetch: async (input, init) => {
-        const url = new URL(input);
-        if (!url.pathname.endsWith("/repositories"))
-          return f.deps.fetch(input, init);
-        queries.push(url.searchParams);
-        const first = queries.length === 1;
-        return Response.json(
-          {
-            object: "page",
-            data: first ? [] : [f.destination()],
-            has_more: first,
-            next: first ? "next-page" : null,
-          },
-          {
-            headers: first
-              ? {
-                  "Codex-Security-Private-Import-Job-Version": "3",
-                  "Codex-Security-Private-Import-Providers": "blackduck",
-                }
-              : {},
-          },
-        );
+test.each(["scope", "media type"] as const)(
+  "discovery rejects a changed %s across repository pages",
+  async (change) => {
+    const f = await fixture(blackDuckBomReport());
+    const repository = `${f.destination().url}.git`;
+    const queries: URLSearchParams[] = [];
+    const prepared = prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        repository,
+        provider: "blackduck",
+        sourceRepositoryUrl: f.destination().url,
       },
-    },
-  );
-  expect(prepared.preview.privateImport).toBeUndefined();
-  expect(prepared.preview.destination.id).toBe(options.repository);
-  expect(queries.map((query) => query.get("repository"))).toEqual([
-    repository,
-    repository,
-  ]);
-  expect(queries.map((query) => query.get("page"))).toEqual([
-    null,
-    "next-page",
-  ]);
-  expect(f.posts).toHaveLength(0);
-});
+      {
+        ...f.deps,
+        fetch: async (input, init) => {
+          const url = new URL(input);
+          if (!url.pathname.endsWith("/repositories"))
+            return f.deps.fetch(input, init);
+          queries.push(url.searchParams);
+          const first = queries.length === 1;
+          return Response.json(
+            {
+              object: "page",
+              data: first ? [] : [f.destination()],
+              has_more: first,
+              next: first ? "next-page" : null,
+            },
+            {
+              headers: {
+                [scopeHeader]:
+                  change === "scope" && first ? "workspace" : "personal",
+                "Content-Type":
+                  change === "media type" && !first
+                    ? "application/json"
+                    : scannerMediaType,
+              },
+            },
+          );
+        },
+      },
+    );
+    await expect(prepared).rejects.toThrow(/scope|contract|discovery/iu);
+    expect(queries.map((query) => query.get("repository"))).toEqual([
+      repository,
+      repository,
+    ]);
+    expect(queries.map((query) => query.get("page"))).toEqual([
+      null,
+      "next-page",
+    ]);
+    expect(f.posts).toHaveLength(0);
+  },
+);
 
 test("repository URLs and IDs share the same resumable destination", async () => {
   const f = await fixture();
@@ -6442,7 +6918,7 @@ test("a separate Cloud app URL follows the resolved repository without changing 
       },
     },
   );
-  const link = `http://localhost:4200/security?preview=true#/repositories/${options.repository}/findings`;
+  const link = `http://localhost:4200/security?preview=true#/repositories/${options.repository}/findings?source=imported`;
   expect(prepared.preview.cloudUrl).toBe(link);
   expect((await prepared.publish()).cloudUrl).toBe(link);
   expect(
@@ -6670,11 +7146,16 @@ test("GitHub publication previews, imports, re-imports, updates and resumes sele
   ).toBe(0);
   expect(f.posts).toHaveLength(0);
   expect(JSON.parse(cli.stdout.text()).source.provider).toBe("github");
-  const first = await (
-    await prepareExternalPublication(f.file, githubOptions, f.deps)
-  ).publish();
+  const initialPreview = await prepareExternalPublication(
+    f.file,
+    githubOptions,
+    f.deps,
+  );
+  const first = await initialPreview.publish();
   expect(first.counts.created).toBe(1);
   expect(first.verified).toBe(1);
+  expect(await initialPreview.publish()).toEqual(first);
+  expect(f.posts).toHaveLength(1);
   const repeated = await (
     await prepareExternalPublication(f.file, githubOptions, f.deps)
   ).publish();
@@ -6951,7 +7432,7 @@ test.each(["code-scanning", "advisory"])(
         if (new URL(url).pathname.endsWith("/repositories")) {
           const body = await response.json();
           body.data[0].url = "https://github.com:443/example/project";
-          return Response.json(body);
+          return Response.json(body, { headers: response.headers });
         }
         return response;
       },
@@ -6985,13 +7466,37 @@ function scoredFindings(score: unknown, report?: Record<string, unknown>) {
 
 type PublicationFixture = Awaited<ReturnType<typeof fixture>>;
 
-function prepareNormalizedFixture(
+function prepareNormalized(
   f: PublicationFixture,
   input: ExternalFindings,
   selected: NormalizedExternalPublicationOptions = options,
 ) {
   return prepareNormalizedExternalPublication(input, selected, f.deps);
 }
+
+test.each([false, true])(
+  "an unsupported pending request is preserved (alternate filename %s)",
+  async (alternate) => {
+    const f = await fixture();
+    const prepared = await prepareExternalPublication(f.file, options, f.deps);
+    const path = await f.loseResponse(prepared);
+    const original = JSON.parse(await readFile(path, "utf8"));
+    const obsolete = JSON.stringify({
+      accountId: original.accountId,
+      requests: original.requests,
+    });
+    const oldPath = alternate
+      ? join(dirname(path), "a".repeat(64) + ".pending.json")
+      : path;
+    if (alternate) await rm(path);
+    await writeFile(oldPath, obsolete);
+    await expect(
+      prepareExternalPublication(f.file, options, f.deps),
+    ).rejects.toThrow("another SDK version");
+    expect(await readFile(oldPath, "utf8")).toBe(obsolete);
+    expect(f.posts).toHaveLength(1);
+  },
+);
 
 test.each(["deep shared data", "cycle", "row BigInt"])(
   "a compact export remains publishable with an unusable native %s",
@@ -7014,7 +7519,7 @@ test.each(["deep shared data", "cycle", "row BigInt"])(
       else for (let n = 0; n < 24; n++) content = [content, content];
       input.findings[0]!.evidence.source_data.score = new Compact(content);
     }
-    const preview = await prepareNormalizedFixture(f, input);
+    const preview = await prepareNormalized(f, input);
     expect(preview.preview.resumed).toBe(false);
     await preview.publish();
     expect(JSON.parse(f.posts[0]!).items[0].evidence.source_data.score).toBe(4);
@@ -7460,7 +7965,7 @@ test("Snyk source repository binding is rechecked for a fresh import after compl
       if (new URL(url).pathname.endsWith("/repositories")) {
         const body = await response.json();
         body.data[0].url = "https://github.com/other/project";
-        return Response.json(body);
+        return Response.json(body, { headers: response.headers });
       }
       return response;
     },
@@ -8668,7 +9173,7 @@ test("Endor source repository binding preserves immutable requests across a repo
       if (new URL(url).pathname.endsWith("/repositories")) {
         const body = await response.json();
         body.data[0].url = "https://github.com/other/project";
-        return Response.json(body);
+        return Response.json(body, { headers: response.headers });
       }
       return response;
     },
@@ -8857,61 +9362,248 @@ test.each(["package", "malware aliases"] as const)(
   },
 );
 
-const versionThreeReports = [
-  ["blackduck", blackDuckBomReport(), { row: blackDuckBomRow() }],
-  [
-    "checkmarx",
-    { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
-    { row: checkmarxSastRow() },
+const readerReports = {
+  armorcode: {
+    data: {
+      findings: [
+        {
+          id: 1,
+          title: "Unchecked index",
+          scanType: ["SAST"],
+          repositoryUrl: exampleRepository,
+        },
+      ],
+    },
+  },
+  blackduck: blackDuckBomReport(),
+  checkmarx: { scanID: "scan-a", totalCount: 1, results: [checkmarxSastRow()] },
+  continuum: {
+    finding: { ...continuumDetail(), createdIssueId: "oneissue" },
+    patches: [continuumPatch],
+  },
+  endor: [endorSource],
+  github: [importedAlert()],
+  inspector: inspectorReport(),
+  opengrep: opengrepJson(),
+  semgrep: nativeSemgrep,
+  snyk: snykJson(),
+  sonar: sonarReport,
+  tenable: tenableReport,
+  trivy,
+  veracode: veracodePolicyPage(),
+  wiz: [
+    {
+      id: "occurrence-1",
+      name: "CVE-2099-0001",
+      detailedName: "example-package",
+      vendorSeverity: "HIGH",
+      vulnerableAsset: { id: "asset-1" },
+    },
   ],
-  ["sonar", sonarReport, { issue: sonarReport.pages[0]!.issues[0]! }],
-  ["trivy", trivy, { vulnerability: trivy.Results[0]!.Vulnerabilities[0]! }],
-  ["veracode", veracodePolicyPage(), { row: veracodePolicyRow() }],
+} satisfies Record<ExternalFindingsReader, unknown>;
+
+const scannerReports = [
+  ...EXTERNAL_FINDINGS_READERS.map((reader) => ({
+    name: reader,
+    reader,
+    report: readerReports[reader],
+  })),
+  { name: "Dependabot", reader: "github", report: [githubDependabotAlert()] },
+  {
+    name: "GitHub repository advisory",
+    reader: "github",
+    report: [importedAdvisory("repository")],
+  },
+  {
+    name: "GitHub global advisory",
+    reader: "github",
+    report: [importedAdvisory("global")],
+  },
 ] as const;
 
+test.each(scannerReports)(
+  "the SDK sends $name to personal and workspace Cloud imports",
+  async ({ reader, report }) => {
+    const provider = reader === "opengrep" ? "semgrep" : reader;
+    const url =
+      reader === "tenable" ? tenableReport.repository_url : exampleRepository;
+    const { f, deps, inbox, uploads, jobs, fileId } =
+      await privateUploadFixture(report, provider, url);
+    const paths: string[] = [];
+    const prepare = () =>
+      prepareExternalPublication(
+        f.file,
+        {
+          ...options,
+          provider: reader,
+          ...(reader === "trivy"
+            ? { trivyScanRoot: "." }
+            : { sourceRepositoryUrl: url }),
+        },
+        {
+          ...deps,
+          fetch(url, init) {
+            paths.push(new URL(url).pathname);
+            return deps.fetch(url, init);
+          },
+        },
+      );
+
+    f.state.catalogHeaders = { [scopeHeader]: "personal" };
+    const personal = await prepare();
+    const { source_finding_id, evidence } = personal.preview.findings[0]!;
+    if (reader === "continuum")
+      expect(evidence.source_data?.["patches"]).toEqual([continuumPatch]);
+    expect((await personal.publish()).verified).toBe(1);
+    const stored = f.reports.get(source_finding_id);
+    expect(stored?.source).toEqual({ provider, source_key: options.sourceKey });
+    expect(stored?.evidence).toEqual(evidence);
+    const root = "/backend-api/aardvark";
+    const { repo_connector_id, id } = f.destination();
+    const reports = `${root}/external/repository_connectors/${repo_connector_id}/repositories/${id}/source_reports`;
+    expect(paths).toEqual([
+      `${root}/external/repositories`,
+      reports,
+      `${root}/external/finding_imports`,
+      `${reports}/${stored!.id}`,
+    ]);
+
+    paths.length = 0;
+    f.state.catalogHeaders = {
+      [scopeHeader]: "workspace",
+      [providerHeader]: provider,
+    };
+    inbox.interruptUpload = false;
+    const workspace = await prepare();
+    expect((await workspace.publish()).privateJob?.status).toBe("completed");
+    expect(paths).toEqual([
+      `${root}/external/repositories`,
+      `${root}/finding-imports/context`,
+      `${root}/finding-imports/context`,
+      `${root}/finding-imports/files`,
+      `${root}/finding-imports/jobs`,
+    ]);
+    const uploaded = JSON.parse(uploads[0]!.bytes).findings;
+    expect(uploaded).toHaveLength(1);
+    expect(uploaded[0].source_finding_id).toBe(source_finding_id);
+    const { locations, severity, ...original } = evidence;
+    const {
+      locations: lines,
+      severity: privateSeverity,
+      ...actual
+    } = uploaded[0].evidence;
+    expect(actual).toEqual(original);
+    expect(privateSeverity).toBe(severity === "unknown" ? null : severity);
+    expect(
+      lines?.map((entry: { path: string; start_line: number | null }) => ({
+        path: entry.path,
+        line: entry.start_line,
+      })),
+    ).toEqual(locations);
+    expect(jobs).toMatchObject([
+      privateJobFields(provider, fileId, "security.findings.v1"),
+    ]);
+    expect(f.posts).toHaveLength(1);
+  },
+);
+
+test.each(["wiz", "endor", "snyk"] as const)(
+  "the released personal Cloud API still accepts %s",
+  async (provider) => {
+    const f = await fixture(readerReports[provider], exampleRepository);
+    f.state.catalogMediaType = "application/json";
+    f.state.catalogHeaders = {
+      "Codex-Security-Repository-Import-Severities":
+        "critical,high,medium,low,informational",
+    };
+    const prepared = await prepareExternalPublication(
+      f.file,
+      {
+        ...options,
+        provider,
+        sourceRepositoryUrl: exampleRepository,
+      },
+      f.deps,
+    );
+    expect((await prepared.publish()).verified).toBe(1);
+    expect(f.posts).toHaveLength(1);
+  },
+);
+
 test.each([
-  ...versionThreeReports.map(([provider, raw, retained]) => ({
-    provider,
-    raw,
-    retained,
-    sourceRepositoryUrl: provider === "trivy" ? undefined : exampleRepository,
-    format: "security.findings.v1" as const,
-    jobVersion: 3 as const,
-  })),
+  ["unrecognized catalog", "application/json", {}],
+  [
+    "scope without a negotiated contract",
+    "application/json",
+    { [scopeHeader]: "personal" },
+  ],
+  ["unrecognized media type", "text/html", { [scopeHeader]: "personal" }],
+  [
+    "unadvertised workspace provider",
+    "application/json",
+    { [providerHeader]: "snyk" },
+  ],
+  [
+    "missing private job version",
+    "application/json",
+    { [providerHeader]: "continuum" },
+  ],
+  [
+    "wrong private job version",
+    "application/json",
+    { [providerHeader]: "continuum", [jobVersionHeader]: "3" },
+  ],
+  [
+    "unsupported personal provider",
+    "application/json",
+    { "Codex-Security-Repository-Import-Severities": "high" },
+  ],
+] as [string, string, Record<string, string>][])(
+  "Continuum rejects %s before transferring evidence",
+  async (_, mediaType, headers) => {
+    const f = await fixture(readerReports.continuum, exampleRepository);
+    f.state.catalogMediaType = mediaType;
+    f.state.catalogHeaders = headers;
+    const paths: string[] = [];
+    await expect(
+      prepareExternalPublication(
+        f.file,
+        {
+          ...options,
+          provider: "continuum",
+          sourceRepositoryUrl: exampleRepository,
+        },
+        {
+          ...f.deps,
+          fetch(url, init) {
+            paths.push(new URL(url).pathname);
+            return f.deps.fetch(url, init);
+          },
+        },
+      ),
+    ).rejects.toThrow(/Cloud|unavailable|scope|provider|contract|catalog/i);
+    expect(paths).toEqual(["/backend-api/aardvark/external/repositories"]);
+    expect(f.posts).toHaveLength(0);
+  },
+);
+
+test.each([
+  {
+    provider: "continuum",
+    format: "security.findings.v1",
+    raw: readerReports.continuum,
+    jobApiVersion: 2,
+  },
+  {
+    provider: "blackduck",
+    format: "security.findings.v1",
+    raw: readerReports.blackduck,
+    jobApiVersion: 3,
+  },
   {
     provider: "github",
     format: "security.findings.v1",
     raw: [importedAlert()],
-  },
-  {
-    provider: "inspector",
-    raw: { findings: [inspectorCodeFinding()] },
-    sourceRepositoryUrl: inspectorRepositoryUrl,
-    format: "security.findings.v1",
-    jobVersion: 2,
-  },
-  {
-    provider: "continuum",
-    raw: continuumDetail(),
-    sourceRepositoryUrl: continuumRepository,
-    format: "security.findings.v1",
-    jobVersion: 2,
-  },
-  { provider: "snyk", format: "security.findings.v1", raw: snykSarif() },
-  {
-    provider: "endor",
-    format: "security.findings.v1",
-    raw: [
-      {
-        uuid: "malware-example",
-        meta: { name: "Malicious package" },
-        spec: {
-          project_uuid: "project",
-          target_dependency_package_name: "npm://example@1.0.0",
-          finding_metadata: { malware: { meta: { name: "MAL-2099-0001" } } },
-        },
-      },
-    ],
   },
   {
     provider: "endor",
@@ -8927,31 +9619,20 @@ test.each([
   {
     provider: "wiz",
     format: "wiz.vulnerability_json.v1",
-    raw: [
-      {
-        id: "occurrence-1",
-        name: "CVE-2099-0001",
-        detailedName: "example-package",
-        vendorSeverity: "HIGH",
-        vulnerableAsset: { id: "asset-1" },
-      },
-    ],
+    raw: readerReports.wiz,
   },
 ] as const)(
   "a signed-in $provider private import resumes lost upload and job responses",
   async (scenario) => {
     const { provider, format, raw } = scenario;
-    const sourceRepositoryUrl =
-      "sourceRepositoryUrl" in scenario
-        ? scenario.sourceRepositoryUrl
-        : undefined;
     const f = await fixture(raw);
     const originalBytes = await readFile(f.file, "utf8");
     const settings = {
       ...options,
       provider,
-      sourceRepositoryUrl,
-      ...(provider === "trivy" && { trivyScanRoot: "." }),
+      ...("jobApiVersion" in scenario && {
+        sourceRepositoryUrl: exampleRepository,
+      }),
     };
     let contextVersion = "generation-a";
     let formats: string[] = [format];
@@ -8960,13 +9641,8 @@ test.each([
     let unavailable = false;
     let terminal: "completed" | "failed" | "cancelled" = "completed";
     let advertised = false;
-    const v1Jobs = "/finding-imports/jobs";
-    const jobVersion =
-      "jobVersion" in scenario ? scenario.jobVersion : undefined;
-    const requestedVersion = String(jobVersion ?? 2);
-    const versionedJobs = jobVersion ? `/v${jobVersion}${v1Jobs}` : v1Jobs;
-    let acknowledgedVersion: string | undefined = requestedVersion;
-    const expectedJobsPath = versionedJobs;
+    let jobsPath = "/finding-imports/jobs";
+    let jobMediaType = scannerMediaType;
     let canCreate = true;
     let reportCount = 1;
     const uploadedReports: { id: string; bytes: string }[] = [];
@@ -8999,15 +9675,28 @@ test.each([
         calls.push(`${init.method} ${path}`);
         if (path === "/external/repositories") {
           const response = await f.deps.fetch(url, init);
-          const headers = new Headers();
-          if (advertised)
-            headers.set("Codex-Security-Private-Import-Providers", provider);
-          const version = "Codex-Security-Private-Import-Job-Version";
-          expect(new Headers(init.headers).get(version)).toBe(requestedVersion);
-          if (acknowledgedVersion) headers.set(version, acknowledgedVersion);
+          const headers = new Headers(response.headers);
+          if (advertised) headers.set(providerHeader, provider);
+          if (
+            "jobApiVersion" in scenario &&
+            f.state.catalogMediaType === "application/json"
+          ) {
+            if (!advertised) headers.set(providerHeader, "wiz");
+            expect(new Headers(init.headers).get(jobVersionHeader)).toBe(
+              String(scenario.jobApiVersion),
+            );
+          }
           return new Response(response.body, { headers });
         }
         if (path.startsWith("/external/")) return f.deps.fetch(url, init);
+        const sendsJob = path === jobsPath || path.startsWith(jobsPath + "/");
+        const headers = new Headers(init.headers);
+        expect(headers.get("Accept")).toBe(
+          sendsJob ? jobMediaType : "application/json",
+        );
+        expect(headers.get("Content-Type")).toBe(
+          sendsJob && init.method === "POST" ? jobMediaType : null,
+        );
         if (path === "/finding-imports/context")
           return privateInboxContext(contextVersion, formats, canCreate);
         if (path === "/finding-imports/files") {
@@ -9022,23 +9711,6 @@ test.each([
             expect(doc.findings[0].source_finding_id).toBeTruthy();
             expect(doc.findings[0].evidence.source_data).toBeTruthy();
             reportCount = doc.findings.length;
-            if ("retained" in scenario) {
-              expect(doc.findings).toHaveLength(1);
-              expect(doc.findings[0].evidence.source_data).toMatchObject(
-                scenario.retained,
-              );
-            }
-            if (provider === "inspector" || provider === "continuum") {
-              const native = provider === "inspector" ? raw.findings : [raw];
-              expect(doc.findings).toHaveLength(native.length);
-              for (const row of native) {
-                const finding = doc.findings.find(
-                  (item: { source_finding_id: string }) =>
-                    item.source_finding_id === row.findingArn,
-                );
-                expect(finding?.evidence.source_data.finding).toEqual(row);
-              }
-            }
           } else {
             expect(JSON.parse(bytes)).toEqual(JSON.parse(originalBytes));
           }
@@ -9051,7 +9723,7 @@ test.each([
         if (path === `/finding-imports/file-requests/${fileRequest}`) {
           return Response.json(fileMetadata());
         }
-        if (path === expectedJobsPath) {
+        if (path === jobsPath) {
           const body = JSON.parse(String(init.body));
           expect(body.request_id).not.toBe(fileRequest);
           expect(body).toEqual({
@@ -9066,7 +9738,9 @@ test.each([
               terminal === "completed"
                 ? "import_" + "d".repeat(32)
                 : "import_" + "c".repeat(32);
-            return Response.json(job(terminal));
+            return Response.json(job(terminal), {
+              headers: { "Content-Type": jobMediaType },
+            });
           }
           if (jobRequest) expect(body.request_id).toBe(jobRequest);
           jobRequest = body.request_id;
@@ -9075,18 +9749,32 @@ test.each([
             throw new Error("lost job response");
           }
           return Response.json(job("queued"), {
-            headers: { "Retry-After": "0" },
+            headers: { "Retry-After": "0", "Content-Type": jobMediaType },
           });
         }
-        if (path === `${expectedJobsPath}/${jobId}`)
+        if (path === `${jobsPath}/${jobId}`)
           return unavailable
             ? new Response(null, { status: 503 })
-            : Response.json(job(terminal));
+            : Response.json(job(terminal), {
+                headers: { "Content-Type": jobMediaType },
+              });
         throw new Error("Unexpected route: " + path);
       },
     };
     const prepare = () => prepareExternalPublication(f.file, settings, deps);
     const repositoryPreview = await prepare();
+    function legacyWorkspace(version: 2 | 3) {
+      f.state.catalogMediaType = "application/json";
+      f.state.catalogHeaders = {
+        [jobVersionHeader]: String(version),
+        "Codex-Security-Repository-Import-Severities":
+          "critical,high,medium,low,informational",
+      };
+      jobsPath = `/v${version}/finding-imports/jobs`;
+      jobMediaType = "application/json";
+    }
+    if (provider === "continuum") legacyWorkspace(scenario.jobApiVersion);
+    else f.state.catalogHeaders[scopeHeader] = "workspace";
     f.state.environmentId = null;
     advertised = true;
     const original = await prepare();
@@ -9094,9 +9782,8 @@ test.each([
     expect(original.preview.privateImport?.format).toBe(format);
     const cli = createCliTest(main);
     const dryRun = [...f.command, "--dry-run"];
-    if (provider === "trivy") dryRun.push("--trivy-scan-root", ".");
-    if (sourceRepositoryUrl)
-      dryRun.push("--source-repository-url", sourceRepositoryUrl);
+    if ("jobApiVersion" in scenario)
+      dryRun.push("--source-repository-url", exampleRepository);
     dryRun[dryRun.indexOf("--provider") + 1] = provider;
     dryRun[dryRun.indexOf("--format") + 1] = "toon";
     expect(
@@ -9105,66 +9792,101 @@ test.each([
     expect(cli.stderr.text()).toContain(
       `Report: ${format} (${original.preview.privateImport?.bytes} bytes)`,
     );
+    if (format !== "security.findings.v1") {
+      formats = [format, "security.findings.v1"];
+      expect((await prepare()).preview.privateImport?.format).toBe(
+        "security.findings.v1",
+      );
+      formats = [format];
+    }
     expect(calls.filter((call) => call.startsWith("POST"))).toEqual([]);
     contextVersion = "generation-b";
     await expect(original.publish()).rejects.toThrow("private inbox changed");
     canCreate = false;
     await expect(prepare()).rejects.toThrow("unavailable");
     canCreate = true;
-    const interrupted = await (
-      await prepare()
-    )
-      .publish()
-      .catch((error: unknown) => error);
+    const staged = await prepare();
+    const interrupted = await staged.publish().catch((error: unknown) => error);
     if (!(interrupted instanceof ExternalPublicationError))
       throw new Error("Expected an interrupted private upload", {
         cause: interrupted,
       });
     expect(interrupted.message).toContain("lost upload response");
-    const saved = JSON.parse(
-      await readFile(interrupted.result.savedSubmission!, "utf8"),
-    );
+    const checkpointPath = interrupted.result.savedSubmission!;
+    const saved = JSON.parse(await readFile(checkpointPath, "utf8"));
     expect(saved).toMatchObject({
       sha256: fileMetadata().sha256,
       uploadRequestId: uploadedReports.at(-1)!.id,
     });
-    expect(saved.jobApiVersion).toBe(jobVersion);
     await expect(repositoryPreview.publish()).rejects.toThrow(
       "A private import already owns this selection",
     );
     expect(f.posts).toHaveLength(0);
     if ("rename" in scenario) {
-      const path = interrupted.result.savedSubmission!;
+      f.state.repositoryUrl = "https://github.com/example/renamed";
+      expect(saved.approvedRepositoryUrl).toBe(exampleRepository);
       const pending = await prepare();
-      await rm(path);
+      await rm(checkpointPath);
       await expect(pending.publish()).rejects.toThrow(
         "saved private import changed",
       );
-      expect(uploadedReports).toHaveLength(1);
-      await writeFile(path, JSON.stringify(saved), { mode: 0o600 });
-      f.state.repositoryUrl = "https://github.com/example/renamed";
-      expect(saved.approvedRepositoryUrl).toBe(exampleRepository);
+      await writeFile(checkpointPath, JSON.stringify(saved));
     }
-    advertised = false;
+    if (provider === "blackduck") {
+      expect(saved.jobApiVersion).toBeUndefined();
+      legacyWorkspace(scenario.jobApiVersion);
+      delete f.state.catalogHeaders[jobVersionHeader];
+      const before = [...calls];
+      await expect(prepare()).rejects.toThrow(/unavailable/i);
+      expect(calls.slice(before.length)).toEqual([
+        "GET /external/repositories",
+      ]);
+      f.state.catalogHeaders[jobVersionHeader] = String(scenario.jobApiVersion);
+    } else {
+      if (provider === "continuum")
+        expect(saved.jobApiVersion).toBe(scenario.jobApiVersion);
+      advertised = false;
+    }
     const resumed = await prepare();
     expect(resumed.preview.resumed).toBe(true);
     expect(resumed.preview.privateImport?.sha256).toBe(saved.sha256);
     await expect(resumed.publish()).rejects.toThrow("lost job response");
     expect(jobRequest).toBe(saved.jobRequestId);
-    expect(calls.at(-1)).toBe(`POST ${expectedJobsPath}`);
-    // Saved jobs retain their route if the catalogue acknowledgement disappears.
-    acknowledgedVersion = undefined;
+    expect(calls.at(-1)).toBe(`POST ${jobsPath}`);
+    if ("jobApiVersion" in scenario) {
+      expect(
+        JSON.parse(await readFile(checkpointPath, "utf8")).jobApiVersion,
+      ).toBe(scenario.jobApiVersion);
+      delete f.state.catalogHeaders[jobVersionHeader];
+      advertised = false;
+    }
     const completed = await (await prepare()).publish();
     expect(completed.privateJob?.counts.created).toBe(1);
-    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
+    expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
     expect(completed.receipts).toEqual([]);
     expect(completed.verified).toBe(0);
     expect(uploadedReports).toHaveLength(1);
     canCreate = false;
     advertised = false;
-    acknowledgedVersion = requestedVersion;
+    if ("jobApiVersion" in scenario) {
+      const previousCalls = calls.length;
+      expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
+      expect(
+        calls.slice(previousCalls).filter((call) => call.startsWith("POST")),
+      ).toEqual([]);
+      expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
+      // The expanded job endpoint can recover the same accepted legacy job.
+      f.state.catalogMediaType = scannerMediaType;
+      f.state.catalogHeaders = { [scopeHeader]: "workspace" };
+      jobsPath = "/finding-imports/jobs";
+      jobMediaType = scannerMediaType;
+    }
+    const acceptedCalls = calls.length;
     expect((await (await prepare()).publish()).privateJob?.id).toBe(jobId);
-    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${jobId}`);
+    expect(calls.at(-1)).toBe(`GET ${jobsPath}/${jobId}`);
+    expect(
+      calls.slice(acceptedCalls).filter((call) => call.startsWith("POST")),
+    ).toEqual([]);
     unavailable = true;
     const acknowledged = {
       result: {
@@ -9189,8 +9911,9 @@ test.each([
     canCreate = true;
     loseResponses = false;
     expectedFormat = "security.findings.v1";
-    terminal =
-      provider === "wiz" || provider === "continuum" ? "cancelled" : "failed";
+    jobsPath = "/finding-imports/jobs";
+    jobMediaType = scannerMediaType;
+    terminal = provider === "wiz" ? "cancelled" : "failed";
     if ("rename" in scenario) {
       await expect(prepare()).rejects.toThrow("does not match");
       f.state.repositoryUrl = exampleRepository;
@@ -9203,7 +9926,6 @@ test.each([
     const failedJob = jobId;
     // The saved receipt remains readable after this provider drops out of discovery.
     advertised = false;
-    acknowledgedVersion = undefined;
     const before = calls.length;
     const readOnly = await prepare();
     expect(readOnly.preview.privateImport?.retryOfJobId).toBeUndefined();
@@ -9211,7 +9933,7 @@ test.each([
       id: failedJob,
       status: terminal,
     });
-    expect(calls.at(-1)).toBe(`GET ${expectedJobsPath}/${failedJob}`);
+    expect(calls.at(-1)).toBe(`GET ${jobsPath}/${failedJob}`);
     contextVersion = "different-inbox";
     await expect(prepare()).rejects.toThrow(
       "Private findings import is unavailable",
@@ -9221,7 +9943,6 @@ test.each([
     ).toEqual([]);
     contextVersion = "generation-c";
     advertised = true;
-    acknowledgedVersion = undefined; // The saved version also applies to its replacement attempt.
     if ("rename" in scenario) {
       f.state.repositoryUrl = "https://github.com/example/renamed";
       await expect(prepare()).rejects.toThrow("does not match");
@@ -9368,6 +10089,36 @@ test("a private structured report retains occurrence IDs, unknown severity and s
   ).toThrow("record limit");
 });
 
+test("native private uploads encode only the reviewed occurrences", () => {
+  const first = endorFinding();
+  const second = { ...first, uuid: "unselected" };
+  const reviewed = normalizeEndorFindings([first, second]).findings.slice(0, 1);
+  const nativeFormat = "endor.findings_json.v1";
+  const context = {
+    object: "security.finding_import_context" as const,
+    context_version: "v1",
+    can_upload: true,
+    can_create_import_jobs: true,
+    can_read: true,
+    formats: [nativeFormat],
+    limits: {
+      max_direct_file_bytes: 32 * 1024 * 1024,
+      max_record_bytes: 1024 * 1024,
+    },
+  };
+  const native = selectPrivateReport(reviewed, "endor", context);
+  expect(native.format).toBe(nativeFormat);
+  expect(JSON.parse(native.bytes)).toEqual({ list: { objects: [first] } });
+  const both = { ...context, formats: [nativeFormat, "security.findings.v1"] };
+  expect(selectPrivateReport(reviewed, "endor", both).format).toBe(
+    "security.findings.v1",
+  );
+  reviewed[0]!.evidence.title = "Changed after normalization";
+  expect(() => selectPrivateReport(reviewed, "endor", context)).toThrow(
+    "security.findings.v1",
+  );
+});
+
 function localFinding(id?: string, severity?: string) {
   const row = normalized(id, severity);
   return { ...row, evidence: validateExternalEvidence(row.evidence, "local") };
@@ -9476,35 +10227,6 @@ test("stored publication reports unsupported providers and Cloud-only exclusions
   expect(cloud.posts).toHaveLength(1);
 });
 
-test("the CLI publishes the selected Tenable occurrence", async () => {
-  const f = await fixture(tenableReport, tenableReport.repository_url);
-  const cli = createCliTest(main);
-  const code = await cli.runCli(
-    [
-      "publish",
-      "findings",
-      f.file,
-      "--to=cloud",
-      "--provider=tenable",
-      `--repository=${f.destination().id}`,
-      `--source-repository-url=${tenableReport.repository_url}`,
-      "--source-key=tenant/code-repository",
-      "--format=json",
-      "--yes",
-    ],
-    f.cliDeps,
-  );
-  expect(code, cli.stderr.text()).toBe(0);
-  expect(JSON.parse(cli.stdout.text())).toMatchObject({
-    status: "complete",
-    verified: 1,
-  });
-  expect(f.reports.get("00017")?.source).toEqual({
-    provider: "tenable",
-    source_key: "tenant/code-repository",
-  });
-});
-
 test.each(["trivy", "endor"] as const)(
   "stored native %s rows use the file reader's Cloud projection when enriched fields exceed its limits",
   async (provider) => {
@@ -9541,3 +10263,72 @@ test.each(["trivy", "endor"] as const)(
     expect(cloud.posts).toHaveLength(0);
   },
 );
+
+test("the CLI publishes the selected Tenable occurrence", async () => {
+  const f = await fixture(tenableReport, tenableReport.repository_url);
+  const cli = createCliTest(main);
+  const code = await cli.runCli(
+    [
+      "publish",
+      "findings",
+      f.file,
+      "--to=cloud",
+      "--provider=tenable",
+      `--repository=${f.destination().id}`,
+      `--source-repository-url=${tenableReport.repository_url}`,
+      "--source-key=tenant/code-repository",
+      "--format=json",
+      "--yes",
+    ],
+    f.cliDeps,
+  );
+  expect(code, cli.stderr.text()).toBe(0);
+  expect(JSON.parse(cli.stdout.text())).toMatchObject({
+    status: "complete",
+    verified: 1,
+  });
+  expect(f.reports.get("00017")?.source).toEqual({
+    provider: "tenable",
+    source_key: "tenant/code-repository",
+  });
+});
+
+test("a changed account scope cannot consume the stored receipt of a reset repository", async () => {
+  const cloud = await fixture();
+  await using local = await storedPublicationFixture(cloud);
+  const { repository, deps } = local;
+  const imported = await local.store("wiz", {
+    read: 1,
+    findings: [localFinding("retained")],
+    excluded: [],
+  });
+  const selection = { repository, importId: imported.importId! };
+  const [group] = (await local.prepare(selection)).groups;
+  using db = new Database(join(local.stateDirectory, "workbench.sqlite3"));
+  db.exec(`CREATE TRIGGER reject_receipts BEFORE INSERT ON external_finding_publications
+    BEGIN SELECT RAISE(ABORT, 'receipt write interrupted'); END`);
+  await expect(group!.publish(group!.reviewId)).rejects.toThrow(
+    /receipt write interrupted/,
+  );
+  db.exec("DROP TRIGGER reject_receipts");
+  expect(await listLocalFindingPublications({ repository }, deps)).toEqual([]);
+  cloud.state.marker = "generation-2";
+  cloud.state.catalogHeaders = {
+    [scopeHeader]: "workspace",
+    [providerHeader]: "wiz",
+  };
+  await expect(local.prepare(selection)).rejects.toThrow(
+    /different Cloud destination/,
+  );
+  expect(await listLocalFindingPublications({ repository }, deps)).toEqual([]);
+  cloud.state.catalogHeaders = { [scopeHeader]: "personal" };
+  await expect(local.prepare(selection)).rejects.toThrow(/reset/);
+  expect(await listLocalFindingPublications({ repository }, deps)).toEqual([
+    expect.objectContaining({
+      id: imported.findings[0]!.id,
+      version: 1,
+      outcome: "created",
+    }),
+  ]);
+  expect(cloud.posts).toHaveLength(1);
+});

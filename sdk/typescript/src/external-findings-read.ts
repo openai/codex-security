@@ -36,8 +36,6 @@ import { isRecord } from "./record.js";
 import { readWizSelection, wizFindingRepository } from "./wiz-findings.js";
 import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 
-export type LocalFindingProvider = Provider;
-
 /** File reader names mapped to the provider stored with each finding. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
@@ -56,7 +54,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   continuum: "continuum",
   checkmarx: "checkmarx",
   tenable: "tenable",
-} as const satisfies Record<string, LocalFindingProvider>;
+} as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
 export const EXTERNAL_FINDINGS_READERS = Object.keys(

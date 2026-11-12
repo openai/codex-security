@@ -104,14 +104,15 @@ For a Cloud import, check the receipt for the destination shown in the preview.
 | Private inbox (`privateImport`)                   | Check that `privateJob.status` is `completed` and its counts account for the selected findings, with zero errors or unprocessed rows. Review exclusions. |
 | Repository publisher (environments in `requests`) | Check each receipt, the verified and unacknowledged counts, failures, and exclusions.                                                                    |
 
-To inspect published findings in Codex, [connect the Cloud app](../../sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
-and ask for imported findings in the destination repository. If the scanner has no
-filter in the findings view, use the source and finding IDs from your receipt to
-identify the record. For a private import, ask for your private import history.
+Use the [Cloud app](../../sdk/typescript/docs/sdk.md#read-existing-cloud-findings)
+to inspect imported findings in a personal repository. For a workspace import,
+open your private imported-findings inbox to inspect the saved evidence.
 
-If the repository publisher requires a reported severity, the preview excludes
-findings whose severity the scanner left unknown. You can keep those findings
-in a local import or a private inbox when available.
+To share a private finding, assess it against the intended repository and commit.
+If the assessment is reportable and your workspace has enabled sharing for that
+scanner, select the destination environment and choose a severity if the scanner
+supplied none. Choose **Publish to shared findings**, then **View shared finding**
+on the receipt to open the workspace finding and its source evidence.
 
 If `publish findings` stops and returns `savedSubmission`, [resume from that checkpoint](schema-guide.md#retry-a-cloud-submission).
 

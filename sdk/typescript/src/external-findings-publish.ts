@@ -1,7 +1,15 @@
 import { readScannerJson } from "./scanner-import.js";
 import { hash, randomUUID } from "node:crypto";
 import { chmodSync } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { nullIfMissingFile } from "./targets.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -9,6 +17,7 @@ import { isProxy } from "node:util/types";
 import {
   privateImportClient,
   privateJobVersions,
+  type PrivateJobVersion,
   selectPrivateReport,
   type PrivateImportFormat,
   readPrivateCheckpoint,
@@ -72,6 +81,7 @@ import {
   semgrepPlatformFindingBinding,
   semgrepPlatformRepositoryReference,
   semgrepPlatformReportScope,
+  submittedSemgrepPlatformId,
 } from "./semgrep-platform-findings.js";
 import {
   hostedRepositoryUrlKey,
@@ -109,6 +119,8 @@ import {
 } from "./external-findings.js";
 import {
   canonicalNumber,
+  SCANNER_IMPORT_MEDIA_TYPE,
+  importResponseMediaType,
   cloudRepositoryUrlKey,
   validateImportRequest,
   validateExternalEvidence,
@@ -199,6 +211,9 @@ export class ExternalPublicationError extends CodexSecurityError {
 }
 
 interface SavedSubmission {
+  format: 1;
+  apiBaseUrl: string;
+  nativeIds?: string[];
   accountId: string;
   trivyRepositoryUrl?: string;
   requests: FindingImportRequest[];
@@ -406,7 +421,6 @@ function sameSubmission(
   return (
     left.accountId === right.accountId &&
     left.trivyRepositoryUrl === right.trivyRepositoryUrl &&
-    left.inspectorProjectMapRequired === right.inspectorProjectMapRequired &&
     canonicalJson(left.requests) === canonicalJson(right.requests)
   );
 }
@@ -947,6 +961,7 @@ function hostedPublicationFindings(
   provider: Provider,
   destination: ImportRepository,
   readerSources: readonly ExternalSourceRepository[],
+  nativeIdsByFinding: Map<string, string>,
 ): ExternalFindings {
   if (provider === "snyk") {
     const first = current.findings.find(isSnykRestFinding);
@@ -965,6 +980,10 @@ function hostedPublicationFindings(
         current.sourceRepositoryPlatform,
       ),
       (finding, source) => {
+        nativeIdsByFinding.set(
+          finding.source_finding_id,
+          finding.source_finding_id,
+        );
         finding.evidence.source_data = source;
       },
     );
@@ -990,11 +1009,9 @@ function hostedPublicationFindings(
   );
   const scope = semgrepPlatformReportScope(current, provider, references);
   const findings = current.findings.map((finding) => {
+    if (!isSemgrepPlatformEvidence(finding, provider)) return finding;
     const data = finding.evidence.source_data;
-    const original =
-      isRecord(data?.["finding"]) &&
-      isSemgrepPlatformEvidence(finding, provider);
-    if (!original && data?.["format"] !== semgrepPlatformFormat) return finding;
+    const original = isRecord(data?.["finding"]);
     const binding = semgrepPlatformFindingBinding(
       finding,
       provider,
@@ -1003,8 +1020,12 @@ function hostedPublicationFindings(
       undefined,
       "cloud",
     );
+    if (binding?.nativeId)
+      nativeIdsByFinding.set(finding.source_finding_id, binding.nativeId);
     return binding?.sourceData &&
-      (original || binding.sourceData["format"] !== semgrepPlatformFormat)
+      (original ||
+        (data?.["format"] === semgrepPlatformFormat &&
+          binding.sourceData["format"] !== semgrepPlatformFormat))
       ? {
           ...finding,
           evidence: {
@@ -1122,13 +1143,18 @@ async function preparePublicationInput(
     (() => readCloudCredentials(environment, dependencies.signal))
   )();
   let canStartJob = false;
+  const legacyRepository = ["wiz", "endor", "snyk"].includes(options.provider);
+  const legacyUnversionedJob =
+    legacyRepository ||
+    options.provider === "github" ||
+    options.provider === "semgrep";
   let repositorySeverities: string[] | undefined;
+  let importScope: "personal" | "workspace" | undefined;
+  let importMedia: string | undefined;
   const jobVersionHeader = "Codex-Security-Private-Import-Job-Version";
   const providerJobVersion = privateJobVersions[options.provider];
-  // Older services recognize an exact v2 request for AWS. Only ask for v3
-  // when publishing a provider introduced by that contract.
   const requestedJobVersion = String(providerJobVersion ?? 2);
-  let jobApiVersion: typeof providerJobVersion;
+  let legacyJobVersion: PrivateJobVersion | undefined;
   async function request(
     endpoint: string,
     body?: FindingImportRequest,
@@ -1137,6 +1163,9 @@ async function preparePublicationInput(
     // Allow upload and response transport around the server's publication budget.
     const timeout = AbortSignal.timeout(body ? 60_000 : 30_000);
     const repositoryCatalog = endpoint.startsWith("/repositories?");
+    const accept = repositoryCatalog
+      ? `${SCANNER_IMPORT_MEDIA_TYPE}, application/json;q=0.9`
+      : (importMedia ?? SCANNER_IMPORT_MEDIA_TYPE);
     const response = await (dependencies.fetch ?? globalThis.fetch)(
       `${cloudApiUrl}${endpoint}`,
       {
@@ -1144,11 +1173,9 @@ async function preparePublicationInput(
         headers: {
           Authorization: `Bearer ${credentials.access_token}`,
           "ChatGPT-Account-ID": credentials.account_id,
-          Accept: "application/json",
-          ...(repositoryCatalog
-            ? { [jobVersionHeader]: requestedJobVersion }
-            : {}),
-          ...(body ? { "Content-Type": "application/json" } : {}),
+          Accept: accept,
+          ...(repositoryCatalog && { [jobVersionHeader]: requestedJobVersion }),
+          ...(body ? { "Content-Type": accept } : {}),
         },
         ...(body ? { body: JSON.stringify(body) } : {}),
         redirect: "error",
@@ -1182,14 +1209,48 @@ async function preparePublicationInput(
       repositorySeverities = advertised(
         "Codex-Security-Repository-Import-Severities",
       );
-      canStartJob =
-        advertised("Codex-Security-Private-Import-Providers")?.includes(
-          options.provider,
-        ) ?? false;
-      jobApiVersion =
+      const privateProviders = advertised(
+        "Codex-Security-Private-Import-Providers",
+      );
+      const media = importResponseMediaType(response);
+      const declaredScope = response.headers.get("Codex-Security-Import-Scope");
+      let scope = declaredScope;
+      if (media === "application/json") {
+        // Released catalogs advertise private providers only for workspace accounts.
+        if (privateProviders) scope = "workspace";
+        else if (repositorySeverities?.some(Boolean)) scope = "personal";
+        else scope = null;
+        if (declaredScope !== null && declaredScope !== scope) scope = null;
+      }
+      if (
+        (media !== SCANNER_IMPORT_MEDIA_TYPE && media !== "application/json") ||
+        (scope !== "personal" && scope !== "workspace") ||
+        (importScope !== undefined &&
+          (scope !== importScope || media !== importMedia))
+      )
+        throw new CodexSecurityError(
+          "Cloud returned an invalid import scope or representation for this account.",
+        );
+      importScope = scope;
+      importMedia = media;
+      legacyJobVersion =
         response.headers.get(jobVersionHeader) === requestedJobVersion
           ? providerJobVersion
           : undefined;
+      canStartJob = privateProviders?.includes(options.provider) ?? false;
+      if (
+        media === "application/json" &&
+        !legacyUnversionedJob &&
+        !legacyJobVersion
+      )
+        canStartJob = false;
+    } else if (
+      importMedia === SCANNER_IMPORT_MEDIA_TYPE &&
+      importResponseMediaType(response) !== importMedia
+    ) {
+      throw new CodexSecurityError(
+        "Cloud returned a different scanner import representation. Retry the approved selection.",
+      );
     }
     return response.json();
   }
@@ -1237,14 +1298,15 @@ async function preparePublicationInput(
   const report: ExternalFindings & Partial<SnykIssuesFindings> =
     resolved.current;
   const source = { provider: options.provider, source_key: options.sourceKey };
-  const importPrefix = source.provider === "sonar" ? "/v2" : "";
-  const sourceReportsPath = importPrefix + sourcePath(destination);
+  const sourceReportsPath = sourcePath(destination);
   const hosted = options.provider === "snyk" || options.provider === "semgrep";
+  const nativeIdsByFinding = new Map<string, string>();
   const parsed = hostedPublicationFindings(
     report,
     options.provider,
     destination,
     readerSources,
+    nativeIdsByFinding,
   );
   const key = hash(
     "sha256",
@@ -1311,11 +1373,15 @@ async function preparePublicationInput(
       ),
     );
   }
+  const unsupportedCheckpoint =
+    "This import has a pending request from another SDK version. Resume it with the original CLI and input before publishing this selection.";
   function readSaved(
     content: SavedSubmission | null | undefined,
   ): SavedSubmission {
+    if (content?.format !== 1)
+      throw new CodexSecurityError(unsupportedCheckpoint);
     if (
-      !content ||
+      content.apiBaseUrl !== apiBaseUrl ||
       content.accountId !== credentials.account_id ||
       !Array.isArray(content.requests) ||
       content.requests.length === 0
@@ -1356,6 +1422,111 @@ async function preparePublicationInput(
     const bytes = await readOptionalFile(pendingPath);
     return bytes === undefined ? undefined : readSaved(JSON.parse(bytes));
   }
+  // An older SDK may have used a different checkpoint key. Hosted selections
+  // may also use different submitted IDs for the same native occurrence.
+  const sourceLock =
+    "source-" +
+    hash(
+      "sha256",
+      canonicalJson([
+        apiBaseUrl,
+        credentials.account_id,
+        destination.id,
+        destination.repo_connector_id,
+        source,
+      ]),
+    );
+  await validatePreparedOutputDir(state, undefined, true).catch(
+    nullIfMissingFile,
+  );
+  const saved = await readPending();
+  const usePrivateImport = importScope === "workspace";
+  // The original selection and request bytes govern a retry even if discovery changes.
+  const severities = saved ? saved.repositorySeverities : repositorySeverities;
+  const direct = usePrivateImport
+    ? parsed
+    : repositorySelection(parsed, severities, resolved.sourcePositions);
+  const submittedIds = new Set(
+    direct.findings.map((row) => row.source_finding_id),
+  );
+  const nativeIds = new Set<string>();
+  for (const id of submittedIds) {
+    const native = nativeIdsByFinding.get(id);
+    if (native) nativeIds.add(native);
+  }
+  const overlaps = (id: string) => submittedIds.has(id) || nativeIds.has(id);
+  const partialSemgrep =
+    options.provider === "semgrep" &&
+    parsed.findings.some(
+      (row) =>
+        !isSemgrepPlatformEvidence(row, "semgrep") &&
+        (scopedSemgrepReport ||
+          hasRetainedSemgrepScope(row.evidence.source_data?.["finding"])),
+    );
+  async function checkPendingSource() {
+    const entries = await readdir(state, { withFileTypes: true }).catch(
+      nullIfMissingFile,
+    );
+    for (const entry of entries ?? []) {
+      if (
+        !entry.isFile() ||
+        !/^[a-f0-9]{64}\.pending\.json$/u.test(entry.name) ||
+        entry.name === key + ".pending.json"
+      )
+        continue;
+      const bytes = await readOptionalFile(join(state, entry.name));
+      if (!bytes) continue;
+      let prior;
+      try {
+        prior = JSON.parse(bytes);
+      } catch {
+        continue;
+      }
+      if (
+        prior?.accountId !== credentials.account_id ||
+        !Array.isArray(prior.requests) ||
+        (prior.apiBaseUrl !== undefined && prior.apiBaseUrl !== apiBaseUrl) ||
+        (prior.format === 1 &&
+          (!hosted ||
+            (!nativeIds.size &&
+              !prior.nativeIds?.length &&
+              !partialSemgrep &&
+              prior.semgrepPartialScopeDigest === undefined)))
+      )
+        continue;
+      const checkSemgrepAliases =
+        source.provider === "semgrep" &&
+        Array.isArray(prior.nativeIds) &&
+        prior.nativeIds.some(overlaps);
+      function overlapsSubmittedItem(
+        item: FindingImportRequest["items"][number],
+      ) {
+        if (overlaps(item.source_finding_id)) return true;
+        if (!checkSemgrepAliases) return false;
+        // Older checkpoints could list aliases for excluded rows. Match the native
+        // occurrence from the approved request before reserving a caller-supplied ID.
+        const nativeId = submittedSemgrepPlatformId(item);
+        return nativeId !== undefined && overlaps(nativeId);
+      }
+      if (
+        prior.requests.some(
+          (batch: FindingImportRequest) =>
+            batch?.repository?.id === destination.id &&
+            batch.repository.repo_connector_id ===
+              destination.repo_connector_id &&
+            batch.source?.provider === source.provider &&
+            batch.source.source_key === source.source_key &&
+            Array.isArray(batch.items) &&
+            batch.items.some(overlapsSubmittedItem),
+        )
+      )
+        throw new CodexSecurityError(
+          prior.format === 1
+            ? "This source has a pending hosted Cloud request for the same finding. Finish that approved request before changing its evidence."
+            : unsupportedCheckpoint,
+        );
+    }
+  }
   async function readCompletedPublication(requests: FindingImportRequest[]) {
     const bytes = await readOptionalFile(join(state, key + ".result.json"));
     if (bytes === undefined) return;
@@ -1372,10 +1543,15 @@ async function preparePublicationInput(
         verified: result.verified,
       };
   }
-  await validatePreparedOutputDir(state, undefined, true).catch(
-    nullIfMissingFile,
-  );
-  const saved = await readPending();
+  const privatePath = join(state, `${key}.private-import.json`);
+  const readPrivate = async () =>
+    parsePrivateCheckpoint(await readOptionalFile(privatePath));
+  const privateSaved = await readPrivate();
+  if ((usePrivateImport && saved) || (!usePrivateImport && privateSaved))
+    throw new CodexSecurityError(
+      "The saved import belongs to a different Cloud destination. Use the account and scope shown in its preview.",
+    );
+  if (!saved) await checkPendingSource();
   if (saved && wasReset(saved)) {
     await underPublishLock(async () => {
       const current = await readPending();
@@ -1407,12 +1583,26 @@ async function preparePublicationInput(
     );
 
   // Existing repository submissions keep their original request bodies and receipts.
-  const privatePath = join(state, `${key}.private-import.json`);
-  const readPrivate = async () =>
-    parsePrivateCheckpoint(await readOptionalFile(privatePath));
-  const privateSaved = await readPrivate();
-  const usePrivateImport =
-    !saved && (canStartJob || privateSaved !== undefined);
+  if (
+    !usePrivateImport &&
+    importMedia === "application/json" &&
+    !legacyRepository
+  )
+    throw new CodexSecurityError(
+      "Repository import is unavailable for this provider on this Cloud deployment.",
+    );
+  if (
+    usePrivateImport &&
+    !canStartJob &&
+    (!privateSaved ||
+      (importMedia === "application/json" &&
+        !legacyUnversionedJob &&
+        !privateSaved.jobApiVersion &&
+        !legacyJobVersion))
+  )
+    throw new CodexSecurityError(
+      "Private findings import is unavailable for this account or provider.",
+    );
   async function preparePrivateAttempt() {
     const context = await privateClient.context();
     if (source.source_key.trim() !== source.source_key)
@@ -1792,19 +1982,29 @@ async function preparePublicationInput(
             throw new CodexSecurityError(
               "A repository submission is pending. Review its saved request before continuing.",
             );
-          const checkpoint = active ?? {
-            ...binding,
-            approvedRepositoryUrl: destination.url,
-            approvedRepositoryPlatform:
-              hostedSource?.github === false ? ("other" as const) : undefined,
-            uploadRequestId: randomUUID(),
-            jobRequestId: randomUUID(),
-            jobApiVersion: retrying ? stored?.jobApiVersion : jobApiVersion,
-            fileId: undefined,
-            jobId: undefined,
-            receipt: undefined,
-            previousReceipt: retrying ? stored?.receipt : undefined,
-          };
+          const negotiatedLegacyJobVersion =
+            importMedia === "application/json" ? legacyJobVersion : undefined;
+          const checkpoint = active
+            ? {
+                ...active,
+                jobApiVersion:
+                  active.jobApiVersion ?? negotiatedLegacyJobVersion,
+              }
+            : {
+                ...binding,
+                approvedRepositoryUrl: destination.url,
+                approvedRepositoryPlatform:
+                  hostedSource?.github === false
+                    ? ("other" as const)
+                    : undefined,
+                uploadRequestId: randomUUID(),
+                jobRequestId: randomUUID(),
+                jobApiVersion: negotiatedLegacyJobVersion,
+                fileId: undefined,
+                jobId: undefined,
+                receipt: undefined,
+                previousReceipt: retrying ? stored?.receipt : undefined,
+              };
           const result: ExternalPublicationResult = {
             cloudApiUrl: preview.cloudApiUrl,
             status: "interrupted",
@@ -1845,7 +2045,8 @@ async function preparePublicationInput(
             const savedReceipt =
               checkpoint.receipt ?? checkpoint.previousReceipt;
             if (savedReceipt) acknowledge(savedReceipt);
-            if (!active) await writeAtomicJson(privatePath, checkpoint);
+            if (!active || active.jobApiVersion !== checkpoint.jobApiVersion)
+              await writeAtomicJson(privatePath, checkpoint);
             if (!checkpoint.fileId) {
               progress({ phase: "uploading", completed: 0 });
               checkpoint.fileId = await client.upload({
@@ -1866,7 +2067,10 @@ async function preparePublicationInput(
                 source,
                 repository: binding.repository,
                 jobId: checkpoint.jobId,
-                jobApiVersion: checkpoint.jobApiVersion,
+                apiVersion:
+                  importMedia === SCANNER_IMPORT_MEDIA_TYPE
+                    ? "current"
+                    : (checkpoint.jobApiVersion ?? 1),
               },
               async (id) => {
                 checkpoint.jobId = id;
@@ -1889,13 +2093,6 @@ async function preparePublicationInput(
     });
   }
 
-  // The original selection and request bytes govern a retry even if discovery changes.
-  const severities = saved ? saved.repositorySeverities : repositorySeverities;
-  const direct = repositorySelection(
-    parsed,
-    severities,
-    resolved.sourcePositions,
-  );
   if (!direct.findings.length) throw new NoPublishableFindingsError(direct);
   let requests = saved?.requests;
   if (!requests) {
@@ -1989,24 +2186,19 @@ async function preparePublicationInput(
     }
     if (current) requests.push(validateImportRequest(current));
   }
-  const bindSemgrepScope =
-    !saved &&
-    options.provider === "semgrep" &&
-    report.findings.some(
-      (finding) =>
-        !isSemgrepPlatformEvidence(finding, "semgrep") &&
-        (scopedSemgrepReport ||
-          hasRetainedSemgrepScope(finding.evidence.source_data?.["finding"])),
-    );
   const submission: SavedSubmission = {
+    format: 1,
+    apiBaseUrl,
+    nativeIds: nativeIds.size ? [...nativeIds] : undefined,
     accountId: credentials.account_id,
     ...(trivyReportUrls && { trivyRepositoryUrl: trivyTarget }),
     requests,
     receipts: saved?.receipts,
     repositorySeverities: severities,
-    semgrepPartialScopeDigest: bindSemgrepScope
-      ? suppliedSemgrepScopeDigest()
-      : saved?.semgrepPartialScopeDigest,
+    semgrepPartialScopeDigest:
+      !saved && partialSemgrep
+        ? suppliedSemgrepScopeDigest()
+        : saved?.semgrepPartialScopeDigest,
     approvedRepositoryUrl:
       hosted || options.provider === "tenable" ? approvedUrl : undefined,
   };
@@ -2099,7 +2291,24 @@ async function preparePublicationInput(
           if (!submission.receipts?.length) throw error;
           throw interruptedPreview(errorMessage(error), error);
         });
+        if (!pending || !sameSubmission(pending, submission)) {
+          const message = pending
+            ? "Another publication prepared this input. Run the command again to review and resume that saved request."
+            : "The saved publication changed after preview. Review its result before publishing again.";
+          const completed = await readCompletedPublication(requests);
+          if (completed) return result(completed.receipts, completed.verified);
+          if (saved) throw interruptedPreview(message);
+          if (pending) throw new CodexSecurityError(message);
+          if ((await readOptionalFile(privatePath)) !== undefined)
+            throw new CodexSecurityError(
+              "A private import already owns this selection. Review its saved job before continuing.",
+            );
+        }
         const current = pending ?? submission;
+        if (current.inspectorProjectMapRequired && !inspectorProjectMap)
+          throw new CodexSecurityError(
+            "Supply the verified Inspector project binding again to resume.",
+          );
         const adoptProjectMap =
           submission.inspectorProjectMapRequired &&
           current.inspectorProjectMapRequired === undefined;
@@ -2109,22 +2318,6 @@ async function preparePublicationInput(
             current.approvedRepositoryUrl,
             current.approvedRepositoryPlatform,
           );
-        if (!pending || !sameSubmission(current, submission)) {
-          const message = pending
-            ? "Another publication prepared this input. Run the command again to review and resume that saved request."
-            : "The saved publication changed after preview. Review its result before publishing again.";
-          if (saved) {
-            const completed = await readCompletedPublication(requests);
-            if (completed)
-              return result(completed.receipts, completed.verified);
-            throw interruptedPreview(message);
-          }
-          if (pending) throw new CodexSecurityError(message);
-          if ((await readOptionalFile(privatePath)) !== undefined)
-            throw new CodexSecurityError(
-              "A private import already owns this selection. Review its saved job before continuing.",
-            );
-        }
         // A preview can pin the catalog URL. Tighten its SCM comparison only
         // once the caller confirms publication, including when resuming a request.
         const adoptStrictRepository =
@@ -2139,9 +2332,22 @@ async function preparePublicationInput(
         const acknowledged: FindingImportReceipt[] = [];
         let verified = 0;
         try {
-          if (!pending || adoptProjectMap || adoptStrictRepository) {
-            await writeAtomicJson(pendingPath, current);
+          if (!pending) {
+            const save = async () => {
+              await checkPendingSource();
+              await writeAtomicJson(pendingPath, current);
+            };
+            if (hosted)
+              await withImportLock(
+                state,
+                sourceLock,
+                dependencies.signal,
+                save,
+              );
+            else await save();
             pending = current;
+          } else if (adoptProjectMap || adoptStrictRepository) {
+            await writeAtomicJson(pendingPath, current);
           }
           progress({
             phase: "uploading",
@@ -2151,8 +2357,7 @@ async function preparePublicationInput(
           let acknowledgedCount = 0;
           for (const [batchIndex, batch] of requests.entries()) {
             const receipt = validatePublicationReceipt(
-              cached[batchIndex] ??
-                (await request(`${importPrefix}/finding_imports`, batch)),
+              cached[batchIndex] ?? (await request("/finding_imports", batch)),
               batch,
             );
             acknowledged.push(receipt);
