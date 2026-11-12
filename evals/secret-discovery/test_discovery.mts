@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -788,6 +795,69 @@ test("scope notes neither fail correct findings nor compensate for missing findi
   assert.equal(gradeResult(result, fixture).passed, false);
 });
 
+test("supplies the policy inventory for the entire synthetic repository", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "source-audit-policy-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = join(root, "repository", "config");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "SECURITY.md"),
+    "Review local configuration.",
+  );
+
+  const prepared = await prepareEval(root);
+  assert.ok(prepared.prompt.includes('["config/SECURITY.md"]'));
+});
+
+test("stages and hashes the selected workflow's audit briefs", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "source-audit-comparison-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const brief = "validate-scan-findings.md";
+  const workflow = join(root, "workflow");
+  await mkdir(workflow);
+  const corePromptPath = join(workflow, "core-scan.md");
+  await writeFile(corePromptPath, `Validate with [this brief](${brief}).`);
+
+  const standalone = await prepareEval(join(root, "standalone"), {
+    corePromptPath,
+  });
+  const bundled = await readFile(
+    new URL(
+      `../../plugins/codex-security/references/${brief}`,
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.equal(
+    await readFile(join(standalone.runtime, "references", brief), "utf8"),
+    bundled,
+  );
+
+  await writeFile(
+    join(workflow, brief),
+    "Validation instructions under comparison.",
+  );
+  const fixedReference = "threat-model.md";
+  await writeFile(join(workflow, fixedReference), "Alternate threat model.");
+  const selected = await prepareEval(join(root, "selected"), {
+    corePromptPath,
+  });
+  assert.equal(
+    await readFile(join(selected.runtime, "references", brief), "utf8"),
+    "Validation instructions under comparison.",
+  );
+  assert.equal(selected.promptSha256, standalone.promptSha256);
+  assert.equal(
+    selected.referenceSha256[fixedReference],
+    standalone.referenceSha256[fixedReference],
+  );
+  assert.notEqual(
+    selected.referenceSha256[brief],
+    standalone.referenceSha256[brief],
+  );
+  assert.ok(!("baseline-auditor.md" in selected.referenceSha256));
+});
+
 test("stages production prompt unchanged and no labels; grades only the final SDK response", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "source-audit-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -804,6 +874,16 @@ test("stages production prompt unchanged and no labels; grades only the final SD
     production,
   );
   assert.ok(prepared.prompt.endsWith(production));
+  for (const brief of ["baseline-auditor.md", "focused-investigator.md"]) {
+    const source = new URL(
+      `../../plugins/codex-security/references/${brief}`,
+      import.meta.url,
+    );
+    assert.deepEqual(
+      await readFile(join(prepared.runtime, "references", brief)),
+      await readFile(source),
+    );
+  }
   const staged = (
     await readdir(prepared.repo, { recursive: true, withFileTypes: true })
   )

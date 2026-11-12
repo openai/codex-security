@@ -36,6 +36,8 @@ codex-security info -c codex-security.yaml --json
 codex-security scan . -c codex-security.yaml --dry-run --json
 ```
 
+The init command prints a preview command using the file it created. On Windows the displayed command uses PowerShell syntax. It includes an editor schema hint when the package is installed in the project. With a global installation the starter contains an empty mapping, which you can replace with your settings. The CLI always validates the file with its bundled schema.
+
 Check that the preview shows your intended repository and scope. To start the
 scan with those settings, keep the same file selection:
 
@@ -154,7 +156,7 @@ load the same config also use that setting. The usual config file is
 | `policy.fail_on_severity`      | Exit threshold: `critical`, `high`, `medium`, or `low`                               | Report-only                        |
 | `output.directory`             | Artifact directory outside the scanned Git worktree                                  | Existing private artifact location |
 
-See [owner suggestions](../sdk/typescript/README.md#scan-options-and-output) for
+See [owner suggestions](../sdk/typescript/docs/cli.md#scan-options-and-output) for
 supported scan types, cost-limit behavior, and the saved report.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
@@ -184,8 +186,8 @@ The resolver maps file keys to the existing SDK options:
 | `scan.deep.stop_after_no_new`             | `stopAfterNoNew`                      | `--stop-after-no-new`                                |
 | `scan.deep.stop_after_consecutive_errors` | `stopAfterConsecutiveErrors`          | No flag                                              |
 | `scan.deep.max_discovery_runs`            | `maxDiscoveryRuns`                    | `--max-discovery-runs`                               |
-| `scan.deep.max_time_hours`                | `maxTimeHours`                        | `--max-time-hours`                                   |
-| `scan.max_time_minutes`                   | `maxTimeMinutes`                      | `--max-time`                                         |
+| `scan.deep.max_time_hours`                | `maxTimeHours`                        | Legacy `--max-time-hours` (hours)                    |
+| `scan.max_time_minutes`                   | `maxTimeMinutes`                      | `--max-time` (minutes, preferred)                    |
 | `limits.max_cost_usd_per_scan`            | `maxCostUsd`                          | `--max-cost`                                         |
 | `policy.fail_on_severity`                 | `failureSeverity`                     | `--fail-on-severity`                                 |
 | `output.directory`                        | `outputDir`                           | `--output-dir`                                       |
@@ -333,7 +335,8 @@ aliases there are errors, while equivalent durations are accepted.
 `max_cost_usd_per_scan` has the same meaning as `--max-cost`: an estimated limit for one
 scan attempt. In-flight work may exceed it. It is not a total budget for a batch or
 follow-up actions. `fail_on_severity` changes the exit status without filtering the
-retained findings.
+retained findings. A bounded scan cannot run `--patch` or `--validate`. Select a
+finding from the saved scan to patch or validate separately.
 
 ## Batch and component scans
 
@@ -348,6 +351,12 @@ Both commands use the same config precedence, path anchoring, native settings,
 context, prompts, per-attempt cost and investigation limits, and severity policy
 as `scan`. The investigation allowance applies independently to each scan, not
 planning, result matching, or total campaign time.
+
+Use `--max-total-cost USD` for a whole invocation. It divides the estimate among
+explicit components or pending repository attempts, including retries. A tighter
+configured per-scan limit still applies. The total limit skips model-based matching
+and owner suggestions, including when `scan.owner_suggestions` is enabled. See the [component scan](../sdk/typescript/docs/cli.md#scan-project-components)
+and [bulk scan](../sdk/typescript/docs/cli.md#bulk-scans) guides for planning and recovery behavior.
 
 A bulk CSV row's mode and scope override the file's defaults for that repository.
 Bulk checkouts are clean, shallow snapshots, so bulk scans accept repository or
