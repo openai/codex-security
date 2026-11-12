@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import { normalizeBlackDuckFindings } from "./blackduck-findings.js";
-import { normalizeContinuumFindings } from "./continuum-findings.js";
+import {
+  continuumIssueFormat,
+  normalizeContinuumFindings,
+} from "./continuum-findings.js";
 import { normalizeEndorFindings } from "./endor-findings.js";
 import {
   validateExternalEvidence,
@@ -15,7 +18,7 @@ import type {
 import { normalizeInspectorFindings } from "./inspector-findings.js";
 import { projectStoredOpenGrepFinding } from "./opengrep-findings.js";
 import { isRecord } from "./record.js";
-import { normalizeRecords } from "./scanner-import.js";
+import { array, normalizeRecords, record } from "./scanner-import.js";
 import { storedSemgrepCloudEvidence } from "./semgrep-platform-findings.js";
 import { normalizeTrivyFindings } from "./trivy-findings.js";
 
@@ -72,6 +75,39 @@ function* nativeReaders(
     yield (target) =>
       normalizeContinuumFindings({ items: [data["finding"]] }, url, target);
   }
+  const issue = data["issue"];
+  if (
+    row.provider === "continuum" &&
+    data["format"] === continuumIssueFormat &&
+    isRecord(issue)
+  )
+    yield (target) => {
+      const artifacts = array(
+        data["evidence_artifacts"] ?? [],
+        "Continuum issue evidence artifacts",
+      );
+      const patches = array(data["patches"] ?? [], "Continuum patches").map(
+        (patch) => ({
+          artifactId: record(patch, "Continuum patch")["artifactId"],
+          artifactType: "PATCH",
+          body: { patch },
+        }),
+      );
+      return normalizeContinuumFindings(
+        {
+          format: continuumIssueFormat,
+          environmentId: data["environmentId"],
+          issues: [
+            {
+              issue: { ...issue, artifacts: [...artifacts, ...patches] },
+              findings: data["findings"],
+            },
+          ],
+        },
+        url,
+        target,
+      );
+    };
   if (
     row.provider === "blackduck" &&
     typeof data["projectVersionUrl"] === "string"
