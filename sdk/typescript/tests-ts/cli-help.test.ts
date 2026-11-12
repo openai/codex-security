@@ -515,6 +515,8 @@ describe("CLI help", () => {
     const menu = (await help(["import", "--help"])).replace(/\s+/gu, " ");
     expect(menu).toContain("publish findings --help");
     expect(menu).toContain("scan import --help");
+    expect(menu).toContain("publish-findings skill");
+    expect(menu).toContain("publish a stored import");
     const vendor = await help(["publish", "findings", "--help"], 60);
     const preview = vendor
       .split("\n")

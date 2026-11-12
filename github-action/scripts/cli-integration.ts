@@ -225,8 +225,10 @@ try {
   assert.deepEqual(pathPreflight.target.paths, ['--help']);
 
   // Existing glob, tilde, and colon filenames are literal repository scopes.
-  const literalFiles = ['src/[slug]/page.tsx', 'src/star*file.ts', 'src/question?file.ts', '~/example.ts', 'module:handler.ts'];
-  const decoys = ['src/s/page.tsx', 'src/l/page.tsx', 'src/starOtherfile.ts', 'src/questionXfile.ts'];
+  const literalFiles = ['src/[slug]/page.tsx', 'src/star*file.ts', 'src/question?file.ts', '~/example.ts', 'module:handler.ts',
+    ' leading.ts', 'trailing.ts ', '  '];
+  const decoys = ['src/s/page.tsx', 'src/l/page.tsx', 'src/starOtherfile.ts', 'src/questionXfile.ts',
+    'leading.ts', 'trailing.ts'];
   for (const path of [...literalFiles, ...decoys]) {
     await mkdir(dirname(join(repository, path)), {recursive:true});
     await writeFile(join(repository, path), 'export const synthetic = 1;\n');
@@ -253,6 +255,15 @@ try {
   generateScopeInput(sourceInput, python, env);
   const selectedFiles = (await readFile(sourceInput, 'utf8')).trim().split('\n').map(row => JSON.parse(row).path).sort();
   assert.deepEqual(selectedFiles, [...literalFiles].sort(), 'Real scope selection must preserve literal names and exclude glob-matching decoys');
+
+  const spaces = [' leading.ts', 'trailing.ts ', '  '];
+  const completedDirectory = join(root, 'literal-completed');
+  const completedInputs: Record<string, string> = {paths: spaces.join('\n'), 'cyber-access-program':'standard'};
+  const completedArguments = scanArguments(parseInputs(name => completedInputs[name] ?? '', repository),
+    {repository}, completedDirectory);
+  const completed = JSON.parse(run([...completedArguments, '--mock'], 0));
+  assert.deepEqual(completed.manifest.scan.scope.includePaths, spaces);
+  assert.equal(completed.sarifPath, join(completedDirectory, 'exports/results.sarif'));
 
   // Preserve the runner-selected virtualenv through Action preflight and the
   // pinned CLI's resolver, which otherwise canonicalizes explicit Python paths.

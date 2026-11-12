@@ -20,14 +20,13 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
     }
     return n;
   };
-  const list = (name: string) => str(name).split(/\r?\n/).map(v => v.trim()).filter(Boolean);
   const safeRelative = (name: string, value: string) => {
     if (value.startsWith('/') || /^[A-Za-z]:/.test(value) || value.includes('\\') || value.split('/').includes('..') || /[\x00-\x1f\x7f]/.test(value))
-      throw new Error(`${name} must contain literal repository-relative paths, without '..'.`);
+      throw new Error(`${name} must contain literal repository-relative paths without '..', backslashes or control characters.`);
     return value;
   };
   // Match the CLI's scope spelling before constructing arguments or checking reports.
-  const paths = [...new Set(list('paths').map(v =>
+  const paths = [...new Set(read('paths').split(/\r?\n/).filter(Boolean).map(v =>
     safeRelative('paths', v).split('/').filter(part => part && part !== '.').join('/') || '.'))];
   const scope = choice('scope', ['repository', 'diff'], 'repository');
   if (scope !== 'repository' && paths.length)
