@@ -11190,7 +11190,7 @@ interface PatchPublication {
   dirtyFiles: Set<string>;
   ignoredFiles: Set<string>;
   ignoredDigests: Set<string>;
-  untrackedRepositoryDigests: Set<string>;
+  nestedRepositoryDigests: Set<string>;
   tree: string;
   root: string;
 }
@@ -12132,14 +12132,14 @@ async function preparePatchPublication(
       resolve(patchPathKey(root), path),
     );
   const ignoredFiles = new Set<string>();
-  const untrackedRepositories: string[] = [];
+  const nestedRepositoryPaths: string[] = [];
   const dirtyFiles = new Set(worktreeChanges.filter(Boolean).map(localPath));
   for (let index = 0; index < paths.length; index += 1) {
     const entry = paths[index]!;
     if (!entry) continue;
     // Git collapses untracked embedded checkouts instead of listing their files.
     if (entry.startsWith("?? ") && entry.endsWith("/"))
-      untrackedRepositories.push(entry.slice(3));
+      nestedRepositoryPaths.push(entry.slice(3));
     (entry.startsWith("!! ") ? ignoredFiles : dirtyFiles).add(
       localPath(entry.slice(3)),
     );
@@ -12156,7 +12156,8 @@ async function preparePatchPublication(
   const ignored = ignoredFiles.size
     ? await patchGitRecords(root, listIgnored, dependencies)
     : [];
-  // The parent index only sees a gitlink, even when the child has ignored files.
+  // The parent records a gitlink. Inventory the child's untracked files,
+  // including ignored files, before the patch can copy their contents.
   if (gitControls?.nestedCheckouts.length) {
     const canonicalRoot = await realpath(root);
     for (const checkout of gitControls.nestedCheckouts) {
@@ -12164,7 +12165,15 @@ async function preparePatchPublication(
       const prefix = patchPathKey(relative(canonicalRoot, checkout));
       const paths = await patchGitRecords(
         root,
-        ["-C", checkout, "-c", "core.fsmonitor=false", ...listIgnored],
+        [
+          "-C",
+          checkout,
+          "-c",
+          "core.fsmonitor=false",
+          "ls-files",
+          "--others",
+          "-z",
+        ],
         dependencies,
         {
           environment: {
@@ -12173,7 +12182,8 @@ async function preparePatchPublication(
           },
         },
       );
-      for (const path of paths) if (path) ignored.push(`${prefix}/${path}`);
+      for (const path of paths)
+        if (path) nestedRepositoryPaths.push(`${prefix}/${path}`);
     }
   }
   const ignoredDigests = await publicationContentDigests(
@@ -12181,9 +12191,9 @@ async function preparePatchPublication(
     ignored.filter(Boolean),
     signal,
   );
-  const untrackedRepositoryDigests = await publicationContentDigests(
+  const nestedRepositoryDigests = await publicationContentDigests(
     root,
-    untrackedRepositories,
+    nestedRepositoryPaths,
     signal,
   );
   return {
@@ -12193,7 +12203,7 @@ async function preparePatchPublication(
     ignoredFiles,
     ignoredDigests,
     hostFilterSettings: gitControls?.hostFilterSettings,
-    untrackedRepositoryDigests,
+    nestedRepositoryDigests,
     sshCommand,
     proxyBindings,
     tree,
@@ -12866,7 +12876,7 @@ async function createPatchPullRequest(
   }
   if (
     publication.ignoredDigests.size ||
-    publication.untrackedRepositoryDigests.size
+    publication.nestedRepositoryDigests.size
   ) {
     const changed = await patchGitRecords(
       root,
@@ -12917,8 +12927,8 @@ async function createPatchPullRequest(
         (capturedDigest !== undefined && digests.has(capturedDigest));
       const source = matches(publication.ignoredDigests)
         ? "ignored"
-        : matches(publication.untrackedRepositoryDigests)
-          ? "untracked repository"
+        : matches(publication.nestedRepositoryDigests)
+          ? "nested repository"
           : undefined;
       if (source !== undefined)
         throw new CodexSecurityError(

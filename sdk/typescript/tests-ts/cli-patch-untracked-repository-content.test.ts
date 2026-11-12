@@ -23,6 +23,7 @@ for (const kind of [
   "ignored metadata",
   "committed",
   "initialized submodule",
+  "untracked file in initialized submodule",
   "raw",
   "scrubbed",
   "directory link",
@@ -46,7 +47,12 @@ for (const kind of [
         nestedGit("config", "user.name", "Synthetic User");
         nestedGit("config", "user.email", "synthetic@example.test");
         nestedGit("config", "commit.gpgsign", "false");
-        await writeFile(join(nested, ".gitignore"), "local.txt\n");
+        const ordinarySubmoduleFile =
+          kind === "untracked file in initialized submodule";
+        await writeFile(
+          join(nested, ".gitignore"),
+          ordinarySubmoduleFile ? "different.txt\n" : "local.txt\n",
+        );
         nestedGit("add", ".gitignore");
         nestedGit("commit", "-m", "Synthetic nested baseline");
         let content = "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
@@ -88,7 +94,7 @@ for (const kind of [
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
         }
-        if (kind === "initialized submodule") {
+        if (kind.endsWith("initialized submodule")) {
           const childRemote = await fixtures.create(
             "publication-child-origin-",
           );
@@ -110,6 +116,11 @@ for (const kind of [
           expect(
             git("ls-files", "--others", "--ignored", "--exclude-standard"),
           ).toBe("");
+          if (ordinarySubmoduleFile) {
+            expect(
+              nestedGit("ls-files", "--others", "--exclude-standard"),
+            ).toBe("local.txt");
+          }
         }
         const copiedPrivateContent = copied && kind !== "directory link";
         const blocked = copiedPrivateContent || kind === "scrubbed";
@@ -118,7 +129,9 @@ for (const kind of [
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
           kind.startsWith("ignored") || kind === "initialized submodule"
             ? ""
-            : "?? nested/",
+            : ordinarySubmoduleFile
+              ? "M nested"
+              : "?? nested/",
         );
         const head = git("rev-parse", "HEAD");
         const nestedHead = nestedGit("rev-parse", "HEAD");
@@ -145,7 +158,11 @@ for (const kind of [
               savedScan(resultWithFindings(["high"]), "scan-1", directory),
             onRepositoryCommand: (command, args, cwd, options) => {
               if (command === "git") {
-                if (args.includes("push")) pushes++;
+                if (args.includes("push")) {
+                  pushes++;
+                  if (ordinarySubmoduleFile && copied)
+                    throw new Error("Unexpected push of pre-existing content");
+                }
                 return runGitRepositoryCommand(command, args, cwd, options);
               }
               if (args[1] === "create") creations++;
