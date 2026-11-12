@@ -46,11 +46,24 @@ function canonicalRoot(root: string): Promise<string> {
   return realpath(root).catch(() => resolve(root));
 }
 
-async function campaignPathHelper() {
+async function bundledToolHelpers() {
   const { bundledPluginRoot } = await import("./bundled-plugin.js");
   const path = join(await bundledPluginRoot(), "mcp/helpers.mjs");
-  const project = (await import(pathToFileURL(path).href)).default
-    .inventoryToolPath;
+  return (await import(pathToFileURL(path).href)).default;
+}
+
+export async function trustedHostPathResolver(
+  cwd: string,
+  roots: readonly string[],
+): Promise<(path: string) => string | null> {
+  const { protectedHostPathResolver } = await bundledToolHelpers();
+  if (typeof protectedHostPathResolver !== "function")
+    throw new Error("The bundled plugin is missing host path protection.");
+  return protectedHostPathResolver(cwd, roots);
+}
+
+async function campaignPathHelper() {
+  const { inventoryToolPath: project } = await bundledToolHelpers();
   if (typeof project !== "function")
     throw new Error("The bundled plugin is missing campaign tool lookup.");
   return project;

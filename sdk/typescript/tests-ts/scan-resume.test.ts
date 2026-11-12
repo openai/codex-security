@@ -2,7 +2,7 @@ import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
 import { gitText } from "./support/shell.js";
-import { readJsonLines } from "./support/json.js";
+import { readJson, readJsonLines, writeJson } from "./support/json.js";
 import { hash, randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
 import {
@@ -42,7 +42,11 @@ import { useTestPython } from "./support/python.js";
 import { runPython } from "./support/python-probe.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import { completedEvents, preparedRuntime } from "./support/api-events.js";
+import {
+  completedEvents,
+  failedEvents,
+  preparedRuntime,
+} from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
 
@@ -60,6 +64,7 @@ async function interruptedScan(
     ScanOptions,
     | "safetyIdentifier"
     | "maxCostUsd"
+    | "maxTimeMinutes"
     | "ownerSuggestions"
     | "postScanPrompt"
     | "auth"
@@ -332,11 +337,11 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
-test.skipIf(process.platform !== "win32")(
-  "CLI resumes the original Windows session before its first output checkpoint",
-  async () => {
+test.skipIf(process.platform !== "win32").each(["deep", "standard"] as const)(
+  "CLI resumes the original Windows %s session before its first output checkpoint",
+  async (mode) => {
     const f = await interruptedScan(
-      "deep",
+      mode,
       false,
       {},
       false,
@@ -362,13 +367,19 @@ test.skipIf(process.platform !== "win32")(
           return {
             id: threadId,
             async runStreamed() {
-              throw new Error("Synthetic continuation reached");
+              async function* disconnected() {
+                yield {
+                  type: "error" as const,
+                  message: "Connection failed: error sending request",
+                };
+              }
+              return { events: disconnected() };
             },
           };
         },
       })),
     );
-    expect(stderr.text()).toContain("Synthetic continuation reached");
+    expect(stderr.text()).toContain("Connection failed");
     expect(resumedThread).toBe(f.threadId);
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
@@ -380,18 +391,18 @@ test.skipIf(process.platform !== "win32")(
 );
 
 test.each([
-  "failed",
-  "canceled",
-  "standard",
-  "changed",
-  "replaced",
-  "wrong-owner",
-])(
-  "resume refuses %s scans without altering their saved state",
-  async (scenario) => {
-    const f = await interruptedScan(
-      scenario === "standard" ? "standard" : "deep",
-    );
+  ["standard", "failed"],
+  ["standard", "canceled"],
+  ["standard", "changed"],
+  ["deep", "failed"],
+  ["deep", "canceled"],
+  ["deep", "changed"],
+  ["deep", "replaced"],
+  ["deep", "wrong-owner"],
+] as const)(
+  "%s resume refuses %s scans without altering their saved state",
+  async (mode, scenario) => {
+    const f = await interruptedScan(mode);
     if (scenario === "failed")
       await f.command([
         "fail-scan",
@@ -435,9 +446,7 @@ test.each([
           ? "checkout is missing or was replaced"
           : scenario === "wrong-owner"
             ? "original owning CLI session"
-            : scenario === "standard"
-              ? "Deep Scan with a saved CLI launch recipe"
-              : "running scan; completed, failed, and canceled",
+            : "running scan; completed, failed, and canceled",
     );
     expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
       before,
@@ -774,6 +783,260 @@ test.each([false, true])(
     );
   },
 );
+
+test("Standard resume preserves checkpoints through another disconnect and completes the same scan", async () => {
+  const f = await interruptedScan("standard", false, {
+    maxTimeMinutes: 5,
+    ownerSuggestions: false,
+  });
+  const draftPath = join(f.scanDir, "drafts", `${f.scanId}.json`);
+  await mkdir(dirname(draftPath), { recursive: true });
+  async function saveDraft(complete: boolean) {
+    await writeJson(draftPath, {
+      manifest: {
+        scan: { complete, scope: { includePaths: ["."], excludePaths: [] } },
+      },
+      findings: { findings: [] },
+      reviewState: {
+        inventoryStrategy: "directory",
+        surfaces: [
+          {
+            id: "source",
+            label: "Source review",
+            disposition: "no_issue_found",
+            receiptRefs: [],
+          },
+        ],
+        deferred: [],
+        explicitExclusions: [],
+      },
+    });
+    await f.command([
+      "write-scan-draft",
+      "--scan-id",
+      f.scanId,
+      "--draft-path",
+      draftPath,
+    ]);
+  }
+  await saveDraft(false);
+  const head = await readJson<{ checkpoint: string }>(
+    join(f.scanDir, "checkpoint-head.json"),
+  );
+  const checkpoint = join(f.scanDir, "checkpoints", head.checkpoint);
+  const readDraft = () =>
+    Promise.all(
+      ["scan-manifest.json", "findings.json", "checkpoint-head.json"].map(
+        (name) => readFile(join(f.scanDir, name), "utf8"),
+      ),
+    );
+  const original = await readDraft();
+  let attempts = 0;
+  const initial = await f.command([
+    "get-cli-scan-resume",
+    "--scan-id",
+    f.scanId,
+  ]);
+  const deps = resumeDependencies(f, () => ({
+    startThread: () => fail("Resume must not start a new session"),
+    resumeThread(id, options) {
+      expect(id).toBe(f.threadId);
+      expect(options.workingDirectory).toBe(f.scanDir);
+      return {
+        id,
+        async runStreamed(prompt) {
+          expect(prompt).toContain(
+            new Date(initial["startedAt"] as string).toISOString(),
+          );
+          expect(await readDraft()).toEqual(original);
+          attempts++;
+          await appendFile(
+            f.sessionPath,
+            JSON.stringify({
+              type: "event_msg",
+              payload: {
+                type: "token_count",
+                info: {
+                  total_token_usage: {
+                    input_tokens: 10000 + attempts * 100,
+                    output_tokens: 2000 + attempts * 20,
+                  },
+                },
+              },
+            }) + "\n",
+          );
+          if (attempts === 1)
+            return {
+              events: failedEvents("Connection failed: error sending request"),
+            };
+          await saveDraft(true);
+          return { events: completedEvents(id) };
+        },
+      };
+    },
+  }));
+  const interrupted = createCliTest(main);
+  expect(
+    await interrupted.runCli(["scans", "resume", f.scanId, "--json"], deps),
+  ).toBe(2);
+  expect(interrupted.stderr.text()).toContain(
+    `codex-security scans resume ${f.scanId}`,
+  );
+  expect(
+    await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
+  ).toEqual(initial);
+  const completed = createCliTest(main);
+  expect(
+    await completed.runCli(["scans", "resume", f.scanId, "--json"], deps),
+    completed.stderr.text(),
+  ).toBe(0);
+  expect(attempts).toBe(2);
+  expect(
+    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+  ).toMatchObject({
+    scanId: f.scanId,
+    continuationThreadId: f.threadId,
+    progress: { status: "complete" },
+    usage: { totalTokens: 12240 },
+  });
+  expect(hash("sha256", await readFile(checkpoint)) + ".json").toBe(
+    head.checkpoint,
+  );
+  await expect(
+    f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
+  ).rejects.toThrow("running scan");
+});
+
+test("a new default Standard scan remains resumable after a network failure", async () => {
+  const f = await interruptedScan("standard");
+  const scanDir = join(f.root, "new-scan");
+  let scanId = "";
+  let initialPrompt = "";
+  const outcomes: string[] = [];
+  const deps = resumeDependencies(
+    f,
+    ({ env }) => ({
+      startThread: () => ({
+        id: f.threadId,
+        async runStreamed(prompt) {
+          initialPrompt = prompt;
+          scanId = env!["CODEX_SECURITY_SCAN_ID"]!;
+          await writeFile(
+            f.sessionPath,
+            JSON.stringify({
+              type: "session_meta",
+              payload: { id: f.threadId, cwd: scanDir },
+            }) + "\n",
+          );
+          async function* disconnected() {
+            yield { type: "thread.started" as const, thread_id: f.threadId };
+            yield {
+              type: "error" as const,
+              message:
+                "Reconnecting... waiting for network (Connection failed: error sending request)",
+            };
+          }
+          return { events: disconnected() };
+        },
+      }),
+    }),
+    {},
+    (options) => new OperationTelemetry(options),
+  );
+  await using client = deps.createSecurity({});
+  await expect(
+    client.run(f.repository, {
+      maxTimeMinutes: 5,
+      onTelemetry: (event) => {
+        if (event.outcome) outcomes.push(event.outcome);
+      },
+      outputDir: scanDir,
+      target: ["source.py"],
+      ownerSuggestions: false,
+    }),
+  ).rejects.toThrow("codex-security scans resume");
+  expect(outcomes).toEqual(["failed"]);
+  expect(scanId).not.toBe(f.scanId);
+  const saved = await f.command(["get-cli-scan-resume", "--scan-id", scanId]);
+  const start = (saved["recipe"] as { timeBudgetStartedAt: string })
+    .timeBudgetStartedAt;
+  expect(typeof start).toBe("string");
+  expect(initialPrompt).toContain(start);
+  expect(saved).toMatchObject({
+    scanId,
+    scanDir,
+    threadId: f.threadId,
+    recipe: {
+      mode: "standard",
+      target: { kind: "paths", paths: ["source.py"] },
+    },
+  });
+});
+
+test.each(["access", "local"])(
+  "a Standard resume %s failure stops the scan",
+  async (kind) => {
+    const f = await interruptedScan("standard");
+    const cli = createCliTest(main);
+    const code = await cli.runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Unexpected new session"),
+        resumeThread: (id) => ({
+          id,
+          async runStreamed() {
+            if (kind === "local")
+              throw new Error(
+                "Invalid network configuration in saved settings",
+              );
+            return { events: failedEvents("403 forbidden: access denied") };
+          },
+        }),
+      })),
+    );
+    expect(code).toBe(2);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "failed" } });
+    expect(cli.stderr.text()).not.toContain(
+      `codex-security scans resume ${f.scanId}`,
+    );
+  },
+);
+
+test("canceling Standard resume keeps the scan canceled", async () => {
+  const f = await interruptedScan("standard");
+  const abort = new AbortController();
+  const deps = resumeDependencies(f, () => ({
+    startThread: () => fail("Unexpected new session"),
+    resumeThread: (id) => ({
+      id,
+      async runStreamed() {
+        async function* canceled() {
+          yield { type: "thread.started" as const, thread_id: id };
+          abort.abort();
+          abort.signal.throwIfAborted();
+        }
+        return { events: canceled() };
+      },
+    }),
+  }));
+  await using client = deps.createSecurity({});
+  await expect(
+    client.run(f.repository, {
+      mode: "standard",
+      resumeScanId: f.scanId,
+      outputDir: f.scanDir,
+      signal: abort.signal,
+    }),
+  ).rejects.toThrow("interrupted");
+  expect(
+    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+  ).toMatchObject({ progress: { status: "canceled" } });
+  await expect(
+    f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
+  ).rejects.toThrow("running scan");
+});
 
 test.each([
   [undefined, 2],

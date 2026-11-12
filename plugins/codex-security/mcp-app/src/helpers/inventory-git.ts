@@ -257,7 +257,7 @@ function canonicalComponent(path: string): string {
 // A campaign can replace files in its checkouts after preparing the workers.
 // Check every component owned by the campaign, including intermediate links
 // whose current destination is an external executable.
-function campaignPathCheck(
+function campaignPathResolver(
   isProtected: (path: string) => boolean,
   cwd: string,
 ) {
@@ -296,11 +296,19 @@ function campaignPathCheck(
   return (path: string) => {
     try {
       const target = expand(cwd, path);
-      return target !== null && !isProtected(target);
+      return target !== null && !isProtected(target) ? target : null;
     } catch {
-      return false;
+      return null;
     }
   };
+}
+
+function campaignPathCheck(
+  isProtected: (path: string) => boolean,
+  cwd: string,
+) {
+  const resolvePath = campaignPathResolver(isProtected, cwd);
+  return (path: string) => resolvePath(path) !== null;
 }
 
 // Confirm the dispatcher starts through a link on the actual temporary mount.
@@ -418,6 +426,24 @@ function scriptPathDirectory(
   return view;
 }
 
+function protectedPathBoundary(roots: readonly string[]) {
+  const key = (path: string) =>
+    sep === "\\" ? windowsLinkPath(path).toLowerCase() : path;
+  const boundaries = new Set(roots.map(key));
+  return (entry: string) => {
+    for (const parent of ancestors(entry))
+      if (boundaries.has(key(parent))) return true;
+    return false;
+  };
+}
+
+export function protectedHostPathResolver(
+  cwd: string,
+  roots: readonly string[],
+) {
+  return campaignPathResolver(protectedPathBoundary(roots), cwd);
+}
+
 export function inventoryToolPath(
   path: string,
   cwd: string,
@@ -425,14 +451,7 @@ export function inventoryToolPath(
   mode: "native" | "script" | "campaign",
 ) {
   const temporary: string[] = [];
-  const key = (path: string) =>
-    sep === "\\" ? windowsLinkPath(path).toLowerCase() : path;
-  const boundaries = new Set(roots.map(key));
-  const isProtected = (entry: string) => {
-    for (const parent of ancestors(entry))
-      if (boundaries.has(key(parent))) return true;
-    return false;
-  };
+  const isProtected = protectedPathBoundary(roots);
   const pathAllowed = campaignPathCheck(isProtected, cwd);
   // Windows removes unsafe search entries in the SDK, before CreateProcess.
   if (windows) return { path, allows: pathAllowed, cleanup() {} };
