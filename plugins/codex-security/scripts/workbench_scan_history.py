@@ -148,9 +148,7 @@ def require_resume_target(scan: sqlite3.Row) -> Path:
         raise SystemExit(
             "Cannot resume: the original checkout is missing or was replaced."
         ) from exc
-    if scan_target_identity(
-        repository, None, expected_digest=scan["target_snapshot_digest"]
-    ) != (
+    if scan_target_identity(repository, None, expected_digest=scan["target_snapshot_digest"]) != (
         scan["target_revision"],
         scan["target_snapshot_digest"],
         scan["target_device"],

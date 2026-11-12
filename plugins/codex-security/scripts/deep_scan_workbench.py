@@ -341,6 +341,8 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
     return {
         "scanId": run["scan_id"],
         "sdkOwnsCompletion": scan["recipe_json"] is not None,
+        "model": scan["model"],
+        "reasoningEffort": scan["reasoning_effort"],
         "serviceTier": run["service_tier"],
         **({"severityRubric": recipe["severityRubric"]} if "severityRubric" in recipe else {}),
         "targetPath": scan["target_path"],
@@ -730,7 +732,8 @@ def begin_deep_scan_for_scan(
                     (dependencies().now(), scan_id),
                 )
                 resumed = True
-            update_scan_model(connection, scan_id, args)
+            else:
+                update_scan_model(connection, scan_id, args)
         return {
             **deep_scan_result(connection, scan_id, start_disposition="joined"),
             **({"coordinatorDisposition": "claimed"} if resumed else {}),

@@ -2294,8 +2294,9 @@ launch recipe and its original session, it also shows the resume command to use 
 The scan must still be `running`, with its original checkout, output directory,
 and Codex session in the same state directory. Checkout identity, revision, and
 contents must match. Completed, failed, and canceled scans need a rerun instead.
-This includes usage-limit pauses whose Deep Scan coordinator is `interrupted`
-with `resumeAvailable: true`. Wait for the allowance to reset before resuming.
+A scan paused by a usage limit remains resumable when its Deep Scan coordinator
+reports `interrupted` with `resumeAvailable: true`. Wait for the allowance to
+reset before resuming. Quota recovery reuses the saved model and reasoning effort.
 Plugin callers resume by calling `start_codex_security_deep_scan` with the same
 `scanId` and, when supplied, its original `handoffClaimToken`.
 

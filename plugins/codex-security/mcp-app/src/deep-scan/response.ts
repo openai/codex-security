@@ -78,6 +78,8 @@ export const runSchema = z
       scanId: requiredString,
       sdkOwnsCompletion: z.boolean().optional(),
       resumeAvailable: z.boolean().optional(),
+      model: optionalString,
+      reasoningEffort: optionalString,
       serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
       discoveryStarted: z.boolean().optional(),

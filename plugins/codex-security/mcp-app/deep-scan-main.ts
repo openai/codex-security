@@ -77,8 +77,6 @@ export async function runCliDeepScan(): Promise<void> {
           }),
         parentSandbox,
         threadId: input.threadId,
-        model: input.model,
-        reasoningEffort: input.reasoningEffort,
       });
       if (controller.signal.aborted) stop();
       terminal = await started.coordinator.wait(controller.signal);

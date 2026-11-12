@@ -26,8 +26,6 @@ export function startDeepScanEngine(options: {
   parentTurn?: DeepScanParentTurn;
   threadId: string;
   handoffClaimToken?: string;
-  model?: string;
-  reasoningEffort?: string;
   log?: DeepScanLogger;
   onStart?: CoordinatorOptions["onStart"];
 }) {
@@ -39,8 +37,8 @@ export function startDeepScanEngine(options: {
     options: {
       store: options.store,
       executor: new CodexSdkWorkerExecutor({
-        model: options.model,
-        reasoningEffort: options.reasoningEffort,
+        model: run.model,
+        reasoningEffort: run.reasoningEffort,
         serviceTier: run.serviceTier,
         deepScanConfig: run.config,
         parentSandbox: options.parentSandbox,

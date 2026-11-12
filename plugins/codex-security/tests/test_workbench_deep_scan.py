@@ -65,7 +65,7 @@ def begin_target_scan(
     codex_home: Path,
     target: Path,
     scan_root: Path,
-    *,
+    *options: str,
     thread_id: str = "thread-deep-scan",
     user_context: str | None = None,
     service_tier: str | None = None,
@@ -79,6 +79,7 @@ def begin_target_scan(
         ".",
         "--scan-root",
         str(scan_root),
+        *options,
         *(("--user-context-stdin",) if user_context is not None else ()),
         *(("--service-tier", service_tier) if service_tier is not None else ()),
         environment=deep_environment(codex_home),
@@ -86,14 +87,14 @@ def begin_target_scan(
     )
 
 
-def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> DeepScan:
+def start_empty_target_scan(tmp_path: Path, *options: str, config: str | None = None) -> DeepScan:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     if config is not None:
         write_deep_config(codex_home, config)
     target = tmp_path / "target"
     target.mkdir()
-    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
+    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans", *options)["deepScan"]
     return DeepScan(state_dir, codex_home, str(run["scanId"]), Path(str(run["scanDir"])))
 
 
@@ -1007,7 +1008,9 @@ def test_worker_failure_diagnostic_survives_coordinator_adoption(
 
 @pytest.mark.cross_platform
 def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path) -> None:
-    deep = start_empty_target_scan(tmp_path)
+    deep = start_empty_target_scan(
+        tmp_path, "--model", "original-model", "--reasoning-effort", "medium"
+    )
     claimed = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
     generation = claimed["coordinatorGeneration"]
     accepted, _, _, result = deep.dispatch_discovery_worker(
@@ -1069,8 +1072,14 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
         deep.state_dir,
         deep.id,
         "thread-deep-scan",
+        "--model",
+        "later-turn-model",
+        "--reasoning-effort",
+        "high",
         environment=deep_environment(deep.codex_home),
     )["deepScan"]
+    assert resumed["model"] == "original-model"
+    assert resumed["reasoningEffort"] == "medium"
     assert resumed["scanId"] == deep.id
     assert resumed["status"] == "running"
     assert resumed["error"] is None

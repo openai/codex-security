@@ -1053,7 +1053,6 @@ export function createCodexSecurityServer(): McpServer {
           registry: deepScanCoordinators,
           store: deepScanStore,
           runWorkbench,
-          ...modelSettings,
           parentSandbox,
           parentTurn: codexParentTurnFromExtra(extra),
           pythonCommand: await resolvePythonCommand(),

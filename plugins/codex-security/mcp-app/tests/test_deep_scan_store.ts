@@ -122,10 +122,22 @@ async function testResumeClaimsItsNewGeneration() {
       startDisposition: "joined",
       coordinatorDisposition:
         args[0] === "begin-deep-scan" ? "claimed" : "adopted",
-      deepScan: { coordinatorGeneration: 3 },
+      deepScan: {
+        coordinatorGeneration: 3,
+        model: "original-model",
+        reasoningEffort: "medium",
+      },
     });
   });
-  await store.begin({ scanId, threadId: "owner", scanRoot: "/fixture/scans" });
+  const resumed = await store.begin({
+    scanId,
+    threadId: "owner",
+    scanRoot: "/fixture/scans",
+    model: "later-turn-model",
+    reasoningEffort: "high",
+  });
+  assert.equal(resumed.model, "original-model");
+  assert.equal(resumed.reasoningEffort, "medium");
   const claim = await store.claimCoordinator({ scanId, threadId: "owner" });
   assert.equal(flagValue(calls[1], "--coordinator-generation"), "3");
   assert.equal(claim.acquired, true);
