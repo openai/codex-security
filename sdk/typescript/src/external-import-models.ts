@@ -18,7 +18,8 @@ export type Provider =
   | "continuum"
   | "checkmarx"
   | "trivy"
-  | "armorcode";
+  | "armorcode"
+  | "tenable";
 export type SourceKey = string;
 export type ClientId = string;
 export type SourceFindingId = string;

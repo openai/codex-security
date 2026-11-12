@@ -6,9 +6,8 @@ that Endor reports. You can also import self-contained `endorctl` SARIF 2.1.0
 with finding UUIDs. A later SARIF import for the same UUID, destination
 and source key can replace the stored commit, package and
 advisory details, and leave severity `unknown`. Use native JSON for updates
-when you need those fields. If the Cloud repository publisher requires a
-reported severity, the preview lists unscored findings under exclusions. Local
-imports and the private inbox can retain findings with an unreported severity.
+when you need those fields. Local imports retain unscored findings. For Cloud,
+check the preview’s exclusions if the destination requires a reported severity.
 
 Native JSON keeps vulnerability and malware advisory IDs and aliases. When
 Endor supplies only the fully qualified dependency name, the import preserves

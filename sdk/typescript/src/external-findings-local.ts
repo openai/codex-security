@@ -954,8 +954,7 @@ export function distinctSourceRepositories(
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
-  options: NormalizedLocalImportOptions &
-    ({ provider: "tenable" } | { provider: Provider }),
+  options: NormalizedLocalImportOptions & { provider: Provider },
   dependencies: LocalExternalImportDependencies,
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),

@@ -26,7 +26,7 @@ which changes can give an occurrence a different ID.
 | [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
 | [ArmorCode](armorcode.md)                                                             | ArmorCode finding ID (`id`) within the source key.                                                                                                                                       |
 | [AWS Continuum](continuum.md)                                                         | Issue ARN for issue exports. For finding exports, a list summary and a detailed response share the finding ARN.                                                                          |
-| [Tenable One](tenable.md)                                                             | Exact Tenable `finding_id` within the local checkout and a stable tenant/asset source key. Use the Code Repository asset UUID in the key.                                                |
+| [Tenable One](tenable.md)                                                             | Exact Tenable `finding_id`. Keep the same source key for the tenant and Code Repository asset UUID.                                                                                      |
 | [Checkmarx SAST](checkmarx.md)                                                        | Checkmarx One uses the similarity ID and result hash. CxSAST scopes the similarity ID and ordered flow to the project and query.                                                         |
 | [Wiz](wiz.md)                                                                         | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
 | [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)   | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
@@ -88,8 +88,9 @@ all locations and the complete saved evidence. Each record includes
 
 **Private Cloud inbox.** Check the format, size and digest under
 `privateImport` in the preview, then inspect the job receipt for errors and
-unprocessed findings. Open a finding in the inbox to assess it and publish
-the assessment when you're ready to share it.
+unprocessed findings. Open a finding in the inbox to review its evidence and
+assess it against the repository. Cloud offers shared publication for eligible
+scanners and workspaces.
 
 Reimporting identical evidence for the same occurrence leaves the saved
 observation in place. If the job reports `source_order_unknown`, Cloud
@@ -101,9 +102,9 @@ authorize that update.
 **Cloud repository publisher.** Each item includes a `source_finding_id` and an `expected_version`.
 Check the per-item result for conflicts. The receipt's source-report,
 observation and canonical-finding IDs identify Cloud records. Read the source
-report for the imported evidence. If this destination requires a known
-severity, findings whose scanner reported no severity appear in the preview's
-exclusions. The private inbox also accepts unknown severity.
+report for the imported evidence. All scanner providers use the same import and
+source-report endpoints. The CLI reuses the approved request ID and evidence
+when it resumes a saved submission.
 
 The repository publisher allows up to 256 KiB and 20 levels of nesting per finding. The publisher
 batches up to 100 items and 5 MiB per request. Local file imports do not apply
@@ -144,6 +145,10 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
+The CLI reuses approved request IDs and skips batches with receipts. For hosted
+Semgrep and Snyk imports, finish a pending submission before changing the
+evidence for one of its findings. Other findings can proceed independently.
+
 For stored findings, reprepare the interrupted source group with its saved selection
 and review ID. Its checkpoint belongs to the selected checkout and finding versions.
 After a repository reset, the workbench records any acknowledged receipts before
@@ -153,9 +158,7 @@ retiring the old request. Review the new destination before publishing again.
 the CLI or SDK build that created their checkpoints. Keep the original input and
 state directory. If the outcome is uncertain, check the private inbox job or
 read back the repository’s source reports to identify the accepted findings
-before preparing a fresh submission. The current client starts a new approval
-for a submission made with the retired checkpoint format.
-[Verify an import](README.md#verify-the-import)
+before preparing a fresh submission. [Verify an import](README.md#verify-the-import)
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

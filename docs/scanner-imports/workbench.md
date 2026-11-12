@@ -68,7 +68,7 @@ For a saved export, say which checkout and report to use. For an upstream read, 
 | “Import completed Checkmarx scan S for payments.”                        | Exports Checkmarx One JSON with `cx results show`, or reads the self-managed CxSAST scan’s XML.                                   | The retained scan ID is S and the result’s ordered path nodes match the export. [Checkmarx](checkmarx.md)                             |
 | “Get Endor Findings A and B from this project and namespace.”            | Filters `endorctl api list --resource Finding` to the project, scan context and requested UUIDs.                                  | The preview contains both requested finding UUIDs once. [Endor Labs](endor.md)                                                        |
 | “Import Veracode STATIC policy flaws for application A.”                 | Reads the application’s Findings API pages for `scan_type=STATIC`, retaining pagination and application links.                    | A flaw on the last page retains its native `issue_id` and application URL. [Veracode](veracode.md)                                    |
-| “Import Tenable findings A and B from this Code Repository asset.”       | Uses the Inventory export or existing CSVs, selects the asset and finding UUIDs, and checks the Git remote before saving locally. | Only A and B belong to the import. Cloud preview identifies Tenable as local-only. [Tenable One](tenable.md)                          |
+| “Import Tenable findings A and B from this Code Repository asset.”       | Uses the Inventory export or existing CSVs, selects the asset and finding UUIDs, and checks the Git remote before saving locally. | The stored finding IDs match A and B. A Cloud preview for the import includes their native evidence. [Tenable One](tenable.md)        |
 
 For the fresh-scan examples above, check the manifest path and installed version for Trivy and the rule ID and source line for Semgrep. For a CI artifact, edit the affected source file after the scan and check that the preview retains the line recorded in the report.
 
@@ -76,7 +76,7 @@ For the fresh-scan examples above, check the manifest path and installed version
 
 > Import this AcmeScanner JSON for acme/payments. Use its occurrence keys and show me any rows you skip.
 
-For an unfamiliar format, Codex inspects sample records and writes a parser. It emits `{ read, findings, excluded }` with a stable string `source_finding_id` and evidence for each finding. It passes the result to `prepareNormalizedLocalImport(data, { provider, sourceKey, repository, sourceRepositoryUrl })`, inspects `.preview`, then calls `.import()` for the requested write. A nonempty import records its membership, including findings already stored at the same version. Tenable and custom provider names can be used locally. [SDK import contract](../../sdk/typescript/docs/sdk.md#import-external-findings)
+For an unfamiliar format, Codex inspects sample records and writes a parser. It emits `{ read, findings, excluded }` with a stable string `source_finding_id` and evidence for each finding. It passes the result to `prepareNormalizedLocalImport(data, { provider, sourceKey, repository, sourceRepositoryUrl })`, inspects `.preview`, then calls `.import()` for the requested write. A nonempty import records its membership, including findings already stored at the same version. Custom provider names can be used locally. [SDK import contract](../../sdk/typescript/docs/sdk.md#import-external-findings)
 
 ## Publish in a later session
 
@@ -113,7 +113,7 @@ Run these from the repository root after installing the pinned SDK/plugin depend
 
 **Publish and resume.** Import Trivy and Guardian, delete the files, and preview a subset across both sources. Drop the response after the server accepts the second source. Resume using that group's original approval. Check that the first group was sent once, the second receives its receipt, and the unselected row has none. Change the destination or remote version and check that the old approval is rejected before any upload.
 
-For each Cloud-supported reader, preview a native file with `prepareExternalPublication`, then import the same file locally. Delete the file and preview the import ID with `prepareStoredFindingsPublication` using the same Cloud repository and source key. Compare the destination, occurrence IDs, evidence, report metadata and exclusions. Publish to a disposable destination and verify a receipt for each accepted local version. For Tenable and a custom provider, check the exclusion reason and zero uploads.
+For each Cloud-supported reader, preview a native file with `prepareExternalPublication`, then import the same file locally. Delete the file and preview the import ID with `prepareStoredFindingsPublication` using the same Cloud repository and source key. Compare the destination, occurrence IDs, evidence, report metadata and exclusions. Publish to a disposable destination and verify a receipt for each accepted local version. For a custom provider, check the exclusion reason and zero uploads.
 
 ```sh
 (cd sdk/typescript && bun test --timeout 60000 tests-ts/external-findings-publish.test.ts tests-ts/stored-finding-projection.test.ts tests-ts/stored-native-private-report.test.ts tests-ts/sonar-import.test.ts)

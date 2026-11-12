@@ -154,7 +154,6 @@ import { prepareSonarImport } from "./sonar-import.js";
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
   EXTERNAL_FINDINGS_READERS,
-  requireCloudReader,
 } from "./external-findings-read.js";
 import {
   externalImportDisposition,
@@ -4146,7 +4145,7 @@ export async function main(
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
           .describe(
-            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable requires --to local and --source-repository-url.",
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable requires --source-repository-url.",
           ),
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
@@ -4349,7 +4348,6 @@ export async function main(
               else if (!structured) writeDiagnostic(summary);
               return { ...result };
             }
-            requireCloudReader(publicationOptions);
             const prepared = await prepareExternalPublication(
               report,
               publicationOptions,

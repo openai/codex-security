@@ -5,7 +5,6 @@ import type {
 } from "./external-findings.js";
 import { readScannerJson, sarifRunRepositories } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
-import { CodexSecurityError } from "./errors.js";
 import { readTenableFindings } from "./tenable-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -37,8 +36,6 @@ import { isRecord } from "./record.js";
 import { readWizSelection, wizFindingRepository } from "./wiz-findings.js";
 import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 
-export type LocalFindingProvider = Provider | "tenable";
-
 /** File reader names mapped to the provider stored with each finding. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
@@ -57,27 +54,14 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   continuum: "continuum",
   checkmarx: "checkmarx",
   tenable: "tenable",
-} as const satisfies Record<string, LocalFindingProvider>;
+} as const satisfies Record<string, Provider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
-export type CloudFindingsReader = Exclude<ExternalFindingsReader, "tenable">;
-
-export function requireCloudReader(
-  options: ExternalFindingsReaderOptions,
-): asserts options is ExternalFindingsReaderOptions & {
-  provider: CloudFindingsReader;
-} {
-  if (options.provider === "tenable")
-    throw new CodexSecurityError(
-      "Tenable findings require a local import (--to local).",
-    );
-}
-
 export const EXTERNAL_FINDINGS_READERS = Object.keys(
   EXTERNAL_FINDINGS_PROVIDERS,
 ) as ExternalFindingsReader[];
 
-/** File readers available in this SDK. Cloud supports a subset of these readers. */
+/** File readers available for local and Cloud imports. */
 export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
@@ -183,10 +167,8 @@ export async function readExternalFindings(
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
   const url = options.sourceRepositoryUrl ?? "";
-  if (provider === "tenable") {
-    if (target === "cloud") requireCloudReader(options);
-    return { findings: await readTenableFindings(path, url) };
-  }
+  if (provider === "tenable")
+    return { findings: await readTenableFindings(path, url, target) };
   if (provider === "sonar") {
     const findings = await readSonarFindings(path, url, target);
     const binding = findings.report?.["repositoryUrl"];
