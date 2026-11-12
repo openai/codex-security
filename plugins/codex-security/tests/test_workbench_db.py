@@ -3215,3 +3215,22 @@ def test_large_patch_preview_preserves_digest_checks(
     captured = capfd.readouterr()
     assert captured.out.removeprefix("\ufeff").strip(" \t\r\n") == ""
     assert captured.err.removeprefix("\ufeff") == ""
+
+
+@pytest.mark.cross_platform
+def test_patch_preview_counts_hunk_lines_that_look_like_file_headers(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    patch = (
+        b"diff --git a/query.sql b/query.sql\n"
+        b"--- a/query.sql\n"
+        b"+++ b/query.sql\n"
+        b"@@ -1,2 +1,2 @@\n"
+        b"--- returns every account\n"
+        b"-SELECT * FROM accounts;\n"
+        b"+++ returns the caller's accounts\n"
+        b"+SELECT * FROM accounts WHERE owner_id = ?;\n"
+    )
+    (tmp_path / "remediation.patch").write_bytes(patch)
+    digest = f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    _, stats = namespace["patch_artifact_preview"](tmp_path, "remediation.patch", digest)
+    assert stats == {"additions": 2, "deletions": 2, "fileCount": 1, "previewTruncated": False}

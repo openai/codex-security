@@ -65,6 +65,7 @@ def patch_artifact_preview(
     file_count = 0
     old_headers = 0
     new_headers = 0
+    old_lines = new_lines = 0
     at_line_start = True
     try:
         with open_scan_file(scan_dir, relative_path) as patch:
@@ -72,13 +73,27 @@ def patch_artifact_preview(
                 digest.update(chunk)
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
+                if at_line_start and (old_lines or new_lines):
+                    # Hunk lines such as a removed "-- comment" are content, not file headers.
+                    if chunk.startswith(b"+"):
+                        additions += 1
+                        new_lines -= 1
+                    elif chunk.startswith(b"-"):
+                        deletions += 1
+                        old_lines -= 1
+                    elif not chunk.startswith(b"\\"):  # No newline at end of file
+                        old_lines -= 1
+                        new_lines -= 1
+                elif at_line_start:
                     if chunk.startswith(b"diff --git "):
                         file_count += 1
                     elif chunk.startswith(b"+++ "):
                         new_headers += 1
                     elif chunk.startswith(b"--- "):
                         old_headers += 1
+                    elif hunk := _HUNK_HEADER.match(chunk):
+                        old_lines = int(hunk[1] or b"1")
+                        new_lines = int(hunk[2] or b"1")
                     elif chunk.startswith(b"+"):
                         additions += 1
                     elif chunk.startswith(b"-"):
