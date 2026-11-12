@@ -2191,6 +2191,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           const entry = workerConfigurations[index];
           const environment = {
             ...process.env,
+            ...scanGitEnvironments[index],
             ...temporaryEnvironments[index],
             CODEX_SECURITY_STATE_DIR: path.join(fixture.root, `state-${index}`),
             CODEX_SECURITY_CONFIG_PATH: entry.path,
@@ -2199,6 +2200,9 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             PYTHONIOENCODING: entry.pythonIoEncoding,
             XDG_CACHE_HOME: path.join(fixture.root, `cache-${index} `),
             CODEX_MCP_NODE_PATH: nodePaths[index],
+            _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: path.dirname(
+              nodePaths[index],
+            ),
             LD_LIBRARY_PATH: path.join(fixture.root, `libraries-${index}`),
             DYLD_LIBRARY_PATH: path.join(fixture.root, `libraries-${index}`),
             DYLD_FALLBACK_LIBRARY_PATH: path.join(
