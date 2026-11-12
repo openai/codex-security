@@ -19,6 +19,7 @@ import {
 } from "./private-finding-import.js";
 import { readCloudCredentials } from "./cloud-publish.js";
 import type { LocalExternalImportOptions } from "./external-findings-import.js";
+import { armorCodeRepositoryUrl } from "./armorcode-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { tenableReportFormat } from "./tenable-findings.js";
 import {
@@ -684,7 +685,10 @@ export async function prepareExternalPublication(
   } else {
     const parsed = await readExternalFindings(path, settings);
     input = normalizedPublicationInput(parsed.findings, provider);
-    if (provider === "endor")
+    if (
+      provider === "endor" ||
+      (provider === "continuum" && parsed.findings.report)
+    )
       fileRepositories = () => parsed.sourceRepositories ?? [];
   }
   return preparePublicationInput(
@@ -1555,6 +1559,8 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
+    if (provider === "armorcode")
+      requireDestination("ArmorCode source", declaredUrl);
     if (report?.["format"] === guardianSelectionFormat)
       requireDestination(
         "Guardian source",
@@ -1615,6 +1621,7 @@ async function preparePublicationInput(
       if (binding) requireDestination(binding.findingId, binding.url);
     }
     const checkOnlyProjected = !checkNative(
+      "armorcode",
       "blackduck",
       "inspector",
       "veracode",
@@ -1648,7 +1655,9 @@ async function preparePublicationInput(
         checkmarxRepository(finding)?.url,
         evidence.details?.repository?.url,
       ];
-      if (provider === "wiz") {
+      if (provider === "armorcode") {
+        urls.push(armorCodeRepositoryUrl(evidence.source_data, "cloud"));
+      } else if (provider === "wiz") {
         const native =
           hasProjection ||
           (!historical && isWizPackageFinding(evidence.source_data));

@@ -9,6 +9,11 @@ export {
   readSealedScanFile,
   requireSealedScanFile,
 } from "./src/sealed-contract.js";
+import { withInventoryToolPaths } from "./src/helpers/inventory-git.js";
+export {
+  inventoryToolPath,
+  protectedHostPathResolver,
+} from "./src/helpers/inventory-git.js";
 export { validateTrackingSource } from "./src/helpers/validate-tracking-source.js";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
@@ -105,9 +110,11 @@ function runHelper(): void {
     command === "make-hosted-repo-scope-input" ||
     command === "make-diff-rank-input"
   ) {
-    void inventoryCommand(command, args).then((code) => {
-      process.exitCode = code;
-    });
+    void withInventoryToolPaths(() => inventoryCommand(command, args)).then(
+      (code) => {
+        process.exitCode = code;
+      },
+    );
   } else if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
   } else if (command === "normalize-candidates") {

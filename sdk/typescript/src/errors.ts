@@ -43,6 +43,7 @@ export class DeduplicationReviewError extends CodexSecurityError {
   }
 }
 
+export class CodexConnectionError extends CodexSecurityError {}
 export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
