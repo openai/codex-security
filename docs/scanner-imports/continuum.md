@@ -231,11 +231,11 @@ native finding detail. If an AWS read fails, retry the export before import.
 Publish this report with `publish findings --provider continuum` and the verified
 `--source-repository-url`. The record is identified by the finding ARN.
 
-Imported validation artifacts are available to attack-path scoring in
-`evidence.source_data.evidence_artifacts`. The local import retains exact patch
-bytes and artifact descriptors in
-`evidence.source_data.patches`. Cloud retains the descriptors and marks
-oversized bodies with `contentOmitted: "cloud_evidence_limit"`.
+Attack-path scoring reads the imported validation artifacts from
+`evidence.source_data.evidence_artifacts`. Matching patches are in
+`evidence.source_data.patches`. Local imports keep the full validation and
+patch bodies. When a body exceeds the Cloud evidence budget, its descriptor
+keeps the artifact ID and records `contentOmitted: "cloud_evidence_limit"`.
 
 ## Use imported evidence in the matching checkout
 

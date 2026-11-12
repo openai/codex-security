@@ -777,8 +777,10 @@ For other reports, pass the verified source repository URL.
 Pass `"local"` as the third argument to retain full patch contents in collector
 captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
 when the patch contents exceed the evidence budget. Available patches are in
-`evidence.source_data.patches`. Matching AWS validation artifacts are in
-`evidence.source_data.evidence_artifacts`.
+`evidence.source_data.patches`. Single-finding captures provide their matching
+validation artifacts in `evidence.source_data.evidence_artifacts`. The local
+projection retains each validation body, and Cloud marks omitted bodies with
+the same `contentOmitted` value.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.

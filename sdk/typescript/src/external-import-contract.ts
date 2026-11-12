@@ -504,9 +504,14 @@ function validateRawEvidence(
 }
 
 export const CLOUD_EVIDENCE_BYTES = 256 * 1024;
+export class CloudEvidenceSizeError extends Error {
+  constructor() {
+    super("Evidence exceeds the Cloud limit of 256 KiB.");
+  }
+}
+
 function checkEvidenceSize(bytes: number): number {
-  if (bytes > CLOUD_EVIDENCE_BYTES)
-    throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
+  if (bytes > CLOUD_EVIDENCE_BYTES) throw new CloudEvidenceSizeError();
   return bytes;
 }
 

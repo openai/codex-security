@@ -508,6 +508,69 @@ test("Cloud publication of a stored capture keeps fitting patches and identifies
   ).toEqual(cloud.findings);
 });
 
+// The first UTF-8 body fits the Cloud limit alone. The second exceeds it alone.
+test.each([87_300, 90_000])(
+  "Cloud keeps a selected finding, fitting validation and patch when a %i-character proof exceeds the available space",
+  (proofLength) => {
+    const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+    const finding = { ...continuumDetail(), createdIssueId: issueId };
+    const validationIssue = {
+      issueId,
+      issueArn,
+      findingIds: [finding.findingId],
+    };
+    const { body: _, ...descriptor } = continuumValidationArtifact();
+    const large = { ...descriptor, body: { raw: "界".repeat(proofLength) } };
+    const small = {
+      ...descriptor,
+      artifactId: "smallproof",
+      body: { validationEvidence: { exploitable: "UNCERTAIN" } },
+    };
+    const patches = [patchArtifact("firstpatch", "+checkedExample(input)\n")];
+    const report = {
+      finding,
+      validationIssue,
+      patches,
+      evidenceArtifacts: [large, small],
+    };
+    const local = normalizeContinuumFindings(
+      report,
+      continuumRepository,
+      "local",
+    );
+    expect(local.excluded).toEqual([]);
+    const stored = local.findings[0]!;
+    expect(stored.evidence.source_data).toEqual({
+      format: "aws-continuum-code-findings/v1",
+      sourceRepositoryUrl: continuumRepository,
+      finding,
+      validation_issue: validationIssue,
+      patches,
+      evidence_artifacts: [large, small],
+    });
+
+    const cloud = normalize(report);
+    expect(cloud.excluded).toEqual([]);
+    expect(cloud.findings[0]!.evidence.source_data).toEqual({
+      ...stored.evidence.source_data,
+      evidence_artifacts: [
+        { ...descriptor, contentOmitted: "cloud_evidence_limit" },
+        small,
+      ],
+    });
+    expect(
+      projectStoredFinding(
+        {
+          provider: "continuum",
+          sourceFindingId: stored.source_finding_id,
+          evidence: stored.evidence,
+        },
+        [],
+      ).findings,
+    ).toEqual(cloud.findings);
+  },
+);
+
 test("preserves dependency and posture evidence without classifying it as a code flaw", () => {
   const summary = continuumSummary();
   const pkg = {

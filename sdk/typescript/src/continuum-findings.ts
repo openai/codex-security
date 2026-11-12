@@ -3,6 +3,7 @@ import { CodexSecurityError } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import {
   CLOUD_EVIDENCE_BYTES,
+  CloudEvidenceSizeError,
   DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
   repositoryUrlKey,
@@ -241,37 +242,46 @@ export function readPatch(value: unknown) {
   };
 }
 
-function projectPatches(
-  patches: ReturnType<typeof readPatch>[],
+function projectArtifactBodies(
+  artifacts: Record<string, unknown>[],
+  key: "patches" | "evidence_artifacts",
   target: ExternalImportTarget,
   project: (artifacts: object[]) => ExternalFinding["evidence"],
 ) {
-  if (!patches.length || target === "local") return project(patches);
+  if (!artifacts.length || target === "local") return project(artifacts);
   try {
-    return project(patches);
-  } catch {
-    // Complete patches can exceed the Cloud evidence budget.
+    return project(artifacts);
+  } catch (error) {
+    if (!(error instanceof CloudEvidenceSizeError)) throw error;
   }
 
-  // Reserve each artifact's lookup information, then include whole patches that fit.
+  // Measure bodies at their actual Cloud JSON depth and wire size.
+  const bodyKey = key === "patches" ? "patch" : "body";
+  const wireBytes = (entry: object) =>
+    validateExternalEvidenceJson({ source_data: { [key]: [entry] } }, target);
   const marker = { contentOmitted: "cloud_evidence_limit" };
-  const markerBytes = Buffer.byteLength(JSON.stringify(marker));
-  const sizes = patches.map(
-    ({ patch }) => Buffer.byteLength(JSON.stringify({ patch })) - markerBytes,
-  );
-  const projected = patches.map(({ patch, ...descriptor }, index) =>
-    sizes[index]! > 0 ? { ...descriptor, ...marker } : patches[index]!,
+  const markerBytes = wireBytes(marker);
+  const sizes = artifacts.map((artifact) => {
+    try {
+      return wireBytes({ [bodyKey]: artifact[bodyKey] }) - markerBytes;
+    } catch (error) {
+      if (error instanceof CloudEvidenceSizeError) return Infinity;
+      throw error;
+    }
+  });
+  const projected = artifacts.map(({ [bodyKey]: _, ...descriptor }, index) =>
+    sizes[index]! > 0 ? { ...descriptor, ...marker } : artifacts[index]!,
   );
   const result = project(projected);
   let remaining =
     CLOUD_EVIDENCE_BYTES - validateExternalEvidenceJson(result, target);
   for (const [index, bytes] of sizes.entries()) {
     if (bytes > 0 && bytes <= remaining) {
-      projected[index] = patches[index]!;
+      projected[index] = artifacts[index]!;
       remaining -= bytes;
     }
   }
-  result.source_data!["patches"] = projected;
+  result.source_data![key] = projected;
   return result;
 }
 
@@ -653,7 +663,7 @@ function normalizeContinuumIssues(
       );
       if (!patches.length) return evidence;
       // Fit optional patch bodies after selecting the scanner evidence to retain.
-      return projectPatches(patches, target, (patches) =>
+      return projectArtifactBodies(patches, "patches", target, (patches) =>
         validateExternalEvidence(
           { ...evidence, source_data: { ...evidence.source_data, patches } },
           target,
@@ -825,9 +835,6 @@ export function normalizeContinuumFindings(
           sourceRepositoryUrl: repository,
           finding: structuredClone(row),
           ...(validationIssue && { validation_issue: validationIssue }),
-          ...(evidenceArtifacts.length && {
-            evidence_artifacts: structuredClone(evidenceArtifacts),
-          }),
         },
       };
       const updatedAt = statusUpdatedAt(row["statusUpdatedAt"]);
@@ -844,22 +851,30 @@ export function normalizeContinuumFindings(
         ? { details: { ...evidence.details, weakness_ids: [namedCwe] } }
         : undefined;
       // Keep previously admissible evidence if an optional projection exceeds the Cloud budget.
-      return projectPatches(patches, target, (artifacts) =>
-        validateEnrichedExternalEvidence(
-          artifacts.length
-            ? {
+      return projectArtifactBodies(
+        structuredClone(evidenceArtifacts),
+        "evidence_artifacts",
+        target,
+        (validation) =>
+          projectArtifactBodies(patches, "patches", target, (patches) =>
+            validateEnrichedExternalEvidence(
+              {
                 ...evidence,
-                source_data: { ...evidence.source_data, patches: artifacts },
-              }
-            : evidence,
-          target,
-          inferred ? { ...enrichment, ...inferred } : undefined,
-          enrichment,
-          packages.length && updatedAt !== null
-            ? { source_updated_at: updatedAt }
-            : undefined,
-          inferred,
-        ),
+                source_data: {
+                  ...evidence.source_data,
+                  ...(validation.length && { evidence_artifacts: validation }),
+                  ...(patches.length && { patches }),
+                },
+              },
+              target,
+              inferred ? { ...enrichment, ...inferred } : undefined,
+              enrichment,
+              packages.length && updatedAt !== null
+                ? { source_updated_at: updatedAt }
+                : undefined,
+              inferred,
+            ),
+          ),
       );
     },
     (value) => {
