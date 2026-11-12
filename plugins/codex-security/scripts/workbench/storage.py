@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import tempfile
@@ -35,18 +36,37 @@ def worker_usage_directory(scan_id: str) -> Path:
     return state_dir() / "codex-home" / "worker-usage" / scan_id
 
 
+def short_archive_prefix(original_name: str) -> str:
+    """Bind a short archive name to the complete original filename."""
+    return f".previous-{hashlib.sha256(os.fsencode(original_name)).hexdigest()}-"
+
+
+def archive_source_directory(archive: Path, source: Path) -> Path | None:
+    """Return the original sibling when the archived name identifies it."""
+    if not source.is_relative_to(archive.parent):
+        return None
+    parts = source.relative_to(archive.parent).parts
+    if not parts or ".." in parts:
+        return None
+    name = parts[0]
+    if archive.name.startswith(f"{name}.previous-") or (
+        archive.name.startswith(".previous-")
+        and archive.name.startswith(short_archive_prefix(name))
+    ):
+        return archive.parent / name
+    return None
+
+
 def archived_deep_path(scan_dir: Path, value: str | None) -> str | None:
     """Resolve old archive rows that still name the original sibling output."""
     if value is None or ".previous-" not in scan_dir.name:
         return value
     path = Path(value)
-    if not path.is_relative_to(scan_dir.parent):
-        return value
-    parts = path.relative_to(scan_dir.parent).parts
-    if not parts or ".." in parts or not scan_dir.name.startswith(f"{parts[0]}.previous-"):
+    original = archive_source_directory(scan_dir, path)
+    if original is None:
         return value
     # Keep missing files inside the archive too. Never follow the replacement scan's output.
-    return str(scan_dir.joinpath(*parts[1:]))
+    return str(scan_dir / path.relative_to(original))
 
 
 def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[Any]:
