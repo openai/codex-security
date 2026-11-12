@@ -135,6 +135,11 @@ def test_workbench_records_scan_failure(tmp_path: Path) -> None:
     )
     assert failed["scan"]["progress"]["status"] == "failed"
     assert failed["scan"]["failureMessage"] == "Repository checkout became unavailable."
+    assert failed["scan"]["logCompletedAt"] is not None
+    repeated = fail_scan(
+        state_dir, scan_id, "Ignored repeated failure.", "--claim-token", claim_token
+    )
+    assert repeated["scan"]["logCompletedAt"] == failed["scan"]["logCompletedAt"]
 
     delivered = mark_handoff_delivered(state_dir, scan_id, claim_token)
     assert delivered["results"]["handoffStatus"] == "delivered"
@@ -170,11 +175,13 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert canceled["results"]["cost"] == cost
     assert canceled["results"]["progress"]["status"] == "canceled"
     assert canceled["results"]["canceledAt"]
+    assert canceled["results"]["logCompletedAt"] == canceled["results"]["canceledAt"]
     assert canceled["results"]["handoffClaimToken"] == claim_token
 
     replayed = cancel_scan(state_dir, scan_id, thread_id)
     assert replayed["results"]["cost"] == cost
     assert replayed["results"]["canceledAt"] == canceled["results"]["canceledAt"]
+    assert replayed["results"]["logCompletedAt"] == canceled["results"]["logCompletedAt"]
 
     for command in (
         ("update-progress", "--phase", "discovery"),
@@ -191,6 +198,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     restarted_scan_id = str(restarted["scanId"])
     assert restarted_scan_id != scan_id
     assert restarted["progress"]["status"] == "running"
+    assert restarted["logCompletedAt"] is None
     previous_scan = get_scan(state_dir, scan_id)
     lifecycle = previous_scan["scan"]["lifecycle"]
     assert lifecycle["status"] == "canceled"

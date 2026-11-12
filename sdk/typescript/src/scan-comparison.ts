@@ -877,6 +877,11 @@ export async function matchCompletedScan(
   const previousOccurrences = new Set(
     options.previousFindings.map(({ occurrenceId }) => occurrenceId),
   );
+  const previousScans = new Set(
+    options.previousFindings.flatMap((finding) =>
+      Array.isArray(finding["knownScanIds"]) ? finding["knownScanIds"] : [],
+    ),
+  );
   const falsePositiveScans = new Map(
     options.falsePositives.map(
       ({ findingId, sourceScanId }) => [findingId, sourceScanId] as const,
@@ -887,6 +892,8 @@ export async function matchCompletedScan(
     "list-unmatched-scan-pairs",
     "--repository",
     options.repository,
+    "--after-scan-id",
+    options.scanId,
   ])) as ScanMatchingPlan;
   const selected = plan.batches?.find(
     ({ afterScanId }) => afterScanId === options.scanId,
@@ -896,12 +903,14 @@ export async function matchCompletedScan(
 
   // A saved comparison covers the whole pair. Let the catalogue group repeated
   // occurrences instead of dropping findings from the selected scans.
-  const beforeScans = batch.beforeScans.filter(({ scanId, findings }) =>
-    findings.some(
-      (finding) =>
-        previousOccurrences.has(finding.occurrenceId) ||
-        falsePositiveScans.get(finding["findingId"]) === scanId,
-    ),
+  const beforeScans = batch.beforeScans.filter(
+    ({ scanId, findings }) =>
+      previousScans.has(scanId) ||
+      findings.some(
+        (finding) =>
+          previousOccurrences.has(finding.occurrenceId) ||
+          falsePositiveScans.get(finding["findingId"]) === scanId,
+      ),
   );
   if (beforeScans.length === 0) return;
 

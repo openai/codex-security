@@ -11,8 +11,10 @@ concurrency:
   queue: max
 
 jobs:
-  native:
-    if: github.repository == 'openai/codex-security'
+  recover-native:
+    name: native / recover verified artifacts
+    needs: eligibility
+    if: needs.eligibility.outputs.mode == 'recover'
     permissions:
       contents: read
     uses: ./.github/workflows/native-artifacts.yml
@@ -22,6 +24,7 @@ jobs:
     name: release tests / release eligibility
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     env: &release-environment
       NPM_CONFIG_REGISTRY: https://openai.firewall.socket.dev/npm/
@@ -110,6 +113,23 @@ jobs:
             printf 'mode=%s\n' "$mode"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify reusable signing workflow ref before signing
+        if: steps.release.outputs.mode == 'publish'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: &verify-signing-workflow-ref |
+          set -euo pipefail
+          # A tag named main takes precedence over the branch in a workflow call.
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" |
+            jq -e --arg workflow "$GITHUB_REPOSITORY/.github/workflows/sign-darwin-release.yml@" '
+              [.referenced_workflows[] | select(.path | startswith($workflow)) | .ref]
+                == ["refs/heads/main"]
+            ' >/dev/null; then
+            echo "The signed addons must come from the signing workflow on protected main." >&2
+            exit 1
+          fi
+
       - name: Validate reviewed release notes
         if: steps.release.outputs.mode == 'publish'
         shell: bash
@@ -130,16 +150,82 @@ jobs:
 
   sign-darwin:
     name: native / sign Darwin addons
-    needs: [eligibility, native]
+    needs: eligibility
     if: needs.eligibility.outputs.mode == 'publish'
-    runs-on: ubuntu-24.04
-    environment: codesigning
     permissions:
       contents: read
       id-token: write
+    uses: openai/codex-security/.github/workflows/sign-darwin-release.yml@main # zizmor: ignore[unpinned-uses] -- The signing policy requires this protected branch in job_workflow_ref.
+    secrets:
+      AKV_CODESIGN_RCODESIGN_BLOB_URI: ${{ secrets.AKV_CODESIGN_RCODESIGN_BLOB_URI }}
+      AKV_CODESIGN_RCODESIGN_SHA256: ${{ secrets.AKV_CODESIGN_RCODESIGN_SHA256 }}
+      AKV_CODESIGN_PKCS11_LIBRARY_BLOB_URI: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_BLOB_URI }}
+      AKV_CODESIGN_PKCS11_LIBRARY_SHA256: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_SHA256 }}
+      AKV_CODESIGN_AZURE_CLIENT_ID: ${{ secrets.AKV_CODESIGN_AZURE_CLIENT_ID }}
+      AKV_CODESIGN_TENANT: ${{ secrets.AKV_CODESIGN_TENANT }}
+      AKV_CODESIGN_SUBSCRIPTION: ${{ secrets.AKV_CODESIGN_SUBSCRIPTION }}
+      SIGNER_SERVICE_ENDPOINT: ${{ secrets.SIGNER_SERVICE_ENDPOINT }}
+      SIGNER_SERVICE_PURPOSE: ${{ secrets.SIGNER_SERVICE_PURPOSE }}
+      SIGNER_SERVICE_KEY_ID: ${{ secrets.SIGNER_SERVICE_KEY_ID }}
+      SIGNING_CERTIFICATE_PEM: ${{ secrets.SIGNING_CERTIFICATE_PEM }}
+
+  native:
+    name: native / select verified artifacts
+    needs: [eligibility, recover-native, sign-darwin]
+    if: >-
+      !cancelled() && needs.eligibility.result == 'success' &&
+      ((needs.eligibility.outputs.mode == 'publish' && needs.sign-darwin.result == 'success' &&
+        needs.recover-native.result == 'skipped') ||
+       (needs.eligibility.outputs.mode == 'recover' && needs.recover-native.result == 'success' &&
+        needs.sign-darwin.result == 'skipped'))
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.select.outputs.native-id }}
+      signed-darwin-id: ${{ steps.select.outputs.signed-id }}
+    steps:
+      - name: Verify reusable signing workflow ref
+        if: needs.eligibility.outputs.mode == 'publish'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: *verify-signing-workflow-ref
+
+      - name: Select the native artifact IDs for this release mode
+        id: select
+        env:
+          RELEASE_MODE: ${{ needs.eligibility.outputs.mode }}
+          PUBLISH_NATIVE_ID: ${{ needs.sign-darwin.outputs.native-artifact-id }}
+          SIGNED_ID: ${{ needs.sign-darwin.outputs.artifact-id }}
+          RECOVER_NATIVE_ID: ${{ needs.recover-native.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_MODE" == publish ]]; then
+            test -n "$PUBLISH_NATIVE_ID"
+            test -n "$SIGNED_ID"
+            echo "native-id=$PUBLISH_NATIVE_ID" >> "$GITHUB_OUTPUT"
+            echo "signed-id=$SIGNED_ID" >> "$GITHUB_OUTPUT"
+          else
+            test -n "$RECOVER_NATIVE_ID"
+            echo "native-id=$RECOVER_NATIVE_ID" >> "$GITHUB_OUTPUT"
+          fi
+
+  verify:
+    needs: [eligibility, native]
+    if: >-
+      !cancelled() && needs.eligibility.result == 'success' && needs.native.result == 'success' &&
+      (needs.eligibility.outputs.mode == 'recover' || needs.native.outputs.signed-darwin-id != '')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env: *release-environment
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      mode: ${{ needs.eligibility.outputs.mode }}
+      version: ${{ needs.eligibility.outputs.version }}
     steps:
+      - *checkout-release
       - &require-release-native
         name: Require the verified native artifact ID
         env:
@@ -153,132 +239,12 @@ jobs:
           path: plugins/codex-security/native/prebuilt
           merge-multiple: true
           digest-mismatch: error
-      - name: Revalidate tag before Developer ID signing
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: &revalidate-release-tag |
-          set -euo pipefail
-
-          invalid_tag() {
-            echo "Protected npm release tag must still point to the verified commit." >&2
-            exit 1
-          }
-
-          if [[ "$GITHUB_REF_TYPE" != "tag" ||
-                "$GITHUB_REF" != "refs/tags/$GITHUB_REF_NAME" ]]; then
-            invalid_tag
-          fi
-
-          if ! tag_fields="$(
-            gh api \
-              "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" \
-              --jq '[.object.type, .object.sha] | @tsv'
-          )"; then
-            invalid_tag
-          fi
-          IFS=$'\t' read -r tag_type tag_object <<< "$tag_fields"
-          if [[ ! "$tag_object" =~ ^[0-9a-f]{40}$ ]]; then
-            invalid_tag
-          fi
-
-          case "$tag_type" in
-            commit)
-              tag_commit="$tag_object"
-              ;;
-            tag)
-              if ! tag_commit="$(
-                gh api \
-                  "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" \
-                  --jq 'if .object.type == "commit" then .object.sha else empty end'
-              )"; then
-                invalid_tag
-              fi
-              ;;
-            *)
-              invalid_tag
-              ;;
-          esac
-
-          if [[ ! "$tag_commit" =~ ^[0-9a-f]{40}$ ||
-                "$tag_commit" != "$GITHUB_SHA" ]]; then
-            invalid_tag
-          fi
-          echo "Protected npm release tag matches the verified commit."
-
-      - name: Set up Developer ID signing
-        id: signing-tools
-        uses: openai/codex/.github/actions/setup-akv-pkcs11-codesigning@9ff072db8ae43d413c8d205ebf22b54b83c72cef
-        with:
-          setup-mode: tools-only
-          rcodesign-blob-uri: ${{ secrets.AKV_CODESIGN_RCODESIGN_BLOB_URI }}
-          rcodesign-sha256: ${{ secrets.AKV_CODESIGN_RCODESIGN_SHA256 }}
-          akv-pkcs11-library-blob-uri: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_BLOB_URI }}
-          akv-pkcs11-library-sha256: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_SHA256 }}
-          azure-client-id: ${{ secrets.AKV_CODESIGN_AZURE_CLIENT_ID }}
-          azure-tenant-id: ${{ secrets.AKV_CODESIGN_TENANT }}
-          azure-subscription-id: ${{ secrets.AKV_CODESIGN_SUBSCRIPTION }}
-          # Required action inputs, unused in tools-only mode.
-          key-vault-name: ""
-          key-name: ""
-      - name: Sign Darwin addons
-        shell: bash
-        env:
-          RCODESIGN: ${{ steps.signing-tools.outputs.rcodesign }}
-          PKCS11_LIBRARY: ${{ steps.signing-tools.outputs.pkcs11-library }}
-          AKV_PKCS11_BACKEND: signer-service
-          SIGNER_SERVICE_ENDPOINT: ${{ secrets.SIGNER_SERVICE_ENDPOINT }}
-          SIGNER_SERVICE_PURPOSE: ${{ secrets.SIGNER_SERVICE_PURPOSE }}
-          SIGNER_SERVICE_KEY_ID: ${{ secrets.SIGNER_SERVICE_KEY_ID }}
-          SIGNER_SERVICE_KEY_LABEL: Developer ID Application
-          SIGNER_SERVICE_CERTIFICATE_FILE: ${{ runner.temp }}/developer-id.pem
-          SIGNING_CERTIFICATE_PEM: ${{ secrets.SIGNING_CERTIFICATE_PEM }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "$SIGNING_CERTIFICATE_PEM" > "$SIGNER_SERVICE_CERTIFICATE_FILE"
-          for target in darwin-arm64 darwin-x64; do
-            mkdir -p "signed/$target"
-            cp "plugins/codex-security/native/prebuilt/$target/unix.node" "signed/$target/unix.node"
-            "$RCODESIGN" sign --config-file /dev/null --shallow --for-notarization \
-              --pkcs11-library "$PKCS11_LIBRARY" \
-              --pkcs11-certificate-file "$SIGNER_SERVICE_CERTIFICATE_FILE" \
-              --pkcs11-key-label "$SIGNER_SERVICE_KEY_LABEL" \
-              --code-signature-flags runtime --binary-identifier com.openai.codex-security.unix \
-              "signed/$target/unix.node"
-          done
-      - name: Upload signed Darwin addons
-        id: upload
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: signed-darwin-addons-${{ github.run_attempt }}
-          path: signed/
-          if-no-files-found: error
-
-  verify:
-    needs: [eligibility, native, sign-darwin]
-    if: >-
-      !cancelled() && needs.eligibility.result == 'success' && needs.native.result == 'success' &&
-      ((needs.eligibility.outputs.mode == 'publish' && needs.sign-darwin.result == 'success' &&
-        needs.sign-darwin.outputs.artifact-id != '') ||
-       (needs.eligibility.outputs.mode == 'recover' && needs.sign-darwin.result == 'skipped'))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env: *release-environment
-    outputs:
-      artifact-id: ${{ steps.upload.outputs.artifact-id }}
-      mode: ${{ needs.eligibility.outputs.mode }}
-      version: ${{ needs.eligibility.outputs.version }}
-    steps:
-      - *checkout-release
-      - *require-release-native
-      - *download-release-native
 
       - name: Overlay signed Darwin addons for publication
         if: needs.eligibility.outputs.mode == 'publish'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          artifact-ids: ${{ needs.sign-darwin.outputs.artifact-id }}
+          artifact-ids: ${{ needs.native.outputs.signed-darwin-id }}
           path: plugins/codex-security/native/prebuilt
           merge-multiple: true
           digest-mismatch: error
@@ -407,7 +373,7 @@ jobs:
 
   test:
     needs: native
-    if: github.repository == 'openai/codex-security'
+    if: ${{ !cancelled() && needs.native.result == 'success' }}
     name: release tests / ${{ matrix.suite }}
     runs-on: ubuntu-latest
     permissions:
@@ -458,7 +424,9 @@ jobs:
   macos-review-items:
     name: release tests / packaged macOS review items
     needs: verify
-    if: needs.verify.outputs.mode == 'publish' && needs.verify.outputs.artifact-id != ''
+    if: >-
+      !cancelled() && needs.verify.result == 'success' &&
+      needs.verify.outputs.mode == 'publish' && needs.verify.outputs.artifact-id != ''
     runs-on: macos-15
     permissions:
       contents: read
@@ -553,10 +521,7 @@ jobs:
 
       - name: Revalidate protected release tag
         if: needs.verify.outputs.mode == 'publish'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: *revalidate-release-tag
+        uses: $/.github/actions/revalidate-release-tag
 
       - name: Publish to npm using trusted publishing
         if: needs.verify.outputs.mode == 'publish'
