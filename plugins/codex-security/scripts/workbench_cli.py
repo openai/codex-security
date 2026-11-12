@@ -256,6 +256,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     set_scan_thread = subparsers.add_parser("set-scan-thread")
     set_scan_thread.add_argument("--scan-id", required=True)
     set_scan_thread.add_argument("--thread-id", required=True)
+    set_scan_thread.add_argument("--time-budget-started-at")
 
     set_scan_cost_limit = add_command("set-scan-cost-limit", "--scan-id")
     set_scan_cost_limit.add_argument("--max-cost-usd", required=True, type=float)

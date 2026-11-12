@@ -5,7 +5,9 @@ import {
   CLOUD_EVIDENCE_BYTES,
   DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
+  repositoryUrlKey,
   validateEnrichedExternalEvidence,
+  validateExternalEvidence,
   validateExternalEvidenceJson,
 } from "./external-import-contract.js";
 import type { ImportedPackage, Provider } from "./external-import-models.js";
@@ -28,10 +30,13 @@ import {
 } from "./scanner-repository-url.js";
 
 const format = "aws-continuum-code-findings/v1";
+export const continuumIssueFormat = "aws-continuum-code-issues/v1";
 const findingArn =
   /^(arn:[a-z0-9-]+:continuum:[a-z0-9-]+:\d{12}:environments\/([a-z0-9]+))\/code-findings\/([a-z0-9]+)$/u;
+const issueArn =
+  /^(arn:[a-z0-9-]+:continuum:[a-z0-9-]+:\d{12}:environments\/([a-z0-9]+))\/code-issues\/([a-z0-9]+)$/u;
 
-function identity(value: unknown) {
+export function findingIdentity(value: unknown) {
   const row = record(value, "Continuum finding");
   const arn = requiredText(row["findingArn"], "Continuum finding ARN");
   const match = findingArn.exec(arn);
@@ -43,7 +48,16 @@ function identity(value: unknown) {
     throw new Error(
       "Expected a Continuum finding ARN matching its environmentId and findingId.",
     );
-  return { arn, scope: match[1]! };
+  return { arn, scope: match[1]!, id: match[3]! };
+}
+
+export function issueIdentity(value: unknown) {
+  const issue = record(value, "Continuum issue");
+  const arn = requiredText(issue["issueArn"], "Continuum issue ARN");
+  const match = issueArn.exec(arn);
+  if (!match || issue["issueId"] !== match[3])
+    throw new Error("Expected a Continuum issue ARN matching its issueId.");
+  return { arn, scope: match[1]!, environmentId: match[2]!, id: match[3]! };
 }
 
 function retainedRepository(
@@ -55,8 +69,10 @@ function retainedRepository(
     source_finding_id: id,
     evidence: { source_data: data },
   } = finding;
-  const native = data?.["finding"];
-  const marked = data?.["format"] === format;
+  const isIssue =
+    data?.["format"] === continuumIssueFormat || issueArn.test(id);
+  const native = data?.[isIssue ? "issue" : "finding"];
+  const marked = isIssue || data?.["format"] === format;
   const nativeArn =
     isRecord(native) && findingArn.test(text(native["findingArn"]) ?? "");
   if (provider !== "continuum") {
@@ -72,10 +88,12 @@ function retainedRepository(
     return;
   }
   if (!marked && !nativeArn && !findingArn.test(id)) return;
-  const { arn, scope } = identity(native);
+  const { arn, scope } = isIssue
+    ? issueIdentity(native)
+    : findingIdentity(native);
   if (arn !== id)
     throw new Error(
-      "Continuum source finding ID does not match the retained finding ARN.",
+      `Continuum source finding ID does not match the retained ${isIssue ? "issue" : "finding"} ARN.`,
     );
   return {
     url: declaredScannerRepositoryUrl(
@@ -92,26 +110,61 @@ export const continuumReportRepositories = repositoryScopeValidator(
   retainedRepository,
 );
 
-function codeLocations(
+function findingVulnerabilities(row: Record<string, unknown>) {
+  return array(row["vulnerabilities"] ?? [], "Continuum vulnerabilities").map(
+    (item) => record(item, "Continuum vulnerability"),
+  );
+}
+
+function* findingCodeLocations(
   row: Record<string, unknown>,
   vulnerabilities: Record<string, unknown>[],
+) {
+  yield {
+    filePath: row["filePath"],
+    startLine: row["lineNumber"],
+    endLine: row["endLine"],
+    code: row["vulnerableCode"],
+  };
+  for (const vulnerability of vulnerabilities) {
+    for (const value of array(
+      vulnerability["locations"] ?? [],
+      "Continuum vulnerability locations",
+    )) {
+      const location = record(value, "Continuum vulnerability location");
+      yield {
+        filePath: location["filePath"],
+        startLine: location["startLine"],
+        endLine: location["endLine"],
+        code: vulnerability["code"],
+      };
+    }
+  }
+}
+
+function locationLine(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+function codeLocations(
+  ranges: Iterable<{
+    filePath: unknown;
+    startLine: unknown;
+    endLine: unknown;
+    code?: unknown;
+  }>,
 ) {
   const locations: { path: string; line: number | null }[] = [];
   const seen = new Set<string>();
   let endLine: number | null = null;
   let snippet: string | null = null;
-  function add(
-    value: unknown,
-    start: unknown,
-    end: unknown,
-    fragment: unknown,
-  ) {
-    const path = repositoryFilePath(value);
-    if (!path) return;
-    const line =
-      typeof start === "number" && Number.isSafeInteger(start) && start > 0
-        ? start
-        : null;
+  for (const range of ranges) {
+    const path = repositoryFilePath(range.filePath);
+    if (!path) continue;
+    const line = locationLine(range.startLine);
+    const end = locationLine(range.endLine);
     const key = JSON.stringify([path, line]);
     if (!seen.has(key)) {
       seen.add(key);
@@ -119,34 +172,8 @@ function codeLocations(
     }
     // The flat location and first nested location can describe the same range.
     if (locations[0]!.path === path && locations[0]!.line === line) {
-      if (
-        line !== null &&
-        typeof end === "number" &&
-        Number.isSafeInteger(end) &&
-        end >= line
-      )
-        endLine ??= end;
-      snippet ??= text(fragment);
-    }
-  }
-  add(
-    row["filePath"],
-    row["lineNumber"],
-    row["endLine"],
-    row["vulnerableCode"],
-  );
-  for (const vulnerability of vulnerabilities) {
-    for (const value of array(
-      vulnerability["locations"] ?? [],
-      "Continuum vulnerability locations",
-    )) {
-      const location = record(value, "Continuum vulnerability location");
-      add(
-        location["filePath"],
-        location["startLine"],
-        location["endLine"],
-        vulnerability["code"],
-      );
+      if (line !== null && end !== null && end >= line) endLine ??= end;
+      snippet ??= text(range.code);
     }
   }
   return { locations, code: { end_line: endLine, snippet } };
@@ -181,7 +208,7 @@ function isPatchCapture(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && !("findingArn" in value) && "finding" in value;
 }
 
-function readPatch(value: unknown) {
+export function readPatch(value: unknown) {
   const artifact = record(value, "Continuum patch artifact");
   const patch = requiredText(artifact["patch"], "Continuum patch content");
   const sizeBytes = Buffer.byteLength(patch);
@@ -299,16 +326,351 @@ function affectedPackages(
   return [...unique.values()];
 }
 
+function linkedIssueFindings(
+  value: unknown,
+  issue: Record<string, unknown>,
+  scope: string,
+) {
+  const ids = array(issue["findingIds"], "Continuum issue findingIds").map(
+    (id) => requiredText(id, "Continuum issue finding ID"),
+  );
+  const missing = new Set(ids);
+  const findings = new Map<string, Record<string, unknown>>();
+  const invalidLinks =
+    "Supply exactly one detail response per Continuum issue finding ID.";
+  if (ids.length === 0 || missing.size !== ids.length)
+    throw new Error(invalidLinks);
+  for (const item of array(value, "Continuum issue findings")) {
+    const { id, scope: findingScope } = findingIdentity(item);
+    if (findingScope !== scope)
+      throw new Error(
+        "Continuum issue and linked finding must share an environment.",
+      );
+    if (!missing.delete(id)) throw new Error(invalidLinks);
+    findings.set(id, record(item, "Continuum finding"));
+  }
+  if (missing.size) throw new Error(invalidLinks);
+  return ids.map((id) => findings.get(id)!);
+}
+
+function issueFindingEvidence(
+  finding: Record<string, unknown>,
+  includeReviewEvidence: boolean,
+) {
+  const dependencyFields = (row: Record<string, unknown>) => ({
+    cveId: text(row["cveId"]),
+    affectedPackages: Array.isArray(row["affectedPackages"])
+      ? row["affectedPackages"]
+      : [],
+  });
+  const vulnerableCode =
+    includeReviewEvidence && text(finding["vulnerableCode"]);
+  const mitigation = includeReviewEvidence && text(finding["mitigation"]);
+  const validation = finding["validation"];
+  // Retain the inputs needed to replay the stored issue. The export on disk
+  // retains the full finding details.
+  return {
+    findingArn: finding["findingArn"],
+    findingId: finding["findingId"],
+    environmentId: finding["environmentId"],
+    ocsfClass:
+      finding["posture"] != null
+        ? "APPLICATION_SECURITY_POSTURE_FINDING"
+        : text(finding["ocsfClass"]),
+    ...dependencyFields(finding),
+    filePath: text(finding["filePath"]),
+    lineNumber: locationLine(finding["lineNumber"]),
+    endLine: locationLine(finding["endLine"]),
+    ...(vulnerableCode && { vulnerableCode }),
+    ...(mitigation && { mitigation }),
+    ...(includeReviewEvidence && isRecord(validation) && { validation }),
+    vulnerabilities: findingVulnerabilities(finding).map((vulnerability) => {
+      const code = includeReviewEvidence && text(vulnerability["code"]);
+      return {
+        ...dependencyFields(vulnerability),
+        locations: vulnerability["locations"] ?? [],
+        ...(code && { code }),
+      };
+    }),
+  };
+}
+
+function issueEvidenceBody(artifact: Record<string, unknown>) {
+  const body = artifact["body"];
+  if (!isRecord(body)) return;
+  if (artifact["artifactType"] === "VALIDATION_EVIDENCE") {
+    if (isRecord(body["validationEvidence"]))
+      return { validationEvidence: body["validationEvidence"] };
+    if (typeof body["raw"] === "string") return { raw: body["raw"] };
+  }
+  const projection = body["prevalidationSignals"];
+  if (artifact["artifactType"] !== "EVIDENCE" || !isRecord(projection)) return;
+  const signals = array(
+    projection["signals"] ?? [],
+    "Continuum evidence signals",
+  ).map((signal) => record(signal, "Continuum evidence signal"));
+  return { prevalidationSignals: { ...projection, signals } };
+}
+
+function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
+  return artifacts.flatMap((artifact) => {
+    const body = issueEvidenceBody(artifact);
+    if (!body) return [];
+    return [
+      {
+        artifactId: requiredText(
+          artifact["artifactId"],
+          "Continuum evidence artifact ID",
+        ),
+        artifactType: artifact["artifactType"],
+        ...(artifact["createdAt"] != null && {
+          createdAt: artifact["createdAt"],
+        }),
+        ...(artifact["mediaType"] != null && {
+          mediaType: artifact["mediaType"],
+        }),
+        ...(artifact["producer"] != null && {
+          producer: artifact["producer"],
+        }),
+        body,
+      },
+    ];
+  });
+}
+
+function normalizeContinuumIssues(
+  document: Record<string, unknown>,
+  repository: string,
+  target: ExternalImportTarget,
+): ExternalFindings {
+  const environmentId = requiredText(
+    document["environmentId"],
+    "Continuum environment ID",
+  );
+  const rows = array(document["issues"], "Continuum issues");
+  const scopes = new Set<string>();
+  const result = normalizeRecords(
+    rows,
+    (value) => {
+      const row = record(value, "Continuum issue record");
+      const { artifacts, ...issue } = record(row["issue"], "Continuum issue");
+      const { arn, id, scope } = issueIdentity(issue);
+      const issueArtifacts = array(
+        artifacts ?? row["evidenceArtifacts"] ?? [],
+        "Continuum issue artifacts",
+      ).map((artifact) => record(artifact, "Continuum issue artifact"));
+      const evidenceArtifacts = issueEvidenceArtifacts(issueArtifacts);
+      const patches = issueArtifacts
+        .filter((artifact) => artifact["artifactType"] === "PATCH")
+        .map((artifact) => {
+          const body = record(artifact["body"], "Continuum patch body");
+          return readPatch({
+            ...record(body["patch"], "Continuum patch"),
+            artifactId: artifact["artifactId"],
+          });
+        });
+      const verdicts = new Set<string>();
+      for (const artifact of evidenceArtifacts) {
+        for (const signal of artifact.body.prevalidationSignals?.signals ??
+          []) {
+          const subject = signal["subjectRef"];
+          const exploitability = signal["exploitability"];
+          if (
+            signal["dimension"] !== "EXPLOITABILITY" ||
+            (subject !== id && subject !== arn) ||
+            !isRecord(exploitability)
+          )
+            continue;
+          const verdict = text(exploitability["verdict"]);
+          if (verdict) verdicts.add(verdict);
+        }
+      }
+      const scannerVerdict = verdicts.size > 1 ? "MIXED" : [...verdicts][0];
+      const linked = linkedIssueFindings(row["findings"], issue, scope);
+      const findings = linked.map((finding) =>
+        issueFindingEvidence(finding, true),
+      );
+      const ranges = findings.flatMap((finding) =>
+        Array.from(findingCodeLocations(finding, finding.vulnerabilities)),
+      );
+      const { locations, code } = codeLocations([
+        ...ranges.filter(({ startLine }) => locationLine(startLine) !== null),
+        ...ranges.filter(({ startLine }) => locationLine(startLine) === null),
+      ]);
+      const all = findings.flatMap((finding) => [
+        finding,
+        ...finding.vulnerabilities,
+      ]);
+      const advisories = [...new Set(strings(all.map((row) => row.cveId)))];
+      const packages = all.flatMap((row) => row.affectedPackages);
+      const dependency = advisories.length > 0 || packages.length > 0;
+      const posture = findings.some(
+        (finding) =>
+          finding.ocsfClass === "APPLICATION_SECURITY_POSTURE_FINDING",
+      );
+      const status = requiredText(issue["status"], "Continuum issue status");
+      const synopsis = requiredText(
+        issue["synopsis"],
+        "Continuum issue synopsis",
+      );
+      const details =
+        posture || (!scannerVerdict && locations[0]?.line == null)
+          ? undefined
+          : {
+              details: {
+                kind: dependency ? "advisory" : "sast",
+                ...(dependency && { advisory: { source: "repository" } }),
+                repository: { url: repository },
+                source_status: status,
+                ...(scannerVerdict && { scanner_verdict: scannerVerdict }),
+                remediation_instructions: text(issue["summary"]),
+                code: { ...code, snippet: null },
+              },
+            };
+      const reviewDetails = details && {
+        details: {
+          ...details.details,
+          remediation_instructions:
+            details.details.remediation_instructions ??
+            findings.find(({ mitigation }) => mitigation)?.mitigation ??
+            null,
+          code,
+        },
+      };
+      const dependencyEvidence = dependency
+        ? {
+            advisory_ids:
+              target === "cloud" ? advisories.slice(0, 100) : advisories,
+            packages: affectedPackages(packages, target),
+          }
+        : undefined;
+      const source = {
+        format: continuumIssueFormat,
+        sourceRepositoryUrl: repository,
+        environmentId,
+        issue,
+        ...(evidenceArtifacts.length && {
+          evidence_artifacts: evidenceArtifacts,
+        }),
+      };
+      const compactSource = structuredClone({
+        ...source,
+        findings: linked.map((finding) => issueFindingEvidence(finding, false)),
+      });
+      const findingsWithVerdicts = compactSource.findings.map(
+        (finding, index) => {
+          const verdict = text(findings[index]?.validation?.["verdict"]);
+          return verdict ? { ...finding, validation: { verdict } } : finding;
+        },
+      );
+      const evidence = validateEnrichedExternalEvidence(
+        {
+          title: requiredText(issue["name"], "Continuum issue name"),
+          severity: text(issue["severity"])?.toLowerCase() ?? "unknown",
+          description: [synopsis, text(issue["severityReasoning"])]
+            .filter(Boolean)
+            .join("\n\n"),
+          // Keep every reported range in source_data, including ranges beyond
+          // the Cloud limit for navigable locations.
+          locations: target === "cloud" ? locations.slice(0, 100) : locations,
+          source_updated_at:
+            statusUpdatedAt(issue["updatedAt"]) ??
+            statusUpdatedAt(issue["statusUpdatedAt"]),
+          source_data: compactSource,
+          ...(scannerVerdict &&
+            details && {
+              details: {
+                ...details.details,
+                remediation_instructions: null,
+                code: null,
+              },
+            }),
+        },
+        target,
+        {
+          ...reviewDetails,
+          ...dependencyEvidence,
+          source_data: structuredClone({ ...source, findings }),
+        },
+        // Bulky linked validation evidence can exceed the Cloud record limit.
+        // Keep the per-finding verdicts with the structured review fields if they fit.
+        {
+          ...reviewDetails,
+          ...dependencyEvidence,
+          source_data: { ...compactSource, findings: findingsWithVerdicts },
+        },
+        dependencyEvidence
+          ? { ...reviewDetails, ...dependencyEvidence }
+          : undefined,
+        reviewDetails,
+        dependencyEvidence ? { ...details, ...dependencyEvidence } : undefined,
+        details,
+        dependencyEvidence,
+      );
+      if (!patches.length) return evidence;
+      // Fit optional patch bodies after selecting the scanner evidence to retain.
+      return projectPatches(patches, target, (patches) =>
+        validateExternalEvidence(
+          { ...evidence, source_data: { ...evidence.source_data, patches } },
+          target,
+        ),
+      );
+    },
+    (value) => {
+      const issue = issueIdentity(
+        record(value, "Continuum issue record")["issue"],
+      );
+      if (issue.environmentId !== environmentId)
+        throw new Error(
+          "Continuum issue ARN does not match the export environment.",
+        );
+      scopes.add(issue.scope);
+      return issue.arn;
+    },
+    target,
+  );
+  if (scopes.size > 1)
+    throw new Error("Continuum issues must belong to the same environment.");
+  return result;
+}
+
 export function normalizeContinuumFindings(
   input: unknown,
-  sourceRepositoryUrl: string,
+  sourceRepositoryUrl?: string,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
+  const issueReport =
+    isRecord(input) && input["format"] === continuumIssueFormat;
+  const capturedSource =
+    issueReport && input["sourceRepositoryUrl"] !== undefined
+      ? declaredScannerRepositoryUrl(
+          input["sourceRepositoryUrl"],
+          "Continuum",
+          target,
+        )
+      : undefined;
   const repository = declaredScannerRepositoryUrl(
-    sourceRepositoryUrl,
+    sourceRepositoryUrl || capturedSource,
     "Continuum",
     target,
   );
+  if (issueReport) {
+    if (
+      capturedSource &&
+      repositoryUrlKey(capturedSource) !== repositoryUrlKey(repository)
+    )
+      throw new Error(
+        "The Continuum export repository does not match the declared source repository.",
+      );
+    const findings = normalizeContinuumIssues(
+      input,
+      capturedSource ?? repository,
+      target,
+    );
+    return capturedSource
+      ? { ...findings, report: { sourceRepositoryUrl: capturedSource } }
+      : findings;
+  }
   const { rows, summary } = reportRows(input);
   const scopes = new Set<string>();
   const output = normalizeRecords(
@@ -340,11 +702,10 @@ export function normalizeContinuumFindings(
         row["severity"],
         "Continuum severity",
       ).toLowerCase();
-      const vulnerabilities = array(
-        row["vulnerabilities"] ?? [],
-        "Continuum vulnerabilities",
-      ).map((item) => record(item, "Continuum vulnerability"));
-      const { locations, code } = codeLocations(row, vulnerabilities);
+      const vulnerabilities = findingVulnerabilities(row);
+      const { locations, code } = codeLocations(
+        findingCodeLocations(row, vulnerabilities),
+      );
       const source = requiredText(row["source"], "Continuum source");
       const status = requiredText(row["status"], "Continuum status");
       const validation = record(
@@ -431,7 +792,7 @@ export function normalizeContinuumFindings(
       );
     },
     (value) => {
-      const { arn, scope } = identity(
+      const { arn, scope } = findingIdentity(
         !summary && isPatchCapture(value) ? value["finding"] : value,
       );
       scopes.add(scope);

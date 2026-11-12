@@ -773,15 +773,17 @@ imports check that URL, when supplied, against the native evidence. Use the
 same source key and native finding IDs when retrying. See the
 [Tenable guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md).
 
-For AWS Continuum, pass a collector capture, native detail, array of selected
-details or captures, or complete list response to `readContinuumFindings` (file
-path) or `normalizeContinuumFindings` (parsed JSON). The second argument is
-the verified Git repository URL. Pass `"local"` as the third argument to retain
-full patch contents locally. The default Cloud projection records
-`contentOmitted: "cloud_evidence_limit"` on patches whose contents exceed the
-finding evidence budget. Read the native finding at `evidence.source_data.finding`
-and its available patches at `evidence.source_data.patches`.
+For AWS Continuum, use `readContinuumFindings(path, sourceRepositoryUrl)` with a
+saved issue export or finding response. Use
+`normalizeContinuumFindings(input, sourceRepositoryUrl)` with parsed JSON.
+Issue exports with a saved repository URL can omit the second argument.
+For other reports, pass the verified source repository URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
+
+Pass `"local"` as the third argument to retain full patch contents in collector
+captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
+when the patch contents exceed the evidence budget. Available patches are in
+`evidence.source_data.patches`.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
