@@ -207,25 +207,15 @@ test('runtime installation opts into validated runner npm configuration without 
 test('runner npm configuration rejects invalid paths without disclosing their values',
   {skip:process.platform !== 'linux' || process.arch !== 'x64'}, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'runtime-runner-npm-invalid-')));
-  const python = await resolveTool('python3');
-  const previousPath = process.env.PATH;
-  t.after(async () => {
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
-    await rm(root, {recursive:true, force:true});
-  });
-  const bin = join(root, 'tools'); const repository = join(root, 'checkout');
-  await mkdir(bin); await mkdir(repository);
-  await symlink(python, join(bin, 'python3'));
-  await writeFile(join(bin, 'npm'), '#!/bin/sh\nexit 70\n', {mode:0o755});
-  process.env.PATH = bin;
+  t.after(() => rm(root, {recursive:true, force:true}));
   const cases = [
     ['NPM_CONFIG_USERCONFIG', {userConfig:join(root, 'missing-secret-named-config')}],
     ['NODE_EXTRA_CA_CERTS', {extraCaCerts:'relative-secret-ca.pem'}],
+    ['NODE_EXTRA_CA_CERTS', {extraCaCerts:root}],
   ] as const;
   for (const [name, runnerNpmConfig] of cases) {
     await assert.rejects(setupRuntime({
-      actionRoot:fileURLToPath(new URL('../', import.meta.url)), tempRoot:root, repository,
+      actionRoot:fileURLToPath(new URL('../', import.meta.url)), tempRoot:root, repository:root,
       provider:'openai', model:'', runnerNpmConfig,
     }), error => error instanceof Error
       && new RegExp(`${name} must be an absolute path to a regular file`).test(error.message)
