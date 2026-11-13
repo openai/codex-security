@@ -1,4 +1,4 @@
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
 import { parseJson } from "./value.js";
@@ -13,6 +13,8 @@ import {
   sessionParentThreadId,
   sessionStartedAt,
 } from "./scan-sessions.js";
+import { compareTimestamps } from "./timestamps.js";
+import { shortArchivePrefix } from "./scan-archive-path.js";
 
 interface ScanLogOptions {
   scanId: string;
@@ -23,6 +25,7 @@ interface ScanLogOptions {
   scanDirectory?: string;
   startedAt?: string;
   completedAt?: string | null;
+  logCompletedAt?: string | null;
   allowMissingRoot?: boolean;
 }
 
@@ -33,9 +36,27 @@ export type ScanLogSource = JsonObject & {
   executionThreadIds?: string[];
   mode?: string;
   scanDir?: string;
+  logCompletedAt?: string | null;
   lifecycle?: { startedAt: string; finishedAt?: string | null };
   progress?: { status?: string; updatedAt?: string };
 };
+
+export function savedScanLogBoundaries(scan: ScanLogSource) {
+  const status = scan.progress?.status;
+  const terminal =
+    status === "complete" || status === "failed" || status === "canceled";
+  return {
+    // Legacy completion still bounds inferred workers, but cannot identify the
+    // final scan turn when sealed artifacts were completed before a resume.
+    completedAt:
+      status === "running"
+        ? null
+        : terminal
+          ? (scan.lifecycle?.finishedAt ?? scan.progress?.updatedAt ?? "")
+          : "",
+    logCompletedAt: terminal ? (scan.logCompletedAt ?? null) : null,
+  };
+}
 
 export function readSavedScanLogs(
   scan: ScanLogSource,
@@ -57,14 +78,7 @@ export function readSavedScanLogs(
     allowMissingRoot: options.allowMissingRoot,
     scanDirectory: scan.mode === "deep" ? scan.scanDir : undefined,
     startedAt: scan.lifecycle?.startedAt,
-    completedAt:
-      scan.progress?.status === "running"
-        ? null
-        : scan.progress?.status === "complete" ||
-            scan.progress?.status === "failed" ||
-            scan.progress?.status === "canceled"
-          ? (scan.lifecycle?.finishedAt ?? scan.progress.updatedAt ?? "")
-          : "",
+    ...savedScanLogBoundaries(scan),
   });
 }
 
@@ -116,6 +130,17 @@ function inRolloutWindow(timestamp: unknown, window: RolloutWindow): boolean {
     typeof timestamp === "string" &&
     compareTimestamps(timestamp, window.startedAt) >= 0 &&
     compareTimestamps(timestamp, window.completedAt) < 0
+  );
+}
+
+function startsAfterCompletion(
+  timestamp: unknown,
+  completedAt: unknown,
+): boolean {
+  return (
+    typeof timestamp === "string" &&
+    typeof completedAt === "string" &&
+    compareTimestamps(timestamp, completedAt) >= 0
   );
 }
 
@@ -173,12 +198,34 @@ async function selectSessionCopies(
   if (options.scanDirectory && startedAt !== null) {
     const directories = [options.scanDirectory];
     const name = basename(options.scanDirectory);
+    const parent = dirname(options.scanDirectory);
+    const originals = new Set<string>();
     for (const marker of name.matchAll(/\.previous-/g)) {
-      if (!marker.index) continue;
-      const original = join(
-        dirname(options.scanDirectory),
-        name.slice(0, marker.index),
-      );
+      if (marker.index)
+        originals.add(join(parent, name.slice(0, marker.index)));
+    }
+    if (name.startsWith(".previous-")) {
+      // A short archive has no readable source name. Only already-bound
+      // sessions can supply a sibling whose complete filename matches its hash.
+      const boundCwds = [
+        root?.workingDirectory,
+        ...Array.from(traversed, (id) => logs.get(id)?.[0].workingDirectory),
+      ];
+      for (const cwd of boundCwds) {
+        if (!cwd) continue;
+        const path = relative(parent, cwd);
+        const sibling = path.split(sep, 1)[0];
+        if (
+          sibling &&
+          sibling !== ".." &&
+          !isAbsolute(path) &&
+          name.startsWith(shortArchivePrefix(sibling))
+        ) {
+          originals.add(join(parent, sibling));
+        }
+      }
+    }
+    for (const original of originals) {
       // A Desktop owner can work outside the scan directory. Its registered
       // workers provide the same binding after archiving the output.
       if (
@@ -194,7 +241,7 @@ async function selectSessionCopies(
     for (const session of children.get(null) ?? []) {
       if (
         session !== root &&
-        belongsToScan(session, directories, startedAt, options.completedAt)
+        belongsToScan(session, directories, startedAt, options)
       ) {
         included.add(session.threadId);
         traversed.add(session.threadId);
@@ -204,6 +251,8 @@ async function selectSessionCopies(
   for (const parentId of traversed) {
     for (const session of children.get(parentId) ?? []) {
       if (window && !inRolloutWindow(session.timestamp, window)) continue;
+      if (startsAfterCompletion(session.timestamp, options.logCompletedAt))
+        continue;
       included.add(session.threadId);
       traversed.add(session.threadId);
     }
@@ -550,6 +599,14 @@ export async function readScanLogs(options: ScanLogOptions) {
     const session = await completeSession(copies);
     sessions.push(session);
     for await (const event of ownSessionEvents(session)) {
+      const payload = event["payload"];
+      if (
+        event["type"] === "event_msg" &&
+        isRecord(payload) &&
+        payload["type"] === "task_started" &&
+        startsAfterCompletion(event["timestamp"], options.logCompletedAt)
+      )
+        break;
       events.push({ threadId: session.threadId, event });
     }
   }
@@ -569,7 +626,7 @@ function belongsToScan(
   session: SessionLog,
   directories: string[],
   startedAt: number,
-  completedAt: string | null | undefined,
+  options: ScanLogOptions,
 ): boolean {
   if (
     session.workingDirectory === null ||
@@ -578,12 +635,12 @@ function belongsToScan(
   ) {
     return false;
   }
-  if (completedAt !== undefined && completedAt !== null) {
-    const completed = Date.parse(completedAt);
-    if (!Number.isFinite(completed) || session.startedAt >= completed) {
-      return false;
-    }
-  }
+  const beforeCompletion =
+    typeof options.logCompletedAt === "string" && session.timestamp !== null
+      ? compareTimestamps(session.timestamp, options.logCompletedAt) < 0
+      : options.completedAt == null ||
+        session.startedAt < Date.parse(options.completedAt);
+  if (!beforeCompletion) return false;
 
   for (const directoryRoot of directories) {
     if (isScanArtifactDirectory(directoryRoot, session.workingDirectory)) {

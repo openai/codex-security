@@ -63,20 +63,26 @@ describe("scan navigation", () => {
           environment: { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: root },
           onWorkbench: (args): JsonObject => {
             calls.push([...args]);
-            if (args[0] === "list-scans")
+            if (args[0] === "list-scans") {
+              if (!args.includes("--prefer-worktree"))
+                return { scans: [{ scanId: "newer-sibling-scan" }] };
               return {
                 scans: args.includes("complete")
                   ? [completed]
                   : [latest, completed],
               };
+            }
             return {
               scan: completedId.startsWith(args[2]!) ? completed : latest,
             };
           },
         });
         for (const interactive of [false, true]) {
+          const selection = interactive ? ["latest"] : [];
           const show = createCliTest(main, { stdout: interactive });
-          expect(await show.runCli(["scans", "show"], deps)).toBe(0);
+          expect(await show.runCli(["scans", "show", ...selection], deps)).toBe(
+            0,
+          );
           expect(show.stderr.text()).toContain(
             `Scan ${completedId} · complete`,
           );
@@ -90,7 +96,9 @@ describe("scan navigation", () => {
           expect(show.stderr.text()).not.toContain(latestId);
 
           const logs = createCliTest(main, { stdout: interactive });
-          expect(await logs.runCli(["scans", "logs"], deps)).toBe(0);
+          expect(await logs.runCli(["scans", "logs", ...selection], deps)).toBe(
+            0,
+          );
           expect(logs.stderr.text()).toContain(`Scan ${latestId} · ${status}`);
           expect(logs.stderr.text()).toContain(
             "including failed and active runs",

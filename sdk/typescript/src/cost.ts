@@ -1,3 +1,4 @@
+import { splitCommand } from "./command-words.js";
 import { isSafeNonNegativeInteger, parseJson } from "./value.js";
 import type { JsonObject } from "./config.js";
 import { workbenchArgs } from "./workbench-arguments.js";
@@ -4078,41 +4079,6 @@ function takeFirstIndex(heap: number[]): number {
   }
   heap[parent] = last;
   return first;
-}
-
-/** Decode the quoted argv rendering emitted by native command completions. */
-function splitCommand(command: string): string[] | null {
-  const words: string[] = [];
-  let word = "";
-  let started = false;
-  let quote: "'" | '"' | null = null;
-  for (let index = 0; index < command.length; index++) {
-    const character = command[index]!;
-    if (character === "\\" && quote !== "'") {
-      const next = command[++index];
-      if (next === undefined) return null;
-      if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next))
-        word += "\\";
-      if (next !== "\n") word += next;
-      started = true;
-    } else if (quote !== null) {
-      if (character === quote) quote = null;
-      else word += character;
-    } else if (character === "'" || character === '"') {
-      quote = character;
-      started = true;
-    } else if (" \t\r\n".includes(character)) {
-      if (started) words.push(word);
-      word = "";
-      started = false;
-    } else {
-      word += character;
-      started = true;
-    }
-  }
-  if (quote !== null) return null;
-  if (started) words.push(word);
-  return words;
 }
 
 function sessionProgressUpdates(
