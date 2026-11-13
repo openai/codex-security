@@ -17,7 +17,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 
 test.skipIf(process.platform !== "win32")(
-  "runs the documented policy command with long and literal paths and preserves the selected launcher's exit code",
+  "runs the documented policy command with long and literal paths and preserves exit codes with inherited ERRORLEVEL",
   async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "policy-launch-")),
@@ -101,6 +101,8 @@ test.skipIf(process.platform !== "win32")(
                 SystemRoot: process.env["SystemRoot"],
                 PATH: system,
                 PATHEXT: pathExtensions,
+                // Both successful and failing helpers must override this inherited value.
+                ERRORLEVEL: "7",
                 CODEX_MCP_NODE_PATH: Bun.which("node")!,
                 CODEX_SECURITY_PLUGIN_ROOT: plugin,
                 CODEX_SECURITY_REPOSITORY: repo,
@@ -910,56 +912,6 @@ test.skipIf(process.platform !== "win32")(
         );
         expect(await readFile(join(root, "%OUTPUT%.md"), "utf8")).toContain(
           "literal percent policy",
-        );
-      }
-    } finally {
-      await removeTemporaryDirectory(root);
-    }
-  },
-);
-
-test.skipIf(process.platform !== "win32")(
-  "preserves Windows helper exit codes when ERRORLEVEL is inherited",
-  async () => {
-    const node = Bun.which("node");
-    if (node === null)
-      throw new Error("Node is required for the launcher test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-helper-errorlevel-")),
-    );
-    try {
-      await writeFile(join(root, "SECURITY.md"), "repository policy\n");
-      const launcher = join(
-        PLUGIN_ROOT,
-        "scripts",
-        "launch_codex_security_mcp.cmd",
-      );
-      for (const [errorlevel, scope, exitCode] of [
-        ["0", "missing", 2],
-        ["7", ".", 0],
-      ] as const) {
-        const result = spawnSync(
-          join(process.env["SystemRoot"]!, "System32", "cmd.exe"),
-          [
-            "/d",
-            "/s",
-            "/c",
-            `""${launcher}" --helper resolve-security-md --repo . --scope ${scope} --out -"`,
-          ],
-          {
-            cwd: root,
-            env: {
-              SystemRoot: process.env["SystemRoot"],
-              CODEX_MCP_NODE_PATH: node,
-              ERRORLEVEL: errorlevel,
-            },
-            encoding: "utf8",
-            windowsHide: true,
-            windowsVerbatimArguments: true,
-          },
-        );
-        expect(result.status, result.stderr || result.error?.message).toBe(
-          exitCode,
         );
       }
     } finally {
