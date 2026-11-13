@@ -542,11 +542,7 @@ function evidence(
     const ecosystem = ecosystems.get(text(item.packageManager) ?? "") ?? null;
     const version = (value: unknown) =>
       concreteVersion(value, ecosystem, item.packageManager === "OS");
-    // Inspector writes NotAvailable when no fixed version exists.
-    const fixed =
-      item.fixedInVersion === "NotAvailable"
-        ? null
-        : version(item.fixedInVersion);
+    const fixed = version(item.fixedInVersion);
     const splitVersion =
       item.packageManager === "OS" &&
       (item.epoch != null || item.release != null);
@@ -555,7 +551,7 @@ function evidence(
       ecosystem,
       installed_version: splitVersion ? null : version(item.version),
       manifest_path: manifestPath(path),
-      fixed_versions: fixed ? [fixed] : [],
+      fixed_versions: fixed && fixed !== "NotAvailable" ? [fixed] : [],
     };
   });
   const locations: { path: string; line: number | null }[] = [...paths].map(
