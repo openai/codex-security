@@ -266,9 +266,8 @@ also honor the selected command provider in that home's `config.toml`.
 
 For OrcaRouter, save this profile in `$CODEX_HOME/orcarouter.config.toml`
 (default `~/.codex/orcarouter.config.toml`), then run
-`codex-security scan . --codex 'profile="orcarouter"'`. This example uses the
-signed-in 1Password CLI to read your router key. Substitute your own secret
-reference or credential command. Codex reads the key from the command's output.
+`codex-security scan . --codex 'profile="orcarouter"'`. Sign in to the 1Password CLI and
+replace the secret reference below with the one for your router key.
 
 ```toml
 model = "orcarouter/fusion"
@@ -283,6 +282,8 @@ wire_api = "responses"
 command = "op"
 args = ["read", "op://Private/OrcaRouter/credential"]
 ```
+
+This profile was tested up to the outgoing Responses request using a local service.
 
 For other providers, set their key and select a model the provider supports:
 
