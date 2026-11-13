@@ -1891,6 +1891,24 @@ describe("semantic scan comparison", () => {
       account,
     );
     expect(onlyProvider["CODEX_HOME"]).toBe(home);
+    const nativeHeader = await comparisonEnvironment(
+      source,
+      account,
+      undefined,
+      undefined,
+      {
+        model_provider: "standardcompute",
+        model_providers: {
+          standardcompute: {
+            name: "Local router",
+            base_url: "http://localhost/v1",
+            env_http_headers: { Authorization: "OPENAI_API_KEY" },
+          },
+        },
+      },
+    );
+    expect(nativeHeader["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
+    expect(nativeHeader).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
     const gateway = {
       model_provider: "gateway",
       model_providers: {

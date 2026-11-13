@@ -643,11 +643,14 @@ async function startReadOnlyCodexThread(
   );
   delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
-  const providerSettings = commandAuth ? providerConfig : (config ?? {});
+  const modelProvider = scanModelProvider(providerConfig);
+  const providerSettings =
+    commandAuth || modelProvider === "standardcompute"
+      ? providerConfig
+      : (config ?? {});
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
-  const modelProvider = scanModelProvider(providerConfig);
   const nativeKey =
     !commandAuth && !isExternalModelProvider(modelProvider)
       ? scanProviderEnvKey(providerConfig)
@@ -739,7 +742,7 @@ async function startReadOnlyCodexThread(
       requestedPermissionProfile = permissions.permissionProfileId;
     }
     if (
-      nativeKey !== undefined &&
+      (nativeKey !== undefined || modelProvider === "standardcompute") &&
       runtimeOptions.nativeProviderEnvironment !== undefined
     ) {
       codexOptions.env = {
@@ -1277,13 +1280,17 @@ export async function comparisonEnvironment(
     }
   }
   if (hasCommandAuth(configuration)) return withoutOpenAiApiKeys(environment);
-  const selectedKey =
-    nativeKey ??
-    (provider === "standardcompute"
-      ? scanProviderEnvKey(configuration)
-      : undefined);
-  if (selectedKey !== undefined) {
-    scanAuthentication(environment, auth, provider, false, false, selectedKey);
+  if (provider === "standardcompute" || nativeKey !== undefined) {
+    const selectedKey = nativeKey ?? scanProviderEnvKey(configuration);
+    scanAuthentication(
+      environment,
+      auth,
+      provider,
+      false,
+      false,
+      selectedKey,
+      configuration,
+    );
     return definedEnvironment(
       selectedScanEnvironment(
         environment,

@@ -169,6 +169,81 @@ test("OpenAI scans omit ambient Standard Compute credentials", () => {
   }
 });
 
+const standardComputeCredentials: JsonObject[] = [
+  { http_headers: { aUtHoRiZaTiOn: "Bearer synthetic-static" } },
+  { env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" } },
+  { experimental_bearer_token: "synthetic-bearer" },
+];
+
+test.each(standardComputeCredentials)(
+  "Standard Compute uses a native credential without its preset key: %j",
+  async (credential) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    await mkdir(repository);
+    await mkdir(home, { mode: 0o700 });
+    const provider = {
+      name: "Private router",
+      base_url: "http://127.0.0.1:8021/v1",
+      wire_api: "responses",
+      ...credential,
+    };
+    const environment = {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      STANDARDCOMPUTE_API_KEY: "unrelated-preset-key",
+      OPENAI_API_KEY: "synthetic-header-value",
+    };
+    await using client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "standardcompute",
+          model_providers: { standardcompute: provider },
+        },
+      },
+      {
+        environment,
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          environment,
+          credentialsAvailable: false,
+        }),
+        resolvePluginPython: async () => "/managed/python",
+        repositoryRevision: async () => "deadbeef",
+        runWorkbench: async (_options, args, input) =>
+          mockWorkbench(args, input),
+        createCodex: async (options) => {
+          expect(options.apiKey).toBeUndefined();
+          expect(options.env).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
+          expect(options.env!["OPENAI_API_KEY"]).toBe(
+            "env_http_headers" in credential
+              ? environment.OPENAI_API_KEY
+              : undefined,
+          );
+          const native = parseToml(
+            await readFile(
+              join(home, `${options.nativeProfile}.config.toml`),
+              "utf8",
+            ),
+          );
+          expect(native["model_providers"] as JsonObject).toEqual({
+            standardcompute: provider,
+          });
+          throw new Error("checked native provider launch");
+        },
+      },
+    );
+    expect((await client.preflight(repository)).authentication).toMatchObject({
+      method: "api_key",
+      source: Object.keys(credential)[0],
+    });
+    await expect(
+      client.run(repository, { outputDir: join(root, "scan") }),
+    ).rejects.toThrow("checked native provider launch");
+  },
+);
+
 test("native worker override tables retain inherited features and MCP servers", async () => {
   const root = await temporaryDirectory();
   const home = join(root, "home");

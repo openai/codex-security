@@ -12,6 +12,7 @@ import {
   isExternalModelProvider,
   modelProviderConfigOverride,
   scanModelProvider,
+  standardComputeCredentialSource,
   type JsonObject,
 } from "./config.js";
 import { AuthenticationRequiredError } from "./errors.js";
@@ -32,6 +33,8 @@ export function resolveSkillAuthentication(
   ) as JsonObject;
   const config = deepMerge(structuredClone(ambientConfig), overrides);
   const provider = options.modelProvider ?? scanModelProvider(config);
+  if (options.modelProvider !== undefined)
+    config["model_provider"] = options.modelProvider;
   // Native Codex ignores configured tables for these built-in providers.
   const providerConfiguration =
     typeof provider === "string" &&
@@ -49,7 +52,10 @@ export function resolveSkillAuthentication(
     options.auth === "chatgpt" && !isExternalModelProvider(provider);
   const providerBearer =
     typeof providerConfiguration?.["experimental_bearer_token"] === "string";
-  const providerKeyConfigured = providerEnvKey !== undefined || providerBearer;
+  const providerKeyConfigured =
+    providerEnvKey !== undefined ||
+    providerBearer ||
+    standardComputeCredentialSource(config) !== undefined;
   const requiresOpenAiAuth =
     !commandAuth &&
     (explicitChatgpt || !providerKeyConfigured) &&
@@ -75,6 +81,9 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
+      false,
+      undefined,
+      config,
     );
   }
   if (
