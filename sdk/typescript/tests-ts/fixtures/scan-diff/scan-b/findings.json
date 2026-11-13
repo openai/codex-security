@@ -21,10 +21,15 @@
       },
       "locations": [
         {
+          "path": "src/caller.py",
+          "startLine": 7,
+          "role": "source"
+        },
+        {
           "path": "src/extract.py",
           "startLine": 48,
           "endLine": 51,
-          "role": "sink"
+          "role": "root_control"
         }
       ]
     },

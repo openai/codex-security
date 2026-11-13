@@ -257,7 +257,11 @@ function findingPath(finding: ScanDiffFinding): string | undefined {
     return finding.path;
   const locations = finding.locations;
   if (!Array.isArray(locations)) return;
-  const location = locations.find(isJsonObject);
+  // Saved catalogue rows put the root control first; exported artifacts preserve input order.
+  const location =
+    locations.find(
+      (entry) => isJsonObject(entry) && entry["role"] === "root_control",
+    ) ?? locations.find(isJsonObject);
   return typeof location?.["path"] === "string" ? location["path"] : undefined;
 }
 
