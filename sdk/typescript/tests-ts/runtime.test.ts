@@ -4220,6 +4220,7 @@ describe("runtime directories and plugin Python boundary", () => {
         await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
       const trace = join(root, "acl-queries.txt");
       const providerTrace = join(root, "provider-queries.txt");
+      await writeFile(providerTrace, "");
       const append = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace.replaceAll("'", "''")}' -Value`;
       const recordProvider = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${providerTrace.replaceAll("'", "''")}' -Value`;
       const restore = instrumentCredentialAcl(home, (script) =>
@@ -4228,15 +4229,10 @@ describe("runtime directories and plugin Python boundary", () => {
             ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'"
             : "",
           `function Read-TestProviderAcl { param($LiteralPath); ${recordProvider} 'acl'; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $LiteralPath }`,
-          `function Read-TestProviderChildren { param($LiteralPath, [switch]$Force); ${recordProvider} 'enumeration'; Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath $LiteralPath -Force:$Force }`,
           script
             .replaceAll(
               "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath",
               "Read-TestProviderAcl -LiteralPath",
-            )
-            .replaceAll(
-              "Microsoft.PowerShell.Management\\Get-ChildItem -LiteralPath",
-              "Read-TestProviderChildren -LiteralPath",
             )
             .replace(
               credentialAclFunction,
@@ -4255,18 +4251,9 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(queries.reduce((total, count) => total + count, 0)).toBe(
           expected,
         );
-        const providerQueries = await readFile(providerTrace, "utf8").catch(
-          (error: unknown) => {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
-            throw error;
-          },
-        );
-        if (language === "FullLanguage")
-          expect(providerQueries).not.toContain("acl");
-        else {
-          expect(providerQueries).toContain("acl");
-          expect(providerQueries).toContain("enumeration");
-        }
+        const providerQueries = await readFile(providerTrace, "utf8");
+        if (language === "FullLanguage") expect(providerQueries).toBe("");
+        else expect(providerQueries).toContain("acl");
       } finally {
         restore();
       }

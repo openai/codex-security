@@ -1116,7 +1116,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "  }",
     "  $children = @(foreach ($entry in $entries) {",
     "    if (($entry.Attributes -band 1024) -and ($entry.LinkType -in @('SymbolicLink', 'Junction'))) { throw 'Windows credential home contains a symbolic link or junction' }",
-    "    if ($entry -isnot [System.IO.DirectoryInfo] -and $entry -isnot [System.IO.FileInfo]) { throw 'Windows credential home contains an unsafe entry' }",
+    "    if ($entry.PSObject.TypeNames -notcontains 'System.IO.DirectoryInfo' -and $entry.PSObject.TypeNames -notcontains 'System.IO.FileInfo') { throw 'Windows credential home contains an unsafe entry' }",
     // Keep the extended-length path when Windows PowerShell returns child names.
     '    "$path\\$($entry.Name)"',
     "  })",
@@ -1132,7 +1132,7 @@ async function secureWindowsCredentialHome(path: string): Promise<void> {
     "    }",
     "  }",
     "  for ($i = 0; $i -lt $children.Count; $i++) {",
-    "    if ($children[$i] -and $entries[$i] -is [System.IO.DirectoryInfo]) { Read-CredentialDescendants $children[$i] }",
+    "    if ($children[$i] -and $entries[$i].PSIsContainer) { Read-CredentialDescendants $children[$i] }",
     "  }",
     "}",
     ancestorAclScript,
