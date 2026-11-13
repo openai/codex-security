@@ -16,6 +16,25 @@ const { git, runTool } = await importSource("src/helpers/inventory-git.ts", {
   define: { "import.meta.url": JSON.stringify(helperUrl.href) },
 });
 
+test("inventory subprocesses omit the MiniMax credential", async (t) => {
+  const key = "MiniMax_API_Key";
+  const saved = process.env[key];
+  t.after(() => {
+    if (saved === undefined) delete process.env[key];
+    else process.env[key] = saved;
+  });
+  process.env[key] = "fixture-value";
+  for (const argument of ["ordinary", "raw-\udcff"]) {
+    const result = await runTool(process.execPath, [
+      "-e",
+      'process.exitCode = Number(Object.keys(process.env).some(k => k.toUpperCase() === "MINIMAX_API_KEY"))',
+      argument,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  assert.equal(process.env[key], "fixture-value");
+});
+
 for (const [name, details] of [
   ["named", { code: "ENOEXEC" }],
   [

@@ -56,6 +56,7 @@ import {
   windows,
 } from "./inventory-paths";
 import { createSourceSampler } from "./source-preview";
+import { helperEnvironment } from "../helper-environment";
 
 interface ToolResult {
   status: number | null;
@@ -689,10 +690,11 @@ function spawnInventoryTool(
 function spawnTool(
   command: string,
   args: string[],
-  options: ToolOptions,
+  spawnOptions: ToolOptions,
   inheritedEnvironment: Record<string, string>,
   inputFd: 0 | 3 = 0,
 ) {
+  const options = { ...spawnOptions, env: helperEnvironment(spawnOptions.env) };
   const stdio = [...options.stdio];
   if (inputFd === 3) stdio.push("pipe");
   const environment = Object.fromEntries(
@@ -771,7 +773,7 @@ function spawnTool(
   ].join("\n");
   // Loader settings belong to the tool: decoded raw values can fail at shell
   // startup, and macOS system shells also strip ordinary DYLD_* values.
-  const env = { ...(options.env ?? process.env) };
+  const env = { ...options.env };
   for (const name of Object.keys(environment)) delete env[name];
   // macOS ships dash; unlike its Bash 3.2 sh, failed exec retains ENOENT's 127.
   const shell = process.platform === "darwin" ? "/bin/dash" : "/bin/sh";
