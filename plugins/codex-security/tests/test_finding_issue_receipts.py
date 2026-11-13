@@ -12,7 +12,7 @@ from contextlib import closing
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 
 import pytest
 from workbench_test_support import load_script, run_workbench, write_completed_contract
@@ -40,9 +40,14 @@ def inspection(tmp_path: Path):
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("root", ["C:\\", "\\\\server\\share\\"])
 @pytest.mark.parametrize("extended", [False, True])
-def test_inspection_windows_filename_spelling(inspection, monkeypatch, root, extended) -> None:
+@pytest.mark.parametrize("require_history", [False, True])
+def test_inspection_windows_filename_spelling(
+    inspection, monkeypatch, root, extended, require_history
+) -> None:
     publication, payload, validated = inspection
-    ordinary = PureWindowsPath(root) / "state %23 # équipe" / "workbench.sqlite3"
+    directory = PureWindowsPath(root) / ("s" * (240 - len(root))) / "state #% é"
+    ordinary = directory / "workbench.sqlite3"
+    assert len(str(directory)) < 260 <= len(str(ordinary))
     expected = (
         ("\\\\?\\UNC\\" + str(ordinary)[2:])
         if root.startswith("\\\\")
@@ -54,6 +59,8 @@ def test_inspection_windows_filename_spelling(inspection, monkeypatch, root, ext
         def stat(self):
             return stat(str(self))
 
+    payload["requireHistory"] = require_history
+    monkeypatch.setattr(publication, "verify_publication_history", Mock())
     path = Filename(expected if extended else ordinary)
     connect = Mock(return_value=sqlite3.connect(":memory:"))
     monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt"))
@@ -69,39 +76,6 @@ def test_inspection_windows_filename_spelling(inspection, monkeypatch, root, ext
         "uri": f"file:{quote(expected, safe='')}?mode=ro",
     }
     assert connect.call_args.kwargs == {"uri": True, "timeout": 5}
-    assert unquote(connect.call_args.args[0][5:].split("?")[0]) == expected
-
-
-@pytest.mark.cross_platform
-@pytest.mark.parametrize("require_history", [False, True])
-def test_inspection_legacy_windows_filename_boundary(
-    inspection, monkeypatch, require_history
-) -> None:
-    publication, payload, validated = inspection
-
-    class Filename(PureWindowsPath):
-        def stat(self):
-            if not str(self).startswith("\\\\?\\") and len(str(self)) >= 260:
-                raise FileNotFoundError("synthetic legacy MAX_PATH failure")
-
-    directory = Filename("C:/") / ("s" * 246)
-    path = directory / "workbench.sqlite3"
-    assert len(str(directory)) < 260 <= len(str(path))
-
-    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt"))
-    monkeypatch.setattr(publication, "validate_contract", lambda _: validated)
-    monkeypatch.setattr(publication, "Path", Filename)
-    monkeypatch.setattr(
-        publication.sqlite3, "connect", Mock(return_value=sqlite3.connect(":memory:"))
-    )
-    monkeypatch.setattr(publication, "verify_publication_history", Mock())
-    payload["requireHistory"] = require_history
-
-    try:
-        result = publication.finding_issues(SimpleNamespace(database_path=lambda: path), payload)
-    except SystemExit as exc:
-        pytest.fail(f"Existing database was treated as missing: {exc}")
-    assert result["storeExists"] is True
 
 
 @pytest.mark.parametrize(
