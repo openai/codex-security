@@ -621,6 +621,7 @@ describe("multiscan", () => {
     ["unknown status", { status: "pending" }, true],
     ["missing output directory", { outputDir: undefined }, false],
     ["non-boolean knowledge failure", { knowledgeBaseFailure: "false" }, false],
+    ["invalid pending checkout cleanup", { cleanupPending: "recover" }, false],
     ["non-boolean checkout flag", { checkoutOccupied: "false" }, false],
     ["non-boolean policy outcome", { policyFailed: "true" }, false],
   ] as const)(

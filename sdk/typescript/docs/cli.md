@@ -1481,7 +1481,8 @@ failed or interrupted attempt:
 
 Each nonempty committed line in `results.jsonl` must be a JSON object with a valid
 task ID, a nonempty output directory, a supported status, and a positive safe
-integer attempt number. Optional receipt flags must be booleans. If a line fails these checks,
+integer attempt number. Optional receipt flags must be booleans, and a pending
+checkout cleanup must name `checkout` or `recovery-checkout`. If a line fails these checks,
 the command reports its line number and preserves the ledger. Restore a complete
 ledger backup that includes every committed attempt, or start a separate campaign
 in a new `--output-dir`. If a repository exhausts its attempt numbers, starting

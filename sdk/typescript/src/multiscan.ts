@@ -1278,6 +1278,14 @@ async function readReceipts(
         throw new Error("Expected a completed or failed receipt status");
       if (typeof saved.outputDir !== "string" || !saved.outputDir.trim())
         throw new Error("Expected a nonempty string outputDir");
+      if (
+        saved.cleanupPending !== undefined &&
+        saved.cleanupPending !== "checkout" &&
+        saved.cleanupPending !== "recovery-checkout"
+      )
+        throw new Error(
+          "Expected cleanupPending to be checkout or recovery-checkout",
+        );
       for (const flag of [
         "knowledgeBaseFailure",
         "checkoutOccupied",
