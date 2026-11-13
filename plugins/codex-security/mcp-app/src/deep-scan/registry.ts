@@ -164,6 +164,7 @@ export class DeepScanRemoteCoordinator {
               scanId: run.scanId,
               threadId,
               handoffClaimToken: options.handoffClaimToken,
+              ...options.adoptionSettings,
             });
           } catch (error) {
             if (!isTransientPersistenceError(error)) {
@@ -217,6 +218,7 @@ export async function startOrJoinDeepScanCoordinator(
     scanId: input.run.scanId,
     threadId,
     handoffClaimToken: input.options.handoffClaimToken,
+    ...input.options.adoptionSettings,
   });
   if (!claim.acquired) {
     return {

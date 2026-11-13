@@ -1050,6 +1050,7 @@ export function createCodexSecurityServer(): McpServer {
         };
         const started = await startDeepScanEngine({
           run: begun,
+          adoptionSettings: modelSettings,
           registry: deepScanCoordinators,
           store: deepScanStore,
           runWorkbench,

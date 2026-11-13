@@ -63,6 +63,10 @@ export async function runCliDeepScan(): Promise<void> {
     if (run.status === "running") {
       const started = await startDeepScanEngine({
         run,
+        adoptionSettings: {
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+        },
         store,
         registry,
         runWorkbench,

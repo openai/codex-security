@@ -616,11 +616,29 @@ def terminal_deep_scan_for_target_snapshot(
     ).fetchone()
 
 
+def save_deep_scan_model_settings(
+    connection: sqlite3.Connection, scan_id: str, args: argparse.Namespace
+) -> None:
+    model = optional_text(args.model, maximum=200)
+    reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
+    if model is not None or reasoning_effort is not None:
+        connection.execute(
+            """
+            UPDATE scans
+            SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort)
+            WHERE id = ?
+            """,
+            (model, reasoning_effort, scan_id),
+        )
+
+
 def begin_deep_scan_for_scan(
     connection: sqlite3.Connection,
     scan_id: str,
     thread_id: str,
     args: argparse.Namespace,
+    *,
+    resume_interrupted: bool = True,
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = dependencies().require_scan(connection, scan_id)
@@ -689,7 +707,7 @@ def begin_deep_scan_for_scan(
         ).fetchone()
         if run is not None:
             resume = (
-                args.scan_id
+                resume_interrupted
                 and run["status"] == "interrupted"
                 and scan["status"] == "running"
                 and scan["seal_manifest_digest"] is None
@@ -721,17 +739,7 @@ def begin_deep_scan_for_scan(
             "UPDATE workspaces SET deep_scan_config_json = ? WHERE id = ? AND deep_scan_config_json IS NULL",
             (json.dumps(configuration), workspace["id"]),
         )
-        model = optional_text(args.model, maximum=200)
-        reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
-        if model is not None or reasoning_effort is not None:
-            connection.execute(
-                """
-                UPDATE scans
-                SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort)
-                WHERE id = ?
-                """,
-                (model, reasoning_effort, scan_id),
-            )
+        save_deep_scan_model_settings(connection, scan_id, args)
         ensure_deep_scan_run(
             connection,
             scan,
@@ -752,7 +760,9 @@ def begin_deep_scan_for_target(
     target_path = str(target)
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
-        return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
+        return begin_deep_scan_for_scan(
+            connection, existing["id"], thread_id, args, resume_interrupted=False
+        )
     user_context = user_context_argument(args)
     # Keep the requested spelling so a continuation can match a removed file or symlink.
     # NULL means no result is pending. The empty string denotes a launch with no project file.
@@ -791,7 +801,9 @@ def begin_deep_scan_for_target(
         if existing is not None:
             require_scan_checkout_owner(connection, existing)
             connection.commit()
-            return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
+            return begin_deep_scan_for_scan(
+                connection, existing["id"], thread_id, args, resume_interrupted=False
+            )
         current_target = dependencies().require_remediation_target(target_path)
         current_metadata = current_target.stat()
         if (current_metadata.st_dev, current_metadata.st_ino) != (
@@ -1020,6 +1032,8 @@ def claim_deep_scan_coordinator_locked(
             adopted = run["coordinator_generation"] > 1 or run["phase"] != "setup"
             if adopted:
                 recover_expired_coordinator(connection, run, timestamp)
+                # Only the caller adopting an expired coordinator can replace its worker settings.
+                save_deep_scan_model_settings(connection, scan_id, args)
             disposition = "adopted" if adopted else "claimed"
 
         connection.execute(

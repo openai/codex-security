@@ -24,6 +24,7 @@ export function startDeepScanEngine(options: {
   pythonCommand: string;
   parentSandbox: DeepWorkerParentSandbox;
   parentTurn?: DeepScanParentTurn;
+  adoptionSettings?: CoordinatorOptions["adoptionSettings"];
   threadId: string;
   handoffClaimToken?: string;
   log?: DeepScanLogger;
@@ -36,23 +37,26 @@ export function startDeepScanEngine(options: {
     registry: options.registry,
     options: {
       store: options.store,
-      executor: new CodexSdkWorkerExecutor({
-        model: run.model,
-        reasoningEffort: run.reasoningEffort,
-        serviceTier: run.serviceTier,
-        deepScanConfig: run.config,
-        parentSandbox: options.parentSandbox,
-        parentTurn: options.parentTurn,
-        artifactContext: {
-          pluginRoot,
-          repoRoot: run.targetPath,
-          scanId: run.scanId,
-          scope: run.scope,
-          includePaths: run.includePaths,
-          filePaths: run.filePaths,
-          pythonCommand: options.pythonCommand,
-        },
-      }),
+      adoptionSettings: options.adoptionSettings,
+      // A lease takeover can select a new model after begin() returns.
+      executor: (run) =>
+        new CodexSdkWorkerExecutor({
+          model: run.model,
+          reasoningEffort: run.reasoningEffort,
+          serviceTier: run.serviceTier,
+          deepScanConfig: run.config,
+          parentSandbox: options.parentSandbox,
+          parentTurn: options.parentTurn,
+          artifactContext: {
+            pluginRoot,
+            repoRoot: run.targetPath,
+            scanId: run.scanId,
+            scope: run.scope,
+            includePaths: run.includePaths,
+            filePaths: run.filePaths,
+            pythonCommand: options.pythonCommand,
+          },
+        }),
       pluginRoot,
       log: options.log,
       onStart: options.onStart,

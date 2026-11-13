@@ -140,6 +140,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     claim_coordinator = add_command("claim-deep-scan-coordinator", "--scan-id", "--thread-id")
     claim_coordinator.add_argument("--claim-token")
+    claim_coordinator.add_argument("--model")
+    claim_coordinator.add_argument("--reasoning-effort")
     claim_coordinator.add_argument("--coordinator-generation", type=positive_int)
 
     upsert_deep_worker = add_command("upsert-deep-scan-worker", "--scan-id", "--worker-id")

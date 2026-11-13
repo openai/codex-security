@@ -220,7 +220,8 @@ export class WorkbenchDeepScanStore {
   }
 
   async claimCoordinator(
-    input: DeepScanCoordinatorLeaseInput,
+    input: DeepScanCoordinatorLeaseInput &
+      Pick<DeepScanRunState, "model" | "reasoningEffort">,
   ): Promise<DeepScanCoordinatorClaim> {
     const result = await this.enqueueWrite(
       workbenchArgs("claim-deep-scan-coordinator", {
@@ -228,6 +229,8 @@ export class WorkbenchDeepScanStore {
         threadId: input.threadId,
         coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         claimToken: input.handoffClaimToken || undefined,
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
       }),
     );
     const run = parseDeepScan(result);

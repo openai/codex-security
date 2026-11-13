@@ -522,11 +522,32 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         )
     )
     with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(executor.map(lambda _: claim(), range(4)))
+
+        def competing_claim(index: int) -> dict[str, object]:
+            return scan_command(
+                state_dir,
+                "claim-deep-scan-coordinator",
+                scan_id,
+                "--thread-id",
+                "thread-deep-scan",
+                "--model",
+                f"replacement-{index}",
+                "--reasoning-effort",
+                "max",
+                environment=deep_environment(codex_home),
+            )
+
+        results = list(executor.map(competing_claim, range(4)))
 
     assert sum(result["coordinatorDisposition"] == "adopted" for result in results) == 1
     assert sum(result["coordinatorDisposition"] == "observing" for result in results) == 3
     assert {result["deepScan"]["coordinatorGeneration"] for result in results} == {3}
+    winner = next(
+        i for i, result in enumerate(results) if result["coordinatorDisposition"] == "adopted"
+    )
+    assert {
+        (result["deepScan"]["model"], result["deepScan"]["reasoningEffort"]) for result in results
+    } == {(f"replacement-{winner}", "max")}
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert (
             connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()

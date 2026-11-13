@@ -74,7 +74,9 @@ export interface ParentScanState {
 export interface CoordinatorOptions {
   run: DeepScanRunState;
   store: DeepScanStore;
-  executor: CodexWorkerExecutor;
+  executor:
+    CodexWorkerExecutor | ((run: DeepScanRunState) => CodexWorkerExecutor);
+  adoptionSettings?: Pick<DeepScanRunState, "model" | "reasoningEffort">;
   pluginRoot: string;
   clock?: DeepScanClock;
   random?: () => number;
@@ -113,6 +115,7 @@ export class DeepScanCoordinator {
   private readonly log: DeepScanLogger;
   private readonly artifacts: DeepScanArtifacts;
   private readonly discoveryWorkers: DeepScanWorkerRunner;
+  private readonly executor: CodexWorkerExecutor;
   private readonly terminalResult: PromiseWithResolvers<DeepScanRunState>;
   private heartbeatTimeout: ReturnType<typeof setTimeout> | undefined;
   private discoveryTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -142,10 +145,14 @@ export class DeepScanCoordinator {
       }
     };
     this.artifacts = createDeepScanArtifacts(this.state.scanDir);
+    this.executor =
+      typeof options.executor === "function"
+        ? options.executor(options.run)
+        : options.executor;
     const workerOptions = {
       run: this.state,
       store: options.store,
-      executor: options.executor,
+      executor: this.executor,
       artifacts: this.artifacts,
       pluginRoot: options.pluginRoot,
       clock: this.clock,
@@ -941,7 +948,7 @@ export class DeepScanCoordinator {
     prompt: string,
     schema: Record<string, unknown>,
   ): Promise<string> {
-    const { executor } = this.options;
+    const { executor } = this;
     if (!executor.compareFindings)
       throw new Error("No Deep Scan finding comparison executor");
     const { scanId, workerUsageDirectory } = this.state;
