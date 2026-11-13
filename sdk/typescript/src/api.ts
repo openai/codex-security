@@ -1,7 +1,10 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 import { workbenchArgs } from "./workbench-arguments.js";
 
-import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
+import {
+  childEnvironmentEntry,
+  isSafeNonNegativeInteger as safeInteger,
+} from "./value.js";
 import {
   explicitlyCanceled,
   hostedScanFailureStatus,
@@ -7747,13 +7750,7 @@ function declaredProviderEnvironment(
     : [];
   return Object.fromEntries(
     names.flatMap((name) => {
-      const key =
-        process.platform === "win32"
-          ? Object.keys(environment)
-              .sort()
-              .find((key) => key.toUpperCase() === name.toUpperCase())
-          : name;
-      const value = key === undefined ? undefined : environment[key];
+      const value = childEnvironmentEntry(environment, name);
       return value === undefined ? [] : [[name, value]];
     }),
   );

@@ -11,6 +11,20 @@ export function environmentEntry(
   )?.[1];
 }
 
+/** Match the environment key that Node passes to a native child. */
+export function childEnvironmentEntry(
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined {
+  if (process.platform !== "win32") return environment[name];
+  const upper = name.toUpperCase();
+  // Windows spawn sorts aliases and passes only the first spelling.
+  const key = Object.keys(environment)
+    .sort()
+    .find((key) => key.toUpperCase() === upper);
+  return key === undefined ? undefined : environment[key];
+}
+
 /** @internal */
 export function isSafeNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;

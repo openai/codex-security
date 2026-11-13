@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
-import { environmentEntry } from "./value.js";
+import { childEnvironmentEntry, environmentEntry } from "./value.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
@@ -102,7 +102,7 @@ export function azureHeaderEnvironment(
   return Object.fromEntries(
     Object.values(headers).flatMap((name) => {
       if (typeof name !== "string") return [];
-      const value = environmentEntry(environment, name);
+      const value = childEnvironmentEntry(environment, name);
       return value === undefined ? [] : [[name, value]];
     }),
   );

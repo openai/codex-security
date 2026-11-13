@@ -1536,6 +1536,10 @@ test.each([
       process.platform === "win32"
         ? "synthetic_custom_header"
         : "SYNTHETIC_CUSTOM_HEADER";
+    const childHeader =
+      process.platform === "win32"
+        ? " synthetic-child-header "
+        : " synthetic-custom-header ";
     const providerEnvironment = {
       [providerKey]: external
         ? " synthetic-custom-key\n"
@@ -1595,6 +1599,8 @@ test.each([
                 ? "synthetic-custom-key"
                 : providerEnvironment[providerKey];
               expect(options.env![providerKey]).toBe(selectedKey);
+              if (providerId === "azure")
+                expect(options.env![headerKey]).toBe(childHeader);
               const status = await nativeRequest(
                 options.env!,
                 repository,
@@ -1619,9 +1625,7 @@ test.each([
                 },
                 recovered: {
                   ...providerEnvironment,
-                  ...(process.platform === "win32"
-                    ? { [headerKey]: " synthetic-child-header " }
-                    : {}),
+                  [headerKey]: childHeader,
                   [providerKey]: selectedKey,
                 },
               });
