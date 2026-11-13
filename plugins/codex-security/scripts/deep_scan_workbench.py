@@ -616,22 +616,6 @@ def terminal_deep_scan_for_target_snapshot(
     ).fetchone()
 
 
-def update_scan_model(
-    connection: sqlite3.Connection, scan_id: str, args: argparse.Namespace
-) -> None:
-    model = optional_text(args.model, maximum=200)
-    reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
-    if model is not None or reasoning_effort is not None:
-        connection.execute(
-            """
-            UPDATE scans
-            SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort)
-            WHERE id = ?
-            """,
-            (model, reasoning_effort, scan_id),
-        )
-
-
 def begin_deep_scan_for_scan(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -732,8 +716,6 @@ def begin_deep_scan_for_scan(
                     (dependencies().now(), scan_id),
                 )
                 resumed = True
-            else:
-                update_scan_model(connection, scan_id, args)
         return {
             **deep_scan_result(connection, scan_id, start_disposition="joined"),
             **({"coordinatorDisposition": "claimed"} if resumed else {}),
@@ -757,7 +739,17 @@ def begin_deep_scan_for_scan(
             "UPDATE workspaces SET deep_scan_config_json = ? WHERE id = ? AND deep_scan_config_json IS NULL",
             (json.dumps(configuration), workspace["id"]),
         )
-        update_scan_model(connection, scan_id, args)
+        model = optional_text(args.model, maximum=200)
+        reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
+        if model is not None or reasoning_effort is not None:
+            connection.execute(
+                """
+                UPDATE scans
+                SET model = COALESCE(?, model), reasoning_effort = COALESCE(?, reasoning_effort)
+                WHERE id = ?
+                """,
+                (model, reasoning_effort, scan_id),
+            )
         ensure_deep_scan_run(
             connection,
             scan,

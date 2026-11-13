@@ -1068,18 +1068,22 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
     sealed = deep.command("complete-scan", "--thread-id", "thread-deep-scan", check=False)
     assert sealed["returncode"] != 0
 
-    resumed = resume_deep_scan(
-        deep.state_dir,
-        deep.id,
-        "thread-deep-scan",
+    resume_options = (
         "--model",
         "later-turn-model",
         "--reasoning-effort",
         "high",
-        environment=deep_environment(deep.codex_home),
-    )["deepScan"]
-    assert resumed["model"] == "original-model"
-    assert resumed["reasoningEffort"] == "medium"
+    )
+    for _ in range(2):
+        resumed = resume_deep_scan(
+            deep.state_dir,
+            deep.id,
+            "thread-deep-scan",
+            *resume_options,
+            environment=deep_environment(deep.codex_home),
+        )["deepScan"]
+        assert resumed["model"] == "original-model"
+        assert resumed["reasoningEffort"] == "medium"
     assert resumed["scanId"] == deep.id
     assert resumed["status"] == "running"
     assert resumed["error"] is None
