@@ -4240,9 +4240,8 @@ export class CodexSecurity {
         result.rolloutSessionIndexPath = rolloutSessionIndexPath;
       return result;
     } catch (error) {
-      // A resumed stream can throw or end before emitting a terminal native event.
-      if (options.resumeScanId !== undefined && scanTurnStatus !== null)
-        turnEndedAt ??= new Date().toISOString();
+      // A disconnected stream can leave the scan running without a terminal event.
+      if (scanTurnStatus !== null) turnEndedAt ??= new Date().toISOString();
       // Capture who stopped the scan before cleanup can fire another signal.
       const callerCancellation =
         callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
@@ -4369,6 +4368,7 @@ export class CodexSecurity {
           return result;
         } catch {}
       }
+      let savedScan: unknown;
       if (activeScan !== null && scanTurnStatus !== null) {
         try {
           const cleanupOptions = { ...activeScan.options, signal: undefined };
@@ -4376,26 +4376,26 @@ export class CodexSecurity {
             cleanupOptions,
             workbenchArgs("get-scan", { scanId: activeScan.id }),
           );
-          const completedScan = saved["scan"];
-          const progress = isRecord(completedScan)
-            ? completedScan["progress"]
+          savedScan = saved["scan"];
+          const progress = isRecord(savedScan)
+            ? savedScan["progress"]
             : undefined;
           // An ended attachment can have its own cutoff while the scan remains resumable.
           if (
             isTerminalScanProgress(progress) ||
             options.resumeScanId !== undefined
           ) {
-            await saveRollouts?.(completedScan);
+            await saveRollouts?.(savedScan);
           }
           if (isRecord(progress) && progress["status"] === "complete") {
             const scanId = activeScan.id;
             activeScan = null;
-            notifyScanLifecycle(options, completedScan);
+            notifyScanLifecycle(options, savedScan);
             if (terminalTurnStatus !== null)
               await finalizeScanUsage(
                 scanId,
                 cleanupOptions,
-                completedScan,
+                savedScan,
                 terminalTurnStatus,
               );
           }
@@ -4425,6 +4425,7 @@ export class CodexSecurity {
           }),
         ).catch(() => null);
         if (saved?.["scanId"] === activeScan.id) {
+          await saveRollouts?.(savedScan ?? saved);
           failure = new ScanInterruptedError(
             `${errorMessage(failure)}\nResume when connected: codex-security scans resume ${activeScan.id}`,
             scanDir,
