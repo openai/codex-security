@@ -1,19 +1,23 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
   lstat,
   mkdir,
   open,
-  rename,
+  writeFile,
   rm,
   type FileHandle,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import {
   acquireCodexSecurityCredentialHomeLock,
   createWindowsOutputDirectory,
+  prepareOutputDir,
+  runCodexCommand,
   requirePrivateDirectory,
   requirePrivateOutputDirectory,
   validatePreparedOutputDir,
@@ -174,40 +178,23 @@ async function writeSegment(
 ): Promise<boolean> {
   let file: FileHandle | undefined;
   try {
-    try {
-      for await (const event of session.events()) {
-        file ??= await open(path, "wx", 0o600);
-        await file.writeFile(JSON.stringify(event) + "\n");
-      }
-      await file?.sync();
-    } finally {
-      await file?.close();
+    for await (const event of session.events()) {
+      file ??= await open(path, "wx", 0o600);
+      await file.writeFile(JSON.stringify(event) + "\n");
     }
-  } catch (error) {
-    if (file) await rm(path, { force: true });
-    throw error;
-  }
-  return file !== undefined;
-}
-
-function serialize(index: RolloutSessionIndex): string {
-  return JSON.stringify(index) + "\n";
-}
-
-async function publish(directory: string, contents: string): Promise<void> {
-  const path = join(directory, `.index-${randomUUID()}.tmp`);
-  const file = await open(path, "wx", 0o600);
-  try {
-    try {
-      await file.writeFile(contents);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    await rename(path, join(directory, "index.json"));
+    return file !== undefined;
   } finally {
-    await rm(path, { force: true });
+    await file?.close();
   }
+}
+
+export async function rolloutDirectoryIdentity(
+  scanDir: string,
+): Promise<string> {
+  const directory = await lstat(scanDir, { bigint: true });
+  if (!directory.isDirectory() || directory.ino === 0n)
+    throw new CodexSecurityError("Cannot identify the scan output directory.");
+  return `${directory.dev}:${directory.ino}`;
 }
 
 export async function writeRolloutSessionIndex(options: {
@@ -216,15 +203,25 @@ export async function writeRolloutSessionIndex(options: {
   startedAt: string;
   rootThreadIds: readonly string[];
   sessions: readonly ScanRolloutSession[];
+  expectedDirectory?: string;
+  stateDirectory?: string;
   retainEvents?: boolean;
   signal?: AbortSignal;
   onWarning?: (message: string) => void;
 }): Promise<string> {
   const { scanDir, scanId, rootThreadIds, sessions } = options;
+  const identity =
+    options.expectedDirectory ?? (await rolloutDirectoryIdentity(scanDir));
   const directory = await indexDirectory(scanDir, true);
   const path = join(directory, "index.json");
   // Resume and terminal callbacks can overlap across SDK processes.
-  const writerState = join(dirname(directory), ".rollout-session-writer");
+  // An archive can rename the scan directory while its exporter is paused.
+  const stateRoot = options.stateDirectory ?? tmpdir();
+  const writerKey = createHash("sha256").update(directory).digest("hex");
+  const writerState = join(
+    stateRoot,
+    `codex-rollout-writer-${process.getuid?.() ?? "user"}-${writerKey}`,
+  );
   await prepareDirectory(writerState, true);
   // A canceled scan can still publish diagnostics when the writer is available.
   const release = await acquireCodexSecurityCredentialHomeLock(
@@ -258,7 +255,12 @@ export async function writeRolloutSessionIndex(options: {
       ],
       sessions: [...entries.values()],
     });
-    let contents = serialize(index);
+    const stage = await prepareOutputDir(
+      undefined,
+      "rollout-stage",
+      writerState,
+    );
+    let contents = JSON.stringify(index) + "\n";
     const pending: string[] = [];
     try {
       if (options.retainEvents) {
@@ -280,19 +282,17 @@ export async function writeRolloutSessionIndex(options: {
             )
               continue;
             const filename = `events-${randomUUID()}.jsonl`;
-            const eventPath = join(directory, filename);
+            const eventPath = join(stage, filename);
             if (!(await writeSegment(eventPath, source))) continue;
-            pending.push(eventPath);
+            pending.push(filename);
             entry.eventSegments = [
               ...segments,
               { startedAt, path: filename },
             ].sort((a, b) => compareTimestamps(a.startedAt, b.startedAt));
           }
-          contents = serialize(index);
+          contents = JSON.stringify(index) + "\n";
         } catch {
-          await Promise.all(
-            pending.splice(0).map((path) => rm(path, { force: true })),
-          );
+          pending.length = 0;
           notify(() =>
             options.onWarning?.(
               "Could not retain rollout events. The session index preserves available metadata and previous event files.",
@@ -300,10 +300,28 @@ export async function writeRolloutSessionIndex(options: {
           );
         }
       }
-      await publish(directory, contents);
-      pending.length = 0;
+      await writeFile(join(stage, "index.json"), contents, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      const result = await runCodexCommand(
+        { command: process.execPath },
+        [
+          fileURLToPath(new URL("./rollout-publish.js", import.meta.url)),
+          identity,
+          stage,
+        ],
+        {},
+        JSON.stringify(pending),
+        undefined,
+        { cwd: scanDir },
+      );
+      if (!result.success)
+        throw new CodexSecurityError(
+          result.stderr || "Could not publish the rollout index.",
+        );
     } finally {
-      await Promise.all(pending.map((path) => rm(path, { force: true })));
+      await rm(stage, { recursive: true, force: true });
     }
     return path;
   } finally {

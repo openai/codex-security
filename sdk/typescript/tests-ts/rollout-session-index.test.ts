@@ -1,5 +1,13 @@
 import { afterEach, expect, test } from "bun:test";
-import { readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
   readRolloutSessionIndex,
@@ -167,6 +175,50 @@ test("a canceled exporter does not wait for a paused writer", async () => {
       (s) => s.threadId,
     ),
   ).toEqual(["parent"]);
+});
+
+test("a delayed export cannot publish into a replacement scan directory", async () => {
+  const root = await temporaryDirectory();
+  const scanDir = join(root, "scan");
+  const stateDirectory = join(root, "state");
+  await mkdir(scanDir, { mode: 0o700 });
+  const options = { scanDir, stateDirectory, scanId, startedAt, rootThreadIds };
+  const writing = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const old = writeRolloutSessionIndex({
+    ...options,
+    retainEvents: true,
+    sessions: [
+      {
+        ...session("old", null),
+        async *events() {
+          writing.resolve();
+          await resume.promise;
+          yield { text: "original scan only" };
+        },
+      },
+    ],
+  });
+  await writing.promise;
+  try {
+    await rename(scanDir, join(root, "archive"));
+    await mkdir(join(scanDir, "artifacts", "rollout-sessions"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await writeFile(
+      join(scanDir, "artifacts", "rollout-sessions", "index.json"),
+      "replacement",
+    );
+  } finally {
+    resume.resolve();
+  }
+  await expect(old).rejects.toThrow("changed before rollout publication");
+  const directory = join(scanDir, "artifacts", "rollout-sessions");
+  expect(await readdir(directory)).toEqual(["index.json"]);
+  expect(await readFile(join(directory, "index.json"), "utf8")).toBe(
+    "replacement",
+  );
 });
 
 test("metadata retries and failed refreshes preserve published events and unrelated files", async () => {

@@ -141,6 +141,7 @@ const distModules = [
   "remediation",
   "request-metadata",
   "retry-windows-rename",
+  "rollout-publish",
   "rollout-session-index",
   "runtime",
   "scan-activity",

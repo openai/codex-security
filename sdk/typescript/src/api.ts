@@ -118,7 +118,10 @@ import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession, scanRolloutSessions } from "./scan-logs.js";
 import { compareTimestamps } from "./timestamps.js";
-import { writeRolloutSessionIndex } from "./rollout-session-index.js";
+import {
+  rolloutDirectoryIdentity,
+  writeRolloutSessionIndex,
+} from "./rollout-session-index.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
   deepScanContextPrompt,
@@ -2264,6 +2267,7 @@ export class CodexSecurity {
     const customValidation = {
       status: "pending" as "pending" | "running" | "complete",
     };
+    let turnEndedAt: string | undefined;
     let saveRollouts: ((savedScan: unknown) => Promise<void>) | undefined;
     let rolloutSessionIndexPath: string | undefined;
     let completionCost: ScanCost | ReturnType<typeof measuredScanCost> = null;
@@ -3080,6 +3084,10 @@ export class CodexSecurity {
         );
       }
       const scanId = registeredScanId;
+      const rolloutIdentity =
+        this.#dependencies.hostedScan === undefined
+          ? await rolloutDirectoryIdentity(scanDir).catch(() => undefined)
+          : undefined;
       const workerReceipts =
         mode === "deep"
           ? {
@@ -3653,7 +3661,6 @@ export class CodexSecurity {
       checkOpen();
       const thread = openThread(parentCodex, resumeThreadId);
       let scanThreadId = thread.id;
-      let turnEndedAt: string | undefined;
       // A resumed thread may contain unrelated turns entered before this attachment.
       const startedAt =
         resumeThreadId !== undefined
@@ -3661,10 +3668,7 @@ export class CodexSecurity {
           : isRecord(registration["lifecycle"])
             ? registration["lifecycle"]["startedAt"]
             : registration["startedAt"];
-      if (
-        this.#dependencies.hostedScan === undefined &&
-        typeof startedAt === "string"
-      ) {
+      if (rolloutIdentity !== undefined && typeof startedAt === "string") {
         saveRollouts = async (savedScan) => {
           saveRollouts = undefined;
           const saved =
@@ -3718,6 +3722,8 @@ export class CodexSecurity {
             });
             if (sessions.length > 0) {
               rolloutSessionIndexPath = await writeRolloutSessionIndex({
+                expectedDirectory: rolloutIdentity,
+                stateDirectory,
                 startedAt,
                 scanDir,
                 scanId,
@@ -4234,6 +4240,9 @@ export class CodexSecurity {
         result.rolloutSessionIndexPath = rolloutSessionIndexPath;
       return result;
     } catch (error) {
+      // A resumed stream can throw or end before emitting a terminal native event.
+      if (options.resumeScanId !== undefined && scanTurnStatus !== null)
+        turnEndedAt ??= new Date().toISOString();
       // Capture who stopped the scan before cleanup can fire another signal.
       const callerCancellation =
         callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)

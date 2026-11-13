@@ -5,7 +5,6 @@ import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
 import { sessionFiles, readWorkerReceipts } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
-import { compareTimestamps } from "./timestamps.js";
 import type { JsonObject } from "./config.js";
 import {
   isScanArtifactDirectory,
