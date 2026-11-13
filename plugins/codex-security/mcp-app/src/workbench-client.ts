@@ -66,6 +66,9 @@ function workbenchExitMessage(error: unknown, command: string) {
 }
 
 function workbenchTimeout(args: string[]): number {
+  // Registration hashes the working tree before it can write the scan record.
+  if (args[0] === "start-headless-standard-scan") return 600_000;
+
   const contextHandoff =
     args[0] === "mark-handoff-delivered" && args.includes("--return-context");
   const longRunningCommand = [
@@ -89,7 +92,6 @@ function workbenchTimeout(args: string[]): number {
     "save-workspace",
     "set-finding-triage",
     "set-finding-remediation",
-    "start-headless-standard-scan",
     "start-prompt-only-scan",
     "start-scan",
     "upsert-deep-scan-worker",

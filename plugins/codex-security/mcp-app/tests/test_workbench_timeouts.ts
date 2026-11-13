@@ -57,6 +57,12 @@ try {
     );
   }
   await executeWorkbench("fixture-python", [
+    "start-headless-standard-scan",
+    "--target-path",
+    "/fixture",
+  ]);
+  assert.equal(invocations.at(-1)!.options.timeout, 600_000);
+  await executeWorkbench("fixture-python", [
     "inspect-target",
     "--target-path",
     "/fixture",
