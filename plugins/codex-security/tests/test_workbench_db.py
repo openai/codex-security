@@ -3225,6 +3225,8 @@ def test_patch_preview_counts_hunk_lines_that_look_like_file_headers(tmp_path: P
         b"From " + b"0" * 40 + b" Mon Sep 17 00:00:00 2001\n"
         b"Subject: [PATCH] Update query\n\n+++ code example\n@@ -1,900 +1,1 @@\n"
         b"diff --git a/query.sql b/query.sql\nThis line quotes a command.\n"
+        b"diff --git a/example b/example\n--- a/example\n+++ b/example\n"
+        b"@@ -1 +1 @@\n-old example\n+new example\n"
         b"---\n query.sql | 4 ++--\n 1 file changed, 2 insertions(+), 2 deletions(-)\n\n"
         b"diff --git a/query.sql b/query.sql\n"
         b"--- a/query.sql\n"
@@ -3243,3 +3245,14 @@ def test_patch_preview_counts_hunk_lines_that_look_like_file_headers(tmp_path: P
         tmp_path, "remediation.patch", digest, lambda *_: io.BytesIO(patch)
     )
     assert stats == {"additions": 2, "deletions": 2, "fileCount": 1, "previewTruncated": False}
+
+
+@pytest.mark.cross_platform
+def test_patch_preview_keeps_displaying_malformed_hunk_counts(tmp_path: Path) -> None:
+    remediation = load_script("workbench_remediation")
+    patch = b"--- a/file\n+++ b/file\n@@ -1," + b"9" * 5000 + b" +1 @@\n-old\n+new\n"
+    digest = f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    preview, _ = remediation.patch_artifact_preview(
+        tmp_path, "remediation.patch", digest, lambda *_: io.BytesIO(patch)
+    )
+    assert preview == patch.decode()

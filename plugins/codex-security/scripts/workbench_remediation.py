@@ -82,6 +82,10 @@ def patch_artifact_preview(
                 if at_line_start and mail and not (hunk_lines or signature):
                     # A format-patch message can quote a header in prose. Git emits
                     # metadata or a unified path pair immediately after a real header.
+                    if chunk.rstrip(b"\r\n") == b"---":
+                        # Git separates the diffstat from the message, which may quote entire diffs.
+                        file_count = additions = deletions = old_headers = new_headers = 0
+                        expect_hunk = False
                     if pending_mail_header and re.match(_GIT_FILE_METADATA, chunk):
                         file_count += 1
                     pending_mail_header = chunk.startswith(b"diff --git ")
@@ -95,7 +99,11 @@ def patch_artifact_preview(
                             deletions += chunk.startswith(b"-")
                             hunk_lines -= 1 if chunk.startswith((b"+", b"-")) else 2
                     elif expect_hunk and (hunk := _HUNK_HEADER.match(chunk)):
-                        hunk_lines = int(hunk[1] or b"1") + int(hunk[2] or b"1")
+                        try:
+                            hunk_lines = int(hunk[1] or b"1") + int(hunk[2] or b"1")
+                        except ValueError:
+                            # Malformed counts must not prevent displaying the saved patch.
+                            expect_hunk = False
                     elif not chunk.startswith(b"\\"):
                         expect_hunk = chunk.startswith(b"+++ ")
                         if chunk.startswith(b"diff --git ") and not mail:
