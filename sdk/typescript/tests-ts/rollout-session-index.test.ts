@@ -11,8 +11,10 @@ import {
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
   readRolloutSessionIndex,
+  rolloutDirectoryIdentity,
   writeRolloutSessionIndex,
 } from "../src/rollout-session-index.js";
+import { prepareScanRegistrationOutput } from "../src/runtime.js";
 import { readJsonLines } from "./support/json.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
@@ -175,6 +177,31 @@ test("a canceled exporter does not wait for a paused writer", async () => {
       (s) => s.threadId,
     ),
   ).toEqual(["parent"]);
+});
+
+test("a stale exporter leaves an empty replacement available for scan registration", async () => {
+  const root = await temporaryDirectory();
+  const scanDir = join(root, "scan");
+  await mkdir(scanDir, { mode: 0o700 });
+  const expectedDirectory = await rolloutDirectoryIdentity(scanDir);
+  await rename(scanDir, join(root, "archived-scan"));
+  await prepareScanRegistrationOutput(scanDir, "new-scan");
+
+  await expect(
+    writeRolloutSessionIndex({
+      scanDir,
+      stateDirectory: join(root, "state"),
+      expectedDirectory,
+      scanId,
+      startedAt,
+      rootThreadIds,
+      sessions: [session("parent", null)],
+    }),
+  ).rejects.toThrow("changed before rollout publication");
+  expect(await readdir(scanDir)).toEqual([]);
+  expect(await prepareScanRegistrationOutput(scanDir, "new-scan")).toBe(
+    scanDir,
+  );
 });
 
 test("a delayed export cannot publish into a replacement scan directory", async () => {

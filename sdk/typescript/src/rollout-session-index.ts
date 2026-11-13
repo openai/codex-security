@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -18,7 +18,6 @@ import {
   createWindowsOutputDirectory,
   prepareOutputDir,
   runCodexCommand,
-  requirePrivateDirectory,
   requirePrivateOutputDirectory,
   validatePreparedOutputDir,
 } from "./runtime.js";
@@ -52,44 +51,6 @@ const indexSchema = z.strictObject({
 });
 export type RolloutSessionIndex = z.infer<typeof indexSchema>;
 
-async function prepareDirectory(path: string, create: boolean): Promise<void> {
-  if (create) {
-    if (process.platform === "win32")
-      await createWindowsOutputDirectory(path, true);
-    else await mkdir(path, { recursive: true, mode: 0o700 });
-  }
-  if (!(await lstat(path)).isDirectory()) {
-    throw new CodexSecurityError(
-      "Rollout artifact directories must be real directories.",
-    );
-  }
-}
-
-async function indexDirectory(
-  scanDir: string,
-  create: boolean,
-): Promise<string> {
-  const root = await validatePreparedOutputDir(
-    resolve(scanDir),
-    undefined,
-    true,
-  );
-  const artifacts = join(root, "artifacts");
-  await prepareDirectory(artifacts, create);
-  const directory = join(artifacts, "rollout-sessions");
-  await prepareDirectory(directory, create);
-  await validatePreparedOutputDir(directory, undefined, true);
-  const metadata = await lstat(directory);
-  if (create)
-    await requirePrivateDirectory(
-      metadata,
-      directory,
-      "rollout artifact directory",
-    );
-  else requirePrivateOutputDirectory(metadata, directory);
-  return directory;
-}
-
 function requireUnique(items: string[]): void {
   if (new Set(items).size !== items.length) {
     throw new CodexSecurityError(
@@ -99,9 +60,22 @@ function requireUnique(items: string[]): void {
 }
 
 async function readIndex(
-  directory: string,
+  root: string,
   scanId: string,
 ): Promise<RolloutSessionIndex | null> {
+  const artifacts = join(root, "artifacts");
+  const parent = await lstat(artifacts).catch(nullIfMissingFile);
+  if (parent === null) return null;
+  if (!parent.isDirectory())
+    throw new CodexSecurityError("Rollout artifacts must be a real directory.");
+  const directory = join(artifacts, "rollout-sessions");
+  const validated = await validatePreparedOutputDir(
+    directory,
+    undefined,
+    true,
+  ).catch(nullIfMissingFile);
+  if (validated === null) return null;
+  requirePrivateOutputDirectory(await lstat(directory), directory);
   const path = join(directory, "index.json");
   const file = await open(
     path,
@@ -168,8 +142,12 @@ export async function readRolloutSessionIndex(
   scanDir: string,
   scanId: string,
 ): Promise<RolloutSessionIndex | null> {
-  const dir = await indexDirectory(scanDir, false).catch(nullIfMissingFile);
-  return dir === null ? null : readIndex(dir, scanId);
+  const root = await validatePreparedOutputDir(
+    resolve(scanDir),
+    undefined,
+    true,
+  ).catch(nullIfMissingFile);
+  return root === null ? null : readIndex(root, scanId);
 }
 
 async function writeSegment(
@@ -212,17 +190,23 @@ export async function writeRolloutSessionIndex(options: {
   const { scanDir, scanId, rootThreadIds, sessions } = options;
   const identity =
     options.expectedDirectory ?? (await rolloutDirectoryIdentity(scanDir));
-  const directory = await indexDirectory(scanDir, true);
-  const path = join(directory, "index.json");
+  const root = await validatePreparedOutputDir(
+    resolve(scanDir),
+    undefined,
+    true,
+  );
+  const path = join(root, ROLLOUT_SESSION_INDEX_RELATIVE_PATH);
   // Resume and terminal callbacks can overlap across SDK processes.
   // An archive can rename the scan directory while its exporter is paused.
   const stateRoot = options.stateDirectory ?? tmpdir();
-  const writerKey = createHash("sha256").update(directory).digest("hex");
+  const writerKey = createHash("sha256").update(dirname(path)).digest("hex");
   const writerState = join(
     stateRoot,
     `codex-rollout-writer-${process.getuid?.() ?? "user"}-${writerKey}`,
   );
-  await prepareDirectory(writerState, true);
+  if (process.platform === "win32")
+    await createWindowsOutputDirectory(writerState, true);
+  else await mkdir(writerState, { recursive: true, mode: 0o700 });
   // A canceled scan can still publish diagnostics when the writer is available.
   const release = await acquireCodexSecurityCredentialHomeLock(
     writerState,
@@ -230,7 +214,7 @@ export async function writeRolloutSessionIndex(options: {
     { allowImmediateAcquisitionOnAbort: true },
   );
   try {
-    const previous = await readIndex(directory, scanId);
+    const previous = await readIndex(root, scanId);
     requireUnique(sessions.map(({ threadId }) => threadId));
     const entries = new Map(
       previous?.sessions.map((entry) => [entry.threadId, entry]),
@@ -311,10 +295,10 @@ export async function writeRolloutSessionIndex(options: {
           identity,
           stage,
         ],
-        {},
+        { SystemRoot: process.env["SystemRoot"] },
         JSON.stringify(pending),
         undefined,
-        { cwd: scanDir },
+        { cwd: root },
       );
       if (!result.success)
         throw new CodexSecurityError(
