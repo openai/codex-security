@@ -1676,6 +1676,22 @@ test("HF defaults disable hosted search without overriding explicit settings", a
   expect(config["web_search"]).toBe("disabled");
   expect(config["model_reasoning_summary"]).toBe("none");
   expect(scanProviderEnvKey(config)).toBe("HF_TOKEN");
+  const alternate = resolveCodexProfile(
+    await mergedCodexConfig({
+      codexOverrides: {
+        model_provider: "openrouter",
+        model_providers: { huggingface: { env_key: "WORKER_TOKEN" } },
+      },
+    }),
+  );
+  expect(alternate["model_providers"]).toMatchObject({
+    huggingface: {
+      wire_api: "responses",
+      base_url: "https://router.huggingface.co/v1",
+      env_key: "WORKER_TOKEN",
+    },
+  });
+  expect(alternate["web_search"]).toBeUndefined();
   expect(config["model_providers"]).toMatchObject({
     huggingface: {
       name: "Hugging Face",

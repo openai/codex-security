@@ -529,15 +529,25 @@ export async function mergedCodexConfig(
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   const modelProvider = scanModelProvider(effectiveOverrides);
-  if (modelProvider === "huggingface") {
-    defaults["web_search"] = "disabled";
-    defaults["model_reasoning_summary"] = "none";
+  const declaresHuggingFace = [
+    effectiveOverrides,
+    selectedScanProfile(effectiveOverrides),
+  ].some(
+    (layer) =>
+      isObject(layer?.["model_providers"]) &&
+      isObject(layer["model_providers"]["huggingface"]),
+  );
+  if (modelProvider === "huggingface" || declaresHuggingFace) {
     const providers =
       resolveCodexProfile(effectiveOverrides)["model_providers"];
     const hf = isObject(providers) ? providers["huggingface"] : undefined;
     defaults["model_providers"] = {
       huggingface: huggingFaceProviderDefaults(hf),
     };
+  }
+  if (modelProvider === "huggingface") {
+    defaults["web_search"] = "disabled";
+    defaults["model_reasoning_summary"] = "none";
   }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (modelProvider === "amazon-bedrock") {
