@@ -100,6 +100,7 @@ export async function suggestOwnersInternal(
       options.config ?? {},
       scanCodexHome(environment),
       environment,
+      "read-only",
     ),
   );
   const model = options.model ?? configured.model;
