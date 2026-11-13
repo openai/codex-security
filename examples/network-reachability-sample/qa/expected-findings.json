@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "threatModel": "Unauthenticated caller on the public internet, entering through the gateway instance",
+  "sourceFindings": [
+    {
+      "id": "NR-001/002/003",
+      "category": "OS command injection",
+      "cwe": ["CWE-78"],
+      "location": "app/worker.py:route_request:/run",
+      "rootCause": "The cmd query parameter is interpolated into a subprocess shell command.",
+      "expectedFix": "Pass fixed command arguments without a shell or reject shell syntax.",
+      "deploymentAssessments": [
+        {
+          "id": "NR-001",
+          "workload": "OpenWorker",
+          "internetReachable": true,
+          "path": "internet -> Gateway:8080 -> /open -> OpenWorker:8080 -> /run",
+          "requiredEvidence": [
+            "Gateway has a public address, internet route, and 0.0.0.0/0 ingress on port 8080.",
+            "Gateway forwards /open to the OpenWorker private address and /run path.",
+            "OpenWorker security group allows port 8080 from the Gateway security group.",
+            "The worker service is running and a benign command injection proof succeeds through the public gateway."
+          ]
+        },
+        {
+          "id": "NR-002",
+          "workload": "BlockedWorker",
+          "internetReachable": false,
+          "path": "internet -> Gateway:8080 -> /blocked -X-> BlockedWorker:8080",
+          "requiredEvidence": [
+            "The same worker source archive runs on BlockedWorker.",
+            "Gateway forwards /blocked to the BlockedWorker private address and /run path.",
+            "BlockedWorker security group has no inbound rule permitting traffic from Gateway.",
+            "The gateway request fails; the failure alone does not prove the security group is the cause."
+          ]
+        },
+        {
+          "id": "NR-003",
+          "workload": "AclBlockedWorker",
+          "internetReachable": false,
+          "path": "internet -> Gateway:8080 -> /acl-blocked -X-> AclBlockedWorker:8080",
+          "requiredEvidence": [
+            "The same worker source archive runs on AclBlockedWorker.",
+            "Gateway forwards /acl-blocked to the AclBlockedWorker private address and /run path.",
+            "AclBlockedWorker security group permits port 8080 from Gateway.",
+            "Its subnet network ACL denies TCP port 8080 from the gateway subnet before a later allow rule.",
+            "The gateway request fails; the failure alone does not prove the network ACL is the cause."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "NR-004",
+      "category": "Dynamic code evaluation",
+      "cwe": ["CWE-94"],
+      "location": "app/worker.py:route_request:/diagnostic",
+      "rootCause": "The worker evaluates the expr query parameter as Python code.",
+      "internetReachable": false,
+      "requiredEvidence": [
+        "All three deployed workers contain the vulnerable /diagnostic route.",
+        "All worker services set ENABLE_DIAGNOSTIC=0, so the handler returns before evaluation.",
+        "The public gateway only forwards /open, /blocked, and /acl-blocked to worker /run.",
+        "No public request path controls the worker URL path."
+      ],
+      "caveat": "The route becomes exploitable if diagnostics are enabled and a caller can reach a worker."
+    }
+  ],
+  "scoringRules": [
+    "Report source vulnerabilities even when a specific deployment is unreachable.",
+    "Assess reachability per workload; identical source code does not imply identical exposure.",
+    "Evaluate subnet routes, security groups, and network ACL rules together.",
+    "Do not claim that a failed HTTP request alone proves the denying network control.",
+    "Do not claim deployed resource or runtime proof from source code or the template alone."
+  ]
+}
