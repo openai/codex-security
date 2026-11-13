@@ -1587,6 +1587,8 @@ on stderr to verify that every finding belongs to the repository you specify.
 
 For Tenable One Code Repository findings, use `--provider tenable --to local` and set `--source-repository-url` to the checkout’s verified HTTPS remote. [Tenable export and import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md)
 
+For CrowdStrike FCS CLI 4.x IaC reports, use `--provider crowdstrike --to local` and select the directory where FCS ran with `--repository`. It does not need to be a Git checkout, but each scanned file must be unchanged since the scan. Add `--source-repository-url` to record the repository; it must match a fetch remote when the directory is a Git checkout. A `git::https://` report names its repository, and a different `--source-repository-url` stops the import. [CrowdStrike import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/crowdstrike.md)
+
 Local readback uses `findings imported [PATH]`. The path defaults to the current
 directory. Each imported record starts as `not_assessed`. Unknown revisions and
 locations stay unknown. Repository-scoped sources are checked against comparable
