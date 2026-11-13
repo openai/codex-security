@@ -72,12 +72,14 @@ export function resolveBundledCodexExecutable(
 ): string {
   const platform = process.platform === "android" ? "linux" : process.platform;
   const packageName = `@openai/codex-${platform}-${process.arch}`;
-  let packageJson: string;
+  let vendor: string;
+  let entries;
   let legacyVendor = false;
   try {
     const selectedPackageJson =
       codexPackageJson ??
       createRequire(import.meta.url).resolve("@openai/codex/package.json");
+    let packageJson: string;
     try {
       packageJson = createRequire(selectedPackageJson).resolve(
         `${packageName}/package.json`,
@@ -87,16 +89,17 @@ export function resolveBundledCodexExecutable(
       packageJson = selectedPackageJson;
       legacyVendor = true;
     }
+    vendor = join(dirname(packageJson), "vendor");
+    entries = readdirSync(vendor, { withFileTypes: true });
   } catch (error) {
     throw new PluginBootstrapError(
       `The bundled Codex executable could not be resolved from ${packageName}. Reinstall @openai/codex with optional dependencies enabled, or set CODEX_CLI_PATH to an installed Codex executable.`,
       { cause: error },
     );
   }
-  const vendor = join(dirname(packageJson), "vendor");
   const architecture = process.arch === "arm64" ? "aarch64" : "x86_64";
   const legacyTarget = `${architecture}-${platform === "darwin" ? "apple-darwin" : platform === "win32" ? "pc-windows-msvc" : "unknown-linux-musl"}`;
-  const target = readdirSync(vendor, { withFileTypes: true }).find(
+  const target = entries.find(
     (entry) =>
       entry.isDirectory() && (!legacyVendor || entry.name === legacyTarget),
   );

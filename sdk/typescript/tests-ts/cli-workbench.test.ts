@@ -4,7 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock } from "bun:test";
-import { PluginBootstrapError } from "../src/errors.js";
+import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
 import { createProfileCodex } from "../src/provider-profile.js";
@@ -1257,7 +1257,18 @@ describe("CLI workbench", () => {
       });
     });
 
-    test("stops on bootstrap failure after saving an empty pair", async () => {
+    test("stops on an incomplete bundled runtime after saving an empty pair", async () => {
+      await using temp = await scopedTemporaryDirectory("incomplete-codex-");
+      const platform =
+        process.platform === "android" ? "linux" : process.platform;
+      const packageRoot = join(
+        temp.path,
+        "node_modules",
+        "@openai",
+        `codex-${platform}-${process.arch}`,
+      );
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, "package.json"), "{}");
       const { saved, onWorkbench } = batchWithInitialSave();
       const { stdout, stderr, runCli } = createCliTest(main);
       const code = await runCli(
@@ -1265,14 +1276,15 @@ describe("CLI workbench", () => {
         dependencies({
           onWorkbench,
           onMatch: async () => {
-            throw new PluginBootstrapError("Missing bundled matcher");
+            resolveBundledCodexExecutable(join(temp.path, "package.json"));
+            return { matches: [], uncertain: [] };
           },
         }),
       );
       expect(code).toBe(2);
       expect(saved).toEqual([["source", "empty"]]);
       expect(stdout.text()).toBe("");
-      expect(stderr.text()).toContain("Missing bundled matcher");
+      expect(stderr.text()).toContain("Reinstall @openai/codex");
     });
 
     test("returns the first matcher error if every batch fails", async () => {
