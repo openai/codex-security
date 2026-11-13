@@ -2531,7 +2531,7 @@ export class CodexSecurity {
               authentication.method !== "stored_credentials")
             ? this.#dependencies.environment
             : undefined,
-          authentication.method === "api_key",
+          options.auth !== "chatgpt" && authentication.method === "api_key",
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =

@@ -930,7 +930,6 @@ for (const mode of ["standard", "deep"] as const) {
           ? {
               AZURE_OPENAI_API_KEY:
                 inheritedEnvironment["AZURE_OPENAI_API_KEY"],
-              OPENAI_API_KEY: inheritedEnvironment["OPENAI_API_KEY"],
             }
           : {}),
       };
