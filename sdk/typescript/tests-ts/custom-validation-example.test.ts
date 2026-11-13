@@ -45,6 +45,10 @@ test("compiled validation example distinguishes vulnerable and repaired ownershi
           status: 200,
           body: { id: "1001", owner: "alice", amount: 25 },
         },
+        target_owner_invoice: {
+          status: 200,
+          body: { id: "1002", owner: "bob", amount: 80 },
+        },
         other_invoice: otherInvoice,
         cross_account_read: crossAccountRead,
         server_stopped: true,

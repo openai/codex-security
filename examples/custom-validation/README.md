@@ -16,8 +16,9 @@ node examples/custom-validation/validate.mjs --output reports/vulnerable-proof.j
 node examples/custom-validation/validate.mjs --mode repaired --output reports/repaired-proof.json
 ```
 
-Both proofs record the mode, a 401 for an anonymous request, a 200 for Alice's own
-invoice, and `server_stopped: true`. Compare Alice's request for Bob's invoice.
+Both proofs record the mode, a 401 for an anonymous request, a 200 for each owner
+reading their own invoice, and `server_stopped: true`. Compare Alice's request for
+Bob's invoice with Bob's successful request for the same record.
 The vulnerable server returns 200 and records `cross_account_read: true`, which
 supports reporting the finding. The repaired server returns 403 and records
 `cross_account_read: false`, which supports suppression. Both runs use a loopback

@@ -54,21 +54,36 @@ async function main(): Promise<number> {
   let evidence: {
     anonymous: HttpResult;
     own_invoice: HttpResult;
+    target_owner_invoice: HttpResult;
     other_invoice: HttpResult;
     cross_account_read: boolean;
   };
   try {
     const anonymous = await get("1002");
     const own_invoice = await get("1001", "demo-alice");
+    const target_owner_invoice = await get("1002", "demo-bob");
     const other_invoice = await get("1002", "demo-alice");
     assert.equal(anonymous.status, 401, "Authentication control failed");
-    assert.equal(own_invoice.status, 200, "Own-account control failed");
+    for (const [result, id, owner] of [
+      [own_invoice, "1001", "alice"],
+      [target_owner_invoice, "1002", "bob"],
+    ] as const) {
+      assert.ok(
+        result.status === 200 &&
+          result.body.id === id &&
+          result.body.owner === owner,
+        `Invoice ${id} must be accessible to its owner`,
+      );
+    }
     evidence = {
       anonymous,
       own_invoice,
+      target_owner_invoice,
       other_invoice,
       cross_account_read:
-        other_invoice.status === 200 && other_invoice.body.owner === "bob",
+        other_invoice.status === 200 &&
+        other_invoice.body.id === target_owner_invoice.body.id &&
+        other_invoice.body.owner === target_owner_invoice.body.owner,
     };
   } finally {
     await promisify(server.close).call(server);
