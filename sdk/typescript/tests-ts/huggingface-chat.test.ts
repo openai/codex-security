@@ -177,7 +177,7 @@ test("preserves JSON object mode and the description of structured outputs", () 
         },
       },
     ],
-  ]) {
+  ] as const) {
     expect(
       huggingFaceChatRequest({ input: "Review", text: { format } })
         .response_format,
