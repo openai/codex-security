@@ -626,6 +626,14 @@ describe("scan knowledge bases", () => {
       "Main-before First text-box guidance.\nSecond text-box guidance.\nMain-after\n",
     ],
     [
+      "hidden run properties in Word and extension namespaces",
+      '<w:p xmlns:s="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:x="urn:vendor:extension">' +
+        "<w:r><w:rPr><x:vanish/></w:rPr><w:t>Enforce MFA.</w:t></w:r>" +
+        '<s:r><s:rPr><s:vanish x:val="0" s:val="1"/></s:rPr><s:t>Hidden.</s:t></s:r>' +
+        "<w:r><x:rPr><w:vanish/></x:rPr><w:t> Audit weekly.</w:t></w:r></w:p>",
+      "Enforce MFA. Audit weekly.\n",
+    ],
+    [
       "ordinary runs after an unclosed field",
       '<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>AUTHOR</w:instrText></w:r></w:p>' +
         "<w:p><w:r><w:t>Require authorization</w:t></w:r></w:p>",
