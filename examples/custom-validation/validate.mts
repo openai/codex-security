@@ -18,7 +18,7 @@ async function main(): Promise<number> {
     const { values } = parseArgs({
       options: {
         output: { type: "string" },
-        mode: { type: "string" },
+        mode: { type: "string", default: "vulnerable" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -29,14 +29,10 @@ async function main(): Promise<number> {
       return 0;
     }
     if (values.output === undefined) throw new Error("--output is required");
-    if (
-      values.mode !== undefined &&
-      values.mode !== "vulnerable" &&
-      values.mode !== "repaired"
-    )
+    if (values.mode !== "vulnerable" && values.mode !== "repaired")
       throw new Error("--mode must be vulnerable or repaired");
     output = values.output;
-    mode = values.mode ?? "vulnerable";
+    mode = values.mode;
   } catch (error) {
     console.error((error as Error).message);
     return 2;

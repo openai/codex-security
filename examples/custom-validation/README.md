@@ -16,15 +16,12 @@ node examples/custom-validation/validate.mjs --output reports/vulnerable-proof.j
 node examples/custom-validation/validate.mjs --mode repaired --output reports/repaired-proof.json
 ```
 
-Each command starts a loopback server and writes the observed responses to its
-proof file. Both modes should return 401 for an anonymous request, 200 for
-Alice's own invoice, and `server_stopped: true`. In the default vulnerable mode,
-Alice can read Bob's invoice with 200, so `cross_account_read` is true and the
-finding is reportable. In repaired mode, the ownership check returns 403, so
-`cross_account_read` is false. This standalone control shows the evidence that
-would support suppression. The scan below validates only the vulnerable mode. The `mode` field
-in each proof identifies which control was exercised. These tests run without
-model access or sign-in.
+Both proofs record the mode, a 401 for an anonymous request, a 200 for Alice's own
+invoice, and `server_stopped: true`. Compare Alice's request for Bob's invoice.
+The vulnerable server returns 200 and records `cross_account_read: true`, which
+supports reporting the finding. The repaired server returns 403 and records
+`cross_account_read: false`, which supports suppression. Both runs use a loopback
+server and work without model access or sign-in.
 
 ## Run the scan with custom validation
 
