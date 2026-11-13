@@ -86,7 +86,8 @@ export function azureProviderEnvironment(
   if (
     (selected === "azure" &&
       native["env_key"] === undefined &&
-      native["auth"] == null) ||
+      native["auth"] == null &&
+      typeof native["experimental_bearer_token"] !== "string") ||
     isAzureKey(native["env_key"]) ||
     (isObject(native["env_http_headers"]) &&
       Object.values(native["env_http_headers"]).some(isAzureKey))
@@ -154,7 +155,11 @@ export function externalProviderTable(
   if (provider !== "azure") return { ...table };
   const native = isObject(configured) ? configured : {};
   const preset: JsonObject = { ...table };
-  if (native["auth"] != null) delete preset["env_key"];
+  if (
+    native["auth"] != null ||
+    typeof native["experimental_bearer_token"] === "string"
+  )
+    delete preset["env_key"];
   return {
     ...preset,
     ...native,
@@ -341,6 +346,19 @@ export function scanPricingContext(
   return { provider: "gcp", managedEndpoint };
 }
 
+/** A native Azure bearer is read by Codex from the private provider table. */
+export function usesAzureBearer(config: Readonly<JsonObject>): boolean {
+  if (scanModelProvider(config) !== "azure") return false;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const azure = isObject(providers) ? providers["azure"] : undefined;
+  return (
+    isObject(azure) &&
+    azure["auth"] == null &&
+    azure["env_key"] == null &&
+    typeof azure["experimental_bearer_token"] === "string"
+  );
+}
+
 /** @internal Use the selected native provider's configured credential key. */
 export function scanProviderEnvKey(
   config: Readonly<JsonObject>,
@@ -348,6 +366,7 @@ export function scanProviderEnvKey(
   const selected = scanModelProvider(config);
   if (
     typeof selected !== "string" ||
+    usesAzureBearer(config) ||
     ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
   )
     return undefined;
@@ -592,7 +611,7 @@ export async function mergedCodexConfig(
   config: CodexSecurityConfig,
   profileHome?: string,
   environment: ProviderEnvironment = process.env,
-  purpose: "scan" | "login" = "scan",
+  purpose: "scan" | "login" | "read-only" = "scan",
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
@@ -621,7 +640,7 @@ export async function mergedCodexConfig(
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   const provider = scanModelProvider(effectiveOverrides);
-  if (provider === "azure") {
+  if (provider === "azure" && purpose !== "read-only") {
     const tables = resolveCodexProfile(effectiveOverrides)["model_providers"];
     const providers = isObject(tables) ? tables : {};
     (selectedScanProfile(effectiveOverrides) ?? effectiveOverrides)[

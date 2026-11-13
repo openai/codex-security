@@ -101,6 +101,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
+  usesAzureBearer,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -1813,6 +1814,7 @@ export class CodexSecurity {
         hasCommandAuth(configuration),
         true,
         scanProviderEnvKey(configuration),
+        configuration,
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -5178,9 +5180,10 @@ export class CodexSecurity {
         commandAuth,
         false,
         providerEnvKey,
+        requestedConfig,
       );
       const apiKey =
-        authentication.method === "api_key"
+        authentication.method === "api_key" && !usesAzureBearer(requestedConfig)
           ? environmentApiKey(
               this.#dependencies.environment,
               modelProvider,
@@ -5314,13 +5317,11 @@ export class CodexSecurity {
       }
       if (
         !runtime.credentialsAvailable &&
-        apiKey === null &&
-        !commandAuth &&
-        authentication.method !== "aws_credentials"
+        authentication.method === "stored_credentials"
       ) {
         throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
-      if (!commandAuth)
+      if (authentication.method === "stored_credentials")
         authentication = await runtimeScanAuthentication(
           this.#dependencies.environment,
           runtime.codexHome,
@@ -5963,6 +5964,7 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
+        usesAzureBearer(requestedConfig) ||
         providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -6894,6 +6896,7 @@ export function scanAuthentication(
   commandAuth = false,
   preflight = false,
   providerEnvKey?: string,
+  config?: JsonObject,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -6901,6 +6904,12 @@ export function scanAuthentication(
     );
   }
   if (commandAuth) return { method: "command", verified: false };
+  if (config && usesAzureBearer(config))
+    return {
+      method: "api_key",
+      source: "experimental_bearer_token",
+      verified: false,
+    };
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",

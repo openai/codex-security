@@ -1680,6 +1680,35 @@ describe("skill authentication", () => {
     },
   );
 
+  test.each(["patch", "verify-fix"] as const)(
+    "%s uses an inherited Azure bearer without a provider key or OpenAI login",
+    async (command) => {
+      const result = await runProviderSkill(stateDirectory, {
+        command,
+        overrides: ['model_provider="azure"'],
+        ambientConfig: [
+          "[model_providers.azure]",
+          'base_url="https://resource.example.test"',
+          'experimental_bearer_token="synthetic-private-bearer"',
+        ].join("\n"),
+        environment: { OPENAI_API_KEY: "synthetic-unrelated-key" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const args = result.launch.args.join(" ");
+      expect(args).not.toContain("env_key");
+      expect(args).not.toContain("synthetic-private-bearer");
+      expect(parseToml(result.launch.config)).toMatchObject({
+        model_providers: {
+          azure: { experimental_bearer_token: "synthetic-private-bearer" },
+        },
+      });
+      expect(result.launch.environment).toEqual({});
+      expect(result.requests.map((request) => request.method)).not.toContain(
+        "account/login/start",
+      );
+    },
+  );
+
   test("patch uses Azure endpoint and key defaults without an ambient table", async () => {
     const result = await runProviderSkill(stateDirectory, {
       overrides: ['model_provider="azure"'],

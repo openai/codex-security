@@ -232,6 +232,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
+  usesAzureBearer,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -11450,6 +11451,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     hasCommandAuth(config) ||
+    usesAzureBearer(config) ||
     scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
@@ -11747,6 +11749,7 @@ async function executeScan(
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
           scanProviderEnvKey(effectiveConfiguration),
+          effectiveConfiguration,
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,

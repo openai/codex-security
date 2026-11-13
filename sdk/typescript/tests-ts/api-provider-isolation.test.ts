@@ -370,6 +370,7 @@ test.each([
           selection === "file default key"
             ? "OPENROUTER_API_KEY"
             : "SYNTHETIC_CUSTOM_API_KEY";
+        const bearer = providerId === "azure" && index === 1;
         const canonicalKey =
           selection === "root"
             ? "OPENROUTER_API_KEY"
@@ -387,7 +388,9 @@ test.each([
             ? {}
             : { base_url: `https://provider-${index}.example.test/v1` }),
           wire_api: "responses",
-          env_key: providerKey,
+          ...(bearer
+            ? { experimental_bearer_token: "synthetic-private-bearer" }
+            : { env_key: providerKey }),
           env_http_headers: {
             "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
             ...(canonicalKey ? { "X-Synthetic-Canonical": canonicalKey } : {}),
@@ -408,9 +411,13 @@ test.each([
           set: { SYNTHETIC_WORKER_VALUE: `shell-value-${index}` },
         };
         const providerEnvironment: Record<string, string> = {
-          [providerKey]: fileProfile
-            ? `synthetic-key-${index}`
-            : ` synthetic-key-${index} `,
+          ...(bearer
+            ? {}
+            : {
+                [providerKey]: fileProfile
+                  ? `synthetic-key-${index}`
+                  : ` synthetic-key-${index} `,
+              }),
           SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
           ...canonicalHeader,
           SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
@@ -419,7 +426,9 @@ test.each([
         // variables, including header values, retain their original bytes.
         const workerEnvironment = {
           ...providerEnvironment,
-          [providerKey]: providerEnvironment[providerKey]!.trim(),
+          ...(bearer
+            ? {}
+            : { [providerKey]: providerEnvironment[providerKey]!.trim() }),
         };
         if (fileProfile) {
           await writeFile(
@@ -680,6 +689,7 @@ test.each([
                     "utf8",
                   );
                   expect(saved).not.toContain("model_providers");
+                  expect(saved).not.toContain("synthetic-private-bearer");
                   expect(saved).not.toContain("synthetic-key-");
                   expect(saved).not.toContain("synthetic-header-");
                   throw new Error("synthetic provider configuration checked");

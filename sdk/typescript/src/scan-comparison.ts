@@ -32,6 +32,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   AZURE_CODEX_PROVIDER,
   azureProviderEnvironment,
+  externalProviderTable,
   deepMerge,
   hasCommandAuth,
   isExternalModelProvider,
@@ -572,6 +573,7 @@ async function startReadOnlyCodexThread(
           options.config,
           configuredCodexHome(source),
           source,
+          options.codex === undefined ? "read-only" : "scan",
         );
   const configuredModel =
     config === undefined ? undefined : scanModelConfiguration(config);
@@ -648,11 +650,20 @@ async function startReadOnlyCodexThread(
   );
   delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
-  const providerSettings = commandAuth ? providerConfig : (config ?? {});
+  const modelProvider = scanModelProvider(providerConfig);
+  const providerSettings =
+    commandAuth || modelProvider === "azure" ? providerConfig : (config ?? {});
+  if (modelProvider === "azure") {
+    const tables = providerConfig["model_providers"];
+    const providers = isRecord(tables) ? tables : {};
+    providerConfig["model_providers"] = {
+      ...providers,
+      azure: externalProviderTable(modelProvider, source, providers["azure"]),
+    };
+  }
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
-  const modelProvider = scanModelProvider(providerConfig);
   const providerKey = scanProviderEnvKey(providerConfig);
   const nativeKey =
     !commandAuth && !isExternalModelProvider(modelProvider)
@@ -679,7 +690,7 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      nativeKey !== undefined || scanModelProvider(providerConfig) === "azure"
+      nativeKey !== undefined || modelProvider === "azure"
         ? undefined
         : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
           environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
@@ -1299,7 +1310,15 @@ export async function comparisonEnvironment(
   const provider = scanModelProvider(configuration);
   if (provider === "azure") {
     const key = scanProviderEnvKey(configuration);
-    scanAuthentication(environment, "api-key", provider, false, false, key);
+    scanAuthentication(
+      environment,
+      "api-key",
+      provider,
+      false,
+      false,
+      key,
+      configuration,
+    );
     return definedEnvironment(
       selectedScanEnvironment(
         environment,

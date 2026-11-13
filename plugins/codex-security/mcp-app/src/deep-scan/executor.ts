@@ -89,7 +89,7 @@ interface BoundCodexExecutable {
 }
 
 interface CodexSdkWorkerRuntimeSettings {
-  hasProviderEnvKey?: boolean;
+  hasProviderCredential?: boolean;
   environment?: Record<string, string>;
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
@@ -221,6 +221,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           this.runtimeSettings = undefined;
           throw error;
         }));
+      // Each managed scan owns the provider credentials its workers may inherit.
+      if (runtimeSettings.environment !== undefined) {
+        for (const name of Object.keys(childEnv)) {
+          if (name.toUpperCase() === "AZURE_OPENAI_API_KEY")
+            delete childEnv[name];
+        }
+      }
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -419,7 +426,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           ...preflightOptions,
           expectedProfile: workerProfile,
           allowOpenAiApiKeyFallback: Boolean(
-            openAiApiKey && !codexApiKey && !runtimeSettings.hasProviderEnvKey,
+            openAiApiKey &&
+            !codexApiKey &&
+            !runtimeSettings.hasProviderCredential,
           ),
         });
       const inheritedServers = new Set([
@@ -1010,8 +1019,10 @@ export async function workerRuntimeSettings(
     model_providers: legacyProviders,
     ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
-  if (isRecord(workerEnvironment)) {
-    settings.environment = workerEnvironment as Record<string, string>;
+  if (isRecord(snapshot)) {
+    settings.environment = isRecord(workerEnvironment)
+      ? (workerEnvironment as Record<string, string>)
+      : {};
   }
   if (typeof nativeProfile === "string") {
     // Match Codex's plain profile-v2 names before constructing a private file path.
@@ -1041,17 +1052,15 @@ export async function workerRuntimeSettings(
         typeof providerId === "string"
           ? nativeProfileConfig.model_providers[providerId]
           : undefined;
-      if (
-        isRecord(provider) &&
-        typeof provider.env_key === "string" &&
-        provider.auth == null
-      ) {
-        settings.hasProviderEnvKey =
-          environmentVariable(
-            settings.environment ?? {},
-            provider.env_key,
-            process.platform,
-          ) !== undefined;
+      if (isRecord(provider) && provider.auth == null) {
+        settings.hasProviderCredential =
+          typeof provider.env_key === "string"
+            ? environmentVariable(
+                settings.environment ?? {},
+                provider.env_key,
+                process.platform,
+              ) !== undefined
+            : typeof provider.experimental_bearer_token === "string";
       }
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,

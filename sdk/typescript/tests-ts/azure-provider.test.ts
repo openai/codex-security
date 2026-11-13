@@ -79,6 +79,38 @@ test("Azure credentials stay isolated from other providers", () => {
   ).toThrow(/AZURE_OPENAI_API_KEY/u);
 });
 
+test("Azure bearer preflight uses the private provider table with an unrelated ambient key", async () => {
+  const root = await temporaryDirectory();
+  const repository = join(root, "repo");
+  await mkdir(repository);
+  await using client = new TestClient(
+    {
+      codexOverrides: {
+        ...deployment,
+        model_providers: {
+          azure: {
+            base_url: resource,
+            experimental_bearer_token: "synthetic-private-bearer",
+          },
+        },
+      },
+    },
+    {
+      environment: {
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        OPENAI_API_KEY: "synthetic-unrelated",
+      },
+    },
+  );
+  const preflight = await client.preflight(repository, { auth: "api-key" });
+  expect(preflight.authentication).toEqual({
+    method: "api_key",
+    source: "experimental_bearer_token",
+    verified: false,
+  });
+  expect(JSON.stringify(preflight)).not.toContain("synthetic-private-bearer");
+});
+
 test.each(["incident-review", "gpt-5.4"])(
   "requires verified pricing to budget Azure deployment %s",
   async (model) => {

@@ -1854,6 +1854,83 @@ describe("semantic scan comparison", () => {
     expect(account).not.toHaveBeenCalled();
   });
 
+  test.each(["env_key", "experimental_bearer_token"] as const)(
+    "retains inherited Azure %s and endpoint for a comparison",
+    async (credential) => {
+      const home = await temporaryDirectory();
+      const native = {
+        name: "Inherited name",
+        base_url: "https://resource.example.test",
+        wire_api: "responses",
+        [credential]:
+          credential === "env_key"
+            ? "SELECTED_AZURE_KEY"
+            : "synthetic-private-bearer",
+      };
+      await writeFile(
+        join(home, "config.toml"),
+        stringify({ model_providers: { azure: native } }),
+      );
+      const profileClient = captureProfileClient();
+      const preflight = spyOn(
+        providerProfiles,
+        "preflightReadOnlyProfileCodex",
+      ).mockImplementation(async (options) => ({
+        permissionProfileId: "fixture-read-only",
+        configOverrides: options.configOverrides ?? [],
+      }));
+      const { codex } = fakeCodex({ matches: [], uncertain: [] });
+      let captured: CodexOptions | undefined;
+      const startThread = observeCodexOptions(codex, (options) => {
+        captured = options;
+      });
+      try {
+        await matchScanFindings(
+          { before: [finding("before")], after: [finding("after")] },
+          {
+            config: {
+              codexOverrides: {
+                model_provider: "azure",
+                model_providers: { azure: { name: "Caller name" } },
+              },
+            },
+            environment: {
+              PATH: process.env["PATH"],
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_HOME: home,
+              AZURE_OPENAI_API_KEY: "synthetic-unrelated-key",
+              ...(credential === "env_key"
+                ? { SELECTED_AZURE_KEY: "synthetic-selected-key" }
+                : {}),
+            },
+            workingDirectory: home,
+          },
+        );
+        expect(profileClient.profiles[0]?.config).toEqual({
+          model_providers: {
+            azure: {
+              ...native,
+              name: "Caller name",
+              base_url: "https://resource.example.test/openai/v1",
+            },
+          },
+        });
+        expect(captured?.env).not.toHaveProperty("AZURE_OPENAI_API_KEY");
+        expect(captured?.apiKey).toBeUndefined();
+        expect(JSON.stringify(captured?.configOverrides)).not.toContain(
+          "synthetic-private-bearer",
+        );
+        expect(JSON.stringify(captured?.config)).not.toContain(
+          "synthetic-private-bearer",
+        );
+      } finally {
+        startThread.mockRestore();
+        profileClient.spy.mockRestore();
+        preflight.mockRestore();
+      }
+    },
+  );
+
   test("uses only the selected Azure credential for read-only inference", async () => {
     const root = await temporaryDirectory("codex-security-comparison-");
     const account = mock(async () => ({

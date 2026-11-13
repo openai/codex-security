@@ -31,7 +31,9 @@ export function resolveSkillAuthentication(
     stringifyToml(options.codexOverrides ?? {}),
   ) as JsonObject;
   const config = deepMerge(structuredClone(ambientConfig), overrides);
-  const provider = options.modelProvider ?? scanModelProvider(config);
+  if (options.modelProvider !== undefined)
+    config["model_provider"] = options.modelProvider;
+  const provider = scanModelProvider(config);
   // Native Codex ignores configured tables for these built-in providers.
   const providerConfiguration =
     typeof provider === "string" &&
@@ -75,6 +77,9 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
+      false,
+      undefined,
+      config,
     );
   }
   if (
