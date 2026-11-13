@@ -554,6 +554,15 @@ describe("scan knowledge bases", () => {
       ),
     );
     await writeFile(
+      join(root, "hidden-control-delimiter.docx"),
+      docxBody(
+        "<w:p><w:r><w:drawing><w:txbxContent><w:p><w:sdt>" +
+          "<w:sdtEndPr><w:rPr><w:vanish/></w:rPr></w:sdtEndPr>" +
+          "<w:sdtContent><w:r><w:t>Require MFA.</w:t></w:r></w:sdtContent>" +
+          "</w:sdt></w:p></w:txbxContent></w:drawing></w:r></w:p>",
+      ),
+    );
+    await writeFile(
       join(root, "hidden-field-markers.docx"),
       docxBody(
         '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>' +
@@ -589,6 +598,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("See the runbook\n");
     expect(documents).toContain("Rotate keys. Audit weekly.\n");
     expect(documents).toContain("Policy owner.\n");
+    expect(documents).toContain("Require MFA.\n\n");
     expect(documents).toContain("Owner: \nData: Confidential\n");
   });
 

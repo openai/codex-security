@@ -367,7 +367,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     const placeholders: boolean[] = [];
     // Word does not display runs whose properties contain w:vanish.
     const hiddenRuns: boolean[] = [];
-    let propertyContext = 0;
+    const elements: string[] = [];
     const wordAttribute = (
       attributes: Record<string, string>,
       localName: string,
@@ -401,6 +401,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       const colon = name.indexOf(":");
       const declaration = colon < 0 ? "xmlns" : "xmlns:" + name.slice(0, colon);
       const localName = name.split(":").at(-1)!;
+      elements.push(localName);
       layout.push(
         declarations.get(declaration)?.at(-1)?.has(localName) ?? false,
       );
@@ -423,10 +424,11 @@ function extractDocx(path: string, bytes: Uint8Array): string {
           wordAttribute(attributes, "val"),
         );
       else if (localName === "r") hiddenRuns.push(false);
-      // Paragraph marks and earlier formatting have their own w:vanish.
-      else if (localName === "pPr" || localName === "rPrChange")
-        propertyContext++;
-      else if (localName === "vanish" && !propertyContext && hiddenRuns.length)
+      else if (
+        localName === "vanish" &&
+        elements.at(-2) === "rPr" &&
+        elements.at(-3) === "r"
+      )
         hiddenRuns[hiddenRuns.length - 1] = !["0", "false", "off"].includes(
           wordAttribute(attributes, "val"),
         );
@@ -450,6 +452,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       else if (localName === "noBreakHyphen") append("-");
     });
     parser.on("closetag", ({ name, attributes, isSelfClosing }) => {
+      elements.pop();
       layout.pop();
       for (const key of Object.keys(attributes)) {
         const bindings = declarations.get(key);
@@ -464,8 +467,6 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       }
       if (localName === "sdt") placeholders.pop();
       else if (localName === "r") hiddenRuns.pop();
-      else if (localName === "pPr" || localName === "rPrChange")
-        propertyContext--;
       if (localName === "txbxContent") {
         while (fields.length > 0) finishField(false);
         const content = text.join("");
