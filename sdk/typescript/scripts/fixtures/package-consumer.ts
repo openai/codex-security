@@ -143,10 +143,10 @@ const options: ScanOptions = {
     progress.filesCompleted satisfies number;
   },
   onWorkerEvent(event: ScanWorkerEvent) {
-    if (event.kind === "observed") {
-      event.worker satisfies number;
-    } else {
+    if (event.kind === "dispatch" || event.kind === "failed") {
       event.attempts satisfies number;
+    } else {
+      event.worker satisfies number;
     }
   },
 };

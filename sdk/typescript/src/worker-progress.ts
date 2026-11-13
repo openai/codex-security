@@ -153,10 +153,8 @@ function dispatchStatus(
 }
 
 /** Runtime dispatch counts derived from live spawn_agent tool calls. */
-export interface ScanWorkerRuntimeEvent {
-  kind: "dispatch" | "failed";
-  attempts: number;
-}
+export type ScanWorkerRuntimeEvent =
+  { kind: "dispatch"; attempts: number } | { kind: "failed"; attempts: number };
 
 /** Deduplicate replayed spawn items while retaining a later failure on the same item. */
 export function createWorkerDispatchMonitor() {
