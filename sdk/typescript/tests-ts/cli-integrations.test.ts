@@ -360,6 +360,9 @@ describe("integration command dispatch", () => {
     const existingExecutable = join(temp.path, "server with spaces");
     await writeFile(existingExecutable, "", { mode: 0o700 });
     const args = ["--mcp", "", "two words", "--json", "one=two"];
+    const http = "HTTP://mcp.example.invalid/MCP?mode=ReadOnly";
+    const https = "hTtPs://mcp.example.invalid/MCP?mode=ReadOnly";
+    const nonAsciiScheme = "httpſ://mcp.example.invalid";
     for (const [launcher, expected] of [
       [
         ["--exec", executable, ...args.map((value) => `--arg=${value}`)],
@@ -379,6 +382,9 @@ describe("integration command dispatch", () => {
         },
       ],
       [["--command=local-server"], { command: "local-server", args: [] }],
+      [[`--command=${http}`], { url: http }],
+      [[`--command=${https}`], { url: https }],
+      [[`--command=${nonAsciiScheme}`], { command: nonAsciiScheme, args: [] }],
       [
         [`--command=${existingExecutable}`],
         { command: existingExecutable, args: [] },
@@ -415,34 +421,6 @@ describe("integration command dispatch", () => {
       expect(amp["amp.mcpServers"]["codex-security"]).toEqual(expected);
     }
   }, 30_000);
-
-  test.each(["http", "HTTP", "hTtP", "https", "HTTPS", "hTtPs"])(
-    "MCP URL launchers accept %s without changing the URL",
-    async (scheme) => {
-      await using temp = await scopedTemporaryDirectory("cli-mcp-url-");
-      const { home, run } = await isolatedCli(temp.path);
-      const url = `${scheme}://mcp.example.invalid/MCP?mode=ReadOnly`;
-      const result = await run(
-        "mcp",
-        "add",
-        "--agent=cursor",
-        "--agent=amp",
-        "--json",
-        `--command=${url}`,
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(JSON.parse(result.stdout).command).toBe(url);
-      const cursor = JSON.parse(
-        await readFile(join(home, ".cursor", "mcp.json"), "utf8"),
-      );
-      const amp = JSON.parse(
-        await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
-      );
-      expect(cursor.mcpServers["codex-security"]).toEqual({ url });
-      expect(amp["amp.mcpServers"]["codex-security"]).toEqual({ url });
-    },
-    30_000,
-  );
 
   test("project registration keeps linked configurations inside the project", async () => {
     await using temp = await scopedTemporaryDirectory("cli-project-links-");
