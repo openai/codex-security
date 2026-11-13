@@ -661,6 +661,7 @@ def list_unmatched_scan_pairs(
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
+    compact = os.environ.get("CODEX_SECURITY_MATCHING_PLAN_FORMAT") == "compact"
     sites: dict[str, _FindingSites] = {}
     known_links: list[sqlite3.Row] | None = None
     for index, after in enumerate(available):
@@ -707,32 +708,26 @@ def list_unmatched_scan_pairs(
         batches.append(
             {
                 "afterScanId": after["id"],
+                **({} if compact else {"afterFindings": matching_findings[after["id"]]}),
                 "beforeScans": [
                     {
                         **_cross_mode_context(before, after, matching_findings, sites),
                         "scanId": before["id"],
+                        **({} if compact else {"findings": matching_findings[before["id"]]}),
                     }
                     for before in previous
                 ],
                 **({"knownFindingGroups": known_groups} if known_groups else {}),
             }
         )
-    plan = {
+    return {
+        **({"findingsByScanId": matching_findings} if compact else {}),
         "batches": batches,
         "repository": str(repository),
         "scanCount": len(selected),
         "skippedPairs": skipped,
         "unavailableScans": len(selected) - len(available),
     }
-    if os.environ.get("CODEX_SECURITY_MATCHING_PLAN_FORMAT") == "compact":
-        plan["findingsByScanId"] = matching_findings
-    else:
-        # SDKs that do not opt in read the findings directly from each pair.
-        for batch in batches:
-            batch["afterFindings"] = matching_findings[batch["afterScanId"]]
-            for scan in batch["beforeScans"]:
-                scan["findings"] = matching_findings[scan["scanId"]]
-    return plan
 
 
 def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> list[sqlite3.Row]:
