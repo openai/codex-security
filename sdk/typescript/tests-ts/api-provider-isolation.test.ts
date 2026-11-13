@@ -372,9 +372,12 @@ test.each([
             ? "OPENROUTER_API_KEY"
             : "SYNTHETIC_CUSTOM_API_KEY";
         const alternateKey =
-          process.platform === "win32" && index === 1
-            ? "openrouter_api_key"
-            : "OPENROUTER_API_KEY";
+          selection === "file Azure" && index === 1
+            ? "CODEX_API_KEY"
+            : process.platform === "win32" && index === 1
+              ? "openrouter_api_key"
+              : "OPENROUTER_API_KEY";
+        const alternateHeader = selection === "file Azure" && index === 0;
         const headerOnly = selection === "file Azure headers";
         const bearer = selection === "file Azure" && index === 1;
         const canonicalKey =
@@ -434,10 +437,13 @@ test.each([
         };
         // Authentication trims the selected API key; other inherited provider
         // variables, including header values, retain their original bytes.
-        const workerEnvironment = {
+        const workerEnvironment: Record<string, string> = {
           ...providerEnvironment,
           ...(providerId === "azure"
             ? { [alternateKey]: `synthetic-alternate-${index}` }
+            : {}),
+          ...(alternateHeader
+            ? { OPENAI_API_KEY: `synthetic-alternate-header-${index}` }
             : {}),
           ...(bearer || headerOnly
             ? {}
@@ -457,6 +463,13 @@ test.each([
                         name: "Alternate managed worker",
                         wire_api: "responses",
                         env_key: alternateKey,
+                        ...(alternateHeader
+                          ? {
+                              env_http_headers: {
+                                "X-Worker-Key": "OPENAI_API_KEY",
+                              },
+                            }
+                          : {}),
                       },
                     }
                   : {}),
@@ -550,12 +563,17 @@ test.each([
                   ? "codex_home"
                   : "CODEX_HOME"]: sourceHome,
                 CODEX_SECURITY_STATE_DIR: state,
-                OPENAI_API_KEY: "synthetic-account-key",
+                OPENAI_API_KEY: alternateHeader
+                  ? `synthetic-alternate-header-${index}`
+                  : "synthetic-account-key",
                 ...(providerId === "azure"
                   ? {
                       AZURE_OPENAI_ENDPOINT: azureResource,
                       AZURE_OPENAI_API_KEY: "synthetic-unrelated-azure-key",
-                      CODEX_API_KEY: "synthetic-unrelated-account-key",
+                      CODEX_API_KEY:
+                        alternateKey === "CODEX_API_KEY"
+                          ? `synthetic-alternate-${index}`
+                          : "synthetic-unrelated-account-key",
                     }
                   : {}),
                 ...(selection === "file custom only"
@@ -569,7 +587,27 @@ test.each([
                 ...providerEnvironment,
                 SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
               },
-              resolvePluginPython: async () => "/managed/python",
+              resolvePluginPython: async ({ environment } = {}) => {
+                if (selection === "file Azure") {
+                  expect(environment).not.toHaveProperty("OPENAI_API_KEY");
+                  expect(environment).not.toHaveProperty("CODEX_API_KEY");
+                }
+                return "/managed/python";
+              },
+              runWorkbench: async (options, args, input) => {
+                if (
+                  selection === "file Azure" &&
+                  args[0] === "register-cli-scan"
+                ) {
+                  expect(options.environment).not.toHaveProperty(
+                    "OPENAI_API_KEY",
+                  );
+                  expect(options.environment).not.toHaveProperty(
+                    "CODEX_API_KEY",
+                  );
+                }
+                return mockWorkbench(args, input);
+              },
               prepareOutputDir: async () => scan,
               repositoryRevision: async () => "deadbeef",
               createCodex: (options) =>
@@ -858,6 +896,9 @@ for (const mode of ["standard", "deep"] as const) {
         : {};
       const inheritedEnvironment: Record<string, string> = {
         AZURE_OPENAI_API_KEY: " synthetic-private-azure ",
+        ...(_selection === "managed Azure"
+          ? { OPENAI_API_KEY: "synthetic-alternate-azure-header" }
+          : {}),
         ...(_selection === "custom Codex key" ||
         _selection === "other external key" ||
         gatewayHeader
@@ -889,6 +930,7 @@ for (const mode of ["standard", "deep"] as const) {
           ? {
               AZURE_OPENAI_API_KEY:
                 inheritedEnvironment["AZURE_OPENAI_API_KEY"],
+              OPENAI_API_KEY: inheritedEnvironment["OPENAI_API_KEY"],
             }
           : {}),
       };
@@ -916,6 +958,7 @@ for (const mode of ["standard", "deep"] as const) {
                   ...provider,
                   base_url: "https://resource.example.test/openai/v1",
                   env_key: "AZURE_OPENAI_API_KEY",
+                  env_http_headers: { "X-Worker-Key": "OPENAI_API_KEY" },
                 },
               }
             : {}),
@@ -938,6 +981,10 @@ for (const mode of ["standard", "deep"] as const) {
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan") {
               expect(options.environment).not.toHaveProperty(providerKey);
+              if (_selection === "managed Azure")
+                expect(options.environment).not.toHaveProperty(
+                  "OPENAI_API_KEY",
+                );
               if (gatewayHeader) {
                 expect(options.environment).not.toHaveProperty(gatewayHeader);
                 expect(options.environment).not.toHaveProperty(inactiveKey);
@@ -1121,6 +1168,7 @@ test.each([
             },
             azure: {
               ...provider,
+              env_http_headers: { "X-Account": "OPENAI_API_KEY" },
               ...(azureCredential === "alternate header" ? header : {}),
               ...(azureCredential === "alternate key"
                 ? { env_key: "AZURE_OPENAI_API_KEY" }

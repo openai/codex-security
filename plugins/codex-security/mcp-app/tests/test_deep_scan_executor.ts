@@ -2907,6 +2907,7 @@ async function testBedrockCredentialsReachWorker(
 async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
+    ["openrouter", "CODEX_API_KEY", "OPENAI_API_KEY"],
     ["azure", "AZURE_OPENAI_API_KEY"],
     ["azure", "SYNTHETIC_AZURE_KEY"],
     ["azure", undefined],
@@ -2927,6 +2928,10 @@ async function testExternalProviderCredentialsReachWorker() {
       const accountHeaders = headerKey
         ? { [headerKey]: "private-scan-header" }
         : {};
+      const expectedAccount = {
+        ...accountHeaders,
+        ...(key === "CODEX_API_KEY" ? { [key]: selectedKey } : {}),
+      };
       const settings = {
         model_provider: provider,
         native_profile: profile,
@@ -3046,11 +3051,13 @@ async function testExternalProviderCredentialsReachWorker() {
             assert.ok(!invocation.argv.join(" ").includes(selectedKey));
           } else {
             assert.equal(
-              invocation.providerKey ?? invocation.providerHeaders[key],
+              invocation.providerKey ??
+                invocation.providerHeaders[key] ??
+                invocation.openaiAuthentication[key],
               selectedKey,
             );
           }
-          assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
+          assert.deepEqual(invocation.openaiAuthentication, expectedAccount);
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {
             model_provider: provider,

@@ -2529,8 +2529,9 @@ export class CodexSecurity {
           mode === "deep" &&
             (options.auth !== "chatgpt" ||
               authentication.method !== "stored_credentials")
-            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            ? this.#dependencies.environment
             : undefined,
+          authentication.method === "api_key",
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -7763,16 +7764,25 @@ function selectedWorkerRuntimeConfig(
   environment: ProcessEnvironment,
   selectedCredentials: Record<string, string>,
   ambientWorkerEnvironment?: ProcessEnvironment,
+  allowAlternateAccountKeys = false,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  // A managed worker can use another provider declared in this private profile.
-  // Preserve its original credentials while honoring the parent's selected key.
+  // Alternate provider tables may name account keys as provider credentials.
+  // The selected provider and non-API-key sign-ins retain their own auth policy.
+  const alternateProviders =
+    allowAlternateAccountKeys && isRecord(providers)
+      ? Object.fromEntries(
+          Object.entries(providers).filter(([name]) => name !== provider),
+        )
+      : undefined;
+  const ambient = ambientWorkerEnvironment ?? {};
   const providerEnvironment = {
-    ...declaredProviderEnvironment(providers, ambientWorkerEnvironment ?? {}),
+    ...declaredProviderEnvironment(providers, withoutOpenAiApiKeys(ambient)),
+    ...declaredProviderEnvironment(alternateProviders, ambient),
     ...declaredProviderEnvironment(providers, environment),
     ...declaredProviderEnvironment(providers, selectedCredentials),
   };
