@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use Codex Security in your work, please cite the version you used."
+type: software
+title: Codex Security
+authors:
+  - name: OpenAI
+version: "0.10.0"
+repository-code: https://github.com/openai/codex-security
+repository-artifact: https://www.npmjs.com/package/@openai/codex-security
+url: https://developers.openai.com/codex/security
+license: Apache-2.0
+abstract: >-
+  Codex Security helps developers find, validate, and fix vulnerabilities in
+  source code. Its security workflows are available in Codex, through a
+  command-line interface, and through a TypeScript SDK.
+keywords:
+  - application security
+  - code scanning
+  - vulnerability scanning

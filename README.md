@@ -234,3 +234,10 @@ for examples.
 - [Examples](examples/README.md)
 
 To report a vulnerability privately, follow the [security policy](SECURITY.md).
+
+## Citation
+
+Use **Cite this repository** on GitHub to copy an APA or BibTeX citation, or
+download the metadata from [CITATION.cff](CITATION.cff). To cite the version
+you used, run `codex-security --version` and include the publication date
+from the matching `npm-vX.Y.Z` entry in [GitHub Releases](https://github.com/openai/codex-security/releases).
