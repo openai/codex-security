@@ -3,6 +3,8 @@ setlocal DisableDelayedExpansion
 
 set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\server.mjs"
 if "%~1"=="--helper" (
+  rem An inherited ERRORLEVEL would shadow the helper exit code.
+  set "ERRORLEVEL="
   set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\helpers.mjs"
   goto launch
 )
@@ -55,8 +57,6 @@ echo Codex Security could not find a Node runtime. Reinstall or update Codex, or
 exit /b 127
 
 :run
-rem An inherited ERRORLEVEL variable would shadow the helper exit code.
-set "ERRORLEVEL="
 rem Direct invocation also chains batch shims without CALL reparsing paths.
 "%CODEX_SECURITY_MCP_NODE%" "%CODEX_SECURITY_MCP_SCRIPT%" %*
 if "%~1"=="--helper" exit /b %errorlevel%
