@@ -2523,7 +2523,7 @@ export class CodexSecurity {
         // private snapshot below retains only variables named by those tables.
         const key = AZURE_CODEX_PROVIDER.env_key;
         const azureKey = environmentEntry(this.#dependencies.environment, key);
-        if (azureKey !== undefined) workerProviderEnvironment[key] = azureKey;
+        if (azureKey !== undefined) workerProviderEnvironment[key] ??= azureKey;
       }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(

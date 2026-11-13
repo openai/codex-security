@@ -1478,6 +1478,7 @@ test.each([
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
+  "AZURE_OPENAI_API_KEY",
 ])(
   "native plugin workers recover the selected %s and other provider variables",
   async (providerKey) => {
@@ -1490,9 +1491,11 @@ test.each([
     await mkdir(scan, { mode: 0o700 });
     await mkdir(sourceHome, { mode: 0o700 });
     const plugin = await createPluginProbe(root, report);
-    const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
-      providerKey,
-    );
+    const external = [
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
+      "AZURE_OPENAI_API_KEY",
+    ].includes(providerKey);
     const providerId = external
       ? providerKey.split("_")[0]!.toLowerCase()
       : "synthetic.gateway";
@@ -1516,7 +1519,10 @@ test.each([
             [providerId]: {
               name: "Synthetic gateway",
               wire_api: "responses",
-              base_url: "https://provider.example.test/v1",
+              base_url:
+                providerId === "azure"
+                  ? "https://provider.example.test/openai/v1"
+                  : "https://provider.example.test/v1",
               env_key: providerKey,
               env_http_headers: {
                 "X-Synthetic-Token": headerKey,
