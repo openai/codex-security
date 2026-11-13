@@ -7019,29 +7019,21 @@ export async function main(
                 `${responseFlag} cannot be used with raw artifact stdout. Omit it to pipe the complete artifact.`,
               );
             }
-            const markdown =
-              options.artifact === "threat-model" ||
-              options.exportFormat === "md";
-            const csv =
-              options.exportFormat === "csv" ||
-              options.exportFormat === "servicenow-avit";
-            const html = options.exportFormat === "html";
-            const expectedFormat = markdown
-              ? "md"
-              : csv || html
-                ? undefined
-                : "json";
+            const artifactFormat =
+              options.exportFormat ??
+              (options.artifact === "threat-model" ? "md" : "sarif");
+            const [label, expectedFormat] = {
+              csv: ["CSV", undefined],
+              "servicenow-avit": ["CSV", undefined],
+              html: ["HTML", undefined],
+              json: ["JSON", "json"],
+              sarif: ["JSON", "json"],
+              md: ["Markdown", "md"],
+            }[artifactFormat];
             const incompatible = frameworkFlags.formats.find(
               (value) => value !== expectedFormat,
             );
             if (incompatible !== undefined) {
-              const label = markdown
-                ? "Markdown"
-                : csv
-                  ? "CSV"
-                  : html
-                    ? "HTML"
-                    : "JSON";
               throw new CodexSecurityError(
                 `${label} stdout cannot be combined with --format ${incompatible}. Omit the response format to pipe the complete artifact.`,
               );

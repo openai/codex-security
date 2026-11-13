@@ -1044,9 +1044,22 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.write_sealed_scan()
         empty = FINALIZER.build_findings_export(self.scan_dir, "html").decode()
         self.assertTrue(empty.startswith("<!DOCTYPE html>"))
-        self.assertIn("No findings.", empty)
+        self.assertIn("No findings were reported.", empty)
         self.assertIn("0 findings", empty)
         self.assertIn("<style>", empty)
+
+    def test_html_export_distinguishes_empty_stopped_scans(self) -> None:
+        self.findings["findings"] = []
+        for status in ("failed", "interrupted", "canceled"):
+            with self.subTest(status=status):
+                self.write_scan()
+                FINALIZER.finalize_scan(
+                    self.scan_dir,
+                    completion_binding={**self.completion_binding(), "status": status},
+                )
+                report = FINALIZER.build_findings_export(self.scan_dir, "html").decode()
+                self.assertIn("No vulnerability conclusion can be drawn.", report)
+                self.assertNotIn("No findings were reported.", report)
 
     def test_malformed_remote_is_a_contract_error(self) -> None:
         self.manifest["scan"]["target"]["remote"] = "https://[invalid"
