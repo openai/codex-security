@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { isRecord } from "./record.js";
+import { errorMessage } from "./errors.js";
 import {
   huggingFaceChatRequest,
   huggingFaceChatResponse,
@@ -138,19 +139,19 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
     if (tool === undefined)
       throw new Error(`HF returned an unknown tool: ${value["name"]}`);
     const { arguments: args, ...rest } = value;
-    if (tool.custom && typeof value["id"] === "string")
-      customItems.add(value["id"]);
-    return {
+    const restored = {
       ...rest,
-      name: tool["name"],
+      name: tool.name,
       ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
-      ...(tool.custom
-        ? {
-            type: "custom_tool_call",
-            input: partial ? "" : JSON.parse(String(args)).input,
-          }
-        : { arguments: args }),
     };
+    if (!tool.custom) return { ...restored, arguments: args };
+    if (typeof value["id"] === "string") customItems.add(value["id"]);
+    const input = partial ? "" : JSON.parse(String(args))?.input;
+    if (typeof input !== "string")
+      throw new Error(
+        `HF returned invalid input for custom tool ${tool.name}.`,
+      );
+    return { ...restored, type: "custom_tool_call", input };
   }
   function response(value: unknown): unknown {
     if (!isRecord(value)) return value;
@@ -186,6 +187,53 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
   return { body, response, event };
 }
 
+/** Read complete SSE frames, including CR, LF, or CRLF split across chunks. */
+async function* chatFrames(body: ReadableStream<Uint8Array>) {
+  let buffer = "";
+  const decoder = new TextDecoder();
+  for await (const chunk of body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let boundary: RegExpExecArray | null;
+    // A CRLF is one line ending, even when its bytes arrive separately.
+    while ((boundary = /(?:\r\n|\r(?!\n)|\n){2}/.exec(buffer)) !== null) {
+      const frame = buffer.slice(0, boundary.index);
+      buffer = buffer.slice(boundary.index + boundary[0].length);
+      const data = frame
+        .split(/\r\n|\r|\n/)
+        .filter((line) => line === "data" || line.startsWith("data:"))
+        .map((line) => line.slice(5).replace(/^ /, ""))
+        .join("\n");
+      if (data) yield data;
+    }
+  }
+  if ((buffer + decoder.decode()).trim())
+    throw new Error("Incomplete Hugging Face response stream.");
+}
+
+const connectionHeaders = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  // Fetch calculates these for the translated request or decoded response body.
+  "host",
+  "content-length",
+  "content-encoding",
+  "accept-encoding",
+]);
+
+function forwardedHeaders(source: Headers): Headers {
+  const result = new Headers(source);
+  for (const name of (source.get("connection") ?? "").split(","))
+    if (name.trim()) result.delete(name.trim());
+  for (const name of connectionHeaders) result.delete(name);
+  return result;
+}
+
 /** Scoped to a private native provider profile, shared by its discovery workers. */
 export async function startHuggingFaceResponsesAdapter(upstream: string) {
   const route = `/${randomUUID()}/v1/responses`;
@@ -200,94 +248,93 @@ export async function startHuggingFaceResponsesAdapter(upstream: string) {
       }
       const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
-      const translation = huggingFaceRequest(
-        JSON.parse(Buffer.concat(chunks).toString("utf8")),
-      );
-      if (translation.body["stream"] !== true) {
-        response.writeHead(400, { "content-type": "application/json" }).end(
-          JSON.stringify({
-            error: {
-              message:
-                "The HF scan adapter requires a streaming Responses request.",
-            },
-          }),
+      let translation: ReturnType<typeof huggingFaceRequest>;
+      let body: ReturnType<typeof huggingFaceChatRequest>;
+      try {
+        const parsed: unknown = JSON.parse(
+          Buffer.concat(chunks).toString("utf8"),
         );
+        if (!isRecord(parsed) || parsed["stream"] !== true)
+          throw new Error(
+            "The HF scan adapter requires a streaming Responses request.",
+          );
+        translation = huggingFaceRequest(parsed);
+        body = huggingFaceChatRequest(translation.body);
+      } catch (error) {
+        response
+          .writeHead(400, { "content-type": "application/json" })
+          .end(JSON.stringify({ error: { message: errorMessage(error) } }));
         return;
       }
       const headers = new Headers();
-      for (const [name, value] of Object.entries(request.headers)) {
-        if (
-          value !== undefined &&
-          ![
-            "host",
-            "content-length",
-            "connection",
-            "transfer-encoding",
-            "accept-encoding",
-          ].includes(name)
-        )
+      for (const [name, value] of Object.entries(request.headers))
+        if (value !== undefined)
           headers.set(name, Array.isArray(value) ? value.join(", ") : value);
-      }
-      const upstreamUrl = new URL(
-        `${upstream.replace(/\/$/, "")}/chat/completions`,
-      );
-      upstreamUrl.search = requestedUrl.search;
+      const upstreamUrl = new URL(upstream);
+      upstreamUrl.pathname = `${upstreamUrl.pathname.replace(/\/$/, "")}/chat/completions`;
+      for (const [name, value] of requestedUrl.searchParams)
+        upstreamUrl.searchParams.append(name, value);
       const result = await fetch(upstreamUrl, {
         method: "POST",
-        headers,
-        body: JSON.stringify(huggingFaceChatRequest(translation.body)),
+        headers: forwardedHeaders(headers),
+        body: JSON.stringify(body),
         signal: controller.signal,
+        // A redirect can otherwise replay scan prompts and custom provider credentials.
+        redirect: "error",
       });
-      const contentType =
-        result.headers.get("content-type") ?? "application/json";
-      response.writeHead(result.status, { "content-type": contentType });
+      const contentType = result.headers.get("content-type") ?? "";
       if (!result.ok) {
-        response.end(await result.text());
-      } else if (contentType.includes("text/event-stream") && result.body) {
+        const responseHeaders = Object.fromEntries(
+          forwardedHeaders(result.headers),
+        );
+        response
+          .writeHead(result.status, responseHeaders)
+          .end(await result.text());
+      } else if (
+        contentType.split(";")[0]?.trim().toLowerCase() ===
+          "text/event-stream" &&
+        result.body
+      ) {
+        response.writeHead(result.status, { "content-type": contentType });
         async function* events() {
-          let pending = "";
-          const decoder = new TextDecoder();
-          const completion = huggingFaceChatResponse();
-          for await (const chunk of result.body!) {
-            pending += decoder.decode(chunk, { stream: true });
-            let boundary: RegExpExecArray | null;
-            while ((boundary = /\r?\n\r?\n/.exec(pending)) !== null) {
-              const frame = pending.slice(0, boundary.index);
-              pending = pending.slice(boundary.index + boundary[0].length);
-              const data = frame
-                .split(/\r?\n/)
-                .filter((line) => line.startsWith("data:"))
-                .map((line) => line.slice(5).trimStart())
-                .join("\n");
-              if (!data || data === "[DONE]") continue;
-              completion.add(JSON.parse(data));
+          try {
+            const completion = huggingFaceChatResponse();
+            for await (const data of chatFrames(result.body!)) {
+              if (data === "[DONE]") break;
+              const chunk: unknown = JSON.parse(data);
+              if (!isRecord(chunk))
+                throw new Error("Invalid Hugging Face stream event.");
+              if (chunk["error"]) {
+                const error = isRecord(chunk["error"])
+                  ? chunk["error"]
+                  : { message: String(chunk["error"]) };
+                yield `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error } })}\n\n`;
+                return;
+              }
+              completion.add(chunk);
               yield ": upstream\n\n";
             }
-          }
-          if (pending.trim())
-            throw new Error("Incomplete Hugging Face response stream.");
-          const completed = completion.finish();
-          yield `data: ${JSON.stringify({ type: "response.created", response: { ...completed, status: "in_progress", output: [] } })}\n\n`;
-          for (const [output_index, item] of completed.output.entries()) {
-            for (const type of [
-              "response.output_item.added",
-              "response.output_item.done",
-            ]) {
-              yield `data: ${JSON.stringify(translation.event({ type, output_index, item }))}\n\n`;
+            const completed = completion.finish();
+            yield `data: ${JSON.stringify({ type: "response.created", response: { ...completed, status: "in_progress", output: [] } })}\n\n`;
+            for (const [output_index, item] of completed.output.entries()) {
+              for (const type of [
+                "response.output_item.added",
+                "response.output_item.done",
+              ]) {
+                yield `data: ${JSON.stringify(translation.event({ type, output_index, item }))}\n\n`;
+              }
             }
-          }
-          yield `data: ${JSON.stringify({ type: "response.completed", response: translation.response(completed) })}\n\n`;
-        }
-        async function* protocolEvents() {
-          try {
-            yield* events();
+            yield `data: ${JSON.stringify({ type: "response.completed", response: translation.response(completed) })}\n\n`;
           } catch (error) {
-            yield `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { message: error instanceof Error ? error.message : String(error) } } })}\n\n`;
+            yield `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { message: errorMessage(error) } } })}\n\n`;
           }
         }
-        await pipeline(Readable.from(protocolEvents()), response);
+        await pipeline(Readable.from(events()), response);
       } else {
-        throw new Error("Expected a streaming HF Chat Completions response.");
+        const diagnostic = await result.text();
+        throw new Error(
+          `Expected a streaming HF Chat Completions response.${diagnostic ? " " + diagnostic : ""}`,
+        );
       }
     })().catch((error: unknown) => {
       if (response.destroyed) return;
@@ -296,13 +343,9 @@ export async function startHuggingFaceResponsesAdapter(upstream: string) {
           error instanceof Error ? error : new Error(String(error)),
         );
       else
-        response.writeHead(502, { "content-type": "application/json" }).end(
-          JSON.stringify({
-            error: {
-              message: error instanceof Error ? error.message : String(error),
-            },
-          }),
-        );
+        response
+          .writeHead(502, { "content-type": "application/json" })
+          .end(JSON.stringify({ error: { message: errorMessage(error) } }));
     });
   });
   server.listen(0, "127.0.0.1");
@@ -310,13 +353,14 @@ export async function startHuggingFaceResponsesAdapter(upstream: string) {
   const address = server.address();
   if (address === null || typeof address === "string")
     throw new Error("HF adapter did not bind a TCP port.");
+  let closing: Promise<void> | undefined;
   return {
     baseUrl: `http://127.0.0.1:${address.port}${route.slice(0, -"/responses".length)}`,
-    async close() {
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error ? reject(error) : resolve())),
-      );
+    close() {
+      return (closing ??= new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+        server.closeAllConnections();
+      }));
     },
   };
 }

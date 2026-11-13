@@ -1,10 +1,34 @@
 import { expect, test } from "bun:test";
-import { createServer } from "node:http";
+import { createServer, type RequestListener } from "node:http";
 import { once } from "node:events";
 import {
   huggingFaceRequest,
   startHuggingFaceResponsesAdapter,
 } from "../src/huggingface-responses.js";
+
+async function listen(handler: RequestListener) {
+  const server = createServer(handler);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as { port: number };
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    [Symbol.asyncDispose]: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  };
+}
+
+function streamingRequest(baseUrl: string, signal?: AbortSignal) {
+  return fetch(`${baseUrl}/responses`, {
+    method: "POST",
+    signal,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "fixture", stream: true, input: "Review" }),
+  });
+}
 
 const tool = {
   type: "function",
@@ -92,6 +116,12 @@ test("restores freeform tools from streamed function arguments and retransmits h
     input: "text('hello')",
   });
   expect(done.item).not.toHaveProperty("arguments");
+  expect(() =>
+    request.event({
+      type: "response.output_item.done",
+      item: { ...item, arguments: '{"input":9}' },
+    }),
+  ).toThrow("invalid input for custom tool exec");
   const next = huggingFaceRequest({
     tools: [{ type: "namespace", name: "functions", tools: [custom] }],
     input: [
@@ -118,9 +148,10 @@ test("rejects unsupported hosted tools rather than silently removing them", () =
 test("adapter forwards authentication, streams split UTF-8 events, and closes", async () => {
   let authorization: string | undefined;
   let billTo: string | undefined;
-  const upstream = createServer(async (req, res) => {
+  await using upstream = await listen(async (req, res) => {
     authorization = req.headers.authorization;
     billTo = req.headers["x-hf-bill-to"] as string;
+    expect(req.url).toBe("/v1/chat/completions?api-version=test&client=x");
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString());
@@ -141,14 +172,11 @@ test("adapter forwards authentication, streams split UTF-8 events, and closes", 
     res.write(event.subarray(0, offset));
     res.end(event.subarray(offset));
   });
-  upstream.listen(0, "127.0.0.1");
-  await once(upstream, "listening");
-  const address = upstream.address() as { port: number };
   const adapter = await startHuggingFaceResponsesAdapter(
-    `http://127.0.0.1:${address.port}/v1`,
+    `${upstream.url}/v1?api-version=test`,
   );
   try {
-    const response = await fetch(`${adapter.baseUrl}/responses`, {
+    const response = await fetch(`${adapter.baseUrl}/responses?client=x`, {
       method: "POST",
       headers: {
         Authorization: "Bearer synthetic-token",
@@ -172,7 +200,6 @@ test("adapter forwards authentication, streams split UTF-8 events, and closes", 
     expect((await fetch(`${adapter.baseUrl}/other`)).status).toBe(404);
   } finally {
     await adapter.close();
-    await new Promise<void>((resolve) => upstream.close(() => resolve()));
   }
   await expect(fetch(`${adapter.baseUrl}/responses`)).rejects.toThrow();
 });
@@ -189,35 +216,148 @@ test("translates forced namespaced tool choice to the advertised function", () =
   });
 });
 
-test("stream failures remain failures with the provider diagnostic", async () => {
-  const upstream = createServer((_req, res) => {
-    res.writeHead(200, { "content-type": "text/event-stream" });
-    res.end(
-      `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "partial" }, finish_reason: "length" }] })}\n\ndata: [DONE]\n\n`,
-    );
-  });
-  upstream.listen(0, "127.0.0.1");
-  await once(upstream, "listening");
-  const adapter = await startHuggingFaceResponsesAdapter(
-    `http://127.0.0.1:${(upstream.address() as { port: number }).port}/v1`,
-  );
-  try {
-    const response = await fetch(`${adapter.baseUrl}/responses`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "synthetic/model",
-        stream: true,
-        tools: [],
-        input: "Review",
-      }),
+test.each([
+  [
+    {
+      choices: [
+        { index: 0, delta: { content: "partial" }, finish_reason: "length" },
+      ],
+    },
+    { message: "HF generation did not complete (finish_reason=length)." },
+  ],
+  [
+    {
+      error: { code: "context_length_exceeded", message: "Shorten the input" },
+    },
+    { code: "context_length_exceeded", message: "Shorten the input" },
+  ],
+])(
+  "stream failures retain the provider diagnostic and error code",
+  async (chunk, error) => {
+    await using upstream = await listen((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`);
     });
-    const result = await response.text();
-    expect(result).toContain('"type":"response.failed"');
-    expect(result).toContain("finish_reason=length");
-    expect(result).not.toContain('"type":"response.completed"');
+    const adapter = await startHuggingFaceResponsesAdapter(
+      `${upstream.url}/v1`,
+    );
+    try {
+      const response = await streamingRequest(adapter.baseUrl);
+      const text = await response.text();
+      const events = text
+        .split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice(6)));
+      expect(events).toEqual([
+        { type: "response.failed", response: { status: "failed", error } },
+      ]);
+    } finally {
+      await adapter.close();
+    }
+  },
+);
+
+test("finishes on the SSE done marker while the provider keeps the HTTP connection open", async () => {
+  const disconnected = Promise.withResolvers<void>();
+  await using upstream = await listen((_req, res) => {
+    res.on("close", disconnected.resolve);
+    res.writeHead(200, { "content-type": "Text/Event-Stream; charset=utf-8" });
+    const data = {
+      choices: [
+        { index: 0, delta: { content: "finished" }, finish_reason: "stop" },
+      ],
+    };
+    res.write(`data: ${JSON.stringify(data)}\r\rdata: [DONE]\r\r`);
+  });
+  const adapter = await startHuggingFaceResponsesAdapter(upstream.url);
+  try {
+    const response = await streamingRequest(adapter.baseUrl);
+    expect(await response.text()).toContain('"type":"response.completed"');
+    await disconnected.promise;
   } finally {
     await adapter.close();
-    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
+});
+
+test.each(["client abort", "adapter shutdown"])(
+  "cancels upstream work on %s",
+  async (action) => {
+    const accepted = Promise.withResolvers<void>();
+    const disconnected = Promise.withResolvers<void>();
+    await using upstream = await listen((_req, res) => {
+      res.on("close", disconnected.resolve);
+      accepted.resolve();
+    });
+    const adapter = await startHuggingFaceResponsesAdapter(upstream.url);
+    const controller = new AbortController();
+    try {
+      const request = streamingRequest(
+        adapter.baseUrl,
+        controller.signal,
+      ).catch((error) => error);
+      await accepted.promise;
+      if (action === "client abort") controller.abort();
+      else await Promise.all([adapter.close(), adapter.close()]);
+      expect(await request).toBeInstanceOf(Error);
+      await disconnected.promise;
+    } finally {
+      await adapter.close();
+    }
+  },
+);
+
+test("preserves retry headers and diagnostics on HTTP failures and non-streaming responses", async () => {
+  let status = 429;
+  await using upstream = await listen((_req, res) => {
+    res.writeHead(status, {
+      "content-type": "application/json",
+      "retry-after": "11",
+      "x-request-id": "hf-123",
+    });
+    res.end('{"error":{"message":"provider diagnostic"}}');
+  });
+  const adapter = await startHuggingFaceResponsesAdapter(upstream.url);
+  try {
+    const busy = await streamingRequest(adapter.baseUrl);
+    expect(busy.status).toBe(429);
+    expect(busy.headers.get("retry-after")).toBe("11");
+    expect(busy.headers.get("x-request-id")).toBe("hf-123");
+    expect(await busy.json()).toEqual({
+      error: { message: "provider diagnostic" },
+    });
+    status = 200;
+    const invalid = await streamingRequest(adapter.baseUrl);
+    expect(invalid.status).toBe(502);
+    expect((await invalid.json()).error.message).toContain(
+      "provider diagnostic",
+    );
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("a provider redirect cannot replay scan inputs or custom credentials to another origin", async () => {
+  let followed = false;
+  await using other = await listen((_req, res) => {
+    followed = true;
+    res.end("redirected");
+  });
+  await using upstream = await listen((_req, res) => {
+    res.writeHead(307, { location: other.url }).end();
+  });
+  const adapter = await startHuggingFaceResponsesAdapter(upstream.url);
+  try {
+    const result = await fetch(`${adapter.baseUrl}/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-provider-token": "synthetic",
+      },
+      body: JSON.stringify({ stream: true, input: "scan contents" }),
+    });
+    expect(result.status).toBe(502);
+    expect(followed).toBe(false);
+  } finally {
+    await adapter.close();
   }
 });

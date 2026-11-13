@@ -3,6 +3,13 @@ import { isRecord } from "./record.js";
 
 /** Map the text/function subset used by the scanner to HF's chat endpoint. */
 export function huggingFaceChatRequest(request: Record<string, unknown>) {
+  if (
+    request["previous_response_id"] != null ||
+    request["conversation"] != null
+  )
+    throw new Error(
+      "HF chat needs the full conversation history in the input.",
+    );
   const messages: Record<string, unknown>[] = [];
   if (request["instructions"])
     messages.push({ role: "system", content: request["instructions"] });
@@ -15,7 +22,8 @@ export function huggingFaceChatRequest(request: Record<string, unknown>) {
     typeof request["input"] === "string"
       ? [{ role: "user", content: request["input"] }]
       : request["input"];
-  for (const item of Array.isArray(input) ? input : []) {
+  if (!Array.isArray(input)) throw new Error("Invalid HF conversation input.");
+  for (const item of input) {
     if (!isRecord(item)) throw new Error("Invalid HF conversation item.");
     if (item["type"] === "reasoning") continue;
     if (item["type"] === "function_call") {
@@ -52,6 +60,18 @@ export function huggingFaceChatRequest(request: Record<string, unknown>) {
   const format = isRecord(request["text"])
     ? request["text"]["format"]
     : undefined;
+  let responseFormat;
+  if (isRecord(format) && format["type"] === "json_schema") {
+    const { type, ...json_schema } = format;
+    responseFormat = { type, json_schema };
+  } else if (isRecord(format) && format["type"] === "json_object") {
+    responseFormat = { type: "json_object" };
+  } else if (
+    format != null &&
+    (!isRecord(format) || format["type"] !== "text")
+  ) {
+    throw new Error("Unsupported HF response format.");
+  }
   const reasoning = request["reasoning"];
   return {
     model: request["model"],
@@ -82,18 +102,9 @@ export function huggingFaceChatRequest(request: Record<string, unknown>) {
     ...(isRecord(reasoning) && reasoning["effort"] !== undefined
       ? { reasoning_effort: reasoning["effort"] }
       : {}),
-    ...(isRecord(format) && format["type"] === "json_schema"
-      ? {
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: format["name"],
-              strict: format["strict"],
-              schema: format["schema"],
-            },
-          },
-        }
-      : {}),
+    ...(responseFormat === undefined
+      ? {}
+      : { response_format: responseFormat }),
     stream: true,
     stream_options: { include_usage: true },
   };
@@ -121,6 +132,7 @@ function content(value: unknown): unknown {
 /** Retain usage and finish status; never turn a truncated generation into success. */
 export function huggingFaceChatResponse() {
   let text = "";
+  let refusal = "";
   let usage: Record<string, unknown> | undefined;
   let finish: unknown;
   const calls = new Map<
@@ -138,6 +150,7 @@ export function huggingFaceChatResponse() {
         if (choice["finish_reason"] != null) finish = choice["finish_reason"];
         const delta = choice["delta"];
         if (!isRecord(delta)) continue;
+        if (typeof delta["refusal"] === "string") refusal += delta["refusal"];
         if (typeof delta["content"] === "string") text += delta["content"];
         for (const fragment of Array.isArray(delta["tool_calls"])
           ? delta["tool_calls"]
@@ -161,9 +174,14 @@ export function huggingFaceChatResponse() {
       }
     },
     finish() {
+      if (refusal) throw new Error(`HF refused the request: ${refusal}`);
       if (finish !== "stop" && finish !== "tool_calls")
         throw new Error(
           `HF generation did not complete (finish_reason=${String(finish)}).`,
+        );
+      if (finish === "tool_calls" && !calls.size)
+        throw new Error(
+          "HF finished with tool_calls but returned no tool calls.",
         );
       const output: Record<string, unknown>[] = [];
       if (text)

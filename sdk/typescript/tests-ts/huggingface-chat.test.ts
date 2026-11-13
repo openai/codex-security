@@ -157,3 +157,70 @@ test("does not report a reasoning-only empty completion as assistant output", ()
     "without assistant content or tool calls",
   );
 });
+
+test("preserves JSON object mode and the description of structured outputs", () => {
+  for (const [format, expected] of [
+    [{ type: "json_object" }, { type: "json_object" }],
+    [
+      {
+        type: "json_schema",
+        name: "report",
+        description: "Scan findings",
+        schema: { type: "object" },
+      },
+      {
+        type: "json_schema",
+        json_schema: {
+          name: "report",
+          description: "Scan findings",
+          schema: { type: "object" },
+        },
+      },
+    ],
+  ]) {
+    expect(
+      huggingFaceChatRequest({ input: "Review", text: { format } })
+        .response_format,
+    ).toEqual(expected);
+  }
+});
+
+test.each([
+  { previous_response_id: "resp_fixture" },
+  { conversation: { id: "conv_fixture" } },
+])("rejects inaccessible conversation history %p", (history) => {
+  expect(() =>
+    huggingFaceChatRequest({ input: "Continue", ...history }),
+  ).toThrow("full conversation history");
+});
+
+test("surfaces a streamed refusal, including its provider explanation", () => {
+  const response = huggingFaceChatResponse();
+  response.add({
+    choices: [{ index: 0, delta: { content: "Partial.", refusal: "Cannot " } }],
+  });
+  response.add({
+    choices: [
+      {
+        index: 0,
+        delta: { refusal: "continue." },
+        finish_reason: "content_filter",
+      },
+    ],
+  });
+  expect(() => response.finish()).toThrow("Cannot continue.");
+});
+
+test("a missing tool call cannot turn a progress update into a successful completion", () => {
+  const response = huggingFaceChatResponse();
+  response.add({
+    choices: [
+      {
+        index: 0,
+        delta: { content: "I will inspect the files." },
+        finish_reason: "tool_calls",
+      },
+    ],
+  });
+  expect(() => response.finish()).toThrow("returned no tool calls");
+});
