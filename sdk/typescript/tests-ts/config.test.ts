@@ -1674,6 +1674,14 @@ test("HF defaults disable hosted search without overriding explicit settings", a
   });
   expect(config["web_search"]).toBe("disabled");
   expect(config["model_reasoning_summary"]).toBe("none");
+  expect(config["model_providers"]).toMatchObject({
+    huggingface: {
+      name: "Hugging Face",
+      base_url: "https://router.huggingface.co/v1",
+      env_key: "HF_TOKEN",
+      wire_api: "responses",
+    },
+  });
   const selected = resolveCodexProfile(
     await mergedCodexConfig({
       codexOverrides: {
@@ -1683,6 +1691,12 @@ test("HF defaults disable hosted search without overriding explicit settings", a
             model_provider: "huggingface",
             web_search: "live",
             model_reasoning_summary: "auto",
+            model_providers: {
+              huggingface: {
+                base_url: "https://private.example.test/v1",
+                auth: { command: "private-token" },
+              },
+            },
           },
         },
       },
@@ -1690,4 +1704,12 @@ test("HF defaults disable hosted search without overriding explicit settings", a
   );
   expect(selected["web_search"]).toBe("live");
   expect(selected["model_reasoning_summary"]).toBe("auto");
+  expect(selected["model_providers"]).toEqual({
+    huggingface: {
+      name: "Hugging Face",
+      wire_api: "responses",
+      base_url: "https://private.example.test/v1",
+      auth: { command: "private-token" },
+    },
+  });
 });

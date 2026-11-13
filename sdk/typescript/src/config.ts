@@ -508,12 +508,23 @@ export async function mergedCodexConfig(
       await readCodexAuthConfig(profileHome, purpose === "login"),
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
-  if (scanModelProvider(effectiveOverrides) === "huggingface") {
+  const modelProvider = scanModelProvider(effectiveOverrides);
+  if (modelProvider === "huggingface") {
     defaults["web_search"] = "disabled";
     defaults["model_reasoning_summary"] = "none";
+    const providers =
+      resolveCodexProfile(effectiveOverrides)["model_providers"];
+    const hf = isObject(providers) ? providers["huggingface"] : undefined;
+    const preset: JsonObject = { ...HUGGINGFACE_CODEX_PROVIDER };
+    if (
+      isObject(hf) &&
+      (hf["auth"] != null || hf["experimental_bearer_token"] != null)
+    )
+      delete preset["env_key"];
+    defaults["model_providers"] = { huggingface: preset };
   }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
-  if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
+  if (modelProvider === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
   }

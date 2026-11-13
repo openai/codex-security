@@ -118,22 +118,17 @@ export async function createProviderProfile(
   if (options.replay) {
     await writePrivateConfig(path, JSON.stringify(config));
   } else {
-    const resolved = resolveCodexProfile(config);
-    const providers = structuredClone(resolved["model_providers"]);
-    if (
-      resolved["model_provider"] === "huggingface" &&
-      isRecord(providers) &&
-      isRecord(providers["huggingface"])
-    ) {
-      const provider = providers["huggingface"];
-      if (typeof provider["base_url"] === "string") {
-        adapter = await startHuggingFaceResponsesAdapter(provider["base_url"]);
-        provider["base_url"] = adapter.baseUrl;
-      }
+    const providers = resolveCodexProfile(config)["model_providers"];
+    const definitions = isRecord(providers) ? { ...providers } : {};
+    const hf = definitions["huggingface"];
+    // A worker can select this declaration even when its parent uses another provider.
+    if (isRecord(hf) && typeof hf["base_url"] === "string") {
+      adapter = await startHuggingFaceResponsesAdapter(hf["base_url"]);
+      definitions["huggingface"] = { ...hf, base_url: adapter.baseUrl };
     }
     try {
       await writeCodexConfig(path, {
-        model_providers: isRecord(providers) ? providers : {},
+        model_providers: definitions,
       });
     } catch (error) {
       await adapter?.close();
