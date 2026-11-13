@@ -542,7 +542,11 @@ function evidence(
     const ecosystem = ecosystems.get(text(item.packageManager) ?? "") ?? null;
     const version = (value: unknown) =>
       concreteVersion(value, ecosystem, item.packageManager === "OS");
-    const fixed = version(item.fixedInVersion);
+    // Inspector writes NotAvailable when no fixed version exists.
+    const fixed =
+      item.fixedInVersion === "NotAvailable"
+        ? null
+        : version(item.fixedInVersion);
     const splitVersion =
       item.packageManager === "OS" &&
       (item.epoch != null || item.release != null);
