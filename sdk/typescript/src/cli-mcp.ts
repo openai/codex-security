@@ -1,3 +1,4 @@
+
 import type { AgentType, McpServerConfig } from "add-mcp";
 import { existsSync } from "node:fs";
 import {
@@ -53,7 +54,7 @@ function mcpServerConfig(
   if (arg.length) throw new Error("Use --arg with --exec or --package.");
   const value = (command ?? defaultCommand).trim();
   if (!value) throw new Error("--command requires a launcher.");
-  if (/^https?:\/\//u.test(value)) return { url: value, type: "http" };
+  if (/^https?:\/\//iu.test(value)) return { url: value, type: "http" };
   // Preserve an existing literal path with spaces. Otherwise a path starts
   // a command line and can be followed by positional arguments or flags.
   const isPath = /^(?:\/|~(?:\/|$)|\.{1,2}\/|[A-Za-z]:[\\/]|\\\\)/u.test(value);
@@ -106,7 +107,7 @@ async function checkProjectConfig(root: string, file: string) {
       const target = await realpath(path);
       if (!isWithin(root, target))
         throw new Error(
-          `Project configuration resolves outside ${root}: ${path}`,
+          `Project configuration resolves outside ${root}: ${file}`,
         );
       if (path === file) entry = await stat(target);
     }

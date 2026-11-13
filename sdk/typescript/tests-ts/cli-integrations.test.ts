@@ -416,6 +416,37 @@ describe("integration command dispatch", () => {
     }
   }, 30_000);
 
+  test("MCP launchers recognize case-insensitive HTTP URL schemes", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-mcp-http-url-");
+    const { home, run } = await isolatedCli(temp.path);
+
+    for (const url of [
+      "http://example.com/mcp",
+      "https://example.com/mcp",
+      "HTTP://example.com/mcp",
+      "HTTPS://example.com/mcp",
+      "HtTpS://example.com/mcp",
+    ]) {
+      const result = await run(
+        "mcp",
+        "add",
+        "--agent=cursor",
+        "--json",
+        `--command=${url}`,
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+
+      const config = JSON.parse(
+        await readFile(join(home, ".cursor", "mcp.json"), "utf8"),
+      );
+
+      expect(config.mcpServers["codex-security"]).toEqual({
+        url,
+      });
+    }
+  }, 30_000);
+
   test("project registration keeps linked configurations inside the project", async () => {
     await using temp = await scopedTemporaryDirectory("cli-project-links-");
     const { home, project, run } = await isolatedCli(temp.path);
