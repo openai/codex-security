@@ -30,6 +30,7 @@ including file names that begin with a dash.
 - [Choose an import command](#import-vendor-findings-locally) to save a scan,
   collect upstream alerts, or store vendor evidence locally or in Cloud.
 - [Inspect saved scans and rerun them](#scan-history-and-reruns),
+  [diff two saved scans](#diffing-saved-scans),
   [classify severity](#classify-finding-severity), or
   [suggest owners](#suggest-finding-owners).
 - [Validate and patch findings](#validate-and-patch-findings) or
@@ -2185,6 +2186,7 @@ in the workbench, without changing sealed report timestamps.
 | `scans rerun [SCAN_ID]`                               | Rerun a saved recipe in its checkout.                                            |
 | `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees. |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                                 |
+| `scans diff BEFORE AFTER`                             | Offline identity-only diff of two saved scans; no model calls.                   |
 | `findings list [REPOSITORY]`                          | List open findings.                                                              |
 | `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.                               |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                                      |
@@ -2327,6 +2329,61 @@ original producer version. Unsupported artifacts are rejected without rewriting 
 
 For bulk scans, use [bulk recovery](#recovering-failed-or-interrupted-bulk-scans)
 to update campaign receipts. Individual resume does not update `results.jsonl`.
+
+### Diffing saved scans
+
+Use `scans diff BEFORE AFTER` to compare two already-saved scans without calling
+the model. Each argument is a scan ID, a scan directory that contains
+`findings.json`, or a `findings.json` path.
+
+Findings match when they share `findingId`. That ID is derived from the scan
+target, `ruleId`, `identity.anchor`, and optional `identity.instance`. Title and
+summary are not part of the identity, so rewriting a description does not count
+as a new finding. `occurrenceId` is unique per scan and is reported only to
+point at the saved rows.
+
+The report has three buckets:
+
+- **new** — present in AFTER and not in BEFORE
+- **resolved** — present in BEFORE and not in AFTER. Absence in AFTER is not
+  verified remediation; `scans compare` records `not_observed` until a finding
+  is closed as already fixed.
+- **unchanged** — present in both, including when the title or summary changed
+
+Human-readable output is the default in a terminal. `--json` (or
+`--format json`) prints the same buckets plus `identity.rule`.
+
+```bash
+codex-security scans diff SCAN_A SCAN_B
+codex-security scans diff ./scan-a ./scan-b --json
+```
+
+Exit codes follow other history commands rather than `git diff`:
+
+- `0` — the diff was produced, including when AFTER has new findings
+- `2` — a scan is missing, incomplete, or unreadable
+- `130` / `143` — interrupted by Ctrl-C or SIGTERM
+
+A successful diff with new findings still exits `0`, matching `scans compare`
+and the default scan policy. Gate CI on `summary.new` in the JSON output.
+
+For root-cause matching that can use the model and save decisions, use
+`scans compare` below.
+
+```ts
+import { readFile } from "node:fs/promises";
+import { diffScanFindings, type ScanDiffInput } from "@openai/codex-security";
+
+const before = JSON.parse(
+  await readFile("/path/to/earlier-scan/findings.json", "utf8"),
+) as ScanDiffInput;
+const after = JSON.parse(
+  await readFile("/path/to/later-scan/findings.json", "utf8"),
+) as ScanDiffInput;
+
+const diff = diffScanFindings(before, after);
+console.log(diff.summary, diff.findings);
+```
 
 ### Matching saved scans
 

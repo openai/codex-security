@@ -358,6 +358,12 @@ import {
   type ScanComparisonOptions,
   type ScanMatchingBatch,
 } from "./scan-comparison.js";
+import {
+  diffScanFindings,
+  tryLoadScanDiffFromPath,
+  type ScanDiffFinding,
+  type ScanDiffInput,
+} from "./scan-diff.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
 import {
   OperationTelemetry,
@@ -3338,7 +3344,7 @@ export async function main(
         "Match findings across completed scans. Uncached matches can use the model and save decisions.",
       usage: [{ suffix: "--all [options]" }],
       examples: [{ options: { all: true } }],
-      hint: "For a pair, use scans compare BEFORE AFTER. The older scans match BEFORE AFTER spelling also works.",
+      hint: "For a pair, use scans compare BEFORE AFTER. For an offline identity-only diff, use scans diff BEFORE AFTER. The older scans match BEFORE AFTER spelling also works.",
       destructive: true,
       args: z.object({
         beforeId: z
@@ -3432,7 +3438,106 @@ export async function main(
           format,
         );
       },
+    })
+    .command("diff", {
+      description:
+        "Diff findings from two saved scans by finding identity, without model calls.",
+      examples: [
+        {
+          args: { beforeId: "BEFORE", afterId: "AFTER" },
+          description:
+            "Report findings that are new in AFTER, resolved since BEFORE, or unchanged.",
+        },
+        {
+          args: {
+            beforeId: "./scan-a",
+            afterId: "./scan-b",
+          },
+          description: "Diff two scan directories that contain findings.json.",
+        },
+      ],
+      hint: "Matches findings by findingId. Title and summary changes do not count as new. Does not call the model; use scans compare for root-cause matching. Exits 0 when the diff is produced, including when AFTER has new findings, and 2 when a scan cannot be read. Inspect summary.new in JSON for a CI gate.",
+      args: z.object({
+        beforeId: z
+          .string()
+          .min(1)
+          .describe(
+            "Earlier saved scan identifier, scan directory, or findings.json path.",
+          ),
+        afterId: z
+          .string()
+          .min(1)
+          .describe(
+            "Later saved scan identifier, scan directory, or findings.json path.",
+          ),
+      }),
+      output: z.record(z.string(), z.unknown()).optional(),
+      async run({ args, format }) {
+        return presentHistory(
+          await history(async () => {
+            const before = await loadScanDiffInput(args.beforeId);
+            const after = await loadScanDiffInput(args.afterId);
+            return diffScanFindings(before, after) as unknown as JsonObject;
+          }),
+          "diff",
+          format,
+        );
+      },
     });
+  const loadScanDiffInput = async (
+    reference: string,
+  ): Promise<ScanDiffInput> => {
+    const fromPath = await tryLoadScanDiffFromPath(
+      reference,
+      dependencies.currentDirectory(),
+    );
+    if (fromPath !== undefined) return fromPath;
+    const context = await dependencies.runWorkbench(
+      workbenchArgs("get-scan", { scanId: reference }),
+    );
+    const scan = context["scan"];
+    if (!isJsonObject(scan) || typeof scan["scanId"] !== "string") {
+      throw new CodexSecurityError(`Could not read saved scan ${reference}.`);
+    }
+    const progress = scan["progress"];
+    if (!isJsonObject(progress) || progress["status"] !== "complete") {
+      throw new CodexSecurityError(`Scan ${scan["scanId"]} is not complete.`);
+    }
+    const scanDir = scan["scanDir"];
+    if (typeof scanDir === "string") {
+      const fromArtifacts = await tryLoadScanDiffFromPath(
+        scanDir,
+        dependencies.currentDirectory(),
+      ).catch((error: unknown) => {
+        if (
+          error instanceof CodexSecurityError &&
+          /does not contain findings\.json|was not found/u.test(error.message)
+        ) {
+          return undefined;
+        }
+        throw error;
+      });
+      if (fromArtifacts !== undefined) {
+        return { ...fromArtifacts, scanId: scan["scanId"] };
+      }
+    }
+    const findings: ScanDiffFinding[] = [];
+    if (Array.isArray(scan["findings"])) {
+      for (const finding of scan["findings"]) {
+        if (isJsonObject(finding)) findings.push(finding);
+      }
+    }
+    if (scan["findingsTruncated"] === true) {
+      findings.length = 0;
+      for await (const finding of workbenchFindings(
+        ["list-findings", "--scan-id", scan["scanId"]],
+        dependencies,
+      )) {
+        findings.push(finding);
+      }
+    }
+    return { scanId: scan["scanId"], findings };
+  };
   const reportPublicationError = (error: unknown, signal: unknown): void => {
     if (signal === "SIGINT" || signal === "SIGTERM") {
       const reason =

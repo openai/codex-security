@@ -105,6 +105,18 @@ export type {
   ScanComparisonProgress,
   ScanComparisonResult,
 } from "./scan-comparison.js";
+export {
+  SCAN_DIFF_IDENTITY_FIELD,
+  SCAN_DIFF_IDENTITY_RULE,
+  diffScanFindings,
+} from "./scan-diff.js";
+export type {
+  ScanDiffEntry,
+  ScanDiffFinding,
+  ScanDiffInput,
+  ScanDiffResult,
+  ScanDiffStatus,
+} from "./scan-diff.js";
 export type {
   CodexSecurityMetadata,
   DeepScanOptions,

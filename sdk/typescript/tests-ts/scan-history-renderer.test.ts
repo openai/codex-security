@@ -34,6 +34,55 @@ describe("scan history renderer", () => {
     expect(historical).not.toContain("scoped paths:");
   });
 
+  test("renders an identity-only scan diff", () => {
+    const text = renderScanHistory(
+      {
+        beforeScanId: "scan_diff_fixture_a",
+        afterScanId: "scan_diff_fixture_b",
+        identity: {
+          field: "findingId",
+          rule: "Findings are the same issue when they share findingId.",
+        },
+        summary: { new: 1, resolved: 1, unchanged: 1 },
+        findings: [
+          {
+            status: "new",
+            findingId: "csf_new",
+            title: "Comment bodies are rendered without escaping",
+            severity: "medium",
+            path: "src/comments.py",
+            afterOccurrenceId: "occ_new",
+          },
+          {
+            status: "resolved",
+            findingId: "csf_old",
+            title: "User filters are concatenated into SQL",
+            severity: "critical",
+            path: "src/query.py",
+            beforeOccurrenceId: "occ_old",
+          },
+          {
+            status: "unchanged",
+            findingId: "csf_same",
+            title: "Rewritten archive extraction title",
+            severity: "high",
+            path: "src/extract.py",
+            beforeOccurrenceId: "occ_before",
+            afterOccurrenceId: "occ_after",
+          },
+        ],
+      },
+      "diff",
+      { color: false },
+    );
+    expect(text).toContain("SCAN DIFF");
+    expect(text).toContain("share findingId");
+    expect(text).toContain("new");
+    expect(text).toContain("resolved");
+    expect(text).toContain("unchanged");
+    expect(text).toContain("Rewritten archive extraction title");
+  });
+
   test("counts singleton sides when the other side is grouped", () => {
     const text = renderScanHistory(
       {

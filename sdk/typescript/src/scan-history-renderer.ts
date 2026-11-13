@@ -9,7 +9,7 @@ import {
 } from "./coverage-presentation.js";
 
 export type HistoryCommand =
-  "list" | "show" | "findings" | "compare" | "match-all";
+  "list" | "show" | "findings" | "compare" | "diff" | "match-all";
 type RendererOptions = {
   columns?: number;
   color?: boolean;
@@ -27,6 +27,7 @@ const STATUS_STYLES: Record<string, { color: number; icon: string }> = {
   reopened: { color: 31, icon: "↻" },
   new: { color: 31, icon: "+" },
   persisting: { color: 33, icon: "●" },
+  unchanged: { color: 36, icon: "=" },
   not_observed: { color: 36, icon: "○" },
   not_rescanned: { color: 36, icon: "○" },
   unknown: { color: 35, icon: "?" },
@@ -77,6 +78,7 @@ export function renderScanHistory(
     show: "SCAN DETAILS",
     findings: "REPOSITORY FINDINGS",
     compare: "SCAN COMPARISON",
+    diff: "SCAN DIFF",
     "match-all": "MATCH RESULTS",
   };
   const lines = [
@@ -452,7 +454,7 @@ export function renderScanHistory(
         finding(entry);
       }
     }
-  } else if (command === "compare") {
+  } else if (command === "compare" || command === "diff") {
     if (result["repository"]) {
       lines.push(
         `  ${strong(clean(basename(result["repository"] as string)))}`,
@@ -461,6 +463,10 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
+    const identity = result["identity"] as JsonObject | undefined;
+    if (command === "diff" && typeof identity?.["rule"] === "string") {
+      wrap(identity["rule"], 2);
+    }
     const groups = Map.groupBy(result["findings"] as JsonObject[], (entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===
