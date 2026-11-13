@@ -214,5 +214,9 @@ describe("saved scan fixtures", () => {
     await expect(tryLoadScanDiffFromPath(path, directory)).rejects.toThrow(
       /invalid finding/,
     );
+    await writeFile(path, JSON.stringify({ findings: [] }));
+    await expect(tryLoadScanDiffFromPath(path, directory)).rejects.toThrow(
+      /does not contain a scan ID/,
+    );
   });
 });

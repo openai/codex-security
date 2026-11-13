@@ -1,5 +1,7 @@
-import { lstat, readFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { lstat } from "node:fs/promises";
+import { join } from "node:path";
+import { readRegularInputFile } from "./prompt-files.js";
+import { resolveInputPath, type ProcessEnvironment } from "./runtime.js";
 import { CodexSecurityError } from "./errors.js";
 import { isRecord as isJsonObject } from "./record.js";
 
@@ -74,11 +76,9 @@ export function diffScanFindings(
   if (before.scanId === after.scanId) {
     throw new CodexSecurityError("Select two different scans to diff.");
   }
-  const beforeGroups = groupByIdentity(before.findings, "before");
-  const afterGroups = groupByIdentity(after.findings, "after");
-  const identities = [
-    ...new Set([...beforeGroups.keys(), ...afterGroups.keys()]),
-  ].sort();
+  const beforeGroups = groupByIdentity(before.findings);
+  const afterGroups = groupByIdentity(after.findings);
+  const identities = new Set([...beforeGroups.keys(), ...afterGroups.keys()]);
   const findings: ScanDiffEntry[] = [];
   const summary: Record<ScanDiffStatus, number> = {
     new: 0,
@@ -132,43 +132,43 @@ export function diffScanFindings(
 export async function tryLoadScanDiffFromPath(
   reference: string,
   cwd: string,
+  environment?: ProcessEnvironment,
 ): Promise<ScanDiffInput | undefined> {
-  const path = resolve(cwd, reference);
-  const stats = await lstat(path).catch(() => undefined);
-  if (stats === undefined) {
-    if (looksLikeFilesystemReference(reference)) {
-      throw new CodexSecurityError(
-        `Saved scan ${reference} was not found at ${path}.`,
-      );
-    }
-    return undefined;
-  }
-  const findingsPath = stats.isDirectory()
-    ? join(path, "findings.json")
-    : stats.isFile()
-      ? path
-      : undefined;
-  if (findingsPath === undefined) {
+  const path = resolveInputPath(reference, cwd, environment);
+  const stats = await lstat(path, { bigint: true }).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      if (looksLikeFilesystemReference(reference)) {
+        throw new CodexSecurityError(
+          `Saved scan ${reference} was not found at ${path}.`,
+          { cause: error },
+        );
+      }
+      return undefined;
+    },
+  );
+  if (!stats) return undefined;
+  const directory = stats.isDirectory();
+  if (!directory && (!stats.isFile() || !isFindingsFileName(path))) {
     throw new CodexSecurityError(
       `Saved scan ${reference} is not a findings.json file or scan directory.`,
     );
   }
-  if (stats.isDirectory()) {
-    const findingsStats = await lstat(findingsPath).catch(() => undefined);
-    if (findingsStats?.isFile() !== true) {
+  const findingsPath = directory ? join(path, "findings.json") : path;
+  const text = await readRegularInputFile(
+    findingsPath,
+    cwd,
+    directory ? undefined : stats,
+  ).catch((error: NodeJS.ErrnoException) => {
+    if (directory && error.code === "ENOENT") {
       throw new CodexSecurityError(
         `Scan directory ${path} does not contain findings.json.`,
+        { cause: error },
       );
     }
-  } else if (!isFindingsFileName(path)) {
-    throw new CodexSecurityError(
-      `Saved scan ${reference} is not a findings.json file or scan directory.`,
-    );
-  }
-  return parseSavedScanFindings(
-    await readFile(findingsPath, "utf8"),
-    findingsPath,
-  );
+    throw error;
+  });
+  return parseSavedScanFindings(text, findingsPath);
 }
 
 export function parseSavedScanFindings(
@@ -194,31 +194,25 @@ export function parseSavedScanFindings(
         `Saved scan ${source} has an invalid finding at index ${index}.`,
       );
     }
-    return finding as ScanDiffFinding;
+    return finding;
   });
   const recordedId = document["scanId"];
-  const fallback = source.replace(/[/\\]?findings\.json$/iu, "");
-  const scanId =
-    typeof recordedId === "string" && recordedId.trim().length > 0
-      ? recordedId
-      : basename(fallback) || "saved-scan";
-  return { scanId, findings };
+  if (typeof recordedId !== "string" || !recordedId.trim()) {
+    throw new CodexSecurityError(
+      `Saved scan ${source} does not contain a scan ID.`,
+    );
+  }
+  return { scanId: recordedId, findings };
 }
 
 function groupByIdentity(
   findings: readonly ScanDiffFinding[],
-  side: "before" | "after",
-): Map<string, ScanDiffFinding[]> {
-  const groups = new Map<string, ScanDiffFinding[]>();
-  findings.forEach((finding, index) => {
-    const identity =
-      findingIdentityKey(finding) ??
-      `\0${side}:${index}:${occurrenceId(finding) ?? ""}`;
-    const group = groups.get(identity);
-    if (group === undefined) groups.set(identity, [finding]);
-    else group.push(finding);
-  });
-  return groups;
+): Map<string | symbol, ScanDiffFinding[]> {
+  // A finding without a stable ID stays unmatched, even when occurrence IDs overlap.
+  return Map.groupBy(
+    findings,
+    (finding) => findingIdentityKey(finding) ?? Symbol(),
+  );
 }
 
 function assignOccurrenceIds(

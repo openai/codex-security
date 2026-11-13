@@ -57,7 +57,9 @@ function clean(value: unknown): string {
 function findingSeverity(finding: JsonObject): string {
   const severity = finding["severity"];
   return clean(
-    typeof severity === "string" ? severity : (severity as JsonObject)["level"],
+    typeof severity === "string"
+      ? severity
+      : ((severity as JsonObject | null)?.["level"] ?? ""),
   ).toUpperCase();
 }
 

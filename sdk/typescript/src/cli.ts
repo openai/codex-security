@@ -191,6 +191,7 @@ import {
   classifyScanDirectorySeverityInternal,
 } from "./classify-scan-severity.js";
 import {
+  readCompletedScan,
   resolveCompletedScan,
   resolveWorkflowScan,
   type SavedScan,
@@ -361,7 +362,6 @@ import {
 import {
   diffScanFindings,
   tryLoadScanDiffFromPath,
-  type ScanDiffFinding,
   type ScanDiffInput,
 } from "./scan-diff.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
@@ -3490,53 +3490,26 @@ export async function main(
     const fromPath = await tryLoadScanDiffFromPath(
       reference,
       dependencies.currentDirectory(),
+      dependencies.environment,
     );
     if (fromPath !== undefined) return fromPath;
-    const context = await dependencies.runWorkbench(
-      workbenchArgs("get-scan", { scanId: reference }),
-    );
-    const scan = context["scan"];
-    if (!isJsonObject(scan) || typeof scan["scanId"] !== "string") {
-      throw new CodexSecurityError(`Could not read saved scan ${reference}.`);
+    const scan = await readCompletedScan(reference, dependencies);
+    // The saved rows belong to this scan even after its artifact directory moves or is reused.
+    const findings: unknown =
+      scan["findingsTruncated"] === true
+        ? await Array.fromAsync(
+            workbenchFindings(
+              ["list-findings", "--scan-id", scan.scanId],
+              dependencies,
+            ),
+          )
+        : scan["findings"];
+    if (!Array.isArray(findings) || !findings.every(isJsonObject)) {
+      throw new CodexSecurityError(
+        `Could not read findings for scan ${scan.scanId}.`,
+      );
     }
-    const progress = scan["progress"];
-    if (!isJsonObject(progress) || progress["status"] !== "complete") {
-      throw new CodexSecurityError(`Scan ${scan["scanId"]} is not complete.`);
-    }
-    const scanDir = scan["scanDir"];
-    if (typeof scanDir === "string") {
-      const fromArtifacts = await tryLoadScanDiffFromPath(
-        scanDir,
-        dependencies.currentDirectory(),
-      ).catch((error: unknown) => {
-        if (
-          error instanceof CodexSecurityError &&
-          /does not contain findings\.json|was not found/u.test(error.message)
-        ) {
-          return undefined;
-        }
-        throw error;
-      });
-      if (fromArtifacts !== undefined) {
-        return { ...fromArtifacts, scanId: scan["scanId"] };
-      }
-    }
-    const findings: ScanDiffFinding[] = [];
-    if (Array.isArray(scan["findings"])) {
-      for (const finding of scan["findings"]) {
-        if (isJsonObject(finding)) findings.push(finding);
-      }
-    }
-    if (scan["findingsTruncated"] === true) {
-      findings.length = 0;
-      for await (const finding of workbenchFindings(
-        ["list-findings", "--scan-id", scan["scanId"]],
-        dependencies,
-      )) {
-        findings.push(finding);
-      }
-    }
-    return { scanId: scan["scanId"], findings };
+    return { scanId: scan.scanId, findings };
   };
   const reportPublicationError = (error: unknown, signal: unknown): void => {
     if (signal === "SIGINT" || signal === "SIGTERM") {

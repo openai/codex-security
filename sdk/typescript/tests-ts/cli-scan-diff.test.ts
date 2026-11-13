@@ -101,6 +101,8 @@ describe("CLI scans diff", () => {
               scan: {
                 scanId,
                 progress: { status: "complete" },
+                // A reused output directory now belongs to a different saved scan.
+                scanDir: scanA,
                 findings:
                   scanId === "scan-before" ? beforeFindings : afterFindings,
               },
@@ -151,18 +153,25 @@ describe("CLI scans diff", () => {
     expect(stdout.text()).toContain("User filters are concatenated into SQL");
   });
 
-  test("exits 0 when the later scan has new findings", async () => {
-    const stdout = captureCli(main, "stdout");
-    expect(
-      await stdout.run(
-        ["scans", "diff", scanA, scanB, "--json"],
-        dependencies({
-          currentDirectory: fixtureRoot,
-          onWorkbench: throwing("fixture diffs must not use the workbench"),
+  test("renders a saved finding without a severity in the terminal", async () => {
+    const stdout = captureCli(main, "stdout", true);
+    const code = await stdout.run(
+      ["scans", "diff", "scan-before", "scan-after"],
+      dependencies({
+        onWorkbench: (args) => ({
+          scan: {
+            scanId: args[2]!,
+            progress: { status: "complete" },
+            findings:
+              args[2] === "scan-before"
+                ? []
+                : [{ findingId: "csf_1", title: "Legacy finding" }],
+          },
         }),
-      ),
-    ).toBe(0);
-    expect(JSON.parse(stdout.text()).summary.new).toBe(1);
+      }),
+    );
+    expect(code).toBe(0);
+    expect(stdout.text()).toContain("Legacy finding");
   });
 
   test("reports an incomplete saved scan without calling the model", async () => {
