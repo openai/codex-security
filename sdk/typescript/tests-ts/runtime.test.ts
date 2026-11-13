@@ -5920,11 +5920,12 @@ describe("runtime directories and plugin Python boundary", () => {
       const readProfileAcl = () => {
         const result = inspectWindowsTestAcl(
           [
+            '$env:PSModulePath = "$PSHOME\\Modules"',
             "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
           ],
           { ...process.env, CODEX_SECURITY_TEST_ACL_PATH: profile },
         );
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         return result.stdout.trim();
       };
       const profileAcl = readProfileAcl();
@@ -5946,33 +5947,28 @@ describe("runtime directories and plugin Python boundary", () => {
       };
 
       await expectRejectedProfile(environment);
-      const childState = join(profile, "private-state");
-      await mkdir(childState);
-      const isolateChild = windowsTestCommand("icacls.exe", [
-        childState,
-        "/inheritance:r",
-        "/grant:r",
-        `*${sid}:(OI)(CI)F`,
-        "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F",
-      ]);
-      expect(isolateChild.status).toBe(0);
+      const privateState = async (path: string) => {
+        await mkdir(path);
+        const secured = windowsTestCommand("icacls.exe", [
+          path,
+          "/inheritance:r",
+          "/grant:r",
+          `*${sid}:(OI)(CI)F`,
+          "*S-1-5-18:(OI)(CI)F",
+          "*S-1-5-32-544:(OI)(CI)F",
+        ]);
+        expect(secured.status, secured.stderr).toBe(0);
+        return path;
+      };
+      const childState = await privateState(join(profile, "private-state"));
       await expectRejectedProfile({
         ...environment,
         CODEX_SECURITY_STATE_DIR: childState,
       });
 
-      const recoveredState = join(root, `codex-security-${sid}`);
-      await mkdir(recoveredState);
-      const secured = windowsTestCommand("icacls.exe", [
-        recoveredState,
-        "/inheritance:r",
-        "/grant:r",
-        `*${sid}:(OI)(CI)F`,
-        "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F",
-      ]);
-      expect(secured.status).toBe(0);
+      const recoveredState = await privateState(
+        join(root, `codex-security-${sid}`),
+      );
       const recoveredHome = await prepareCodexSecurityCredentialHome({
         ...environment,
         CODEX_SECURITY_STATE_DIR: recoveredState,
