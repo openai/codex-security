@@ -2974,6 +2974,7 @@ async function testExternalProviderCredentialsReachWorker() {
           parentSandbox: trustedParentSandbox,
         });
         for (const turn of ["fresh", "resume", "compare"]) {
+          process.env.STANDARDCOMPUTE_API_KEY = "changed-ambient-key";
           process.env[key] = "changed-ambient-key";
           if (headerKey) process.env[headerKey] = "changed-ambient-header";
           if (turn === "compare") {
@@ -2996,6 +2997,11 @@ async function testExternalProviderCredentialsReachWorker() {
             invocation.providerKey ?? invocation.providerHeaders[key],
             selectedKey,
           );
+          if (key !== "STANDARDCOMPUTE_API_KEY")
+            assert.equal(
+              invocation.providerHeaders.STANDARDCOMPUTE_API_KEY,
+              undefined,
+            );
           assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {

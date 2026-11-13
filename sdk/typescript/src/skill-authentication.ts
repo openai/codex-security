@@ -90,6 +90,8 @@ export function resolveSkillAuthentication(
     processEnvironment,
     authentication.method === "command" ? "chatgpt" : options.auth,
     provider,
+    undefined,
+    config,
   );
   if (
     explicitChatgpt &&

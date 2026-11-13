@@ -724,6 +724,7 @@ const fileProviderKeyCases = [
   ["gateway", "declared OpenAI account header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
+  ["openrouter", "alternate Standard Compute", "OPENROUTER_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -795,12 +796,17 @@ for (const mode of ["standard", "deep"] as const) {
         headerKey || _selection === "missing custom primary"
           ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
           : {};
-      const inactiveKey = gatewayHeader
-        ? "CHEAPER_INFERENCE_API_KEY"
-        : "INACTIVE_GATEWAY_TOKEN";
-      const inactiveEnvironment = gatewayHeader
-        ? { [inactiveKey]: "synthetic-inactive-key" }
-        : {};
+      const alternateStandardCompute =
+        _selection === "alternate Standard Compute";
+      const inactiveKey = alternateStandardCompute
+        ? "STANDARDCOMPUTE_API_KEY"
+        : gatewayHeader
+          ? "CHEAPER_INFERENCE_API_KEY"
+          : "INACTIVE_GATEWAY_TOKEN";
+      const inactiveEnvironment =
+        gatewayHeader || alternateStandardCompute
+          ? { [inactiveKey]: "synthetic-inactive-key" }
+          : {};
       const inheritedEnvironment: Record<string, string> = {
         ...(_selection === "custom Codex key" ||
         _selection === "other external key" ||
@@ -895,7 +901,7 @@ for (const mode of ["standard", "deep"] as const) {
                       name === providerKey ||
                         name === canonicalKey ||
                         name === headerKey ||
-                        name === inactiveKey
+                        (name === inactiveKey && !alternateStandardCompute)
                         ? inheritedEnvironment[name]
                         : undefined,
                     );

@@ -62,6 +62,39 @@ export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
   Object.values(EXTERNAL_CODEX_PROVIDERS).map(({ env_key }) => env_key),
 );
 
+/** Keep the Standard Compute credential only when the selected provider uses it. */
+export function standardComputeEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+  provider: unknown,
+  providerEnvKey?: string,
+  config?: JsonObject,
+): Record<string, string | undefined> {
+  const key = STANDARDCOMPUTE_CODEX_PROVIDER.env_key;
+  if (!Object.keys(environment).some((name) => name.toUpperCase() === key))
+    return environment;
+  const tables = config && resolveCodexProfile(config)["model_providers"];
+  const selected =
+    typeof provider === "string" && isObject(tables)
+      ? tables[provider]
+      : undefined;
+  const settings = isObject(selected) ? selected : {};
+  const referencesKey = (name: unknown) =>
+    typeof name === "string" && name.toUpperCase() === key;
+  if (
+    referencesKey(providerEnvKey ?? settings["env_key"]) ||
+    (provider === "standardcompute" &&
+      providerEnvKey === undefined &&
+      settings["env_key"] == null &&
+      settings["auth"] == null) ||
+    (isObject(settings["env_http_headers"]) &&
+      Object.values(settings["env_http_headers"]).some(referencesKey))
+  )
+    return environment;
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !referencesKey(name)),
+  );
+}
+
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
 
 export function isExternalModelProvider(

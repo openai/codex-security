@@ -34,6 +34,7 @@ import {
   hasCommandAuth,
   isExternalModelProvider,
   scanProviderEnvKey,
+  standardComputeEnvironment,
   mergedCodexConfig,
   readCodexFileProfile,
   normalizeLegacyWindowsSandboxOverride,
@@ -667,7 +668,7 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      nativeKey !== undefined
+      nativeKey !== undefined || modelProvider === "standardcompute"
         ? undefined
         : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
           environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
@@ -1263,10 +1264,10 @@ export async function comparisonEnvironment(
   auth: ScanAuthMode = "api-key",
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
-  const environment = Object.fromEntries(
-    Object.entries(source).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
+  const configuration = config ?? (await readCodexHomeConfig(source, signal));
+  const provider = scanModelProvider(configuration);
+  const environment = definedEnvironment(
+    standardComputeEnvironment(source, provider, nativeKey, configuration),
   );
   const home = configuredCodexHome(environment);
   for (const key of Object.keys(environment)) {
@@ -1275,17 +1276,23 @@ export async function comparisonEnvironment(
       environment[key] = home;
     }
   }
-  if (nativeKey !== undefined && config !== undefined) {
-    const provider = scanModelProvider(config);
-    scanAuthentication(environment, auth, provider, false, false, nativeKey);
+  if (hasCommandAuth(configuration)) return withoutOpenAiApiKeys(environment);
+  const selectedKey =
+    nativeKey ??
+    (provider === "standardcompute"
+      ? scanProviderEnvKey(configuration)
+      : undefined);
+  if (selectedKey !== undefined) {
+    scanAuthentication(environment, auth, provider, false, false, selectedKey);
     return definedEnvironment(
-      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
+      selectedScanEnvironment(
+        environment,
+        auth,
+        provider,
+        selectedKey,
+        configuration,
+      ),
     );
-  }
-  if (
-    hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
-  ) {
-    return withoutOpenAiApiKeys(environment);
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;

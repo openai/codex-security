@@ -83,6 +83,7 @@ import {
   CODEX_AUTH_CONFIG_KEYS,
   EXTERNAL_CODEX_PROVIDERS,
   EXTERNAL_PROVIDER_KEYS,
+  standardComputeEnvironment,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -2496,6 +2497,8 @@ export class CodexSecurity {
             options.auth,
             modelProvider,
             session.providerEnvKey,
+            effectiveConfig,
+            "selected",
           ),
         ),
         ...(session.apiKey === null
@@ -2504,6 +2507,16 @@ export class CodexSecurity {
               [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
+      if (
+        mode === "deep" &&
+        (options.auth !== "chatgpt" ||
+          authentication.method !== "stored_credentials")
+      ) {
+        // A managed worker can use a different provider declared in this scan's private profile.
+        const key = EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key;
+        const candidate = environmentEntry(this.#dependencies.environment, key);
+        if (candidate !== undefined) workerProviderEnvironment[key] = candidate;
+      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
@@ -4942,6 +4955,8 @@ export class CodexSecurity {
               auth,
               modelProvider,
               providerEnvKey,
+              session.effectiveConfig,
+              "selected",
             ),
           ),
         ),
@@ -5164,6 +5179,8 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         providerEnvKey,
+        requestedConfig,
+        "selected",
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5870,6 +5887,8 @@ export class CodexSecurity {
       auth,
       modelProvider,
       providerEnvKey,
+      requestedConfig,
+      "selected",
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -6989,18 +7008,23 @@ export function selectedScanEnvironment(
   modelProvider?: unknown,
   providerEnvKey?: string,
   config?: JsonObject,
+  providerKeys: "selected" | "declared" = "declared",
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
   const selectedProviderKey = providerEnvKey ?? standardProviderKey;
   const bedrockProvider = modelProvider === "amazon-bedrock";
-  if (selectedProviderKey === null) {
-    environment = withoutProviderKey(
-      environment,
-      EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key,
-    );
-  }
+  environment = standardComputeEnvironment(
+    environment,
+    modelProvider,
+    providerEnvKey,
+    auth === "chatgpt" &&
+      !isExternalModelProvider(modelProvider) &&
+      !hasCommandAuth(config ?? {})
+      ? undefined
+      : config,
+  );
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
@@ -7013,6 +7037,7 @@ export function selectedScanEnvironment(
           key === selectedProviderKey.toUpperCase()
         );
       }
+      if (key === EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key) return true;
       if (EXTERNAL_PROVIDER_KEYS.has(key)) {
         return (
           !bedrockProvider &&
@@ -7025,6 +7050,7 @@ export function selectedScanEnvironment(
     }),
   );
   if (
+    providerKeys === "declared" &&
     config !== undefined &&
     providerEnvKey !== undefined &&
     standardProviderKey === null &&
