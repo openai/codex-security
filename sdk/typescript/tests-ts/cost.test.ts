@@ -221,6 +221,43 @@ function progressMessage(
   };
 }
 
+test("matches line-continued live commands to saved argument arrays", async () => {
+  const { home, parent } = await workerSessionFixture();
+  const current: ScanProgress = {
+    phase: "validation",
+    filesCompleted: 1,
+    filesTotal: 8,
+  };
+  const later: ScanProgress = { ...current, phase: "reporting" };
+  const updates: ScanProgress[] = [];
+  const tracker = costTracker(home, {
+    expectedFilesTotal: 8,
+    onProgress: (update) => updates.push(update),
+  });
+  const output = commandOutput(progressMarker("validation", 1, 8));
+  tracker.start("scan-thread");
+  try {
+    await tracker.refresh();
+    tracker.beginParentTurn();
+    const event = completedCommand("printf \\\n value", output);
+    expect(tracker.recordParentProgress(current, event)).toBe(true);
+    tracker.acceptParentProgress(current, event);
+    updates.push(current);
+    await appendFile(
+      parent,
+      jsonLines([
+        nativeCommand(["printf", "value"], persistedCommandOutput),
+        nativeCommand("later-review", progressMarker("reporting", 1, 8)),
+        nativeCommand(["different-command"], persistedCommandOutput),
+      ]) + "\n",
+    );
+    await tracker.refresh();
+    expect(updates).toEqual([current, later]);
+  } finally {
+    await tracker.stop();
+  }
+});
+
 test.each(
   ["native", "raw-before", "raw-after"].flatMap((projection) =>
     ["current", "repeated", "pending", "released"].flatMap((scenario) =>
