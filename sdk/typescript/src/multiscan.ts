@@ -1278,7 +1278,11 @@ async function readReceipts(
         throw new Error("Expected a completed or failed receipt status");
       if (typeof saved.outputDir !== "string" || !saved.outputDir.trim())
         throw new Error("Expected a nonempty string outputDir");
-      for (const flag of ["knowledgeBaseFailure", "policyFailed"]) {
+      for (const flag of [
+        "knowledgeBaseFailure",
+        "checkoutOccupied",
+        "policyFailed",
+      ]) {
         if (saved[flag] !== undefined && typeof saved[flag] !== "boolean")
           throw new Error(`Expected a boolean ${flag}`);
       }
