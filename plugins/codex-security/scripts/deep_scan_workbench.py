@@ -673,37 +673,28 @@ def begin_deep_scan_for_scan(
             )
             if claimed_scan.rowcount != 1:
                 raise SystemExit("A scan can only be orchestrated from its owning Codex thread.")
-    scan, _ = require_owned_scan(connection, scan_id, thread_id)
-    require_current_continuation(
-        scan,
-        args.claim_token,
-        error_message="Deep Scan orchestration is owned by another continuation.",
-    )
-    if scan["mode"] != "deep":
-        raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
-    existing = connection.execute(
-        "SELECT scan_id FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
-    ).fetchone()
-    if args.join_only and existing is None and workspace["deep_scan_config_json"] is None:
-        return {"newScanTarget": scan["target_path"]}
-    if existing is not None:
-        resumed = False
-        connection.execute("BEGIN IMMEDIATE")
-        with connection:
-            scan, _ = require_owned_scan(connection, scan_id, thread_id)
-            require_current_continuation(
-                scan,
-                args.claim_token,
-                error_message="Deep Scan orchestration is owned by another continuation.",
-            )
-            run = require_deep_scan_run(connection, scan_id)
-            if (
-                run["status"] == "interrupted"
+    connection.execute("BEGIN IMMEDIATE")
+    with connection:
+        scan, workspace = require_owned_scan(connection, scan_id, thread_id)
+        require_scan_checkout_owner(connection, scan)
+        require_current_continuation(
+            scan,
+            args.claim_token,
+            error_message="Deep Scan orchestration is owned by another continuation.",
+        )
+        if scan["mode"] != "deep":
+            raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
+        run = connection.execute(
+            "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+        ).fetchone()
+        if run is not None:
+            resume = (
+                args.scan_id
+                and run["status"] == "interrupted"
                 and scan["status"] == "running"
                 and scan["seal_manifest_digest"] is None
-            ):
-                if not args.scan_id:
-                    return deep_scan_result(connection, scan_id, start_disposition="joined")
+            )
+            if resume:
                 # Explicit same-ID continuation fences the stopped coordinator.
                 # Recover unfinished attempts before granting the new lease.
                 require_resume_target(scan)
@@ -715,26 +706,17 @@ def begin_deep_scan_for_scan(
                     "WHERE scan_id = ?",
                     (dependencies().now(), scan_id),
                 )
-                resumed = True
-        return {
-            **deep_scan_result(connection, scan_id, start_disposition="joined"),
-            **({"coordinatorDisposition": "claimed"} if resumed else {}),
-        }
-    workspace = dependencies().require_workspace(connection, scan["workspace_id"])
-    configuration = effective_deep_scan_config(args, workspace)
-    config = configuration["settings"]
-    workflow_version = optional_text(args.workflow_version, maximum=256)
-    if workflow_version is None:
-        raise SystemExit("workflow-version is required.")
-    connection.execute("BEGIN IMMEDIATE")
-    with connection:
-        scan, _ = require_owned_scan(connection, scan_id, thread_id)
-        require_scan_checkout_owner(connection, scan)
-        require_current_continuation(
-            scan,
-            args.claim_token,
-            error_message="Deep Scan orchestration is owned by another continuation.",
-        )
+            return {
+                **deep_scan_result(connection, scan_id, start_disposition="joined"),
+                **({"coordinatorDisposition": "claimed"} if resume else {}),
+            }
+        if args.join_only and workspace["deep_scan_config_json"] is None:
+            return {"newScanTarget": scan["target_path"]}
+        configuration = effective_deep_scan_config(args, workspace)
+        config = configuration["settings"]
+        workflow_version = optional_text(args.workflow_version, maximum=256)
+        if workflow_version is None:
+            raise SystemExit("workflow-version is required.")
         connection.execute(
             "UPDATE workspaces SET deep_scan_config_json = ? WHERE id = ? AND deep_scan_config_json IS NULL",
             (json.dumps(configuration), workspace["id"]),
