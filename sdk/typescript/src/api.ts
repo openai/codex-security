@@ -2515,7 +2515,8 @@ export class CodexSecurity {
         // A managed worker can use a different provider declared in this scan's private profile.
         const key = EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key;
         const candidate = environmentEntry(this.#dependencies.environment, key);
-        if (candidate !== undefined) workerProviderEnvironment[key] = candidate;
+        if (candidate !== undefined)
+          workerProviderEnvironment[key] ??= candidate;
       }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
