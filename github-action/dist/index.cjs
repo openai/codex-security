@@ -54205,6 +54205,7 @@ async function regularFile(path6) {
   return target;
 }
 async function runnerConfigurationFile(path6, name) {
+  if (path6 === void 0) return void 0;
   const invalid = `${name} must be an absolute path to a regular file.`;
   if (!(0, import_node_path4.isAbsolute)(path6)) throw new Error(invalid);
   try {
@@ -54325,10 +54326,8 @@ async function setupRuntime(options) {
   const runnerLibraryPath = process.env.LD_LIBRARY_PATH;
   const tempRoot = await (0, import_promises3.realpath)(options.tempRoot);
   const actionRoot = await (0, import_promises3.realpath)(options.actionRoot);
-  const runnerNpmConfig = options.runnerNpmConfig && {
-    userConfig: options.runnerNpmConfig.userConfig === void 0 ? void 0 : await runnerConfigurationFile(options.runnerNpmConfig.userConfig, "NPM_CONFIG_USERCONFIG"),
-    extraCaCerts: options.runnerNpmConfig.extraCaCerts === void 0 ? void 0 : await runnerConfigurationFile(options.runnerNpmConfig.extraCaCerts, "NODE_EXTRA_CA_CERTS")
-  };
+  const runnerUserConfig = await runnerConfigurationFile(options.runnerNpmConfig?.userConfig, "NPM_CONFIG_USERCONFIG");
+  const runnerCaCerts = await runnerConfigurationFile(options.runnerNpmConfig?.extraCaCerts, "NODE_EXTRA_CA_CERTS");
   const npmPath = await resolveTool("npm", runnerPath);
   const pythonPath = await resolveTool("python3", runnerPath);
   const nodePath = process.execPath;
@@ -54354,22 +54353,20 @@ async function setupRuntime(options) {
     const destination = (0, import_node_path4.join)(root, "install");
     await (0, import_promises3.copyFile)(packagePath, (0, import_node_path4.join)(destination, "package.json"));
     await (0, import_promises3.writeFile)((0, import_node_path4.join)(destination, "package-lock.json"), lockBytes, { mode: 384, flag: "wx" });
-    const userConfig = runnerNpmConfig?.userConfig ?? (0, import_node_path4.join)(root, "npm-user.conf");
+    const userConfig = runnerUserConfig ?? (0, import_node_path4.join)(root, "npm-user.conf");
     const globalConfig = (0, import_node_path4.join)(root, "npm-global.conf");
-    if (!runnerNpmConfig?.userConfig) await (0, import_promises3.writeFile)(userConfig, "", { mode: 384, flag: "wx" });
+    if (!runnerUserConfig) await (0, import_promises3.writeFile)(userConfig, "", { mode: 384, flag: "wx" });
     await (0, import_promises3.writeFile)(globalConfig, "", { mode: 384, flag: "wx" });
-    const installEnv = {
-      ...env,
-      ...runnerNpmConfig?.userConfig ? { NPM_CONFIG_USERCONFIG: runnerNpmConfig.userConfig } : {},
-      ...runnerNpmConfig?.extraCaCerts ? { NODE_EXTRA_CA_CERTS: runnerNpmConfig.extraCaCerts } : {}
-    };
+    const installEnv = { ...env };
+    if (runnerUserConfig) installEnv.NPM_CONFIG_USERCONFIG = runnerUserConfig;
+    if (runnerCaCerts) installEnv.NODE_EXTRA_CA_CERTS = runnerCaCerts;
     const install = await runProcess(
       npmPath,
       [
         "ci",
         "--ignore-scripts",
         "--include=optional",
-        ...!runnerNpmConfig?.userConfig ? [`--registry=${REGISTRY}`] : [],
+        ...!runnerUserConfig ? [`--registry=${REGISTRY}`] : [],
         `--userconfig=${userConfig}`,
         `--globalconfig=${globalConfig}`,
         `--cache=${(0, import_node_path4.join)(root, "npm-cache")}`,
