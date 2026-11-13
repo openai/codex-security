@@ -9,6 +9,7 @@
 
 - import AWS Continuum code issues ([#2619](https://github.com/openai/codex-security/pull/2619))
 - import CrowdStrike FCS IaC findings locally (#2589) ([4822a9c](https://github.com/openai/codex-security/commit/4822a9cbc4c4976b6f81ba5afd50787af923ba91))
+- add synthetic security workflow benchmarks ([#2618](https://github.com/openai/codex-security/pull/2618))
 
 </details>
 
