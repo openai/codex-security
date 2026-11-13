@@ -65,6 +65,7 @@ def patch_artifact_preview(
     file_count = 0
     old_headers = 0
     new_headers = 0
+    mail_preamble = False
     hunk_lines = 0
     expect_hunk = False
     # Older saved previews can contain a bare Git header followed directly by changes.
@@ -74,9 +75,13 @@ def patch_artifact_preview(
         with open_scan_file(scan_dir, relative_path) as patch:
             while chunk := patch.readline(1024 * 1024):
                 digest.update(chunk)
+                if not preview:
+                    mail_preamble = _FORMAT_PATCH_FROM.fullmatch(chunk) is not None
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start:
+                if at_line_start and mail_preamble:
+                    mail_preamble = not chunk.startswith(b"diff --git ")
+                if at_line_start and not mail_preamble:
                     if hunk_lines:
                         # Both sides count a context line; neither counts a no-newline marker.
                         if not chunk.startswith(b"\\"):
@@ -236,6 +241,9 @@ def latest_attempt(connection: sqlite3.Connection, occurrence_id: str) -> sqlite
     ).fetchone()
 
 
+_FORMAT_PATCH_FROM = re.compile(
+    rb"From (?:[0-9a-f]{40}|[0-9a-f]{64}) Mon Sep 17 00:00:00 2001\r?\n"
+)
 _HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
 _QUOTED_GIT_PATH = rb'"((?:[^"\\]|\\(?:[abfnrtv"\\]|[0-3][0-7]{2}))*)"'
 _SUBMODULE_SUMMARY_END = re.compile(
@@ -279,7 +287,7 @@ def _matches_git_paths(header: bytes, old_field: bytes, new_field: bytes) -> boo
 
 
 def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
-    mail = re.match(rb"From (?:[0-9a-f]{40}|[0-9a-f]{64}) Mon Sep 17 00:00:00 2001\r?\n", patch)
+    mail = _FORMAT_PATCH_FROM.match(patch)
     if mail:
         first = re.search(rb"(?m)^diff --git [^\n]+\n", patch)
         if first:

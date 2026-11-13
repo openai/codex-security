@@ -3223,7 +3223,7 @@ def test_patch_preview_counts_hunk_lines_that_look_like_file_headers(tmp_path: P
     remediation = load_script("workbench_remediation")
     patch = (
         b"From " + b"0" * 40 + b" Mon Sep 17 00:00:00 2001\n"
-        b"Subject: [PATCH] Update query\n\n@@ -1,900 +1,1 @@\n\n"
+        b"Subject: [PATCH] Update query\n\n+++ code example\n@@ -1,900 +1,1 @@\n\n"
         b"diff --git a/query.sql b/query.sql\n"
         b"--- a/query.sql\n"
         b"+++ b/query.sql\n"
