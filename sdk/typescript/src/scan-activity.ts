@@ -437,16 +437,12 @@ function repositoryPathMatcher(repository: string, literal: boolean) {
   // A recorded UNC path can refer to either an SMB share or a case-sensitive
   // WebDAV collection. Keep every component after the server exact.
   return (raw: string, value = normalize(raw)): string | null => {
-    if (root !== "") {
-      if (
-        windowsActivityRoot(raw) === root &&
-        value.slice(root.length).toLowerCase().startsWith(directory.toLowerCase())
-      ) {
-        return value.slice(prefix.length);
-      }
-      return null;
-    }
-    if (value.startsWith(prefix)) {
+    if (
+      value.startsWith(prefix) ||
+      (root !== "" &&
+        value.startsWith(directory, root.length) &&
+        windowsActivityRoot(raw) === root)
+    ) {
       return value.slice(prefix.length);
     }
     return null;

@@ -3372,7 +3372,6 @@ async function readSessionUsage(
       }
     } catch (error) {
       if (isMissingFile(error)) return;
-      session.unreadable = true;
       throw error;
     }
     session.compressedRead = true;
@@ -3386,7 +3385,6 @@ async function readSessionUsage(
     file = await open(path, "r");
   } catch (error) {
     if (isMissingFile(error)) return;
-    session.unreadable = true;
     throw error;
   }
   try {
