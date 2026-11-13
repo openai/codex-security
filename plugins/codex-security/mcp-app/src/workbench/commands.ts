@@ -13,9 +13,16 @@ import {
 } from "./duplicates";
 import {
   listExternalFindings,
+  listExternalImports,
   storeExternalFindings,
+  type ExternalFindingSelection,
   type ExternalFindingsImport,
 } from "./external-findings";
+import {
+  listExternalFindingPublications,
+  recordExternalFindingPublications,
+  type ExternalPublicationLinks,
+} from "./external-finding-publications";
 
 import {
   readSeverityClassification,
@@ -84,6 +91,7 @@ export async function workbenchCommand(
         command !== "local-dedupe" &&
         command !== "store-findings" &&
         command !== "store-external-findings" &&
+        command !== "record-external-finding-publications" &&
         command !== "store-dedupe-groups" &&
         command !== "severity-classification",
     },
@@ -101,8 +109,21 @@ export async function workbenchCommand(
         payload as ExternalFindingsImport,
         new Date().toISOString(),
       );
-    if (command === "list-external-findings")
+    if (command === "read-external-findings")
       return listExternalFindings(
+        database,
+        payload as ExternalFindingSelection,
+      );
+    if (command === "list-external-imports")
+      return listExternalImports(database, payload as { repository: string });
+    if (command === "record-external-finding-publications")
+      return recordExternalFindingPublications(
+        database,
+        payload as ExternalPublicationLinks,
+        new Date().toISOString(),
+      );
+    if (command === "list-external-finding-publications")
+      return listExternalFindingPublications(
         database,
         payload as { repository: string; id?: string },
       );

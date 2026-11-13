@@ -9,10 +9,9 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from threading import Event
 from unittest.mock import Mock
 
 import pytest
@@ -258,13 +257,18 @@ def test_archive_contention_during_windows_patch_write(
     backend = sys.modules["windows_scan_local_files"]
     write_all = backend._write_all
     rename = Path.rename
-    writing, rename_denied = Event(), Event()
+    rename_denied = Future()
+    archive_attempt = None
     before_archive = Mock()
 
     def write_while_archiving(handle, data):
+        nonlocal archive_attempt
         if data == patch:
-            writing.set()
-            assert rename_denied.wait(10)
+            archive_attempt = pool.submit(archive)
+            wait((rename_denied, archive_attempt), return_when=FIRST_COMPLETED)
+            if not rename_denied.done():
+                archive_attempt.result()
+                pytest.fail("archive succeeded while the patch was open")
             # A different writer can commit before the patch releases its open handles.
             with sqlite3.connect(database) as other:
                 other.execute("BEGIN IMMEDIATE")
@@ -275,12 +279,11 @@ def test_archive_contention_during_windows_patch_write(
         try:
             return rename(source, destination)
         except PermissionError as exc:
-            if source == scan_dir and exc.winerror in {5, 32}:
-                rename_denied.set()
+            if source == scan_dir and exc.winerror in {5, 32} and not rename_denied.done():
+                rename_denied.set_result(None)
             raise
 
     def archive():
-        assert writing.wait(10)
         target = tmp_path / "target"
         registration = argparse.Namespace(
             repository=str(target),
@@ -303,14 +306,14 @@ def test_archive_contention_during_windows_patch_write(
     monkeypatch.setattr(backend, "_write_all", write_while_archiving)
     monkeypatch.setattr(Path, "rename", observe_rename)
     with ThreadPoolExecutor(max_workers=1) as pool, sqlite3.connect(database) as connection:
-        future = pool.submit(archive)
         connection.row_factory = sqlite3.Row
         result = workbench_api["set_finding_remediation"](connection, args)
+        assert archive_attempt is not None
         if timeout:
-            archived = future.result(timeout=10)
+            archived = archive_attempt.result()
         else:
             with pytest.raises(PermissionError) as denied:
-                future.result(timeout=10)
+                archive_attempt.result()
             assert denied.value.winerror in {5, 32}
             assert not list(scan_dir.parent.glob(f"{scan_dir.name}.previous-*"))
             archived = scan_dir

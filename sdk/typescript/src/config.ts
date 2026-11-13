@@ -58,6 +58,10 @@ export const EXTERNAL_CODEX_PROVIDERS = {
   standardcompute: STANDARDCOMPUTE_CODEX_PROVIDER,
 } as const;
 
+export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
+  Object.values(EXTERNAL_CODEX_PROVIDERS).map(({ env_key }) => env_key),
+);
+
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
 
 export function isExternalModelProvider(
@@ -96,6 +100,41 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
     sandbox: "elevated",
   }),
 });
+
+/** @internal Authentication settings shared by login and model commands. */
+export const CODEX_AUTH_CONFIG_KEYS = [
+  "cli_auth_credentials_store",
+  "forced_login_method",
+  "forced_chatgpt_workspace_id",
+] as const;
+
+/**
+ * @internal Read only the native sign-in preferences. Scans with independently
+ * supplied credentials may not have access to the ambient home.
+ */
+export async function readCodexAuthConfig(
+  home: string,
+  required = false,
+): Promise<JsonObject> {
+  let config: JsonObject;
+  try {
+    config = parse(await readFile(join(home, "config.toml"), "utf8"), {
+      integersAsBigInt: "asNeeded",
+    }) as JsonObject;
+  } catch (error) {
+    if (!required || (error as NodeJS.ErrnoException).code === "ENOENT")
+      return {};
+    throw new ConfigurationError(
+      `Could not read Codex sign-in settings from ${join(home, "config.toml")}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  return Object.fromEntries(
+    CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
+      config[key] === undefined ? [] : [[key, config[key]]],
+    ),
+  );
+}
 
 export function scanModelConfiguration(
   config: Readonly<JsonObject>,
@@ -446,6 +485,7 @@ export function resolveNestedConfigPaths(
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
   profileHome?: string,
+  purpose: "scan" | "login" = "scan",
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
@@ -464,6 +504,13 @@ export async function mergedCodexConfig(
     }
   }
   const defaults: JsonObject = structuredClone(DEFAULT_CODEX_CONFIG);
+  // Native login keeps the credential home's existing store unless one was requested.
+  if (purpose === "login") delete defaults["cli_auth_credentials_store"];
+  if (profileHome !== undefined)
+    Object.assign(
+      defaults,
+      await readCodexAuthConfig(profileHome, purpose === "login"),
+    );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {

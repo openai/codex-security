@@ -390,7 +390,8 @@
             "sonar",
             "continuum",
             "checkmarx",
-            "trivy"
+            "trivy",
+            "armorcode"
           ],
           "title": "Provider",
           "type": "string"
