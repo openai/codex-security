@@ -1243,8 +1243,9 @@ try a standalone Node installation. For example, with Homebrew's `node@24`:
 export CODEX_MCP_NODE_PATH="$(brew --prefix node@24)/bin/node"
 ```
 
-Rerun the command from that terminal. Use `unset CODEX_MCP_NODE_PATH` to
-restore automatic selection.
+Start a new CLI or plugin host process from that terminal so it inherits the
+setting. To restore automatic selection, run `unset CODEX_MCP_NODE_PATH`
+and restart that process.
 
 ### Progress and cost
 
