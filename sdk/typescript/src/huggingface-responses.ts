@@ -19,7 +19,6 @@ interface ToolIdentity {
 /** HF chat accepts flat function tools; Codex uses namespaces and freeform tools. */
 export function huggingFaceRequest(request: Record<string, unknown>) {
   const identities = new Map<string, ToolIdentity>();
-  const customItems = new Set<string>();
   function alias(identity: ToolIdentity): string {
     // Chat tool names are limited to 64 characters. Keep names readable without
     // letting truncation or namespace separators merge distinct tool identities.
@@ -28,9 +27,7 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
       .join("__")
       .replace(/[^a-zA-Z0-9_-]/g, "_")
       .slice(0, 48);
-    const name = `${label}_${createHash("sha256").update(JSON.stringify(identity)).digest("hex").slice(0, 12)}`;
-    identities.set(name, identity);
-    return name;
+    return `${label}_${createHash("sha256").update(JSON.stringify(identity)).digest("hex").slice(0, 12)}`;
   }
   function identity(
     tool: Record<string, unknown>,
@@ -56,10 +53,12 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
         );
       }
       const tool = identity(value, namespace);
+      const name = alias(tool);
+      identities.set(name, tool);
       return [
         {
           type: "function",
-          name: alias(tool),
+          name,
           description: `${namespace ? namespace + "." : ""}${tool.name}: ${value["description"] ?? ""}`,
           parameters: tool.custom
             ? {
@@ -133,8 +132,8 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
       },
     };
   }
-  function output(value: unknown, partial = false): unknown {
-    if (!isRecord(value) || value["type"] !== "function_call") return value;
+  function output(value: Record<string, unknown>): Record<string, unknown> {
+    if (value["type"] !== "function_call") return value;
     const tool = identities.get(String(value["name"]));
     if (tool === undefined)
       throw new Error(`HF returned an unknown tool: ${value["name"]}`);
@@ -145,46 +144,14 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
       ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
     };
     if (!tool.custom) return { ...restored, arguments: args };
-    if (typeof value["id"] === "string") customItems.add(value["id"]);
-    const input = partial ? "" : JSON.parse(String(args))?.input;
+    const input = JSON.parse(String(args))?.input;
     if (typeof input !== "string")
       throw new Error(
         `HF returned invalid input for custom tool ${tool.name}.`,
       );
     return { ...restored, type: "custom_tool_call", input };
   }
-  function response(value: unknown): unknown {
-    if (!isRecord(value)) return value;
-    return {
-      ...value,
-      ...(Array.isArray(value["output"])
-        ? { output: value["output"].map((item) => output(item)) }
-        : {}),
-    };
-  }
-  function event(value: Record<string, unknown>): unknown | null {
-    if (
-      typeof value["type"] === "string" &&
-      value["type"].startsWith("response.function_call_arguments.") &&
-      customItems.has(String(value["item_id"]))
-    )
-      return null;
-    return {
-      ...value,
-      ...(value["item"] === undefined
-        ? {}
-        : {
-            item: output(
-              value["item"],
-              value["type"] === "response.output_item.added",
-            ),
-          }),
-      ...(value["response"] === undefined
-        ? {}
-        : { response: response(value["response"]) }),
-    };
-  }
-  return { body, response, event };
+  return { body, output };
 }
 
 /** Read complete SSE frames, including CR, LF, or CRLF split across chunks. */
@@ -314,17 +281,27 @@ export async function startHuggingFaceResponsesAdapter(upstream: string) {
               completion.add(chunk);
               yield ": upstream\n\n";
             }
-            const completed = completion.finish();
+            const generation = completion.finish();
+            // Validate the entire generation before emitting tool calls.
+            const completed = {
+              ...generation,
+              output: generation.output.map(translation.output),
+            };
             yield `data: ${JSON.stringify({ type: "response.created", response: { ...completed, status: "in_progress", output: [] } })}\n\n`;
             for (const [output_index, item] of completed.output.entries()) {
               for (const type of [
                 "response.output_item.added",
                 "response.output_item.done",
               ]) {
-                yield `data: ${JSON.stringify(translation.event({ type, output_index, item }))}\n\n`;
+                const eventItem =
+                  type === "response.output_item.added" &&
+                  item["type"] === "custom_tool_call"
+                    ? { ...item, input: "" }
+                    : item;
+                yield `data: ${JSON.stringify({ type, output_index, item: eventItem })}\n\n`;
               }
             }
-            yield `data: ${JSON.stringify({ type: "response.completed", response: translation.response(completed) })}\n\n`;
+            yield `data: ${JSON.stringify({ type: "response.completed", response: completed })}\n\n`;
           } catch (error) {
             yield `data: ${JSON.stringify({ type: "response.failed", response: { status: "failed", error: { message: errorMessage(error) } } })}\n\n`;
           }

@@ -60,14 +60,17 @@ test("flattens namespaces without losing identical tool names or call history", 
     { ...history, namespace: undefined, name: flat[1]!.name },
     { type: "function_call_output", call_id: "call_1", output: "ok" },
   ]);
-  const response = {
-    output: [{ ...history, namespace: undefined, name: flat[1]!.name }],
-    usage: { input_tokens: 12, output_tokens: 3 },
-  };
-  expect(request.response(response)).toEqual({
-    ...response,
-    output: [history],
-  });
+  expect(
+    request.output({ ...history, namespace: undefined, name: flat[1]!.name }),
+  ).toEqual(history);
+  // A past tool call remains valid history after the tool is removed.
+  const later = huggingFaceRequest({ tools: [tool], input: [history] });
+  expect(later.body.input).toEqual([
+    { ...history, namespace: undefined, name: flat[1]!.name },
+  ]);
+  expect(() => later.output({ ...history, name: flat[1]!.name })).toThrow(
+    "unknown tool",
+  );
 });
 
 test("restores freeform tools from streamed function arguments and retransmits history", () => {
@@ -88,44 +91,24 @@ test("restores freeform tools from streamed function arguments and retransmits h
     call_id: "call_1",
     arguments: "",
   };
-  expect(
-    request.event({ type: "response.output_item.added", item }),
-  ).toMatchObject({
-    item: {
-      type: "custom_tool_call",
-      namespace: "functions",
-      name: "exec",
-      input: "",
-    },
+  const done = request.output({
+    ...item,
+    arguments: JSON.stringify({ input: "text('hello')" }),
   });
-  expect(
-    request.event({
-      type: "response.function_call_arguments.delta",
-      item_id: "fc_1",
-      delta: "{",
-    }),
-  ).toBeNull();
-  const done = request.event({
-    type: "response.output_item.done",
-    item: { ...item, arguments: JSON.stringify({ input: "text('hello')" }) },
-  }) as { item: Record<string, unknown> };
-  expect(done.item).toMatchObject({
+  expect(done).toMatchObject({
     type: "custom_tool_call",
     namespace: "functions",
     name: "exec",
     input: "text('hello')",
   });
-  expect(done.item).not.toHaveProperty("arguments");
-  expect(() =>
-    request.event({
-      type: "response.output_item.done",
-      item: { ...item, arguments: '{"input":9}' },
-    }),
-  ).toThrow("invalid input for custom tool exec");
+  expect(done).not.toHaveProperty("arguments");
+  expect(() => request.output({ ...item, arguments: '{"input":9}' })).toThrow(
+    "invalid input for custom tool exec",
+  );
   const next = huggingFaceRequest({
     tools: [{ type: "namespace", name: "functions", tools: [custom] }],
     input: [
-      done.item,
+      done,
       { type: "custom_tool_call_output", call_id: "call_1", output: "hello" },
     ],
   });
