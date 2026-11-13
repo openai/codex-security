@@ -12,6 +12,7 @@ import { nodeCommand } from "./support/shell.js";
 import { main } from "../src/cli.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
+  disabledMcpServers,
   matchScanFindings,
   type ScanComparisonInput,
 } from "../src/scan-comparison.js";
@@ -1285,6 +1286,33 @@ describe("CLI workbench", () => {
       expect(saved).toEqual([["source", "empty"]]);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain("Reinstall @openai/codex");
+    });
+
+    test("stops on invalid MCP configuration output after an empty batch", async () => {
+      const { saved, onWorkbench } = batchWithInitialSave();
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async () => {
+            await disabledMcpServers(
+              {
+                command: nodeCommand().command,
+                args: ["-e", 'console.log("invalid JSON")', "--"],
+              },
+              undefined,
+              {},
+              {},
+            );
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      );
+      expect(code, stderr.text()).toBe(2);
+      expect(saved).toEqual([["source", "empty"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("MCP configuration");
     });
 
     test("returns the first matcher error if every batch fails", async () => {

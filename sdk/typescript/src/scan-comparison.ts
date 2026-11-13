@@ -814,37 +814,37 @@ export async function disabledMcpServers(
   environment: Record<string, string>,
   options: ReadOnlyCodexOptions,
 ): Promise<JsonObject> {
-  const { success, stdout, stderr } = await runCodexCommand(
-    command,
-    [
-      "-C",
-      options.workingDirectory ?? process.cwd(),
-      "-c",
-      "features.plugins=false",
-      "mcp",
-      "list",
-      "--json",
-    ],
-    environment,
-    undefined,
-    options.signal,
-  ).catch((error: unknown) => {
+  let inheritedNames: string[];
+  try {
+    const { success, stdout, stderr } = await runCodexCommand(
+      command,
+      [
+        "-C",
+        options.workingDirectory ?? process.cwd(),
+        "-c",
+        "features.plugins=false",
+        "mcp",
+        "list",
+        "--json",
+      ],
+      environment,
+      undefined,
+      options.signal,
+    );
+    if (!success) throw new Error(stderr.trim());
+    inheritedNames = z
+      .array(z.object({ name: z.string() }))
+      .parse(JSON.parse(stdout))
+      .map(({ name }) => name);
+  } catch (error) {
     options.signal?.throwIfAborted();
     throw new ConfigurationError(
       `Could not read MCP configuration for a read-only helper: ${errorMessage(error)}`,
       { cause: error },
     );
-  });
-  if (!success)
-    throw new ConfigurationError(
-      `Could not read MCP configuration for a read-only helper: ${stderr.trim()}`,
-    );
-  const inherited = JSON.parse(stdout) as { name: string }[];
+  }
   const configured = (config?.["mcp_servers"] ?? {}) as JsonObject;
-  const names = new Set([
-    ...Object.keys(configured),
-    ...inherited.map(({ name }) => name),
-  ]);
+  const names = new Set([...Object.keys(configured), ...inheritedNames]);
   return Object.fromEntries(
     [...names].map((name) => [
       name,
