@@ -2935,13 +2935,28 @@ async function testExternalProviderCredentialsReachWorker() {
           ...accountHeaders,
         },
       };
-      await writeFile(configPath, stringifyToml({ model_provider: provider }));
+      // A managed discovery override can choose OpenRouter for an Azure parent.
+      const parentProvider = provider === "openrouter" ? "azure" : provider;
+      await writeFile(
+        configPath,
+        stringifyToml({ model_provider: parentProvider }),
+      );
       await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
       await writeFile(
         path.join(fixture.root, `${profile}.config.toml`),
         stringifyToml({
-          model_provider: provider,
+          model_provider: parentProvider,
           model_providers: {
+            ...(parentProvider !== provider
+              ? {
+                  azure: {
+                    name: "Azure",
+                    wire_api: "responses",
+                    base_url: "https://resource.example.test/openai/v1",
+                    env_key: "AZURE_OPENAI_API_KEY",
+                  },
+                }
+              : {}),
             [provider]: {
               name: provider,
               base_url: `https://${provider}.example.test/v1`,

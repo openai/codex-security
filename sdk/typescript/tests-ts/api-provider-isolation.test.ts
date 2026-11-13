@@ -371,6 +371,10 @@ test.each([
           selection === "file default key"
             ? "OPENROUTER_API_KEY"
             : "SYNTHETIC_CUSTOM_API_KEY";
+        const alternateKey =
+          process.platform === "win32" && index === 1
+            ? "openrouter_api_key"
+            : "OPENROUTER_API_KEY";
         const headerOnly = selection === "file Azure headers";
         const bearer = selection === "file Azure" && index === 1;
         const canonicalKey =
@@ -432,6 +436,9 @@ test.each([
         // variables, including header values, retain their original bytes.
         const workerEnvironment = {
           ...providerEnvironment,
+          ...(providerId === "azure"
+            ? { [alternateKey]: `synthetic-alternate-${index}` }
+            : {}),
           ...(bearer || headerOnly
             ? {}
             : { [providerKey]: providerEnvironment[providerKey]!.trim() }),
@@ -444,6 +451,15 @@ test.each([
               model_provider: providerId,
               model_providers: {
                 [providerId]: provider,
+                ...(providerId === "azure"
+                  ? {
+                      openrouter: {
+                        name: "Alternate managed worker",
+                        wire_api: "responses",
+                        env_key: alternateKey,
+                      },
+                    }
+                  : {}),
                 "required.gateway": {
                   name: "Managed selection",
                   wire_api: "responses",
@@ -544,7 +560,12 @@ test.each([
                   : {}),
                 ...(selection === "file custom only"
                   ? {}
-                  : { OPENROUTER_API_KEY: "synthetic-sdk-account-key" }),
+                  : {
+                      OPENROUTER_API_KEY:
+                        providerId === "azure"
+                          ? `synthetic-alternate-${index}`
+                          : "synthetic-sdk-account-key",
+                    }),
                 ...providerEnvironment,
                 SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
               },
@@ -668,6 +689,8 @@ test.each([
                   )[providerId] as JsonObject;
                   expect(actual).toMatchObject(provider);
                   if (providerId === "azure") {
+                    expect(environment["OPENROUTER_API_KEY"]).toBeUndefined();
+                    expect(environment[alternateKey]).toBeUndefined();
                     expect(actual["base_url"]).toBe(
                       `${azureResource}/openai/v1`,
                     );

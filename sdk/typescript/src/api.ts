@@ -2497,46 +2497,37 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const workerProviderEnvironment = {
-        ...withoutOpenAiApiKeys(
-          selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-            session.providerEnvKey,
-            effectiveConfig,
-          ),
+      const workerProviderEnvironment = withoutOpenAiApiKeys(
+        selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          modelProvider,
+          session.providerEnvKey,
+          effectiveConfig,
         ),
+      );
+      const selectedWorkerCredentials = {
         ...azureHeaderEnvironment(
           this.#dependencies.environment,
           effectiveConfig,
         ),
+        ...session.nativeProviderEnvironment,
         ...(session.apiKey === null
           ? {}
-          : {
-              [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
-            }),
+          : { [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey }),
       };
-      if (
-        mode === "deep" &&
-        (options.auth !== "chatgpt" ||
-          authentication.method === "command" ||
-          authentication.method === "api_key" ||
-          authentication.method === "aws_credentials")
-      ) {
-        // A managed worker can select another declared native provider. Its
-        // private snapshot below retains only variables named by those tables.
-        const key = AZURE_CODEX_PROVIDER.env_key;
-        const azureKey = environmentEntry(this.#dependencies.environment, key);
-        if (azureKey !== undefined) workerProviderEnvironment[key] ??= azureKey;
-      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
           modelProvider,
           scanDir,
           workerProviderEnvironment,
-          session.nativeProviderEnvironment,
+          selectedWorkerCredentials,
+          mode === "deep" &&
+            (options.auth !== "chatgpt" ||
+              authentication.method !== "stored_credentials")
+            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            : undefined,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -7773,16 +7764,21 @@ function selectedWorkerRuntimeConfig(
   selectedProvider: unknown,
   workingDirectory: string,
   environment: ProcessEnvironment,
-  nativeProviderEnvironment?: Record<string, string>,
+  selectedCredentials: Record<string, string>,
+  ambientWorkerEnvironment?: ProcessEnvironment,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  const providerEnvironment =
-    nativeProviderEnvironment ??
-    declaredProviderEnvironment(providers, environment);
+  // A managed worker can use another provider declared in this private profile.
+  // Preserve its original credentials while honoring the parent's selected key.
+  const providerEnvironment = {
+    ...declaredProviderEnvironment(providers, ambientWorkerEnvironment ?? {}),
+    ...declaredProviderEnvironment(providers, environment),
+    ...declaredProviderEnvironment(providers, selectedCredentials),
+  };
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
