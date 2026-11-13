@@ -65,7 +65,10 @@ def patch_artifact_preview(
     file_count = 0
     old_headers = 0
     new_headers = 0
-    old_lines = new_lines = 0
+    hunk_lines = 0
+    expect_hunk = False
+    # Older saved previews can contain a bare Git header followed directly by changes.
+    bare_git_diff = False
     at_line_start = True
     try:
         with open_scan_file(scan_dir, relative_path) as patch:
@@ -73,31 +76,28 @@ def patch_artifact_preview(
                 digest.update(chunk)
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start and (old_lines or new_lines):
-                    # Hunk lines such as a removed "-- comment" are content, not file headers.
-                    if chunk.startswith(b"+"):
-                        additions += 1
-                        new_lines -= 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
-                        old_lines -= 1
-                    elif not chunk.startswith(b"\\"):  # No newline at end of file
-                        old_lines -= 1
-                        new_lines -= 1
-                elif at_line_start:
-                    if chunk.startswith(b"diff --git "):
-                        file_count += 1
-                    elif chunk.startswith(b"+++ "):
-                        new_headers += 1
-                    elif chunk.startswith(b"--- "):
-                        old_headers += 1
-                    elif hunk := _HUNK_HEADER.match(chunk):
-                        old_lines = int(hunk[1] or b"1")
-                        new_lines = int(hunk[2] or b"1")
-                    elif chunk.startswith(b"+"):
-                        additions += 1
-                    elif chunk.startswith(b"-"):
-                        deletions += 1
+                if at_line_start:
+                    if hunk_lines:
+                        # Both sides count a context line; neither counts a no-newline marker.
+                        if not chunk.startswith(b"\\"):
+                            additions += chunk.startswith(b"+")
+                            deletions += chunk.startswith(b"-")
+                            hunk_lines -= 1 if chunk.startswith((b"+", b"-")) else 2
+                    elif expect_hunk and (hunk := _HUNK_HEADER.match(chunk)):
+                        hunk_lines = int(hunk[1] or b"1") + int(hunk[2] or b"1")
+                    elif not chunk.startswith(b"\\"):
+                        expect_hunk = chunk.startswith(b"+++ ")
+                        if chunk.startswith(b"diff --git "):
+                            file_count += 1
+                            bare_git_diff = True
+                        elif chunk.startswith(b"--- "):
+                            old_headers += 1
+                            bare_git_diff = False
+                        elif expect_hunk:
+                            new_headers += 1
+                        elif bare_git_diff:
+                            additions += chunk.startswith(b"+")
+                            deletions += chunk.startswith(b"-")
                 at_line_start = chunk.endswith(b"\n")
     except SystemExit:
         return None, None
