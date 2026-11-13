@@ -3588,12 +3588,18 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
     assert.equal(invocation.argv.includes("resume"), resumed);
 
     controller.abort("coordinator immediately canceled its remaining workers");
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    assert.deepEqual(unexpectedErrors, []);
-    if (!withProfile) {
-      assert.throws(() => process.kill(worker!.pid!, 0), { code: "ESRCH" });
+    const child = worker;
+    assert.ok(child?.killed, "completed worker received a termination signal");
+    if (child.exitCode === null && child.signalCode === null) {
+      // The native-profile fixture deliberately ignores SIGTERM after completion.
+      if (withProfile) child.kill("SIGKILL");
+      armDeadline(5_000, "completed worker process did not exit");
+      await Promise.race([
+        new Promise<void>((resolve) => child.once("close", () => resolve())),
+        deadline.promise,
+      ]);
     }
+    assert.deepEqual(unexpectedErrors, []);
   } finally {
     clearTimeout(timeout);
     controller.abort("completed worker fixture cleanup");
