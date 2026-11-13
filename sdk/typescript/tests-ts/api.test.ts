@@ -15999,14 +15999,13 @@ if __name__ == "__main__":
   });
 
   test.each([
-    ["completed", false],
-    ["failed", false],
-    ["unavailable", false],
-    ["completed", true],
+    ["finished", false],
+    ["running", false],
+    ["finished", true],
   ] as const)(
-    "recovers exhausted deep-scan budget when completion is %s (missing worker=%p)",
-    async (completion, missingWorker) => {
-      const { root, repository, codexHome, scanDir } = await scanDirectories();
+    "reports an exhausted Deep Scan budget with %s discovery (missing worker=%p)",
+    async (discovery, missingWorker) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
       const commands: Array<readonly string[]> = [];
       const warnings: string[] = [];
       const onLifecycle = mock<NonNullable<ScanOptions["onLifecycle"]>>();
@@ -16024,9 +16023,9 @@ if __name__ == "__main__":
       };
       const terminal = {
         ...registration,
-        status: completion === "completed" ? "completed" : "failed",
+        status: "failed",
         finishedAt: "2026-01-01T00:01:00Z",
-        hasReportableFindings: completion === "completed" ? true : null,
+        hasReportableFindings: null,
       };
       const runStreamed = mock(
         async (_input: string, options: { signal: AbortSignal }) => {
@@ -16081,43 +16080,18 @@ if __name__ == "__main__":
           if (args[0] !== "complete-budget-exhausted-scan") {
             return mockWorkbench(args, input);
           }
-          if (completion === "unavailable") {
+          if (discovery === "running") {
             throw new Error("Deep Scan discovery has not completed.");
           }
-          await copyCompletedScan(root);
-          const coveragePath = join(scanDir, "coverage.json");
-          const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
-          coverage.mode = "deep_repository";
-          delete coverage.completeness;
-          if (completion === "completed") {
-            coverage.deferred.push({
-              id: "budget-exhausted",
-              reason: "The scan reached its configured cost limit.",
-            });
-          }
-          const coverageBytes = `${JSON.stringify(coverage)}\n`;
-          await writeFile(coveragePath, coverageBytes);
-          const manifestPath = join(scanDir, "scan-manifest.json");
-          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-          if (completion === "failed") manifest.scan.status = "failed";
-          const artifact = manifest.scan.artifacts.find(
-            (item: { path: string }) => item.path === "coverage.json",
-          );
-          artifact.sha256 = hash("sha256", coverageBytes);
-          await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
           return {
             scan: {
-              ...(completion === "completed"
-                ? {
-                    usage: {
-                      completion: {
-                        threadId: "scan-thread",
-                        turnId: "completion-turn",
-                        finalized: false,
-                      },
-                    },
-                  }
-                : {}),
+              usage: {
+                completion: {
+                  threadId: "scan-thread",
+                  turnId: "completion-turn",
+                  finalized: false,
+                },
+              },
               lifecycle: terminal,
               warnings: [
                 args
@@ -16138,24 +16112,10 @@ if __name__ == "__main__":
           onLifecycle,
           onWarning: (warning) => warnings.push(warning),
         });
-        if (completion === "unavailable" || completion === "failed") {
-          await expect(result).rejects.toBeInstanceOf(
-            ScanCostLimitExceededError,
-          );
-          if (completion === "unavailable") {
-            expect(commands.at(-1)?.[0]).toBe("fail-scan");
-          } else {
-            expect(commands.some((args) => args[0] === "fail-scan")).toBe(
-              false,
-            );
-          }
+        await expect(result).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+        if (discovery === "running") {
+          expect(commands.at(-1)?.[0]).toBe("fail-scan");
         } else {
-          const recovered = await result;
-          expect(recovered.review).not.toHaveProperty("status");
-          expect(recovered.findings.findings).toHaveLength(1);
-          expect(recovered.threadId).toBe("scan-thread");
-          if (missingWorker) expect(recovered.cost).toBeNull();
-          else expect(recovered.cost?.estimatedUsd).toBe(0.00488);
           expect(warnings).toEqual([
             `Scan stopped: short-context budget baseline $0.00488 exceeded the $0.004 limit; estimated cost $0.00488–$0.01156 (standard, context unknown, cache writes unknown); scan output directory: ${scanDir}.`,
           ]);
@@ -16197,7 +16157,7 @@ if __name__ == "__main__":
         );
         expect(onLifecycle.mock.calls.map(([scan]) => scan.status)).toEqual([
           "running",
-          completion === "completed" ? "completed" : "failed",
+          "failed",
         ]);
       } finally {
         clearTimeout(keepAlive);

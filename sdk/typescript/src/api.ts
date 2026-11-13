@@ -2261,20 +2261,12 @@ export class CodexSecurity {
     let validationThreadId: string | undefined;
     let nativeTurnFailure: string | undefined;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
-    let budgetRecovery: {
-      expectation: ScanExpectation;
-      pluginRoot: string;
-      pythonPath: string;
-      protectedRoot: string;
-      model: string;
-      pricingContext?: ScanPricingContext;
-      threadId: string | null;
-    } | null = null;
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let activeScan: {
       id: string;
+      mode: ScanMode;
       options: WorkbenchCommandOptions;
     } | null = null;
     let stopHeadDriftMonitor: (() => void) | undefined;
@@ -2646,17 +2638,6 @@ export class CodexSecurity {
       };
       const { model } = scanModelConfiguration(effectiveConfig);
       validateScanCostLimit(options.maxCostUsd, model, pricingContext);
-      if (mode === "deep" && options.maxCostUsd !== undefined) {
-        budgetRecovery = {
-          expectation,
-          pluginRoot: runtime.plugin.installedRoot,
-          pythonPath: session.python,
-          protectedRoot,
-          model,
-          pricingContext,
-          threadId: null,
-        };
-      }
       const trackScopedInventory =
         options.resumeScanId === undefined &&
         !hosted &&
@@ -3233,7 +3214,7 @@ export class CodexSecurity {
       costTracker = tracker;
       const targetRevision =
         registeredRevision === "unversioned" ? null : registeredRevision;
-      activeScan = { id: scanId, options: workbenchOptions };
+      activeScan = { id: scanId, mode, options: workbenchOptions };
       await this.#operationTelemetry?.bindScan(scanId);
       if (options.resumeScanId === undefined)
         notifyScanLifecycle(options, registration);
@@ -3580,7 +3561,6 @@ export class CodexSecurity {
       };
       if (typeof resumeThreadId === "string") {
         tracker.start(resumeThreadId);
-        if (budgetRecovery !== null) budgetRecovery.threadId = resumeThreadId;
         await tracker.refresh().catch(reportTrackingError);
       }
       checkOpen();
@@ -3733,7 +3713,6 @@ export class CodexSecurity {
           if (resumeThreadId !== undefined) {
             return;
           }
-          if (budgetRecovery !== null) budgetRecovery.threadId = threadId;
           if (directDeepScan)
             tracker.recordUsage(DIRECT_DEEP_SCAN_CONTROL_USAGE, threadId);
           tracker.start(threadId);
@@ -4187,9 +4166,7 @@ export class CodexSecurity {
         verifiedCost.estimatedUsd > failure.maxCostUsd &&
         (customValidation.status !== "running" ||
           validationThreadId !== undefined) &&
-        budgetRecovery !== null &&
-        budgetRecovery.threadId !== null &&
-        activeScan !== null &&
+        activeScan?.mode === "deep" &&
         !callerSignal.aborted
       ) {
         try {
@@ -4216,22 +4193,6 @@ export class CodexSecurity {
           activeScan = null;
           notifyScanLifecycle(options, completion["scan"]);
           runPostScan = null;
-          const result = await collectResult(
-            {
-              status: "completed",
-              model: budgetRecovery.model,
-              ...turnPricingMetadata(budgetRecovery.pricingContext),
-              usage: snapshot.usage,
-            },
-            budgetRecovery.threadId,
-            scanDir,
-            budgetRecovery.pluginRoot,
-            budgetRecovery.expectation,
-            callerSignal,
-            true,
-            budgetRecovery.pythonPath,
-            budgetRecovery.protectedRoot,
-          );
           const completedScan = completion["scan"];
           const targetWarnings = new Set(
             Array.isArray(completion["targetWarnings"])
@@ -4256,7 +4217,6 @@ export class CodexSecurity {
                 : undefined,
             );
           }
-          return result;
         } catch {}
       }
       if (activeScan !== null && scanTurnStatus !== null) {
