@@ -3279,6 +3279,7 @@ def _write_prepared_scan_finalization(
     source_root: Path | None = None,
     *,
     projection_warnings: list[str] | None = None,
+    replace_review_checkpoint: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
@@ -3306,7 +3307,9 @@ def _write_prepared_scan_finalization(
         _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
         if "coverageRef" in scan:
             _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
-        elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
+        elif "preservedSources" not in scan and (
+            replace_review_checkpoint or not (scan_dir / "checkpoint-head.json").exists()
+        ):
             checkpoint = {
                 "scanId": scan["id"],
                 "complete": scan["status"] == "completed",

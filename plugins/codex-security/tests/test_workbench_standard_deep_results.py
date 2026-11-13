@@ -2202,7 +2202,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
         warning,
     )["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findingCount"] == 1
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     assert completed["warnings"] == [warning]
@@ -2217,7 +2217,7 @@ def test_budget_exhaustion_preserves_validated_standard_results_without_candidat
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     assert sarif["runs"][0]["invocations"] == [
         {
-            "executionSuccessful": True,
+            "executionSuccessful": False,
             "toolExecutionNotifications": [{"level": "warning", "message": {"text": warning}}],
         }
     ]

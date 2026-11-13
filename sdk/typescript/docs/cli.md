@@ -1291,11 +1291,15 @@ Node.js decoder bundled with the plugin.
 Missing or unreadable usage fails budget verification. Without a limit, usage
 reporting remains best effort.
 
-When Deep discovery has finished at a cost stop and usage is verified, the scan returns a sealed
-report and retains unvalidated candidates as follow-up work. The saved report and
-the manifest's `scan.scope.limitations` record that validation was deferred.
-Reaching a configured limit with a valid finalized report returns `0` by default,
-or `1` if findings meet a configured failure threshold.
+When Deep discovery has finished at a cost stop and usage is verified, the scan
+retains a sealed report and unvalidated candidates as follow-up work. The saved
+report and the manifest's `scan.scope.limitations` record that validation was
+deferred. The manifest uses `scan.status: "failed"`, SARIF reports
+`executionSuccessful: false`, and the CLI emits `scan.failed` with
+`classification="cost_limit_exceeded"` and exits `2`. This is the same
+machine-readable stopped outcome used when the limit is reached before discovery
+finishes; retained findings remain available, but absent findings are
+inconclusive.
 
 When a worker turn fails with a known cybersecurity policy refusal or an
 exhausted usage limit, Deep Scan stops retries and replacements, cancels active
