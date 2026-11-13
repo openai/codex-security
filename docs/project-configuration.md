@@ -419,6 +419,17 @@ values, insert defaults, or discard unknown wrapper keys. Completion inside
 existing checks. CLI `scan --schema --json` and result artifact schemas remain
 separate contracts.
 
+### Deep Scan sandbox qualification
+
+The CLI dry run and SDK `preflight()` are configuration checks, not sandbox
+qualification. They do not start a Deep Scan worker or execute a command under
+its generated permissions, so they cannot establish that the worker enforces
+filesystem, credential-store, or network restrictions. The documented CLI and
+SDK preflight surfaces do not export that generated policy or run a synthetic
+command under it. Do not use either preflight result as evidence of worker
+isolation. See the [security policy](../SECURITY.md) for the limits of read-only
+worker execution and inherited tools.
+
 ## Saved reruns
 
 New recipes retain resolved native configuration, scope, auth choice, finding
