@@ -1195,7 +1195,9 @@ def complete_budget_exhausted_scan(
                 f"Deep Scan reached its cost limit after an estimated "
                 f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
             )
-        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        saved_results.budget_exhausted_draft(
+            _WORKBENCH_DB_CONTEXT, scan, scan_dir, candidates, warning
+        )
         warnings = json.loads(scan["completion_warnings_json"])
         if warning not in warnings:
             connection.execute(
@@ -1276,12 +1278,6 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
                 "Canonical Deep Scan candidate must include a location in its in-scope inventory."
             )
     return candidates
-
-
-def budget_exhausted_draft(
-    scan: sqlite3.Row, scan_dir: Path, candidates: list[dict[str, Any]], warning: str
-) -> None:
-    saved_results.budget_exhausted_draft(sys.modules[__name__], scan, scan_dir, candidates, warning)
 
 
 def complete_scan_locked(
