@@ -1228,7 +1228,7 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
                 for line in source
                 if line.strip()
             ]
-    except (ContractError, OSError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         raise SystemExit(f"{label} is invalid: {exc}") from exc
 
     candidate_ids: set[str] = set()
