@@ -1322,7 +1322,7 @@ describe("CLI workbench", () => {
         else if (problem === "unreadable configuration") await mkdir(file);
         else if (problem === "rejected configuration")
           await writeFile(file, "model = []\n");
-        const { saved, onWorkbench } = batchWithInitialSave();
+        const { batches, saved, onWorkbench } = batchWithInitialSave();
         batches[2]!.afterFindings.length = 0;
         const { stdout, stderr, runCli } = createCliTest(main);
         const code = await runCli(
