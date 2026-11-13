@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Synthetic SW-003 Lambda workloads in an isolated test account
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+  OrderKey:
+    Type: String
+  BillingKey:
+    Type: String
+  AnalyticsKey:
+    Type: String
+  ContinuumExternalId:
+    Type: String
+    NoEcho: true
+  ContinuumEnvironmentArn:
+    Type: String
+    Default: ""
+  ContinuumCollectorArn:
+    Type: String
+    Default: ""
+
+Conditions:
+  HasCollectorAssociation: !And
+    - !Not [!Equals [!Ref ContinuumEnvironmentArn, ""]]
+    - !Not [!Equals [!Ref ContinuumCollectorArn, ""]]
+
+Resources:
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  ContinuumIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /continuum/integrations/
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: continuum.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ContinuumExternalId
+      Policies:
+        - PolicyName: SourceBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/sw003/*
+                  - !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/context/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/continuum-patches/*
+
+  ContinuumCollectorDataAccessRole:
+    Type: AWS::IAM::Role
+    Condition: HasCollectorAssociation
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: continuum.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Ref ContinuumEnvironmentArn
+      Policies:
+        - PolicyName: CollectorDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: continuum:GetCollectorDataAccessAuthorization
+                Resource: !Ref ContinuumCollectorArn
+
+  OrderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: app.lambda_handler.handler
+      Role: !GetAtt ExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref OrderKey
+      Timeout: 5
+      MemorySize: 128
+
+  BillingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: service.handler
+      Role: !GetAtt ExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref BillingKey
+      Environment:
+        Variables:
+          AUTHORIZED_TENANT_ID: acme
+      Timeout: 5
+      MemorySize: 128
+
+  AnalyticsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: worker.handler
+      Role: !GetAtt ExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref AnalyticsKey
+      Timeout: 5
+      MemorySize: 128
+
+  OrderApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: sw003-order-api
+      ProtocolType: HTTP
+
+  OrderIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref OrderApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt OrderFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  OrderRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref OrderApi
+      RouteKey: $default
+      Target: !Join ["/", [integrations, !Ref OrderIntegration]]
+
+  OrderStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref OrderApi
+      StageName: $default
+      AutoDeploy: true
+
+  OrderInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref OrderFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${OrderApi}/*/*
+
+  AnalyticsSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(1 day)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AnalyticsFunction.Arn
+          Id: analytics
+
+  AnalyticsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AnalyticsFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AnalyticsSchedule.Arn
+
+Outputs:
+  OrderApiUrl:
+    Value: !Sub https://${OrderApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  OrderFunctionArn:
+    Value: !GetAtt OrderFunction.Arn
+  BillingFunctionArn:
+    Value: !GetAtt BillingFunction.Arn
+  AnalyticsFunctionArn:
+    Value: !GetAtt AnalyticsFunction.Arn
+  ContinuumIntegrationRoleArn:
+    Value: !GetAtt ContinuumIntegrationRole.Arn
+  ContinuumCollectorDataAccessRoleArn:
+    Condition: HasCollectorAssociation
+    Value: !GetAtt ContinuumCollectorDataAccessRole.Arn
