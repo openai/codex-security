@@ -278,8 +278,7 @@ codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
 For Opper, save this profile in `$CODEX_HOME/opper.config.toml`
-(default `~/.codex/opper.config.toml`). The gateway requires cached web search
-to be disabled.
+(default `~/.codex/opper.config.toml`). Opper requires `web_search = "disabled"`.
 
 ```toml
 model_provider = "opper"
@@ -294,9 +293,9 @@ env_key = "OPPER_API_KEY"
 ```
 
 Set `OPPER_API_KEY` in your environment and run
-`codex-security scan . --codex 'profile="opper"'`. Choose a model with tool
-calling and streaming. This profile uses `--auth auto` (the default) or
-`--auth api-key`. For `--auth chatgpt`, select a provider configured for ChatGPT.
+`codex-security scan . --codex 'profile="opper"'`. Choose a model that supports
+tool calling and streaming. Verification covered profile loading and a request to
+a local Responses endpoint.
 See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents/codex).
 
 ### Hugging Face compatibility
