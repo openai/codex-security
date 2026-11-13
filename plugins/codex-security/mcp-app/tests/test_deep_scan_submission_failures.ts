@@ -7,7 +7,7 @@ import { afterEach, test, type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { ThreadEvent } from "@openai/codex-sdk";
+import type { McpToolCallItem, ThreadEvent } from "@openai/codex-sdk";
 import {
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
@@ -132,7 +132,7 @@ async function artifactClient(root: string, id = scanId) {
     async call(
       tool: string,
       args: Record<string, unknown>,
-    ): Promise<ThreadEvent> {
+    ): Promise<{ type: "item.completed"; item: McpToolCallItem }> {
       const reply = CallToolResultSchema.parse(
         await client.callTool({ name: tool, arguments: args }),
       );
@@ -161,6 +161,18 @@ async function artifactClient(root: string, id = scanId) {
       await server.close();
     },
   };
+}
+
+async function readWorkerCheckpoint(artifactDir: string) {
+  const head = JSON.parse(
+    await readFile(path.join(artifactDir, "checkpoint-head.json"), "utf8"),
+  );
+  return JSON.parse(
+    await readFile(
+      path.join(artifactDir, "checkpoints", head.checkpoint),
+      "utf8",
+    ),
+  );
 }
 
 for (const failure of ["schema", "handler", "transport"] as const) {
@@ -255,10 +267,7 @@ test("persisted submissions reset the streak; other tools and intermediate event
         }),
       );
     const success = await artifacts.call(draftTool, artifacts.draft);
-    assert.equal(
-      (success as { item: { status: string } }).item.status,
-      "completed",
-    );
+    assert.equal(success.item.status, "completed");
     events.push(success);
   }
   // Failed reads, foreign tool names, and nonterminal updates are not submissions.
@@ -267,16 +276,14 @@ test("persisted submissions reset the streak; other tools and intermediate event
       ...artifacts.draft,
       threatModel: "{}",
     });
-    assert.equal(failure.type, "item.completed");
-    if (failure.type !== "item.completed") throw new Error("Missing item");
     events.push({
       ...failure,
       item: { ...failure.item, server: "foreign" },
-    } as ThreadEvent);
+    });
     events.push({
       ...failure,
       item: { ...failure.item, tool: "read_deep_scan_peer_notes" },
-    } as ThreadEvent);
+    });
     events.push({ ...failure, type: "item.updated" });
   }
   await f.events(events);
@@ -419,18 +426,7 @@ test("coordinator retains accepted findings and partial checkpoints when submiss
   assert.ok(aggregate.findings[0].provenance);
   for (const worker of store.workers.values()) {
     if (worker.kind !== "discovery") continue;
-    const head = JSON.parse(
-      await readFile(
-        path.join(worker.artifactDir, "checkpoint-head.json"),
-        "utf8",
-      ),
-    );
-    const checkpoint = JSON.parse(
-      await readFile(
-        path.join(worker.artifactDir, "checkpoints", head.checkpoint),
-        "utf8",
-      ),
-    );
+    const checkpoint = await readWorkerCheckpoint(worker.artifactDir);
     assert.equal(checkpoint.scanId, scan.run.scanId);
     assert.equal(checkpoint.complete, worker.status === "succeeded");
     assert.equal(checkpoint.findings.length, 1);
@@ -515,18 +511,7 @@ for (const cancel of [false, true]) {
     const worker = [...store.workers.values()].find(
       (worker) => worker.kind === "discovery",
     )!;
-    const head = JSON.parse(
-      await readFile(
-        path.join(worker.artifactDir, "checkpoint-head.json"),
-        "utf8",
-      ),
-    );
-    const checkpoint = JSON.parse(
-      await readFile(
-        path.join(worker.artifactDir, "checkpoints", head.checkpoint),
-        "utf8",
-      ),
-    );
+    const checkpoint = await readWorkerCheckpoint(worker.artifactDir);
     assert.equal(checkpoint.findings.length, 1);
     assert.equal(checkpoint.complete, !cancel);
     assert.equal(checkpoint.scanId, scan.run.scanId);
