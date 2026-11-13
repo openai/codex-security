@@ -1146,7 +1146,7 @@ For filesystem and approval behavior, see the
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                            |
 | `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                              |
 | `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                               |
-| `CODEX_MCP_NODE_PATH`                                                       | Node executable for the plugin's MCP server and helpers. See [helper Node runtime](#helper-node-runtime).            |
+| `CODEX_MCP_NODE_PATH`                                                       | Node executable for the MCP plugin launcher. See [helper Node runtime](#helper-node-runtime).                        |
 | `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                           |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                     |
 | `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                            |
@@ -1231,24 +1231,20 @@ directory.
 
 #### Helper Node runtime
 
-The plugin's MCP server and helpers run in Node.js. Set `CODEX_MCP_NODE_PATH`
-to the absolute path of a compatible Node executable to select their runtime.
-A usable explicit override takes precedence over automatic runtime discovery.
-For scans launched from another app, the variable must be available in the
-environment inherited by its plugin server when that server starts.
-On macOS, automatic discovery checks managed runtimes for native-addon
-compatibility before trying Node executables on `PATH`.
+The plugin launcher uses `CODEX_MCP_NODE_PATH` to select Node for its MCP server
+and helpers. Set it to an absolute executable path in the environment that
+starts the plugin. On macOS, automatic discovery checks managed runtimes for
+native-addon compatibility before trying Node on `PATH`.
 
-If a macOS helper fails to load `unix.node` with an error about
-`different Team IDs`, try a standalone Node installation. With Homebrew's
-`node@24` already installed, run this in the terminal where you launch the CLI:
+If the launcher reports that `unix.node` and Node have `different Team IDs`,
+try a standalone Node installation. For example, with Homebrew's `node@24`:
 
 ```sh
 export CODEX_MCP_NODE_PATH="$(brew --prefix node@24)/bin/node"
 ```
 
-Then rerun your original command from that terminal. To return to automatic
-runtime selection for subsequent commands, run `unset CODEX_MCP_NODE_PATH`.
+Rerun the command from that terminal. Use `unset CODEX_MCP_NODE_PATH` to
+restore automatic selection.
 
 ### Progress and cost
 
