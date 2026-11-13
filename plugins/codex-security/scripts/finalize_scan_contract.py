@@ -2193,7 +2193,9 @@ def _validate_schema_node(
             try:
                 _validate_schema_node(value, condition, context, root_schema)
             except ContractError:
-                pass
+                else_schema = schema.get("else")
+                if isinstance(else_schema, dict):
+                    _validate_schema_node(value, else_schema, context, root_schema)
             else:
                 then_schema = schema.get("then")
                 if isinstance(then_schema, dict):

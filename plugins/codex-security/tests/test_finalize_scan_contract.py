@@ -595,6 +595,25 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
             path,
         )
 
+    def test_manifest_schema_requires_mode_and_review_without_coverage_ref(self) -> None:
+        example_dir = EXAMPLE_DIR.parent / "completed-scan"
+        manifest = json.loads((example_dir / "scan-manifest.json").read_text(encoding="utf-8"))
+        schema = EXAMPLE_DIR.parents[1] / "schemas" / "scan-manifest.schema.json"
+        for field in ("review", "mode"):
+            with self.subTest(field=field):
+                incomplete = copy.deepcopy(manifest)
+                del incomplete["scan"][field]
+                with self.assertRaisesRegex(
+                    FINALIZER.ContractError, rf"\.{field}: missing required schema property"
+                ):
+                    FINALIZER.validate_against_schema(incomplete, schema)
+
+    def test_manifest_schema_accepts_legacy_coverage_ref(self) -> None:
+        manifest = json.loads((EXAMPLE_DIR / "scan-manifest.json").read_text(encoding="utf-8"))
+        FINALIZER.validate_against_schema(
+            manifest, EXAMPLE_DIR.parents[1] / "schemas" / "scan-manifest.schema.json"
+        )
+
     def test_finalize_normalizes_unsealed_deep_inventory_strategy_alias(self) -> None:
         self.coverage["mode"] = "deep_repository"
         self.coverage["inventoryStrategy"] = "deep_repository_repeated_discovery"
