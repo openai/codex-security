@@ -47,7 +47,7 @@ function docx(
 function docxBody(body: string): Uint8Array {
   return zipSync({
     "word/document.xml": strToU8(
-      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
+      `<?xml version="1.0"?>\n<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
     ),
   });
 }
@@ -502,16 +502,6 @@ describe("scan knowledge bases", () => {
       docx("Authentication", "Review sessions", "<w:cr/>"),
     );
     await writeFile(
-      join(root, "declared.docx"),
-      zipSync({
-        "word/document.xml": strToU8(
-          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
-            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
-            "<w:body><w:p><w:r><w:t>Declared policy.</w:t></w:r></w:p></w:body></w:document>",
-        ),
-      }),
-    );
-    await writeFile(
       join(root, "paired-tab.docx"),
       docx("Role", "Capability", "<w:tab></w:tab>"),
     );
@@ -571,7 +561,6 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
-    expect(documents).toContain("Declared policy.\n");
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
     expect(documents).toContain("X-Frame-Options\n");
