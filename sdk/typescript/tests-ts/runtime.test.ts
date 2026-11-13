@@ -4924,6 +4924,7 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(grant.status, grant.stderr).toBe(0);
         const descriptor = inspectWindowsTestAcl(
           [
+            '$env:PSModulePath = "$PSHOME\\Modules"',
             "(Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:TEST_PARENT).Sddl",
           ],
           { ...process.env, TEST_PARENT: parent },
