@@ -1190,6 +1190,12 @@ describe("CLI workbench", () => {
       };
     }
 
+    function batchWithInitialSave() {
+      const fixture = batchWorkbench(["empty", "match", "later"]);
+      fixture.batches[0]!.afterFindings.length = 0;
+      return fixture;
+    }
+
     test("skips conflicting and failed batches without losing saved groups", async () => {
       const { stdout, stderr, runCli } = createCliTest(main);
       const { saved, onWorkbench } = batchWorkbench(
@@ -1252,12 +1258,7 @@ describe("CLI workbench", () => {
     });
 
     test("stops on bootstrap failure after saving an empty pair", async () => {
-      const { batches, saved, onWorkbench } = batchWorkbench([
-        "empty",
-        "match",
-        "later",
-      ]);
-      batches[0]!.afterFindings.length = 0;
+      const { saved, onWorkbench } = batchWithInitialSave();
       const { stdout, stderr, runCli } = createCliTest(main);
       const code = await runCli(
         argv,
@@ -1321,12 +1322,7 @@ describe("CLI workbench", () => {
         else if (problem === "unreadable configuration") await mkdir(file);
         else if (problem === "rejected configuration")
           await writeFile(file, "model = []\n");
-        const { batches, saved, onWorkbench } = batchWorkbench([
-          "empty",
-          "match",
-          "later",
-        ]);
-        batches[0]!.afterFindings.length = 0;
+        const { saved, onWorkbench } = batchWithInitialSave();
         batches[2]!.afterFindings.length = 0;
         const { stdout, stderr, runCli } = createCliTest(main);
         const code = await runCli(
@@ -1429,8 +1425,8 @@ describe("CLI workbench", () => {
           onMatch: async (input) => {
             const id = input.after[0]!.occurrenceId;
             matched.push(id);
-            if (id === "second" && failure !== "save") {
-              if (failure === "cancellation") signals.emit("SIGINT");
+            if (id === "second" && failure === "cancellation") {
+              signals.emit("SIGINT");
               throw error;
             }
             return { matches: [], uncertain: [] };
