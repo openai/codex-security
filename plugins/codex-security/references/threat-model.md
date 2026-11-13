@@ -6,7 +6,7 @@ Model how the authorized software is used and which boundaries protect its asset
 
 - Identify the product, users, interfaces, components, and supported execution/deployment modes. Separate production, privileged administration/build/release workflows, and tests/examples; include each only within the authorized scope.
 - Follow representative inputs through actual entry points, controls, and sensitive consumers. Establish the actors, transferred data or authority, protected asset, and invariant. Use callers and effective behavior rather than keyword matches or a complete call graph.
-  - For example, if you find a route in a test or on a deleted line, check whether the app still serves it.
+  - For routes found in tests or deleted lines, verify the app still serves them.
 - For library APIs, identify which protections the library enforces by default and which its callers must enable or implement.
 - For workers, extensions, native bindings, and tool APIs, distinguish available operations from enforced caller authority. Trace inherited permissions, brokered writes, ownership claims, and the component enforcing a restriction. Do not invent isolation between actors with the same authority.
 - When configuration or deployment changes a boundary, trace materially different paths from the consumer through helper returns, path derivation, configuration precedence, and mounts. Record effective locations, readers/writers or recipients, controls, and source evidence. A directory name, mount label, or separate setting does not prove isolation. Keep discrepancies between documented and actual behavior, including material platform differences.
