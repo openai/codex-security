@@ -66,6 +66,7 @@ def patch_artifact_preview(
     old_headers = 0
     new_headers = 0
     mail = pending_mail_header = signature = False
+    mail_separator = None
     hunk_lines = 0
     expect_hunk = False
     # Older saved previews can contain a bare Git header followed directly by changes.
@@ -79,18 +80,29 @@ def patch_artifact_preview(
                     mail = _FORMAT_PATCH_FROM.fullmatch(chunk) is not None
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start and mail and not (hunk_lines or signature):
-                    # A format-patch message can quote a header in prose. Git emits
-                    # metadata or a unified path pair immediately after a real header.
-                    if chunk.rstrip(b"\r\n") == b"---":
-                        # Git separates the diffstat from the message, which may quote entire diffs.
-                        file_count = additions = deletions = old_headers = new_headers = 0
-                        expect_hunk = False
-                    if pending_mail_header and re.match(_GIT_FILE_METADATA, chunk):
-                        file_count += 1
-                    pending_mail_header = chunk.startswith(b"diff --git ")
-                    if file_count and chunk.rstrip(b"\r\n") == b"-- ":
-                        signature = True
+                if at_line_start and mail:
+                    line = chunk.rstrip(b"\r\n")
+                    # A quoted patch can include a signature or an unfinished hunk.
+                    # Git's diffstat ends with a summary and a blank before the real diff.
+                    if line == b"---":
+                        mail_separator = "diffstat"
+                    elif mail_separator == "diffstat" and line.startswith(b" "):
+                        if re.match(rb" [0-9]+ files? changed(?:,|$)", line):
+                            mail_separator = "summary"
+                    elif mail_separator == "summary" and not line:
+                        mail_separator = "patch"
+                    else:
+                        if mail_separator == "patch" and line.startswith(b"diff --git "):
+                            file_count = additions = deletions = old_headers = new_headers = 0
+                            hunk_lines = 0
+                            expect_hunk = signature = pending_mail_header = False
+                        mail_separator = None
+                    if not (hunk_lines or signature):
+                        if pending_mail_header and re.match(_GIT_FILE_METADATA, chunk):
+                            file_count += 1
+                        pending_mail_header = chunk.startswith(b"diff --git ")
+                        if file_count and line == b"-- ":
+                            signature = True
                 if at_line_start and not signature and (not mail or file_count):
                     if hunk_lines:
                         # Both sides count a context line; neither counts a no-newline marker.
