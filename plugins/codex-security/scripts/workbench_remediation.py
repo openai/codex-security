@@ -83,10 +83,10 @@ def patch_artifact_preview(
                 if at_line_start and mail:
                     line = chunk.rstrip(b"\r\n")
                     # A quoted patch can include a signature or an unfinished hunk.
-                    # Git's diffstat ends with a summary and a blank before the real diff.
+                    # Git can list file creations, modes and renames after the diffstat total.
                     if line == b"---":
                         mail_separator = "diffstat"
-                    elif mail_separator == "diffstat" and line.startswith(b" "):
+                    elif mail_separator in ("diffstat", "summary") and line.startswith(b" "):
                         if re.match(rb" [0-9]+ files? changed(?:,|$)", line):
                             mail_separator = "summary"
                     elif mail_separator == "summary" and not line:
