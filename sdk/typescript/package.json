@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -55,6 +55,7 @@
   "publishConfig": {
     "access": "public",
     "executableFiles": [
+      "_bundled_plugin/scripts/dispatch_inventory_tool",
       "_bundled_plugin/scripts/launch_codex_security_mcp"
     ]
   },
@@ -104,6 +105,7 @@
     "smol-toml": "1.9.1",
     "string-width": "8.3.0",
     "strip-ansi": "7.2.0",
+    "tokenx": "1.6.0",
     "yaml": "2.9.1",
     "yauzl": "3.4.0",
     "zod": "4.6.7"

@@ -192,6 +192,10 @@ function optionRow(row: Row, command: string): Row {
     }
     return `<${VALUE_LABELS[name] ?? (type === "number" ? "count" : name)}>`;
   });
+  if (name === "token-limit")
+    description = "Maximum tokens in the text view (nonnegative integer).";
+  if (name === "token-offset")
+    description = "Start the text view at this token (nonnegative integer).";
   label = label.replace(/^--([\w-]+), (-\w)/u, "$2, --$1");
   if (command === "scan" && !/default:/iu.test(description)) {
     const setting = DEEP_SCAN_SETTINGS.find(
@@ -226,7 +230,7 @@ function globalRows(rows: Row[], command: string): Row[] {
   ) {
     formats.label = formats.label.replace("|md", "");
   }
-  if (formats && command !== "scan import") {
+  if (formats) {
     visible.push({
       label: "--json",
       description: "Shorthand for --format json.",
@@ -241,11 +245,11 @@ function globalRows(rows: Row[], command: string): Row[] {
 }
 
 /** Present Incur's generated help without changing its routing or command output. */
-export function formatCliHelp(text: string, columns = 80): string {
+export function formatCliHelp(text: string, columns = 80): string | undefined {
   const header = text.match(
     /^(codex-security(?:@[^\s]+)?((?: [a-z][a-z-]*)*))(?: — ([^\n]*))?\n\nUsage: /u,
   );
-  if (!header) return text;
+  if (!header) return undefined;
   const command = header[2]!.trim();
   const sections: string[] = [];
   // Presentation width only; long paths and copyable commands remain intact.
@@ -302,6 +306,16 @@ export function formatCliHelp(text: string, columns = 80): string {
                 description: "Choose a collector below.",
               },
               {
+                label: "CLI, API, or MCP source",
+                description:
+                  "Ask Codex to import it using the publish-findings skill.",
+              },
+              {
+                label: "Workbench findings",
+                description:
+                  "Ask Codex to publish a stored import or selected finding versions.",
+              },
+              {
                 label: "Saved vendor report",
                 description:
                   "See codex-security publish findings --help for local storage and publication.",
@@ -329,7 +343,11 @@ export function formatCliHelp(text: string, columns = 80): string {
       );
     } else if (title === "Options:") {
       const options = parseRows(lines)
-        .filter((row) => command !== "publish scan" || rowName(row) !== "csv")
+        .filter(
+          (row) =>
+            !(command === "publish scan" && rowName(row) === "csv") &&
+            !(command === "publish check" && rowName(row) === "to"),
+        )
         .map((row) => optionRow(row, command));
       const rows = options.filter(
         (row) => !row.description.startsWith("[deprecated]"),

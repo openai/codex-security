@@ -5,6 +5,7 @@ import { main } from "../src/cli.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { createCliTest } from "./support/cli-run.js";
 
 async function help(args: readonly string[], columns?: number) {
   const stdout = capture(true);
@@ -236,8 +237,8 @@ describe("CLI help", () => {
 
   test("distinguishes JSON file import from JSON output", async () => {
     const text = await help(["scan", "import", "--help"]);
-    expect(option(text, "--json")).toContain("<file>");
-    expect(option(text, "--csv")).toContain("<file>");
+    expect(option(text, "--json")).toContain("--format json");
+    expect(option(text, "--input-format")).toContain("Input format");
     expect(text.replace(/\s+/gu, " ")).toContain("--format json");
     expect(option(text, "--format")).toContain("json");
   });
@@ -366,6 +367,40 @@ describe("CLI help", () => {
     expect(stderr.text()).toContain(`Did you mean '${verb}'?`);
   });
 
+  test.each([
+    { command: [], expected: "Usage: codex-security" },
+    ...["skills", "mcp", "import", "publish", "completions"].map((name) => ({
+      command: [name],
+      expected: `Usage: codex-security ${name}`,
+    })),
+    { command: ["completions", "zsh"], expected: "#compdef" },
+  ])(
+    "formats the text from $command before applying JSON token controls",
+    async ({ command, expected }) => {
+      async function run(...flags: string[]) {
+        const { runCli, stdout, stderr } = createCliTest(main);
+        expect(await runCli([...command, ...flags], dependencies())).toBe(0);
+        expect(stderr.text()).toBe("");
+        return stdout.text();
+      }
+      const plain = await run();
+      expect(plain).toContain(expected);
+      expect(JSON.parse(await run("--json"))).toBe(plain);
+      const flags = ["--format=jsonl", "--full-output"];
+      expect(JSON.parse(await run(...flags))).toMatchObject({
+        ok: true,
+        data: plain,
+      });
+      expect(JSON.parse(await run(...flags, "--token-count"))).toBeGreaterThan(
+        0,
+      );
+      expect(JSON.parse(await run(...flags, "--token-limit=1"))).toMatchObject({
+        ok: true,
+        meta: { nextOffset: 1 },
+      });
+    },
+  );
+
   test("uses the completion shell schema without generating a script", async () => {
     const schema = JSON.parse(
       await help(["completions", "--json", "--schema"]),
@@ -480,6 +515,8 @@ describe("CLI help", () => {
     const menu = (await help(["import", "--help"])).replace(/\s+/gu, " ");
     expect(menu).toContain("publish findings --help");
     expect(menu).toContain("scan import --help");
+    expect(menu).toContain("publish-findings skill");
+    expect(menu).toContain("publish a stored import");
     const vendor = await help(["publish", "findings", "--help"], 60);
     const preview = vendor
       .split("\n")
@@ -532,7 +569,7 @@ describe("CLI help", () => {
     }
   });
 
-  test("completes scan import and its file options from the command registry", async () => {
+  test("completes scan import and its input format option from the command registry", async () => {
     const previousShell = process.env["COMPLETE"];
     const previousIndex = process.env["_COMPLETE_INDEX"];
     try {
@@ -540,9 +577,9 @@ describe("CLI help", () => {
       process.env["_COMPLETE_INDEX"] = "2";
       expect((await help(["--", "cs", "scan", "im"])).trim()).toBe("import");
       process.env["_COMPLETE_INDEX"] = "3";
-      expect((await help(["--", "cs", "scan", "import", "--cs"])).trim()).toBe(
-        "--csv",
-      );
+      expect(
+        (await help(["--", "cs", "scan", "import", "--input-f"])).trim(),
+      ).toBe("--input-format");
     } finally {
       if (previousShell === undefined) delete process.env["COMPLETE"];
       else process.env["COMPLETE"] = previousShell;
