@@ -6874,7 +6874,7 @@ export async function main(
                       dependencies.environment,
                     );
                     const budget = batchScanBudget(
-                      prompts.reserveResumeBudget?.(),
+                      prompts.reserveResumeBudget(),
                       recipe,
                     );
                     const security = dependencies.createSecurity({

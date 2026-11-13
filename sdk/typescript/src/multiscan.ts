@@ -131,7 +131,7 @@ export interface MultiscanOptions extends ScanPromptSettings {
     prompts: ScanPromptSettings &
       Pick<ScanOptions, "onMeasurement" | "onTelemetry"> & {
         /** Reserve budget only when resuming execution of a saved scan. */
-        reserveResumeBudget?: () => number;
+        reserveResumeBudget: () => number | undefined;
         knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
         /** @internal Preserve correlation when the resumed SDK has no saved binding. */
         telemetryContext?: { operationId: string; parentAttemptId?: string };
@@ -565,9 +565,10 @@ async function runCampaign(
         };
         let threatModelPath: string | null | undefined;
         let exhaustedBudget = false;
-        const reserveBudget = (costPool: BatchCostPool) => {
+        const reserveBudget = () => {
+          if (!pool) return undefined;
           try {
-            reservation ??= costPool.reserve(budget.maxCostUsd);
+            reservation ??= pool.reserve(budget.maxCostUsd);
             return reservation.maxCostUsd;
           } catch (error) {
             exhaustedBudget = true;
@@ -620,9 +621,7 @@ async function runCampaign(
               }
               result = await options.recoverScan(scanDir, {
                 ...options,
-                ...(pool === undefined
-                  ? {}
-                  : { reserveResumeBudget: () => reserveBudget(pool) }),
+                reserveResumeBudget: reserveBudget,
                 knowledgeBaseSnapshot: knowledge?.snapshot,
                 ...observers,
                 ...(operationId === undefined
@@ -635,8 +634,7 @@ async function runCampaign(
           if (result === undefined) {
             if (options.recoverScan !== undefined) attempt = nextAttempt();
             scanDir = join(artifactRoot, `attempt-${attempt}`);
-            const maxCostUsd =
-              pool === undefined ? budget.maxCostUsd : reserveBudget(pool);
+            const maxCostUsd = reserveBudget() ?? budget.maxCostUsd;
             notifyProgress(options, {
               repository: task.id,
               attempt,
