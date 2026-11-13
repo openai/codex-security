@@ -2508,6 +2508,17 @@ export class CodexSecurity {
               [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
+      let alternateProviderEnvironment: ProcessEnvironment | undefined;
+      if (
+        mode === "deep" &&
+        (options.auth !== "chatgpt" ||
+          authentication.method !== "stored_credentials")
+      ) {
+        alternateProviderEnvironment =
+          options.auth !== "chatgpt" && authentication.method === "api_key"
+            ? this.#dependencies.environment
+            : withoutOpenAiApiKeys(this.#dependencies.environment);
+      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
@@ -2515,11 +2526,7 @@ export class CodexSecurity {
           scanDir,
           workerProviderEnvironment,
           selectedWorkerCredentials,
-          mode === "deep" &&
-            (options.auth !== "chatgpt" ||
-              authentication.method !== "stored_credentials")
-            ? withoutOpenAiApiKeys(this.#dependencies.environment)
-            : undefined,
+          alternateProviderEnvironment,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -7721,11 +7728,17 @@ function selectedWorkerRuntimeConfig(
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
+  const alternateProviders =
+    isRecord(providers) && alternateProviderEnvironment !== undefined
+      ? Object.fromEntries(
+          Object.entries(providers).filter(([id]) => id !== provider),
+        )
+      : undefined;
   const providerEnvironment = {
     // Only declared credentials enter the snapshot. The parent provider's
     // prepared values take precedence over credentials for alternate workers.
     ...declaredProviderEnvironment(
-      providers,
+      alternateProviders,
       alternateProviderEnvironment ?? {},
     ),
     ...declaredProviderEnvironment(providers, environment),

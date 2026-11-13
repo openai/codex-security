@@ -2909,6 +2909,7 @@ async function testExternalProviderCredentialsReachWorker() {
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
     ["standardcompute", "STANDARDCOMPUTE_API_KEY"],
+    ["account-gateway", "CODEX_API_KEY", "OPENAI_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
   ] as const) {
@@ -2921,7 +2922,9 @@ async function testExternalProviderCredentialsReachWorker() {
       const deepPath = path.join(fixture.root, "workers.toml");
       const profile = `scan-${provider}`;
       const parentProvider =
-        provider === "openrouter" ? "standardcompute" : provider;
+        provider === "openrouter" || provider === "account-gateway"
+          ? "standardcompute"
+          : provider;
       const selectedKey = `synthetic-${provider}-scan-key`;
       const accountHeaders = headerKey
         ? { [headerKey]: "private-scan-header" }
@@ -3009,7 +3012,9 @@ async function testExternalProviderCredentialsReachWorker() {
           }
           const invocation = await readJson(fixture.markerPath);
           assert.equal(
-            invocation.providerKey ?? invocation.providerHeaders[key],
+            invocation.providerKey ??
+              invocation.providerHeaders[key] ??
+              invocation.openaiAuthentication[key],
             selectedKey,
           );
           if (key !== "STANDARDCOMPUTE_API_KEY")
@@ -3017,7 +3022,10 @@ async function testExternalProviderCredentialsReachWorker() {
               invocation.providerHeaders.STANDARDCOMPUTE_API_KEY,
               undefined,
             );
-          assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
+          assert.deepEqual(invocation.openaiAuthentication, {
+            ...accountHeaders,
+            ...(key === "CODEX_API_KEY" ? { [key]: selectedKey } : {}),
+          });
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {
             model_provider: provider,
