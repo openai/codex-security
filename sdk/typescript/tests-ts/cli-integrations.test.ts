@@ -416,6 +416,34 @@ describe("integration command dispatch", () => {
     }
   }, 30_000);
 
+  test.each(["http", "HTTP", "hTtP", "https", "HTTPS", "hTtPs"])(
+    "MCP URL launchers accept %s without changing the URL",
+    async (scheme) => {
+      await using temp = await scopedTemporaryDirectory("cli-mcp-url-");
+      const { home, run } = await isolatedCli(temp.path);
+      const url = `${scheme}://mcp.example.invalid/MCP?mode=ReadOnly`;
+      const result = await run(
+        "mcp",
+        "add",
+        "--agent=cursor",
+        "--agent=amp",
+        "--json",
+        `--command=${url}`,
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).command).toBe(url);
+      const cursor = JSON.parse(
+        await readFile(join(home, ".cursor", "mcp.json"), "utf8"),
+      );
+      const amp = JSON.parse(
+        await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
+      );
+      expect(cursor.mcpServers["codex-security"]).toEqual({ url });
+      expect(amp["amp.mcpServers"]["codex-security"]).toEqual({ url });
+    },
+    30_000,
+  );
+
   test("project registration keeps linked configurations inside the project", async () => {
     await using temp = await scopedTemporaryDirectory("cli-project-links-");
     const { home, project, run } = await isolatedCli(temp.path);
