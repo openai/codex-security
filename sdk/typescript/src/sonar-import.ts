@@ -1,5 +1,12 @@
 import { hash } from "node:crypto";
-import { lstat, open, readlink, realpath, stat } from "node:fs/promises";
+import {
+  lstat,
+  open,
+  readFile,
+  readlink,
+  realpath,
+  stat,
+} from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { resolveConfigPath } from "./config-path.js";
 import { collectSonarIssues } from "./sonar-collector.js";
@@ -9,15 +16,16 @@ import {
   type ConfiguredFetchRemote,
   prepareLocalImport,
 } from "./external-findings-local.js";
+import { prepareStoredFindingsPublication } from "./stored-findings-publication.js";
 import { commandGitProtectionRoots } from "./local-git-metadata.js";
 import {
+  cloudReviewDigest,
   ExternalPublicationError,
   externalPublicationStateDirectory,
-  prepareNormalizedExternalPublication,
+  prepareNormalizedPublication,
   writeAtomicJson,
   type ExternalPublicationDependencies,
   type ExternalPublicationPreview,
-  type PreparedExternalPublication,
 } from "./external-findings-publish.js";
 import { readScannerJson, stableId } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -30,7 +38,11 @@ import {
   requireOutputOutsideRepositories,
   workbenchEnvironment,
 } from "./runtime.js";
-import { gitMarkerRoot, normalizeRepository } from "./targets.js";
+import {
+  gitMarkerRoot,
+  normalizeRepository,
+  nullIfMissingFile,
+} from "./targets.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson } from "./record.js";
 import {
@@ -50,34 +62,6 @@ interface SonarImportOptions {
   to: "local" | "cloud";
   dryRun: boolean;
   yes: boolean;
-}
-
-function cloudReviewDigest(
-  preview: ExternalPublicationPreview,
-  checkout: string,
-) {
-  return hash(
-    "sha256",
-    canonicalJson({
-      checkout,
-      api: preview.cloudApiUrl,
-      account: preview.accountId,
-      repository: preview.destination.id,
-      connector: preview.destination.repo_connector_id,
-      url: preview.destination.url,
-      reset: preview.destination.reset_marker,
-      source: preview.source,
-      privateImport: preview.privateImport,
-      items: preview.requests.flatMap((request) =>
-        request.items.map((item) => [
-          item.source_finding_id,
-          item.expected_version,
-          request.repository.environment_id,
-          item.evidence,
-        ]),
-      ),
-    }),
-  );
 }
 
 async function readCapture(input: string) {
@@ -313,8 +297,24 @@ export async function prepareSonarImport(
       [],
       fetchRemotes,
     );
-    let cloud: PreparedExternalPublication | undefined;
+    // Record the selection before submitting so a lost response can be replayed
+    // with the workbench checkpoint for these exact finding versions.
+    const selectionPath = `${localCapture}.import`;
+    const storedPublication = async (importId: string, ifCurrent = false) =>
+      (
+        await prepareStoredFindingsPublication(
+          { repository, importId, ifCurrent },
+          { repository: repositoryUrl },
+          dependencies,
+        )
+      ).groups[0];
+    let cloud: ExternalPublicationPreview | undefined;
     let cloudError: string | undefined;
+    const reviewedCapturePath = (preview: ExternalPublicationPreview) =>
+      join(
+        root,
+        `${evidenceDigest}.${checkout}.${cloudReviewDigest(preview, repository)}.json`,
+      );
     if (options.to === "cloud" && local.preview.read > 0) {
       const reviewedCheckout =
         retained?.[2] === checkout && Boolean(retained?.[3]);
@@ -336,27 +336,33 @@ export async function prepareSonarImport(
           "This checkout has no matching Git remote. Verify the Sonar project's repository and pass --source-repository-url to preview Cloud publication.";
         if (!confirmedRepository && !reviewedCheckout)
           throw new Error(bindingError);
-        const prepared = await prepareNormalizedExternalPublication(
-          normalizeSonarFindings(
-            report,
-            options.sourceRepositoryUrl ?? "",
-            "cloud",
-          ),
-          { repository: repositoryUrl, ...source },
-          dependencies,
+        const savedId = await readFile(selectionPath, "utf8").catch(
+          nullIfMissingFile,
         );
-        const review = cloudReviewDigest(prepared.preview, repository);
-        const reviewedCapture = join(
-          root,
-          `${evidenceDigest}.${checkout}.${review}.json`,
-        );
+        const previous =
+          savedId === null
+            ? undefined
+            : await storedPublication(JSON.parse(savedId), true);
+        const prepared =
+          previous ??
+          (await prepareNormalizedPublication(
+            normalizeSonarFindings(
+              report,
+              options.sourceRepositoryUrl ?? "",
+              "cloud",
+            ),
+            { repository: repositoryUrl, ...source },
+            dependencies,
+            "preview",
+          ));
+        const reviewedCapture = reviewedCapturePath(prepared.preview);
         if (input !== reviewedCapture) {
           if (!confirmedRepository) throw new Error(bindingError);
           if (options.yes && !options.dryRun) throw new Error(reviewError);
           await writeAtomicJson(reviewedCapture, report);
         }
         capture = reviewedCapture;
-        cloud = prepared;
+        cloud = prepared.preview;
       } catch (error) {
         signal?.throwIfAborted();
         cloudError = errorMessage(error);
@@ -376,17 +382,27 @@ export async function prepareSonarImport(
     return {
       info,
       local: local.preview,
-      cloud: cloud?.preview,
+      cloud,
       cloudError,
       async import() {
         signal?.throwIfAborted();
-        const { counts, ready, excluded } = await local.import();
-        const saved = { ...info, local: { counts, ready, excluded } };
+        const { counts, ready, excluded, importId } = await local.import();
+        const saved = { ...info, local: { counts, ready, excluded, importId } };
         if (!cloud) return { ...saved, cloudError, cloud: undefined };
         try {
+          if (!importId) throw new Error("No stored Sonar import to publish.");
+          const publication = await storedPublication(importId);
+          if (
+            !publication ||
+            reviewedCapturePath(publication.preview) !== capture
+          )
+            throw new Error(
+              "The stored findings or Cloud destination have changed. Preview the Sonar capture again with --to cloud --dry-run.",
+            );
+          await writeAtomicJson(selectionPath, importId);
           return {
             ...saved,
-            cloud: await cloud.publish(),
+            cloud: await publication.publish(publication.reviewId),
             cloudError: undefined,
           };
         } catch (error) {

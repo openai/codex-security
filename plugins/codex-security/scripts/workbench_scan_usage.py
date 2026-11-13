@@ -17,9 +17,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from snapshot_sqlite import readonly_sqlite_uri
 from workbench.storage import archive_source_directory, worker_usage_directory
 
 TOKEN_FIELDS = {
@@ -336,6 +336,12 @@ def collect_scan_usage(
                 started_at=started_at,
                 completed_at=stopped_at,
                 completed_turn_id=completed_turn_id if session.thread_id == thread_id else None,
+                resume_owner=(
+                    scan["mode"] == "standard"
+                    and "recipe_json" in scan.keys()
+                    and scan["recipe_json"] is not None
+                    and session.thread_id == scan["continuation_thread_id"]
+                ),
                 is_scan_owner=(
                     scan["mode"] == "deep"
                     and session.thread_id == scan["deep_scan_owner_thread_id"]
@@ -654,7 +660,7 @@ def _discover_rollout_sessions(
     completed_at: datetime | None,
 ) -> tuple[list[RolloutSession], set[str]]:
     database = sqlite3.connect(
-        f"file:{quote(str(state_database), safe='')}?mode=ro",
+        readonly_sqlite_uri(state_database),
         uri=True,
         timeout=STATE_DATABASE_TIMEOUT_SECONDS,
     )
@@ -926,6 +932,7 @@ def _read_rollout_usage(
     completed_at: datetime | None,
     completed_turn_id: str | None = None,
     is_scan_owner: bool = False,
+    resume_owner: bool = False,
 ) -> RolloutUsage:
     result = RolloutUsage(_empty_token_usage(), set(), None, {})
     total = result.tokens
@@ -947,6 +954,7 @@ def _read_rollout_usage(
     started_turns: set[str] = set()
     open_turns: set[str] = set()
     closed_turns: set[str] = set()
+    failed_turns: set[str] = set()
     measured_turns: set[str] = set()
 
     def past_scan_end(timestamp: datetime, turn_id: object) -> bool:
@@ -1077,6 +1085,8 @@ def _read_rollout_usage(
                     if timestamp >= started_at:
                         if terminal_turn_id in started_turns:
                             closed_turns.add(terminal_turn_id)
+                            if payload.get("type") == "task_complete" and payload.get("error"):
+                                failed_turns.add(terminal_turn_id)
                         if payload.get("type") == "turn_aborted":
                             # Later successful work does not recover interrupted request usage.
                             warnings.add("turn_interrupted")
@@ -1143,6 +1153,20 @@ def _read_rollout_usage(
                     warnings.add("token_record_incomplete")
                 result.tokens_updated_at = max(result.tokens_updated_at or timestamp, timestamp)
                 _add_token_usage(response_usage, usage)
+                if (
+                    resume_owner
+                    and receipt_turn_id == current_turn_id
+                    and current_turn_id in started_turns
+                    and (open_turns - {current_turn_id} or failed_turns)
+                ):
+                    # Matching thread totals account for turns left open or failed before resume.
+                    cumulative = _usage_counts(payload.get("thread_token_usage"))
+                    if cumulative is not None and all(
+                        cumulative[key] == total[key] + response_usage[key]
+                        for key in TOKEN_FIELDS.values()
+                    ):
+                        open_turns.intersection_update({current_turn_id})
+                        closed_turns.difference_update(failed_turns - {current_turn_id})
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -1310,27 +1311,25 @@ def test_usage_finds_state_database_in_configured_home(
 
 @pytest.mark.cross_platform
 @pytest.mark.parametrize(
-    "spelling",
-    ["leading-relative", "trailing-absolute"]
-    + ([] if sys.platform == "win32" else ["literal-tilde"]),
+    ("spelling", "filename"),
+    [
+        ("leading-relative", " usage.sqlite"),
+        (
+            "trailing-absolute",
+            "usage.sqlite\N{NO-BREAK SPACE}" if sys.platform == "win32" else "usage.sqlite ",
+        ),
+    ]
+    + ([] if sys.platform == "win32" else [("literal-tilde", "~synthetic-usage.sqlite")])
+    + ([("filesystem-bytes", b"usage-\xff?#%.sqlite")] if sys.platform == "linux" else []),
 )
 def test_completion_reads_the_literal_usage_database(
-    tmp_path: Path, spelling: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, spelling: str, filename: str | bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fixture = _start_scan(tmp_path)
     counted = fixture.started_at + timedelta(microseconds=1)
     fixture.write_parent_rollout([_token_event(counted, 18, 2)])
     original = Path(fixture.environment["CODEX_SQLITE_HOME"]) / "state_5.sqlite"
-    selected = (
-        tmp_path
-        / {
-            "leading-relative": " usage.sqlite",
-            "trailing-absolute": "usage.sqlite\N{NO-BREAK SPACE}"
-            if sys.platform == "win32"
-            else "usage.sqlite ",
-            "literal-tilde": "~synthetic-usage.sqlite",
-        }[spelling]
-    )
+    selected = tmp_path / os.fsdecode(filename)
     original.rename(selected)
 
     neighbor = tmp_path / "neighbor"
