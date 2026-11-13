@@ -4831,6 +4831,9 @@ describe("runtime directories and plugin Python boundary", () => {
       "0x40000",
       "0x80000",
       "0x1301bf",
+      "0x40000000", // GW
+      "0x00120116", // FW
+      "0x1201bf", // FW plus read and execute
     ]) {
       expect(
         inspectWindowsCredentialAcl(
@@ -4847,6 +4850,9 @@ describe("runtime directories and plugin Python boundary", () => {
       ["", "GRGX"],
       ["", "AFAX"],
       ["", "0x1200a9"],
+      ["", "0x1200ab"], // read/execute and FILE_ADD_FILE
+      ["", "0x6"], // FILE_ADD_FILE and FILE_ADD_SUBDIRECTORY
+      ["IO", "0x00120116"],
       ["IO", "FA"],
     ] as const) {
       expect(
@@ -4895,59 +4901,6 @@ describe("runtime directories and plugin Python boundary", () => {
         user,
       ),
     ).toThrow("owner is not a trusted principal");
-  });
-
-  test("treats hex ancestor write masks like their SDDL abbreviations", () => {
-    const user = "S-1-5-21-111-222-333-1001";
-    // Each pair is the same grant spelled two ways: the SDDL abbreviation and
-    // the access mask Windows emits when the grant is not a single
-    // abbreviation. Both spellings must reach the same verdict.
-    for (const [abbreviation, mask] of [
-      ["FA", "0x001f01ff"],
-      ["GA", "0x10000000"],
-      ["FW", "0x00120116"],
-      ["GW", "0x40000000"],
-      ["SD", "0x00010000"],
-      ["WD", "0x00040000"],
-      ["WO", "0x00080000"],
-      ["DC", "0x00000002"],
-      ["DT", "0x00000040"],
-    ] as const) {
-      const abbreviated = inspectWindowsCredentialAcl(
-        `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;${abbreviation};;;WD)`,
-        user,
-        { scope: "ancestor" },
-      ).untrustedPrincipals;
-      expect(
-        inspectWindowsCredentialAcl(
-          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;${mask};;;WD)`,
-          user,
-          { scope: "ancestor" },
-        ).untrustedPrincipals,
-      ).toEqual(abbreviated);
-    }
-
-    // Individual append and attribute bits in FW do not confer FW on their own.
-    for (const mask of ["0x4", "0x10", "0x100", "0x114"]) {
-      expect(
-        inspectWindowsCredentialAcl(
-          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;${mask};;;WD)`,
-          user,
-          { scope: "ancestor" },
-        ).untrustedPrincipals,
-      ).toEqual([]);
-    }
-
-    // Composite grants Windows renders as hex rather than an abbreviation.
-    for (const mask of ["0x1201bf", "0x1301bf", "0x00000006", "0x40000001"]) {
-      expect(
-        inspectWindowsCredentialAcl(
-          `O:${user}G:SYD:(A;OICI;FA;;;${user})(A;;${mask};;;WD)`,
-          user,
-          { scope: "ancestor" },
-        ).untrustedPrincipals,
-      ).toEqual(["S-1-1-0"]);
-    }
   });
 
   test("accepts private credential-file ACLs without inheritance flags", () => {
