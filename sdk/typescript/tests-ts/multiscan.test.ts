@@ -126,7 +126,7 @@ second,${source.path},${source.revision}
   test("recovers completed results after the invocation budget runs out", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "source");
-    const ids = ["overrun", "sealed", "pending"];
+    const ids = ["overrun", "sealed", "active", "pending"];
     await writeFile(
       paths.input,
       [
@@ -168,19 +168,32 @@ second,${source.path},${source.revision}
     }
     const sealedDir = join(paths.output, "artifacts", "sealed", "attempt-1");
     const sealed = await completedScan(sealedDir);
+    const activeDir = join(paths.output, "artifacts", "active", "attempt-1");
     const summary = await runMultiscan({
       ...campaign,
-      recoverScan: async (scanDir) =>
-        scanDir === sealedDir
-          ? { ...sealed, alreadyCompleted: true }
-          : undefined,
+      recoverScan: async (scanDir, prompts) => {
+        if (scanDir === sealedDir) return { ...sealed, alreadyCompleted: true };
+        if (scanDir === activeDir) {
+          return attempts(source.path, {
+            outputDir: scanDir,
+            maxCostUsd: prompts.reserveResumeBudget(),
+          });
+        }
+        return undefined;
+      },
     });
 
-    expect(summary).toMatchObject({ completed: 1, failed: 2 });
+    expect(summary).toMatchObject({ completed: 1, failed: 3 });
     expect(attempts).toHaveBeenCalledTimes(1);
     expect(await results(summary.resultsPath)).toMatchObject([
       { id: "overrun", attempt: 2, status: "failed" },
       { id: "sealed", attempt: 1, status: "completed" },
+      {
+        id: "active",
+        attempt: 1,
+        status: "failed",
+        error: expect.stringContaining("invocation cost limit is exhausted"),
+      },
       {
         id: "pending",
         attempt: 2,
