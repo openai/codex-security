@@ -917,3 +917,53 @@ test.skipIf(process.platform !== "win32")(
     }
   },
 );
+
+test.skipIf(process.platform !== "win32")(
+  "preserves Windows helper exit codes when ERRORLEVEL is inherited",
+  async () => {
+    const node = Bun.which("node");
+    if (node === null)
+      throw new Error("Node is required for the launcher test.");
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "codex-security-helper-errorlevel-")),
+    );
+    try {
+      await writeFile(join(root, "SECURITY.md"), "repository policy\n");
+      const launcher = join(
+        PLUGIN_ROOT,
+        "scripts",
+        "launch_codex_security_mcp.cmd",
+      );
+      for (const [errorlevel, scope, exitCode] of [
+        ["0", "missing", 2],
+        ["7", ".", 0],
+      ] as const) {
+        const result = spawnSync(
+          join(process.env["SystemRoot"]!, "System32", "cmd.exe"),
+          [
+            "/d",
+            "/s",
+            "/c",
+            `""${launcher}" --helper resolve-security-md --repo . --scope ${scope} --out -"`,
+          ],
+          {
+            cwd: root,
+            env: {
+              SystemRoot: process.env["SystemRoot"],
+              CODEX_MCP_NODE_PATH: node,
+              ERRORLEVEL: errorlevel,
+            },
+            encoding: "utf8",
+            windowsHide: true,
+            windowsVerbatimArguments: true,
+          },
+        );
+        expect(result.status, result.stderr || result.error?.message).toBe(
+          exitCode,
+        );
+      }
+    } finally {
+      await removeTemporaryDirectory(root);
+    }
+  },
+);
