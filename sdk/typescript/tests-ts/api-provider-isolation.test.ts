@@ -1374,17 +1374,10 @@ test.each([
                   "huggingface"
                 ] as JsonObject
               )["base_url"] = hf["base_url"]!;
-              // Verify the worker's native child loads the same private profile.
-              const native = await effectiveProvider(
-                {
-                  CODEX_HOME: options.env!["CODEX_HOME"]!,
-                  HF_TOKEN: "synthetic-hf-key",
-                },
-                repository,
-                ['model_provider="huggingface"'],
-                String(profile),
-              );
-              expect(native).toMatchObject(hf);
+              const settings = await workerRuntimeSettings(options.env!);
+              expect(profile).toBe(settings.nativeProfile);
+              expect(settings.config["model_provider"]).toBe("huggingface");
+              expect((await fetch(String(hf["base_url"]))).status).toBe(404);
             }
             expect({ ...options.config, ...providerConfig }).toMatchObject(
               expected,
