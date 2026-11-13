@@ -1208,25 +1208,19 @@ def complete_budget_exhausted_scan(
 
 def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
     artifacts = deep_scan.canonical_discovery_artifacts(scan)
-    ledger = Path(artifacts["candidateLedgerPath"])
+    label = "Canonical Deep Scan in-scope inventory"
     try:
         inventory = Path(artifacts["inScopeFilesPath"])
-        inventory_descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            inventory.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan in-scope inventory",
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir, inventory.relative_to(scan_dir).as_posix(), label
         )
-        with os.fdopen(inventory_descriptor, "rb") as source:
+        with os.fdopen(descriptor, "rb") as source:
             lines = re.split(r"\r?\n", source.read().decode("utf-8"))
             in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
-    except (ContractError, OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"Canonical Deep Scan in-scope inventory is invalid: {exc}") from exc
-
-    try:
+        label = "Canonical Deep Scan candidate ledger"
+        ledger = Path(artifacts["candidateLedgerPath"])
         descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            ledger.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan candidate ledger",
+            scan_dir, ledger.relative_to(scan_dir).as_posix(), label
         )
         with os.fdopen(descriptor, "r", encoding="utf-8") as source:
             candidates = [
@@ -1234,8 +1228,8 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
                 for line in source
                 if line.strip()
             ]
-    except (ContractError, OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"Canonical Deep Scan candidate ledger is invalid: {exc}") from exc
+    except (ContractError, OSError, ValueError) as exc:
+        raise SystemExit(f"{label} is invalid: {exc}") from exc
 
     candidate_ids: set[str] = set()
     for candidate in candidates:
