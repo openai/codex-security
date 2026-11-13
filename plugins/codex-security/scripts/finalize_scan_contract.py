@@ -2193,13 +2193,11 @@ def _validate_schema_node(
             try:
                 _validate_schema_node(value, condition, context, root_schema)
             except ContractError:
-                else_schema = schema.get("else")
-                if isinstance(else_schema, dict):
-                    _validate_schema_node(value, else_schema, context, root_schema)
+                branch = schema.get("else")
             else:
-                then_schema = schema.get("then")
-                if isinstance(then_schema, dict):
-                    _validate_schema_node(value, then_schema, context, root_schema)
+                branch = schema.get("then")
+            if isinstance(branch, dict):
+                _validate_schema_node(value, branch, context, root_schema)
         for key in schema.get("required", []):
             if key not in value:
                 raise ContractError(f"{context}.{key}: missing required schema property")
