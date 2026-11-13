@@ -725,6 +725,7 @@ const fileProviderKeyCases = [
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
   ["openrouter", "alternate Standard Compute", "OPENROUTER_API_KEY"],
+  ["standardcompute", "alternate OpenRouter", "STANDARDCOMPUTE_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -796,15 +797,19 @@ for (const mode of ["standard", "deep"] as const) {
         headerKey || _selection === "missing custom primary"
           ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
           : {};
-      const alternateStandardCompute =
-        _selection === "alternate Standard Compute";
-      const inactiveKey = alternateStandardCompute
-        ? "STANDARDCOMPUTE_API_KEY"
+      const alternateProvider =
+        _selection === "alternate Standard Compute"
+          ? "standardcompute"
+          : _selection === "alternate OpenRouter"
+            ? "openrouter"
+            : undefined;
+      const inactiveKey = alternateProvider
+        ? `${alternateProvider.toUpperCase()}_API_KEY`
         : gatewayHeader
           ? "CHEAPER_INFERENCE_API_KEY"
           : "INACTIVE_GATEWAY_TOKEN";
       const inactiveEnvironment =
-        gatewayHeader || alternateStandardCompute
+        gatewayHeader || alternateProvider
           ? { [inactiveKey]: "synthetic-inactive-key" }
           : {};
       const inheritedEnvironment: Record<string, string> = {
@@ -853,7 +858,10 @@ for (const mode of ["standard", "deep"] as const) {
         model_provider: providerId,
         model_providers: {
           [providerId]: provider,
-          inactive: { ...provider, env_key: inactiveKey },
+          [alternateProvider ?? "inactive"]: {
+            ...provider,
+            env_key: inactiveKey,
+          },
         },
         features: { shell_tool: false, unified_exec: false },
       });
@@ -901,7 +909,7 @@ for (const mode of ["standard", "deep"] as const) {
                       name === providerKey ||
                         name === canonicalKey ||
                         name === headerKey ||
-                        (name === inactiveKey && !alternateStandardCompute)
+                        (name === inactiveKey && !alternateProvider)
                         ? inheritedEnvironment[name]
                         : undefined,
                     );
@@ -1356,6 +1364,10 @@ test.each([
     const providerId = external
       ? providerKey.split("_")[0]!.toLowerCase()
       : "synthetic.gateway";
+    const declaredKey =
+      process.platform === "win32" && providerId === "standardcompute"
+        ? providerKey.toLowerCase()
+        : providerKey;
     const headerKey =
       process.platform === "win32"
         ? "synthetic_custom_header"
@@ -1377,7 +1389,7 @@ test.each([
               name: "Synthetic gateway",
               wire_api: "responses",
               base_url: "https://provider.example.test/v1",
-              env_key: providerKey,
+              env_key: declaredKey,
               env_http_headers: {
                 "X-Synthetic-Token": headerKey,
                 ...(!external ? { "X-Synthetic-Primary": providerKey } : {}),
@@ -1415,7 +1427,7 @@ test.each([
               const selectedKey = external
                 ? "synthetic-custom-key"
                 : providerEnvironment[providerKey];
-              expect(options.env![providerKey]).toBe(selectedKey);
+              expect(options.env![declaredKey]).toBe(selectedKey);
               const status = await nativeRequest(
                 options.env!,
                 repository,
@@ -1439,11 +1451,13 @@ test.each([
                   STANDARDCOMPUTE_API_KEY: null,
                 },
                 recovered: {
-                  ...providerEnvironment,
-                  ...(process.platform === "win32"
-                    ? { [headerKey]: " synthetic-child-header " }
-                    : {}),
-                  [providerKey]: selectedKey,
+                  [declaredKey]: selectedKey,
+                  [headerKey]:
+                    process.platform === "win32"
+                      ? " synthetic-child-header "
+                      : providerEnvironment[headerKey],
+                  SYNTHETIC_REQUIRED_KEY:
+                    providerEnvironment.SYNTHETIC_REQUIRED_KEY,
                 },
               });
               for (const text of [

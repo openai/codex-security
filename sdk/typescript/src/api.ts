@@ -2490,41 +2490,36 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const workerProviderEnvironment = {
-        ...withoutOpenAiApiKeys(
-          selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-            session.providerEnvKey,
-            effectiveConfig,
-            "selected",
-          ),
+      const workerProviderEnvironment = withoutOpenAiApiKeys(
+        selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          modelProvider,
+          session.providerEnvKey,
+          effectiveConfig,
+          "selected",
         ),
+      );
+      const selectedWorkerCredentials = {
+        ...session.nativeProviderEnvironment,
         ...(session.apiKey === null
           ? {}
           : {
               [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
-      if (
-        mode === "deep" &&
-        (options.auth !== "chatgpt" ||
-          authentication.method !== "stored_credentials")
-      ) {
-        // A managed worker can use a different provider declared in this scan's private profile.
-        const key = EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key;
-        const candidate = environmentEntry(this.#dependencies.environment, key);
-        if (candidate !== undefined)
-          workerProviderEnvironment[key] ??= candidate;
-      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
           modelProvider,
           scanDir,
           workerProviderEnvironment,
-          session.nativeProviderEnvironment,
+          selectedWorkerCredentials,
+          mode === "deep" &&
+            (options.auth !== "chatgpt" ||
+              authentication.method !== "stored_credentials")
+            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            : undefined,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -7718,16 +7713,24 @@ function selectedWorkerRuntimeConfig(
   selectedProvider: unknown,
   workingDirectory: string,
   environment: ProcessEnvironment,
-  nativeProviderEnvironment?: Record<string, string>,
+  selectedCredentials: Record<string, string>,
+  alternateProviderEnvironment?: ProcessEnvironment,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  const providerEnvironment =
-    nativeProviderEnvironment ??
-    declaredProviderEnvironment(providers, environment);
+  const providerEnvironment = {
+    // Only declared credentials enter the snapshot. The parent provider's
+    // prepared values take precedence over credentials for alternate workers.
+    ...declaredProviderEnvironment(
+      providers,
+      alternateProviderEnvironment ?? {},
+    ),
+    ...declaredProviderEnvironment(providers, environment),
+    ...declaredProviderEnvironment(providers, selectedCredentials),
+  };
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];

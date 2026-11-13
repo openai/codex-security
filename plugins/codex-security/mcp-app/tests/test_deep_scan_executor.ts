@@ -2920,6 +2920,8 @@ async function testExternalProviderCredentialsReachWorker() {
       const configPath = path.join(fixture.root, "provider.toml");
       const deepPath = path.join(fixture.root, "workers.toml");
       const profile = `scan-${provider}`;
+      const parentProvider =
+        provider === "openrouter" ? "standardcompute" : provider;
       const selectedKey = `synthetic-${provider}-scan-key`;
       const accountHeaders = headerKey
         ? { [headerKey]: "private-scan-header" }
@@ -2929,13 +2931,26 @@ async function testExternalProviderCredentialsReachWorker() {
         native_profile: profile,
         environment: { [key]: selectedKey, ...accountHeaders },
       };
-      await writeFile(configPath, stringifyToml({ model_provider: provider }));
+      await writeFile(
+        configPath,
+        stringifyToml({ model_provider: parentProvider }),
+      );
       await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
       await writeFile(
         path.join(fixture.root, `${profile}.config.toml`),
         stringifyToml({
-          model_provider: provider,
+          model_provider: parentProvider,
           model_providers: {
+            ...(parentProvider !== provider
+              ? {
+                  [parentProvider]: {
+                    name: parentProvider,
+                    base_url: "https://parent.example.test/v1",
+                    wire_api: "responses",
+                    env_key: "STANDARDCOMPUTE_API_KEY",
+                  },
+                }
+              : {}),
             [provider]: {
               name: provider,
               base_url: `https://${provider}.example.test/v1`,
