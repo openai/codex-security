@@ -3682,6 +3682,8 @@ describe("CLI", () => {
     for (const [field, literal] of [
       ["env_key", '"CUSTOM_HF_TOKEN"'],
       ["experimental_bearer_token", '"synthetic-bearer"'],
+      ["http_headers", '{AuThOrIzAtIoN="Bearer synthetic"}'],
+      ["env_http_headers", '{Authorization="CUSTOM_AUTHORIZATION"}'],
       ["auth", '{command="token-helper"}'],
     ]) {
       const config = parseCodexOverrides(

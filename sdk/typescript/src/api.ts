@@ -83,6 +83,8 @@ import {
   CODEX_AUTH_CONFIG_KEYS,
   EXTERNAL_CODEX_PROVIDERS,
   HUGGINGFACE_CODEX_PROVIDER,
+  huggingFaceCredentialField,
+  huggingFaceCredentialSource,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -5175,7 +5177,7 @@ export class CodexSecurity {
       );
       const apiKey =
         authentication.method === "api_key" &&
-        !hasHuggingFaceBearer(requestedConfig)
+        !huggingFaceCredentialSource(requestedConfig)
           ? environmentApiKey(
               this.#dependencies.environment,
               modelProvider,
@@ -5334,6 +5336,27 @@ export class CodexSecurity {
         );
       }
       notifyObserver(options, "onAuthentication")(authentication);
+      let nativeProviderEnvironment: Record<string, string> | undefined;
+      if (modelProvider === "huggingface") {
+        nativeProviderEnvironment = huggingFaceHeaderEnvironment(
+          effectiveConfig,
+          this.#dependencies.environment,
+        );
+      } else if (
+        providerEnvKey !== undefined &&
+        apiKey !== null &&
+        !isExternalModelProvider(modelProvider)
+      ) {
+        nativeProviderEnvironment = {
+          ...declaredProviderEnvironment(providers, {
+            ...(options.auth === "chatgpt"
+              ? withoutOpenAiApiKeys(this.#dependencies.environment)
+              : this.#dependencies.environment),
+            ...withoutOpenAiApiKeys(runtime.environment),
+          }),
+          [providerEnvKey]: apiKey,
+        };
+      }
       const helperEnvironment = withoutProviderKey(
         withoutProviderKey(scanEnvironment, HUGGINGFACE_CODEX_PROVIDER.env_key),
         providerEnvKey,
@@ -5361,20 +5384,7 @@ export class CodexSecurity {
           runtime.environment,
         ),
         providerEnvKey,
-        nativeProviderEnvironment:
-          providerEnvKey !== undefined &&
-          apiKey !== null &&
-          !isExternalModelProvider(modelProvider)
-            ? {
-                ...declaredProviderEnvironment(providers, {
-                  ...(options.auth === "chatgpt"
-                    ? withoutOpenAiApiKeys(this.#dependencies.environment)
-                    : this.#dependencies.environment),
-                  ...withoutOpenAiApiKeys(runtime.environment),
-                }),
-                [providerEnvKey]: apiKey,
-              }
-            : undefined,
+        nativeProviderEnvironment,
         apiKey,
         scanEnvironment: helperEnvironment,
         authentication,
@@ -5959,7 +5969,7 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
-        hasHuggingFaceBearer(requestedConfig) ||
+        huggingFaceCredentialSource(requestedConfig) ||
         providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -6884,19 +6894,6 @@ async function collectResult(
   });
 }
 
-/** @internal Native Codex reads this credential directly from the private profile. */
-export function hasHuggingFaceBearer(config: JsonObject): boolean {
-  if (scanModelProvider(config) !== "huggingface") return false;
-  const providers = resolveCodexProfile(config)["model_providers"];
-  const provider = isRecord(providers) ? providers["huggingface"] : undefined;
-  return (
-    isRecord(provider) &&
-    provider["auth"] == null &&
-    provider["env_key"] == null &&
-    typeof provider["experimental_bearer_token"] === "string"
-  );
-}
-
 export function scanAuthentication(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
@@ -6912,10 +6909,11 @@ export function scanAuthentication(
     );
   }
   if (commandAuth) return { method: "command", verified: false };
-  if (config && hasHuggingFaceBearer(config))
+  const nativeSource = config && huggingFaceCredentialSource(config);
+  if (nativeSource !== undefined)
     return {
       method: "api_key",
-      source: "experimental_bearer_token",
+      source: nativeSource,
       verified: false,
     };
   if (modelProvider === "amazon-bedrock") {
@@ -7036,6 +7034,22 @@ function withoutProviderKey(
   return child;
 }
 
+/** Resolve only the selected HF header variables using native child environment semantics. */
+export function huggingFaceHeaderEnvironment(
+  config: JsonObject,
+  environment: ProcessEnvironment,
+): Record<string, string> {
+  if (scanModelProvider(config) !== "huggingface") return {};
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const hf = isRecord(providers) ? providers["huggingface"] : undefined;
+  return isRecord(hf)
+    ? declaredProviderEnvironment(
+        { huggingface: { env_http_headers: hf["env_http_headers"] } },
+        environment,
+      )
+    : {};
+}
+
 /** @internal Keep the Hub token only when the selected model provider consumes it. */
 export function huggingFaceEnvironment(
   environment: ProcessEnvironment,
@@ -7059,7 +7073,7 @@ export function huggingFaceEnvironment(
     settings["env_key"] ??
     (provider === "huggingface" &&
     settings["auth"] == null &&
-    settings["experimental_bearer_token"] == null
+    huggingFaceCredentialField(settings) === undefined
       ? key
       : undefined);
   if (
@@ -7136,6 +7150,18 @@ export function selectedScanEnvironment(
         auth === "chatgpt" ? withoutOpenAiApiKeys(environment) : environment,
       ),
     );
+  }
+  if (config && modelProvider === "huggingface") {
+    const headers = huggingFaceHeaderEnvironment(config, environment);
+    if (providerKeys === "declared") Object.assign(selected, headers);
+    else {
+      const names = new Set(
+        Object.keys(headers).map((name) => name.toUpperCase()),
+      );
+      for (const name of Object.keys(selected)) {
+        if (names.has(name.toUpperCase())) delete selected[name];
+      }
+    }
   }
   return selected;
 }

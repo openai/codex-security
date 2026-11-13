@@ -51,16 +51,51 @@ export const HUGGINGFACE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
-function huggingFaceUsesNativeAuthentication(native: unknown): boolean {
-  return (
-    isObject(native) &&
-    (native["auth"] != null || native["experimental_bearer_token"] != null)
-  );
+/** Credential field read by the native provider. Other headers, such as billing, can accompany HF_TOKEN. */
+export function huggingFaceCredentialField(
+  native: unknown,
+): string | undefined {
+  if (!isObject(native) || native["auth"] != null || native["env_key"] != null)
+    return undefined;
+  if (typeof native["experimental_bearer_token"] === "string")
+    return "experimental_bearer_token";
+  const customGateway =
+    typeof native["base_url"] === "string" &&
+    native["base_url"].replace(/\/+$/u, "") !==
+      HUGGINGFACE_CODEX_PROVIDER.base_url;
+  for (const field of ["http_headers", "env_http_headers"] as const) {
+    const headers = native[field];
+    if (
+      isObject(headers) &&
+      Object.keys(headers).some(
+        (name) =>
+          /^(?:authorization|(?:x-)?api-key)$/iu.test(name) ||
+          (customGateway && name.toLowerCase() !== "x-hf-bill-to"),
+      )
+    )
+      return field;
+  }
+  return undefined;
+}
+
+/** Native Codex reads this credential directly from the selected private profile. */
+export function huggingFaceCredentialSource(
+  config: Readonly<JsonObject>,
+): string | undefined {
+  if (scanModelProvider(config) !== "huggingface") return undefined;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  return isObject(providers)
+    ? huggingFaceCredentialField(providers["huggingface"])
+    : undefined;
 }
 
 export function huggingFaceProviderDefaults(native: unknown): JsonObject {
   const preset: JsonObject = { ...HUGGINGFACE_CODEX_PROVIDER };
-  if (huggingFaceUsesNativeAuthentication(native)) delete preset["env_key"];
+  if (
+    isObject(native) &&
+    (native["auth"] != null || huggingFaceCredentialField(native))
+  )
+    delete preset["env_key"];
   return preset;
 }
 
@@ -267,7 +302,7 @@ export function scanProviderEnvKey(
     selected === "huggingface" &&
     isObject(provider) &&
     provider["env_key"] == null &&
-    huggingFaceUsesNativeAuthentication(provider)
+    (provider["auth"] != null || huggingFaceCredentialField(provider))
   )
     return undefined;
   return isObject(provider) && typeof provider["env_key"] === "string"

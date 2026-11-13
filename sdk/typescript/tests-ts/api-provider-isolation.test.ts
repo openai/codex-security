@@ -6,6 +6,7 @@ import {
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
   type JsonObject,
+  type JsonValue,
 } from "../src/config.js";
 import { selectedScanEnvironment } from "../src/api.js";
 import { main } from "../src/cli.js";
@@ -170,57 +171,84 @@ test("OpenAI scans omit ambient Hugging Face credentials", () => {
   }
 });
 
-test("a private Hugging Face bearer starts a scan without ambient account or Hub credentials", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository");
-  const home = join(root, "home");
-  await mkdir(repository);
-  await mkdir(home, { mode: 0o700 });
-  const ambient = {
-    OPENAI_API_KEY: "synthetic-unrelated-account",
-    HF_TOKEN: "synthetic-unrelated-hub",
-  };
-  const client = new TestClient(
-    {
-      codexOverrides: {
-        model_provider: "huggingface",
-        model_providers: {
-          huggingface: {
-            experimental_bearer_token: "synthetic-private-bearer",
+const privateHuggingFaceCredentials: { field: string; value: JsonValue }[] = [
+  { field: "experimental_bearer_token", value: "synthetic-private-bearer" },
+  {
+    field: "http_headers",
+    value: { aUtHoRiZaTiOn: "Bearer synthetic-private-bearer" },
+  },
+  { field: "env_http_headers", value: { Authorization: "SYNTHETIC_HEADER" } },
+];
+test.each(privateHuggingFaceCredentials)(
+  "starts a Hugging Face scan using private $field authentication",
+  async ({ field, value }) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    await mkdir(repository);
+    await mkdir(home, { mode: 0o700 });
+    const ambient = {
+      OPENAI_API_KEY: "synthetic-unrelated-account",
+      HF_TOKEN: "synthetic-unrelated-hub",
+    };
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "huggingface",
+          model_providers: {
+            huggingface: {
+              [field]: value,
+            },
           },
         },
       },
-    },
-    {
-      environment: { ...ambient, CODEX_HOME: home },
-      prepareRuntime: async () => ({
-        ...preparedRuntime(home),
-        environment: ambient,
-        credentialsAvailable: false,
-      }),
-      resolvePluginPython: async () => "/managed/python",
-      createCodex: (options) => {
-        expect(options.apiKey).toBeUndefined();
-        for (const name of ["HF_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"])
-          expect(options.env).not.toHaveProperty(name);
-        expect(JSON.stringify(options)).not.toContain(
-          "synthetic-private-bearer",
-        );
-        throw new Error("private bearer selected");
+      {
+        environment: {
+          ...ambient,
+          SYNTHETIC_HEADER: "synthetic-extra-token",
+          CODEX_HOME: home,
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          environment: ambient,
+          credentialsAvailable: false,
+        }),
+        resolvePluginPython: async (options) => {
+          if (field === "env_http_headers")
+            expect(options?.environment).not.toHaveProperty("SYNTHETIC_HEADER");
+          return "/managed/python";
+        },
+        createCodex: (options) => {
+          if (field === "env_http_headers")
+            expect(options.env?.["SYNTHETIC_HEADER"]).toBe(
+              "synthetic-extra-token",
+            );
+          expect(options.apiKey).toBeUndefined();
+          for (const name of ["HF_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"])
+            expect(options.env).not.toHaveProperty(name);
+          expect(JSON.stringify(options)).not.toContain(
+            "synthetic-private-bearer",
+          );
+          throw new Error("private provider credential selected");
+        },
       },
-    },
-  );
-  try {
-    await expect(
-      client.run(repository, {
-        auth: "api-key",
-        outputDir: join(root, "scan"),
-      }),
-    ).rejects.toThrow("private bearer selected");
-  } finally {
-    await client.close();
-  }
-});
+    );
+    try {
+      expect(
+        (await client.preflight(repository, { auth: "api-key" }))
+          .authentication,
+      ).toEqual({ method: "api_key", source: field, verified: false });
+      await expect(
+        client.run(repository, {
+          auth: "api-key",
+          outputDir: join(root, "scan"),
+        }),
+      ).rejects.toThrow("private provider credential selected");
+    } finally {
+      await client.close();
+    }
+  },
+);
 
 test("native worker override tables retain inherited features and MCP servers", async () => {
   const root = await temporaryDirectory();

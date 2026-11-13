@@ -291,6 +291,9 @@ The SDK accepts `codexOverrides: { model_provider: "huggingface", model:
 "zai-org/GLM-5.3:novita" }`. Existing native provider overrides, including
 `env_key`, `base_url`, and `http_headers`, still apply. For organization
 billing, set `model_providers.huggingface.http_headers` with `X-HF-Bill-To`.
+A custom gateway can authenticate through a static or environment-backed header.
+To send `HF_TOKEN` alongside supplemental headers on a custom gateway, set
+`env_key = "HF_TOKEN"` in its provider table.
 
 Standard scans and Deep Scan workers use a local adapter to send Codex
 requests to HF's Chat Completions endpoint. The adapter translates namespaced

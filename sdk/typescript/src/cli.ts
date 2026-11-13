@@ -103,7 +103,6 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
-  hasHuggingFaceBearer,
   runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
@@ -216,6 +215,7 @@ import {
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   huggingFaceProviderDefaults,
+  huggingFaceCredentialSource,
   isExternalModelProvider,
   mergeCodexOverrides,
   hasCommandAuth,
@@ -11494,7 +11494,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     hasCommandAuth(config) ||
-    hasHuggingFaceBearer(config) ||
+    huggingFaceCredentialSource(config) ||
     scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
@@ -13516,15 +13516,13 @@ async function parseScanCodexOverrides(
   const providers = profile["model_providers"];
   if (
     isExternalModelProvider(provider) &&
+    provider !== "huggingface" &&
     isJsonObject(providers) &&
     isJsonObject(providers[provider])
   ) {
     // Fill missing defaults without replacing file settings or combining
     // native command auth with the generated env-key definition.
-    const generated: JsonObject =
-      provider === "huggingface"
-        ? huggingFaceProviderDefaults(providers[provider])
-        : { ...EXTERNAL_CODEX_PROVIDERS[provider] };
+    const generated: JsonObject = { ...EXTERNAL_CODEX_PROVIDERS[provider] };
     for (const key of Object.keys(providers[provider])) delete generated[key];
     if (providers[provider]["auth"] !== undefined) delete generated["env_key"];
     delete result["model_providers"];
@@ -13626,12 +13624,22 @@ export function parseCodexOverrides(
     const selectedModel = scanModel(selected);
     if (provider === "huggingface") {
       const declared = resolveCodexProfile(selected)["model_providers"];
+      const baseProviders = resolveCodexProfile(defaults ?? {})[
+        "model_providers"
+      ];
+      const base = isJsonObject(baseProviders)
+        ? baseProviders["huggingface"]
+        : undefined;
+      const preset = huggingFaceProviderDefaults(
+        isJsonObject(declared) ? declared["huggingface"] : undefined,
+      );
+      if (isJsonObject(base)) {
+        for (const key of Object.keys(base)) delete preset[key];
+      }
       const explicit = result["model_providers"];
       result["model_providers"] = mergeCodexOverrides(
         {
-          huggingface: huggingFaceProviderDefaults(
-            isJsonObject(declared) ? declared["huggingface"] : undefined,
-          ),
+          huggingface: preset,
         },
         isJsonObject(explicit) ? explicit : {},
       );

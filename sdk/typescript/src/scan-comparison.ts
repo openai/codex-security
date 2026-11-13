@@ -18,7 +18,7 @@ import {
   scanAuthentication,
   selectedScanEnvironment,
   huggingFaceEnvironment,
-  hasHuggingFaceBearer,
+  huggingFaceHeaderEnvironment,
   definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
@@ -35,6 +35,7 @@ import {
   deepMerge,
   hasCommandAuth,
   huggingFaceProviderDefaults,
+  huggingFaceCredentialSource,
   isExternalModelProvider,
   scanProviderEnvKey,
   mergedCodexConfig,
@@ -756,21 +757,26 @@ async function startReadOnlyCodexThread(
       codexOptions.configOverrides = permissions.configOverrides;
       requestedPermissionProfile = permissions.permissionProfileId;
     }
-    if (
-      nativeKey !== undefined &&
-      runtimeOptions.nativeProviderEnvironment !== undefined
-    ) {
-      codexOptions.env = {
-        ...definedEnvironment(
-          huggingFaceEnvironment(
-            runtimeOptions.nativeProviderEnvironment,
-            modelProvider,
-            nativeKey,
-            providerConfig,
+    const nativeEnvironment = runtimeOptions.nativeProviderEnvironment;
+    if (nativeEnvironment !== undefined) {
+      if (modelProvider === "huggingface") {
+        codexOptions.env = {
+          ...environment,
+          ...huggingFaceHeaderEnvironment(providerConfig, nativeEnvironment),
+        };
+      } else if (nativeKey !== undefined) {
+        codexOptions.env = {
+          ...definedEnvironment(
+            huggingFaceEnvironment(
+              nativeEnvironment,
+              modelProvider,
+              nativeKey,
+              providerConfig,
+            ),
           ),
-        ),
-        ...environment,
-      };
+          ...environment,
+        };
+      }
     }
     const codex =
       profile === undefined
@@ -1301,8 +1307,14 @@ export async function comparisonEnvironment(
       environment[key] = home;
     }
   }
-  if (hasCommandAuth(configuration) || hasHuggingFaceBearer(configuration))
-    return withoutOpenAiApiKeys(environment);
+  if (
+    hasCommandAuth(configuration) ||
+    huggingFaceCredentialSource(configuration)
+  )
+    return {
+      ...withoutOpenAiApiKeys(environment),
+      ...huggingFaceHeaderEnvironment(configuration, source),
+    };
   const selectedKey =
     nativeKey ??
     (provider === "huggingface"
