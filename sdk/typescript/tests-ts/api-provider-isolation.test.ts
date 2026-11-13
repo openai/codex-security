@@ -297,6 +297,7 @@ test.each([
   "file custom only",
   "file default key",
   "file Azure",
+  "file Azure headers",
 ] as const)(
   "concurrent provider snapshots preserve %s credentials",
   async (selection) => {
@@ -312,7 +313,7 @@ test.each([
     const providerId =
       selection === "file custom only"
         ? "synthetic.gateway"
-        : selection === "file Azure"
+        : selection.startsWith("file Azure")
           ? "azure"
           : "openrouter";
     const ready = [
@@ -370,7 +371,8 @@ test.each([
           selection === "file default key"
             ? "OPENROUTER_API_KEY"
             : "SYNTHETIC_CUSTOM_API_KEY";
-        const bearer = providerId === "azure" && index === 1;
+        const headerOnly = selection === "file Azure headers";
+        const bearer = selection === "file Azure" && index === 1;
         const canonicalKey =
           selection === "root"
             ? "OPENROUTER_API_KEY"
@@ -390,9 +392,12 @@ test.each([
           wire_api: "responses",
           ...(bearer
             ? { experimental_bearer_token: "synthetic-private-bearer" }
-            : { env_key: providerKey }),
+            : headerOnly
+              ? {}
+              : { env_key: providerKey }),
           env_http_headers: {
             "X-Synthetic-Token": "SYNTHETIC_CUSTOM_HEADER",
+            ...(headerOnly ? { "api-key": "OPENAI_API_KEY" } : {}),
             ...(canonicalKey ? { "X-Synthetic-Canonical": canonicalKey } : {}),
             "X-Synthetic-Missing": "SYNTHETIC_UNSET",
           },
@@ -411,7 +416,7 @@ test.each([
           set: { SYNTHETIC_WORKER_VALUE: `shell-value-${index}` },
         };
         const providerEnvironment: Record<string, string> = {
-          ...(bearer
+          ...(bearer || headerOnly
             ? {}
             : {
                 [providerKey]: fileProfile
@@ -419,6 +424,7 @@ test.each([
                   : ` synthetic-key-${index} `,
               }),
           SYNTHETIC_CUSTOM_HEADER: ` synthetic-header-${index} `,
+          ...(headerOnly ? { OPENAI_API_KEY: `private-header-${index}` } : {}),
           ...canonicalHeader,
           SYNTHETIC_REQUIRED_KEY: `synthetic-required-${index}`,
         };
@@ -426,7 +432,7 @@ test.each([
         // variables, including header values, retain their original bytes.
         const workerEnvironment = {
           ...providerEnvironment,
-          ...(bearer
+          ...(bearer || headerOnly
             ? {}
             : { [providerKey]: providerEnvironment[providerKey]!.trim() }),
         };
@@ -668,7 +674,11 @@ test.each([
                     expect(environment["AZURE_OPENAI_API_KEY"]).toBe(
                       canonicalHeader["AZURE_OPENAI_API_KEY"],
                     );
-                    expect(environment["OPENAI_API_KEY"]).toBeUndefined();
+                    expect(environment["OPENAI_API_KEY"]).toBe(
+                      headerOnly
+                        ? providerEnvironment["OPENAI_API_KEY"]
+                        : undefined,
+                    );
                     expect(environment["CODEX_API_KEY"]).toBeUndefined();
                     expect(options.apiKey).toBeUndefined();
                   }

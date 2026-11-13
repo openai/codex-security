@@ -19,7 +19,7 @@ import {
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, test, mock } from "bun:test";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
   hasStoredChatGPTSignIn,
   main,
@@ -1680,29 +1680,49 @@ describe("skill authentication", () => {
     },
   );
 
-  test.each(["patch", "verify-fix"] as const)(
-    "%s uses an inherited Azure bearer without a provider key or OpenAI login",
-    async (command) => {
+  test.each([
+    ["patch", "experimental_bearer_token"],
+    ["verify-fix", "experimental_bearer_token"],
+    ["patch", "http_headers"],
+    ["verify-fix", "http_headers"],
+    ["patch", "env_http_headers"],
+    ["verify-fix", "env_http_headers"],
+  ] as const)(
+    "%s uses inherited Azure %s without a provider key or OpenAI login",
+    async (command, source) => {
+      const native = {
+        experimental_bearer_token: "synthetic-private-bearer",
+        http_headers: { "api-key": "synthetic-private-header" },
+        env_http_headers: { Authorization: "GATEWAY_API_KEY" },
+      }[source];
+      const environment =
+        source === "env_http_headers"
+          ? { GATEWAY_API_KEY: "synthetic-private-header" }
+          : {};
       const result = await runProviderSkill(stateDirectory, {
         command,
         overrides: ['model_provider="azure"'],
-        ambientConfig: [
-          "[model_providers.azure]",
-          'base_url="https://resource.example.test"',
-          'experimental_bearer_token="synthetic-private-bearer"',
-        ].join("\n"),
-        environment: { OPENAI_API_KEY: "synthetic-unrelated-key" },
+        ambientConfig: stringifyToml({
+          model_providers: {
+            azure: {
+              base_url: "https://resource.example.test",
+              [source]: native,
+            },
+          },
+        }),
+        environment: {
+          ...environment,
+          OPENAI_API_KEY: "synthetic-unrelated-key",
+        },
       });
       expect(result.status, result.stderr).toBe(0);
       const args = result.launch.args.join(" ");
       expect(args).not.toContain("env_key");
-      expect(args).not.toContain("synthetic-private-bearer");
+      expect(args).not.toContain("synthetic-private");
       expect(parseToml(result.launch.config)).toMatchObject({
-        model_providers: {
-          azure: { experimental_bearer_token: "synthetic-private-bearer" },
-        },
+        model_providers: { azure: { [source]: native } },
       });
-      expect(result.launch.environment).toEqual({});
+      expect(result.launch.environment).toEqual(environment);
       expect(result.requests.map((request) => request.method)).not.toContain(
         "account/login/start",
       );

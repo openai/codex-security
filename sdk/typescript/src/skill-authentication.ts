@@ -8,6 +8,7 @@ import {
 import { environmentEntry, withoutOpenAiApiKeys } from "./auth.js";
 import {
   deepMerge,
+  azureCredentialSource,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   modelProviderConfigOverride,
@@ -51,7 +52,10 @@ export function resolveSkillAuthentication(
     options.auth === "chatgpt" && !isExternalModelProvider(provider);
   const providerBearer =
     typeof providerConfiguration?.["experimental_bearer_token"] === "string";
-  const providerKeyConfigured = providerEnvKey !== undefined || providerBearer;
+  const providerKeyConfigured =
+    providerEnvKey !== undefined ||
+    providerBearer ||
+    azureCredentialSource(config) !== undefined;
   const requiresOpenAiAuth =
     !commandAuth &&
     (explicitChatgpt || !providerKeyConfigured) &&

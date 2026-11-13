@@ -101,7 +101,8 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
-  usesAzureBearer,
+  azureCredentialSource,
+  azureHeaderEnvironment,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -2505,6 +2506,10 @@ export class CodexSecurity {
             session.providerEnvKey,
             effectiveConfig,
           ),
+        ),
+        ...azureHeaderEnvironment(
+          this.#dependencies.environment,
+          effectiveConfig,
         ),
         ...(session.apiKey === null
           ? {}
@@ -5032,6 +5037,10 @@ export class CodexSecurity {
     let sdkEnvironment = definedEnvironment({
       ...session.nativeProviderEnvironment,
       ...withoutOpenAiApiKeys(environment),
+      ...azureHeaderEnvironment(
+        this.#dependencies.environment,
+        session.effectiveConfig,
+      ),
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
     });
     if (
@@ -5183,7 +5192,8 @@ export class CodexSecurity {
         requestedConfig,
       );
       const apiKey =
-        authentication.method === "api_key" && !usesAzureBearer(requestedConfig)
+        authentication.method === "api_key" &&
+        azureCredentialSource(requestedConfig) === undefined
           ? environmentApiKey(
               this.#dependencies.environment,
               modelProvider,
@@ -5964,7 +5974,7 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
-        usesAzureBearer(requestedConfig) ||
+        azureCredentialSource(requestedConfig) !== undefined ||
         providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -6904,10 +6914,11 @@ export function scanAuthentication(
     );
   }
   if (commandAuth) return { method: "command", verified: false };
-  if (config && usesAzureBearer(config))
+  const azureCredential = config && azureCredentialSource(config);
+  if (azureCredential !== undefined)
     return {
       method: "api_key",
-      source: "experimental_bearer_token",
+      source: azureCredential,
       verified: false,
     };
   if (modelProvider === "amazon-bedrock") {
@@ -7096,6 +7107,8 @@ export function selectedScanEnvironment(
       ),
     );
   }
+  if (config !== undefined && modelProvider === "azure")
+    Object.assign(selected, azureHeaderEnvironment(environment, config));
   return selected;
 }
 

@@ -1060,7 +1060,12 @@ export async function workerRuntimeSettings(
                 provider.env_key,
                 process.platform,
               ) !== undefined
-            : typeof provider.experimental_bearer_token === "string";
+            : typeof provider.experimental_bearer_token === "string" ||
+              (providerId === "azure" &&
+                [provider.http_headers, provider.env_http_headers].some(
+                  (headers) =>
+                    isRecord(headers) && Object.keys(headers).length > 0,
+                ));
       }
       const providers = preflightProviderDefinitions(
         nativeProfileConfig.model_providers,

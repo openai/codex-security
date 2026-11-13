@@ -2910,6 +2910,7 @@ async function testExternalProviderCredentialsReachWorker() {
     ["azure", "AZURE_OPENAI_API_KEY"],
     ["azure", "SYNTHETIC_AZURE_KEY"],
     ["azure", undefined],
+    ["azure", undefined, "OPENAI_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
@@ -2945,9 +2946,11 @@ async function testExternalProviderCredentialsReachWorker() {
               name: provider,
               base_url: `https://${provider}.example.test/v1`,
               wire_api: "responses",
-              ...(key === undefined
-                ? { experimental_bearer_token: selectedKey }
-                : { env_key: key }),
+              ...(key !== undefined
+                ? { env_key: key }
+                : headerKey === undefined
+                  ? { experimental_bearer_token: selectedKey }
+                  : {}),
               ...(headerKey === "OPENAI_API_KEY"
                 ? { requires_openai_auth: true }
                 : {}),
@@ -3012,7 +3015,12 @@ async function testExternalProviderCredentialsReachWorker() {
                   name: provider,
                   base_url: `https://${provider}.example.test/v1`,
                   wire_api: "responses",
-                  experimental_bearer_token: selectedKey,
+                  ...(headerKey === undefined
+                    ? { experimental_bearer_token: selectedKey }
+                    : {
+                        env_http_headers: { "X-Scan-Header": headerKey },
+                        requires_openai_auth: true,
+                      }),
                 },
               },
             );

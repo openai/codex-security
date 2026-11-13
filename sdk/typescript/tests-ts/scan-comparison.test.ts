@@ -1854,7 +1854,12 @@ describe("semantic scan comparison", () => {
     expect(account).not.toHaveBeenCalled();
   });
 
-  test.each(["env_key", "experimental_bearer_token"] as const)(
+  test.each([
+    "env_key",
+    "experimental_bearer_token",
+    "http_headers",
+    "env_http_headers",
+  ] as const)(
     "retains inherited Azure %s and endpoint for a comparison",
     async (credential) => {
       const home = await temporaryDirectory();
@@ -1862,10 +1867,12 @@ describe("semantic scan comparison", () => {
         name: "Inherited name",
         base_url: "https://resource.example.test",
         wire_api: "responses",
-        [credential]:
-          credential === "env_key"
-            ? "SELECTED_AZURE_KEY"
-            : "synthetic-private-bearer",
+        [credential]: {
+          env_key: "SELECTED_AZURE_KEY",
+          experimental_bearer_token: "synthetic-private-bearer",
+          http_headers: { "api-key": "synthetic-private-bearer" },
+          env_http_headers: { Authorization: "OPENAI_API_KEY" },
+        }[credential],
       };
       await writeFile(
         join(home, "config.toml"),
@@ -1899,6 +1906,7 @@ describe("semantic scan comparison", () => {
               SystemRoot: process.env["SystemRoot"],
               CODEX_HOME: home,
               AZURE_OPENAI_API_KEY: "synthetic-unrelated-key",
+              OPENAI_API_KEY: "synthetic-declared-header",
               ...(credential === "env_key"
                 ? { SELECTED_AZURE_KEY: "synthetic-selected-key" }
                 : {}),
@@ -1916,6 +1924,11 @@ describe("semantic scan comparison", () => {
           },
         });
         expect(captured?.env).not.toHaveProperty("AZURE_OPENAI_API_KEY");
+        expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
+          credential === "env_http_headers"
+            ? "synthetic-declared-header"
+            : undefined,
+        );
         expect(captured?.apiKey).toBeUndefined();
         expect(JSON.stringify(captured?.configOverrides)).not.toContain(
           "synthetic-private-bearer",

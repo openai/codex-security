@@ -67,6 +67,47 @@ export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
 
 type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
 
+function azureTableCredential(
+  native: JsonObject,
+  environment?: ProviderEnvironment,
+): string | undefined {
+  if (typeof native["experimental_bearer_token"] === "string")
+    return "experimental_bearer_token";
+  const defaultKey =
+    environment &&
+    environmentEntry(environment, AZURE_CODEX_PROVIDER.env_key)?.trim();
+  for (const field of ["http_headers", "env_http_headers"] as const) {
+    const headers = native[field];
+    if (!isObject(headers)) continue;
+    const names = Object.keys(headers);
+    if (names.some((name) => /^(?:authorization|api-key)$/iu.test(name)))
+      return field;
+    // A gateway can authenticate with its own header name. Ancillary headers
+    // still allow an explicitly supplied Azure resource key to use the preset.
+    if (names.length && !defaultKey) return field;
+  }
+  return undefined;
+}
+
+/** Only declared header variables belong in the selected Azure model process. */
+export function azureHeaderEnvironment(
+  environment: ProviderEnvironment,
+  config: Readonly<JsonObject>,
+): Record<string, string> {
+  if (scanModelProvider(config) !== "azure") return {};
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const azure = isObject(providers) ? providers["azure"] : undefined;
+  const headers = isObject(azure) ? azure["env_http_headers"] : undefined;
+  if (!isObject(headers)) return {};
+  return Object.fromEntries(
+    Object.values(headers).flatMap((name) => {
+      if (typeof name !== "string") return [];
+      const value = environmentEntry(environment, name);
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
+}
+
 /** Keep the Azure key only for a model configuration that names it. */
 export function azureProviderEnvironment(
   environment: ProviderEnvironment,
@@ -87,7 +128,7 @@ export function azureProviderEnvironment(
     (selected === "azure" &&
       native["env_key"] === undefined &&
       native["auth"] == null &&
-      typeof native["experimental_bearer_token"] !== "string") ||
+      azureTableCredential(native, environment) === undefined) ||
     isAzureKey(native["env_key"]) ||
     (isObject(native["env_http_headers"]) &&
       Object.values(native["env_http_headers"]).some(isAzureKey))
@@ -157,7 +198,7 @@ export function externalProviderTable(
   const preset: JsonObject = { ...table };
   if (
     native["auth"] != null ||
-    typeof native["experimental_bearer_token"] === "string"
+    azureTableCredential(native, environment) !== undefined
   )
     delete preset["env_key"];
   return {
@@ -346,17 +387,16 @@ export function scanPricingContext(
   return { provider: "gcp", managedEndpoint };
 }
 
-/** A native Azure bearer is read by Codex from the private provider table. */
-export function usesAzureBearer(config: Readonly<JsonObject>): boolean {
-  if (scanModelProvider(config) !== "azure") return false;
+/** Codex reads header and bearer credentials from the private provider table. */
+export function azureCredentialSource(
+  config: Readonly<JsonObject>,
+): string | undefined {
+  if (scanModelProvider(config) !== "azure") return undefined;
   const providers = resolveCodexProfile(config)["model_providers"];
   const azure = isObject(providers) ? providers["azure"] : undefined;
-  return (
-    isObject(azure) &&
-    azure["auth"] == null &&
-    azure["env_key"] == null &&
-    typeof azure["experimental_bearer_token"] === "string"
-  );
+  return isObject(azure) && azure["auth"] == null && azure["env_key"] == null
+    ? azureTableCredential(azure)
+    : undefined;
 }
 
 /** @internal Use the selected native provider's configured credential key. */
@@ -366,7 +406,7 @@ export function scanProviderEnvKey(
   const selected = scanModelProvider(config);
   if (
     typeof selected !== "string" ||
-    usesAzureBearer(config) ||
+    azureCredentialSource(config) !== undefined ||
     ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
   )
     return undefined;

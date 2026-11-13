@@ -232,7 +232,7 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
-  usesAzureBearer,
+  azureCredentialSource,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -11451,7 +11451,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     hasCommandAuth(config) ||
-    usesAzureBearer(config) ||
+    azureCredentialSource(config) !== undefined ||
     scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )

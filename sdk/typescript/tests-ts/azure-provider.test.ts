@@ -51,6 +51,51 @@ test.each([
   },
 );
 
+test("Azure metadata headers preserve the default key while authentication headers stand alone", async () => {
+  for (const [headers, environment, expectedKey] of [
+    [
+      { http_headers: { "X-Request-ID": "synthetic-request" } },
+      { AZURE_OPENAI_API_KEY: "synthetic-default" },
+      "AZURE_OPENAI_API_KEY",
+    ],
+    [
+      { env_http_headers: { "X-Request-ID": "REQUEST_ID" } },
+      {
+        AZURE_OPENAI_API_KEY: "synthetic-default",
+        REQUEST_ID: "synthetic-request",
+      },
+      "AZURE_OPENAI_API_KEY",
+    ],
+    [
+      { http_headers: { "API-Key": "synthetic-private" } },
+      { AZURE_OPENAI_API_KEY: "synthetic-unrelated" },
+      undefined,
+    ],
+    [
+      { env_http_headers: { "X-Gateway-Proof": "GATEWAY_API_KEY" } },
+      { GATEWAY_API_KEY: "synthetic-gateway" },
+      undefined,
+    ],
+  ] as const) {
+    const config = await mergedCodexConfig(
+      {
+        codexOverrides: {
+          ...deployment,
+          model_providers: { azure: { base_url: resource, ...headers } },
+        },
+      },
+      undefined,
+      environment,
+    );
+    expect(config).toMatchObject({ model_providers: { azure: headers } });
+    const providers = config["model_providers"] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(providers["azure"]?.["env_key"]).toBe(expectedKey);
+  }
+});
+
 test("Azure credentials stay isolated from other providers", () => {
   const keys = {
     AZURE_OPENAI_API_KEY: "synthetic-key",
@@ -79,37 +124,49 @@ test("Azure credentials stay isolated from other providers", () => {
   ).toThrow(/AZURE_OPENAI_API_KEY/u);
 });
 
-test("Azure bearer preflight uses the private provider table with an unrelated ambient key", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repo");
-  await mkdir(repository);
-  await using client = new TestClient(
-    {
-      codexOverrides: {
-        ...deployment,
-        model_providers: {
-          azure: {
-            base_url: resource,
-            experimental_bearer_token: "synthetic-private-bearer",
+test.each([
+  "experimental_bearer_token",
+  "http_headers",
+  "env_http_headers",
+] as const)(
+  "Azure %s preflight uses the private provider table",
+  async (source) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repo");
+    await mkdir(repository);
+    await using client = new TestClient(
+      {
+        codexOverrides: {
+          ...deployment,
+          model_providers: {
+            azure: {
+              base_url: resource,
+              [source]: {
+                experimental_bearer_token: "synthetic-private-bearer",
+                http_headers: { "api-key": "synthetic-private-bearer" },
+                env_http_headers: { Authorization: "NATIVE_DEPLOYMENT_KEY" },
+              }[source],
+            },
           },
         },
       },
-    },
-    {
-      environment: {
-        CODEX_SECURITY_STATE_DIR: join(root, "state"),
-        OPENAI_API_KEY: "synthetic-unrelated",
+      {
+        environment: {
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+          OPENAI_API_KEY: "synthetic-unrelated",
+          NATIVE_DEPLOYMENT_KEY: "synthetic-private-bearer",
+        },
       },
-    },
-  );
-  const preflight = await client.preflight(repository, { auth: "api-key" });
-  expect(preflight.authentication).toEqual({
-    method: "api_key",
-    source: "experimental_bearer_token",
-    verified: false,
-  });
-  expect(JSON.stringify(preflight)).not.toContain("synthetic-private-bearer");
-});
+    );
+    const preflight = await client.preflight(repository, { auth: "api-key" });
+    expect(preflight.authentication).toEqual({
+      method: "api_key",
+      source,
+      verified: false,
+    });
+    expect(JSON.stringify(preflight)).not.toContain("synthetic-private-bearer");
+  },
+);
 
 test.each(["incident-review", "gpt-5.4"])(
   "requires verified pricing to budget Azure deployment %s",
