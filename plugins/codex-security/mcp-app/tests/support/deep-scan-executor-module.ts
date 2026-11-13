@@ -14,7 +14,7 @@ export const executor = await importModule({
   stdin: {
     // Expose internal worker checks only to the test fixtures.
     contents: `${await readFile(executorSource, "utf8")}
-export { snapshotWorkerEnvironment, appendItemDiagnostic, verifyBoundCodexExecutable };
+export { snapshotWorkerEnvironment, appendItemDiagnostic, bindCodexExecutable, verifyBoundCodexExecutable };
 export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),
@@ -22,7 +22,18 @@ export { parseDeepScan } from "./response.js";`,
   },
 });
 
-export const verifyBoundCodexExecutable: (executable: {
-  path: string;
-  identity: import("node:fs").BigIntStats;
-}) => Promise<void> = executor.verifyBoundCodexExecutable;
+export const verifyBoundCodexExecutable: (
+  executable: {
+    path: string;
+    identity: import("node:fs").BigIntStats;
+    sha256?: string;
+  },
+  signal?: AbortSignal,
+) => Promise<void> = executor.verifyBoundCodexExecutable;
+
+export const bindCodexExecutable: (
+  environment: NodeJS.ProcessEnv,
+  cwd: string,
+  signal?: AbortSignal,
+) => Promise<Parameters<typeof verifyBoundCodexExecutable>[0]> =
+  executor.bindCodexExecutable;
