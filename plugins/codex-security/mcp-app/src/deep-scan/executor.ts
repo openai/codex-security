@@ -478,10 +478,20 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ? (discovery.continuationPrompt ?? prompt)
         : prompt;
       const pluginRoot = this.modelSettings.artifactContext?.pluginRoot;
-      const input =
+      let input =
         discovery && pluginRoot
           ? `${workerPrompt}\n\nFor a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name and read <skill-name>/SKILL.md beneath ${JSON.stringify(join(pluginRoot, "skills"))}. Follow that file and resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow; this does not expand the worker's assigned role.`
           : workerPrompt;
+      if (
+        discovery?.onInputDigest &&
+        process.env.CODEX_SECURITY_RETAIN_ROLLOUT_SESSIONS === "1"
+      ) {
+        // Native exec omits turn IDs even on failure. Bind this exact input to the host receipt.
+        input += `\n\nWorker attempt ID: ${attemptId}`;
+        discovery.onInputDigest(
+          createHash("sha256").update(input).digest("hex"),
+        );
+      }
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {

@@ -31,7 +31,7 @@ import {
   trustedParentSandboxWithDenials,
 } from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   assertConfigOverrides,
   assertFlagPair,
@@ -3198,27 +3198,51 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
 async function testSdkResumesExistingThread() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "original worker prompt\n");
-    const result = await new CodexSdkWorkerExecutor({
+    const executor = new CodexSdkWorkerExecutor({
       model: "gpt-5.6-sol",
       reasoningEffort: "ultra",
       parentSandbox: trustedParentSandbox,
-    }).run(
-      workerRequest(promptPath, workingDirectory, {
-        subagents: 3,
-        resumeThreadId: "fixture-existing-thread",
-        continuationPrompt: "continue the existing worker\n",
-      }),
-    );
-    assert.equal(result.threadId, "fixture-existing-thread");
-    const invocation = await readJson(fixture.markerPath);
-    const resumeIndex = invocation.argv.indexOf("resume");
-    assert.notEqual(resumeIndex, -1);
-    assert.equal(invocation.argv[resumeIndex + 1], "fixture-existing-thread");
-    assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
-    assertConfigOverrides(invocation.argv, { model_reasoning_effort: "ultra" });
-    assertReadOnlyWorkerPolicy(invocation.argv);
-    assertWorkerSubagentPolicy(invocation.argv, 3);
-    assert.equal(invocation.stdin, "continue the existing worker\n");
+    });
+    const onInputDigest = mock.fn();
+    const attemptId = randomUUID();
+    const request = workerRequest(promptPath, workingDirectory, {
+      attemptId,
+      onInputDigest,
+      subagents: 3,
+      resumeThreadId: "fixture-existing-thread",
+      continuationPrompt: "continue the existing worker\n",
+    });
+    const retentionFlag = "CODEX_SECURITY_RETAIN_ROLLOUT_SESSIONS";
+    const previous = process.env[retentionFlag];
+    try {
+      process.env[retentionFlag] = "1";
+      await executor.run(request);
+      const marked = (await readJson(fixture.markerPath)).stdin;
+      assert.equal(
+        marked,
+        request.continuationPrompt + "\n\nWorker attempt ID: " + attemptId,
+      );
+      assert.deepEqual(onInputDigest.mock.calls[0]?.arguments, [
+        createHash("sha256").update(marked).digest("hex"),
+      ]);
+      process.env[retentionFlag] = "0";
+      const result = await executor.run(request);
+      assert.equal(onInputDigest.mock.callCount(), 1);
+      assert.equal(result.threadId, "fixture-existing-thread");
+      const invocation = await readJson(fixture.markerPath);
+      const resumeIndex = invocation.argv.indexOf("resume");
+      assert.notEqual(resumeIndex, -1);
+      assert.equal(invocation.argv[resumeIndex + 1], "fixture-existing-thread");
+      assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
+      assertConfigOverrides(invocation.argv, {
+        model_reasoning_effort: "ultra",
+      });
+      assertReadOnlyWorkerPolicy(invocation.argv);
+      assertWorkerSubagentPolicy(invocation.argv, 3);
+      assert.equal(invocation.stdin, "continue the existing worker\n");
+    } finally {
+      restoreEnv(retentionFlag, previous);
+    }
   });
 }
 

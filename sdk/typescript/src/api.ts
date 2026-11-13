@@ -3533,6 +3533,8 @@ export class CodexSecurity {
       const runtimePaths = {
         ...sqliteEnvironment,
         PYTHON: python,
+        CODEX_SECURITY_RETAIN_ROLLOUT_SESSIONS:
+          options.retainRolloutSessions === true ? "1" : "0",
         CODEX_SECURITY_STARTED_AT:
           options.resumeScanId !== undefined &&
           typeof registration["startedAt"] === "string"

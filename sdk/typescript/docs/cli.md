@@ -2269,9 +2269,13 @@ Pass `--retain-rollout-sessions` to `scan` or `bulk-scan` to save private JSONL
 files of attributable scan events alongside the index. These files may include
 prompts, source code, and tool output. Sessions with ambiguous turn ownership
 can appear in the index without an event file. For retried Deep workers, the
-exporter keeps only turns identified by the scan’s receipts. If those receipts
-lack turn IDs, the worker appears only in the index. Worker input is omitted
-when its origin cannot be verified. To retain events on a later invocation,
+exporter accepts native turn IDs from the scan’s receipts. When the native
+launcher omits an ID, opted-in discovery workers add their attempt ID to the
+submitted prompt and record its SHA-256 digest in the receipt. A unique native
+user item matching the digest, thread, turn and attempt window allows the
+exporter to retain subsequent events. Ambiguous or missing evidence, including
+older retries with no native ID or digest, leaves those attempts metadata-only.
+The exporter omits submitted worker input from these event files. To retain events on a later invocation,
 pass the flag again to `scans rerun`, `scans resume`, or `bulk-scan --recover`.
 A retention failure leaves the original scan outcome intact.
 

@@ -471,6 +471,98 @@ describe("saved scan logs", () => {
     },
   );
 
+  test.each([
+    "distinct",
+    "replayed",
+    "late",
+    "wrong thread",
+    "outside receipt",
+  ] as const)(
+    "binds failed discovery retries to their native submitted input (%s)",
+    async (scenario) => {
+      const home = await temporaryHome();
+      const directory = join(home, "worker-usage", "scan");
+      await mkdir(directory, { recursive: true });
+      const events = [];
+      for (const [id, start, end] of [
+        ["first", "001", "003"],
+        ["manual", "004", "006"],
+        ["retry", "007", "009"],
+      ] as const) {
+        const attempt =
+          scenario === "replayed" && id === "manual" ? "first" : id;
+        const text = `private input\n\nWorker attempt ID: ${attempt}`;
+        const started = taskStarted(id, at(start));
+        if (id !== "manual")
+          await writeFile(
+            join(directory, id + ".json"),
+            JSON.stringify({
+              schemaVersion: 1,
+              source: "codex_sdk",
+              usageScope: "thread_cumulative",
+              kind: "discovery",
+              scanId: "scan",
+              attemptId: id,
+              threadId: "worker",
+              resumed: id === "retry",
+              outcome: "failed",
+              startedAt: at(start),
+              observedAt: at(
+                scenario === "outside receipt" && id === "first" ? start : end,
+              ),
+              inputSha256: createHash("sha256").update(text).digest("hex"),
+            }),
+          );
+        events.push(started, injected(text, start));
+        if (scenario === "late" && id === "first")
+          events.push(commandEvent("other work", "earlier", at(start)));
+        events.push(
+          {
+            type: "event_msg",
+            timestamp: at(start),
+            payload: {
+              type: "item_completed",
+              thread_id:
+                scenario === "wrong thread" && id === "first"
+                  ? "other"
+                  : "worker",
+              turn_id: id,
+              item: {
+                type: "UserMessage",
+                content: [{ type: "text", text, text_elements: [] }],
+              },
+            },
+          },
+          commandEvent("result", id, at(start)),
+          task(end, "task_complete"),
+        );
+      }
+      await writeSession(home, "worker", events, undefined, at("001"));
+      const sessions = await scanRolloutSessions({
+        codexHome: home,
+        rootThreadId: "root",
+        executionThreadIds: ["worker"],
+        workerReceipts: { directory, scanId: "scan" },
+        startedAt: at("001"),
+        completedAt: at("011"),
+      });
+      const retained = await Array.fromAsync(sessions[0]!.events());
+      const ids = retained.flatMap(({ payload }) =>
+        typeof payload === "object" && payload && "call_id" in payload
+          ? [payload.call_id]
+          : [],
+      );
+      expect(ids).toEqual(
+        scenario === "distinct"
+          ? ["first", "retry"]
+          : scenario === "replayed"
+            ? []
+            : ["retry"],
+      );
+      expect(JSON.stringify(retained)).not.toContain("private input");
+    },
+  );
+
   test("keeps registered worker lineages when the execution root rollout is missing", async () => {
     const home = await temporaryHome();
     const startedAt = "2026-08-11T12:00:00Z",

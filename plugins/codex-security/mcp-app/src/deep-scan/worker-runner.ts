@@ -368,6 +368,9 @@ export class DeepScanWorkerRunner {
               author: input.workerLabel,
             },
           },
+          onInputDigest: (digest) => {
+            receipt.inputSha256 = digest;
+          },
           onAttribution: (value) => {
             attribution = value;
             logStarted();

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
@@ -124,7 +125,10 @@ interface RolloutWindow {
   completedAt: string;
 }
 
-function inRolloutWindow(timestamp: unknown, window: RolloutWindow): boolean {
+function inRolloutWindow(
+  timestamp: unknown,
+  window: RolloutWindow,
+): timestamp is string {
   return (
     typeof timestamp === "string" &&
     compareTimestamps(timestamp, window.startedAt) >= 0 &&
@@ -321,9 +325,51 @@ function rolloutInput(
   return undefined;
 }
 
+function nativeUserText(item: Record<string, unknown>): string | undefined {
+  const content = item["content"];
+  if (
+    !Array.isArray(content) ||
+    content.length !== 1 ||
+    !isRecord(content[0]) ||
+    content[0]["type"] !== "text" ||
+    typeof content[0]["text"] !== "string"
+  )
+    return;
+  return content[0]["text"];
+}
+
+function taggedWorkerInput(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /\n\nWorker attempt ID: [0-9a-f-]{36}$/u.test(value)
+  );
+}
+
+function workerInputProof(text: string | undefined, worker?: WorkerTurns) {
+  if (text === undefined || !worker?.inputs.size) return;
+  const proof = worker.inputs.get(
+    createHash("sha256").update(text).digest("hex"),
+  );
+  return proof && text.endsWith(`\n\nWorker attempt ID: ${proof.attemptId}`)
+    ? proof
+    : undefined;
+}
+
 interface TurnMatch {
   count: number;
   windows: Map<string | undefined, RolloutWindow | undefined>;
+  inputs: Map<string, string | null>;
+}
+
+interface WorkerInputReceipt extends RolloutWindow {
+  attemptId: string;
+  turnId?: string;
+}
+
+interface WorkerTurns {
+  ids: Set<string>;
+  inputs: Map<string, WorkerInputReceipt>;
+  requiresProof: boolean;
 }
 
 // A root thread can be reused. Only its exact submitted input opens a retained
@@ -333,7 +379,7 @@ async function* retainedTurnEvents(
   window: RolloutWindow,
   prompt: string | undefined,
   match: TurnMatch,
-  turnIds?: ReadonlySet<string>,
+  worker?: WorkerTurns,
 ) {
   let eligible = false;
   let active = false;
@@ -341,11 +387,17 @@ async function* retainedTurnEvents(
   let workerResponded = false;
   let turnStart: string | undefined;
   let turnId: string | undefined;
+  let awaitingWorkerInput = false;
+  let inputReceipt: WorkerInputReceipt | undefined;
   const begin = (timestamp: string) => {
     match.count++;
     match.windows.set(turnId, {
       startedAt: timestamp,
-      completedAt: window.completedAt,
+      completedAt:
+        inputReceipt &&
+        compareTimestamps(inputReceipt.completedAt, window.completedAt) < 0
+          ? inputReceipt.completedAt
+          : window.completedAt,
     });
     active = true;
   };
@@ -361,7 +413,8 @@ async function* retainedTurnEvents(
       else if (compareTimestamps(timestamp, childWindow.completedAt) < 0)
         childWindow.completedAt = timestamp;
     }
-    eligible = active = false;
+    eligible = active = awaitingWorkerInput = false;
+    inputReceipt = undefined;
   };
   for await (const event of ownSessionEvents(session, true)) {
     const payload = event["payload"];
@@ -379,21 +432,88 @@ async function* retainedTurnEvents(
       workerResponded = false;
       turnStart = typeof timestamp === "string" ? timestamp : undefined;
       turnId =
-        turnIds && typeof payload["turn_id"] === "string"
+        worker && typeof payload["turn_id"] === "string" && payload["turn_id"]
           ? payload["turn_id"]
           : undefined;
+      awaitingWorkerInput = !!turnId && !!worker?.inputs.size;
       eligible =
         typeof turnStart === "string" &&
         inRolloutWindow(turnStart, window) &&
-        (!turnIds || (turnId !== undefined && turnIds.has(turnId)));
+        (!worker || (turnId !== undefined && worker.ids.has(turnId)));
       if (eligible && prompt === undefined) begin(turnStart!);
     }
+    if (
+      (awaitingWorkerInput || inputReceipt) &&
+      (task === "thread_rolled_back" ||
+        type === "compacted" ||
+        ("turn_id" in payload && payload["turn_id"] !== turnId) ||
+        ("thread_id" in payload && payload["thread_id"] !== session.threadId))
+    )
+      finish(timestamp);
+    if (
+      inputReceipt &&
+      (!inRolloutWindow(timestamp, window) ||
+        !inRolloutWindow(timestamp, inputReceipt))
+    )
+      finish(timestamp);
     const input = rolloutInput(type, payload);
+    // This native record binds the submitted user input to both IDs, even when exec fails.
+    const item =
+      type === "event_msg" &&
+      (task === "item_started" || task === "item_completed")
+        ? payload["item"]
+        : undefined;
+    const userItem =
+      isRecord(item) && item["type"] === "UserMessage" ? item : undefined;
+    const text = userItem && nativeUserText(userItem);
+    if (prompt === undefined && !worker && taggedWorkerInput(text ?? input)) {
+      // An opted-in worker whose receipt could not be written cannot use the legacy fallback.
+      match.count++;
+      finish(timestamp);
+    }
+    if (prompt === undefined && userItem) {
+      const proof = task === "item_completed" && workerInputProof(text, worker);
+      if (proof) {
+        // Reject a replay anywhere in this thread, even outside the receipt window.
+        if (match.inputs.has(proof.attemptId)) match.count++;
+        match.inputs.set(proof.attemptId, null);
+        if (
+          awaitingWorkerInput &&
+          !active &&
+          turnId &&
+          (!proof.turnId || proof.turnId === turnId) &&
+          payload["thread_id"] === session.threadId &&
+          payload["turn_id"] === turnId &&
+          inRolloutWindow(turnStart, proof) &&
+          inRolloutWindow(timestamp, proof) &&
+          inRolloutWindow(turnStart, window) &&
+          inRolloutWindow(timestamp, window) &&
+          compareTimestamps(timestamp, turnStart) >= 0
+        ) {
+          inputReceipt = { ...proof, startedAt: timestamp };
+          match.inputs.set(proof.attemptId, turnId);
+          begin(timestamp);
+        }
+      } else if (inputReceipt) finish(timestamp);
+      if (task === "item_completed") awaitingWorkerInput = false;
+      // Never export the event's copy of the submitted worker prompt.
+      continue;
+    }
+    if (
+      awaitingWorkerInput &&
+      ((type === "response_item" &&
+        input === undefined &&
+        payload["role"] !== "developer" &&
+        payload["role"] !== "system") ||
+        task === "agent_message" ||
+        task === "agent_reasoning")
+    )
+      awaitingWorkerInput = false;
     if (input !== undefined) {
       if (prompt === undefined) {
         // Backends can emit several user-role setup records before a worker's
         // first reply. Its input is unknown; omit it and stop at subsequent input.
-        if (workerResponded) finish(timestamp);
+        if (inputReceipt || workerResponded) finish(timestamp);
         continue;
       }
       if (active && input !== prompt) {
@@ -453,7 +573,7 @@ export async function scanRolloutSessions(
     options.rootThreadId,
     ...(options.executionThreadIds ?? []),
   ];
-  const workerTurns = new Map<string, { ids: Set<string>; reused: boolean }>();
+  const workerTurns = new Map<string, WorkerTurns>();
   if (options.workerReceipts) {
     await readWorkerReceipts(options.workerReceipts, new Map(), (receipt) => {
       const threadId = receipt["threadId"];
@@ -467,13 +587,41 @@ export async function scanRolloutSessions(
       if (receipt["kind"] === "compare") execution.push(threadId);
       if (receipt["kind"] === "discovery") {
         const previous = workerTurns.get(threadId);
-        const ids = previous?.ids ?? new Set<string>();
-        if (typeof receipt["turnId"] === "string" && receipt["turnId"])
-          ids.add(receipt["turnId"]);
-        workerTurns.set(threadId, {
-          ids,
-          reused: previous !== undefined || receipt["resumed"] === true,
-        });
+        const worker = previous ?? {
+          ids: new Set<string>(),
+          inputs: new Map<string, WorkerInputReceipt>(),
+          requiresProof: false,
+        };
+        worker.requiresProof ||=
+          previous !== undefined ||
+          receipt["resumed"] === true ||
+          "inputSha256" in receipt;
+        const nativeId = receipt["turnId"];
+        if (
+          !("inputSha256" in receipt) &&
+          typeof nativeId === "string" &&
+          nativeId
+        )
+          worker.ids.add(nativeId);
+        else if (
+          typeof receipt["inputSha256"] === "string" &&
+          /^[a-f0-9]{64}$/u.test(receipt["inputSha256"]) &&
+          typeof receipt["attemptId"] === "string" &&
+          typeof receipt["startedAt"] === "string" &&
+          typeof receipt["observedAt"] === "string" &&
+          ["failed", "succeeded", "canceled"].includes(
+            String(receipt["outcome"]),
+          )
+        ) {
+          worker.inputs.set(receipt["inputSha256"], {
+            attemptId: receipt["attemptId"],
+            ...(typeof nativeId === "string" &&
+              nativeId && { turnId: nativeId }),
+            startedAt: receipt["startedAt"],
+            completedAt: receipt["observedAt"],
+          });
+        }
+        workerTurns.set(threadId, worker);
       }
     });
   }
@@ -492,7 +640,7 @@ export async function scanRolloutSessions(
     session: SessionLog;
     prompt?: string;
     window: RolloutWindow;
-    turnIds?: ReadonlySet<string>;
+    worker?: WorkerTurns;
     match: TurnMatch;
   };
   const captures = new Map<string, Promise<Capture | null>>();
@@ -508,11 +656,13 @@ export async function scanRolloutSessions(
       const worker = prompt === undefined ? workerTurns.get(id) : undefined;
       // A retry receipt prevents the single-turn fallback even if only one
       // task survives in the rollout and no receipt has a native turn ID.
-      const turnIds =
-        worker && (worker.reused || worker.ids.size) ? worker.ids : undefined;
+      const proofs =
+        worker && (worker.requiresProof || worker.ids.size)
+          ? worker
+          : undefined;
       if (
         prompt === undefined &&
-        !turnIds &&
+        !proofs &&
         !inRolloutWindow(session.timestamp, options)
       )
         return null;
@@ -541,20 +691,24 @@ export async function scanRolloutSessions(
         compareTimestamps(session.timestamp, options.startedAt) > 0
           ? { ...options, startedAt: session.timestamp }
           : options;
-      const match: TurnMatch = { count: 0, windows: new Map() };
+      const match: TurnMatch = {
+        count: 0,
+        windows: new Map(),
+        inputs: new Map(),
+      };
       // Establish uniqueness without keeping whole rollouts in memory.
       for await (const _ of retainedTurnEvents(
         session,
         window,
         prompt,
         match,
-        turnIds,
+        proofs,
       )) {
         /* drain */
       }
       // Duplicate starts for one ID (including the legacy no-ID case) are ambiguous.
       return match.count > 0 && match.count === match.windows.size
-        ? { session, prompt, window, match, turnIds }
+        ? { session, prompt, window, match, worker: proofs }
         : null;
     })();
     captures.set(id, result);
@@ -575,13 +729,17 @@ export async function scanRolloutSessions(
     async *events() {
       const selected = await capture(session.threadId);
       if (!selected) return;
-      const match: TurnMatch = { count: 0, windows: new Map() };
+      const match: TurnMatch = {
+        count: 0,
+        windows: new Map(),
+        inputs: new Map(),
+      };
       yield* retainedTurnEvents(
         selected.session,
         selected.window,
         selected.prompt,
         match,
-        selected.turnIds,
+        selected.worker,
       );
       if (!isDeepStrictEqual(match, selected.match))
         throw new CodexSecurityError(
