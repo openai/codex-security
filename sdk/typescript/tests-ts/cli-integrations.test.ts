@@ -360,6 +360,9 @@ describe("integration command dispatch", () => {
     const existingExecutable = join(temp.path, "server with spaces");
     await writeFile(existingExecutable, "", { mode: 0o700 });
     const args = ["--mcp", "", "two words", "--json", "one=two"];
+    const http = "HTTP://mcp.example.invalid/MCP?mode=ReadOnly";
+    const https = "hTtPs://mcp.example.invalid/MCP?mode=ReadOnly";
+    const nonAsciiScheme = "httpſ://mcp.example.invalid";
     for (const [launcher, expected] of [
       [
         ["--exec", executable, ...args.map((value) => `--arg=${value}`)],
@@ -379,6 +382,9 @@ describe("integration command dispatch", () => {
         },
       ],
       [["--command=local-server"], { command: "local-server", args: [] }],
+      [[`--command=${http}`], { url: http }],
+      [[`--command=${https}`], { url: https }],
+      [[`--command=${nonAsciiScheme}`], { command: nonAsciiScheme, args: [] }],
       [
         [`--command=${existingExecutable}`],
         { command: existingExecutable, args: [] },
@@ -413,37 +419,6 @@ describe("integration command dispatch", () => {
       );
       expect(cursor.mcpServers["codex-security"]).toEqual(expected);
       expect(amp["amp.mcpServers"]["codex-security"]).toEqual(expected);
-    }
-  }, 30_000);
-
-  test("MCP launchers recognize case-insensitive HTTP URL schemes", async () => {
-    await using temp = await scopedTemporaryDirectory("cli-mcp-http-url-");
-    const { home, run } = await isolatedCli(temp.path);
-
-    for (const url of [
-      "http://example.com/mcp",
-      "https://example.com/mcp",
-      "HTTP://example.com/mcp",
-      "HTTPS://example.com/mcp",
-      "HtTpS://example.com/mcp",
-    ]) {
-      const result = await run(
-        "mcp",
-        "add",
-        "--agent=cursor",
-        "--json",
-        `--command=${url}`,
-      );
-
-      expect(result.status, result.stderr).toBe(0);
-
-      const config = JSON.parse(
-        await readFile(join(home, ".cursor", "mcp.json"), "utf8"),
-      );
-
-      expect(config.mcpServers["codex-security"]).toEqual({
-        url,
-      });
     }
   }, 30_000);
 
