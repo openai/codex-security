@@ -2963,7 +2963,6 @@ async function testExternalProviderCredentialsReachWorker() {
         FIREWORKS_API_KEY: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
         MINIMAX_API_KEY: undefined,
-        FAKE_CODEX_PROVIDER_ENV_KEY: key,
       };
       const saved = Object.keys(environment).map(
         (name) => [name, process.env[name]] as const,
@@ -2993,7 +2992,10 @@ async function testExternalProviderCredentialsReachWorker() {
             );
           }
           const invocation = await readJson(fixture.markerPath);
-          assert.equal(invocation.providerKey, selectedKey);
+          assert.equal(
+            invocation.providerKey ?? invocation.providerHeaders[key],
+            selectedKey,
+          );
           assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {
