@@ -1667,3 +1667,37 @@ describe("Codex configuration", () => {
     expect(parse(await readFile(path, "utf8"))).toEqual({ hooks });
   });
 });
+
+test("SDK Standard Compute selection supplies the native provider table", async () => {
+  const bare = await mergedCodexConfig({
+    codexOverrides: { model_provider: "standardcompute" },
+  });
+  expect(bare["model_providers"]).toEqual({
+    standardcompute: {
+      name: "Standard Compute",
+      wire_api: "responses",
+      base_url: "https://api.stdcmpt.com/v1",
+      env_key: "STANDARDCOMPUTE_API_KEY",
+    },
+  });
+  const native = {
+    name: "Private gateway",
+    base_url: "http://localhost:1234/v1",
+    wire_api: "responses",
+    auth: { command: "token-helper" },
+  };
+  const configured = resolveCodexProfile(
+    await mergedCodexConfig({
+      codexOverrides: {
+        profile: "review",
+        profiles: {
+          review: {
+            model_provider: "standardcompute",
+            model_providers: { standardcompute: native },
+          },
+        },
+      },
+    }),
+  );
+  expect(configured["model_providers"]).toEqual({ standardcompute: native });
+});

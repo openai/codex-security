@@ -545,6 +545,15 @@ export async function mergedCodexConfig(
       await readCodexAuthConfig(profileHome, purpose === "login"),
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  if (scanModelProvider(effectiveOverrides) === "standardcompute") {
+    const providers =
+      resolveCodexProfile(effectiveOverrides)["model_providers"];
+    if (!isObject(providers) || providers["standardcompute"] === undefined) {
+      defaults["model_providers"] = {
+        standardcompute: STANDARDCOMPUTE_CODEX_PROVIDER,
+      };
+    }
+  }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
