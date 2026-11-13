@@ -20,6 +20,7 @@ import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from html import escape
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, TextIO
 from urllib.parse import quote, urlsplit
@@ -88,10 +89,35 @@ SOURCE_READ_CHUNK_SIZE = 64 * 1024
 MAX_JSON_INTEGER = (1 << 53) - 1
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
+    "html": "exports/findings.html",
     "servicenow-avit": "exports/servicenow-avit.csv",
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
 }
+_HTML_EXPORT_STYLE = """
+:root { color-scheme: light dark; }
+body { font: 15px/1.45 system-ui, sans-serif; margin: 1.5rem auto; max-width: 72rem;
+  padding: 0 1rem; }
+h1 { font-size: 1.5rem; margin: 0 0 .35rem; }
+.meta, .empty { color: #555; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0 2rem; }
+th, td { border-bottom: 1px solid #ccc; text-align: left; padding: .45rem .5rem;
+  vertical-align: top; }
+th { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
+.sev { display: inline-block; border-radius: .25rem; font-size: .75rem;
+  font-weight: 600; padding: .1rem .45rem; text-transform: uppercase; }
+.critical { background: #7f1d1d; color: #fff; }
+.high { background: #b91c1c; color: #fff; }
+.medium { background: #b45309; color: #fff; }
+.low { background: #1d4ed8; color: #fff; }
+.informational { background: #4b5563; color: #fff; }
+.finding { border-top: 1px solid #ccc; margin: 1.5rem 0; padding-top: 1rem; }
+.finding h2 { font-size: 1.1rem; }
+dl { display: grid; gap: .25rem 1rem; grid-template-columns: 9rem 1fr; }
+dt { color: #444; font-weight: 600; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+a { color: inherit; }
+""".strip()
 THREAT_MODEL_EXPORT_PATH = "exports/threatmodel.md"
 _LEGACY_THREAT_MODEL_PATHS = (
     "threatmodel.md",
@@ -2882,6 +2908,119 @@ def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
     )
 
 
+def _html_text(value: Any) -> str:
+    return escape("" if value is None else str(value), quote=True)
+
+
+def _html_location_label(location: dict[str, Any]) -> str:
+    start = location["startLine"]
+    end = location.get("endLine", start)
+    suffix = f":{start}" if end == start else f":{start}-{end}"
+    return f"{location['path']}{suffix}"
+
+
+def _html_severity(level: str) -> str:
+    text = _html_text(level)
+    return f'<span class="sev {text}">{text}</span>'
+
+
+def _html_fields(rows: tuple[tuple[str, str], ...]) -> str:
+    return "<dl>" + "".join(f"<dt>{label}</dt><dd>{value}</dd>" for label, value in rows) + "</dl>"
+
+
+def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) -> bytes:
+    """Encode findings as a self-contained UTF-8 HTML report a browser can open."""
+    scan = manifest["scan"]
+    target = scan.get("target") if isinstance(scan.get("target"), dict) else {}
+    display_name = target.get("displayName") if isinstance(target.get("displayName"), str) else ""
+    title = (
+        display_name
+        or (scan.get("id") if isinstance(scan.get("id"), str) else "")
+        or (findings.get("scanId") if isinstance(findings.get("scanId"), str) else "")
+        or "Codex Security findings"
+    )
+    items = findings["findings"]
+    counts = {level: 0 for level in report_projection.SEVERITY_ORDER}
+    for finding in items:
+        level = finding["severity"]["level"]
+        if level in counts:
+            counts[level] += 1
+    mix = ", ".join(f"{level}: {n}" for level, n in counts.items() if n) or "none"
+    finding_word = "finding" if len(items) == 1 else "findings"
+    completed = scan.get("completedAt") if isinstance(scan.get("completedAt"), str) else ""
+    meta_parts = [
+        part
+        for part in (
+            f"Scan {scan['id']}" if isinstance(scan.get("id"), str) else "",
+            scan.get("status") if isinstance(scan.get("status"), str) else "",
+            completed,
+        )
+        if part
+    ]
+    rows: list[str] = []
+    details: list[str] = []
+    for index, finding in enumerate(items, start=1):
+        location = _html_text(_html_location_label(_sarif_primary_location(finding)))
+        severity = finding["severity"]["level"]
+        status = _html_text("open")
+        finding_id = f"finding-{index}"
+        title_html = _html_text(finding["title"])
+        rows.append(
+            "<tr>"
+            f"<td>{_html_severity(severity)}</td>"
+            f'<td><a href="#{finding_id}">{title_html}</a></td>'
+            f"<td><code>{location}</code></td>"
+            f"<td>{status}</td>"
+            "</tr>"
+        )
+        details.append(
+            f'<article class="finding" id="{finding_id}">'
+            f"<h2>{title_html}</h2>"
+            + _html_fields(
+                (
+                    ("Severity", _html_severity(severity)),
+                    ("Location", f"<code>{location}</code>"),
+                    ("Status", status),
+                    ("Finding ID", f"<code>{_html_text(finding['findingId'])}</code>"),
+                    ("Occurrence ID", f"<code>{_html_text(finding['occurrenceId'])}</code>"),
+                    ("Summary", _html_text(finding["summary"])),
+                    ("Remediation", _html_text(finding["remediation"])),
+                )
+            )
+            + "</article>"
+        )
+    table_body = (
+        "\n".join(rows) if rows else '<tr><td class="empty" colspan="4">No findings.</td></tr>'
+    )
+    heading = _html_text(" · ".join(meta_parts) if meta_parts else title)
+    summary = _html_text(f"{len(items)} {finding_word} · {mix}")
+    document = (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{_html_text(f'Codex Security findings — {title}')}</title>\n"
+        f"<style>\n{_HTML_EXPORT_STYLE}\n</style>\n"
+        "</head>\n"
+        "<body>\n"
+        "<header>\n"
+        "<h1>Codex Security findings</h1>\n"
+        f'<p class="meta">{heading}</p>\n'
+        f'<p class="meta">{summary}</p>\n'
+        "</header>\n"
+        "<table>\n"
+        "<thead><tr><th>Severity</th><th>Finding</th><th>Location</th>"
+        "<th>Status</th></tr></thead>\n"
+        f"<tbody>\n{table_body}\n</tbody>\n"
+        "</table>\n"
+        f"{''.join(details)}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+    return document.encode("utf-8")
+
+
 def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
     """Encode findings in input order as UTF-8 CSV using the columns selected by coverage and findings."""
     output = io.StringIO(newline="")
@@ -2930,7 +3069,8 @@ def build_findings_export(
     """Return bytes for the requested export of a sealed scan.
 
     JSON preserves the sealed findings bytes. SARIF can use source_root to resolve
-    locations. ServiceNow AVIT requires an application template.
+    locations. HTML is a self-contained report. ServiceNow AVIT requires an
+    application template.
     """
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -2938,11 +3078,13 @@ def build_findings_export(
         return _json_bytes(build_sarif_projection(scan_dir, source_root, schema_dir))
     if source_root is not None:
         raise ContractError("source-root is only supported for SARIF exports")
-    _, findings, coverage, findings_bytes = _read_sealed_scan(
+    manifest, findings, coverage, findings_bytes = _read_sealed_scan(
         scan_dir, schema_dir, f"{export_format.upper()} export"
     )
     if export_format == "json":
         return findings_bytes
+    if export_format == "html":
+        return build_html_projection(manifest, findings)
     if export_format == "servicenow-avit":
         if avit_template is None:
             raise ContractError("--export-format servicenow-avit requires --avit-template")

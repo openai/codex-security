@@ -30,6 +30,7 @@ export type ArtifactOutput = Pick<NodeJS.WriteStream, "write">;
 
 export const ARTIFACT_EXPORT_FILENAMES = {
   csv: "findings.csv",
+  html: "findings.html",
   "servicenow-avit": "servicenow-avit.csv",
   json: "findings.json",
   sarif: "results.sarif",
@@ -67,7 +68,7 @@ export type ExportArtifactOptions = {
     }
   | {
       artifact?: "findings";
-      format?: "csv" | "json" | "sarif";
+      format?: "csv" | "html" | "json" | "sarif";
       sourceRoot?: string;
       avitTemplate?: never;
     }
@@ -124,7 +125,7 @@ export function resolveArtifactFormat(
     throw new CodexSecurityError(
       artifact === "threat-model"
         ? "Threat-model exports only support --export-format md."
-        : "Findings exports support --export-format csv, json, sarif, or servicenow-avit.",
+        : "Findings exports support --export-format csv, html, json, sarif, or servicenow-avit.",
     );
   }
   if (selected === "servicenow-avit" && !avitTemplate) {

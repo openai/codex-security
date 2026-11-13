@@ -210,6 +210,7 @@ describe("CLI help", () => {
     expect(text).toContain("threatmodel.md");
     expect(option(text, "--export-format")).toContain("<format>");
     expect(option(text, "--export-format")).toContain("sarif");
+    expect(option(text, "--export-format")).toContain("html");
     expect(text).toContain("--avit-template <file>");
     for (const flag of [
       "--format",
@@ -228,7 +229,7 @@ describe("CLI help", () => {
         properties: {
           artifact: { enum: ["findings", "threat-model"], default: "findings" },
           exportFormat: {
-            enum: ["csv", "json", "sarif", "md", "servicenow-avit"],
+            enum: ["csv", "html", "json", "sarif", "md", "servicenow-avit"],
           },
         },
       },

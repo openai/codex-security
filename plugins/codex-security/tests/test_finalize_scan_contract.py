@@ -781,7 +781,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.write_sealed_scan()
         canonical = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
 
-        for export_format in ("json", "csv", "sarif"):
+        for export_format in ("json", "csv", "html", "sarif"):
             with self.subTest(export_format=export_format):
                 result = subprocess.run(
                     [
@@ -825,6 +825,18 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     self.assertEqual(row["path"], "src/extract.py")
                     self.assertEqual(row["start_line"], "41")
                     self.assertEqual(row["end_line"], "44")
+                elif export_format == "html":
+                    html = result.stdout.decode()
+                    self.assertTrue(html.startswith("<!DOCTYPE html>"))
+                    self.assertIn("<style>", html)
+                    self.assertNotIn("<link", html)
+                    self.assertNotIn('src="http', html)
+                    self.assertNotIn('href="http', html)
+                    self.assertIn("=Unsafe archive extraction", html)
+                    self.assertIn("high", html)
+                    self.assertIn("src/extract.py:41-44", html)
+                    self.assertIn(">open<", html)
+                    self.assertNotIn("report.html", html)
                 else:
                     sarif = json.loads(result.stdout)
                     self.assertEqual(sarif["version"], "2.1.0")
@@ -934,7 +946,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
     def test_exports_reject_unsealed_and_tampered_scans(self) -> None:
         self.write_scan()
-        for export_format in ("json", "csv"):
+        for export_format in ("json", "csv", "html"):
             with self.subTest(export_format=export_format, state="unsealed"):
                 with self.assertRaisesRegex(
                     FINALIZER.ContractError,
@@ -951,7 +963,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         FINALIZER.finalize_scan(self.scan_dir)
         sarif_path.unlink()
         self.write_json("findings.json", {"changed": True})
-        for export_format in ("json", "csv"):
+        for export_format in ("json", "csv", "html"):
             with self.subTest(export_format=export_format, state="tampered"):
                 with self.assertRaisesRegex(FINALIZER.ContractError, "sealed artifact changed"):
                     FINALIZER.build_findings_export(self.scan_dir, export_format)
@@ -1004,6 +1016,37 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn(str(diagnostic), stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_html_export_escapes_markup_and_keeps_an_empty_scan_self_contained(self) -> None:
+        self.finding["title"] = "<script>alert(1)</script>"
+        self.finding["summary"] = '<img src="x" onerror="alert(1)">'
+        self.finding["locations"] = [
+            {"path": "src/<b>.py", "startLine": 7, "endLine": 9, "role": "sink"}
+        ]
+        self.findings["findings"] = [copy.deepcopy(self.finding)]
+        self.write_sealed_scan()
+        canonical = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
+
+        html = FINALIZER.build_findings_export(self.scan_dir, "html").decode()
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;img src=", html)
+        self.assertNotIn('<img src="x"', html)
+        self.assertIn("src/&lt;b&gt;.py:7-9", html)
+        self.assertIn("<style>", html)
+        self.assertNotIn("<link", html)
+        self.assertNotIn('src="http', html)
+        self.assertNotIn('href="http', html)
+        self.assertIn(">open<", html)
+        self.assertEqual(canonical, self.scan_file_bytes(*canonical))
+
+        self.findings["findings"] = []
+        self.write_sealed_scan()
+        empty = FINALIZER.build_findings_export(self.scan_dir, "html").decode()
+        self.assertTrue(empty.startswith("<!DOCTYPE html>"))
+        self.assertIn("No findings.", empty)
+        self.assertIn("0 findings", empty)
+        self.assertIn("<style>", empty)
 
     def test_malformed_remote_is_a_contract_error(self) -> None:
         self.manifest["scan"]["target"]["remote"] = "https://[invalid"
