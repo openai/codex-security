@@ -506,18 +506,26 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           events,
           stopOnCompletion: true,
           onEvent: async (event) => {
-            if (
+            const reportedTurnId =
               (event.type === "turn.started" ||
-                event.type === "turn.completed") &&
+                event.type === "turn.completed" ||
+                event.type === "turn.failed") &&
               "turn_id" in event &&
               typeof event.turn_id === "string"
-            )
-              turnId = event.turn_id;
-            if (event.type === "turn.completed") {
+                ? event.turn_id
+                : undefined;
+            if (reportedTurnId) turnId = reportedTurnId;
+            if (event.type === "turn.completed" || reportedTurnId) {
               try {
-                await request.onUsage?.(readUsage(event.usage), turnId);
+                // Persist an available ID even if the attempt never reports usage.
+                await request.onUsage?.(
+                  event.type === "turn.completed"
+                    ? readUsage(event.usage)
+                    : null,
+                  turnId,
+                );
               } catch {
-                // Retaining optional usage must not change turn acceptance.
+                // Retaining an optional receipt must not change turn acceptance.
               }
             }
             const item = event.type === "item.completed" ? event.item : event;

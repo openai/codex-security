@@ -3783,7 +3783,11 @@ async function testWorkerTerminalEvents() {
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
-      { type: "turn.failed", error: { message: wrappedQuota } },
+      {
+        type: "turn.failed",
+        turn_id: "fixture-failed-turn",
+        error: { message: wrappedQuota },
+      },
       { type: "turn.failed", error: { message: disconnect } },
       { type: "turn.failed", error: { message: policyMessage } },
       {
@@ -3808,17 +3812,21 @@ async function testWorkerTerminalEvents() {
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
       },
     ] as const) {
+      const reportsStartedTurn =
+        event?.type === "turn.failed" && event.error.message === disconnect;
       await writeFile(
         promptPath,
         event
-          ? `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n`
+          ? `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n${reportsStartedTurn ? "FIXTURE_WORKER_TURN_ID" : ""}`
           : "NULL_USAGE\n",
       );
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
         const onNonRetryableError = mock.fn();
+        const onUsage = mock.fn();
         const execution = runWorker(promptPath, workingDirectory, {
           resumeThreadId,
           onNonRetryableError,
+          onUsage,
         });
         if (event?.type === "turn.failed") {
           const permanent = terminalMessages.includes(event.error.message);
@@ -3826,6 +3834,15 @@ async function testWorkerTerminalEvents() {
             name: permanent ? "DeepScanNonRetryableError" : "Error",
             message: event.error.message,
           });
+          const turnId = reportsStartedTurn
+            ? "fixture-started-turn"
+            : "turn_id" in event
+              ? event.turn_id
+              : undefined;
+          assert.deepEqual(
+            onUsage.mock.calls.map((call) => call.arguments),
+            turnId ? [[null, turnId]] : [],
+          );
           assert.deepEqual(
             onNonRetryableError.mock.calls.map(
               ({ arguments: [error] }) => error.message,
