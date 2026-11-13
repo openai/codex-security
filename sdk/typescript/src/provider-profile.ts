@@ -92,6 +92,21 @@ export function privateReplayOverrides(
   return result;
 }
 
+/** A worker can select the HF declaration even when its parent uses another provider. */
+export async function adaptHuggingFaceProviders(providers: JsonObject) {
+  const hf = providers["huggingface"];
+  if (!isRecord(hf) || typeof hf["base_url"] !== "string")
+    return { providers, cleanup: async () => {} };
+  const adapter = await startHuggingFaceResponsesAdapter(hf["base_url"]);
+  return {
+    providers: {
+      ...providers,
+      huggingface: { ...hf, base_url: adapter.baseUrl },
+    },
+    cleanup: adapter.close,
+  };
+}
+
 /** Provider definitions use a native file layer, never process arguments. */
 export async function createProviderProfile(
   codexHome: string,
@@ -113,25 +128,21 @@ export async function createProviderProfile(
       options,
     );
   }
-  let adapter:
-    Awaited<ReturnType<typeof startHuggingFaceResponsesAdapter>> | undefined;
+  let closeAdapter: (() => Promise<void>) | undefined;
   if (options.replay) {
     await writePrivateConfig(path, JSON.stringify(config));
   } else {
     const providers = resolveCodexProfile(config)["model_providers"];
-    const definitions = isRecord(providers) ? { ...providers } : {};
-    const hf = definitions["huggingface"];
-    // A worker can select this declaration even when its parent uses another provider.
-    if (isRecord(hf) && typeof hf["base_url"] === "string") {
-      adapter = await startHuggingFaceResponsesAdapter(hf["base_url"]);
-      definitions["huggingface"] = { ...hf, base_url: adapter.baseUrl };
-    }
+    const adapted = await adaptHuggingFaceProviders(
+      isRecord(providers) ? providers : {},
+    );
+    closeAdapter = adapted.cleanup;
     try {
       await writeCodexConfig(path, {
-        model_providers: definitions,
+        model_providers: adapted.providers,
       });
     } catch (error) {
-      await adapter?.close();
+      await closeAdapter();
       throw error;
     }
   }
@@ -139,8 +150,7 @@ export async function createProviderProfile(
     name,
     path,
     cleanup: async () => {
-      await adapter?.close();
-      adapter = undefined;
+      await closeAdapter?.();
       await rm(path, { force: true });
     },
   };

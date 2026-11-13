@@ -213,6 +213,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
+  huggingFaceProviderDefaults,
   isExternalModelProvider,
   mergeCodexOverrides,
   hasCommandAuth,
@@ -11687,9 +11688,18 @@ async function executeScan(
       )?.[provider];
       providerOptions = {
         provider,
-        providerConfiguration: isExternalModelProvider(provider)
-          ? { ...EXTERNAL_CODEX_PROVIDERS[provider], ...providerConfiguration }
-          : providerConfiguration,
+        providerConfiguration:
+          provider === "huggingface"
+            ? {
+                ...huggingFaceProviderDefaults(providerConfiguration),
+                ...providerConfiguration,
+              }
+            : isExternalModelProvider(provider)
+              ? {
+                  ...EXTERNAL_CODEX_PROVIDERS[provider],
+                  ...providerConfiguration,
+                }
+              : providerConfiguration,
       };
     }
     selectedAuthentication = arguments_.mock
@@ -13426,7 +13436,10 @@ async function parseScanCodexOverrides(
   ) {
     // Fill missing defaults without replacing file settings or combining
     // native command auth with the generated env-key definition.
-    const generated: JsonObject = { ...EXTERNAL_CODEX_PROVIDERS[provider] };
+    const generated: JsonObject =
+      provider === "huggingface"
+        ? huggingFaceProviderDefaults(providers[provider])
+        : { ...EXTERNAL_CODEX_PROVIDERS[provider] };
     for (const key of Object.keys(providers[provider])) delete generated[key];
     if (providers[provider]["auth"] !== undefined) delete generated["env_key"];
     delete result["model_providers"];
@@ -13455,9 +13468,11 @@ export function parseCodexOverrides(
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
   if (isExternalModelProvider(provider)) {
     result["model_provider"] = provider;
-    result["model_providers"] = {
-      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-    };
+    if (provider !== "huggingface") {
+      result["model_providers"] = {
+        [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+      };
+    }
   } else if (provider === "amazon-bedrock") {
     result["model_provider"] = provider;
   }
@@ -13522,9 +13537,20 @@ export function parseCodexOverrides(
     cursor[final] = parsed;
   }
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
-    const selectedModel = scanModel(
-      mergeCodexOverrides(defaults ?? {}, result),
-    );
+    const selected = mergeCodexOverrides(defaults ?? {}, result);
+    const selectedModel = scanModel(selected);
+    if (provider === "huggingface") {
+      const declared = resolveCodexProfile(selected)["model_providers"];
+      const explicit = result["model_providers"];
+      result["model_providers"] = mergeCodexOverrides(
+        {
+          huggingface: huggingFaceProviderDefaults(
+            isJsonObject(declared) ? declared["huggingface"] : undefined,
+          ),
+        },
+        isJsonObject(explicit) ? explicit : {},
+      );
+    }
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
         selectedModel === undefined

@@ -3678,6 +3678,29 @@ describe("CLI", () => {
     }
   });
 
+  test("Hugging Face CLI overrides preserve explicit provider authentication", () => {
+    for (const [field, literal] of [
+      ["env_key", '"CUSTOM_HF_TOKEN"'],
+      ["experimental_bearer_token", '"synthetic-bearer"'],
+      ["auth", '{command="token-helper"}'],
+    ]) {
+      const config = parseCodexOverrides(
+        [`model_providers.huggingface.${field}=${literal}`],
+        "test-model",
+        undefined,
+        "huggingface",
+      );
+      const provider = (config["model_providers"] as JsonObject)[
+        "huggingface"
+      ] as JsonObject;
+      expect(provider["base_url"]).toBe("https://router.huggingface.co/v1");
+      expect(provider["env_key"]).toBe(
+        field === "env_key" ? "CUSTOM_HF_TOKEN" : undefined,
+      );
+      expect(provider[field!]).toBeDefined();
+    }
+  });
+
   test.each(
     [
       ["info", "--workers"],

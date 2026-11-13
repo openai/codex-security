@@ -51,6 +51,19 @@ export const HUGGINGFACE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+function huggingFaceUsesNativeAuthentication(native: unknown): boolean {
+  return (
+    isObject(native) &&
+    (native["auth"] != null || native["experimental_bearer_token"] != null)
+  );
+}
+
+export function huggingFaceProviderDefaults(native: unknown): JsonObject {
+  const preset: JsonObject = { ...HUGGINGFACE_CODEX_PROVIDER };
+  if (huggingFaceUsesNativeAuthentication(native)) delete preset["env_key"];
+  return preset;
+}
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
@@ -250,6 +263,13 @@ export function scanProviderEnvKey(
     return undefined;
   const providers = resolveCodexProfile(config)["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
+  if (
+    selected === "huggingface" &&
+    isObject(provider) &&
+    provider["env_key"] == null &&
+    huggingFaceUsesNativeAuthentication(provider)
+  )
+    return undefined;
   return isObject(provider) && typeof provider["env_key"] === "string"
     ? provider["env_key"]
     : isExternalModelProvider(selected)
@@ -515,13 +535,9 @@ export async function mergedCodexConfig(
     const providers =
       resolveCodexProfile(effectiveOverrides)["model_providers"];
     const hf = isObject(providers) ? providers["huggingface"] : undefined;
-    const preset: JsonObject = { ...HUGGINGFACE_CODEX_PROVIDER };
-    if (
-      isObject(hf) &&
-      (hf["auth"] != null || hf["experimental_bearer_token"] != null)
-    )
-      delete preset["env_key"];
-    defaults["model_providers"] = { huggingface: preset };
+    defaults["model_providers"] = {
+      huggingface: huggingFaceProviderDefaults(hf),
+    };
   }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (modelProvider === "amazon-bedrock") {

@@ -14,6 +14,7 @@ import {
   scanPricingContext,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvKey,
 } from "../src/config.js";
 import {
   ConfigurationError,
@@ -1674,6 +1675,7 @@ test("HF defaults disable hosted search without overriding explicit settings", a
   });
   expect(config["web_search"]).toBe("disabled");
   expect(config["model_reasoning_summary"]).toBe("none");
+  expect(scanProviderEnvKey(config)).toBe("HF_TOKEN");
   expect(config["model_providers"]).toMatchObject({
     huggingface: {
       name: "Hugging Face",
@@ -1704,6 +1706,7 @@ test("HF defaults disable hosted search without overriding explicit settings", a
   );
   expect(selected["web_search"]).toBe("live");
   expect(selected["model_reasoning_summary"]).toBe("auto");
+  expect(scanProviderEnvKey(selected)).toBeUndefined();
   expect(selected["model_providers"]).toEqual({
     huggingface: {
       name: "Hugging Face",
