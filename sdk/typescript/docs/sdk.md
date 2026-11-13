@@ -389,15 +389,10 @@ controls, replay, and reporting definitions.
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 two kinds of signal:
 
-- `{ kind: "dispatch", phase, planned, started }` and `{ kind: "failed",
-phase, planned, started, reason }` come from live `spawn_agent` tool calls
-  on the parent event stream. These fire when the runtime actually starts (or
-  fails to start) a delegated worker, independently of model-emitted status
-  markers. `started` is the number of spawn attempts observed so far in the
-  run; `planned` is the same count when the scheduler has not advertised a
-  larger target. The event is delivered in the same turn as the spawn item,
-  before session-log polling. A completed scan that never emitted `dispatch`
-  or `failed` started no `spawn_agent` call on that stream.
+- `{ kind: "dispatch", attempts }` reports a live `spawn_agent` invocation from
+  the parent event stream. `{ kind: "failed", attempts, reason }` reports a failed
+  invocation. Both count distinct spawn attempts seen on that stream, including
+  failures. The tool event does not identify the scan phase or planned worker count.
 - `{ kind: "observed", worker: number }` reports persisted worker sessions
   discovered by the SDK's existing session tracker.
 
@@ -405,9 +400,7 @@ phase, planned, started, reason }` come from live `spawn_agent` tool calls
 await security.run(repository, {
   onWorkerEvent(event) {
     if (event.kind === "dispatch") {
-      console.log(
-        `Delegated ${event.phase}: ${event.started}/${event.planned}`,
-      );
+      console.log(`Worker spawn attempt ${event.attempts}`);
     } else if (event.kind === "failed") {
       console.log(`Worker start failed: ${event.reason}`);
     } else {
@@ -427,7 +420,7 @@ tracking, before `postScanPrompt`.
 Persistence and polling can delay `observed` notifications, and a missing
 `observed` event does not prove that delegation was skipped. An observed
 session does not establish that a worker just started or that file review has
-begun. Use the `dispatch` and `failed` events for that boundary. Use
+begun. Use
 `maxCostUsd` or `signal` for cancellation. Observer failures go to
 `onObserverError` without stopping the scan.
 

@@ -908,8 +908,8 @@ describe("one-shot scan events", () => {
       }),
     ).resolves.toBeDefined();
     expect(events).toEqual([
-      { kind: "dispatch", phase: "file_review", planned: 1, started: 1 },
-      { kind: "dispatch", phase: "file_review", planned: 2, started: 2 },
+      { kind: "dispatch", attempts: 1 },
+      { kind: "dispatch", attempts: 2 },
     ]);
     expect(statuses).toEqual([]);
   });
@@ -949,12 +949,10 @@ describe("one-shot scan events", () => {
       }),
     ).resolves.toBeDefined();
     expect(events).toEqual([
-      { kind: "dispatch", phase: "file_review", planned: 1, started: 1 },
+      { kind: "dispatch", attempts: 1 },
       {
         kind: "failed",
-        phase: "file_review",
-        planned: 1,
-        started: 1,
+        attempts: 1,
         reason: "capacity exhausted",
       },
     ]);

@@ -6116,7 +6116,8 @@ export async function runScanEvents(
   let tacStatusReported = false;
   try {
     options.signal.throwIfAborted();
-    const workerDispatch = createWorkerDispatchMonitor();
+    const workerDispatch =
+      options.onWorkerEvent && createWorkerDispatchMonitor();
     const turn = await readCodexTurn({
       thread: options.thread,
       events: options.events,
@@ -6162,8 +6163,8 @@ export async function runScanEvents(
         if (workerStatus !== null) {
           notifyObserver(options, "onWorkerStatus")(workerStatus);
         }
-        const workerEvent = workerDispatch.observe(event);
-        if (workerEvent !== null) {
+        const workerEvent = workerDispatch?.observe(event);
+        if (workerEvent) {
           notifyObserver(options, "onWorkerEvent")(workerEvent);
         }
         if (event.type === "thread.started") {

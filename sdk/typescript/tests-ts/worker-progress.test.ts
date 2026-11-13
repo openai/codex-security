@@ -340,9 +340,7 @@ describe("runtime worker dispatch monitor", () => {
     ).toBeNull();
     expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toEqual({
       kind: "dispatch",
-      phase: "file_review",
-      planned: 1,
-      started: 1,
+      attempts: 1,
     });
     expect(
       monitor.observe(
@@ -352,9 +350,7 @@ describe("runtime worker dispatch monitor", () => {
       ),
     ).toEqual({
       kind: "dispatch",
-      phase: "file_review",
-      planned: 2,
-      started: 2,
+      attempts: 2,
     });
     expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toBeNull();
     expect(monitor.observe(spawnEvent("item.completed", "spawn-1"))).toBeNull();
@@ -376,9 +372,7 @@ describe("runtime worker dispatch monitor", () => {
       ),
     ).toEqual({
       kind: "failed",
-      phase: "file_review",
-      planned: 1,
-      started: 1,
+      attempts: 1,
       reason: "capacity exhausted",
     });
     expect(
@@ -395,9 +389,7 @@ describe("runtime worker dispatch monitor", () => {
     const monitor = createWorkerDispatchMonitor();
     expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toEqual({
       kind: "dispatch",
-      phase: "file_review",
-      planned: 1,
-      started: 1,
+      attempts: 1,
     });
     expect(
       monitor.observe(
@@ -408,9 +400,7 @@ describe("runtime worker dispatch monitor", () => {
       ),
     ).toEqual({
       kind: "failed",
-      phase: "file_review",
-      planned: 1,
-      started: 1,
+      attempts: 1,
       reason: "thread spawn rejected",
     });
   });

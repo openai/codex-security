@@ -146,10 +146,7 @@ const options: ScanOptions = {
     if (event.kind === "observed") {
       event.worker satisfies number;
     } else {
-      event.phase satisfies
-        "file_review" | "ranking" | "validation" | "attack_path";
-      event.started satisfies number;
-      event.planned satisfies number;
+      event.attempts satisfies number;
     }
   },
 };

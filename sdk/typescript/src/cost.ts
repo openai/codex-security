@@ -39,7 +39,7 @@ import {
 import {
   scanProgressUpdatesFromText,
   type ScanProgress,
-  type ScanWorkerPhase,
+  type ScanWorkerRuntimeEvent,
 } from "./worker-progress.js";
 
 export { estimateScanCost, formatUsd, type ScanCost } from "./cost-model.js";
@@ -160,19 +160,7 @@ export type ScanWorkerEvent =
       /** Scan-local number shared with activity and session observers. */
       worker: number;
     }
-  | {
-      kind: "dispatch";
-      phase: ScanWorkerPhase;
-      planned: number;
-      started: number;
-    }
-  | {
-      kind: "failed";
-      phase: ScanWorkerPhase;
-      planned: number;
-      started: number;
-      reason: string;
-    };
+  | ScanWorkerRuntimeEvent;
 
 export interface ScanSessionEvent {
   threadId: string;
