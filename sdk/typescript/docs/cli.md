@@ -292,27 +292,21 @@ The SDK accepts `codexOverrides: { model_provider: "huggingface", model:
 `env_key`, `base_url`, and `http_headers`, still apply. For organization
 billing, set `model_providers.huggingface.http_headers` with `X-HF-Bill-To`.
 
-The SDK starts a temporary loopback Responses-to-Chat-Completions adapter for
-the private provider profile. It uses HF's `/v1/chat/completions` endpoint because
-the hosted Responses adapter rejects namespaces and can reject growing scan
-requests with HTTP 413. The local adapter flattens Codex namespaces, wraps
-freeform inputs as function arguments, and restores tool identities in Responses
-events and conversation history. Standard scans and Deep Scan workers share
-that profile. Reruns and resumed scans create a fresh adapter; saved recipes keep
-the upstream endpoint. Closing the client closes the adapter.
+Standard scans and Deep Scan workers use a local adapter to send Codex
+requests to HF's Chat Completions endpoint. The adapter translates namespaced
+functions and freeform tools and restores their identities in the response and
+conversation history. Saved scan recipes retain the upstream URL. Rerunning
+or resuming a scan starts a new adapter. Patch and validation commands,
+including patches generated after a scan, close their adapter when the command
+finishes.
 
-Hosted web search defaults to disabled. The adapter supports text, images, local
-function tools, and JSON-schema output. Hosted tools (including remote MCP),
-remote compaction, and server-side Responses conversation state are not provided.
-Reasoning effort is forwarded to HF; provider reasoning summaries are not replayed.
-Generation output is delivered after each upstream completion, with keepalives
-while it runs. A transport instruction tells the model to include a tool call
-with progress updates, since Chat Completions has no separate commentary channel.
-Explicit configuration is preserved; unsupported hosted tools fail
-rather than being silently removed. Freeform grammar constraints
-cannot be enforced by HF's function API. The selected model must produce valid
-tool input. HF model prices are not bundled, so `--max-cost` is unavailable for
-these model IDs; review token usage and your HF billing dashboard instead.
+The adapter supports text, images, local function tools, and JSON-schema
+output. Hosted web search defaults to disabled. Hosted tools, remote
+compaction, and server-side Responses conversation state are unsupported.
+The adapter forwards reasoning effort and delivers generated output once the
+upstream completion finishes. Freeform tool input must satisfy the original
+grammar. HF model prices are not bundled, so token usage is available but
+`--max-cost` is unavailable for these model IDs.
 
 See [HF's Codex integration](https://huggingface.co/docs/inference-providers/integrations/codex)
 and [Responses API](https://huggingface.co/docs/inference-providers/guides/responses-api).
