@@ -65,7 +65,7 @@ def patch_artifact_preview(
     file_count = 0
     old_headers = 0
     new_headers = 0
-    mail_preamble = False
+    mail = pending_mail_header = signature = False
     hunk_lines = 0
     expect_hunk = False
     # Older saved previews can contain a bare Git header followed directly by changes.
@@ -76,12 +76,18 @@ def patch_artifact_preview(
             while chunk := patch.readline(1024 * 1024):
                 digest.update(chunk)
                 if not preview:
-                    mail_preamble = _FORMAT_PATCH_FROM.fullmatch(chunk) is not None
+                    mail = _FORMAT_PATCH_FROM.fullmatch(chunk) is not None
                 if len(preview) <= PATCH_PREVIEW_BYTES:
                     preview.extend(chunk[: PATCH_PREVIEW_BYTES + 1 - len(preview)])
-                if at_line_start and mail_preamble:
-                    mail_preamble = not chunk.startswith(b"diff --git ")
-                if at_line_start and not mail_preamble:
+                if at_line_start and mail and not (hunk_lines or signature):
+                    # A format-patch message can quote a header in prose. Git emits
+                    # metadata or a unified path pair immediately after a real header.
+                    if pending_mail_header and re.match(_GIT_FILE_METADATA, chunk):
+                        file_count += 1
+                    pending_mail_header = chunk.startswith(b"diff --git ")
+                    if file_count and chunk.rstrip(b"\r\n") == b"-- ":
+                        signature = True
+                if at_line_start and not signature and (not mail or file_count):
                     if hunk_lines:
                         # Both sides count a context line; neither counts a no-newline marker.
                         if not chunk.startswith(b"\\"):
@@ -92,7 +98,7 @@ def patch_artifact_preview(
                         hunk_lines = int(hunk[1] or b"1") + int(hunk[2] or b"1")
                     elif not chunk.startswith(b"\\"):
                         expect_hunk = chunk.startswith(b"+++ ")
-                        if chunk.startswith(b"diff --git "):
+                        if chunk.startswith(b"diff --git ") and not mail:
                             file_count += 1
                             bare_git_diff = True
                         elif chunk.startswith(b"--- "):
@@ -244,6 +250,10 @@ def latest_attempt(connection: sqlite3.Connection, occurrence_id: str) -> sqlite
 _FORMAT_PATCH_FROM = re.compile(
     rb"From (?:[0-9a-f]{40}|[0-9a-f]{64}) Mon Sep 17 00:00:00 2001\r?\n"
 )
+_GIT_FILE_METADATA = (
+    rb"index |--- |@@ |old mode|new mode|new file|deleted file"
+    rb"|(?:dis)?similarity index|(?:rename|copy) |GIT binary patch|Binary files |Files |Only in "
+)
 _HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
 _QUOTED_GIT_PATH = rb'"((?:[^"\\]|\\(?:[abfnrtv"\\]|[0-3][0-7]{2}))*)"'
 _SUBMODULE_SUMMARY_END = re.compile(
@@ -305,8 +315,7 @@ def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
                 # With --no-stat Git can retain a quoted header as the preimage of
                 # the first change. Ignore it only for the same in-place file edit.
                 file = re.compile(
-                    rb"(?m)^diff --git [^\n]+\n(?=index |--- |@@ |old mode|new mode|new file|deleted file"
-                    rb"|(?:dis)?similarity index|(?:rename|copy) |GIT binary patch|Binary files |Files |Only in )"
+                    rb"(?m)^diff --git [^\n]+\n(?=" + _GIT_FILE_METADATA + rb")"
                 ).search(patch, start)
                 if (
                     file
