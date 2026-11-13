@@ -284,11 +284,11 @@ an available model. A provider suffix pins routing:
 
 ```bash
 export HF_TOKEN="<your-hugging-face-token>"
-codex-security scan . --provider huggingface --model zai-org/GLM-5.3:deepinfra
+codex-security scan . --provider huggingface --model zai-org/GLM-5.3:novita
 ```
 
 The SDK accepts `codexOverrides: { model_provider: "huggingface", model:
-"zai-org/GLM-5.3:deepinfra" }`. Existing native provider overrides, including
+"zai-org/GLM-5.3:novita" }`. Existing native provider overrides, including
 `env_key`, `base_url`, and `http_headers`, still apply. For organization
 billing, set `model_providers.huggingface.http_headers` with `X-HF-Bill-To`.
 
@@ -306,7 +306,9 @@ function tools, and JSON-schema output. Hosted tools (including remote MCP),
 remote compaction, and server-side Responses conversation state are not provided.
 Reasoning effort is forwarded to HF; provider reasoning summaries are not replayed.
 Generation output is delivered after each upstream completion, with keepalives
-while it runs. Explicit configuration is preserved; unsupported hosted tools fail
+while it runs. A transport instruction tells the model to include a tool call
+with progress updates, since Chat Completions has no separate commentary channel.
+Explicit configuration is preserved; unsupported hosted tools fail
 rather than being silently removed. Freeform grammar constraints
 cannot be enforced by HF's function API. The selected model must produce valid
 tool input. HF model prices are not bundled, so `--max-cost` is unavailable for
