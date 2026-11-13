@@ -390,7 +390,7 @@ Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 two kinds of signal:
 
 - `{ kind: "dispatch", attempts }` reports a live `spawn_agent` invocation from
-  the parent event stream. `{ kind: "failed", attempts, reason }` reports a failed
+  the parent event stream. `{ kind: "failed", attempts }` reports a failed
   invocation. Both count distinct spawn attempts seen on that stream, including
   failures. The tool event does not identify the scan phase or planned worker count.
 - `{ kind: "observed", worker: number }` reports persisted worker sessions
@@ -402,7 +402,7 @@ await security.run(repository, {
     if (event.kind === "dispatch") {
       console.log(`Worker spawn attempt ${event.attempts}`);
     } else if (event.kind === "failed") {
-      console.log(`Worker start failed: ${event.reason}`);
+      console.log(`Worker spawn failed (attempts: ${event.attempts})`);
     } else {
       console.log(`Worker ${event.worker} observed`);
     }

@@ -153,9 +153,10 @@ function dispatchStatus(
 }
 
 /** Runtime dispatch counts derived from live spawn_agent tool calls. */
-export type ScanWorkerRuntimeEvent =
-  | { kind: "dispatch"; attempts: number }
-  | { kind: "failed"; attempts: number; reason: string };
+export interface ScanWorkerRuntimeEvent {
+  kind: "dispatch" | "failed";
+  attempts: number;
+}
 
 /** Deduplicate replayed spawn items while retaining a later failure on the same item. */
 export function createWorkerDispatchMonitor() {
@@ -167,14 +168,9 @@ export function createWorkerDispatchMonitor() {
       const item = event["item"];
       if (
         !isRecord(item) ||
-        item["type"] !== "mcp_tool_call" ||
+        item["type"] !== "collab_tool_call" ||
+        item["tool"] !== "spawn_agent" ||
         typeof item["id"] !== "string"
-      )
-        return null;
-      const tool = item["tool"];
-      if (
-        typeof tool !== "string" ||
-        (tool !== "spawn_agent" && !tool.endsWith("__spawn_agent"))
       )
         return null;
       const id = item["id"];
@@ -191,20 +187,9 @@ export function createWorkerDispatchMonitor() {
         return {
           kind: "failed",
           attempts: attempts.size,
-          reason: spawnFailureReason(item),
         };
       }
       return null;
     },
   };
-}
-
-function spawnFailureReason(item: Readonly<Record<string, unknown>>): string {
-  const error = item["error"];
-  if (typeof error === "string" && error.trim() !== "") return error;
-  if (isRecord(error) && typeof error["message"] === "string") {
-    const message = error["message"].trim();
-    if (message !== "") return message;
-  }
-  return "Delegated worker failed to start.";
 }

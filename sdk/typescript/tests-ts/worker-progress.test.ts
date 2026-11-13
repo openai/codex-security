@@ -311,19 +311,21 @@ describe("worker progress events", () => {
 function spawnEvent(
   type: "item.started" | "item.completed",
   id: string,
-  options: { tool?: string; status?: string; error?: unknown } = {},
+  options: { type?: string; tool?: string; status?: string } = {},
 ): Record<string, unknown> {
   return {
     type,
     item: {
       id,
-      type: "mcp_tool_call",
+      type: options.type ?? "collab_tool_call",
       tool: options.tool ?? "spawn_agent",
-      arguments: { message: "Review routes/login.ts" },
+      sender_thread_id: "parent",
+      receiver_thread_ids: [],
+      prompt: null,
+      agents_states: {},
       status:
         options.status ??
         (type === "item.started" ? "in_progress" : "completed"),
-      ...(options.error === undefined ? {} : { error: options.error }),
     },
   };
 }
@@ -342,18 +344,17 @@ describe("runtime worker dispatch monitor", () => {
       kind: "dispatch",
       attempts: 1,
     });
-    expect(
-      monitor.observe(
-        spawnEvent("item.started", "spawn-2", {
-          tool: "multi_agent_v1__spawn_agent",
-        }),
-      ),
-    ).toEqual({
+    expect(monitor.observe(spawnEvent("item.started", "spawn-2"))).toEqual({
       kind: "dispatch",
       attempts: 2,
     });
     expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toBeNull();
     expect(monitor.observe(spawnEvent("item.completed", "spawn-1"))).toBeNull();
+    expect(
+      monitor.observe(
+        spawnEvent("item.started", "external", { type: "mcp_tool_call" }),
+      ),
+    ).toBeNull();
     expect(
       monitor.observe(
         spawnEvent("item.started", "wait-1", { tool: "wait_agent" }),
@@ -367,19 +368,16 @@ describe("runtime worker dispatch monitor", () => {
       monitor.observe(
         spawnEvent("item.completed", "spawn-fail", {
           status: "failed",
-          error: "capacity exhausted",
         }),
       ),
     ).toEqual({
       kind: "failed",
       attempts: 1,
-      reason: "capacity exhausted",
     });
     expect(
       monitor.observe(
         spawnEvent("item.completed", "spawn-fail", {
           status: "failed",
-          error: "capacity exhausted",
         }),
       ),
     ).toBeNull();
@@ -395,13 +393,11 @@ describe("runtime worker dispatch monitor", () => {
       monitor.observe(
         spawnEvent("item.completed", "spawn-1", {
           status: "failed",
-          error: { message: "thread spawn rejected" },
         }),
       ),
     ).toEqual({
       kind: "failed",
       attempts: 1,
-      reason: "thread spawn rejected",
     });
   });
 });
