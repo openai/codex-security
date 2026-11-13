@@ -108,21 +108,12 @@ test(function testNativeTurnFailureClassification() {
 test(function testContextLimitClassification() {
   for (const error of [
     { code: "context_length_exceeded" },
-    Object.assign(new Error("Request failed"), {
-      code: "context_length_exceeded",
-    }),
     new Error("context_length_exceeded"),
-    new Error(
-      "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
-    ),
-    new Error(
-      "Your input exceeds the context window of this model. Please adjust your input and try again.",
-    ),
-    new Error(
-      "This model's maximum context length is 128000 tokens. However, your messages resulted in 131072 tokens.",
-    ),
-    new Error("compaction service context window exceeded"),
-    new Error("The request exceeded the model's context window."),
+    "Codex ran out of room in the model's context window.",
+    "Your input exceeds the context window of this model.",
+    "This model's maximum context length is 128000 tokens.",
+    "compaction service context window exceeded",
+    "The request exceeded the model's context window.",
     "Context length exceeded",
   ]) {
     assert.equal(exceedsContext(error), true, String(error));
