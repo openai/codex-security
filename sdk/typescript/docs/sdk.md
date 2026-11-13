@@ -308,6 +308,10 @@ console.log(plan);
 `preflight()` checks local inputs without starting Codex or using the network. The returned `stateDirectory` identifies the checked storage root, including when the final scan directory will be allocated automatically.
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
+Neither preflight starts a Deep Scan worker or executes a command under its
+generated permissions, so neither qualifies the worker sandbox. See [Deep Scan
+sandbox qualification](../../../docs/project-configuration.md#deep-scan-sandbox-qualification)
+for the boundary and the limits of what these checks establish.
 
 ### Set investigation time
 
