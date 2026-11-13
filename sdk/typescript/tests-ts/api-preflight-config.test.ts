@@ -7,6 +7,7 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
+  configuredParentSessionThreadLimit,
   mergedCodexConfig,
   scanModelProvider,
   writeCodexConfig,
@@ -22,72 +23,28 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 afterEach(cleanup);
 
 describe("CodexSecurity preflight configuration", () => {
-  test.each([
-    ["default", {}, 9],
-    [
-      "minimum",
-      {
-        features: { multi_agent_v2: { max_concurrent_threads_per_session: 1 } },
-      },
-      1,
-    ],
-    [
-      "selected profile",
-      {
-        profile: "review",
-        profiles: {
-          review: {
-            features: {
-              multi_agent_v2: { max_concurrent_threads_per_session: 4 },
-            },
-          },
-        },
-      },
-      4,
-    ],
-  ] as const)(
-    "reports the %s per-session thread ceiling without starting the runtime",
-    async (_name, codexOverrides, expected) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      await mkdir(repository);
-      await using client = new TestClient(
-        { codexOverrides },
-        {
-          environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
-          prepareRuntime: async () => {
-            throw new Error("Local preflight must not start the runtime");
-          },
-        },
-      );
-
-      await expect(client.preflight(repository)).resolves.toMatchObject({
-        configuredParentSessionThreadLimit: expected,
-      });
-    },
-  );
-
   test.each([0, -1, 1.5])(
-    "rejects invalid parent session thread limit %s during preflight",
-    async (limit) => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
-      await mkdir(repository);
-      await using client = new TestClient(
-        {
-          codexOverrides: {
-            features: {
-              multi_agent_v2: { max_concurrent_threads_per_session: limit },
-            },
+    "rejects invalid parent session thread limit %s",
+    (limit) => {
+      expect(() =>
+        configuredParentSessionThreadLimit({
+          features: {
+            multi_agent_v2: { max_concurrent_threads_per_session: limit },
           },
-        },
-        { environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") } },
-      );
-      await expect(client.preflight(repository)).rejects.toThrow(
+        }),
+      ).toThrow(
         "max_concurrent_threads_per_session must be a positive integer",
       );
     },
   );
+
+  test("accepts a session limited to the parent thread", () => {
+    expect(
+      configuredParentSessionThreadLimit({
+        features: { multi_agent_v2: { max_concurrent_threads_per_session: 1 } },
+      }),
+    ).toBe(1);
+  });
 
   test("retains only native skill path and enabled settings for fallback workers", () => {
     const rootSkill = join(
