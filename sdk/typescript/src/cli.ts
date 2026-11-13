@@ -102,6 +102,7 @@ import {
   listRepositoryFindings,
   SCAN_AUTH_MODES,
   scanAuthentication,
+  hasHuggingFaceBearer,
   runtimeScanAuthentication,
   selectedScanEnvironment,
   type DeepScanOptions,
@@ -11411,6 +11412,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     hasCommandAuth(config) ||
+    hasHuggingFaceBearer(config) ||
     scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
@@ -11711,6 +11713,7 @@ async function executeScan(
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
           scanProviderEnvKey(effectiveConfiguration),
+          effectiveConfiguration,
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,

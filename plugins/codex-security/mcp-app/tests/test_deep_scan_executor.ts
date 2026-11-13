@@ -2908,6 +2908,8 @@ async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
+    ["huggingface", "HF_TOKEN"],
+    ["account-gateway", "CODEX_API_KEY", "OPENAI_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
   ] as const) {
@@ -2919,6 +2921,10 @@ async function testExternalProviderCredentialsReachWorker() {
       const configPath = path.join(fixture.root, "provider.toml");
       const deepPath = path.join(fixture.root, "workers.toml");
       const profile = `scan-${provider}`;
+      const parentProvider =
+        provider === "openrouter" || provider === "account-gateway"
+          ? "huggingface"
+          : provider;
       const selectedKey = `synthetic-${provider}-scan-key`;
       const accountHeaders = headerKey
         ? { [headerKey]: "private-scan-header" }
@@ -2926,15 +2932,38 @@ async function testExternalProviderCredentialsReachWorker() {
       const settings = {
         model_provider: provider,
         native_profile: profile,
-        environment: { [key]: selectedKey, ...accountHeaders },
+        environment: {
+          ...(provider === "huggingface"
+            ? {
+                OPENAI_API_KEY: "alternate-account-key",
+                OPENROUTER_API_KEY: "alternate-router-key",
+              }
+            : {}),
+          HF_TOKEN: "other-scan-credential",
+          [key]: selectedKey,
+          ...accountHeaders,
+        },
       };
-      await writeFile(configPath, stringifyToml({ model_provider: provider }));
+      await writeFile(
+        configPath,
+        stringifyToml({ model_provider: parentProvider }),
+      );
       await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
       await writeFile(
         path.join(fixture.root, `${profile}.config.toml`),
         stringifyToml({
-          model_provider: provider,
+          model_provider: parentProvider,
           model_providers: {
+            ...(parentProvider !== provider
+              ? {
+                  [parentProvider]: {
+                    name: parentProvider,
+                    base_url: "https://parent.example.test/v1",
+                    wire_api: "responses",
+                    env_key: "HF_TOKEN",
+                  },
+                }
+              : {}),
             [provider]: {
               name: provider,
               base_url: `https://${provider}.example.test/v1`,
@@ -2960,6 +2989,7 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
+        HF_TOKEN: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
       };
       const saved = Object.keys(environment).map(
@@ -2972,6 +3002,7 @@ async function testExternalProviderCredentialsReachWorker() {
           parentSandbox: trustedParentSandbox,
         });
         for (const turn of ["fresh", "resume", "compare"]) {
+          process.env.HF_TOKEN = "changed-ambient-key";
           process.env[key] = "changed-ambient-key";
           if (headerKey) process.env[headerKey] = "changed-ambient-header";
           if (turn === "compare") {
@@ -2991,10 +3022,22 @@ async function testExternalProviderCredentialsReachWorker() {
           }
           const invocation = await readJson(fixture.markerPath);
           assert.equal(
-            invocation.providerKey ?? invocation.providerHeaders[key],
+            invocation.providerKey ??
+              invocation.providerHeaders[key] ??
+              invocation.openaiAuthentication[key],
             selectedKey,
           );
-          assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
+          if (key !== "HF_TOKEN")
+            assert.equal(invocation.providerHeaders.HF_TOKEN, undefined);
+          if (provider === "huggingface")
+            assert.equal(
+              invocation.providerHeaders.OPENROUTER_API_KEY,
+              undefined,
+            );
+          assert.deepEqual(invocation.openaiAuthentication, {
+            ...accountHeaders,
+            ...(key === "CODEX_API_KEY" ? { [key]: selectedKey } : {}),
+          });
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {
             model_provider: provider,

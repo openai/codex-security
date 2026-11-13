@@ -17,6 +17,8 @@ import {
   scanCodexHome,
   scanAuthentication,
   selectedScanEnvironment,
+  huggingFaceEnvironment,
+  hasHuggingFaceBearer,
   definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
@@ -32,6 +34,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   hasCommandAuth,
+  huggingFaceProviderDefaults,
   isExternalModelProvider,
   scanProviderEnvKey,
   mergedCodexConfig,
@@ -597,6 +600,19 @@ async function startReadOnlyCodexThread(
     ),
     configuredCodexHome(source),
   );
+  // Read-only commands may inherit the provider solely from their native home.
+  if (scanModelProvider(providerConfig) === "huggingface") {
+    const providers = providerConfig["model_providers"];
+    const definitions = isRecord(providers) ? providers : {};
+    const hf = definitions["huggingface"];
+    providerConfig["model_providers"] = {
+      ...definitions,
+      huggingface: {
+        ...huggingFaceProviderDefaults(hf),
+        ...(isRecord(hf) ? hf : {}),
+      },
+    };
+  }
   const suppliedConfig = resolveCodexProfile(
     deepMerge(
       await readCodexFileProfile(
@@ -642,7 +658,10 @@ async function startReadOnlyCodexThread(
   );
   delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
-  const providerSettings = commandAuth ? providerConfig : (config ?? {});
+  const providerSettings =
+    commandAuth || scanModelProvider(providerConfig) === "huggingface"
+      ? providerConfig
+      : (config ?? {});
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
@@ -667,7 +686,7 @@ async function startReadOnlyCodexThread(
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      nativeKey !== undefined
+      nativeKey !== undefined || modelProvider === "huggingface"
         ? undefined
         : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
           environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
@@ -742,7 +761,14 @@ async function startReadOnlyCodexThread(
       runtimeOptions.nativeProviderEnvironment !== undefined
     ) {
       codexOptions.env = {
-        ...runtimeOptions.nativeProviderEnvironment,
+        ...definedEnvironment(
+          huggingFaceEnvironment(
+            runtimeOptions.nativeProviderEnvironment,
+            modelProvider,
+            nativeKey,
+            providerConfig,
+          ),
+        ),
         ...environment,
       };
     }
@@ -1263,10 +1289,10 @@ export async function comparisonEnvironment(
   auth: ScanAuthMode = "api-key",
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
-  const environment = Object.fromEntries(
-    Object.entries(source).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
+  const configuration = config ?? (await readCodexHomeConfig(source, signal));
+  const provider = scanModelProvider(configuration);
+  const environment = definedEnvironment(
+    huggingFaceEnvironment(source, provider, nativeKey, configuration),
   );
   const home = configuredCodexHome(environment);
   for (const key of Object.keys(environment)) {
@@ -1275,17 +1301,24 @@ export async function comparisonEnvironment(
       environment[key] = home;
     }
   }
-  if (nativeKey !== undefined && config !== undefined) {
-    const provider = scanModelProvider(config);
-    scanAuthentication(environment, auth, provider, false, false, nativeKey);
-    return definedEnvironment(
-      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
-    );
-  }
-  if (
-    hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
-  ) {
+  if (hasCommandAuth(configuration) || hasHuggingFaceBearer(configuration))
     return withoutOpenAiApiKeys(environment);
+  const selectedKey =
+    nativeKey ??
+    (provider === "huggingface"
+      ? scanProviderEnvKey(configuration)
+      : undefined);
+  if (selectedKey !== undefined) {
+    scanAuthentication(environment, auth, provider, false, false, selectedKey);
+    return definedEnvironment(
+      selectedScanEnvironment(
+        environment,
+        auth,
+        provider,
+        selectedKey,
+        configuration,
+      ),
+    );
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;

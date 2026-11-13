@@ -82,6 +82,7 @@ import {
 import {
   CODEX_AUTH_CONFIG_KEYS,
   EXTERNAL_CODEX_PROVIDERS,
+  HUGGINGFACE_CODEX_PROVIDER,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -1807,6 +1808,7 @@ export class CodexSecurity {
         hasCommandAuth(configuration),
         true,
         scanProviderEnvKey(configuration),
+        configuration,
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -2488,28 +2490,43 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const workerProviderEnvironment = {
-        ...withoutOpenAiApiKeys(
-          selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-            session.providerEnvKey,
-          ),
+      const workerProviderEnvironment = withoutOpenAiApiKeys(
+        selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          modelProvider,
+          session.providerEnvKey,
+          effectiveConfig,
+          "selected",
         ),
+      );
+      const selectedWorkerCredentials = {
+        ...session.nativeProviderEnvironment,
         ...(session.apiKey === null
           ? {}
           : {
               [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
+      let alternateProviderEnvironment: ProcessEnvironment | undefined;
+      if (
+        mode === "deep" &&
+        (options.auth !== "chatgpt" ||
+          authentication.method !== "stored_credentials")
+      ) {
+        alternateProviderEnvironment =
+          options.auth !== "chatgpt" && authentication.method === "api_key"
+            ? this.#dependencies.environment
+            : withoutOpenAiApiKeys(this.#dependencies.environment);
+      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
           modelProvider,
           scanDir,
           workerProviderEnvironment,
-          session.nativeProviderEnvironment,
+          selectedWorkerCredentials,
+          alternateProviderEnvironment,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -4941,6 +4958,8 @@ export class CodexSecurity {
               auth,
               modelProvider,
               providerEnvKey,
+              session.effectiveConfig,
+              "selected",
             ),
           ),
         ),
@@ -4998,7 +5017,12 @@ export class CodexSecurity {
         ? undefined
         : this.#codexCommand().command;
     let sdkEnvironment = definedEnvironment({
-      ...session.nativeProviderEnvironment,
+      ...huggingFaceEnvironment(
+        session.nativeProviderEnvironment ?? {},
+        modelProvider,
+        providerEnvKey,
+        session.effectiveConfig,
+      ),
       ...withoutOpenAiApiKeys(environment),
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
     });
@@ -5147,9 +5171,11 @@ export class CodexSecurity {
         commandAuth,
         false,
         providerEnvKey,
+        requestedConfig,
       );
       const apiKey =
-        authentication.method === "api_key"
+        authentication.method === "api_key" &&
+        !hasHuggingFaceBearer(requestedConfig)
           ? environmentApiKey(
               this.#dependencies.environment,
               modelProvider,
@@ -5163,6 +5189,8 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         providerEnvKey,
+        requestedConfig,
+        "selected",
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5281,13 +5309,11 @@ export class CodexSecurity {
       }
       if (
         !runtime.credentialsAvailable &&
-        apiKey === null &&
-        !commandAuth &&
-        authentication.method !== "aws_credentials"
+        authentication.method === "stored_credentials"
       ) {
         throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
-      if (!commandAuth)
+      if (authentication.method === "stored_credentials")
         authentication = await runtimeScanAuthentication(
           this.#dependencies.environment,
           runtime.codexHome,
@@ -5309,7 +5335,7 @@ export class CodexSecurity {
       }
       notifyObserver(options, "onAuthentication")(authentication);
       const helperEnvironment = withoutProviderKey(
-        scanEnvironment,
+        withoutProviderKey(scanEnvironment, HUGGINGFACE_CODEX_PROVIDER.env_key),
         providerEnvKey,
       );
       const python = await (
@@ -5869,6 +5895,8 @@ export class CodexSecurity {
       auth,
       modelProvider,
       providerEnvKey,
+      requestedConfig,
+      "selected",
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -5904,14 +5932,20 @@ export class CodexSecurity {
       throwIfAborted(signal);
       const codexCommand =
         await this.#providerPreflightCommand(requestedConfig);
+      const bootstrapEnvironment = withoutCodexHome(
+        withoutProviderKey(
+          processEnvironment,
+          HUGGINGFACE_CODEX_PROVIDER.env_key,
+        ),
+      );
       await (this.#dependencies.probeCodexSandbox ?? probeCodexSandbox)(
         codexCommand,
-        { ...withoutCodexHome(processEnvironment), CODEX_HOME: codexHome },
+        { ...bootstrapEnvironment, CODEX_HOME: codexHome },
         signal,
       );
       const plugin = await bootstrapPlugin(codexHome, pluginRoot, {
         codexCommand,
-        environment: withoutCodexHome(processEnvironment),
+        environment: bootstrapEnvironment,
         signal,
       });
       if (await pluginSupportsIsolatedDeepScanConfig(plugin.pluginRoot)) {
@@ -5925,6 +5959,7 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
+        hasHuggingFaceBearer(requestedConfig) ||
         providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -6849,6 +6884,19 @@ async function collectResult(
   });
 }
 
+/** @internal Native Codex reads this credential directly from the private profile. */
+export function hasHuggingFaceBearer(config: JsonObject): boolean {
+  if (scanModelProvider(config) !== "huggingface") return false;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider = isRecord(providers) ? providers["huggingface"] : undefined;
+  return (
+    isRecord(provider) &&
+    provider["auth"] == null &&
+    provider["env_key"] == null &&
+    typeof provider["experimental_bearer_token"] === "string"
+  );
+}
+
 export function scanAuthentication(
   environment: ProcessEnvironment,
   auth: ScanAuthMode = DEFAULT_SCAN_AUTH,
@@ -6856,6 +6904,7 @@ export function scanAuthentication(
   commandAuth = false,
   preflight = false,
   providerEnvKey?: string,
+  config?: JsonObject,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -6863,6 +6912,12 @@ export function scanAuthentication(
     );
   }
   if (commandAuth) return { method: "command", verified: false };
+  if (config && hasHuggingFaceBearer(config))
+    return {
+      method: "api_key",
+      source: "experimental_bearer_token",
+      verified: false,
+    };
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -6981,6 +7036,41 @@ function withoutProviderKey(
   return child;
 }
 
+/** @internal Keep the Hub token only when the selected model provider consumes it. */
+export function huggingFaceEnvironment(
+  environment: ProcessEnvironment,
+  provider: unknown,
+  providerEnvKey?: string,
+  config?: JsonObject,
+): ProcessEnvironment {
+  const key = HUGGINGFACE_CODEX_PROVIDER.env_key;
+  if (!Object.keys(environment).some((name) => name.toUpperCase() === key))
+    return environment;
+  const providers = config && resolveCodexProfile(config)["model_providers"];
+  const selected =
+    typeof provider === "string" && isRecord(providers)
+      ? providers[provider]
+      : undefined;
+  const settings = isRecord(selected) ? selected : {};
+  const consumesToken = (name: unknown) =>
+    typeof name === "string" && name.toUpperCase() === key;
+  const primary =
+    providerEnvKey ??
+    settings["env_key"] ??
+    (provider === "huggingface" &&
+    settings["auth"] == null &&
+    settings["experimental_bearer_token"] == null
+      ? key
+      : undefined);
+  if (
+    consumesToken(primary) ||
+    (isRecord(settings["env_http_headers"]) &&
+      Object.values(settings["env_http_headers"]).some(consumesToken))
+  )
+    return environment;
+  return withoutProviderKey(environment, key);
+}
+
 /** @internal */
 export function selectedScanEnvironment(
   environment: ProcessEnvironment,
@@ -6988,12 +7078,23 @@ export function selectedScanEnvironment(
   modelProvider?: unknown,
   providerEnvKey?: string,
   config?: JsonObject,
+  providerKeys: "selected" | "declared" = "declared",
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
   const selectedProviderKey = providerEnvKey ?? standardProviderKey;
   const bedrockProvider = modelProvider === "amazon-bedrock";
+  environment = huggingFaceEnvironment(
+    environment,
+    modelProvider,
+    providerEnvKey,
+    auth === "chatgpt" &&
+      !isExternalModelProvider(modelProvider) &&
+      !hasCommandAuth(config ?? {})
+      ? undefined
+      : config,
+  );
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
@@ -7022,6 +7123,7 @@ export function selectedScanEnvironment(
     }),
   );
   if (
+    providerKeys === "declared" &&
     config !== undefined &&
     providerEnvKey !== undefined &&
     standardProviderKey === null &&
@@ -7688,16 +7790,30 @@ function selectedWorkerRuntimeConfig(
   selectedProvider: unknown,
   workingDirectory: string,
   environment: ProcessEnvironment,
-  nativeProviderEnvironment?: Record<string, string>,
+  selectedCredentials: Record<string, string>,
+  alternateProviderEnvironment?: ProcessEnvironment,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  const providerEnvironment =
-    nativeProviderEnvironment ??
-    declaredProviderEnvironment(providers, environment);
+  const alternateProviders =
+    isRecord(providers) && alternateProviderEnvironment !== undefined
+      ? Object.fromEntries(
+          Object.entries(providers).filter(([id]) => id !== provider),
+        )
+      : undefined;
+  const providerEnvironment = {
+    // Only declared credentials enter the snapshot. The parent provider's
+    // prepared values take precedence over credentials for alternate workers.
+    ...declaredProviderEnvironment(
+      alternateProviders,
+      alternateProviderEnvironment ?? {},
+    ),
+    ...declaredProviderEnvironment(providers, environment),
+    ...declaredProviderEnvironment(providers, selectedCredentials),
+  };
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];

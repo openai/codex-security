@@ -75,6 +75,9 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
+      false,
+      undefined,
+      config,
     );
   }
   if (
@@ -90,6 +93,8 @@ export function resolveSkillAuthentication(
     processEnvironment,
     authentication.method === "command" ? "chatgpt" : options.auth,
     provider,
+    undefined,
+    config,
   );
   if (
     explicitChatgpt &&

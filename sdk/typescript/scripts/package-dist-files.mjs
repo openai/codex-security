@@ -7,6 +7,8 @@ const distModules = [
   "hosted-remediation-protocol",
   "hosted-scan",
   "hosted-scan-protocol",
+  "huggingface-chat",
+  "huggingface-responses",
   "artifact-export",
   "auth",
   "bulk-scan-discovery",
