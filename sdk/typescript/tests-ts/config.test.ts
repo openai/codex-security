@@ -1680,6 +1680,15 @@ test("SDK Standard Compute selection supplies the native provider table", async 
       env_key: "STANDARDCOMPUTE_API_KEY",
     },
   });
+  const next = await mergedCodexConfig({
+    codexOverrides: { model_provider: "standardcompute" },
+  });
+  const firstProvider = (bare["model_providers"] as JsonObject)[
+    "standardcompute"
+  ];
+  expect((next["model_providers"] as JsonObject)["standardcompute"]).not.toBe(
+    firstProvider,
+  );
   const native = {
     name: "Private gateway",
     base_url: "http://localhost:1234/v1",

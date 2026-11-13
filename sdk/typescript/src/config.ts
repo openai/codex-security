@@ -550,7 +550,7 @@ export async function mergedCodexConfig(
       resolveCodexProfile(effectiveOverrides)["model_providers"];
     if (!isObject(providers) || providers["standardcompute"] === undefined) {
       defaults["model_providers"] = {
-        standardcompute: STANDARDCOMPUTE_CODEX_PROVIDER,
+        standardcompute: { ...STANDARDCOMPUTE_CODEX_PROVIDER },
       };
     }
   }
