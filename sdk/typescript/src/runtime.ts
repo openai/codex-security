@@ -765,7 +765,8 @@ function windowsAceAllowsAncestorReplacement(
   }
   // Rights tokens stay aligned to pairs of UTF-16 code units.
   for (const [right] of rights.matchAll(/[\s\S]{2}/g)) {
-    if (["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(right))
+    // SDDL DT is FILE_DELETE_CHILD (0x40). DC is FILE_ADD_FILE (0x2).
+    if (["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DT"].includes(right))
       return true;
   }
   return false;
