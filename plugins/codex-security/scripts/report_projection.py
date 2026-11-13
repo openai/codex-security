@@ -72,7 +72,9 @@ def _escape_markdown(value: str) -> str:
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
+    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized) or re.match(
+        r"^(?:#{1,6}|[-*+]|\d+[.)]|-{2,}|_{3,}|\*{3,})$", normalized
+    ):
         normalized = f"Text: {normalized}"
     return _escape_markdown(normalized)
 
