@@ -3,7 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, test, type TestContext } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -42,7 +42,7 @@ afterEach(async () => {
   await coordinatorDirectories.cleanup();
 });
 
-async function fixture() {
+async function fixture(t: TestContext) {
   const saved = new Map<string, string | undefined>();
   const set = (name: string, value?: string) => {
     if (!saved.has(name)) saved.set(name, process.env[name]);
@@ -79,6 +79,15 @@ async function fixture() {
       };
     },
   );
+  t.after(() => {
+    onKill = undefined;
+    for (const { child } of launches) {
+      if (child.exitCode === null && child.signalCode === null)
+        child.kill("SIGKILL");
+    }
+    restoreSpawn();
+    for (const [name, value] of saved) restoreEnv(name, value);
+  });
   const promptPath = path.join(fake.root, "prompt.md");
   await writeFile(promptPath, "Complete the synthetic review.\n");
   return {
@@ -99,15 +108,6 @@ async function fixture() {
         parentSandbox: trustedParentSandbox,
         deepScanConfig: { ...config, stopAfterConsecutiveErrors: limit },
       });
-    },
-    close() {
-      onKill = undefined;
-      for (const { child } of launches) {
-        if (child.exitCode === null && child.signalCode === null)
-          child.kill("SIGKILL");
-      }
-      restoreSpawn();
-      for (const [name, value] of saved) restoreEnv(name, value);
     },
   };
 }
@@ -164,175 +164,163 @@ async function artifactClient(root: string, id = scanId) {
 }
 
 for (const failure of ["schema", "handler", "transport"] as const) {
-  test(`stops repeated ${failure} submissions inside the turn despite successful reads`, async () => {
-    const f = await fixture();
+  test(`stops repeated ${failure} submissions inside the turn despite successful reads`, async (t) => {
+    const f = await fixture(t);
     const artifacts = await artifactClient(path.join(f.root, "output"));
     const controller = new AbortController();
-    try {
-      const events: ThreadEvent[] = [];
-      for (let i = 0; i < 3; i++) {
-        events.push(
-          failure === "transport"
-            ? {
-                type: "item.completed",
-                item: {
-                  id: `transport-${i}`,
-                  type: "mcp_tool_call",
-                  server: "cs_artifacts",
-                  tool: draftTool,
-                  arguments: {},
-                  status: "failed",
-                  error: { message: "synthetic transport closed" },
-                },
-              }
-            : await artifacts.call(
-                draftTool,
-                failure === "schema"
-                  ? {
-                      ...artifacts.draft,
-                      threatModel: JSON.stringify({
-                        summary: "Synthetic model",
-                      }),
-                    }
-                  : { ...artifacts.draft, scanId: randomUUID() },
-              ),
-        );
-        events.push(await artifacts.call("read_deep_scan_peer_notes", {}));
-      }
-      assert.equal(
-        (events[0] as { item: { status: string } }).item.status,
-        "failed",
+    t.after(() => artifacts.close());
+    const events: ThreadEvent[] = [];
+    for (let i = 0; i < 3; i++) {
+      events.push(
+        failure === "transport"
+          ? {
+              type: "item.completed",
+              item: {
+                id: `transport-${i}`,
+                type: "mcp_tool_call",
+                server: "cs_artifacts",
+                tool: draftTool,
+                arguments: {},
+                status: "failed",
+                error: { message: "synthetic transport closed" },
+              },
+            }
+          : await artifacts.call(
+              draftTool,
+              failure === "schema"
+                ? {
+                    ...artifacts.draft,
+                    threatModel: JSON.stringify({
+                      summary: "Synthetic model",
+                    }),
+                  }
+                : { ...artifacts.draft, scanId: randomUUID() },
+            ),
       );
-      if (failure !== "transport") {
-        assert.match(
-          JSON.stringify(events[0]),
-          failure === "schema"
-            ? /Input validation error/
-            : /coordinator-bound worker scan/,
-        );
-      }
-      await f.events(events);
-      let completed = false;
-      await assert.rejects(
-        f.executor().run(
-          workerRequest(f.promptPath, f.root, {
-            signal: controller.signal,
-            onUsage: () => {
-              completed = true;
-            },
-          }),
-        ),
-        /3 consecutive.*submission/i,
-      );
-      assert.equal(
-        completed,
-        false,
-        "buffered turn.completed must not override the failure",
-      );
-      assert.equal(
-        controller.signal.aborted,
-        false,
-        "only this attempt is canceled",
-      );
-      assert.equal(f.launches.length, 1);
-      assert.equal(f.launches[0].signal.aborted, true);
-      assert.equal(f.launches[0].child.killed, true);
-    } finally {
-      await artifacts.close();
-      f.close();
+      events.push(await artifacts.call("read_deep_scan_peer_notes", {}));
     }
+    assert.equal(
+      (events[0] as { item: { status: string } }).item.status,
+      "failed",
+    );
+    if (failure !== "transport") {
+      assert.match(
+        JSON.stringify(events[0]),
+        failure === "schema"
+          ? /Input validation error/
+          : /coordinator-bound worker scan/,
+      );
+    }
+    await f.events(events);
+    let completed = false;
+    await assert.rejects(
+      f.executor().run(
+        workerRequest(f.promptPath, f.root, {
+          signal: controller.signal,
+          onUsage: () => {
+            completed = true;
+          },
+        }),
+      ),
+      /3 consecutive.*submission/i,
+    );
+    assert.equal(
+      completed,
+      false,
+      "buffered turn.completed must not override the failure",
+    );
+    assert.equal(
+      controller.signal.aborted,
+      false,
+      "only this attempt is canceled",
+    );
+    assert.equal(f.launches.length, 1);
+    assert.equal(f.launches[0].signal.aborted, true);
+    assert.equal(f.launches[0].child.killed, true);
   });
 }
 
-test("persisted submissions reset the streak; other tools and intermediate events do not count", async () => {
-  const f = await fixture();
+test("persisted submissions reset the streak; other tools and intermediate events do not count", async (t) => {
+  const f = await fixture(t);
   const output = path.join(f.root, "output");
   const artifacts = await artifactClient(output);
-  try {
-    const events: ThreadEvent[] = [];
-    for (let round = 0; round < 2; round++) {
-      for (let i = 0; i < 2; i++)
-        events.push(
-          await artifacts.call(draftTool, {
-            ...artifacts.draft,
-            threatModel: "{}",
-          }),
-        );
-      const success = await artifacts.call(draftTool, artifacts.draft);
-      assert.equal(
-        (success as { item: { status: string } }).item.status,
-        "completed",
+  t.after(() => artifacts.close());
+  const events: ThreadEvent[] = [];
+  for (let round = 0; round < 2; round++) {
+    for (let i = 0; i < 2; i++)
+      events.push(
+        await artifacts.call(draftTool, {
+          ...artifacts.draft,
+          threatModel: "{}",
+        }),
       );
-      events.push(success);
-    }
-    // Failed reads, foreign tool names, and nonterminal updates are not submissions.
-    for (let i = 0; i < 4; i++) {
-      const failure = await artifacts.call(draftTool, {
-        ...artifacts.draft,
-        threatModel: "{}",
-      });
-      assert.equal(failure.type, "item.completed");
-      if (failure.type !== "item.completed") throw new Error("Missing item");
-      events.push({
-        ...failure,
-        item: { ...failure.item, server: "foreign" },
-      } as ThreadEvent);
-      events.push({
-        ...failure,
-        item: { ...failure.item, tool: "read_deep_scan_peer_notes" },
-      } as ThreadEvent);
-      events.push({ ...failure, type: "item.updated" });
-    }
-    await f.events(events);
-    await f.executor().run(workerRequest(f.promptPath, f.root));
-    assert.equal(f.launches[0].signal.aborted, false);
-    const saved = JSON.parse(
-      await readFile(path.join(output, "result.json"), "utf8"),
+    const success = await artifacts.call(draftTool, artifacts.draft);
+    assert.equal(
+      (success as { item: { status: string } }).item.status,
+      "completed",
     );
-    assert.equal(saved.complete, false);
-    assert.equal(saved.findings.length, 1);
-    assert.deepEqual(
-      saved.findings[0].provenance,
-      artifacts.draft.findings[0].provenance,
-    );
-  } finally {
-    await artifacts.close();
-    f.close();
+    events.push(success);
   }
+  // Failed reads, foreign tool names, and nonterminal updates are not submissions.
+  for (let i = 0; i < 4; i++) {
+    const failure = await artifacts.call(draftTool, {
+      ...artifacts.draft,
+      threatModel: "{}",
+    });
+    assert.equal(failure.type, "item.completed");
+    if (failure.type !== "item.completed") throw new Error("Missing item");
+    events.push({
+      ...failure,
+      item: { ...failure.item, server: "foreign" },
+    } as ThreadEvent);
+    events.push({
+      ...failure,
+      item: { ...failure.item, tool: "read_deep_scan_peer_notes" },
+    } as ThreadEvent);
+    events.push({ ...failure, type: "item.updated" });
+  }
+  await f.events(events);
+  await f.executor().run(workerRequest(f.promptPath, f.root));
+  assert.equal(f.launches[0].signal.aborted, false);
+  const saved = JSON.parse(
+    await readFile(path.join(output, "result.json"), "utf8"),
+  );
+  assert.equal(saved.complete, false);
+  assert.equal(saved.findings.length, 1);
+  assert.deepEqual(
+    saved.findings[0].provenance,
+    artifacts.draft.findings[0].provenance,
+  );
 });
 
-test("saved per-scan limits isolate concurrent executors and apply to resumed turns", async () => {
-  const f = await fixture();
+test("saved per-scan limits isolate concurrent executors and apply to resumed turns", async (t) => {
+  const f = await fixture(t);
   const artifacts = await artifactClient(path.join(f.root, "output"));
-  try {
-    await f.events(
-      await Promise.all(
-        [1, 2].map(() =>
-          artifacts.call(draftTool, { ...artifacts.draft, threatModel: "{}" }),
-        ),
+  t.after(() => artifacts.close());
+  await f.events(
+    await Promise.all(
+      [1, 2].map(() =>
+        artifacts.call(draftTool, { ...artifacts.draft, threatModel: "{}" }),
       ),
-    );
-    const results = await Promise.allSettled(
-      [2, 3].map((limit) =>
-        f.executor(limit).run(
-          workerRequest(f.promptPath, f.root, {
-            resumeThreadId: `thread-limit-${limit}`,
-          }),
-        ),
+    ),
+  );
+  const results = await Promise.allSettled(
+    [2, 3].map((limit) =>
+      f.executor(limit).run(
+        workerRequest(f.promptPath, f.root, {
+          resumeThreadId: `thread-limit-${limit}`,
+        }),
       ),
-    );
-    assert.equal(results[0].status, "rejected");
-    assert.equal(results[1].status, "fulfilled");
-    assert.equal(f.launches.filter(({ signal }) => signal.aborted).length, 1);
-    assert.ok(f.launches.every(({ args }) => args.includes("resume")));
-  } finally {
-    await artifacts.close();
-    f.close();
-  }
+    ),
+  );
+  assert.equal(results[0].status, "rejected");
+  assert.equal(results[1].status, "fulfilled");
+  assert.equal(f.launches.filter(({ signal }) => signal.aborted).length, 1);
+  assert.ok(f.launches.every(({ args }) => args.includes("resume")));
 });
 
-test("coordinator retains accepted findings and partial checkpoints when submission retries exhaust", async () => {
-  const f = await fixture();
+test("coordinator retains accepted findings and partial checkpoints when submission retries exhaust", async (t) => {
+  const f = await fixture(t);
   const { fixture: scan, store } = await coordinatorFixture({
     ...config,
     stopAfterConsecutiveErrors: 2,
@@ -343,129 +331,119 @@ test("coordinator retains accepted findings and partial checkpoints when submiss
   let stopped = false;
   let acceptedCheckpoint: string | undefined;
   const resumes: (string | undefined)[] = [];
-  try {
-    const coordinator = createCoordinator(
-      scan,
-      store,
-      {
-        async run(request) {
-          attempts++;
-          if (attempts === 2) {
-            acceptedCheckpoint = await readFile(
-              store.iterations[0].resultPath,
-              "utf8",
-            );
-          }
-          resumes.push(request.resumeThreadId);
-          const artifacts = await artifactClient(
-            request.workingDirectory,
-            scan.run.scanId,
+  const coordinator = createCoordinator(
+    scan,
+    store,
+    {
+      async run(request) {
+        attempts++;
+        if (attempts === 2) {
+          acceptedCheckpoint = await readFile(
+            store.iterations[0].resultPath,
+            "utf8",
           );
-          try {
-            // Accept the first discovery, then checkpoint the failing workers.
-            const saved = await artifacts.call(draftTool, {
-              ...artifacts.draft,
-              complete: attempts === 1,
-            });
-            const failures =
-              attempts === 1
-                ? []
-                : await Promise.all(
-                    [1, 2].map(() =>
-                      artifacts.call(draftTool, {
-                        ...artifacts.draft,
-                        threatModel: "{}",
-                      }),
-                    ),
-                  );
-            await f.events([saved, ...failures]);
-          } finally {
-            await artifacts.close();
-          }
-          return executor.run(request);
-        },
+        }
+        resumes.push(request.resumeThreadId);
+        const artifacts = await artifactClient(
+          request.workingDirectory,
+          scan.run.scanId,
+        );
+        try {
+          // Accept the first discovery, then checkpoint the failing workers.
+          const saved = await artifacts.call(draftTool, {
+            ...artifacts.draft,
+            complete: attempts === 1,
+          });
+          const failures =
+            attempts === 1
+              ? []
+              : await Promise.all(
+                  [1, 2].map(() =>
+                    artifacts.call(draftTool, {
+                      ...artifacts.draft,
+                      threatModel: "{}",
+                    }),
+                  ),
+                );
+          await f.events([saved, ...failures]);
+        } finally {
+          await artifacts.close();
+        }
+        return executor.run(request);
       },
-      {
-        retryDelaysMs: [0],
-        threadId: "synthetic-coordinator",
-        onStopped: async () => {
-          stopped = true;
-        },
-        onComplete: async () => {
-          assert.fail("Partial scans must not be completed");
-        },
+    },
+    {
+      retryDelaysMs: [0],
+      threadId: "synthetic-coordinator",
+      onStopped: async () => {
+        stopped = true;
       },
-    );
-    coordinator.start();
-    const terminal = await coordinator.wait(AbortSignal.timeout(120_000));
-    assert.equal(terminal.status, "failed", terminal.error);
-    assert.equal(
-      attempts,
-      5,
-      "one accepted worker, two attempts per failing worker, then the saved error limit",
-    );
-    assert.deepEqual(
-      resumes,
-      [
-        undefined,
-        undefined,
-        "fixture-thread-id",
-        undefined,
-        "fixture-thread-id",
-      ],
-      JSON.stringify(store.workerUpdates),
-    );
-    assert.equal(stopped, true);
-    assert.equal(store.finishCalls.length, 0);
-    assert.equal(f.launches[0].signal.aborted, false);
-    assert.ok(f.launches.slice(1).every(({ signal }) => signal.aborted));
-    assert.ok(
-      store.workerUpdates.some(({ error }) =>
-        /2 consecutive.*submission/i.test(error ?? ""),
+      onComplete: async () => {
+        assert.fail("Partial scans must not be completed");
+      },
+    },
+  );
+  coordinator.start();
+  const terminal = await coordinator.wait(AbortSignal.timeout(120_000));
+  assert.equal(terminal.status, "failed", terminal.error);
+  assert.equal(
+    attempts,
+    5,
+    "one accepted worker, two attempts per failing worker, then the saved error limit",
+  );
+  assert.deepEqual(
+    resumes,
+    [undefined, undefined, "fixture-thread-id", undefined, "fixture-thread-id"],
+    JSON.stringify(store.workerUpdates),
+  );
+  assert.equal(stopped, true);
+  assert.equal(store.finishCalls.length, 0);
+  assert.equal(f.launches[0].signal.aborted, false);
+  assert.ok(f.launches.slice(1).every(({ signal }) => signal.aborted));
+  assert.ok(
+    store.workerUpdates.some(({ error }) =>
+      /2 consecutive.*submission/i.test(error ?? ""),
+    ),
+  );
+  assert.equal(store.iterations.length, 1);
+  assert.equal(
+    await readFile(store.iterations[0].resultPath, "utf8"),
+    acceptedCheckpoint,
+    "Accepted findings and their aggregate provenance must remain unchanged",
+  );
+  const aggregate = JSON.parse(
+    await readFile(store.iterations[0].resultPath, "utf8"),
+  );
+  assert.equal(aggregate.scanId, scan.run.scanId);
+  assert.equal(aggregate.findings.length, 1);
+  assert.ok(aggregate.findings[0].provenance);
+  for (const worker of store.workers.values()) {
+    if (worker.kind !== "discovery") continue;
+    const head = JSON.parse(
+      await readFile(
+        path.join(worker.artifactDir, "checkpoint-head.json"),
+        "utf8",
       ),
     );
-    assert.equal(store.iterations.length, 1);
-    assert.equal(
-      await readFile(store.iterations[0].resultPath, "utf8"),
-      acceptedCheckpoint,
-      "Accepted findings and their aggregate provenance must remain unchanged",
+    const checkpoint = JSON.parse(
+      await readFile(
+        path.join(worker.artifactDir, "checkpoints", head.checkpoint),
+        "utf8",
+      ),
     );
-    const aggregate = JSON.parse(
-      await readFile(store.iterations[0].resultPath, "utf8"),
+    assert.equal(checkpoint.scanId, scan.run.scanId);
+    assert.equal(checkpoint.complete, worker.status === "succeeded");
+    assert.equal(checkpoint.findings.length, 1);
+    assert.deepEqual(
+      checkpoint.findings[0].provenance,
+      finding("preserved", "fixture.ts").provenance,
     );
-    assert.equal(aggregate.scanId, scan.run.scanId);
-    assert.equal(aggregate.findings.length, 1);
-    assert.ok(aggregate.findings[0].provenance);
-    for (const worker of store.workers.values()) {
-      if (worker.kind !== "discovery") continue;
-      const head = JSON.parse(
-        await readFile(
-          path.join(worker.artifactDir, "checkpoint-head.json"),
-          "utf8",
-        ),
-      );
-      const checkpoint = JSON.parse(
-        await readFile(
-          path.join(worker.artifactDir, "checkpoints", head.checkpoint),
-          "utf8",
-        ),
-      );
-      assert.equal(checkpoint.scanId, scan.run.scanId);
-      assert.equal(checkpoint.complete, worker.status === "succeeded");
-      assert.equal(checkpoint.findings.length, 1);
-      assert.deepEqual(
-        checkpoint.findings[0].provenance,
-        finding("preserved", "fixture.ts").provenance,
-      );
-    }
-  } finally {
-    f.close();
   }
 });
 
 for (const cancel of [false, true]) {
-  test(`coordinator ${cancel ? "cancellation racing the guard preserves" : "successful resume retains"} saved findings`, async () => {
-    const f = await fixture();
+  test(`coordinator ${cancel ? "cancellation racing the guard preserves" : "successful resume retains"} saved findings`, async (t) => {
+    const f = await fixture(t);
     const { fixture: scan, store } = await coordinatorFixture({
       ...config,
       stopAfterConsecutiveErrors: 2,
@@ -474,101 +452,97 @@ for (const cancel of [false, true]) {
     const executor = f.executor(2);
     let attempts = 0;
     let published: Record<string, unknown> | undefined;
-    try {
-      const coordinator = createCoordinator(
-        scan,
-        store,
-        {
-          async run(request) {
-            attempts++;
-            const artifacts = await artifactClient(
-              request.workingDirectory,
-              scan.run.scanId,
-            );
-            try {
-              if (attempts === 1) {
-                const saved = await artifacts.call(draftTool, artifacts.draft);
-                const failures = await Promise.all(
-                  [1, 2].map(() =>
-                    artifacts.call(draftTool, {
-                      ...artifacts.draft,
-                      threatModel: "{}",
-                    }),
-                  ),
-                );
-                await f.events([saved, ...failures]);
-              } else {
-                assert.equal(request.resumeThreadId, "fixture-thread-id");
-                // The retry omits the previously saved finding. The real writer
-                // must preserve it while accepting completion of source review.
-                await f.events([
-                  await artifacts.call(draftTool, {
+    const coordinator = createCoordinator(
+      scan,
+      store,
+      {
+        async run(request) {
+          attempts++;
+          const artifacts = await artifactClient(
+            request.workingDirectory,
+            scan.run.scanId,
+          );
+          try {
+            if (attempts === 1) {
+              const saved = await artifacts.call(draftTool, artifacts.draft);
+              const failures = await Promise.all(
+                [1, 2].map(() =>
+                  artifacts.call(draftTool, {
                     ...artifacts.draft,
-                    findings: [],
-                    complete: true,
+                    threatModel: "{}",
                   }),
-                ]);
-              }
-            } finally {
-              await artifacts.close();
+                ),
+              );
+              await f.events([saved, ...failures]);
+            } else {
+              assert.equal(request.resumeThreadId, "fixture-thread-id");
+              // The retry omits the previously saved finding. The real writer
+              // must preserve it while accepting completion of source review.
+              await f.events([
+                await artifacts.call(draftTool, {
+                  ...artifacts.draft,
+                  findings: [],
+                  complete: true,
+                }),
+              ]);
             }
-            return executor.run(request);
-          },
+          } finally {
+            await artifacts.close();
+          }
+          return executor.run(request);
         },
-        {
-          retryDelaysMs: [0],
-          onComplete: async (draft: Record<string, unknown>) => {
-            published = draft;
-          },
+      },
+      {
+        retryDelaysMs: [0],
+        onComplete: async (draft: Record<string, unknown>) => {
+          published = draft;
         },
+      },
+    );
+    if (cancel)
+      f.setOnKill(() =>
+        coordinator.cancel("synthetic user cancellation during abort"),
       );
-      if (cancel)
-        f.setOnKill(() =>
-          coordinator.cancel("synthetic user cancellation during abort"),
-        );
-      coordinator.start();
-      const terminal = await coordinator.wait(AbortSignal.timeout(120_000));
-      assert.equal(
-        terminal.status,
-        cancel ? "canceled" : "succeeded",
-        terminal.error,
-      );
-      assert.equal(attempts, cancel ? 1 : 2);
-      assert.equal(f.launches[0].signal.aborted, true);
-      const worker = [...store.workers.values()].find(
-        (worker) => worker.kind === "discovery",
-      )!;
-      const head = JSON.parse(
-        await readFile(
-          path.join(worker.artifactDir, "checkpoint-head.json"),
-          "utf8",
-        ),
-      );
-      const checkpoint = JSON.parse(
-        await readFile(
-          path.join(worker.artifactDir, "checkpoints", head.checkpoint),
-          "utf8",
-        ),
-      );
-      assert.equal(checkpoint.findings.length, 1);
-      assert.equal(checkpoint.complete, !cancel);
-      assert.equal(checkpoint.scanId, scan.run.scanId);
-      assert.deepEqual(
-        checkpoint.findings[0].provenance,
-        finding("preserved", "fixture.ts").provenance,
-      );
-      if (cancel) {
-        assert.equal(published, undefined);
-        assert.equal(store.finishCalls.length, 0);
-      } else {
-        assert.equal(f.launches[1].signal.aborted, false);
-        assert.equal((published!.findings as unknown[]).length, 1);
-        assert.equal(worker.status, "succeeded");
-        assert.equal(worker.attempt, 2);
-        assert.equal(store.iterations.length, 1);
-      }
-    } finally {
-      f.close();
+    coordinator.start();
+    const terminal = await coordinator.wait(AbortSignal.timeout(120_000));
+    assert.equal(
+      terminal.status,
+      cancel ? "canceled" : "succeeded",
+      terminal.error,
+    );
+    assert.equal(attempts, cancel ? 1 : 2);
+    assert.equal(f.launches[0].signal.aborted, true);
+    const worker = [...store.workers.values()].find(
+      (worker) => worker.kind === "discovery",
+    )!;
+    const head = JSON.parse(
+      await readFile(
+        path.join(worker.artifactDir, "checkpoint-head.json"),
+        "utf8",
+      ),
+    );
+    const checkpoint = JSON.parse(
+      await readFile(
+        path.join(worker.artifactDir, "checkpoints", head.checkpoint),
+        "utf8",
+      ),
+    );
+    assert.equal(checkpoint.findings.length, 1);
+    assert.equal(checkpoint.complete, !cancel);
+    assert.equal(checkpoint.scanId, scan.run.scanId);
+    assert.deepEqual(
+      checkpoint.findings[0].provenance,
+      finding("preserved", "fixture.ts").provenance,
+    );
+    if (cancel) {
+      assert.equal(published, undefined);
+      assert.equal(store.finishCalls.length, 0);
+    } else {
+      assert.equal(f.launches[1].signal.aborted, false);
+      assert.equal((published!.findings as unknown[]).length, 1);
+      assert.equal(worker.status, "succeeded");
+      assert.equal(worker.attempt, 2);
+      assert.equal(store.iterations.length, 1);
     }
   });
 }

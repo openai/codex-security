@@ -537,7 +537,6 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
             if (event.type === "thread.started") {
               await request.onThreadStarted?.(event.thread_id);
             } else if (event.type === "item.completed") {
-              appendItemDiagnostic(diagnostics, event.item);
               const item = event.item;
               if (
                 submissionErrorLimit !== undefined &&
@@ -558,12 +557,12 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
                   const error = new Error(
                     `Deep Scan worker stopped after ${failedSubmissions} consecutive failed draft submissions: ${failure.map(({ message }) => message).join(" ")}`,
                   );
-                  // Stop dispatch now, even if turn.completed is already buffered.
-                  // Only abort this attempt; the runner owns retry and recovery.
+                  // Stop this attempt even if turn.completed is already buffered.
                   controller.abort(error);
                   throw error;
                 }
               }
+              appendItemDiagnostic(diagnostics, item);
             } else if (event.type === "turn.completed") {
               request.signal.removeEventListener("abort", forwardAbort);
             } else if (event.type === "turn.failed") {
