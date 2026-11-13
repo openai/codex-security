@@ -2,6 +2,7 @@ import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
+  HUGGINGFACE_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
   type JsonObject,
@@ -1154,6 +1155,8 @@ test.each([
   ["profile", "openai"],
   ["root", "openrouter"],
   ["profile", "openrouter"],
+  ["root", "huggingface"],
+  ["profile", "huggingface"],
 ] as const)(
   "Deep workers, rerun and resume inherit the %s %s endpoint",
   async (selection, provider) => {
@@ -1173,7 +1176,9 @@ test.each([
             model_provider: provider,
             model_providers: {
               [provider]: {
-                ...OPENROUTER_CODEX_PROVIDER,
+                ...(provider === "huggingface"
+                  ? HUGGINGFACE_CODEX_PROVIDER
+                  : OPENROUTER_CODEX_PROVIDER),
                 base_url: endpoint,
                 query_params: { version: "preview" },
               },
@@ -1183,6 +1188,7 @@ test.each([
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-openai-key",
       OPENROUTER_API_KEY: "synthetic-openrouter-key",
+      HF_TOKEN: "synthetic-hf-key",
     };
     let recipe: JsonObject;
     const client = new TestClient(
@@ -1224,10 +1230,34 @@ test.each([
                     profile,
                   )
                 : {};
+            const expected = structuredClone(routing);
+            if (provider === "huggingface") {
+              const definitions = providerConfig[
+                "model_providers"
+              ] as JsonObject;
+              const hf = definitions["huggingface"] as JsonObject;
+              expect(hf["base_url"]).toMatch(/^http:\/\/127\.0\.0\.1:/);
+              (
+                (expected["model_providers"] as JsonObject)[
+                  "huggingface"
+                ] as JsonObject
+              )["base_url"] = hf["base_url"]!;
+              // Verify the worker's native child loads the same private profile.
+              const native = await effectiveProvider(
+                {
+                  CODEX_HOME: options.env!["CODEX_HOME"]!,
+                  HF_TOKEN: "synthetic-hf-key",
+                },
+                repository,
+                ['model_provider="huggingface"'],
+                String(profile),
+              );
+              expect(native).toMatchObject(hf);
+            }
             expect({ ...options.config, ...providerConfig }).toMatchObject(
-              routing,
+              expected,
             );
-            expect({ ...runtime, ...providerConfig }).toMatchObject(routing);
+            expect({ ...runtime, ...providerConfig }).toMatchObject(expected);
             throw new Error("synthetic endpoint inherited");
           })(),
       },

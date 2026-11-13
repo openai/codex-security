@@ -59,6 +59,7 @@ import { scanPreflightCodexConfig } from "../src/api.js";
 import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "../src/version.js";
 import {
+  HUGGINGFACE_CODEX_PROVIDER,
   CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
@@ -873,6 +874,7 @@ describe("CLI", () => {
               "openrouter",
               "fireworks",
               "cheaperinference",
+              "huggingface",
               "amazon-bedrock",
             ],
           },
@@ -3426,6 +3428,13 @@ describe("CLI", () => {
       "gpt-5.4",
       "claude-sonnet-5",
       CHEAPERINFERENCE_CODEX_PROVIDER,
+    ],
+    [
+      "Hugging Face",
+      "huggingface",
+      "synthetic/model",
+      "synthetic/alternate",
+      HUGGINGFACE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes scans through %s",

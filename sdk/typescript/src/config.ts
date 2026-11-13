@@ -44,10 +44,18 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const HUGGINGFACE_CODEX_PROVIDER = {
+  name: "Hugging Face",
+  base_url: "https://router.huggingface.co/v1",
+  env_key: "HF_TOKEN",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
+  huggingface: HUGGINGFACE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
@@ -500,6 +508,10 @@ export async function mergedCodexConfig(
       await readCodexAuthConfig(profileHome, purpose === "login"),
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  if (scanModelProvider(effectiveOverrides) === "huggingface") {
+    defaults["web_search"] = "disabled";
+    defaults["model_reasoning_summary"] = "none";
+  }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.

@@ -16,6 +16,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
+import { startHuggingFaceResponsesAdapter } from "./huggingface-responses.js";
 import { nativeCodexLaunch } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
@@ -112,15 +113,42 @@ export async function createProviderProfile(
       options,
     );
   }
+  let adapter:
+    Awaited<ReturnType<typeof startHuggingFaceResponsesAdapter>> | undefined;
   if (options.replay) {
     await writePrivateConfig(path, JSON.stringify(config));
   } else {
-    const providers = resolveCodexProfile(config)["model_providers"];
-    await writeCodexConfig(path, {
-      model_providers: isRecord(providers) ? providers : {},
-    });
+    const resolved = resolveCodexProfile(config);
+    const providers = structuredClone(resolved["model_providers"]);
+    if (
+      resolved["model_provider"] === "huggingface" &&
+      isRecord(providers) &&
+      isRecord(providers["huggingface"])
+    ) {
+      const provider = providers["huggingface"];
+      if (typeof provider["base_url"] === "string") {
+        adapter = await startHuggingFaceResponsesAdapter(provider["base_url"]);
+        provider["base_url"] = adapter.baseUrl;
+      }
+    }
+    try {
+      await writeCodexConfig(path, {
+        model_providers: isRecord(providers) ? providers : {},
+      });
+    } catch (error) {
+      await adapter?.close();
+      throw error;
+    }
   }
-  return { name, path, cleanup: () => rm(path, { force: true }) };
+  return {
+    name,
+    path,
+    cleanup: async () => {
+      await adapter?.close();
+      adapter = undefined;
+      await rm(path, { force: true });
+    },
+  };
 }
 
 /** Restore private replay settings from the credential home, never scan artifacts. */

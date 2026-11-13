@@ -1667,3 +1667,27 @@ describe("Codex configuration", () => {
     expect(parse(await readFile(path, "utf8"))).toEqual({ hooks });
   });
 });
+
+test("HF defaults disable hosted search without overriding explicit settings", async () => {
+  const config = await mergedCodexConfig({
+    codexOverrides: { model_provider: "huggingface" },
+  });
+  expect(config["web_search"]).toBe("disabled");
+  expect(config["model_reasoning_summary"]).toBe("none");
+  const selected = resolveCodexProfile(
+    await mergedCodexConfig({
+      codexOverrides: {
+        profile: "selected",
+        profiles: {
+          selected: {
+            model_provider: "huggingface",
+            web_search: "live",
+            model_reasoning_summary: "auto",
+          },
+        },
+      },
+    }),
+  );
+  expect(selected["web_search"]).toBe("live");
+  expect(selected["model_reasoning_summary"]).toBe("auto");
+});
