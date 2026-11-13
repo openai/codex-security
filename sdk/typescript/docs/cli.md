@@ -292,9 +292,9 @@ env_key = "UBERLLM_API_KEY"
 ```
 
 Set `UBERLLM_API_KEY` in your environment and run
-`codex-security scan . --codex 'profile="uberllm"'`. Model IDs are namespaced by
-vendor (`GET https://api.uberllm.dev/v1/models` lists them); choose a model with
-tool calling. This profile uses `--auth auto` (the default) or `--auth api-key`.
+`codex-security scan . --codex 'profile="uberllm"'`. The example model handled a
+shell tool call over the Responses API. A full scan also requires support for
+Codex Security's namespaced completion tool, which has yet to be verified on UberLLM.
 See [UberLLM's Codex setup guide](https://uberllm.dev/docs/codex).
 
 ### Hugging Face compatibility
