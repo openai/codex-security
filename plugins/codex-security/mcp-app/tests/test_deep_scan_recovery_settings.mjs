@@ -13,7 +13,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
 import { importModule } from "./import-module.ts";
+
+const root = await mkdtemp(join(tmpdir(), "deep-settings-"));
+const pluginMcp = join(root, "installed-plugin", "mcp");
+await build({
+  entryPoints: [
+    fileURLToPath(new URL("../src/session-decompression.ts", import.meta.url)),
+  ],
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  outfile: join(pluginMcp, "session-decompression.mjs"),
+});
 
 const module = await importModule({
   banner: {
@@ -21,9 +34,8 @@ const module = await importModule({
   },
   nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
   define: {
-    "import.meta.url": JSON.stringify(
-      new URL("../src/deep-scan/recovery-settings.ts", import.meta.url).href,
-    ),
+    // Standalone MCP bundles compile import.meta.url as the loader filename.
+    "import.meta.url": JSON.stringify(join(pluginMcp, "server.mjs")),
   },
   entryPoints: [
     fileURLToPath(
@@ -37,7 +49,6 @@ const {
   restoredDeepScanWorkerSettings: restoreSettings,
   loadDeepScanExecutionSettings: loadSettings,
 } = module;
-const root = await mkdtemp(join(tmpdir(), "deep-settings-"));
 try {
   const settings = {
     codexPath: "/fixture/runtime/codex",
@@ -509,6 +520,23 @@ profile = "fixture-profile"
       payload: { id: "fixture-other", model_provider: "other-provider" },
     }) + "\n",
   );
+  const archive = join(root, "archived_sessions");
+  await mkdir(archive);
+  // A native Zstandard session_meta frame from the selected parent.
+  await writeFile(
+    join(archive, "parent.jsonl.zst"),
+    Buffer.from(
+      "KLUv/QRYTQIAsoQPFKDFDZxcS+7Ss3DSb/3DzeWhhjgxQGudqGqbSUlcc/F0so8DTKWD0Pdx1LNxvC3r+OKX0pCzilCijyevdBYCADcJQMyhzAYyQIw=",
+      "base64",
+    ),
+  );
+  const archived = await captureSettings(
+    {},
+    { filesystemDenies: [] },
+    { CODEX_HOME: root, CODEX_CLI_PATH: process.execPath },
+    { threadId: "archived-parent" },
+  );
+  assert.equal(archived.modelProvider, "archived-provider");
   const badHistoryHome = join(root, "unreadable-history");
   await mkdir(badHistoryHome);
   await writeFile(

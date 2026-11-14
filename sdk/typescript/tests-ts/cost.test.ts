@@ -9162,6 +9162,140 @@ test.each([0, 100])(
   },
 );
 
+test.each([300, 1_300])(
+  "preserves legacy token usage across a compaction boundary (%i)",
+  async (next) => {
+    const home = await codexHome();
+    const counter = (input_tokens: number) =>
+      legacyUsageRecord({ input_tokens, output_tokens: 0 });
+    const path = await writeSession(home, "owner", {});
+    await appendFile(
+      path,
+      jsonLines([
+        counter(1_000),
+        { type: "compacted", payload: {} },
+        counter(next),
+      ]) + "\n",
+    );
+    const tracker = costTracker(home);
+    tracker.start("owner");
+    expect((await tracker.stop()).measurement.usage?.input_tokens).toBe(1_300);
+  },
+);
+
+test("reconciles exact receipts against counters from the same turn", async () => {
+  const home = await codexHome();
+  const path = await writeSession(home, "worker", {});
+  const at = "2026-09-01T00:00:02Z";
+  const turn = (turn_id: string, model: string) => ({
+    type: "turn_context",
+    timestamp: at,
+    payload: { turn_id, model },
+  });
+  const receipt = (turn_id: string, n: number, model: string) => ({
+    type: "token_usage_record",
+    timestamp: at,
+    payload: {
+      turn_id,
+      model,
+      response_id: turn_id,
+      usage: { input_tokens: n, output_tokens: 0 },
+      thread_token_usage: { input_tokens: 1_500, output_tokens: 0 },
+    },
+  });
+  await appendFile(
+    path,
+    jsonLines([
+      turn("a", "gpt-5.6-sol"),
+      {
+        ...legacyUsageRecord({ input_tokens: 1000, output_tokens: 0 }),
+        timestamp: at,
+      },
+      turn("b", "gpt-6-astra"),
+      receipt("b", 500, "gpt-6-astra"),
+    ]) + "\n",
+  );
+  const tracker = costTracker(home);
+  tracker.setAttributionReader(async () => ({
+    formatVersion: 1,
+    startedAt: at,
+    completedAt: null,
+    owner: { threadId: "worker", turnId: null, startedAt: at },
+    executionThreadIds: ["worker"],
+  }));
+  tracker.start("worker");
+  try {
+    const first = await tracker.refresh();
+    expect(first.measurement.usage?.input_tokens).toBe(1_500);
+    expect(first.measurement.coverage).toBe("complete");
+    expect(first.cost?.estimatedUsd).toBeGreaterThan(0);
+    await appendFile(
+      path,
+      jsonLines([receipt("a", 1000, "gpt-5.6-sol")]) + "\n",
+    );
+    const last = await tracker.stop();
+    expect(last.measurement.usage?.input_tokens).toBe(1_500);
+    expect(last.measurement.coverage).toBe("complete");
+    expect(last.cost?.estimatedUsd).toBe(first.cost?.estimatedUsd);
+  } finally {
+    await tracker.stop();
+  }
+});
+
+test("includes host comparison receipts when Deep worker attribution is active", async () => {
+  const home = await codexHome();
+  const scanId = "scan";
+  const directory = join(home, "worker-usage", scanId);
+  await mkdir(directory, { recursive: true });
+  const at = "2026-09-01T00:00:02Z";
+  const usage = (input_tokens: number) => ({ input_tokens, output_tokens: 0 });
+  for (const [thread, amount] of [
+    ["owner", 100],
+    ["comparison", 500],
+    ["unrelated", 700],
+  ] as const) {
+    const path = await writeSession(home, thread, {});
+    await appendFile(
+      path,
+      jsonLines([
+        {
+          type: "turn_context",
+          timestamp: at,
+          payload: { turn_id: "t", model: "gpt-5.6-sol" },
+        },
+        { ...legacyUsageRecord(usage(amount)), timestamp: at },
+      ]) + "\n",
+    );
+  }
+  await writeFile(
+    join(directory, "compare.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      source: "codex_sdk",
+      usageScope: "thread_cumulative",
+      kind: "compare",
+      scanId,
+      attemptId: "compare",
+      threadId: "comparison",
+      usage: usage(500),
+    }),
+  );
+  const tracker = costTracker(home, { workerReceipts: { directory, scanId } });
+  tracker.setAttributionReader(async () => ({
+    formatVersion: 1,
+    startedAt: at,
+    completedAt: null,
+    owner: { threadId: "owner", turnId: "t", startedAt: at },
+    executionThreadIds: [],
+  }));
+  tracker.start("owner");
+  expect((await tracker.stop()).measurement).toMatchObject({
+    coverage: "complete",
+    threadCount: 2,
+    usage: { input_tokens: 600 },
+  });
+});
+
 test.each(["other turn", "outside window"])(
   "keeps owned legacy model before an unrelated first receipt: %s",
   async (kind) => {

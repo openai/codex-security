@@ -14,6 +14,7 @@ from test_budget_selection_publication import assert_budget_seal_receipt
 from test_deep_scan_publication_authority import stage_publication
 from test_publication_stop_interleavings import saved_selection
 from test_workbench_db import BUDGET_COST
+from workbench_test_support import read_review_state, saved_draft, write_checkpoint
 
 
 def selected_result(connection, scan):
@@ -643,8 +644,9 @@ def test_selected_republication_checks_identity_before_writing_checkpoints(
     assert "\n".join(workbench_db.iterdump()) == state
 
 
+@pytest.mark.parametrize("unfinished", [False, True])
 def test_selected_zero_discovery_deadline_preserves_the_published_draft(
-    workbench_api, workbench_db, publication_scan
+    workbench_api, workbench_db, publication_scan, unfinished
 ):
     scan = publication_scan()
     scan.findings = []
@@ -670,6 +672,16 @@ def test_selected_zero_discovery_deadline_preserves_the_published_draft(
             "finalization_input_json = ? WHERE scan_id = ?",
             (json.dumps(selection), scan.scan_id),
         )
+    if unfinished:
+        worker_id, output = scan.canceled_discovery_output()
+        checkpoint = write_checkpoint(
+            output / "checkpoints",
+            saved_draft(
+                scan.scan_id,
+                deferred=[{"id": "audit", "reason": "Review the interrupted worker evidence."}],
+            ),
+        )
+        original = checkpoint.read_bytes()
     draft_dir = scan.scan_dir / "drafts"
     draft_dir.mkdir()
     draft_path = draft_dir / "00000000-0000-4000-8000-000000000001.json"
@@ -708,9 +720,30 @@ def test_selected_zero_discovery_deadline_preserves_the_published_draft(
         coordinator_generation=2,
     )
     deep = workbench_api["deep_scan"]
+    if unfinished:
+        manifest_path = scan.scan_dir / "scan-manifest.json"
+        original_parent = manifest_path.read_bytes()
+        manifest = json.loads(original_parent)
+        manifest["scan"]["reviewState"]["deferred"][0]["reason"] = "Replaced deadline reason."
+        manifest_path.write_text(json.dumps(manifest))
+        with pytest.raises(workbench_api["ContractError"], match="publication"):
+            deep.finish_deep_scan(workbench_db, finish)
+        manifest_path.write_bytes(original_parent)
     deep.finish_deep_scan(workbench_db, finish)
     assert workbench_db.execute("SELECT status FROM deep_scan_runs").fetchone()[0] == "succeeded"
-    assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == before
+    if unfinished:
+        deferred = read_review_state(workbench_db, scan.scan_dir)["deferred"]
+        assert any(
+            row.get("workerId") == worker_id
+            and row["reason"] == "Review the interrupted worker evidence."
+            for row in deferred
+        )
+        assert checkpoint.read_bytes() == original
+        selection_json = workbench_db.execute(
+            "SELECT finalization_input_json FROM deep_scan_runs"
+        ).fetchone()[0]
+    else:
+        assert {path: path.read_bytes() for path in scan.scan_dir.rglob("*.json")} == before
     completion = Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None)
     prepared = workbench_api["complete_scan"](workbench_db, completion, prepare_only=True)
     assert prepared["acceptedFindings"] is False

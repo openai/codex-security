@@ -226,11 +226,15 @@ def parse_args(
     list_scans.add_argument("--status", choices=("running", "complete", "failed", "canceled"))
     list_scans.add_argument("--mode", choices=MODES)
     list_scans.add_argument("--repository")
+    list_scans.add_argument(
+        "--prefer-worktree", action="store_true", help="List scans from this checkout first."
+    )
     list_scans.add_argument("--scan-root")
     list_scans.add_argument("--offset", type=non_negative_int, default=0)
     list_scans.add_argument("--limit", type=positive_int)
 
     list_unmatched_scan_pairs = add_command("list-unmatched-scan-pairs", "--repository")
+    list_unmatched_scan_pairs.add_argument("--after-scan-id")
     list_unmatched_scan_pairs.add_argument("--force", action="store_true")
 
     register_cli_scan = add_command("register-cli-scan", "--scan-dir", "--repository")
@@ -246,7 +250,17 @@ def parse_args(
     )
     register_cli_scan.add_argument("--archived-scan-dir")
 
-    add_command("set-scan-thread", "--scan-id", "--thread-id")
+    restore_cli_scan_archive = subparsers.add_parser("restore-cli-scan-archive")
+    restore_cli_scan_archive.add_argument("--scan-dir", required=True)
+    restore_cli_scan_archive.add_argument("--archived-scan-dir", required=True)
+    previous_scan = restore_cli_scan_archive.add_mutually_exclusive_group(required=True)
+    previous_scan.add_argument("--previous-scan-id")
+    previous_scan.add_argument("--previous-scan-absent", action="store_true")
+
+    set_scan_thread = subparsers.add_parser("set-scan-thread")
+    set_scan_thread.add_argument("--scan-id", required=True)
+    set_scan_thread.add_argument("--thread-id", required=True)
+    set_scan_thread.add_argument("--time-budget-started-at")
 
     set_scan_cost_limit = add_command("set-scan-cost-limit", "--scan-id")
     set_scan_cost_limit.add_argument("--max-cost-usd", required=True, type=float)
@@ -274,7 +288,9 @@ def parse_args(
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
-    list_global_findings.add_argument("--target-id")
+    finding_repository = list_global_findings.add_mutually_exclusive_group()
+    finding_repository.add_argument("--target-id")
+    finding_repository.add_argument("--repository")
     list_global_findings.add_argument("--offset", type=non_negative_int, default=0)
     list_global_findings.add_argument("--limit", type=positive_int, default=FINDINGS_PAGE_MAX)
     list_repositories = subparsers.add_parser("list-repositories")

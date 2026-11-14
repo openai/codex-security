@@ -1,3 +1,4 @@
+import { splitCommand } from "./command-words.js";
 import { isSafeNonNegativeInteger, parseJson } from "./value.js";
 import type { JsonObject } from "./config.js";
 import { workbenchArgs } from "./workbench-arguments.js";
@@ -363,6 +364,9 @@ interface SessionUsage {
   model: string | null;
   modelUsage: Map<string | null, ScanTokenUsage>;
   counterModelUsage: Map<string | null, ScanTokenUsage>;
+  legacyTurnUsage: Map<string, Map<string | null, ScanTokenUsage>>;
+  afterCompaction: boolean;
+  priorCounterEpochs: ScanTokenUsage | null;
   currentTurnId: string | null;
   previousUsage: ScanTokenUsage | null;
   responseIds: Set<string>;
@@ -405,6 +409,7 @@ interface SessionUsage {
 type WorkerReceipt = {
   threadId: string | null;
   usage: ScanTokenUsage | null;
+  comparison: boolean;
 };
 
 function sessionObservation<T>(
@@ -483,6 +488,9 @@ function createSessionUsage(observeUsage: boolean): SessionUsage {
     model: null,
     modelUsage: new Map(),
     counterModelUsage: new Map(),
+    legacyTurnUsage: new Map(),
+    afterCompaction: false,
+    priorCounterEpochs: null,
     currentTurnId: null,
     previousUsage: null,
     responseIds: new Set(),
@@ -2713,8 +2721,19 @@ export class ScanCostTracker {
       this.#workerReceipts,
     );
     collectionErrors.push(...workerReceipts.errors);
-    const included = this.#attribution
-      ? attributedScanThreads(this.#sessions.values(), this.#attribution)
+    // Comparisons have protected per-scan receipts but no discovery-worker row.
+    const attribution =
+      this.#attribution && workerReceipts.comparisons.size > 0
+        ? {
+            ...this.#attribution,
+            executionThreadIds: [
+              ...this.#attribution.executionThreadIds,
+              ...workerReceipts.comparisons,
+            ],
+          }
+        : this.#attribution;
+    const included = attribution
+      ? attributedScanThreads(this.#sessions.values(), attribution)
       : new Set([
           this.#threadId,
           ...this.#receipts.keys(),
@@ -2786,17 +2805,13 @@ export class ScanCostTracker {
     const usages = new Map<string, ScanTokenUsage | null>(
       [...included].map((threadId) => [
         threadId,
-        this.#attribution &&
-        !this.#attribution.executionThreadIds.includes(threadId)
+        attribution && !attribution.executionThreadIds.includes(threadId)
           ? null
           : (this.#receipts.get(threadId) ?? null),
       ]),
     );
     for (const [threadId, receipt] of workerReceipts.usages) {
-      if (
-        this.#attribution &&
-        !this.#attribution.executionThreadIds.includes(threadId)
-      )
+      if (attribution && !attribution.executionThreadIds.includes(threadId))
         continue;
       const current = usages.get(threadId);
       if (
@@ -3057,8 +3072,7 @@ export class ScanCostTracker {
       if (
         (session.counterRegressed && !session.responseUsageObserved) ||
         session.incompleteResponseEpoch ||
-        (session.responseEpochUsageObserved &&
-          session.expectedResponseTokens > session.responseTokens)
+        missingResponseTokens(session)
       )
         incomplete.add(threadId);
       if (session.pendingLine.length > 0 && !this.#receipts.get(threadId))
@@ -3727,6 +3741,7 @@ async function readWorkerReceipts(
 ): Promise<{
   usages: Map<string, ScanTokenUsage | null>;
   unknownAttempts: number;
+  comparisons: Set<string>;
   attemptIds: Set<string>;
   errors: unknown[];
 }> {
@@ -3735,6 +3750,7 @@ async function readWorkerReceipts(
   const result = {
     usages,
     unknownAttempts: 0,
+    comparisons: new Set<string>(),
     attemptIds: attempts,
     errors: [] as unknown[],
   };
@@ -3776,6 +3792,7 @@ async function readWorkerReceipts(
         threadId:
           typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,
         usage: tokenUsage(receipt["usage"]),
+        comparison: receipt["kind"] === "compare",
       });
     }
   } catch (error) {
@@ -3783,12 +3800,13 @@ async function readWorkerReceipts(
   }
   // As with native sessions, a later read failure cannot erase observed usage.
   // Keep attempts separate so a worker's initial unknown identity can resolve.
-  for (const [attemptId, { threadId, usage }] of retained) {
+  for (const [attemptId, { threadId, usage, comparison }] of retained) {
     attempts.add(attemptId);
     if (threadId === null) {
       result.unknownAttempts += 1;
       continue;
     }
+    if (comparison) result.comparisons.add(threadId);
     const existing = usages.get(threadId) ?? null;
     // Native SDK completions include earlier turns of a resumed thread.
     usages.set(
@@ -4034,12 +4052,9 @@ function readSessionEvent(
     return;
   }
   if (event["type"] === "compacted") {
+    session.afterCompaction = true;
     // Later counter epochs cannot account for missing earlier scan receipts.
-    if (
-      session.responseEpochUsageObserved &&
-      session.expectedResponseTokens > session.responseTokens
-    )
-      session.incompleteResponseEpoch = true;
+    if (missingResponseTokens(session)) session.incompleteResponseEpoch = true;
     session.responseTokens = 0;
     session.expectedResponseTokens = 0;
     session.responseEpochUsageObserved = false;
@@ -4101,11 +4116,34 @@ function readSessionEvent(
       return;
     session.responseEpochUsageObserved = true;
     if (!session.responseUsageObserved) {
-      // Exact receipts include compaction and survive counter resets. Keep the
-      // legacy counter as an independent lower bound, never add it to receipts.
+      // Only counters from a different identified turn are independent of this receipt.
       session.responseUsageObserved = true;
       session.usage = null;
       session.modelUsage.clear();
+      if (turnId === null) session.legacyTurnUsage.clear();
+      else session.legacyTurnUsage.delete(turnId);
+      for (const models of session.legacyTurnUsage.values()) {
+        for (const [model, tokens] of models) {
+          session.usage = addTokenUsage(session.usage, tokens);
+          session.modelUsage.set(
+            model,
+            addTokenUsage(session.modelUsage.get(model) ?? null, tokens),
+          );
+        }
+      }
+    } else if (turnId !== null) {
+      // A delayed receipt replaces its own turn's provisional model subtotal.
+      for (const [model, tokens] of session.legacyTurnUsage.get(turnId) ?? []) {
+        session.usage = subtractTokenUsage(session.usage!, tokens);
+        const remaining = subtractTokenUsage(
+          session.modelUsage.get(model)!,
+          tokens,
+        );
+        if (remaining && remaining.total_tokens > 0)
+          session.modelUsage.set(model, remaining);
+        else session.modelUsage.delete(model);
+      }
+      session.legacyTurnUsage.delete(turnId);
     }
     const model =
       typeof payload["model"] === "string" ? payload["model"] : session.model;
@@ -4379,6 +4417,15 @@ function readSessionEvent(
       ? usage
       : subtractTokenUsage(usage, session.inheritedUsage);
   if (ownUsage !== null) {
+    if (
+      session.afterCompaction &&
+      session.previousUsage !== null &&
+      ownUsage.total_tokens < session.previousUsage.total_tokens
+    ) {
+      session.previousUsage = null;
+      session.priorCounterEpochs = session.counterUsage;
+    }
+    session.afterCompaction = false;
     const hadPreviousUsage = session.previousUsage !== null;
     const delta =
       session.previousUsage === null
@@ -4411,20 +4458,30 @@ function readSessionEvent(
         model,
         addTokenUsage(session.counterModelUsage.get(model) ?? null, delta),
       );
+      if (session.currentTurnId !== null && !session.responseUsageObserved) {
+        const models =
+          session.legacyTurnUsage.get(session.currentTurnId) ??
+          new Map<string | null, ScanTokenUsage>();
+        models.set(model, addTokenUsage(models.get(model) ?? null, delta));
+        session.legacyTurnUsage.set(session.currentTurnId, models);
+      }
       if (!session.responseUsageObserved)
         session.modelUsage.set(
           session.model,
           addTokenUsage(session.modelUsage.get(session.model) ?? null, delta),
         );
     }
+    const counterTotal = session.priorCounterEpochs
+      ? addTokenUsage(session.priorCounterEpochs, ownUsage)
+      : ownUsage;
     session.counterUsage =
       attribution && delta !== null
         ? addTokenUsage(session.counterUsage, delta)
         : session.responseUsageObserved &&
             session.counterUsage !== null &&
-            session.counterUsage.total_tokens >= ownUsage.total_tokens
+            session.counterUsage.total_tokens >= counterTotal.total_tokens
           ? session.counterUsage
-          : ownUsage;
+          : counterTotal;
     if (!session.responseUsageObserved) {
       observeUsageEvent(session, event["timestamp"], session.counterUsage);
       session.usage = session.counterUsage;
@@ -4754,41 +4811,6 @@ function takeFirstIndex(heap: number[]): number {
   return first;
 }
 
-/** Decode the quoted argv rendering emitted by native command completions. */
-function splitCommand(command: string): string[] | null {
-  const words: string[] = [];
-  let word = "";
-  let started = false;
-  let quote: "'" | '"' | null = null;
-  for (let index = 0; index < command.length; index++) {
-    const character = command[index]!;
-    if (character === "\\" && quote !== "'") {
-      const next = command[++index];
-      if (next === undefined) return null;
-      if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next))
-        word += "\\";
-      if (next !== "\n") word += next;
-      started = true;
-    } else if (quote !== null) {
-      if (character === quote) quote = null;
-      else word += character;
-    } else if (character === "'" || character === '"') {
-      quote = character;
-      started = true;
-    } else if (" \t\r\n".includes(character)) {
-      if (started) words.push(word);
-      word = "";
-      started = false;
-    } else {
-      word += character;
-      started = true;
-    }
-  }
-  if (quote !== null) return null;
-  if (started) words.push(word);
-  return words;
-}
-
 function sessionProgressUpdates(
   payload: Readonly<Record<string, unknown>>,
 ): ScanProgress[] {
@@ -4884,6 +4906,18 @@ function isBlockedLogRead(error: unknown): boolean {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error["code"] === "ENOENT";
+}
+
+function missingResponseTokens(session: SessionUsage): boolean {
+  if (
+    !session.responseEpochUsageObserved ||
+    session.responseTokens >= session.expectedResponseTokens
+  )
+    return false;
+  let accounted = session.responseTokens;
+  for (const models of session.legacyTurnUsage.values())
+    for (const usage of models.values()) accounted += usage.total_tokens;
+  return accounted < session.expectedResponseTokens;
 }
 
 function sessionUsageTotal(session: SessionUsage): number {

@@ -18,6 +18,7 @@ import {
 } from "../src/errors.js";
 import { prepareScanArtifactRestorer, runWorkbench } from "../src/runtime.js";
 import { resumeSelectedDeepScan } from "../src/deep-scan-finalization.js";
+import { git } from "./git-fixture.js";
 import { TestClient } from "./support/api-client.js";
 import { completedEvents, preparedRuntime } from "./support/api-events.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -311,6 +312,14 @@ for (const {
       mkdir(codexHome, { recursive: true }),
     ]);
     await writeFile(join(repository, "extract.py"), "# Synthetic source\n");
+    const recoverOwners =
+      outcome === "restart-missing-logs" ||
+      outcome === "restart-deleted-target";
+    if (recoverOwners) {
+      git(repository, "init", "-q");
+      git(repository, "add", "extract.py");
+      git(repository, "commit", "-qm", "Add synthetic source");
+    }
     const environment = {
       ...process.env,
       CODEX_HOME: codexHome,
@@ -1363,6 +1372,7 @@ for (const {
       }
       const result = await client.run(repository, {
         mode: "deep",
+        ownerSuggestions: recoverOwners,
         ...(outcome === "restart-missing-knowledge"
           ? { knowledgeBasePaths: [join(root, "missing-knowledge.md")] }
           : {}),
@@ -1374,6 +1384,25 @@ for (const {
         ...(restart ? { resumeScanId: scanId, outputDir: scanDir } : {}),
       });
       expect(result.threadId).toBe(threadId);
+      if (outcome === "restart-missing-logs") {
+        const path = join(scanDir, "owner-suggestions.json");
+        expect(result.ownerSuggestionsPath).toBe(path);
+        expect(result.ownerSuggestionsError).toBeUndefined();
+        expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+          revision: git(repository, "rev-parse", "HEAD"),
+          results: [
+            expect.objectContaining({
+              findingId: result.findings.findings[0]!.findingId,
+            }),
+          ],
+        });
+      } else if (outcome === "restart-deleted-target") {
+        expect(result.ownerSuggestionsPath).toBeUndefined();
+        expect(result.ownerSuggestionsError).toBeTruthy();
+        expect(warnings).toContain(
+          `Could not generate owner suggestions: ${result.ownerSuggestionsError}`,
+        );
+      }
       if (completeBeforePreparation) {
         expect(completedBeforePreparation).toBe(true);
         expect(await readSealedArtifacts(scanDir)).toEqual(

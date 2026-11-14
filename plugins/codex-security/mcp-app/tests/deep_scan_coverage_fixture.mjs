@@ -363,7 +363,7 @@ export async function publishCoverageFixture(
       ).acceptedResultPath;
       lastReducerId = id;
     }
-    if (legacyAttempts) {
+    if (legacyAttempts === true) {
       // Migrated discoveries and prior reducers can have frozen claims without attempt rows.
       await exec(process.env.PYTHON || "python3", [
         "-c",
@@ -376,7 +376,28 @@ export async function publishCoverageFixture(
         lastReducerId,
       ]);
     }
-    run = await store.get(run.scanId, threadId);
+    if (legacyAttempts === "before-bindings") {
+      // These are the rows a v1 writer records before attempts and frozen input columns exist.
+      await exec(process.env.PYTHON || "python3", [
+        "-c",
+        [
+          "import sqlite3, sys",
+          "with sqlite3.connect(sys.argv[1]) as db:",
+          '    db.execute("DELETE FROM deep_scan_attempts")',
+          '    db.execute("DELETE FROM deep_scan_merge_claims")',
+          '    db.execute("UPDATE deep_scan_dedup_inputs SET attempt=NULL, result_manifest_path=NULL, result_manifest_sha256=NULL")',
+          '    db.execute("UPDATE deep_scan_workers SET attempt=0 WHERE kind=?", ("dedup",))',
+          '    db.execute("UPDATE deep_scan_workers SET completed_at=? WHERE status=?", ("2020-01-01T00:00:00Z", "succeeded"))',
+        ].join("\n"),
+        path.join(root, "state", "workbench.sqlite3"),
+      ]);
+      ({ run } = await store.claimCoordinator({
+        scanId: run.scanId,
+        threadId,
+      }));
+    } else {
+      run = await store.get(run.scanId, threadId);
+    }
     if (discardMutableResults) {
       for (const worker of run.persistedWorkers) {
         const acceptedPath =
@@ -519,7 +540,9 @@ export async function publishCoverageFixture(
         draft,
         runWorkbench,
         signal,
-        selectedRecovery ? publication : undefined,
+        selectedRecovery || legacyAttempts === "before-bindings"
+          ? publication
+          : undefined,
       );
     },
   };

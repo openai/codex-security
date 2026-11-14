@@ -14,6 +14,7 @@ for (const [continueAfterResume, legacyAttempts, splitSeededReducers] of [
   [false, false, false],
   [true, false, false],
   [true, true, false],
+  [true, "before-bindings", false],
   [false, false, true],
   [false, true, true],
 ]) {

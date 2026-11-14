@@ -18,6 +18,7 @@ import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
 from finalize_scan_contract import (
     PreparedScanFinalization,
+    _prepare_scan_finalization,
     _read_scan_local_json,
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
@@ -40,6 +41,7 @@ from workbench_saved_results import _restore_published_outputs, _snapshot_publis
 from workbench_scan_usage import capture_scan_usage_owner
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
+from workbench_target_state import require_scan_checkout_owner
 from workbench_validation import (
     optional_text,
     reject_non_finite_json,
@@ -821,6 +823,7 @@ def begin_deep_scan_for_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = dependencies().require_scan(connection, scan_id)
+    require_scan_checkout_owner(connection, candidate)
     model_thread_id = getattr(args, "model_thread_id", None)
     require_tokenless_scan_owner(connection, candidate, model_thread_id)
     existing = connection.execute(
@@ -897,6 +900,7 @@ def begin_deep_scan_for_scan(
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan, _ = require_owned_scan(connection, scan_id, thread_id)
+        require_scan_checkout_owner(connection, scan)
         require_current_continuation(
             scan,
             args.claim_token,
@@ -982,6 +986,7 @@ def begin_deep_scan_for_target(
     with connection:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
         if existing is not None:
+            require_scan_checkout_owner(connection, existing)
             connection.commit()
             return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
         current_target = dependencies().require_remediation_target(target_path)
@@ -1006,6 +1011,7 @@ def begin_deep_scan_for_target(
             target_inode,
         )
         if terminal is not None:
+            require_scan_checkout_owner(connection, terminal)
             connection.commit()
             return deep_scan_result(
                 connection,
@@ -1031,7 +1037,8 @@ def begin_deep_scan_for_target(
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = dependencies().now()
-        target_id = dependencies().ensure_security_target(connection, target_path)
+        registration = dependencies().register_security_target(connection, target_path)
+        target_id = registration.target_id
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -1063,6 +1070,7 @@ def begin_deep_scan_for_target(
             scope=scope,
             diff_target=None,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             source_scopes=source_scopes,
             target_root=target_root,
             target_summary=None,
@@ -1248,6 +1256,8 @@ def claim_deep_scan_coordinator_locked(
                     "This Deep Scan has no recorded original execution settings; "
                     "its executable and Codex home cannot be recovered."
                 )
+        if run["workflow_version"] in ("deep-security-scan/v1", "deep-scan-mcp/v1"):
+            bind_legacy_worker_results(connection, scan)
         if disposition == "adopted":
             recover_expired_coordinator(connection, run, timestamp)
         connection.execute(
@@ -1586,6 +1596,45 @@ def record_worker_attempt(
             ) VALUES (?, ?, ?, ?, ?)
             """,
             (scan["id"], worker["id"], worker["attempt"], observed_thread_id, timestamp),
+        )
+
+
+def bind_legacy_worker_results(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
+    """Freeze accepted v1 results that predate attempt tracking before the coordinator reuses them."""
+    latest = final_deep_scan_reducer(connection, scan["id"])
+    workers = connection.execute(
+        """
+        SELECT w.* FROM deep_scan_workers AS w
+        JOIN schema_migrations AS migration ON migration.name = 'retain deep scan attempts and exact merge inputs'
+        WHERE w.scan_id = ? AND w.status = 'succeeded' AND w.result_manifest_path IS NOT NULL
+          AND (w.kind = 'discovery' OR w.id = ?) AND w.completed_at < migration.applied_at
+          AND NOT EXISTS (SELECT 1 FROM deep_scan_attempts
+              WHERE worker_id = w.id AND attempt = w.attempt)
+          AND NOT EXISTS (SELECT 1 FROM deep_scan_dedup_inputs
+              WHERE discovery_worker_id = w.id AND (attempt IS NULL OR attempt = w.attempt)
+                AND (result_manifest_path IS NOT NULL OR result_manifest_sha256 IS NOT NULL))
+          AND NOT EXISTS (SELECT 1 FROM deep_scan_merge_claims
+              WHERE previous_worker_id = w.id
+                AND (previous_result_path IS NOT NULL OR previous_result_sha256 IS NOT NULL))
+        """,
+        (scan["id"], latest["id"] if latest else None),
+    )
+    for worker in workers:
+        path, digest = snapshot_accepted_result(scan, worker)
+        connection.execute(
+            """INSERT INTO deep_scan_attempts (
+                scan_id, worker_id, attempt, status, started_at, completed_at,
+                end_reason, accepted_result_path, accepted_result_sha256
+            ) VALUES (?, ?, ?, 'succeeded', ?, ?, 'succeeded', ?, ?)""",
+            (
+                scan["id"],
+                worker["id"],
+                worker["attempt"],
+                worker["started_at"] or worker["created_at"],
+                worker["completed_at"],
+                path,
+                digest,
+            ),
         )
 
 
@@ -2245,9 +2294,22 @@ def finish_deep_scan_locked(
                 kind="file",
             )
             promotion = promote_staged_file(staged_manifest_path, manifest_path)
-        if (zero_discovery_deadline or (discovery_deadline and standard_scan_manifest)) and (
-            finalization is None or "publicationSha256" not in finalization
+        deadline = zero_discovery_deadline or discovery_deadline and standard_scan_manifest
+        selected_publication = finalization is not None and "publicationSha256" in finalization
+        if deadline and (
+            not selected_publication
+            or connection.execute(
+                "SELECT 1 FROM deep_scan_workers WHERE scan_id = ? "
+                "AND kind = 'discovery' AND status = 'canceled' LIMIT 1",
+                (scan_id,),
+            ).fetchone()
+            is not None
         ):
+            if selected_publication:
+                # Verify the protected parent before folding in an interrupted worker's evidence.
+                saved_results.require_selected_publication(
+                    dependencies(), connection, scan, prepare_deadline_publication(connection, scan)
+                )
             deadline_publication = saved_results.preserve_deep_deadline_draft(
                 dependencies(),
                 connection,
@@ -2255,6 +2317,14 @@ def finish_deep_scan_locked(
                 preserve_reduction=not zero_discovery_deadline,
                 allow_empty=not standard_scan_manifest,
             )
+            if selected_publication and deadline_publication is not None:
+                bind_selected_publication(
+                    finalization, prepare_deadline_publication(connection, scan)
+                )
+                connection.execute(
+                    "UPDATE deep_scan_runs SET finalization_input_json = ? WHERE scan_id = ?",
+                    (json.dumps(finalization), scan_id),
+                )
         timestamp = dependencies().now()
         connection.execute(
             """
@@ -2283,6 +2353,18 @@ def finish_deep_scan_locked(
     if promotion is not None:
         finish_staged_file(promotion)
     return deep_scan_result(connection, scan_id)
+
+
+def prepare_deadline_publication(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> PreparedScanFinalization:
+    db = dependencies()
+    return _prepare_scan_finalization(
+        Path(scan["scan_dir"]),
+        expected_coverage_mode=db.expected_coverage_mode(scan),
+        completion_binding=db.workbench_completion_binding(scan, db.now()),
+        accepted_findings=saved_results.has_verified_selected_result(db, connection, scan),
+    )
 
 
 def final_deep_scan_reducer(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row | None:

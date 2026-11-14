@@ -528,6 +528,13 @@ export function restoredDeepScanWorkerSettings(
       ? {}
       : { runtimeSettings: settings.runtimeSettings }),
     parentSandbox: {
+      // Named read access comes from the current parent, including when resuming.
+      ...(currentParentSandbox.pluginReadRoot === undefined
+        ? {}
+        : { pluginReadRoot: currentParentSandbox.pluginReadRoot }),
+      ...(currentParentSandbox.sourceReadRoot === undefined
+        ? {}
+        : { sourceReadRoot: currentParentSandbox.sourceReadRoot }),
       filesystemDenies: [
         ...new Set([
           ...(originalSandbox?.filesystemDenies ?? []),

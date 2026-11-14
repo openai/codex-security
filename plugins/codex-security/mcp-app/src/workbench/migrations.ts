@@ -14,7 +14,10 @@ export interface Migration {
   statements: readonly string[];
 }
 
-export const migrations: readonly Migration[] = history;
+// Python owns the repository-dependent migrations 67–71.
+export const migrations: readonly Migration[] = history.filter(
+  (item) => item.version <= 66 || item.version >= 72,
+);
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;
 
@@ -130,9 +133,16 @@ export function stableTargetId(path: string): string {
 }
 
 function backfillTargets(database: DatabaseSync): void {
+  const validatedWorkspace = columns(database, "workspaces").has(
+    "target_path_unvalidated",
+  )
+    ? " AND target_path_unvalidated = 0"
+    : "";
   const targets = database
     .prepare(
-      "SELECT target_path FROM workspaces WHERE target_path IS NOT NULL UNION SELECT target_path FROM scans",
+      "SELECT target_path FROM workspaces WHERE target_path IS NOT NULL" +
+        validatedWorkspace +
+        " UNION SELECT target_path FROM scans",
     )
     .all();
   const lookup = database.prepare(
@@ -152,7 +162,8 @@ function backfillTargets(database: DatabaseSync): void {
     for (const table of ["workspaces", "scans"]) {
       database
         .prepare(
-          `UPDATE ${table} SET target_id = ? WHERE target_path = ? AND target_id IS NULL`,
+          `UPDATE ${table} SET target_id = ? WHERE target_path = ? AND target_id IS NULL` +
+            (table === "workspaces" ? validatedWorkspace : ""),
         )
         .run(id, path);
     }
@@ -225,19 +236,18 @@ export function applyMigrations(
         )
           repairSchema(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
-        else if (item.version >= 63 && item.version <= 68) {
+        else if (
+          item.version === 63 ||
+          (item.version >= 73 && item.version <= 77)
+        ) {
           // Restore recorded extensions when the base Deep tables were recreated.
           // Data updates from an already applied migration must not run again.
           for (const statement of item.statements) {
-            if (statement.startsWith("ALTER TABLE "))
-              addColumn(database, statement);
-            else if (statement.startsWith("CREATE TABLE "))
-              database.exec(
-                statement.replace(
-                  "CREATE TABLE ",
-                  "CREATE TABLE IF NOT EXISTS ",
-                ),
-              );
+            if (
+              statement.startsWith("ALTER TABLE ") ||
+              statement.startsWith("CREATE TABLE ")
+            )
+              applyRepairStatement(database, statement);
           }
         }
       } else {

@@ -236,6 +236,58 @@ def test_iteration_refuses_to_bind_unsigned_legacy_result(tmp_path: Path, kind: 
         )
 
 
+@pytest.mark.parametrize(
+    "workflow", ["deep-security-scan/v1", "deep-scan-mcp/v1", "deep-security-scan/v2"]
+)
+def test_coordinator_binds_results_accepted_before_attempt_tracking(
+    tmp_path: Path, workflow: str
+) -> None:
+    from test_workbench_deep_scan import claim_deep_scan_coordinator
+
+    deep = start_empty_target_scan(tmp_path)
+    original, _, _, discovery = deep.dispatch_discovery_worker(name="discovery-1")
+    first = deep.record_iteration(name="dedup-1", input_worker_ids=[original], new_findings_count=0)
+    reducer = next(worker for worker in first["workers"] if worker["kind"] == "dedup")
+    buffered = deep.dispatch_discovery_worker(name="discovery-2")[0]
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as db:
+        db.execute("UPDATE deep_scan_runs SET workflow_version = ?", (workflow,))
+        db.execute("DELETE FROM deep_scan_attempts")
+        db.execute("DELETE FROM deep_scan_merge_claims")
+        db.execute(
+            "UPDATE deep_scan_dedup_inputs SET result_manifest_path = NULL, result_manifest_sha256 = NULL, attempt = NULL"
+        )
+        db.execute("UPDATE deep_scan_workers SET attempt = 0 WHERE kind = 'dedup'")
+        db.execute(
+            "UPDATE deep_scan_workers SET created_at = ?, started_at = ?, completed_at = ?",
+            ("2020-01-01T00:00:00Z",) * 3,
+        )
+
+    claimed = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
+    if workflow == "deep-security-scan/v2":
+        assert not claimed["attempts"]
+        return
+    workers = {worker["id"]: worker for worker in claimed["workers"]}
+    for worker_id in (original, reducer["id"], buffered):
+        worker = workers[worker_id]
+        expected = Path(worker["resultManifestPath"]).read_bytes()
+        assert Path(worker["acceptedResultPath"]).read_bytes() == expected
+        assert worker["acceptedResultSha256"] == hashlib.sha256(expected).hexdigest()
+    discovery.unlink()
+    Path(reducer["resultManifestPath"]).unlink()
+    result = deep.record_iteration(
+        name="dedup-2",
+        input_worker_ids=[buffered],
+        new_findings_count=0,
+        coordinator_generation=claimed["coordinatorGeneration"],
+    )
+    assert (
+        result["mergeClaims"][-1]["previousResultSha256"]
+        == workers[reducer["id"]]["acceptedResultSha256"]
+    )
+    later_input = next(row for row in result["dedupInputs"] if row["discoveryWorkerId"] == buffered)
+    assert later_input["resultManifestSha256"] == workers[buffered]["acceptedResultSha256"]
+
+
 def test_legacy_claims_retain_exact_worker_bytes_without_attempts(
     tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:

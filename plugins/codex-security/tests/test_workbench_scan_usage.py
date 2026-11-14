@@ -990,17 +990,20 @@ def test_completion_distinguishes_missing_cache_writes_from_zero(
         reported.pop("cache_write_input_tokens")
     else:
         reported["cache_write_input_tokens"] = cache_writes
-    _state_graph(
-        fixture.environment,
-        {"scan-parent": _rollout(tmp_path, "scan-parent", [event])},
-        [],
-    )
+    fixture.write_parent_rollout([_event(counted, "turn_context", {"model": "model-one"}), event])
     live = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
     assert live["cacheWriteInputTokensReported"] is (cache_writes is not None)
     measurement = _complete_scan(fixture)["scan"]["usage"]
     assert measurement["totalTokens"] == 135
     assert measurement["cacheWriteInputTokens"] == (cache_writes or 0)
     assert measurement["coverage"] == "complete"
+    assert measurement["modelUsage"] == [
+        {
+            "model": "model-one",
+            **_counts(120, 30, 15, cache_write_input_tokens=cache_writes or 0),
+            **({"cacheWriteInputTokensReported": False} if cache_writes is None else {}),
+        }
+    ]
     if cache_writes is None:
         assert measurement["cacheWriteInputTokensReported"] is False
         assert measurement["byRole"]["parent"]["cacheWriteInputTokensReported"] is False
@@ -1146,6 +1149,7 @@ def test_legacy_cache_refinement_survives_turn_boundaries(
     later["payload"]["info"]["total_token_usage"]["cache_write_input_tokens"] = 30
     events = [
         _event(started, "event_msg", {"type": "task_started", "turn_id": "previous"}),
+        _event(started, "turn_context", {"turn_id": "previous", "model": "first-model"}),
         initial,
     ]
     if previous_native:
@@ -1163,6 +1167,7 @@ def test_legacy_cache_refinement_survives_turn_boundaries(
     events.extend(
         [
             _event(started, "event_msg", {"type": "task_started", "turn_id": "current"}),
+            _event(started, "turn_context", {"turn_id": "current", "model": "second-model"}),
             refined,
         ]
     )
@@ -1184,7 +1189,11 @@ def test_legacy_cache_refinement_survives_turn_boundaries(
         for turn in ("previous", "current")
     )
     parent = _rollout(tmp_path, "scan-parent", events)
-    result = _measure_rollout(scan_usage, parent, started, started)
+    models = {}
+    result = _measure_rollout(scan_usage, parent, started, started, model_usage=models)
+    assert models["first-model"]["cachedInputTokens"] == (7 if previous_native else 20)
+    assert models["first-model"]["cacheWriteInputTokens"] == (0 if previous_native else 30)
+    assert models["second-model"]["cachedInputTokens"] == (5 if current_native else 0)
 
     expected = _counts(
         150,
@@ -1198,6 +1207,36 @@ def test_legacy_cache_refinement_survives_turn_boundaries(
         expected["cacheWriteInputTokensReported"] = False
     assert result.tokens == expected
     assert result.warnings == set()
+
+
+@pytest.mark.parametrize("second_model", ["first-model", "second-model"])
+def test_late_cache_correction_requires_a_known_prior_model(
+    tmp_path: Path, second_model: str
+) -> None:
+    fixture = _start_scan(tmp_path)
+    at = fixture.started_at + timedelta(microseconds=1)
+    events = []
+    for turn, model, count, cached in (
+        ("first", "first-model", 100, 0),
+        ("second", second_model, 200, 0),
+        ("correction", second_model, 200, 20),
+    ):
+        events.extend(
+            [
+                _event(at, "event_msg", {"type": "task_started", "turn_id": turn}),
+                _event(at, "turn_context", {"turn_id": turn, "model": model}),
+                _token_event(at, count, 10, cached_input_tokens=cached),
+                _event(at, "event_msg", {"type": "task_complete", "turn_id": turn}),
+            ]
+        )
+    fixture.write_parent_rollout(events)
+    usage = fixture.command("read-scan-usage", "--thread-id", "scan-parent")
+    assert usage["coverage"] == "complete"
+    assert usage["cachedInputTokens"] == 20
+    if second_model == "first-model":
+        assert usage["modelUsage"] == [{"model": "first-model", **_counts(200, 20, 10)}]
+    else:
+        assert "modelUsage" not in usage
 
 
 def test_completion_excludes_separately_inherited_worker_snapshots(tmp_path: Path) -> None:

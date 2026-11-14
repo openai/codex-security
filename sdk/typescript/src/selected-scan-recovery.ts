@@ -67,8 +67,8 @@ export async function recoverSelectedScanStartup<T>(input: {
   collect: (context: {
     scanDir: string;
     threadId: string;
-    pluginRoot: string;
-    python: string;
+    command: WorkbenchCommandOptions;
+    modelConfiguration: ReturnType<typeof scanModelConfiguration>;
     expectation: ScanExpectation;
     turnResult: TurnResultMetadata;
   }) => Promise<T>;
@@ -223,7 +223,8 @@ export async function recoverSelectedScanStartup<T>(input: {
       ...DEFAULT_CODEX_CONFIG,
       ...(isRecord(recipe["config"]) ? (recipe["config"] as JsonObject) : {}),
     };
-    const { model } = scanModelConfiguration(savedConfig);
+    const modelConfiguration = scanModelConfiguration(savedConfig);
+    const { model } = modelConfiguration;
     const pricingContext = scanPricingContext(savedConfig, input.environment);
     input.registered(
       {
@@ -373,8 +374,8 @@ export async function recoverSelectedScanStartup<T>(input: {
     return await input.collect({
       scanDir,
       threadId,
-      pluginRoot,
-      python,
+      command,
+      modelConfiguration,
       expectation: {
         repository: recipe["repository"] as string,
         repositoryRevision:

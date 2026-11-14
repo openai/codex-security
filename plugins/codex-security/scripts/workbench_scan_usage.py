@@ -456,6 +456,12 @@ def collect_scan_usage(
                     completed_turn_id if session.thread_id == completion_thread_id else None
                 ),
                 model_usage=models,
+                resume_owner=(
+                    scan["mode"] == "standard"
+                    and "recipe_json" in scan.keys()
+                    and scan["recipe_json"] is not None
+                    and session.thread_id == scan["continuation_thread_id"]
+                ),
                 is_scan_owner=(
                     scan["mode"] == "deep"
                     and session.thread_id == scan["deep_scan_owner_thread_id"]
@@ -583,10 +589,7 @@ def collect_scan_usage(
         for model, part in models.items():
             _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), part)
     if model_usage and (attribution or any(model is not None for model in model_usage)):
-        result["modelUsage"] = [
-            {"model": model, **{key: counts[key] for key in TOKEN_FIELDS.values()}}
-            for model, counts in model_usage.items()
-        ]
+        result["modelUsage"] = [{"model": model, **counts} for model, counts in model_usage.items()]
     return result
 
 
@@ -599,6 +602,7 @@ def _read_rollout_copies_usage(
     completed_turn_id: str | None = None,
     model_usage: dict[str | None, dict[str, int]],
     is_scan_owner: bool = False,
+    resume_owner: bool = False,
 ) -> RolloutUsage:
     readings = []
     for session in copies:
@@ -612,6 +616,7 @@ def _read_rollout_copies_usage(
                 completed_turn_id=completed_turn_id,
                 model_usage=local_models,
                 is_scan_owner=is_scan_owner,
+                resume_owner=resume_owner,
             )
         except (OSError, UnicodeError, ValueError):
             continue
@@ -1297,6 +1302,7 @@ def _read_rollout_usage(
     model_usage: dict[str | None, dict[str, int]] | None = None,
     completed_turn_id: str | None = None,
     is_scan_owner: bool = False,
+    resume_owner: bool = False,
 ) -> RolloutUsage:
     usage, _ = _read_rollout_usage_with_extent(
         session,
@@ -1306,6 +1312,7 @@ def _read_rollout_usage(
         completed_turn_id=completed_turn_id,
         model_usage=model_usage,
         is_scan_owner=is_scan_owner,
+        resume_owner=resume_owner,
     )
     return usage
 
@@ -1319,6 +1326,7 @@ def _read_rollout_usage_with_extent(
     completed_turn_id: str | None = None,
     model_usage: dict[str | None, dict[str, int]] | None = None,
     is_scan_owner: bool = False,
+    resume_owner: bool = False,
 ) -> tuple[RolloutUsage, int]:
     parsed_events = 0
     result = RolloutUsage(_empty_token_usage(), set(), None, {})
@@ -1332,7 +1340,8 @@ def _read_rollout_usage_with_extent(
     ambiguous_legacy_cache = False
     boundary_reached = False
     session_started_at: datetime | None = None
-    completed_legacy_usage = _empty_token_usage()
+    completed_legacy_capacity = 0
+    completed_legacy_models: set[str | None] = set()
     current_turn_id: str | None = None
     current_model: str | None = None
     response_ids: set[str] = set()
@@ -1350,6 +1359,7 @@ def _read_rollout_usage_with_extent(
     started_turns: set[str] = set()
     open_turns: set[str] = set()
     closed_turns: set[str] = set()
+    failed_turns: set[str] = set()
     measured_turns: set[str] = set()
 
     def past_scan_end(timestamp: datetime, turn_id: object) -> bool:
@@ -1362,9 +1372,12 @@ def _read_rollout_usage_with_extent(
 
     def finish_turn() -> None:
         nonlocal total, counter_total, local_models, response_usage_observed, native_receipts
-        nonlocal ambiguous_legacy_cache
+        nonlocal ambiguous_legacy_cache, completed_legacy_capacity
         if not response_usage_observed:
-            _add_token_usage(completed_legacy_usage, total)
+            completed_legacy_capacity += _uncached_input(total)
+            completed_legacy_models.update(
+                model for model, usage in local_models.items() if _uncached_input(usage) > 0
+            )
             if ambiguous_legacy_cache:
                 warnings.add("token_breakdown_unavailable")
         ambiguous_legacy_cache = False
@@ -1534,6 +1547,8 @@ def _read_rollout_usage_with_extent(
                     if timestamp >= started_at:
                         if terminal_turn_id in started_turns:
                             closed_turns.add(terminal_turn_id)
+                            if payload.get("type") == "task_complete" and payload.get("error"):
+                                failed_turns.add(terminal_turn_id)
                         if payload.get("type") == "turn_aborted":
                             # Later successful work does not recover interrupted request usage.
                             warnings.add("turn_interrupted")
@@ -1600,7 +1615,6 @@ def _read_rollout_usage_with_extent(
                         expected_response_tokens, cumulative["totalTokens"]
                     )
                 response_tokens += usage["totalTokens"]
-                receipt_turn_id = payload.get("turn_id")
                 if isinstance(receipt_turn_id, str):
                     measured_turns.add(receipt_turn_id)
                 if timestamp < started_at:
@@ -1612,8 +1626,6 @@ def _read_rollout_usage_with_extent(
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
                     continue
-                if current_turn_id is None:
-                    current_turn_id = payload.get("turn_id")
                 if turn_usage is not None:
                     native_receipts = True
                     if any(
@@ -1635,6 +1647,19 @@ def _read_rollout_usage_with_extent(
                     model = None
                 _add_token_usage(total, usage)
                 _add_token_usage(local_models.setdefault(model, _empty_token_usage()), usage)
+                if (
+                    resume_owner
+                    and receipt_turn_id == current_turn_id
+                    and current_turn_id in started_turns
+                    and (open_turns - {current_turn_id} or failed_turns)
+                ):
+                    # Matching thread totals account for turns left open or failed before resume.
+                    if cumulative is not None and all(
+                        cumulative[key] == finished_total[key] + total[key]
+                        for key in TOKEN_FIELDS.values()
+                    ):
+                        open_turns.intersection_update({current_turn_id})
+                        closed_turns.difference_update(failed_turns - {current_turn_id})
                 continue
             if event.get("type") != "event_msg" or payload.get("type") != "token_count":
                 continue
@@ -1729,7 +1754,7 @@ def _read_rollout_usage_with_extent(
             )
             # Late cumulative cache details can classify an earlier legacy turn.
             completed_capacity = (
-                _uncached_input(completed_legacy_usage)
+                completed_legacy_capacity
                 if refines_classification and not response_usage_observed
                 else 0
             )
@@ -1754,8 +1779,14 @@ def _read_rollout_usage_with_extent(
                 delta[key] = current
                 cache_write_capacity -= current
                 completed_capacity -= completed
-                completed_legacy_usage[key] += completed
-                finished_total[key] += completed
+                if completed:
+                    # Only one eligible legacy model makes a later cache correction attributable.
+                    if len(completed_legacy_models) == 1:
+                        finished_models[next(iter(completed_legacy_models))][key] += completed
+                    completed_legacy_capacity -= completed
+                    if not completed_legacy_capacity:
+                        completed_legacy_models.clear()
+                    finished_total[key] += completed
             delta["reasoningOutputTokens"] = min(
                 delta["reasoningOutputTokens"], delta["outputTokens"]
             )
