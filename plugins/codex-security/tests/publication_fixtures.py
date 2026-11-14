@@ -297,7 +297,9 @@ def finish_after_crashes(deadline_scan, tmp_path):
             completed = scan.complete(connection)
         coverage = read_review_state(scan.connection, scan.scan_dir)
         assert completed["progress"]["status"] == "complete"
-        assert all(publication == coverage for publication in publications)
+        first, *retries = publications
+        assert all(retry == first for retry in retries)
+        assert coverage == {**first, "receiptSealVersion": 1}
         return completed, coverage
 
     return run
@@ -315,7 +317,7 @@ def assert_published_aggregate(scan):
         coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
         for field in ("documentType", "schemaVersion", "scanId"):
             coverage.pop(field)
-        assert coverage == scan.coverage
+        assert coverage == {**scan.coverage, "receiptSealVersion": 1}
     else:
         assert manifest["scan"]["review"] == {
             "excludedPaths": [item["pattern"] for item in scan.coverage["explicitExclusions"]],

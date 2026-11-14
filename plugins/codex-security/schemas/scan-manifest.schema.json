@@ -148,7 +148,44 @@
         "review": {
           "type": "object",
           "properties": {
-            "excludedPaths": { "type": "array", "items": { "type": "string" } }
+            "excludedPaths": { "type": "array", "items": { "type": "string" } },
+            "unresolvedCandidates": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "reason": { "type": "string", "minLength": 1 },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "oneOf": [
+                        {},
+                        {
+                          "type": "string",
+                          "$comment": "invalidSealedDeferredPath",
+                          "pattern": "^(?:/|[A-Za-z]:)|(?:^|/)\\.\\.(?:/|$)|[\\\\\\x00-\\x1f]|[\\ud800-\\udbff](?![\\udc00-\\udfff])|(?:^|[^\\ud800-\\udbff])[\\udc00-\\udfff]"
+                        }
+                      ]
+                    }
+                  },
+                  "surfaceIds": { "$ref": "#/$defs/stringList" },
+                  "candidateId": {
+                    "description": "A non-blank string identifies a saved candidate; other historical metadata is preserved unchanged.",
+                    "tsType": "unknown"
+                  },
+                  "candidate": {
+                    "description": "Saved candidate details and evidence awaiting a final decision.",
+                    "tsType": "unknown"
+                  }
+                },
+                "required": ["id", "reason"]
+              },
+              "description": "Saved candidate proof gaps. Multiple rows may describe the same candidate.",
+              "tsType": "CoverageDocument[\"deferred\"]"
+            }
           },
           "required": ["excludedPaths"]
         },

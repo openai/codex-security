@@ -7,6 +7,7 @@ import { setImmediate } from "node:timers/promises";
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
 import { regexes } from "zod";
 import { normalizePersistedFindingDetails } from "./finding-normalization.js";
+import { coverageCandidateKey } from "./artifact-candidates.js";
 import { isRecord } from "./record.js";
 import {
   adaptTrackingSchema,
@@ -70,6 +71,7 @@ export async function loadSealedContract(
   } = {},
 ): Promise<{
   contract: LoadedSealedContract;
+  legacyCoverage?: CoverageDocument;
   scanDirectory: string;
   fileDigests: ReadonlyMap<string, string>;
 }> {
@@ -216,6 +218,7 @@ export async function loadSealedContract(
     await verifyScanRoot(scanRoot, options.signal);
     return {
       contract: { mode, manifest, findings, review },
+      ...(hasCoverage ? { legacyCoverage: coverage } : {}),
       scanDirectory: scanRoot.path,
       fileDigests,
     };
@@ -609,11 +612,27 @@ async function validateSeal(
       );
     }
   };
+  const requireReceipts = (receipts: unknown) => {
+    if (!Array.isArray(receipts)) {
+      throw new ContractValidationError(
+        "Coverage receipt references must be an array.",
+      );
+    }
+    for (const receipt of receipts)
+      requireSealedReference(receipt, "Coverage receipt");
+  };
   for (const surface of coverage?.surfaces ?? []) {
     if (root.profile === "tracking" && surface.receiptRefs === undefined)
       continue;
-    for (const receipt of surface.receiptRefs) {
-      requireSealedReference(receipt, "Coverage receipt");
+    requireReceipts(surface.receiptRefs);
+  }
+  if (coverage?.receiptSealVersion === 1) {
+    for (const exclusion of coverage.explicitExclusions ?? []) {
+      if (
+        coverageCandidateKey(exclusion) !== undefined &&
+        exclusion["receiptRefs"] !== undefined
+      )
+        requireReceipts(exclusion["receiptRefs"]);
     }
   }
   const extensions = scan["extensions"];

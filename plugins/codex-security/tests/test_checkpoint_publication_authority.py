@@ -2245,6 +2245,9 @@ def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
             else "artifacts/review.txt"
         ]
         if receipt_state.startswith("shared"):
+            rejected["coverage"]["surfaces"][0]["provenance"] = {
+                "scanReceiptRefs": ["artifacts/review.txt"]
+            }
             prior_ref = (
                 "artifacts/Review.txt"
                 if receipt_state == "shared-collision"

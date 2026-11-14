@@ -2427,9 +2427,13 @@ try {
   assert.deepEqual(mappingProgress.structuredContent, {
     scan: {
       scanId,
-      progress: savedScan.progress,
+      progress: { ...savedScan.progress, candidates: { reportable: 0 } },
       userContext: appUserContext,
     },
+  });
+  assert.deepEqual(savedScan.progress.candidates, {
+    reportable: 0,
+    unresolved: 0,
   });
   assert.equal(savedScan.model, "gpt-5.6-terra");
   assert.equal(savedScan.reasoningEffort, "low");

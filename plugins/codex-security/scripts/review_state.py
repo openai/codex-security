@@ -29,7 +29,7 @@ def review_state(scan: dict[str, Any]) -> dict[str, Any]:
     state = copy.deepcopy(scan.get("reviewState", {}))
     mode = scan.get("mode", "repository")
     state.setdefault("surfaces", [])
-    state.setdefault("deferred", [])
+    state.setdefault("deferred", copy.deepcopy(summary.get("unresolvedCandidates", [])))
     state.setdefault(
         "explicitExclusions",
         [
@@ -54,12 +54,13 @@ def review_state(scan: dict[str, Any]) -> dict[str, Any]:
 
 
 def checkpoint_review_state(state: dict[str, Any]) -> dict[str, Any]:
-    """Copy the review data needed for recovery, omitting per-surface risk areas and report metadata."""
+    """Retain unfinished work and candidate outcomes, without a coverage report."""
+    surfaces = copy.deepcopy(state.get("surfaces", []))
+    for surface in surfaces:
+        if isinstance(surface, dict):
+            surface.pop("riskArea", None)
     return {
-        "surfaces": [
-            {key: copy.deepcopy(value) for key, value in item.items() if key != "riskArea"}
-            for item in state.get("surfaces", [])
-        ],
+        "surfaces": surfaces,
         "explicitExclusions": copy.deepcopy(state.get("explicitExclusions", [])),
         "deferred": copy.deepcopy(state.get("deferred", [])),
         **{

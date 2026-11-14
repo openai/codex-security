@@ -62,6 +62,7 @@ from workbench.storage import (
     saved_deep_workers,
     state_dir,
 )
+from workbench_budget_candidates import validate_budget_candidates
 from workbench_cli import parse_args
 from workbench_constants import (
     ARTIFACTS,
@@ -1195,12 +1196,13 @@ def complete_budget_exhausted_scan(
                 f"Deep Scan reached its cost limit after an estimated "
                 f"${measured['estimatedUsd']:.6g}; completed discovery was preserved."
             )
-        budget_exhausted_draft(scan, scan_dir, candidates, warning)
+        receipt_warnings = budget_exhausted_draft(scan, scan_dir, candidates, warning)
         warnings = json.loads(scan["completion_warnings_json"])
-        if warning not in warnings:
+        additions = [message for message in [warning, *receipt_warnings] if message not in warnings]
+        if additions:
             connection.execute(
                 "UPDATE scans SET completion_warnings_json = ? WHERE id = ? AND status = 'running'",
-                (json.dumps([*warnings, warning]), scan_id),
+                (json.dumps([*warnings, *additions]), scan_id),
             )
             connection.commit()
         return complete_scan_locked(connection, scan_id, None, cost_json)
@@ -1233,55 +1235,16 @@ def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[
     except (ContractError, OSError, UnicodeError, ValueError) as exc:
         raise SystemExit(f"Canonical Deep Scan candidate ledger is invalid: {exc}") from exc
 
-    candidate_ids: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            raise SystemExit("Canonical Deep Scan candidate ledger rows must be objects.")
-        candidate_id = candidate.get("candidate_id")
-        locations = candidate.get("locations")
-        if (
-            not isinstance(candidate_id, str)
-            or not candidate_id.strip()
-            or candidate_id in {".", ".."}
-            or "/" in candidate_id
-            or "\\" in candidate_id
-            or candidate_id in candidate_ids
-            or not isinstance(candidate.get("summary"), str)
-            or not candidate["summary"].strip()
-            or not isinstance(candidate.get("evidence"), str)
-            or not candidate["evidence"].strip()
-            or not isinstance(locations, list)
-            or not locations
-        ):
-            raise SystemExit("Canonical Deep Scan candidate ledger contains an invalid candidate.")
-        candidate_ids.add(candidate_id)
-        for location in locations:
-            if not isinstance(location, dict):
-                raise SystemExit("Canonical Deep Scan candidate location must be an object.")
-            path = location.get("path")
-            if (
-                not isinstance(path, str)
-                or not path
-                or "\\" in path
-                or "\x00" in path
-                or re.match(r"^[A-Za-z]:", path)
-                or PurePosixPath(path).is_absolute()
-                or any(part in {".", "..", ""} for part in path.split("/"))
-            ):
-                raise SystemExit(
-                    "Canonical Deep Scan candidate location must be repository-relative."
-                )
-        if not any(location["path"] in in_scope for location in locations):
-            raise SystemExit(
-                "Canonical Deep Scan candidate must include a location in its in-scope inventory."
-            )
+    validate_budget_candidates(candidates, in_scope)
     return candidates
 
 
 def budget_exhausted_draft(
     scan: sqlite3.Row, scan_dir: Path, candidates: list[dict[str, Any]], warning: str
-) -> None:
-    saved_results.budget_exhausted_draft(sys.modules[__name__], scan, scan_dir, candidates, warning)
+) -> list[str]:
+    return saved_results.budget_exhausted_draft(
+        sys.modules[__name__], scan, scan_dir, candidates, warning
+    )
 
 
 def complete_scan_locked(
@@ -2893,6 +2856,10 @@ def scan_result(
     finding_count = sum(severity_counts.values())
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
     progress_result, review_updated_at = progress.scan_progress_result(connection, scan)
+    # Saved candidate decisions require artifact I/O. Keep frequent progress polls DB-only.
+    progress_result["candidates"]["unresolved"] = scan_history.saved_unresolved_candidate_count(
+        scan, verify_manifest_binding
+    )
     relations = scan_history.finding_relations(
         connection, scan["id"], (row["id"] for row in occurrence_rows)
     )

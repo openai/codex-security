@@ -6,13 +6,13 @@ import copy
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from candidate_identity import _has_identity_text, finding_candidate_key
 from finalize_scan_contract import (
     ContractError,
-    _has_identity_text,
+    _finding_strength,
     _read_json,
     _recover_unsealed_coverage,
     _recover_unsealed_findings,
@@ -23,6 +23,8 @@ from finalize_scan_contract import (
 from finalize_scan_contract import _schema_values_equal as same_raw_value
 from workbench.saved_coverage import _coverage_rows, _saved_coverage_id
 from workbench.saved_sources import _digest, _encoded
+from workbench_budget_candidates import current_report, valid_exclusion
+from workbench_budget_candidates import finding_content as _finding_content
 from workbench_coverage_receipts import resolve_coverage_receipts
 
 _FINDING_IDENTITY_SCHEMA = _read_json(
@@ -89,15 +91,6 @@ def _worker_candidate_key(
     anchor = identity.get("anchor") if isinstance(identity, dict) else None
     instance = identity.get("instance") if isinstance(identity, dict) else None
     return worker_id, candidate_id, finding.get("ruleId"), anchor, instance
-
-
-def _finding_content(finding: dict[str, Any]) -> dict[str, Any]:
-    """Return substantive finding content without generated identity or provenance."""
-    return {
-        key: value
-        for key, value in finding.items()
-        if key not in {"findingId", "occurrenceId", "fingerprints", "identity", "provenance"}
-    }
 
 
 def _identity_candidate(finding: dict[str, Any]) -> str | None:
@@ -197,32 +190,6 @@ def _ensure_finding_identities(findings: list[Any], *, deep: bool = False) -> No
                     break
                 suffix += 1
         used.add(key)
-
-
-def _retained_findings(finding: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Yield canonical and historical findings without trusting candidate IDs."""
-    pending = [finding]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        yield current
-        provenance = current.get("provenance")
-        if not isinstance(provenance, dict):
-            continue
-        previous = provenance.get("previousFindings")
-        if isinstance(previous, list):
-            pending.extend(item for item in reversed(previous) if isinstance(item, dict))
-        sources = provenance.get("sourceFindings")
-        if isinstance(sources, list):
-            pending.extend(
-                source["finding"]
-                for source in reversed(sources)
-                if isinstance(source, dict) and isinstance(source.get("finding"), dict)
-            )
 
 
 def _append_previous_finding(
@@ -516,16 +483,39 @@ def _saved_candidate_outcomes(
     candidate_order,
     workers_by_id,
     coverage_schema,
+    selected_observations,
+    source_order,
 ):
     """Return saved candidate outcomes with their evidence and the ordering of pending candidates by owner."""
     pending_candidate_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
     outcomes = []
+    accepted_in_source = set()
     for relative, draft, owner in current_drafts:
         reported_candidates = {
-            finding_candidate_id(finding)
+            key
             for finding in draft["findings"]
-            if isinstance(finding, dict) and valid_finding(finding)
+            if isinstance(finding, dict)
+            and valid_finding(finding)
+            and (key := finding_candidate_key(finding, owner)) is not None
+            and current_report(finding, draft, owner, relative in selected_observations)
         }
+        terminal_candidates = {
+            key
+            for field in ("surfaces", "explicitExclusions")
+            for row in _coverage_rows(draft["reviewState"], field)
+            if (owner is None or draft.get("complete") is not False)
+            and isinstance(row, dict)
+            and row.get("disposition") in ("rejected", "not_applicable")
+            and (
+                valid_exclusion(row, coverage_schema[field]["items"])
+                if field == "explicitExclusions"
+                else isinstance(row.get("label"), str) and row["label"].strip()
+            )
+            and (key := coverage_candidate(owner, row)) is not None
+        }
+        accepted_in_source.update(
+            (relative, key) for key in reported_candidates | terminal_candidates
+        )
         pending_candidates = set()
         for field in ("deferred", "surfaces"):
             for item in _coverage_rows(draft["reviewState"], field):
@@ -533,33 +523,15 @@ def _saved_candidate_outcomes(
                     field == "deferred" or item.get("disposition") == "needs_follow_up"
                 ):
                     if (pending := coverage_candidate(owner, item)) is not None:
-                        if (
-                            owner is not None
-                            and pending[0] == owner
-                            and pending[1] in reported_candidates
-                        ):
+                        if (relative, pending) in accepted_in_source:
                             continue
                         pending_candidates.add(pending)
                         order = candidate_order(relative, pending[0], item)
                         pending_candidate_orders[pending] = max(
                             pending_candidate_orders.get(pending, order), order
                         )
-        for finding in draft["findings"]:
-            if (
-                isinstance(finding, dict)
-                and valid_finding(finding)
-                and (candidate_id := finding_candidate_id(finding))
-            ):
-                outcomes.append(
-                    (
-                        relative,
-                        owner,
-                        candidate_id,
-                        "reported",
-                        candidate_order(relative, owner),
-                        (),
-                    )
-                )
+        for candidate in reported_candidates:
+            outcomes.append((relative, *candidate, "reported", source_order[relative], ()))
         for field in ("surfaces", "explicitExclusions"):
             for item in _coverage_rows(draft["reviewState"], field):
                 if (
@@ -567,7 +539,7 @@ def _saved_candidate_outcomes(
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in ("reported", "rejected", "not_applicable")
                     and (candidate := coverage_candidate(owner, item)) is not None
-                    and (item["disposition"] != "reported" or candidate[1] in reported_candidates)
+                    and (item["disposition"] != "reported" or candidate in reported_candidates)
                     and (candidate not in pending_candidates or item["disposition"] == "reported")
                 ):
                     receipts = ()
@@ -592,7 +564,7 @@ def _saved_candidate_outcomes(
                             receipts,
                         )
                     )
-    return outcomes, pending_candidate_orders
+    return outcomes, pending_candidate_orders, accepted_in_source
 
 
 def _competing_rejection_receipts(outcomes, all_sources, source_surface_receipts):
@@ -613,3 +585,290 @@ def _competing_rejection_receipts(outcomes, all_sources, source_surface_receipts
     ):
         return {ref for spellings in receipt_spellings.values() for ref in spellings}
     return set()
+
+
+def after_custom_validation(parent, sources):
+    scope = parent.get("scope") if parent else None
+    if not isinstance(scope, dict) or scope.get("validationMode") != "custom":
+        return sources
+
+    def provisional(finding):
+        extensions = finding.get("extensions") if isinstance(finding, dict) else None
+        return isinstance(extensions, dict) and bool(extensions.get("customValidationSurfaceIds"))
+
+    # The validator removes its provisional marker when it publishes a finding.
+    # Earlier parent checkpoints can still carry those inputs and unrelated evidence.
+    if any(provisional(finding) for finding in parent["findings"]):
+        return sources
+    return [
+        (
+            relative,
+            {**draft, "findings": [row for row in draft["findings"] if not provisional(row)]},
+            owner,
+        )
+        if owner is None and any(provisional(row) for row in draft["findings"])
+        else (relative, draft, owner)
+        for relative, draft, owner in sources
+    ]
+
+
+def group_saved_findings(
+    all_sources,
+    parent_is_canonical,
+    precedes_terminal_parent,
+    finding_source_order,
+    replaced_parent_finding,
+    valid_finding,
+    finding_within_scope,
+    same_owner,
+    terminal_findings,
+    represented,
+    represented_history,
+    represented_candidates,
+    represented_candidate_history,
+):
+    """Reconcile equivalent saved findings and retain each distinct group and its history."""
+    logical_rows: dict[tuple[Any, ...], dict[str, dict[str, Any]]] = {}
+    row_groups: dict[tuple[str, int], dict[str, Any]] = {}
+    published_groups: list[dict[str, Any]] = []
+    finding_sources = [
+        source for source in all_sources if not precedes_terminal_parent(source[0], source[2])
+    ]
+    # Publication chronology spans workers; attempt numbers only order one worker's revisions.
+    for source in sorted(finding_sources, key=lambda item: finding_source_order(item)[2:]):
+        relative, draft, source_owner = source
+        explicit_identity_counts = Counter(
+            _semantic_identity_key(sibling, _finding_identity(sibling))
+            for sibling in draft["findings"]
+            if isinstance(sibling, dict)
+            and isinstance(sibling.get("identity"), dict)
+            and ((relative == "parent" and parent_is_canonical) or finding_within_scope(sibling))
+        )
+        pending = []
+        for index, value in enumerate(draft["findings"]):
+            if (
+                not isinstance(value, dict)
+                or replaced_parent_finding(relative, source_owner, value)
+                or not valid_finding(value)
+                or (
+                    not (relative == "parent" and parent_is_canonical)
+                    and not finding_within_scope(value)
+                )
+            ):
+                continue
+            owner = raw_owner(value, source_owner)
+            scope = raw_scope(value)
+            candidate = finding_candidate_id(value)
+            scopes = [scope, (scope[0], candidate)] if candidate else [scope]
+            publication_identity = (
+                _finding_identity(
+                    value if "identity" in value else terminal_findings[relative][index]
+                )
+                if relative in terminal_findings
+                else None
+            )
+            matches = [
+                group
+                for group in {
+                    key: group
+                    for saved_scope in scopes
+                    for key, group in logical_rows.get(saved_scope, {}).items()
+                }.values()
+                if same_owner(owner, group["owner"])
+                and (
+                    publication_identity is None
+                    or group["identity"] is None
+                    or _semantic_identity_key(value, group["identity"])
+                    == _semantic_identity_key(value, publication_identity)
+                )
+                and (
+                    (relative == "parent" and parent_is_canonical)
+                    or group["identity"] is None
+                    or "identity" not in value
+                    or _semantic_identity_key(value, group["identity"])
+                    == _semantic_identity_key(value, _finding_identity(value))
+                )
+                and all(same_raw_finding(value, previous) for previous in group["rows"])
+            ]
+            ranked = []
+            for group in matches:
+                latest = group["latest"]
+                if (
+                    isinstance(value.get("identity"), dict)
+                    and explicit_identity_counts[
+                        _semantic_identity_key(value, _finding_identity(value))
+                    ]
+                    == 1
+                    and group["identity"] is not None
+                    and _semantic_identity_key(value, _finding_identity(value))
+                    == _semantic_identity_key(value, group["identity"])
+                ):
+                    rank = 4
+                elif (
+                    owner == group["owner"]
+                    and same_raw_content(value, latest)
+                    and _identity_candidate(value) == _identity_candidate(latest)
+                    and identifiers(value) == identifiers(latest)
+                ):
+                    rank = 3
+                elif any(same_raw_content(value, previous) for previous in group["rows"]):
+                    rank = 2
+                elif (
+                    latest.get("title") == value.get("title")
+                    and raw_scope(latest) == scope
+                    and all(
+                        previous is None or current == previous
+                        for current, previous in zip(
+                            identifiers(value), identifiers(latest), strict=True
+                        )
+                    )
+                ):
+                    rank = 1
+                else:
+                    rank = 0
+                ranked.append((group, rank))
+            pending.append((index, value, owner, scopes, ranked))
+        assigned = {}
+        claimed = set()
+        for index, value, owner, _, matches in pending:
+            for group, _ in matches:
+                if (
+                    group["key"] not in claimed
+                    and owner == group["owner"]
+                    and same_raw_value(value, group["latest"])
+                ):
+                    assigned[index] = group
+                    claimed.add(group["key"])
+                    break
+        for rank in (4, 3, 2, 1, 0):
+            identity_claims = {
+                group["key"]
+                for index, _, _, _, matches in pending
+                for group, score in matches
+                if score == 4 and assigned.get(index) is group
+            }
+            options = {
+                index: [
+                    group
+                    for group, score in matches
+                    if score >= rank
+                    and (
+                        group["key"] not in claimed
+                        or (rank == 0 and group["key"] not in identity_claims)
+                    )
+                ]
+                for index, _, _, _, matches in pending
+                if index not in assigned
+            }
+            counts = {}
+            for groups in options.values():
+                for group in groups:
+                    counts[group["key"]] = counts.get(group["key"], 0) + 1
+            chosen = {
+                index: groups[0]
+                for index, groups in options.items()
+                if len(groups) == 1
+                and groups[0]["key"] not in claimed
+                and counts[groups[0]["key"]] == 1
+            }
+            assigned.update(chosen)
+            claimed.update(group["key"] for group in chosen.values())
+        current_groups: list[tuple[int, dict[str, Any]]] = []
+        for index, value, owner, scopes, _ in pending:
+            match = assigned.get(index)
+            if match is None:
+                match = {
+                    "owner": owner,
+                    "rows": [],
+                    "identity": None,
+                    "key": f"raw:{len(row_groups)}",
+                }
+            for saved_scope in scopes:
+                logical_rows.setdefault(saved_scope, {})[match["key"]] = match
+            if match["owner"] is None:
+                match["owner"] = owner
+            if not any(same_raw_value(value, previous) for previous in match["rows"]):
+                match["rows"].append(value)
+            observations = match.setdefault("observations", {})
+            previous = observations.get(source_owner)
+            if previous is None or (
+                finding_source_order(source, True),
+                _finding_strength(value),
+            ) > (
+                finding_source_order(previous[0], True),
+                _finding_strength(previous[1]),
+            ):
+                observations[source_owner] = (source, value)
+                match["latest"] = max(
+                    observations.values(),
+                    key=lambda observation: (
+                        finding_source_order(observation[0]),
+                        _finding_strength(observation[1]),
+                    ),
+                )[1]
+            if relative in terminal_findings:
+                match["identity"] = copy.deepcopy(
+                    _finding_identity(
+                        value if "identity" in value else terminal_findings[relative][index]
+                    )
+                )
+            elif "identity" in value and (match["identity"] is None or relative == "parent"):
+                match["identity"] = copy.deepcopy(_finding_identity(value))
+            row_groups[(relative, index)] = match
+            current_groups.append((index, match))
+        if source_owner is None:
+            current_ordered = [
+                group for _, group in sorted(current_groups, key=lambda item: item[0])
+            ]
+            ordered = current_ordered + [
+                group for group in published_groups if group not in current_ordered
+            ]
+            normalized = []
+            for group in ordered:
+                value = copy.deepcopy(group["latest"])
+                if group["identity"] is not None:
+                    value["identity"] = copy.deepcopy(group["identity"])
+                normalized.append(value)
+            _ensure_finding_identities(normalized)
+            for group, value in zip(ordered, normalized, strict=True):
+                group["identity"] = value["identity"]
+            published_groups = ordered
+
+    # A later worker draft can collapse raw duplicates that it fully contains.
+    # Keep established identities and any evidence absent from the newer report.
+    contained_groups = set()
+    for group in {group["key"]: group for group in row_groups.values()}.values():
+        owner = group["owner"]
+        previous = group["observations"].get(owner)
+        if owner is None or group["identity"] is not None or previous is None:
+            continue
+        for current in logical_rows.get(raw_scope(group["latest"]), {}).values():
+            observed = current["observations"].get(owner)
+            if (
+                current["owner"] == owner
+                and observed is not None
+                and finding_source_order(observed[0], True)
+                > finding_source_order(previous[0], True)
+                and all(contains_raw_value(current["latest"], row) for row in group["rows"])
+            ):
+                contained_groups.add(group["key"])
+                break
+
+    # An absorbed source represents every reconciled version of that worker report.
+    for groups in logical_rows.values():
+        for group in groups.values():
+            destinations = set()
+            for value in group["rows"]:
+                history_key = _finding_key(value)
+                if _digest(_finding_content(value)) in represented_history.get(history_key, set()):
+                    destinations.add(represented.get(history_key))
+                elif group["owner"] and (candidate_id := finding_candidate_id(value)):
+                    candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
+                    if _digest(_finding_content(value)) in represented_candidate_history.get(
+                        candidate_key, set()
+                    ):
+                        destinations.add(represented_candidates[candidate_key])
+            if len(destinations) == 1 and None not in destinations:
+                group["parent_key"] = destinations.pop()
+
+    return row_groups, contained_groups

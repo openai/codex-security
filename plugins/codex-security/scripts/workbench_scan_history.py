@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import unresolved_candidates
 from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
@@ -24,7 +25,7 @@ from finalize_scan_contract import (
     manifest_is_sealed,
 )
 from report_projection import SEVERITY_ORDER
-from review_state import review_state
+from review_state import review_state, uses_legacy_review
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
@@ -41,6 +42,76 @@ from workbench_target_state import (
     scan_repository_generation,
 )
 from workbench_validation import timestamp_key
+
+
+def _history_manifest(scan: sqlite3.Row, scan_dir: Path) -> dict[str, Any]:
+    manifest, contents = _read_scan_local_json_bytes(
+        scan_dir, ARTIFACTS["manifest"], "Saved manifest"
+    )
+    expected = scan["seal_manifest_digest"]
+    if expected is not None and f"sha256:{hashlib.sha256(contents).hexdigest()}" != expected:
+        raise ContractError("The sealed scan manifest changed after completion.")
+    return manifest
+
+
+def _history_artifact(
+    scan_dir: Path, name: str, scan_id: str, pinned: dict[str, Any] | None
+) -> dict[str, Any]:
+    document, contents = _read_scan_local_json_bytes(scan_dir, name, name)
+    if pinned is not None:
+        expected = next(
+            (item["sha256"] for item in pinned["artifacts"] if item["path"] == name), None
+        )
+        if hashlib.sha256(contents).hexdigest() != expected:
+            raise ContractError(f"The sealed {name} changed after completion.")
+    if document.get("scanId", scan_id if pinned is None else None) != scan_id:
+        raise ContractError(f"{name} does not belong to this scan.")
+    return document
+
+
+def saved_unresolved_candidate_count(
+    scan: sqlite3.Row, verify_manifest_binding: Callable[[sqlite3.Row, dict[str, Any]], None]
+) -> int:
+    """Read candidate counts from saved artifacts without requiring a completed scan."""
+    scan_dir = Path(scan["scan_dir"])
+    if scan["status"] == "complete" and scan["seal_manifest_digest"] is None:
+        try:
+            manifest, findings, coverage, _ = _read_sealed_scan(
+                scan_dir, None, "history candidates"
+            )
+            verify_manifest_binding(scan, manifest)
+            return len(unresolved_candidates(coverage, findings["findings"], sealed=True))
+        except (ContractError, OSError, ValueError, SystemExit):
+            return 0
+    try:
+        manifest = _history_manifest(scan, scan_dir)
+        manifest_scan = manifest.get("scan")
+    except (ContractError, OSError, ValueError):
+        if scan["seal_manifest_digest"] is not None:
+            return 0
+        manifest_scan = None
+    try:
+        if isinstance(manifest_scan, dict) and manifest_scan.get("id", scan["id"]) != scan["id"]:
+            return 0
+        pinned = manifest_scan if scan["seal_manifest_digest"] is not None else None
+        sealed = isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None
+        if isinstance(manifest_scan, dict) and not uses_legacy_review(manifest_scan):
+            state = manifest_scan.get("reviewState")
+            coverage = state if isinstance(state, dict) else {}
+            review = manifest_scan.get("review")
+            if "deferred" not in coverage and isinstance(review, dict):
+                coverage = {**coverage, "deferred": review.get("unresolvedCandidates")}
+            if sealed:
+                return len(unresolved_candidates(coverage, sealed=True))
+        else:
+            coverage = _history_artifact(scan_dir, "coverage.json", scan["id"], pinned)
+        if not unresolved_candidates(coverage, sealed=sealed):
+            return 0
+        findings = _history_artifact(scan_dir, "findings.json", scan["id"], pinned)
+    except (ContractError, OSError, ValueError):
+        # Running and removed scans may have no readable canonical artifacts yet.
+        return 0
+    return len(unresolved_candidates(coverage, findings.get("findings", []), sealed=sealed))
 
 
 def reads_missing_history(args: argparse.Namespace, path: Path) -> bool:
@@ -257,14 +328,7 @@ def coverage_summary_for_history(
         else:
             # Completion already validated the full scan. History only needs the
             # pinned manifest and any legacy coverage artifact, not findings or receipts.
-            manifest, manifest_bytes = _read_scan_local_json_bytes(
-                scan_dir, ARTIFACTS["manifest"], ARTIFACTS["manifest"]
-            )
-            if (
-                f"sha256:{hashlib.sha256(manifest_bytes).hexdigest()}"
-                != scan["seal_manifest_digest"]
-            ):
-                raise ContractError("The sealed scan manifest changed after completion.")
+            manifest = _history_manifest(scan, scan_dir)
             sealed_scan = manifest["scan"]
             if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
                 raise ContractError("The sealed coverage does not belong to this scan.")
@@ -276,22 +340,7 @@ def coverage_summary_for_history(
                 }
             if sealed_scan["coverageRef"] != coverage_ref:
                 raise ContractError("The sealed coverage does not belong to this scan.")
-            coverage, coverage_bytes = _read_scan_local_json_bytes(
-                scan_dir, coverage_ref, coverage_ref
-            )
-            expected = next(
-                (
-                    artifact["sha256"]
-                    for artifact in sealed_scan["artifacts"]
-                    if artifact["path"] == coverage_ref
-                ),
-                None,
-            )
-            if (
-                hashlib.sha256(coverage_bytes).hexdigest() != expected
-                or coverage.get("scanId") != scan["id"]
-            ):
-                raise ContractError("The sealed coverage changed after completion.")
+            coverage = _history_artifact(scan_dir, coverage_ref, scan["id"], sealed_scan)
     except ContractError as exc:
         raise SystemExit(str(exc)) from exc
     return {

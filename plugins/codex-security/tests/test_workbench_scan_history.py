@@ -60,7 +60,12 @@ def test_rename_persists_without_changing_scan_results(
     assert renamed == {"scanId": scan["scanId"], "name": "Release audit"}
     after = run_workbench(state_dir, "get-scan", "--scan-id", scan["scanId"])["scan"]
     assert get_scan(state_dir, scan["scanId"][:8], "--progress-only") == {
-        "scan": {"progress": after["progress"]}
+        "scan": {
+            "progress": {
+                **after["progress"],
+                "candidates": {"reportable": after["progress"]["candidates"]["reportable"]},
+            }
+        }
     }
     assert after == {**before, "name": "Release audit"}
     listed = run_workbench(state_dir, "list-scans", "--query", "release audit")["scans"]
@@ -306,6 +311,27 @@ def test_get_scan_reads_pinned_coverage_independently_of_unrelated_artifacts(
         assert after["coverage"] == before["coverage"]
     else:
         assert "coverage" not in after
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_get_scan_ignores_replaced_candidate_artifacts(tmp_path: Path, legacy: bool) -> None:
+    state, repository = empty_history_paths(tmp_path)
+    saved = create_cli_scan(state, tmp_path / "results", repository, finding=False)
+    if legacy:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (saved["scanId"],)
+            )
+    scan_dir = Path(saved["scanDir"])
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_bytes())
+    coverage["deferred"] = [{"candidateId": "pending", "reason": "Another scan's review"}]
+    coverage_path.write_text(json.dumps(coverage))
+    for remove_manifest in (False, True):
+        if remove_manifest:
+            (scan_dir / "scan-manifest.json").unlink()
+        detail = get_scan(state, saved["scanId"])["scan"]
+        assert detail["progress"]["candidates"]["unresolved"] == 0
 
 
 @pytest.mark.parametrize("finding", [False, True])

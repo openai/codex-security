@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from candidate_identity import coverage_candidate_key
 from finalize_scan_contract import (
     ContractError,
     _normalize_unsealed_open_questions,
@@ -17,10 +18,6 @@ from finalize_scan_contract import (
     _validate_resolved_deferred,
     _validate_schema_node,
 )
-
-
-def _has_candidate_metadata(row: dict[str, Any]) -> bool:
-    return any(key in row for key in ("candidateId", "candidate", "finding"))
 
 
 def _coverage_rows(coverage: dict[str, Any], field: str) -> list[Any]:
@@ -183,6 +180,11 @@ def prepare_saved_coverage_projection(
                     rows[index] = row
                 if not isinstance(row, dict):
                     continue
+                if coverage_candidate_key(row, owner) is not None:
+                    legacy = {**copy.deepcopy(row), "sourceWorkerId": owner}
+                    if field == "surfaces":
+                        legacy["receiptRefs"] = receipt_resolver(relative, row, owner)
+                    projected[field].append((_coverage_comparison_row(legacy, field), row))
                 original_owners.setdefault(id(row), row.get("workerId", missing))
                 row["workerId"] = owner
                 if field == "surfaces":
@@ -278,6 +280,18 @@ class SavedCoverageProjection:
             if qualified or not self.project_worker_coverage
             else _project_worker_coverage_row(item, owner, field)
         )
+        if (
+            owner is not None
+            and not qualified
+            and isinstance(retained, dict)
+            and isinstance(retained.get("candidateId"), str)
+        ):
+            # A draft checkpoint carries a worker-local candidate ID until its attempt is accepted.
+            retained["sourceWorkerId"] = owner
+            provenance = retained.get("provenance")
+            if isinstance(provenance, dict):
+                provenance.pop("workerId", None)
+                provenance.pop("candidateId", None)
         if retained not in output:
             output.append(retained)
         retained = output[output.index(retained)]

@@ -1074,7 +1074,13 @@ def test_anonymous_worker_receipt_precedes_another_workers_rejection(tmp_path, e
     earlier_ref = f"artifacts/{earlier_name}"
     ref = "artifacts/review.txt"
     early = {"label": "Review", "disposition": "no_issue_found", "receiptRefs": [earlier_ref]}
-    rejection = {**early, "candidateId": "review", "disposition": "rejected", "receiptRefs": [ref]}
+    rejection = {
+        **early,
+        "candidateId": "review",
+        "disposition": "rejected",
+        "receiptRefs": [ref],
+        "provenance": {"scanReceiptRefs": [ref]},
+    }
     first = worker(tmp_path, "first", saved_draft("coverage-scan", complete=True, surfaces=[early]))
     second = worker(tmp_path, "second", saved_draft("coverage-scan", complete=True, **records))
     for source in (first, second):
@@ -1091,8 +1097,13 @@ def test_anonymous_worker_receipt_precedes_another_workers_rejection(tmp_path, e
     _, findings, coverage = recover(tmp_path, [first, second], project=True, warnings=[])
     collision = earlier_ref != ref
     assert len(findings["findings"]) == int(collision and prior == "reported")
-    candidates = [row.get("provenance", {}).get("candidateId") for row in coverage["deferred"]]
-    assert ("review" in candidates) == (collision and prior == "pending")
+    reasons = [
+        row["reason"]
+        for row in coverage["deferred"]
+        if row.get("provenance", {}).get("candidateId") == "review"
+    ]
+    assert bool(reasons) == collision
+    assert (task["reason"] in reasons) == (collision and prior == "pending")
     dispositions = [row["disposition"] for row in coverage["surfaces"]]
     assert dispositions == ["no_issue_found", "needs_follow_up" if collision else "rejected"]
 

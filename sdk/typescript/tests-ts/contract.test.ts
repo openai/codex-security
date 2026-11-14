@@ -15,7 +15,11 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, test, mock, spyOn } from "bun:test";
-import { ContractValidationError, loadContract } from "../src/index.js";
+import {
+  ContractValidationError,
+  loadContract,
+  ScanResult,
+} from "../src/index.js";
 import {
   loadContractWithScanDirectory,
   readScanFile,
@@ -25,8 +29,9 @@ import {
 import type { NormalizedTarget, ScanExpectation } from "../src/index.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { useTestPython } from "./support/python.js";
-import { runPython } from "./support/python-probe.js";
+import { runPython, runPythonJsonProbe } from "./support/python-probe.js";
 import { createContractTestFixtures } from "./support/contract-fixture.js";
+import type { DeferredCoverage } from "../src/models.js";
 import { readJson as readJsonFile, writeJson } from "./support/json.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
@@ -1812,3 +1817,294 @@ describe("canonical scan contract", () => {
     ).rejects.toThrow("producer version");
   });
 });
+
+for (const sourceWorkerId of [
+  "",
+  " ",
+  "worker-a",
+  { worker: "synthetic-worker" },
+  ["synthetic-worker"],
+  null,
+]) {
+  test(`loads sealed v1 coverage with historical owner metadata ${JSON.stringify(sourceWorkerId)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["surfaces"][0]["sourceWorkerId"] = sourceWorkerId;
+    coverage["completeness"] = "partial";
+    coverage["deferred"] = [
+      {
+        id: "historical-review",
+        candidateId: "historical-candidate",
+        reason: "Historical saved review remains pending.",
+        sourceWorkerId,
+        surfaceIds: [coverage["surfaces"][0]["id"]],
+      },
+    ];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    const pythonPending = runPythonJsonProbe(
+      "import json,sys; sys.path.insert(0,sys.argv[1]); from candidate_identity import unresolved_candidates; value=json.loads(sys.argv[2]); print(json.dumps(unresolved_candidates(value['coverage'],value['findings'])))",
+      { coverage, findings: loaded.findings.findings },
+    ) as DeferredCoverage[];
+    const result = new ScanResult({
+      ...loaded,
+      scanDir,
+      threadId: "saved-thread",
+      turnResult: {},
+    });
+    expect(result.unresolvedCandidates).toEqual(pythonPending);
+    expect(result.toJSON()).toMatchObject({
+      unresolvedCandidateCount: (pythonPending as unknown[]).length,
+    });
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}
+
+for (const candidate of [
+  null,
+  "Historical annotation.",
+  ["Historical trace."],
+  {},
+  { evidence: "Opaque historical evidence." },
+]) {
+  test(`loads sealed v1 deferred historical candidate extension ${JSON.stringify(candidate)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["completeness"] = "partial";
+    const deferred: DeferredCoverage = {
+      id: "historical-proof",
+      candidateId: "historical-candidate",
+      reason: "The historical proof gap remains.",
+      candidate,
+      surfaceIds: [coverage["surfaces"][0]["id"]],
+    };
+    coverage["deferred"] = [deferred];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.review.unresolvedCandidates?.[0]?.candidate).toEqual(
+      candidate,
+    );
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}
+
+for (const candidateId of [
+  null,
+  false,
+  0,
+  {},
+  ["historical"],
+  "",
+  " ",
+  "review/auth",
+]) {
+  test(`loads sealed coverage with generic candidateId metadata ${JSON.stringify(candidateId)}`, async () => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    coverage["surfaces"][0]["candidateId"] = candidateId;
+    coverage["completeness"] = "partial";
+    coverage["deferred"] = [
+      {
+        id: "historical-review",
+        candidateId,
+        reason: "Independent review remains.",
+      },
+    ];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(
+      loaded.review.unresolvedCandidates?.map((row) => row.candidateId) ?? [],
+    ).toEqual(
+      typeof candidateId === "string" && candidateId.trim()
+        ? [candidateId]
+        : [],
+    );
+    const exported = pythonExport(scanDir);
+    expect(exported.exitCode).toBe(0);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  });
+}
+
+for (const receiptRefs of [
+  ["artifacts/proof.bin"],
+  ["artifacts/missing.bin"],
+  { opaque: true },
+  [7, { opaque: true }],
+]) {
+  test(
+    "preserves legacy exclusion metadata across sealed readers: " +
+      JSON.stringify(receiptRefs),
+    async () => {
+      const scanDir = await copyExample();
+      const coverage = await readJson(join(scanDir, "coverage.json"));
+      delete coverage["receiptSealVersion"];
+      const reason = "Legacy candidate proof gap remains unanswered.";
+      coverage["surfaces"] = [];
+      coverage["completeness"] = "partial";
+      coverage["deferred"] = [
+        { id: "legacy-gap", candidateId: "legacy-candidate", reason },
+        {
+          id: "second-gap",
+          candidateId: "legacy-candidate",
+          reason: "Another observation.",
+        },
+      ];
+      coverage["explicitExclusions"] = [
+        {
+          pattern: "src/extract.py",
+          reason: "Opaque historical decision.",
+          id: { opaque: 7 },
+          candidateId: "legacy-candidate",
+          disposition: "rejected",
+          receiptRefs,
+        },
+      ];
+      await writeJson(join(scanDir, "coverage.json"), coverage);
+      await mkdir(join(scanDir, "artifacts"), { recursive: true });
+      await writeFile(
+        join(scanDir, "artifacts/proof.bin"),
+        "Synthetic legacy proof",
+      );
+      await reseal(scanDir);
+      const names = ["scan-manifest.json", "coverage.json", "findings.json"];
+      const original = await Promise.all(
+        names.map((name) => readFile(join(scanDir, name))),
+      );
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      const result = new ScanResult({
+        ...loaded,
+        scanDir,
+        threadId: "saved-thread",
+        turnResult: {},
+      });
+      expect(loaded.review.unresolvedCandidates).toEqual(coverage["deferred"]);
+      expect(result.unresolvedCandidates).toEqual([coverage["deferred"][0]]);
+      const replay = runPython(
+        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+        [
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+        ],
+      );
+      expect(replay.exitCode, new TextDecoder().decode(replay.stderr)).toBe(0);
+      expect(await readFile(join(scanDir, "report.md"), "utf8")).toContain(
+        reason,
+      );
+      expect(pythonExport(scanDir).exitCode).toBe(0);
+      expect(
+        await Promise.all(names.map((name) => readFile(join(scanDir, name)))),
+      ).toEqual(original);
+    },
+  );
+}
+
+test.each([
+  { receiptRefs: ["artifacts/opaque.bin"] },
+  { receiptRefs: { opaque: true } },
+])(
+  "loads current generic exclusion receipt metadata without treating it as proof: %p",
+  async ({ receiptRefs }) => {
+    const scanDir = await copyExample();
+    const coverage = await readJson(join(scanDir, "coverage.json"));
+    const exclusion = {
+      pattern: "src/generated.ts",
+      reason: "Synthetic scope exclusion.",
+      receiptRefs,
+    };
+    coverage["receiptSealVersion"] = 1;
+    coverage["explicitExclusions"] = [exclusion];
+    await writeJson(join(scanDir, "coverage.json"), coverage);
+    await reseal(scanDir);
+    const original = await readFile(join(scanDir, "coverage.json"));
+    const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+    expect(loaded.review.excludedPaths).toEqual([exclusion.pattern]);
+    expect(await readFile(join(scanDir, "coverage.json"))).toEqual(original);
+  },
+);
+
+for (const change of ["inventory", "bytes"]) {
+  test(
+    "new exclusion receipts remain sealed across readers after " +
+      change +
+      " changes",
+    async () => {
+      const scanDir = await copyExample();
+      const manifest = await readJson(join(scanDir, "scan-manifest.json"));
+      delete manifest["scan"]["sealedAt"];
+      delete manifest["scan"]["artifacts"];
+      await writeJson(join(scanDir, "scan-manifest.json"), manifest);
+      const coverage = await readJson(join(scanDir, "coverage.json"));
+      coverage["surfaces"] = [];
+      coverage["completeness"] = "partial";
+      coverage["deferred"] = [
+        {
+          id: "gap",
+          candidateId: "reviewed",
+          sourceWorkerId: "reviewer",
+          reason: "Saved proof gap.",
+        },
+      ];
+      coverage["explicitExclusions"] = [
+        {
+          pattern: "src/extract.py",
+          reason: "Reviewed candidate.",
+          candidateId: "reviewed",
+          provenance: { workerId: "reviewer", candidateId: null },
+          disposition: "rejected",
+          receiptRefs: ["artifacts/proof.bin"],
+        },
+      ];
+      await writeJson(join(scanDir, "coverage.json"), coverage);
+      await mkdir(join(scanDir, "artifacts"), { recursive: true });
+      await writeFile(
+        join(scanDir, "artifacts/proof.bin"),
+        Buffer.from([0, 255, 128]),
+      );
+      const sealed = runPython(
+        process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
+        [
+          join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
+          "--scan-dir",
+          scanDir,
+        ],
+      );
+      expect(sealed.exitCode, new TextDecoder().decode(sealed.stderr)).toBe(0);
+      const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
+      expect(
+        (await readJson(join(scanDir, "coverage.json")))["receiptSealVersion"],
+      ).toBe(1);
+      const result = new ScanResult({
+        ...loaded,
+        scanDir,
+        threadId: "saved-thread",
+        turnResult: {},
+      });
+      expect(result.unresolvedCandidates).toEqual([]);
+      if (change === "inventory") {
+        const changed = await readJson(join(scanDir, "scan-manifest.json"));
+        changed["scan"]["artifacts"] = changed["scan"]["artifacts"].filter(
+          (artifact: { path: string }) =>
+            artifact.path !== "artifacts/proof.bin",
+        );
+        await writeJson(join(scanDir, "scan-manifest.json"), changed);
+      } else {
+        await writeFile(join(scanDir, "artifacts/proof.bin"), "Changed proof");
+      }
+      await expect(
+        loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
+      ).rejects.toThrow();
+      expect(pythonExport(scanDir).exitCode).not.toBe(0);
+    },
+  );
+}

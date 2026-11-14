@@ -18,10 +18,16 @@ import type { ScanDraftInput } from "../src/artifact-scan-draft.ts";
 import type { ScanUnion } from "../src/deep-scan/artifact-validation.ts";
 import type { JsonObject } from "../src/types.ts";
 
-const { addScanCoverage, scanCoverage, validateDiscoveryArtifacts } =
-  await importSource(
-    path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-  );
+const {
+  addScanCoverage,
+  scanCoverage,
+  scanUnionToDraft,
+  persistedScanUnion,
+  parseScanUnion,
+  validateDiscoveryArtifacts,
+} = await importSource(
+  path.join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+);
 
 const {
   recordCodexSecurityWorkerScanDraft,
@@ -66,11 +72,120 @@ try {
   for (const candidate of [false, true])
     for (const reverse of [false, true])
       await testCurrentAnonymousReceiptSelection(root, candidate, reverse);
+  await testUnresolvedCandidates(root);
+  testCandidateCoverageAggregation(root);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
 
 console.log("deep scan artifact validation tests passed");
+
+async function testUnresolvedCandidates(root: string) {
+  const candidate = {
+    candidateId: "candidate-review",
+    reason: "Validation remains pending.",
+    paths: ["src/handler.ts"],
+    candidate: { evidence: "The handler still requires review." },
+  };
+  const confirmed = {
+    ...finding("confirmed", "src/other.ts"),
+    provenance: { source: "local_plugin", candidateId: "confirmed" },
+  };
+  const worker = draft([confirmed], {
+    reviewState: {
+      completeness: "partial",
+      surfaces: [
+        {
+          label: "Shared review surface",
+          candidateId: "candidate-review",
+          disposition: "reported",
+        },
+        {
+          label: "Reviewed candidate",
+          candidateId: "rejected",
+          disposition: "rejected",
+        },
+      ],
+      explicitExclusions: [],
+      deferred: [
+        { reason: "General review work remains." },
+        candidate,
+        { candidateId: "confirmed", reason: "Old checkpoint." },
+        { candidateId: "rejected", reason: "Old checkpoint." },
+      ],
+    },
+  });
+  const aggregate: ScanUnion = { scanId, findings: [] };
+  const accept = (union: ScanUnion, id: string, result: ScanDraftInput) =>
+    addScanCoverage(
+      union,
+      { id, result, resultPath: path.join(root, id, "result.json") },
+      root,
+    );
+  accept(aggregate, "worker-1", worker);
+  assert.deepEqual(aggregate.unresolvedCandidates, [
+    { ...candidate, sourceWorkerId: "worker-1" },
+  ]);
+
+  // A worker owns the evidence it submitted, even when a finding imported another owner.
+  const importedFinding = {
+    ...finding("imported-owner", "src/imported.ts"),
+    provenance: {
+      source: "local_plugin",
+      candidateId: candidate.candidateId,
+      sourceWorkerId: "worker-2",
+    },
+  };
+  const original = draft([importedFinding], {
+    reviewState: { ...worker.reviewState, deferred: [candidate] },
+  });
+  const source = await createWorker(
+    path.join(root, "imported"),
+    "worker-1",
+    original,
+  );
+  const accepted = await validateDiscoveryArtifacts(
+    source.artifacts,
+    source.resultPath,
+    scanId,
+    { workerId: source.id },
+  );
+  assert.equal(accepted.findings[0].provenance.sourceWorkerId, source.id);
+  assert.equal(
+    accepted.findings[0].provenance.previousFindings[0].provenance
+      .sourceWorkerId,
+    "worker-2",
+  );
+  assert.deepEqual(await readJson(source.resultPath), original);
+
+  const pendingWorker = draft([], {
+    reviewState: { ...worker.reviewState, deferred: [candidate, candidate] },
+  });
+  accept(aggregate, "worker-2", pendingWorker);
+  const resumed = parseScanUnion(persistedScanUnion(aggregate));
+  accept(resumed, "worker-2", pendingWorker);
+  assert.deepEqual(
+    resumed.unresolvedCandidates,
+    ["worker-1", "worker-2"].map((sourceWorkerId) => ({
+      ...candidate,
+      sourceWorkerId,
+    })),
+  );
+  accept(resumed, source.id, accepted);
+  assert.deepEqual(resumed.unresolvedCandidates, [
+    { ...candidate, sourceWorkerId: "worker-2" },
+  ]);
+  const historical = parseScanUnion(
+    JSON.parse(JSON.stringify(persistedScanUnion(resumed))),
+  );
+  const published = scanUnionToDraft(historical);
+  assert.equal(published.reviewState.completeness, undefined);
+  assert.deepEqual(
+    published.reviewState.deferred,
+    resumed.unresolvedCandidates,
+  );
+  assert.equal(Object.hasOwn(published, "unresolvedCandidates"), false);
+}
 
 function testDistinctThreatModels() {
   const aggregate: ScanUnion = { scanId, findings: [] };
@@ -103,7 +218,21 @@ function testResolvedDeferredPublication() {
   const source = {
     surfaces: [],
     explicitExclusions: [],
-    deferred: [{ id: "pending", reason: "A separate task remains." }],
+    deferred: [
+      {
+        id: "pending",
+        candidateId: "candidate",
+        reason: "A separate task remains.",
+        receiptRefs: [{ kind: "external review" }],
+      },
+    ],
+    openQuestions: [
+      {
+        question: "Can the reviewer confirm the scope?",
+        candidateId: "candidate",
+        receiptRefs: [{ kind: "external review" }],
+      },
+    ],
     resolvedDeferred: [{ id: "1", reason: "The original review finished." }],
   };
   const previous: ScanUnion = { scanId, findings: [] };
@@ -705,6 +834,17 @@ async function testCoveragePublicationParity(root: string) {
     path.join(output, "artifacts/review.md"),
     "Review evidence.\n",
   );
+  // Older retained coverage recorded the normalized scan-owned receipt.
+  const historical = structuredClone(original);
+  historical.reviewState.surfaces[0].receiptRefs = ["artifacts/./review.md"];
+  historical.reviewState.surfaces[0].provenance = {
+    scanReceiptRefs: ["artifacts/review.md"],
+  };
+  const projected = scanCoverage(
+    { ...worker, result: historical },
+    worker.artifacts.scanDir,
+  );
+  assert.deepEqual(projected.surfaces[0].receiptRefs, ["artifacts/review.md"]);
   for (const ref of [
     "artifacts/review.md",
     "artifacts/./review.md",
@@ -1402,6 +1542,108 @@ function reduction<Finding extends Record<string, unknown>>(
   extra = {},
 ) {
   return { scanId, findings, ...extra };
+}
+
+function testCandidateCoverageAggregation(scanDir: string) {
+  const candidate = {
+    id: "pending",
+    candidateId: "shared-candidate",
+    reason: "Needs validation.",
+    surfaceIds: ["review"],
+    receiptRefs: ["artifacts/review.json"],
+    provenance: {
+      workerId: "imported-worker",
+      candidateId: "imported-candidate",
+      note: "Imported observation.",
+    },
+  };
+  const discoveries = ["worker-1", "worker-2"].map((id) => ({
+    id,
+    resultPath: path.join(scanDir, "workers", id, "output", "result.json"),
+    result: draft(
+      id === "worker-1"
+        ? [
+            {
+              ...finding("confirmed-shared", "src/handler.ts"),
+              provenance: {
+                source: "local_plugin",
+                candidateId: candidate.candidateId,
+              },
+            },
+          ]
+        : [],
+      {
+        reviewState: {
+          surfaces: [
+            {
+              id: "review",
+              label: "Review",
+              candidateId: "shared-candidate",
+              disposition: id === "worker-1" ? "reported" : "needs_follow_up",
+              receiptRefs: ["artifacts/review.json"],
+            },
+          ],
+          explicitExclusions: [
+            {
+              id: "excluded",
+              pattern: "generated/**",
+              reason: "Generated files.",
+            },
+          ],
+          deferred: [
+            { id: "general", reason: "Review another entry point." },
+            candidate,
+          ],
+          openQuestions: ["Which entry point accepts requests?"],
+        },
+      },
+    ),
+  }));
+  const original = structuredClone(discoveries);
+  const aggregate: ScanUnion = { scanId, findings: [] };
+  for (const worker of discoveries) addScanCoverage(aggregate, worker, scanDir);
+  const coverage = scanUnionToDraft(aggregate).reviewState;
+  assert.equal(coverage.surfaces.length, 2);
+  assert.equal(coverage.explicitExclusions.length, 2);
+  assert.equal(coverage.openQuestions.length, 2);
+  assert.equal(
+    coverage.deferred.length,
+    3,
+    "both generic tasks and the unresolved worker candidate survive",
+  );
+  const pending = coverage.deferred.filter(
+    (row: Record<string, unknown>) =>
+      (row.provenance as Record<string, unknown>)?.candidateId ===
+      "shared-candidate",
+  );
+  assert.equal(
+    pending.length,
+    1,
+    "the resolved worker's checkpoint is not reopened",
+  );
+  assert.equal(pending[0].provenance.workerId, "worker-2");
+  assert.equal(pending[0].provenance.note, "Imported observation.");
+  assert.equal(pending[0].id, "worker-2-attempt-unknown-deferred-2");
+  assert.deepEqual(pending[0].surfaceIds, [
+    "worker-2-attempt-unknown-surface-1",
+  ]);
+  assert.deepEqual(pending[0].receiptRefs, [
+    "workers/worker-2/output/artifacts/review.json",
+  ]);
+  assert.equal(coverage.surfaces[0].provenance.workerId, "worker-1");
+  const legacy = scanUnionToDraft({
+    scanId,
+    findings: [],
+    unresolvedCandidates: [{ ...candidate, sourceWorkerId: "worker-2" }],
+  }).reviewState.deferred[0];
+  assert.equal(legacy.sourceWorkerId, "worker-2");
+  assert.equal(legacy.candidateId, candidate.candidateId);
+  assert.deepEqual(legacy.provenance, { note: "Imported observation." });
+  assert.deepEqual(
+    discoveries,
+    original,
+    "aggregation leaves resumed source artifacts unchanged",
+  );
 }
 
 function workerReceiptRef(

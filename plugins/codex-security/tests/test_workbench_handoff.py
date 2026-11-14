@@ -177,12 +177,15 @@ def test_deep_handoff_leaves_preflight_progress_to_coordinator(tmp_path: Path) -
             "--claim-token",
             claim_token,
         )
+    # Model progress reads database counters. The full handoff also inspects saved candidates.
+    progress = delivered["results"]["progress"]
+    assert progress["candidates"] == {"reportable": 0, "unresolved": 0}
     assert model_progress == {
         "deepPreflight": True,
         "scan": {
             "scanId": scan_id,
             "userContext": delivered["results"]["userContext"],
-            "progress": delivered["results"]["progress"],
+            "progress": {**progress, "candidates": {"reportable": 0}},
         },
     }
     rejected = update_progress(state_dir, scan_id, "--model-update", check=False)

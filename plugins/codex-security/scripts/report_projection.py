@@ -4,13 +4,35 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import re
+import sys
 from collections import Counter
 from collections.abc import Iterator
 from itertools import chain
+from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import (
+    CandidateKey,
+    coverage_candidate_key,
+    coverage_owner,
+    finding_candidate_id,
+    finding_candidate_key,
+    unresolved_candidate_rows,
+    unresolved_candidates,
+)
+
+SARIF_SECURITY_SCORES = {
+    "critical": 9.5,
+    "high": 8.0,
+    "medium": 5.0,
+    "low": 2.0,
+    "informational": 0.0,
+}
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 REPORTABLE_SEVERITIES = {"critical", "high", "medium", "low"}
@@ -36,6 +58,147 @@ WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
 
 class ReportProjectionError(ValueError):
     """Raised when a canonical scan cannot be projected into a valid report."""
+
+
+def _sarif_label(value: str) -> str:
+    words = re.sub(r"[-_./]+", " ", value).split()
+    acronyms = {"api", "csrf", "html", "http", "id", "rce", "sql", "ssrf", "url", "xml", "xss"}
+    label = " ".join(word.upper() if word.lower() in acronyms else word for word in words)
+    return label[:1].upper() + label[1:]
+
+
+def _sarif_rule(rule_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    name = ": ".join(_sarif_label(part) for part in rule_id.split("."))
+    categories = sorted({finding["taxonomy"]["category"] for finding in findings})
+    cwes = sorted({cwe for finding in findings for cwe in finding["taxonomy"]["cwe"]})
+    tags = {"security", *categories}
+    for cwe in cwes:
+        match = re.fullmatch(r"CWE-([0-9]+)", cwe, re.IGNORECASE)
+        if match and (digits := match[1].lstrip("0")):
+            tags.add(f"external/cwe/cwe-{digits.zfill(3)}")
+    description = f"{name}. Categories: {', '.join(map(_sarif_label, categories))}."
+    if cwes:
+        description += f" Weaknesses: {', '.join(cwes)}."
+    remediation = "\n\n".join(sorted({finding["remediation"] for finding in findings}))
+    properties: dict[str, Any] = {"tags": sorted(tags)}
+    # GitHub assigns security severity to the shared rule, not each result.
+    score = max(
+        finding["severity"].get("score", SARIF_SECURITY_SCORES[finding["severity"]["level"]])
+        for finding in findings
+    )
+    if score > 0:
+        properties["security-severity"] = str(score)
+    return {
+        "id": rule_id,
+        "name": name,
+        "shortDescription": {"text": name},
+        "fullDescription": {"text": description},
+        "help": {
+            "text": f"{description}\n\nRemediation:\n\n{remediation}",
+            "markdown": f"{description}\n\n## Remediation\n\n{remediation}",
+        },
+        "properties": properties,
+    }
+
+
+def _sarif_finding_message(finding: dict[str, Any]) -> str:
+    taxonomy = finding["taxonomy"]
+    details = [
+        finding["title"],
+        finding["summary"],
+        f"Severity: {finding['severity']['level']}",
+        f"Category: {_sarif_label(taxonomy['category'])}",
+    ]
+    if taxonomy["cwe"]:
+        details.append(f"Weaknesses: {', '.join(taxonomy['cwe'])}")
+    details.append(f"Remediation:\n{finding['remediation']}")
+    for key, label in (
+        ("remediationTests", "Remediation tests"),
+        ("preventiveControls", "Preventive controls"),
+    ):
+        if finding.get(key):
+            details.append(f"{label}:\n" + "\n".join(f"- {item}" for item in finding[key]))
+    return "\n\n".join(details)
+
+
+def _sarif_primary_location(finding: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        (location for location in finding["locations"] if location.get("role") == "root_control"),
+        finding["locations"][0],
+    )
+
+
+def csv_cell(value: Any) -> Any:
+    if isinstance(value, str) and (
+        value.startswith(("'", "\t", "\r", "\n"))
+        or value.lstrip().startswith(("=", "+", "-", "@", "＝", "＋", "－", "＠"))
+    ):
+        return f"'{value}"
+    return value
+
+
+def _csv_candidate_id(finding: dict[str, Any]) -> str | None:
+    candidate_id = finding_candidate_id(finding)
+    if candidate_id is not None:
+        return candidate_id
+    # Preserve literal CSV metadata, such as FEFF, that is not a canonical identity.
+    for metadata, fields in (
+        (finding.get("provenance"), ("candidateId",)),
+        (finding.get("extensions"), ("candidateId", "reportId", "ledgerRowId")),
+    ):
+        if isinstance(metadata, dict):
+            for field in fields:
+                value = metadata.get(field)
+                if isinstance(value, str) and value.strip():
+                    return value
+    return None
+
+
+def finding_csv_columns(deep_scan: bool) -> tuple[str, ...]:
+    return (
+        "occurrence_id",
+        "finding_id",
+        *(("candidate_id",) if deep_scan else ()),
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "status",
+        "close_reason",
+        "note",
+        "remediation",
+        "path",
+        "start_line",
+        "end_line",
+    )
+
+
+def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    deep_scan = uses_deep_presentation(coverage, findings["findings"])
+    writer.writerow(finding_csv_columns(deep_scan))
+    for finding in findings["findings"]:
+        location = _sarif_primary_location(finding)
+        writer.writerow(
+            (
+                csv_cell(finding["occurrenceId"]),
+                csv_cell(finding["findingId"]),
+                *((csv_cell(_csv_candidate_id(finding)),) if deep_scan else ()),
+                csv_cell(finding["title"]),
+                csv_cell(finding["summary"]),
+                csv_cell(finding["severity"]["level"]),
+                csv_cell(finding["confidence"]["level"]),
+                "open",
+                "",
+                "",
+                csv_cell(finding["remediation"]),
+                csv_cell(location["path"]),
+                location["startLine"],
+                location.get("endLine", location["startLine"]),
+            )
+        )
+    return output.getvalue().encode("utf-8")
 
 
 def markdown_threat_model_content(model: dict[str, Any]) -> str | None:
@@ -130,16 +293,10 @@ def _deep_report_id(finding: dict[str, Any]) -> str:
     )
 
 
-def _deep_candidate_id(finding: dict[str, Any]) -> str:
-    extensions = finding.get("extensions")
-    if isinstance(extensions, dict):
-        candidate_id = extensions.get("candidateId")
-        if isinstance(candidate_id, str) and candidate_id.strip():
-            return candidate_id
-    return _deep_report_id(finding)
-
-
 def _has_deep_child_metadata(finding: dict[str, Any]) -> bool:
+    candidate = finding_candidate_key(finding)
+    if candidate is not None and candidate[0] is not None:
+        return True
     extensions = finding.get("extensions")
     if not isinstance(extensions, dict):
         return False
@@ -155,8 +312,8 @@ def uses_deep_presentation(coverage: dict[str, Any], findings: list[dict[str, An
         return True
     if coverage.get("mode") != "scoped_path":
         return False
-    # Scoped deep scans can arrive as scoped_path artifacts. The child ids are
-    # the stable deep-scan signal; ordinary scoped scans do not emit them.
+    # Standard scans also use candidate IDs. Deep children add worker ownership
+    # or the legacy extension identifiers to scoped_path artifacts.
     return any(_has_deep_child_metadata(finding) for finding in findings)
 
 
@@ -413,8 +570,8 @@ def _code_evidence_location(item: dict[str, Any]) -> str:
     if isinstance(location, dict):
         item = location
     path = item.get("path")
-    start = item.get("startLine")
-    end = item.get("endLine")
+    start = item.get("startLine", item.get("start_line"))
+    end = item.get("endLine", item.get("end_line", start))
     if not isinstance(path, str) or not path:
         return ""
     path = _path_label(path)
@@ -465,6 +622,41 @@ def _locations(finding: dict[str, Any]) -> str:
         suffix = f":{start}" if end == start else f":{start}-{end}"
         rendered.append(f"{_path_text(location['path'])}{suffix}")
     return ", ".join(rendered)
+
+
+def _candidate_details(candidate: dict[str, Any], saved: dict[str, Any]) -> tuple[str, str]:
+    """Render the evidence shapes saved by discovery and finding validation."""
+    locations = []
+    evidence = []
+    validation = candidate.get("validation")
+    for value in (
+        candidate.get("evidence"),
+        validation.get("evidence") if isinstance(validation, dict) else None,
+    ):
+        evidence.extend(
+            item
+            for item in (value if isinstance(value, list) else [value])
+            if isinstance(item, str) and item.strip()
+        )
+    for field in ("locations", "sourceEvidence", "codeEvidence", "code_evidence", "evidence"):
+        items = candidate.get(field, [])
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if location := _code_evidence_location(item):
+                locations.append(location)
+            if field != "locations":
+                evidence.extend(
+                    value
+                    for key in ("explanation", "code")
+                    if isinstance(value := item.get(key), str) and value.strip()
+                )
+    paths = saved.get("paths", [])
+    return (
+        ", ".join(dict.fromkeys(locations))
+        or ", ".join(path for path in paths if isinstance(path, str)),
+        "; ".join(dict.fromkeys(evidence)) or candidate.get("summary", ""),
+    )
 
 
 def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, str, str]:
@@ -791,11 +983,17 @@ def build_report_markdown(
             + ", ".join(duplicate_writeup_paths)
         )
     deep_presentation = uses_deep_presentation(coverage, findings)
-    deep_finding_groups: dict[str, list[tuple[int, dict[str, Any], str | None]]] = {}
+    sealed = scan.get("sealedAt") is not None
+    pending_candidates = unresolved_candidates(
+        coverage, findings_document["findings"], sealed=sealed
+    )
+    pending_rows = unresolved_candidate_rows(coverage, findings_document["findings"], sealed=sealed)
+    deep_finding_groups: dict[CandidateKey, list[tuple[int, dict[str, Any], str | None]]] = {}
     if deep_presentation:
         for entry in numbered_findings:
             _, finding, _ = entry
-            deep_finding_groups.setdefault(_deep_candidate_id(finding), []).append(entry)
+            key = finding_candidate_key(finding) or (None, _deep_report_id(finding))
+            deep_finding_groups.setdefault(key, []).append(entry)
     hardening_portfolio_path = _hardening_portfolio_path(scan)
     include_paths = [
         _path_text(path) for path in coverage.get("includePaths", scope.get("includePaths", []))
@@ -856,6 +1054,7 @@ def build_report_markdown(
             "| --- | --- |",
             f"| Scan outcome | {scan.get('status', 'completed')} |",
             *summary_count_lines,
+            f"| Unresolved candidates | {len(pending_candidates)} |",
             f"| Validation mode | {_cell(scope.get('validationMode', 'not recorded'))} |",
             "",
             "Canonical artifacts: `scan-manifest.json` and `findings.json`. This report is a deterministic projection of those files.",
@@ -972,6 +1171,32 @@ def build_report_markdown(
                 f"[Open the structural hardening portfolio]({hardening_portfolio_path})",
             ]
         )
+    if pending_candidates:
+        lines.extend(
+            [
+                "",
+                "## Unresolved candidates",
+                "",
+                "These saved candidates have not resolved into a saved finding or a terminal disposition.",
+                "",
+                "| Candidate | Source worker | Title | Remaining review | Locations | Evidence |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for candidate in pending_rows:
+            candidate_id = coverage_candidate_key(candidate)[1]
+            original = candidate.get("candidate", candidate.get("finding", {}))
+            original = original if isinstance(original, dict) else {}
+            title = original.get("title", original.get("summary"))
+            locations, evidence = _candidate_details(original, candidate)
+            lines.append(
+                f"| {_cell(candidate_id)} "
+                f"| {_cell(coverage_owner(candidate))} "
+                f"| {_cell(title or candidate.get('title', candidate_id))} "
+                f"| {_cell(candidate.get('reason'))} "
+                f"| {_cell(locations)} "
+                f"| {_cell(evidence)} |"
+            )
     surfaces = coverage.get("surfaces", [])
     if surfaces:
         lines.extend(
@@ -1003,27 +1228,34 @@ def build_report_markdown(
                 + " |"
             )
     open_questions = coverage.get("openQuestions", [])
-    deferred_questions = []
     deferred = coverage.get("deferred", [])
-    if isinstance(deferred, list):
-        deferred_questions = [
-            {
-                "question": item.get("reason", "Deferred review requires follow-up."),
-                "followUpPrompt": " ".join(
-                    (
-                        f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
-                        f"Paths: {', '.join(item.get('paths', []))}." if item.get("paths") else "",
-                        (
-                            f"Surfaces: {', '.join(item.get('surfaceIds', []))}."
-                            if item.get("surfaceIds")
-                            else ""
-                        ),
-                    )
-                ).strip(),
-            }
+    follow_ups = (
+        [
+            item
             for item in deferred
-            if isinstance(item, dict)
+            if isinstance(item, dict) and coverage_candidate_key(item) is None
         ]
+        if isinstance(deferred, list)
+        else []
+    )
+    follow_ups.extend(pending_rows)
+    deferred_questions = [
+        {
+            "question": item.get("reason", "Deferred review requires follow-up."),
+            "followUpPrompt": " ".join(
+                (
+                    f"Review deferred unit {item.get('id', 'unknown')} and close its stated proof gap.",
+                    f"Paths: {', '.join(item.get('paths', []))}." if item.get("paths") else "",
+                    (
+                        f"Surfaces: {', '.join(item.get('surfaceIds', []))}."
+                        if item.get("surfaceIds")
+                        else ""
+                    ),
+                )
+            ).strip(),
+        }
+        for item in follow_ups
+    ]
     for heading, questions in (
         ("Deferred Requested Work", deferred_questions),
         ("Open Questions And Follow Up", open_questions),

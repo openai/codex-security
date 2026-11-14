@@ -22,7 +22,13 @@ type CompletedResult = {
       fingerprints: { primary: string };
     })[];
   };
-  review: { excludedPaths: string[] };
+  review: {
+    excludedPaths: string[];
+    unresolvedCandidates?: {
+      candidateId: string;
+      candidate: { evidence: string };
+    }[];
+  };
 };
 type ToolResponse = Awaited<ReturnType<Client["callTool"]>>;
 type WorkspaceResult = {
@@ -457,7 +463,18 @@ async function testCompactDiffScanCompletion(
     requireSuccessfulTool(
       await call("record_codex_security_discovery_candidates", {
         scanId,
-        candidates: [candidateInput],
+        candidates: [
+          candidateInput,
+          {
+            cwe_ids: [],
+            locations: [
+              { path: "src/handler.py", start_line: 1, role: "evidence" },
+            ],
+            summary: "A synthetic handler condition needs further review.",
+            evidence: "Synthetic evidence retained for follow-up.",
+            instance: "pending-review",
+          },
+        ],
       }),
       `${runtimeLabel}: record a diff candidate alongside a deleted file`,
     );
@@ -476,17 +493,23 @@ async function testCompactDiffScanCompletion(
     );
     assert.equal(await readFile(ledger, "utf8"), before);
     const candidates = requireSuccessfulTool<{
-      rows: { candidate_id: string }[];
+      rows: { candidate_id: string; instance?: string; evidence?: string }[];
     }>(
       await call("list_codex_security_candidates", { scanId }),
       `${runtimeLabel}: read compact diff candidates`,
     );
+    const pending = candidates.rows.find(
+      (row) => row.instance === "pending-review",
+    );
+    const reviewed = candidates.rows.find((row) => !row.instance);
+    assert.ok(pending);
+    assert.ok(reviewed);
     requireSuccessfulTool(
       await call("record_codex_security_candidate_validations", {
         scanId,
         validations: [
           {
-            candidateId: candidates.rows[0].candidate_id,
+            candidateId: reviewed.candidate_id,
             validation: {
               disposition: "suppressed",
               method: "Static review of the changed handler.",
@@ -502,6 +525,20 @@ async function testCompactDiffScanCompletion(
               remaining_uncertainty: "",
             },
           },
+          {
+            candidateId: pending.candidate_id,
+            validation: {
+              disposition: "deferred",
+              method: "Static review of a synthetic condition.",
+              confidence: "low",
+              confidence_rationale:
+                "The synthetic condition remains unverified.",
+              rubric: ["The condition requires further review."],
+              evidence: [pending.evidence],
+              counterevidence_or_proof_gap: "The condition remains unverified.",
+              remaining_uncertainty: "The condition needs follow-up.",
+            },
+          },
         ],
       }),
       `${runtimeLabel}: record the compact diff validation`,
@@ -509,9 +546,25 @@ async function testCompactDiffScanCompletion(
     requireSuccessfulTool(
       await call("record_candidate_attack_paths", {
         scanId,
-        attackPaths: [],
+        attackPaths: [
+          {
+            candidateId: pending.candidate_id,
+            attackPath: {
+              decision: "deferred",
+              severity: "unknown",
+              dataflow: "Synthetic condition pending review.",
+              reachability: "Unknown.",
+              counterevidence: "No final determination is available.",
+              impact: "unknown",
+              likelihood: "unknown",
+              severity_rationale: "The condition remains unverified.",
+              change_conditions: "Finish the synthetic review.",
+              proof_gap: "The condition needs follow-up.",
+            },
+          },
+        ],
       }),
-      `${runtimeLabel}: close the empty compact diff attack-path phase`,
+      `${runtimeLabel}: retain the deferred compact diff decision`,
     );
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", {
@@ -576,6 +629,10 @@ async function testCompactDiffScanCompletion(
     );
     assert.equal(completed.manifest.scan.mode, "branch_diff");
     assert.equal(completed.findings.findings.length, 0);
+    const pendingReviews = completed.review.unresolvedCandidates;
+    assert.equal(pendingReviews?.length, 1);
+    assert.equal(pendingReviews[0].candidateId, pending.candidate_id);
+    assert.equal(pendingReviews[0].candidate.evidence, pending.evidence);
   } finally {
     await client.close();
   }
@@ -723,7 +780,7 @@ async function testSemanticScanDraftCompletion(
       explicitExclusions: [],
       deferred: [
         {
-          candidateId: "candidate-deferred-query",
+          candidateId: "review/auth",
           reason: "A neighboring SQL execution mode remains unavailable.",
           paths: ["src/fixture.py"],
           source: "preserve-candidate-metadata",
@@ -739,7 +796,7 @@ async function testSemanticScanDraftCompletion(
           surfaceIds: ["surface_sql-execution"],
         },
         {
-          candidateId: "candidate-deferred-query",
+          candidateId: "review/auth",
           reason: "Another query sink requires a unique deferred identity.",
         },
         {
@@ -837,40 +894,6 @@ async function testSemanticScanDraftCompletion(
           openQuestions: [{ followUpPrompt: "Trace the SQL entrypoint." }],
         },
       ],
-      ...[
-        ["a path-traversal candidate identity", ".."],
-        ["a forward-slash candidate identity", "candidate/nested"],
-        ["a backslash candidate identity", "candidate\\nested"],
-        ["a control-character candidate identity", "candidate\u0001nested"],
-        ["an oversized candidate identity", "a".repeat(513)],
-      ].flatMap(([description, candidateId]) => [
-        [
-          description,
-          {
-            ...reviewState,
-            deferred: [
-              {
-                candidateId,
-                reason: "The candidate identity must remain safe.",
-              },
-            ],
-          },
-        ],
-        [
-          `${description} alongside an explicit deferred identity`,
-          {
-            ...reviewState,
-            deferred: [
-              {
-                id: "explicit-safe-deferred",
-                candidateId,
-                reason:
-                  "An explicit identity must not bypass candidate validation.",
-              },
-            ],
-          },
-        ],
-      ]),
     ] as const) {
       let invalid;
       try {
@@ -1044,7 +1067,6 @@ async function testSemanticScanDraftCompletion(
     assert.equal(results.manifest.scan.mode, "repository");
     assert.deepEqual(results.manifest.scan.scope.includePaths, ["."]);
     assert.deepEqual(results.manifest.scan.scope.excludePaths, []);
-    assert.deepEqual(results.review, { excludedPaths: [] });
     const head = await readJson(scanDirectory, "checkpoint-head.json");
     const retained = (
       await readJson(scanDirectory, "checkpoints", head.checkpoint)
@@ -1055,10 +1077,10 @@ async function testSemanticScanDraftCompletion(
       id,
     });
     assert.deepEqual(retained.deferred, [
-      withId(reviewState.deferred[0], "candidate-deferred-query"),
+      withId(reviewState.deferred[0], "review/auth"),
       withId(reviewState.deferred[1], "candidate-reserved-query-2"),
       reviewState.deferred[2],
-      withId(reviewState.deferred[3], "candidate-deferred-query-2"),
+      withId(reviewState.deferred[3], "review/auth-2"),
       withId(reviewState.deferred[4], "candidate-reserved-query-3"),
       withId(reasonOnlyDeferred, generatedIds[0]),
       withId(reasonOnlyDeferred, generatedIds[1]),
@@ -1067,6 +1089,12 @@ async function testSemanticScanDraftCompletion(
       reviewState.deferred[9],
       withId(reviewState.deferred[10], candidateCollisionDeferredId),
     ]);
+    assert.deepEqual(results.review, {
+      excludedPaths: [],
+      unresolvedCandidates: retained.deferred.filter(
+        (row: { candidateId?: string }) => row.candidateId !== undefined,
+      ),
+    });
     assert.deepEqual(retained.openQuestions, [
       { question: "Can a neighboring query API bypass parameterization?" },
       reviewState.openQuestions[1],

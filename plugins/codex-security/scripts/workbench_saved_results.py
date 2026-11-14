@@ -17,6 +17,14 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from candidate_identity import (
+    archive_candidate_payloads,
+    coverage_candidate_key,
+    finding_candidate_key,
+)
+from candidate_identity import (
+    unresolved_candidates as unresolved_candidates,
+)
 from finalize_scan_contract import (
     ContractError,
     ScanLocalIOError,
@@ -40,6 +48,7 @@ from finalize_scan_contract import (
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
+from workbench.retained_coverage import recoverable_findings
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
 )
@@ -71,6 +80,13 @@ from workbench.saved_sources import (
     _digest as _digest,
 )
 from workbench.storage import saved_deep_workers
+from workbench_budget_candidates import (
+    _diff_candidate_decision as _diff_candidate_decision,
+)
+from workbench_budget_candidates import (
+    preserve_budget_candidates,
+    recover_candidate_receipts,
+)
 from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
@@ -291,7 +307,10 @@ def _recovery_source_digests(
     paths = dict(_saved_result_paths(scan_dir, workers))
     recovery_sources = dict(frozen_sources or {})
     parent_context: dict[str, str] = {}
-    source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources, parent_context)
+    receipt_states: dict[str, Any] = {}
+    source_times = _frozen_source_times(
+        scan_dir, scan["id"], recovery_sources, parent_context, receipt_states=receipt_states
+    )
     for relative, expected_digest in recovery_sources.items():
         try:
             _, digest, observed = _read_saved_result(
@@ -334,7 +353,14 @@ def _recovery_source_digests(
     try:
         if snapshot_error is not None:
             raise snapshot_error
-        _freeze_source_times(scan_dir, scan["id"], recovery_sources, source_times, parent_context)
+        _freeze_source_times(
+            scan_dir,
+            scan["id"],
+            recovery_sources,
+            source_times,
+            parent_context,
+            receipt_states=receipt_states,
+        )
     except (ContractError, OSError) as exc:
         failure = _CheckpointSnapshotError(
             str(exc),
@@ -1445,7 +1471,7 @@ def budget_exhausted_draft(
     scan_dir: Path,
     candidates: list[dict[str, Any]],
     warning: str,
-) -> None:
+) -> list[str]:
     documents: dict[str, dict[str, Any]] = {}
     for name in ("scan-manifest.json", "findings.json"):
         path = db.artifact_path(scan_dir, name, required=False)
@@ -1499,66 +1525,40 @@ def budget_exhausted_draft(
             "deferred": [],
         }
 
-    findings_by_candidate = {
-        candidate_id
+    recovered_findings = [
+        (
+            finding,
+            recoverable_findings(scan_dir, scan["id"], {"targetId": scan["target_id"]}, [finding]),
+        )
         for finding in findings["findings"]
-        if isinstance(finding, dict)
-        and isinstance(candidate_id := finding_candidate_id(finding), str)
-    }
-    existing_deferred = {
-        item.get("candidateId", item.get("id"))
-        for item in coverage["deferred"]
-        if isinstance(item, dict) and isinstance(item.get("candidateId", item.get("id")), str)
-    }
-    existing_surfaces = {
-        item.get("id")
-        for item in coverage["surfaces"]
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-    for candidate in candidates:
-        candidate_id = candidate["candidate_id"]
-        if candidate_id in findings_by_candidate or candidate_id in existing_deferred:
+    ]
+    valid_findings = [finding for _, rows in recovered_findings for finding in rows]
+    receipt_warnings: list[str] = []
+    receipt_reopened: set[tuple[str | None, str]] = set()
+    recovered = recover_candidate_receipts(
+        {"reviewState": coverage}, scan_dir, receipt_warnings, reopened=receipt_reopened
+    )
+    assert recovered is not None
+    coverage = recovered["reviewState"]
+    dismissed = preserve_budget_candidates(
+        coverage, valid_findings, candidates, receipt_reopened=receipt_reopened
+    )
+    retained_findings = []
+    for original, rows in recovered_findings:
+        keys = {finding_candidate_key(finding) for finding in rows}
+        if not keys or not keys <= dismissed:
+            # Keep invalid records for the existing finalizer's recovery and warnings.
+            retained_findings.append(original)
             continue
-        paths = list(dict.fromkeys(location["path"] for location in candidate["locations"]))
-        surface_id = f"candidate-{candidate_id}"
-        validation = candidate.get("validation")
-        validation = validation.get("disposition") if isinstance(validation, dict) else None
-        attack = candidate.get("attack_path")
-        attack = attack.get("decision") if isinstance(attack, dict) else None
-        disposition = (
-            "needs_follow_up"
-            if validation == "deferred" or attack == "deferred"
-            else "not_applicable"
-            if validation == "not_applicable"
-            else "rejected"
-            if validation == "suppressed" or attack == "ignore"
-            else "needs_follow_up"
-        )
-        if surface_id not in existing_surfaces:
-            coverage["surfaces"].append(
-                {
-                    "id": surface_id,
-                    "label": candidate["summary"],
-                    "disposition": disposition,
-                    "notes": candidate["evidence"],
-                    "receiptRefs": [],
-                }
-            )
-            existing_surfaces.add(surface_id)
-        if disposition != "needs_follow_up":
-            continue
-        coverage["deferred"].append(
-            {
-                "id": candidate_id,
-                "candidateId": candidate_id,
-                "reason": (
-                    "Validation was deferred because the scan reached its cost limit: "
-                    f"{candidate['summary']}. Evidence: {candidate['evidence']}"
-                ),
-                "paths": paths,
-                "surfaceIds": [surface_id],
-            }
-        )
+        for field in ("surfaces", "explicitExclusions"):
+            for row in coverage[field]:
+                if (
+                    isinstance(row, dict)
+                    and row.get("disposition") in ("rejected", "not_applicable")
+                    and coverage_candidate_key(row) in keys
+                ):
+                    archive_candidate_payloads(row, [{"finding": original}])
+    findings["findings"] = retained_findings
     deferred_reason = "Validation was deferred because the scan reached its cost limit."
     limitations = manifest["scan"].setdefault("scope", {}).setdefault("limitations", [])
     if deferred_reason not in limitations:
@@ -1596,3 +1596,4 @@ def budget_exhausted_draft(
             )
         except (ContractError, OSError, TypeError, ValueError) as exc:
             raise SystemExit(f"Budget-exhausted scan draft could not be saved: {exc}") from exc
+    return receipt_warnings
