@@ -1015,14 +1015,14 @@ test("snapshot binding frames retain raw stdin and unset semantics while native 
   await writeFile(
     join(home, "config.toml"),
     windows +
-      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nGH_TOKEN="synthetic-policy-github"\nPGPASSWORD="synthetic-policy-password"\ngitlab_token="synthetic-policy-gitlab"\nAWS_SESSION_TOKEN="synthetic-policy-session"\nAWS_CONTAINER_AUTHORIZATION_TOKEN="synthetic-container-token"\nSNAPSHOT_USER_SET="preserved"\n',
+      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nGH_TOKEN="synthetic-policy-github"\nPGPASSWORD="synthetic-policy-password"\nDATABASE_URL="postgresql://fixture:synthetic@db.example.test/policy"\ngitlab_token="synthetic-policy-gitlab"\nAWS_SESSION_TOKEN="synthetic-policy-session"\nAWS_CONTAINER_AUTHORIZATION_TOKEN="synthetic-container-token"\nSNAPSHOT_USER_SET="preserved"\n',
   );
   const script = join(root, "inspect.cjs");
   await writeFile(
     script,
     `const fs=require("node:fs");
 if(process.argv.includes("bedrock")){fs.writeSync(1, JSON.stringify(Object.keys(process.env).filter(key=>/^AWS_/i.test(key))));process.exit(0);}
-fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,credentialKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN","GH_TOKEN","gitlab_token","GITHUB_TOKEN","GLAB_TOKEN","SSH_AUTH_SOCK","OPENAI_IDENTITY_TOKEN_FILE","OPENAI_FEDERATION_RULE_ID","PGPASSWORD"].filter(key=>key in process.env)})+"\\n");
+fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,credentialKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN","GH_TOKEN","gitlab_token","GITHUB_TOKEN","GLAB_TOKEN","SSH_AUTH_SOCK","OPENAI_IDENTITY_TOKEN_FILE","OPENAI_FEDERATION_RULE_ID","PGPASSWORD","DATABASE_URL"].filter(key=>key in process.env)})+"\\n");
 fs.writeSync(1, fs.readFileSync(0));
 if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.\\n");process.exitCode=17;}
 `,
