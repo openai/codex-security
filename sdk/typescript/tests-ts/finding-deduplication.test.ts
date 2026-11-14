@@ -1381,6 +1381,7 @@ test.each(
       expect(await pending).toEqual({
         scanId: manifest.scan.id,
         uniqueFindingIds: [group[0]],
+        scanRepresentativeFindingIds: [group[0]],
         duplicateGroups: [group],
         deduplicationStatus: "completed",
       });
@@ -1515,6 +1516,9 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
       expect(result).toEqual({
         scanId: "scan_example_001",
         uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+        scanRepresentativeFindingIds: document.findings.map(
+          (finding) => finding.findingId,
+        ),
         duplicateGroups: [],
         deduplicationStatus: "completed",
       });
@@ -1593,6 +1597,9 @@ test("deduplicates an explicit sealed scan directory without reading scan histor
     expect(result).toEqual({
       scanId: "scan_example_001",
       uniqueFindingIds: document.findings.map((finding) => finding.findingId),
+      scanRepresentativeFindingIds: document.findings.map(
+        (finding) => finding.findingId,
+      ),
       duplicateGroups: [],
       deduplicationStatus: "completed",
     });

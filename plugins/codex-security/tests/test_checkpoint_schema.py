@@ -13,7 +13,7 @@ import pytest
     "omitted_versions, legacy_checkpoint, main_reader",
     [
         ((), False, False),
-        ((57, 58, 59, 60), False, False),
+        ((57, 58, 59), False, False),
         ((), 47, False),
         ((), 47, True),
         ((), 48, False),
@@ -71,15 +71,20 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
         if main_reader:
             connection.execute(next(sql for version, _, sql in migrations if version == 47))
         connection.execute(
+            "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) "
+            "VALUES ('saved-target', 'target', 'Target', ?, ?)",
+            (timestamp, timestamp),
+        )
+        connection.execute(
             "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
             ("workspace", timestamp, timestamp),
         )
         for status in ("running", "failed"):
             connection.execute(
-                "INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, "
+                "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, scope, "
                 "mode, scan_dir, status, phase, started_at, created_at, updated_at, "
                 "failure_message, retained_source_digests_json) "
-                "VALUES (?, 'workspace', 'target', 'revision', '.', 'deep', ?, ?, "
+                "VALUES (?, 'workspace', 'saved-target', 'target', 'revision', '.', 'deep', ?, ?, "
                 "'discovery', ?, ?, ?, ?, ?)",
                 (
                     status,
@@ -157,10 +162,16 @@ def test_frozen_checkpoint_head_migration_preserves_scan_state(
                 ).fetchone()[:]
                 == original_checkpoint_migration[1:]
             )
-        applied_versions = connection.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        )
-        assert [row[0] for row in applied_versions] == [version for version, _, _ in migrations]
+        assert connection.execute(
+            "SELECT COUNT(*), MAX(version) FROM schema_migrations"
+        ).fetchone()[:] == (len(migrations), migrations[-1][0])
+        for version in (43, 44, 45, 46, 47):
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = ?", (version,)
+                ).fetchone()[0]
+                == 1
+            )
         assert connection.execute(
             "SELECT discovery_user_context_json FROM deep_scan_runs"
         ).fetchone()[0] == (context if legacy_checkpoint != 47 or main_reader else None)

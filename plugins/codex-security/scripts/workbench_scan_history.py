@@ -8,8 +8,9 @@ import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
+from fractions import Fraction
 from functools import cache
-from itertools import chain, groupby
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
@@ -25,17 +26,37 @@ from finalize_scan_contract import (
 from report_projection import SEVERITY_ORDER
 from review_state import review_state
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
-from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
 from workbench_target import (
-    git_output,
-    repository_origin,
     require_remediation_target,
     require_scan_target_identity,
     verified_windows_checkout,
 )
+from workbench_target_state import (
+    RepositoryIdentityCache,
+    _timestamp_ns,
+    repository_relative_path,
+    same_repository_worktree,
+    scan_repository_generation,
+)
 from workbench_validation import timestamp_key
+
+
+def reads_missing_history(args: argparse.Namespace, path: Path) -> bool:
+    """Select an in-memory database only for history reads on a fresh profile."""
+    if args.command not in {"list-scans", "list-repositories", "list-global-findings"} and not (
+        args.command == "get-scan" and not (args.request_id or args.action_token)
+    ):
+        return False
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        # The ordinary connection reports inaccessible storage.
+        pass
+    return False
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -58,6 +79,26 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def expected_coverage_mode(scan: sqlite3.Row) -> str:
+    """Return the coverage mode implied by the recorded scope, scan mode, and diff target kind."""
+    if scan["mode"] == "diff":
+        mode = {
+            "commit": "commit",
+            "range": "branch_diff",
+            "working_tree": "working_tree",
+        }.get(scan["diff_target_kind"])
+        if mode is None:
+            raise SystemExit("This migrated diff scan does not have a validated change set.")
+        return mode
+    if scan["scope"] != "." or (
+        "recipe_json" in scan.keys()
+        and scan["recipe_json"] is not None
+        and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
+    ):
+        return "scoped_path"
+    return "deep_repository" if scan["mode"] == "deep" else "repository"
+
+
 def preserve_sealed_completion(
     binding: dict[str, Any], manifest: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -74,6 +115,8 @@ def preserve_sealed_completion(
 
 
 def _windows_resume_checkout(scan: sqlite3.Row) -> Path:
+    from workbench_scan_start import scan_target_identity
+
     replaced = "Cannot resume: the original checkout is missing or was replaced."
     try:
         repository = require_remediation_target(scan["target_path"])
@@ -95,9 +138,10 @@ def cli_scan_resume(
     scan: sqlite3.Row,
     workspace: sqlite3.Row,
 ) -> dict[str, Any]:
+
     scan = scan_with_progress(connection, scan["id"])
-    if scan["mode"] != "deep" or scan["recipe_json"] is None:
-        raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
+    if scan["mode"] not in {"standard", "deep"} or scan["recipe_json"] is None:
+        raise SystemExit("Resume requires a Standard or Deep Scan with a saved CLI launch recipe.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
         raise SystemExit(
             "Resume requires a running scan; completed, failed, and canceled scans cannot resume."
@@ -124,6 +168,8 @@ def cli_scan_resume(
         except OSError as exc:
             raise SystemExit(f"Cannot verify the original Windows checkout: {exc}") from exc
     else:
+        from workbench_scan_start import scan_target_identity
+
         try:
             repository = require_scan_target_identity(scan)
         except SystemExit as exc:
@@ -263,61 +309,59 @@ def _windows_path_key(value: str) -> str:
     return os.path.normcase(os.path.realpath(value))
 
 
-def _requested_repository(connection: sqlite3.Connection, repository: Path) -> sqlite3.Row:
-    return connection.execute(
-        """
-        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = :path), '') AS target_id,
-            :path AS target_path
-        """,
-        {"path": str(repository)},
-    ).fetchone()
-
-
 def _same_repository(
+    connection: sqlite3.Connection,
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    read_git: Callable[..., str | None] | None = None,
+    identities: RepositoryIdentityCache | None = None,
 ) -> bool:
-    same_target = before["target_id"] is not None and before["target_id"] == after["target_id"]
-    if all(
-        "target_git_identity_json" in scan.keys() and scan["target_git_identity_json"] is not None
-        for scan in (before, after)
-    ):
-        before_identity = json.loads(before["target_git_identity_json"])
-        saved_after_identity = json.loads(after["target_git_identity_json"])
-        before_directory = before_identity.get("commonDirectoryIdentity")
-        after_directory = saved_after_identity.get("commonDirectoryIdentity")
-        before_origin, after_origin = before_identity["origin"], saved_after_identity["origin"]
-        if before_origin is not None and after_origin is not None:
-            # A replacement checkout can reuse its predecessor's directory inode.
-            # A remote rename requires explicit evidence before carrying decisions across origins.
-            return before_origin == after_origin
-        if before_directory is not None and after_directory is not None:
-            return before_directory == after_directory
-        return same_target or (
-            Path(before_identity["commonDirectory"])
-            == Path(saved_after_identity["commonDirectory"])
-        )
-    if same_target:
+    before_stored = scan_repository_generation(before)
+    after_stored = scan_repository_generation(after)
+    if before_stored is not None and before_stored == after_stored:
         return True
-    before_target = Path(before["target_path"])
-    after_target = Path(after["target_path"])
-    if before_target.resolve() == after_target.resolve():
-        return True
-    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    read_git = read_git or git_output
-    before_git_dir = read_git(before_target, *common_dir)
+    if before["target_id"] and before["target_id"] == after["target_id"]:
+        return before_stored is None or after_stored is None
+    identities = identities or RepositoryIdentityCache(connection)
+    before_state = identities.for_row(before)
+    after_state = identities.for_row(after)
     if (
-        before_git_dir is not None
-        and (after_git_dir := read_git(after_target, *common_dir)) is not None
-        and Path(before_git_dir).resolve() == Path(after_git_dir).resolve()
+        not before_state.ownership_matches
+        or not after_state.ownership_matches
+        or before_stored is not None
+        and before_stored != before_state.live_identity
+        or after_stored is not None
+        and after_stored != after_state.live_identity
     ):
+        return False
+    if (
+        before_state.resolved_path is not None
+        and before_state.resolved_path == after_state.resolved_path
+    ):
+        return before_stored is None or after_stored is None
+    if before_state.repository is None or after_state.repository is None:
+        if same_repository_worktree(Path(before_state.target_path), Path(after_state.target_path)):
+            return True
+        before_relative = repository_relative_path(Path(before_state.target_path))
+        after_relative = repository_relative_path(Path(after_state.target_path))
+        after_origin = identities.origin(after_state)
+        return (
+            before_relative is not None
+            and before_relative == after_relative
+            and after_origin is not None
+            and identities.origin(before_state) == after_origin
+        )
+    before_identity = before_state.live_identity
+    after_identity = after_state.live_identity
+    if before_identity is not None and before_identity == after_identity:
         return True
-    origin = ("remote", "get-url", "origin")
-    before_origin = repository_origin(read_git(before_target, *origin))
-    return before_origin is not None and before_origin == repository_origin(
-        read_git(after_target, *origin)
+    if before_identity is None or after_identity is None:
+        return False
+    after_origin = identities.origin(after_state)
+    return (
+        after_origin is not None
+        and identities.origin(before_state) == after_origin
+        and before_state.repository.relative_path == after_state.repository.relative_path
     )
 
 
@@ -416,24 +460,27 @@ def list_scans(
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
     clauses: list[str] = []
     values: list[Any] = []
+    worktree_order = ""
     if args is not None and args.repository:
-        repository = Path(args.repository).expanduser().resolve()
-        requested_repository = _requested_repository(connection, repository)
-        cached_git = cache(git_output)
-        related_target_ids = [
-            target["target_id"]
-            for target in connection.execute(
-                "SELECT id AS target_id, current_path AS target_path FROM security_targets"
-            )
-            if _same_repository(target, requested_repository, read_git=cached_git)
-        ]
-        repository_clauses = ["scans.target_path = ?"]
-        values.append(str(repository))
-        if related_target_ids:
-            placeholders = ", ".join("?" for _ in related_target_ids)
-            repository_clauses.append(f"scans.target_id IN ({placeholders})")
-            values.extend(related_target_ids)
-        clauses.append(f"({' OR '.join(repository_clauses)})")
+        repository = Path(args.repository).expanduser().absolute()
+        identities = RepositoryIdentityCache(connection)
+        repository = Path(identities.history_path(str(repository)))
+        clause, scope_values = identities.scope_for_path(str(repository)).sql(
+            supports_generation=identities.supports_generation
+        )
+        clauses.append(clause)
+        values.extend(scope_values)
+        if getattr(args, "prefer_worktree", False):
+
+            @cache
+            def in_worktree(target_path: str) -> bool:
+                try:
+                    return repository.samefile(target_path)
+                except OSError:
+                    return False
+
+            connection.create_function("in_worktree", 1, in_worktree)
+            worktree_order = "in_worktree(scans.target_path) DESC,"
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -480,7 +527,7 @@ def list_scans(
         f"""
         {SCAN_SUMMARY_QUERY}
         {where}
-        ORDER BY
+        ORDER BY {worktree_order}
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
             MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
             julianday(upper(scans.started_at)) DESC,
@@ -489,7 +536,11 @@ def list_scans(
         """,
         values,
     ).fetchall()
-    result = {"scans": [scan_summary(row) for row in rows[:limit]]}
+    scans = [scan_summary(row) for row in rows[:limit]]
+    if worktree_order:
+        for scan in scans:
+            scan["inCurrentWorktree"] = in_worktree(scan["targetPath"])
+    result = {"scans": scans}
     if limit is not None:
         result.update(
             {
@@ -499,6 +550,17 @@ def list_scans(
             }
         )
     return result
+
+
+def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, int | Fraction, str]:
+    sequence = scan["completion_sequence"] if "completion_sequence" in scan.keys() else None
+    if sequence is not None:
+        return (1, sequence, scan["id"])
+    completed_at = scan["completed_at"] if "completed_at" in scan.keys() else None
+    timestamp = _timestamp_ns(completed_at)
+    if timestamp is None:
+        timestamp = _timestamp_ns(scan["started_at"])
+    return (0, timestamp if timestamp is not None else 0, scan["id"])
 
 
 _FindingSites = dict[tuple[str, str | None, PurePosixPath, int, int], dict[str, Any] | None]
@@ -532,11 +594,14 @@ def _cross_mode_context(
     findings: dict[str, list[dict[str, Any]]],
     sites: dict[str, _FindingSites],
 ) -> dict[str, Any]:
-    # Different repository subdirectories can share both the Git revision and clean digest.
+    # The saved generation includes the relative target path in a linked worktree.
+    same_target = before["target_id"] is not None and before["target_id"] == after["target_id"]
+    if not same_target:
+        generation = scan_repository_generation(before)
+        same_target = generation is not None and generation == scan_repository_generation(after)
     if (
         {before["mode"], after["mode"]} != {"standard", "deep"}
-        or before["target_id"] is None
-        or before["target_id"] != after["target_id"]
+        or not same_target
         or before["target_revision"] != after["target_revision"]
         or before["target_snapshot_digest"] is None
         or before["target_snapshot_digest"] != after["target_snapshot_digest"]
@@ -563,49 +628,58 @@ def list_unmatched_scan_pairs(
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    repository = Path(args.repository).expanduser().resolve()
-    requested = _requested_repository(connection, repository)
-    selected = []
-    cached_git = cache(git_output)
-    membership: dict[tuple[str | None, str], bool] = {}
-    for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'"):
-        target = (scan["target_id"], scan["target_path"])
-        if target not in membership:
-            membership[target] = _same_repository(scan, requested, read_git=cached_git)
-        if membership[target]:
-            selected.append(scan)
+    requested_repository = Path(args.repository).expanduser().absolute()
+    repository = requested_repository.resolve()
+    identities = RepositoryIdentityCache(connection)
+    requested = identities.for_path(str(requested_repository))
+    if identities.supports_identity:
+        requested.require_owner()
+    clause, values = identities.scope_for_path(str(requested_repository)).sql(
+        supports_generation=identities.supports_generation
+    )
+    selected = connection.execute(
+        f"SELECT * FROM scans WHERE status = 'complete' AND {clause}",
+        values,
+    ).fetchall()
 
     selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
 
     available = []
-    for selected_index, scan in enumerate(selected):
+    for scan in selected:
         try:
             read_coverage(scan)
         except SystemExit:
             continue
-        available.append((selected_index, scan))
+        available.append(scan)
 
     saved_pairs = {
-        (row["before_scan_id"], row["after_scan_id"])
+        frozenset((row["before_scan_id"], row["after_scan_id"]))
         for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
     }
+    focus_scan_id = getattr(args, "after_scan_id", None)
+    if focus_scan_id is not None and not any(scan["id"] == focus_scan_id for scan in selected):
+        raise SystemExit("The scan to match is not a completed scan in this repository.")
+    if focus_scan_id is not None:
+        available.sort(key=_scan_completion_order)
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     sites: dict[str, _FindingSites] = {}
     known_links: list[sqlite3.Row] | None = None
-    for index, (selected_index, after) in enumerate(available):
-        comparable = [
+    for index, after in enumerate(available):
+        if focus_scan_id is not None and after["id"] != focus_scan_id:
+            continue
+        candidates = [
             before
-            for _, before in available[:index]
-            if _same_repository(before, after, read_git=cached_git)
+            for before in available[:index]
+            if _same_repository(connection, before, after, identities=identities)
         ]
         previous = [
             before
-            for before in comparable
-            if args.force or (before["id"], after["id"]) not in saved_pairs
+            for before in candidates
+            if args.force or frozenset((before["id"], after["id"])) not in saved_pairs
         ]
-        skipped += len(comparable) - len(previous)
+        skipped += len(candidates) - len(previous)
         if not previous:
             continue
         if known_links is None:
@@ -620,13 +694,18 @@ def list_unmatched_scan_pairs(
                 matching_findings[scan["id"]] = [
                     _matching_input(row) for row in _scan_findings(connection, scan["id"]).values()
                 ]
-        history = selected[: selected_index + 1]
-        excluded = [scan["id"] for scan in history if _saved_repository_conflict(scan, after)]
-        eligible_ids = {scan["id"] for scan in history} - set(excluded)
         known_groups = _known_finding_groups(
-            link
-            for link in known_links
-            if link["before_scan_id"] in eligible_ids and link["after_scan_id"] in eligible_ids
+            known_links,
+            {
+                scan["id"]
+                for scan in selected
+                if (
+                    _scan_completion_order(scan) <= _scan_completion_order(after)
+                    if focus_scan_id is not None
+                    else (timestamp_key(scan["started_at"]), scan["id"])
+                    <= (timestamp_key(after["started_at"]), after["id"])
+                )
+            },
         )
         batches.append(
             {
@@ -641,7 +720,6 @@ def list_unmatched_scan_pairs(
                     for before in previous
                 ],
                 **({"knownFindingGroups": known_groups} if known_groups else {}),
-                **({"excludedScanIds": excluded} if excluded else {}),
             }
         )
     return {
@@ -688,98 +766,16 @@ def _finding_aliases(links: Iterable[tuple[str, str]]) -> dict[str, str]:
     return {finding_id: root(finding_id) for finding_id in parents}
 
 
-def _known_finding_groups(links: Iterable[sqlite3.Row]) -> list[list[str]]:
+def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:
     aliases = _finding_aliases(
-        (link["before_finding_id"], link["after_finding_id"]) for link in links
+        (link["before_finding_id"], link["after_finding_id"])
+        for link in links
+        if link["before_scan_id"] in scan_ids and link["after_scan_id"] in scan_ids
     )
     groups: dict[str, list[str]] = {}
     for finding_id, identity in aliases.items():
         groups.setdefault(identity, []).append(finding_id)
     return sorted(sorted(group) for group in groups.values() if len(group) > 1)
-
-
-_EQUIVALENT_MATCH_REASON = (
-    "The findings share a vulnerability class and identical locations in the same reviewed content."
-)
-
-
-def _same_reviewed_content(before: sqlite3.Row, after: sqlite3.Row) -> bool:
-    required = ("mode", "target_revision", "target_snapshot_digest")
-    if any(column not in scan.keys() for scan in (before, after) for column in required):
-        return False
-    if before["target_revision"] == "unversioned":
-        if before["target_path"] != after["target_path"]:
-            return False
-    elif (
-        any(
-            field not in scan.keys() or scan[field] is None
-            for scan in (before, after)
-            for field in ("target_git_prefix", "target_git_identity_json")
-        )
-        or before["target_git_prefix"] != after["target_git_prefix"]
-        or any(
-            json.loads(scan["target_git_identity_json"]).get("commonDirectoryIdentity") is None
-            for scan in (before, after)
-        )
-    ):
-        return False
-    return (
-        before["mode"] != "diff"
-        and after["mode"] != "diff"
-        and before["target_revision"] == after["target_revision"]
-        and before["target_snapshot_digest"] is not None
-        and before["target_snapshot_digest"] == after["target_snapshot_digest"]
-    )
-
-
-def _rule_location_identities(
-    connection: sqlite3.Connection, findings: dict[str, sqlite3.Row]
-) -> dict[tuple[str, str, int, int, str], list[str]]:
-    identities: dict[tuple[str, str, int, int, str], list[str]] = {}
-    locations = _rows_for_ids(
-        connection,
-        """
-        SELECT occurrences.id AS occurrence_id, occurrences.finding_id,
-            findings.rule_id, findings.identity_instance, locations.relative_path,
-            locations.start_line, locations.end_line, locations.role
-        FROM finding_occurrences AS occurrences
-        JOIN findings ON findings.id = occurrences.finding_id
-        JOIN finding_locations AS locations ON locations.occurrence_id = occurrences.id
-        WHERE occurrences.id IN (SELECT value FROM json_each(?))
-        ORDER BY occurrences.id, locations.sort_order
-        """,
-        (row["id"] for row in findings.values()),
-    )
-    for occurrence_id, sites in groupby(locations, lambda row: row["occurrence_id"]):
-        row = min(sites, key=lambda site: _COMPARISON_LOCATION_RANK.get(site["role"], 2))
-        key = (
-            row["rule_id"],
-            row["relative_path"],
-            row["start_line"],
-            row["end_line"],
-            row["identity_instance"] or "",
-        )
-        identities.setdefault(key, []).append(occurrence_id)
-    return identities
-
-
-def _equivalent_finding_links(
-    connection: sqlite3.Connection,
-    before_findings: dict[str, sqlite3.Row],
-    after_findings: dict[str, sqlite3.Row],
-) -> list[tuple[str, str]]:
-    """Pair findings that unambiguously share a rule, primary location, and instance."""
-    before_keys = _rule_location_identities(connection, before_findings)
-    after_keys = _rule_location_identities(connection, after_findings)
-    return [
-        (before_ids[0], after_ids[0])
-        for key, before_ids in sorted(before_keys.items())
-        for after_ids in (after_keys.get(key, []),)
-        if len(before_ids) == 1
-        and len(after_ids) == 1
-        and before_findings[before_ids[0]]["finding_id"]
-        != after_findings[after_ids[0]]["finding_id"]
-    ]
 
 
 def compare_scans(
@@ -799,7 +795,7 @@ def compare_scans(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     cached = connection.execute(
         "SELECT result_json FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
@@ -816,7 +812,7 @@ def compare_scans(
                 f"'codex-security scans compare {after['id']} {before['id']}'."
             )
         raise SystemExit(
-            "No saved matches for these scans. Run 'codex-security scans match BEFORE AFTER' first."
+            "No saved matches for these scans. Run 'codex-security scans compare BEFORE AFTER' first."
         )
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)
@@ -827,88 +823,7 @@ def compare_scans(
     matches = json.loads(cached["result_json"]) if cached is not None else None
     saved_matches = matches["matches"] if matches is not None else []
     occurrences = before_findings | after_findings
-    excluded_scan_ids = _excluded_finding_history_scans(connection, occurrences, after)
-    aliases = _confirmed_finding_aliases(connection, occurrences, excluded_scan_ids)
-
-    def identity(row: sqlite3.Row) -> str:
-        return aliases.get(row["finding_id"], row["finding_id"])
-
-    before_identities = {identity(row) for row in before_findings.values()}
-    after_identities = {identity(row) for row in after_findings.values()}
-    # Deterministic links must preserve confirmed groups and explicit root-cause distinctions.
-    equivalent = [
-        (before_findings[previous], after_findings[current])
-        for previous, current in (
-            _equivalent_finding_links(connection, before_findings, after_findings)
-            if _same_reviewed_content(before, after)
-            else []
-        )
-        if identity(before_findings[previous]) not in after_identities
-        and identity(after_findings[current]) not in before_identities
-    ]
-    if equivalent:
-        related_pairs: set[frozenset[str]] = set()
-        linked_occurrences = _rows_for_ids(
-            connection,
-            "SELECT id, finding_id, scan_id FROM finding_occurrences "
-            "WHERE finding_id IN (SELECT value FROM json_each(?)) ORDER BY scan_id",
-            chain((row["finding_id"] for row in occurrences.values()), aliases),
-        )
-        for scan_id, rows in groupby(linked_occurrences, lambda row: row["scan_id"]):
-            if scan_id in excluded_scan_ids:
-                continue
-            finding_ids = {row["id"]: row["finding_id"] for row in rows}
-            for occurrence_id, relations in finding_relations(
-                connection, scan_id, finding_ids, aliases=aliases
-            ).items():
-                finding_id = finding_ids[occurrence_id]
-                related_pairs.update(
-                    frozenset(
-                        (
-                            aliases.get(finding_id, finding_id),
-                            aliases.get(pair["findingId"], pair["findingId"]),
-                        )
-                    )
-                    for pair in relations
-                    if pair["scanId"] not in excluded_scan_ids
-                )
-        equivalent = [
-            (previous, current)
-            for previous, current in equivalent
-            if frozenset((identity(previous), identity(current))) not in related_pairs
-        ]
-        combined = _finding_aliases(
-            chain(
-                aliases.items(), ((old["finding_id"], new["finding_id"]) for old, new in equivalent)
-            )
-        )
-        conflicts = {
-            combined.get(previous, previous)
-            for previous, current in related_pairs
-            if combined.get(previous, previous) == combined.get(current, current)
-        }
-        equivalent = [
-            (previous, current)
-            for previous, current in equivalent
-            if combined[previous["finding_id"]] not in conflicts
-        ]
-    if equivalent:
-        aliases = _finding_aliases(
-            chain(
-                aliases.items(), ((old["finding_id"], new["finding_id"]) for old, new in equivalent)
-            )
-        )
-        saved_matches = [
-            *saved_matches,
-            *(
-                {
-                    "beforeOccurrenceIds": [previous["id"]],
-                    "afterOccurrenceIds": [current["id"]],
-                    "reason": _EQUIVALENT_MATCH_REASON,
-                }
-                for previous, current in equivalent
-            ),
-        ]
+    aliases = _confirmed_finding_aliases(connection, occurrences)
     groups = _finding_groups(before_findings, after_findings, saved_matches, aliases)
     uncertain = (
         {
@@ -1015,18 +930,22 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
+        identities = RepositoryIdentityCache(connection)
         after_key = (timestamp_key(after["started_at"]), after["id"])
         known_scan_ids = {
             scan["id"]
             for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
             if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
-            and _same_repository(scan, after)
+            and _same_repository(connection, scan, after, identities=identities)
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
-            link
-            for link in _saved_finding_links(connection, known_scan_ids)
-            if (link["before_scan_id"], link["after_scan_id"]) not in excluded_pairs
+            [
+                link
+                for link in _saved_finding_links(connection, known_scan_ids)
+                if (link["before_scan_id"], link["after_scan_id"]) not in excluded_pairs
+            ],
+            known_scan_ids,
         )
         inputs = {
             before["id"]: [_matching_input(row) for row in before_findings.values()],
@@ -1056,7 +975,7 @@ def save_scan_comparison(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(before, after):
+    if not _same_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     read_coverage(after)
     allowed = {
@@ -1137,8 +1056,10 @@ def save_scan_comparison(
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "DELETE FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
-            (before["id"], after["id"]),
+            "DELETE FROM scan_comparisons "
+            "WHERE (before_scan_id = ? AND after_scan_id = ?) "
+            "OR (before_scan_id = ? AND after_scan_id = ?)",
+            (before["id"], after["id"], after["id"], before["id"]),
         )
         connection.execute(
             """
@@ -1186,8 +1107,8 @@ def _rows_for_ids(
         yield from connection.execute(query, (json.dumps(values),))
 
 
-# Follow indexed stable IDs, but exclude occurrences whose saved Git identity
-# rejects the selected repository: a replaced checkout can reuse path-derived IDs.
+# Stable finding IDs already include the target identity. Follow their indexed
+# occurrences instead of resolving repository paths or scanning every saved link.
 _FINDING_NEIGHBORS_SQL = """
     FROM linked
     CROSS JOIN finding_occurrences AS source
@@ -1197,16 +1118,13 @@ _FINDING_NEIGHBORS_SQL = """
     CROSS JOIN finding_occurrences AS neighbor ON neighbor.id = CASE
         WHEN matches.before_occurrence_id = source.id THEN matches.after_occurrence_id
         ELSE matches.before_occurrence_id END
-    WHERE source.scan_id NOT IN excluded_scans AND neighbor.scan_id NOT IN excluded_scans
 """
 # Traverse only the selected findings' components, including recurring stable IDs.
 _LINKED_FINDINGS_SQL = f"""
-    WITH RECURSIVE excluded_scans(scan_id) AS (SELECT value FROM json_each(?)),
-    linked(finding_id) AS (
+    WITH RECURSIVE linked(finding_id) AS (
         SELECT occurrences.finding_id
         FROM finding_occurrences AS occurrences
         WHERE occurrences.id IN (SELECT value FROM json_each(?))
-            AND occurrences.scan_id NOT IN excluded_scans
         UNION
         SELECT neighbor.finding_id
         {_FINDING_NEIGHBORS_SQL}
@@ -1214,38 +1132,8 @@ _LINKED_FINDINGS_SQL = f"""
 """
 
 
-def _saved_repository_conflict(before: sqlite3.Row, after: sqlite3.Row) -> bool:
-    return (
-        before["target_git_identity_json"] is not None
-        and after["target_git_identity_json"] is not None
-        and not _same_repository(before, after)
-    )
-
-
-def _excluded_finding_history_scans(
-    connection: sqlite3.Connection, occurrence_ids: Iterable[str], reference: sqlite3.Row
-) -> set[str]:
-    # Legacy history has no saved identity to reject. Preserve its indexed traversal
-    # without introducing live Git discovery for old or unavailable checkouts.
-    if reference["target_git_identity_json"] is None:
-        return set()
-    query = f"""
-        {_LINKED_FINDINGS_SQL}
-        SELECT DISTINCT scans.*
-        FROM linked
-        CROSS JOIN finding_occurrences AS occurrences
-            ON occurrences.finding_id = linked.finding_id
-        CROSS JOIN scans ON scans.id = occurrences.scan_id
-    """
-    return {
-        scan["id"]
-        for scan in connection.execute(query, ("[]", json.dumps(tuple(occurrence_ids))))
-        if _saved_repository_conflict(scan, reference)
-    }
-
-
 def _confirmed_finding_aliases(
-    connection: sqlite3.Connection, occurrence_ids: Iterable[str], excluded_scan_ids: set[str]
+    connection: sqlite3.Connection, occurrence_ids: Iterable[str]
 ) -> dict[str, str]:
     query = f"""
         {_LINKED_FINDINGS_SQL}
@@ -1255,9 +1143,7 @@ def _confirmed_finding_aliases(
     """
     return _finding_aliases(
         (row["before_finding_id"], row["after_finding_id"])
-        for row in connection.execute(
-            query, (json.dumps(sorted(excluded_scan_ids)), json.dumps(tuple(occurrence_ids)))
-        )
+        for row in _rows_for_ids(connection, query, occurrence_ids)
     )
 
 
@@ -1278,11 +1164,7 @@ def _separate_finding_pairs(
 
 
 def finding_relations(
-    connection: sqlite3.Connection,
-    scan_id: str,
-    occurrence_ids: Iterable[str],
-    *,
-    aliases: dict[str, str] | None = None,
+    connection: sqlite3.Connection, scan_id: str, occurrence_ids: Iterable[str]
 ) -> dict[str, list[dict[str, Any]]]:
     selected = set(occurrence_ids)
     if not selected:
@@ -1324,12 +1206,8 @@ def finding_relations(
         and occurrences[pair["afterOccurrenceId"]]["scan_id"] == pair["afterScanId"]
     ]
     result: dict[str, list[dict[str, Any]]] = {}
-    if aliases is None and pairs:
-        scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-        occurrence_ids = [pair["beforeOccurrenceId"] for pair in pairs]
-        excluded_scan_ids = _excluded_finding_history_scans(connection, occurrence_ids, scan)
-        aliases = _confirmed_finding_aliases(connection, occurrence_ids, excluded_scan_ids)
-    for pair in _separate_finding_pairs(pairs, occurrences, aliases or {}):
+    aliases = _confirmed_finding_aliases(connection, (pair["beforeOccurrenceId"] for pair in pairs))
+    for pair in _separate_finding_pairs(pairs, occurrences, aliases):
         finding = occurrences[pair["afterOccurrenceId"]]
         result.setdefault(pair["beforeOccurrenceId"], []).append(
             {
@@ -1343,11 +1221,44 @@ def finding_relations(
     return result
 
 
+def finding_management_updated_at(connection: sqlite3.Connection, scan_id: str) -> str | None:
+    return connection.execute(
+        """
+        SELECT MAX(updated_at)
+        FROM (
+            SELECT triage.updated_at
+            FROM finding_triage AS triage
+            JOIN finding_occurrences AS occurrences ON occurrences.id = triage.occurrence_id
+            WHERE occurrences.scan_id = ?
+            UNION ALL
+            SELECT remediation.updated_at
+            FROM finding_remediation_attempts AS remediation
+            JOIN finding_occurrences AS occurrences ON occurrences.id = remediation.occurrence_id
+            WHERE occurrences.scan_id = ?
+        )
+        """,
+        (scan_id, scan_id),
+    ).fetchone()[0]
+
+
+def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT status, close_reason, note, updated_at FROM finding_triage WHERE occurrence_id = ?",
+        (occurrence_id,),
+    ).fetchone()
+    if row is None:
+        return {"status": "open"}
+    return {
+        "closeReason": row["close_reason"],
+        "note": row["note"],
+        "status": row["status"],
+        "updatedAt": row["updated_at"],
+    }
+
+
 def finding_matches(
     connection: sqlite3.Connection, occurrence_id: str, scan_id: str, started_at: str
 ) -> tuple[list[dict[str, Any]], str, list[str]]:
-    scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-    excluded_scan_ids = _excluded_finding_history_scans(connection, (occurrence_id,), scan)
     rows = connection.execute(
         """
         SELECT matches.after_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
@@ -1365,9 +1276,9 @@ def finding_matches(
         """,
         (occurrence_id, occurrence_id),
     ).fetchall()
-    rows = [row for row in rows if row["scan_id"] not in excluded_scan_ids]
     linked_rows = list(
-        connection.execute(
+        _rows_for_ids(
+            connection,
             f"""
             {_LINKED_FINDINGS_SQL}
             SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
@@ -1376,9 +1287,8 @@ def finding_matches(
             CROSS JOIN finding_occurrences AS occurrences
                 ON occurrences.finding_id = linked.finding_id
             CROSS JOIN scans ON scans.id = occurrences.scan_id
-            WHERE scans.id NOT IN excluded_scans
             """,
-            (json.dumps(sorted(excluded_scan_ids)), json.dumps((occurrence_id,))),
+            (occurrence_id,),
         )
     )
     known_scans = sorted(

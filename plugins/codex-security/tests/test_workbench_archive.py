@@ -299,6 +299,8 @@ def test_generate_waits_for_the_archive_transaction(
             if sql.startswith("UPDATE scans SET scan_dir"):
                 moved.set()
                 assert finish_archive.wait(10)
+                if rollback:
+                    raise sqlite3.OperationalError("fixture archive rollback")
             return result
 
     def archive():
@@ -313,10 +315,10 @@ def test_generate_waits_for_the_archive_transaction(
                 recipe_json=recipe(target),
                 recipe_json_stdin=False,
                 registration_json_stdin=False,
-                parent_scan_id=str(uuid.uuid4()) if rollback else None,
+                parent_scan_id=None,
             )
             if rollback:
-                with pytest.raises(SystemExit, match="not found"):
+                with pytest.raises(sqlite3.OperationalError, match="fixture archive rollback"):
                     workbench_api["register_cli_scan"](connection, args)
                 return output
             return Path(workbench_api["register_cli_scan"](connection, args)["archivedScanDir"])
