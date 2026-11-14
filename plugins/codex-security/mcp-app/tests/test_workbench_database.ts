@@ -1048,7 +1048,9 @@ test("recorded additive migrations restore missing columns and configured error 
   database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version, status, phase,
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
-  for (const version of [27, 28, 31, 32, 47, 54, 55, 58, 59, 60, 61])
+  for (const version of [
+    27, 28, 31, 32, 47, 54, 55, 57, 58, 59, 60, 61, 63, 73, 74, 75, 76, 77,
+  ])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
       .run(version, workbenchMigrations[version - 1].name);
@@ -1098,6 +1100,10 @@ test("recorded additive migrations restore missing columns and configured error 
     storedValue(database, "deep_scan_runs", "discovery_user_context_json"),
     null,
   );
+  database.exec(`SELECT discovery_user_context, finalization_input_json, usage_owner_json,
+      execution_settings_json FROM deep_scan_runs;
+    SELECT result_manifest_path, result_manifest_sha256, attempt FROM deep_scan_dedup_inputs;
+    SELECT 1 FROM deep_scan_attempts, deep_scan_attempt_sessions, deep_scan_merge_claims;`);
   database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
     discovery_user_context_json = '"Original discovery context"'`);
   applyMigrations(database);
@@ -1329,6 +1335,100 @@ test("retries an upgrade when another process holds the write lock beyond the bu
     await writer.terminate();
   }
 });
+
+for (const snapshot of [
+  "original",
+  "previous-main",
+  "before-repository-migrations",
+]) {
+  test(`${snapshot} Deep history preserves saved inputs and applies local embedding migrations`, (t) => {
+    const originalVersions = new Map([
+      ["preserve original deep scan discovery context", 44],
+      ["retain deep scan attempts and exact merge inputs", 45],
+      ["persist selected deep scan finalization input", 46],
+      ["freeze stopped scan checkpoint selections", 47],
+      ["bind original deep scan parent usage turn", 48],
+      ["bind original deep scan execution settings", 51],
+    ]);
+    let previousMain = 43;
+    if (snapshot === "before-repository-migrations") {
+      previousMain = 66;
+      originalVersions.clear();
+      for (const item of migrations.filter((entry) => entry.version >= 73))
+        originalVersions.set(item.name, item.version - 6);
+    } else if (snapshot === "previous-main") {
+      previousMain = 52;
+      // This preview followed main migration 52 and recorded its six extensions at 53–58.
+      let version = 53;
+      for (const name of originalVersions.keys())
+        originalVersions.set(name, version++);
+    }
+    const database = memory(t);
+    database.exec(`CREATE TABLE schema_migrations (
+    version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+    for (const item of migrations.filter(
+      (entry) =>
+        entry.version <= previousMain || originalVersions.has(entry.name),
+    )) {
+      for (const statement of item.statements) database.exec(statement);
+      database
+        .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
+        .run(originalVersions.get(item.name) ?? item.version, item.name);
+    }
+    insertScan(database);
+    database.exec(`INSERT INTO deep_scan_runs (scan_id, schema_version, workflow_version,
+    status, phase, workers, subagents, stop_after_no_new, max_discovery_runs,
+    discovery_user_context, finalization_input_json, usage_owner_json,
+    execution_settings_json, created_at, updated_at)
+    VALUES ('scan', 1, 'deep-scan-mcp/v1', 'running', 'discovery', 2, 0, 2, 10,
+      'original context', '{"result":"original"}', '{"turn":"original"}',
+      '{"model":"synthetic"}', 'created', 'updated')`);
+    const original = database.prepare("SELECT * FROM deep_scan_runs").get()!;
+
+    applyMigrations(database);
+
+    const upgraded = database.prepare("SELECT * FROM deep_scan_runs").get()!;
+    for (const [column, value] of Object.entries(original))
+      assert.deepEqual(upgraded[column], value, column);
+    assert.equal(upgraded.discovery_user_context_json, null);
+    assert.deepEqual(
+      database.prepare("SELECT * FROM local_finding_embeddings").all(),
+      [],
+    );
+    assert.ok(
+      database
+        .prepare("PRAGMA table_info(finding_embeddings)")
+        .all()
+        .some((row) => row.name === "cache_key"),
+    );
+    assert.ok(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'invalidate_local_finding_embedding'",
+        )
+        .get(),
+    );
+    const recorded = database
+      .prepare("SELECT * FROM schema_migrations ORDER BY version")
+      .all();
+    assert.deepEqual(
+      recorded.map((row) => [row.version, row.name]),
+      migrations.map((item) => [item.version, item.name]),
+    );
+    assert.ok(
+      recorded
+        .filter((row) => originalVersions.has(String(row.name)))
+        .every((row) => row.applied_at === "original"),
+    );
+    applyMigrations(database);
+    assert.deepEqual(
+      database
+        .prepare("SELECT * FROM schema_migrations ORDER BY version")
+        .all(),
+      recorded,
+    );
+  });
+}
 
 function pythonMigrations(databasePath: string, through?: number): void {
   const result = spawnSync(
@@ -1691,6 +1791,9 @@ with sqlite3.connect(sys.argv[2]) as connection:
           name !== "external_finding_imports" &&
           name !== "external_finding_import_members" &&
           name !== "external_finding_publications" &&
+          name !== "deep_scan_attempts" &&
+          name !== "deep_scan_attempt_sessions" &&
+          name !== "deep_scan_merge_claims" &&
           name !== "sqlite_sequence",
       )
       .map(([name, rows]) => {
@@ -1764,6 +1867,12 @@ with sqlite3.connect(sys.argv[2]) as connection:
     initialized.prepare("SELECT * FROM external_source_reports").all(),
     [],
   );
+  for (const table of [
+    "deep_scan_attempts",
+    "deep_scan_attempt_sessions",
+    "deep_scan_merge_claims",
+  ])
+    assert.deepEqual(initialized.prepare(`SELECT * FROM "${table}"`).all(), []);
   assertMigrationNames(initialized, 53);
   assert.equal(
     initialized

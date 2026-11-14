@@ -26,6 +26,10 @@ export const {
       );
 
 export const {
+  WorkbenchDeepScanStore,
+  captureDeepScanExecutionSettings,
+  loadDeepScanExecutionSettings,
+  restoredDeepScanWorkerSettings,
   resolveCodexPath,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,

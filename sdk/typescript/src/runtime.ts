@@ -2015,18 +2015,16 @@ export async function preparePersistentOutputRoot(
 }
 
 const WORKBENCH_ARGUMENTS_PROGRAM = String.raw`
-import json, sys
-sys.argv[2:] = json.loads(sys.stdin.buffer.readline())
+import json, runpy, sys
+sys.argv = [sys.argv[1], *json.loads(sys.stdin.buffer.readline())]
 `;
-const WORKBENCH_SCRIPT_PROGRAM = String.raw`
-import runpy, sys
-sys.argv = sys.argv[1:]
-runpy.run_path(sys.argv[0], run_name="__main__")
-`;
+const WORKBENCH_SCRIPT_PROGRAM =
+  'runpy.run_path(sys.argv[0], run_name="__main__")';
+const VALIDATED_DRAFT_PROGRAM =
+  'runpy.run_path(sys.argv[0])["main"](framed_input=True)';
 
 const WORKBENCH_REGISTRATION_PROGRAM = String.raw`
-import os, runpy, sys
-sys.argv = sys.argv[1:]
+import os
 def before_output_change():
     with os.fdopen(3, "r+b", buffering=0) as control:
         control.write(b"?")
@@ -2102,6 +2100,11 @@ export async function runWorkbench(
       : undefined;
     // Validate one JSON document before framing its unchanged source as payload.
     if (nativeLocalDedupe && input !== undefined) JSON.parse(input);
+    const pythonProgram = registrationHandshake
+      ? WORKBENCH_REGISTRATION_PROGRAM
+      : arguments_[0] === "write-scan-draft" && input !== undefined
+        ? VALIDATED_DRAFT_PROGRAM
+        : WORKBENCH_SCRIPT_PROGRAM;
     const result = await runCodexCommand(
       { command },
       native
@@ -2112,10 +2115,7 @@ export async function runWorkbench(
             "utf8",
             "-B",
             "-c",
-            WORKBENCH_ARGUMENTS_PROGRAM +
-              (registrationHandshake
-                ? WORKBENCH_REGISTRATION_PROGRAM
-                : WORKBENCH_SCRIPT_PROGRAM),
+            WORKBENCH_ARGUMENTS_PROGRAM + pythonProgram,
             script,
           ],
       pluginHelperEnvironment({
@@ -4357,6 +4357,7 @@ export async function runCodexCommand(
         : ["pipe", "pipe", "pipe"],
       windowsHide: true,
       signal: commandSignal,
+      ...(cwd === undefined ? {} : { cwd }),
     },
   );
   let stdout = "";
@@ -4453,11 +4454,14 @@ export async function probeCodexSandbox(
         // Campaign tool selection happens before the sandbox process starts.
         signal?.throwIfAborted();
         timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
+        timeout.throwIfAborted();
         return signal === undefined
           ? timeout
           : AbortSignal.any([signal, timeout]);
       },
     );
+    signal?.throwIfAborted();
+    timeout?.throwIfAborted();
     if (result.success) return;
     detail =
       result.stderr.trim() ||

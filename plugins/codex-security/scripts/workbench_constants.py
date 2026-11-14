@@ -2,6 +2,7 @@
 
 import argparse
 
+DEEP_SCAN_WORKFLOW_VERSION = "deep-security-scan/v2"
 MODES = ("diff", "standard", "deep")
 DIFF_TARGET_KINDS = ("working_tree", "commit", "range")
 PHASES = ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting")

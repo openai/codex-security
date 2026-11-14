@@ -63,6 +63,9 @@ describe("Codex sandbox probe", () => {
           (error: Error) => error,
         );
         expect(failure).toBeInstanceOf(SandboxUnavailableError);
+        await expect(readFile(`${command}.args`)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
         expect(failure?.cause).toBeDefined();
         expect(failure?.message).toContain("timed out");
         expect(failure?.message).not.toContain("user namespaces");

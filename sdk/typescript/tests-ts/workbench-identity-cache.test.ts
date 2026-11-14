@@ -249,7 +249,7 @@ with ExitStack() as stack:
     # untrusted drive, so keep the fixture in a private directory under the profile.
     root = Path(stack.enter_context(TemporaryDirectory(
         prefix="workbench-identity-", dir=Path.home() if os.name == "nt" else None,
-    )))
+    ))).resolve()
     stack.enter_context(patch.object(Path, "resolve", resolve_path))
     stack.enter_context(patch.object(Path, "stat", stat_path))
     stack.enter_context(patch.object(Path, "lstat", lstat_path))
@@ -1237,9 +1237,9 @@ with ExitStack() as stack:
             add_target(name, stored, live, relative="service" if name == "scope" else ".")
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
         missing.add(paths["removed"])
+        Path(paths["requested"]).mkdir()
         scan_dir = root / "scan-output"
-        original_iterdir = Path.iterdir
-        stack.enter_context(patch.object(Path, "iterdir", lambda path: iter(()) if path == scan_dir else original_iterdir(path)))
+        scan_dir.mkdir()
         stack.enter_context(patch.object(workbench, "require_target", return_value=Path(paths["requested"])))
         stack.enter_context(patch.object(workbench, "require_scannable_target"))
         stack.enter_context(patch.object(workbench, "require_canonical_scan_directory", return_value=scan_dir))

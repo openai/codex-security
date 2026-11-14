@@ -433,6 +433,15 @@ outside that limit. With a cost limit, completing the scan requires verifiable
 usage for the scan and its workers. Matching earlier findings can also make model calls.
 See [progress and cost](cli.md#progress-and-cost) for accounting and budget callbacks.
 
+New Deep scans preserve the selected aggregate and original terminal reason through
+publication and completion retries. Resuming a selected result reuses accepted
+findings instead of starting another discovery or reducer run; older scans keep
+their recorded workflow. Remaining workers use their recorded execution settings,
+while authentication continues to use the original configured account.
+Saved execution attribution and recorded worker homes let resumed usage and
+session logs retain their original scan membership. A known priced lower bound can
+still stop an explicit budget when another model's price is unavailable.
+
 ### Validate an existing finding
 
 `validate()` sends the finding to your configured model provider. The model's

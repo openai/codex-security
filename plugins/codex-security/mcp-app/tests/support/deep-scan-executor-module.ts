@@ -8,6 +8,9 @@ const executorSource = new URL(
   import.meta.url,
 );
 export const executor = await importModule({
+  banner: {
+    js: `const require = process.getBuiltinModule("node:module").createRequire(${JSON.stringify(executorSource.href)});`,
+  },
   define: {
     "import.meta.url": JSON.stringify(executorSource.href),
   },
@@ -15,6 +18,8 @@ export const executor = await importModule({
     // Expose internal worker checks only to the test fixtures.
     contents: `${await readFile(executorSource, "utf8")}
 export { snapshotWorkerEnvironment, appendItemDiagnostic, bindCodexExecutable, verifyBoundCodexExecutable };
+export * from "./recovery-settings.js";
+export { WorkbenchDeepScanStore } from "./store.js";
 export { parseDeepScan } from "./response.js";`,
     loader: "ts",
     resolveDir: path.dirname(fileURLToPath(executorSource)),

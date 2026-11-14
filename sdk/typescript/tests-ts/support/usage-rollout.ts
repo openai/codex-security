@@ -201,11 +201,13 @@ export async function writeSession(
     cwd,
     timestamp,
     parentField = "source",
+    trailingRecord = "",
   }: {
     parent?: string;
     cwd?: string;
     timestamp?: string;
     parentField?: SessionParentField;
+    trailingRecord?: string;
   } = {},
 ): Promise<string> {
   const directory = join(home, "sessions", "2026", "07", "26");
@@ -230,7 +232,7 @@ export async function writeSession(
           info: { total_token_usage: usage },
         },
       }),
-      "",
+      trailingRecord,
     ].join("\n"),
   );
   return path;

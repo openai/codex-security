@@ -1,5 +1,6 @@
 /// <reference lib="es2023.array" />
-import { randomUUID } from "node:crypto";
+import { emptyDeadlineDraft, publishSelectedDeepScan } from "./finalization.js";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import {
@@ -25,13 +26,13 @@ import {
   type ScanUnion,
 } from "./artifact-validation.js";
 import {
-  scanDraftInputSchema,
   type DeepScanPublication,
   findingsWithinScope,
   type ScanDraftInput,
 } from "../artifact-scan-draft.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import { DeepScanWorkerRunner } from "./worker-runner.js";
+import { isTransientPersistenceError } from "./store.js";
 import type { AcceptedDiscovery, DiscoveryOutcome } from "./worker-runner.js";
 import {
   confirmedOwnershipChange,
@@ -55,8 +56,10 @@ import type {
 const RETRY_DELAYS_MS = [60_000, 180_000, 540_000] as const;
 const COORDINATOR_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_DISCOVERY_TIMEOUT_HOURS = 96;
-const NO_REVIEW_BEFORE_DEADLINE =
-  "The configured discovery time limit elapsed before any source review completed.";
+
+function acceptedResult(path?: string, sha256?: string) {
+  return path && sha256 ? { path, sha256 } : undefined;
+}
 
 interface LoopResult {
   reason: DeepScanTerminalReason;
@@ -95,6 +98,8 @@ export interface CoordinatorOptions {
     signal: AbortSignal,
     publication: DeepScanPublication,
   ) => Promise<void>;
+  /** Complete the enclosing scan after selected publication, before local waiters settle. */
+  onFinalized?: (run: DeepScanRunState, signal: AbortSignal) => Promise<void>;
   onStopped?: (run: DeepScanRunState) => Promise<void>;
   onStart?: (coordinator: DeepScanCoordinator) => void;
 }
@@ -125,6 +130,7 @@ export class DeepScanCoordinator {
   private canceled = false;
   private externallyFailed = false;
   private failurePersisted = false;
+  private parentPublicationPending = false;
   private setupComplete = false;
   private discoveryDeadlineReached = false;
   private state: DeepScanRunState;
@@ -173,7 +179,7 @@ export class DeepScanCoordinator {
     if (this.started) return;
     this.started = true;
     this.log({ event: "coordinator_started", scanId: this.state.scanId });
-    this.scheduleDiscoveryDeadline();
+    if (!this.state.finalizationInput) this.scheduleDiscoveryDeadline();
     this.scheduleHeartbeat();
     void this.run().catch((error: unknown) => {
       this.log({
@@ -286,6 +292,9 @@ export class DeepScanCoordinator {
     try {
       const parent = await readParentState();
       const parentStatus = parent.status;
+      // A committed parent can reject cancellation before the finalizer's reply arrives.
+      if (parentStatus === "complete" && this.parentPublicationPending)
+        await persistCancellation();
       if (parentStatus === "failed")
         this.failExternallyPersisted(parent.failureMessage);
       if (parentStatus === "canceled") this.cancel(reason);
@@ -296,7 +305,8 @@ export class DeepScanCoordinator {
       ) {
         // Terminal discovery has no active writers to stop. Keep its outcome
         // until the parent actually accepts cancellation.
-        if (this.state.status === "running") this.cancel(reason);
+        if (this.state.status === "running" || this.parentPublicationPending)
+          this.cancel(reason);
         await this.cancellationReady.promise;
         if (!this.failurePersisted) {
           try {
@@ -351,11 +361,18 @@ export class DeepScanCoordinator {
   }
 
   private async run(): Promise<void> {
+    let finalizationFailure: { error: unknown } | undefined;
+    let selectingFinalization = false;
     try {
       // A replacement coordinator must honor a worker failure committed before handoff.
       if (this.state.error) throw new Error(this.state.error);
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
+
+      if (this.state.finalizationInput) {
+        await this.completeSelectedFinalization();
+        return;
+      }
 
       if (this.options.checkFreshTarget && isFreshRun(this.state)) {
         await this.options.checkFreshTarget(
@@ -369,18 +386,26 @@ export class DeepScanCoordinator {
       const loopResult = await this.runIterations();
       if (this.canceled || this.externallyFailed) return;
       this.abortController.signal.throwIfAborted();
+      if (this.state.workflowVersion === "deep-security-scan/v2") {
+        if (!this.options.store.selectFinalization)
+          throw new Error(
+            "The Deep Scan store cannot select finalization input.",
+          );
+        selectingFinalization = true;
+        this.state = await this.options.store.selectFinalization({
+          scanId: this.state.scanId,
+          reason: loopResult.reason,
+          manifestPath: join(this.state.scanDir, "scan-manifest.json"),
+          resultPath: loopResult.resultPath,
+          omittedWorkerIds: [],
+        });
+        selectingFinalization = false;
+        await this.completeSelectedFinalization();
+        return;
+      }
       const draft = loopResult.result
         ? scanUnionToDraft(loopResult.result)
-        : scanDraftInputSchema.parse({
-            scanId: this.state.scanId,
-            findings: [],
-            scope: { limitations: [NO_REVIEW_BEFORE_DEADLINE] },
-            reviewState: {
-              surfaces: [],
-              explicitExclusions: [],
-              deferred: [{ reason: NO_REVIEW_BEFORE_DEADLINE }],
-            },
-          });
+        : emptyDeadlineDraft(this.state.scanId);
       if (draft.scanId !== this.state.scanId) {
         throw new Error(
           "Deep Scan aggregate does not match its authoritative scan identity.",
@@ -409,16 +434,33 @@ export class DeepScanCoordinator {
       });
       if (this.canceled || this.externallyFailed) return;
       this.state = completed;
-      this.log({
-        event: "coordinator_terminal",
-        scanId: this.state.scanId,
-        reason: loopResult.reason,
-      });
+      await this.completeParentPublication(loopResult.reason);
     } catch (error) {
+      const cancellationPendingAtFailure =
+        this.cancellationPersistence !== undefined;
       if (this.canceled || this.externallyFailed) {
         return;
       }
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
+        return;
+      }
+      if (
+        this.state.finalizationInput ||
+        (selectingFinalization && isTransientPersistenceError(error))
+      ) {
+        // A lost selection response may hide a committed input even when the
+        // ownership read also fails. Leave that selection attempt resumable.
+        // Publication can be retried from the committed input without model work.
+        this.log({
+          event: "coordinator_publication_pending",
+          scanId: this.state.scanId,
+          reason: errorKind(error),
+        });
+        if (cancellationPendingAtFailure) {
+          finalizationFailure = { error };
+        } else if (this.stopLocally()) {
+          this.terminalResult.reject(error);
+        }
         return;
       }
       if (
@@ -556,11 +598,77 @@ export class DeepScanCoordinator {
       }
       if (this.canceled && !this.failurePersisted)
         this.state = { ...this.state, status: "canceled" };
-      if (this.stopLocally())
-        this.terminalResult.resolve(cloneState(this.state));
+      if (this.stopLocally()) {
+        if (finalizationFailure && !this.canceled && !this.externallyFailed)
+          this.terminalResult.reject(finalizationFailure.error);
+        else this.terminalResult.resolve(cloneState(this.state));
+      }
     }
   }
 
+  private async completeSelectedFinalization(): Promise<void> {
+    this.state = await publishSelectedDeepScan({
+      run: this.state,
+      artifacts: this.artifacts,
+      signal: this.publicationAbortController.signal,
+      publish: async (...args) => {
+        await this.options.onComplete?.(...args);
+      },
+      finish: async (input) => {
+        try {
+          return await this.options.store.finish(input);
+        } catch (error) {
+          // The terminal mutation may commit even when every retry loses its
+          // response. Recover our committed run so parent finalization still runs.
+          const current = this.options.threadId
+            ? await this.options.store
+                .get(this.state.scanId, this.options.threadId)
+                .catch(() => undefined)
+            : undefined;
+          if (
+            !this.publicationAbortController.signal.aborted &&
+            current?.status === "succeeded" &&
+            current.coordinatorGeneration ===
+              this.state.coordinatorGeneration &&
+            current.finalizationInput?.resultPath ===
+              this.state.finalizationInput?.resultPath &&
+            current.finalizationInput?.resultSha256 ===
+              this.state.finalizationInput?.resultSha256 &&
+            current.finalizationInput?.selectedAt ===
+              this.state.finalizationInput?.selectedAt &&
+            current.manifestPath === input.manifestPath &&
+            current.terminalReason === input.reason
+          )
+            return current;
+          throw error;
+        }
+      },
+    });
+    if (!this.canceled && !this.externallyFailed)
+      await this.completeParentPublication();
+  }
+
+  private async completeParentPublication(
+    reason = this.state.terminalReason,
+  ): Promise<void> {
+    if (this.options.onFinalized) {
+      this.parentPublicationPending = true;
+      try {
+        await this.options.onFinalized(
+          cloneState(this.state),
+          this.publicationAbortController.signal,
+        );
+      } finally {
+        this.parentPublicationPending = false;
+      }
+    }
+    if (!this.canceled && !this.externallyFailed)
+      this.log({
+        event: "coordinator_terminal",
+        scanId: this.state.scanId,
+        reason: reason ?? undefined,
+      });
+  }
   private stopLocally(): boolean {
     if (this.terminal) return false;
     this.terminal = true;
@@ -659,7 +767,8 @@ export class DeepScanCoordinator {
   ): Promise<boolean> {
     if (this.externallyFailed || this.terminal || !threadId)
       return this.externallyFailed;
-    let current = confirmedOwnershipChange(error, this.state.scanId)?.run;
+    const ownershipChange = confirmedOwnershipChange(error, this.state.scanId);
+    let current = ownershipChange?.run;
     try {
       current ??= await this.options.store.get(this.state.scanId, threadId);
       this.failurePersisted ||= current.status === "failed";
@@ -673,11 +782,30 @@ export class DeepScanCoordinator {
     }
     if (this.externallyFailed || this.terminal) return this.externallyFailed;
     const replacementConfirmed =
-      current.status === "running" &&
-      current.coordinatorGeneration !== undefined &&
-      this.state.coordinatorGeneration !== undefined &&
-      current.coordinatorGeneration > this.state.coordinatorGeneration;
-    if (current.status === "running" && !replacementConfirmed) return false;
+      ownershipChange !== undefined ||
+      (current.status === "running" &&
+        current.coordinatorGeneration !== undefined &&
+        this.state.coordinatorGeneration !== undefined &&
+        current.coordinatorGeneration > this.state.coordinatorGeneration);
+    // finish-deep-scan commits before the enclosing scan's finalizer. Its own
+    // succeeded generation is still ours until that finalizer settles.
+    const completingSelectedParent =
+      current.status === "succeeded" &&
+      this.state.finalizationInput !== undefined &&
+      current.coordinatorGeneration === this.state.coordinatorGeneration;
+    if (
+      !replacementConfirmed &&
+      (current.status === "running" || completingSelectedParent)
+    ) {
+      // A selection response can be lost after its transaction commits.
+      if (current.finalizationInput)
+        this.state = {
+          ...this.state,
+          finalizationInput: current.finalizationInput,
+          terminalReason: current.terminalReason,
+        };
+      return false;
+    }
 
     this.externallyFailed = true;
     this.state = current;
@@ -725,7 +853,7 @@ export class DeepScanCoordinator {
         relative(this.artifacts.dedupRoot, resultPath).split(sep)[0]!,
         "dedup",
       );
-    let resultPath = persisted
+    const latestCheckpoint = persisted
       .flatMap((worker) =>
         worker.kind === "dedup" &&
         worker.status === "succeeded" &&
@@ -734,10 +862,12 @@ export class DeepScanCoordinator {
           : [],
       )
       .sort((a, b) => Number(checkpointNumber(b) - checkpointNumber(a)))[0];
-    const result = await this.restoreUnion(
-      resultPath,
+    const restored = await this.restoreUnion(
+      latestCheckpoint,
       accepted.filter((w) => merged.has(w.id)),
     );
+    const result = restored.result;
+    let resultPath = restored.resultPath;
     const scanLabel = await nextWorkerLabel(
       this.artifacts.workersRoot,
       "discovery",
@@ -766,7 +896,9 @@ export class DeepScanCoordinator {
       // in dispatch order, including failures before a later accepted worker.
       const lastMerged = accepted.findLast((worker) => merged.has(worker.id));
       const boundary = lastMerged
-        ? discoverySequence(dirname(lastMerged.resultPath))
+        ? discoverySequence(
+            lastMerged.artifactDir ?? dirname(lastMerged.resultPath),
+          )
         : -1n;
       const pending = persisted
         .filter(
@@ -812,12 +944,20 @@ export class DeepScanCoordinator {
           "output",
           "result.json",
         );
-        await writeJsonAtomic(resultPath, persistedScanUnion(result));
+        const bytes = await writeJsonAtomic(
+          resultPath,
+          this.state.workflowVersion === "deep-security-scan/v2"
+            ? result
+            : persistedScanUnion(result),
+        );
         const iterationId = randomUUID();
         const saved = await this.options.store.recordIteration({
           id: iterationId,
           scanId,
           workerIds: batch.map((w) => w.id),
+          validatedResultSha256: createHash("sha256")
+            .update(bytes)
+            .digest("hex"),
           resultPath,
           noNewStreak: streak,
           consecutiveErrors: errors,
@@ -861,7 +1001,15 @@ export class DeepScanCoordinator {
           !this.discoveryDeadlineReached && streak >= config.stopAfterNoNew
             ? "saturated"
             : "capped";
-        return { reason, result: resultPath ? result : undefined, resultPath };
+        const checkpoint = this.state.persistedWorkers?.find(
+          (worker) =>
+            worker.kind === "dedup" && worker.resultManifestPath === resultPath,
+        );
+        return {
+          reason,
+          result: resultPath ? result : undefined,
+          resultPath: checkpoint?.acceptedResultPath ?? resultPath,
+        };
       }
 
       const count = Math.min(
@@ -1009,22 +1157,46 @@ export class DeepScanCoordinator {
   private async restoreUnion(
     resultPath: string | undefined,
     merged: AcceptedDiscovery[],
-  ): Promise<ScanUnion> {
+  ): Promise<{ result: ScanUnion; resultPath?: string }> {
     if (!resultPath) {
       if (merged.length)
         throw new Error("Deep Scan is missing its saved iteration result.");
-      return { scanId: this.state.scanId, findings: [] };
+      return { result: { scanId: this.state.scanId, findings: [] } };
     }
-    await requireRegularFile(resultPath, this.artifacts.dedupRoot);
+    const checkpoint = this.state.persistedWorkers?.find(
+      (worker) =>
+        worker.kind === "dedup" && worker.resultManifestPath === resultPath,
+    );
+    const claim = this.state.persistedMergeClaims?.find(
+      (item) =>
+        item.previousWorkerId === checkpoint?.id &&
+        item.previousResultPath &&
+        item.previousResultSha256,
+    );
+    const reference =
+      acceptedResult(
+        checkpoint?.acceptedResultPath,
+        checkpoint?.acceptedResultSha256,
+      ) ??
+      acceptedResult(claim?.previousResultPath, claim?.previousResultSha256);
+    if (!reference)
+      throw new Error(
+        "Saved Deep Scan iteration is missing its accepted result digest.",
+      );
+    await requireRegularFile(reference.path, this.artifacts.dedupRoot);
     const result = parseStoredScanDraft(
-      await readJsonObject(resultPath),
+      await readJsonObject(reference.path, {
+        scanRoot: this.artifacts.scanDir,
+        sha256: reference.sha256,
+      }),
       "Saved Deep Scan iteration",
       this.state.scanId,
       parseScanUnion,
     );
-    for (const worker of merged)
-      addScanCoverage(result, worker, this.artifacts.scanDir);
-    return result;
+    if (!result.sourceCoverage)
+      for (const worker of merged)
+        addScanCoverage(result, worker, this.artifacts.scanDir);
+    return { result, resultPath: reference.path };
   }
 
   private async scanBatch(
@@ -1077,29 +1249,53 @@ export class DeepScanCoordinator {
     for (const worker of this.state.persistedWorkers ?? []) {
       if (worker.kind !== "discovery" || worker.status !== "succeeded")
         continue;
-      if (!worker.resultManifestPath || !worker.completionSequence) {
+      // Migrated workers can have frozen merge inputs without an attempt record.
+      const claimedInput = this.state.persistedDedupInputs?.find(
+        (input) =>
+          input.discoveryWorkerId === worker.id &&
+          (input.attempt === undefined || input.attempt === worker.attempt) &&
+          input.resultManifestPath &&
+          input.resultManifestSha256,
+      );
+      const reference =
+        acceptedResult(
+          worker.acceptedResultPath,
+          worker.acceptedResultSha256,
+        ) ??
+        acceptedResult(
+          claimedInput?.resultManifestPath,
+          claimedInput?.resultManifestSha256,
+        );
+      if (!reference || !worker.completionSequence) {
         throw new Error(
           `Accepted discovery ${worker.id} has incomplete persisted evidence.`,
         );
       }
       const result = await validateDiscoveryArtifacts(
         this.artifacts,
-        worker.resultManifestPath,
+        reference.path,
         this.state.scanId,
-        this.state,
-        "previously-accepted",
+        {
+          ...this.state,
+          accepted: true,
+          validateWriteups:
+            this.state.workflowVersion === "deep-security-scan/v2",
+          artifactDir: worker.artifactDir,
+          resultSha256: reference.sha256,
+        },
       );
       recovered.push({
         id: worker.id,
-        resultPath: worker.resultManifestPath,
+        artifactDir: worker.artifactDir,
+        resultPath: reference.path,
         result,
         attempt: worker.attempt,
       });
     }
     return recovered.sort((a, b) =>
       Number(
-        discoverySequence(dirname(a.resultPath)) -
-          discoverySequence(dirname(b.resultPath)),
+        discoverySequence(a.artifactDir ?? dirname(a.resultPath)) -
+          discoverySequence(b.artifactDir ?? dirname(b.resultPath)),
       ),
     );
   }

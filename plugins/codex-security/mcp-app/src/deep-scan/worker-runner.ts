@@ -1,8 +1,12 @@
+import {
+  auditEvidence,
+  runAcceptedAudit,
+} from "../../../../../sdk/typescript/src/accepted-audit.js";
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
-import { validateDiscoveryArtifacts } from "./artifact-validation.js";
+import { readDiscoveryAuditDraft } from "./artifact-validation.js";
 import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
@@ -31,6 +35,7 @@ import type {
 
 export interface AcceptedDiscovery {
   id: string;
+  artifactDir?: string;
   resultPath: string;
   result: ScanDraftInput;
   attempt?: number;
@@ -68,9 +73,11 @@ type WorkerAttemptOutcome =
   | {
       status: "failed";
       error: Error;
+      attempt?: number;
+      threadId?: string;
       replaceableFailureKind?: DeepScanReplaceableFailureKind;
     }
-  | { status: "canceled" };
+  | { status: "canceled"; attempt?: number; threadId?: string };
 
 /** Owns prompt rendering, retries, validation, and persistence for each worker. */
 export class DeepScanWorkerRunner {
@@ -124,6 +131,7 @@ export class DeepScanWorkerRunner {
       attempt: 1,
     });
     let discoveryResult: ScanDraftInput | undefined;
+    let validatedResultSha256: string | undefined;
     const outcome = await this.runWorkerWithRetries({
       workerId,
       workerLabel,
@@ -131,15 +139,21 @@ export class DeepScanWorkerRunner {
       promptRoot,
       artifactDir,
       validate: async () => {
-        discoveryResult = await validateDiscoveryArtifacts(
+        discoveryResult = await readDiscoveryAuditDraft(
           artifacts,
           resultPath,
           run.scanId,
-          run,
+          {
+            ...run,
+            onDigest: (digest) => {
+              validatedResultSha256 = digest;
+            },
+          },
         );
+        return discoveryResult;
       },
     });
-    if (!discoveryResult) {
+    if (!discoveryResult || discoveryResult.complete === false) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
@@ -171,6 +185,7 @@ export class DeepScanWorkerRunner {
         attempt: outcome.attempt,
         threadId: outcome.threadId,
         resultManifestPath: resultPath,
+        validatedResultSha256,
       });
       if (!persisted.completionSequence) {
         throw new Error(
@@ -205,7 +220,8 @@ export class DeepScanWorkerRunner {
       status: "succeeded",
       worker: {
         id: workerId,
-        resultPath,
+        artifactDir,
+        resultPath: persisted.acceptedResultPath ?? resultPath,
         result: discoveryResult!,
         attempt: persisted.attempt,
       },
@@ -218,7 +234,7 @@ export class DeepScanWorkerRunner {
     promptPath: string;
     promptRoot: string;
     artifactDir: string;
-    validate: () => Promise<void>;
+    validate: () => Promise<ScanDraftInput>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -233,7 +249,7 @@ export class DeepScanWorkerRunner {
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;
-      let terminalFailure: Promise<WorkerAttemptOutcome> | undefined;
+      let terminalFailure: Promise<Error> | undefined;
       const baseMutation: DeepScanWorkerMutation = {
         id: input.workerId,
         scanId: run.scanId,
@@ -332,93 +348,102 @@ export class DeepScanWorkerRunner {
         const resumePrompt = resumableThreadId
           ? (continuationPrompt ?? transientExecutionContinuation(attempt))
           : undefined;
-        const result = await this.options.executor.run({
-          attemptId,
-          workerUsageDirectory: run.workerUsageDirectory,
-          kind: "discovery",
-          promptPath: executionPromptPath,
-          workingDirectory: input.artifactDir,
-          subagents: run.config.subagents,
-          signal,
-          onNonRetryableError: (error) => {
-            if (signal.aborted || terminalFailure) return;
-            terminalFailure = this.options.store
-              .updateWorker({
-                ...baseMutation,
-                threadId: activeThreadId,
-                status: "failed",
-                error: deepScanErrorMessage(error),
-                terminalFailure: true,
-              })
-              .then(() => ({ status: "failed", error }));
-            // Await this write after executor cleanup, even if it rejects first.
-            void terminalFailure.catch(() => {});
-            this.options.onNonRetryableError?.(error);
-          },
-          resumeThreadId: resumableThreadId,
-          continuationPrompt:
-            resumePrompt && run.severityRubric
-              ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
-              : resumePrompt,
-          artifactContext: {
-            root: input.artifactDir,
-            layout: "worker",
-            discoveryBoard: {
-              root: this.options.artifacts.peerNotesRoot,
-              author: input.workerLabel,
+        const execute = async () => {
+          const result = await this.options.executor.run({
+            attemptId,
+            workerUsageDirectory: run.workerUsageDirectory,
+            kind: "discovery",
+            promptPath: executionPromptPath,
+            workingDirectory: input.artifactDir,
+            subagents: run.config.subagents,
+            signal,
+            onNonRetryableError: (error) => {
+              if (signal.aborted || terminalFailure) return;
+              terminalFailure = this.options.store
+                .updateWorker({
+                  ...baseMutation,
+                  threadId: activeThreadId,
+                  status: "failed",
+                  error: deepScanErrorMessage(error),
+                  terminalFailure: true,
+                })
+                .then(() => error);
+              // Await this write after executor cleanup, even if it rejects first.
+              void terminalFailure.catch(() => {});
+              this.options.onNonRetryableError?.(error);
             },
-          },
-          onAttribution: (value) => {
-            attribution = value;
-            logStarted();
-          },
-          onUsage: async (usage, turnId) => {
-            receipt.usage = usage;
-            receipt.turnId = turnId;
-            await persistUsage();
-          },
-          onThreadStarted: async (threadId) => {
-            logStarted();
-            activeThreadId = threadId;
-            lastThreadId = threadId;
-            receipt.threadId = threadId;
-            await this.options.store.updateWorker({
-              ...baseMutation,
-              threadId,
-            });
-            await persistUsage();
-            this.log({
-              event: "worker_thread_started",
-              scanId: run.scanId,
-              workerId: input.workerId,
-              kind: "discovery",
-              attempt,
-              threadId,
-            });
-          },
-        });
-        logStarted();
-        activeThreadId = result.threadId ?? activeThreadId;
-        receipt.threadId = activeThreadId;
-        receipt.turnId = result.turnId ?? receipt.turnId;
-        if (result.usage !== undefined) receipt.usage = result.usage;
-        if (terminalFailure) return terminalFailure;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
+            resumeThreadId: resumableThreadId,
+            continuationPrompt:
+              resumePrompt && run.severityRubric
+                ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
+                : resumePrompt,
+            artifactContext: {
+              root: input.artifactDir,
+              layout: "worker",
+              discoveryBoard: {
+                root: this.options.artifacts.peerNotesRoot,
+                author: input.workerLabel,
+              },
+            },
+            onAttribution: (value) => {
+              attribution = value;
+              logStarted();
+            },
+            onUsage: async (usage, turnId) => {
+              receipt.usage = usage;
+              receipt.turnId = turnId;
+              await persistUsage();
+            },
+            onThreadStarted: async (threadId) => {
+              logStarted();
+              activeThreadId = threadId;
+              lastThreadId = threadId;
+              receipt.threadId = threadId;
+              await this.options.store.updateWorker({
+                ...baseMutation,
+                threadId,
+              });
+              await persistUsage();
+              this.log({
+                event: "worker_thread_started",
+                scanId: run.scanId,
+                workerId: input.workerId,
+                kind: "discovery",
+                attempt,
+                threadId,
+              });
+            },
+          });
+          logStarted();
+          activeThreadId = result.threadId ?? activeThreadId;
+          receipt.threadId = activeThreadId;
+          receipt.turnId = result.turnId ?? receipt.turnId;
+          if (result.usage !== undefined) receipt.usage = result.usage;
+          await persistUsage();
+          return result;
+        };
+        const accept = async (result: Awaited<ReturnType<typeof execute>>) => {
+          if (terminalFailure) throw await terminalFailure;
+          validationStarted = true;
+          let accepted: ScanDraftInput;
+          try {
+            accepted = await input.validate();
+          } catch (validationError) {
+            throw withWorkerDiagnostics(validationError, result.diagnostics);
+          }
+          validationCompleted = accepted?.complete !== false;
+          return auditEvidence(accepted);
+        };
+        const audit = await runAcceptedAudit({ signal, execute, accept });
+        if (audit.status === "checkpoint") {
+          throw withWorkerDiagnostics(
+            new Error(
+              "Standard scan worker wrote only a checkpoint; its audit is not complete.",
+            ),
+            audit.execution.diagnostics,
+          );
         }
-        await persistUsage();
-        validationStarted = true;
-        try {
-          await input.validate();
-        } catch (validationError) {
-          throw withWorkerDiagnostics(validationError, result.diagnostics);
-        }
-        validationCompleted = true;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
+        const result = audit.execution;
         outcome = "validated";
         return {
           status: "validated",
@@ -429,7 +454,8 @@ export class DeepScanWorkerRunner {
       } catch (error) {
         finishedAt = this.options.clock.now();
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
-        if (terminalFailure) return terminalFailure;
+        if (terminalFailure)
+          return { status: "failed", error: await terminalFailure };
         if (signal.aborted) {
           outcome = "canceled";
           return await this.cancelAttempt(input, attempt, activeThreadId);
@@ -461,6 +487,8 @@ export class DeepScanWorkerRunner {
             status: "failed",
             error: normalized,
             ...(replaceableFailureKind ? { replaceableFailureKind } : {}),
+            attempt,
+            threadId: activeThreadId,
           };
         }
         await this.options.store.updateWorker({
@@ -543,14 +571,14 @@ export class DeepScanWorkerRunner {
     );
   }
 
-  private async cancelAttempt(
+  private async persistWorkerCancellation(
     input: Pick<
       Parameters<DeepScanWorkerRunner["runWorkerWithRetries"]>[0],
       "workerId" | "promptPath" | "artifactDir"
     >,
     attempt: number,
     threadId: string | undefined,
-  ): Promise<WorkerAttemptOutcome> {
+  ): Promise<void> {
     const coordinatorShutdown =
       this.options.signal.reason === "mcp_transport_closed";
     await this.options.store.updateWorker({
@@ -566,7 +594,23 @@ export class DeepScanWorkerRunner {
         ? { error: "coordinator_shutdown: mcp_transport_closed" }
         : {}),
     });
-    return { status: "canceled" };
+  }
+
+  private async cancelAttempt(
+    input: {
+      workerId: string;
+      promptPath: string;
+      artifactDir: string;
+    },
+    attempt: number,
+    threadId: string | undefined,
+  ): Promise<WorkerAttemptOutcome> {
+    await this.persistWorkerCancellation(input, attempt, threadId);
+    return {
+      status: "canceled",
+      attempt,
+      threadId,
+    };
   }
 }
 

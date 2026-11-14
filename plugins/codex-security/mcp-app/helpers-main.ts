@@ -35,7 +35,9 @@ import {
 } from "./src/helpers/json";
 import { decodeUtf8 } from "./src/helpers/utf8";
 
-// Importing the bundled parser does not invoke its CLI adapter.
+export { resumeSelectedDeepScan } from "./src/deep-scan/finalization.js";
+
+// Importing the bundled helper from the SDK does not invoke its CLI adapter.
 const entryPath = import.meta.url.startsWith("file:")
   ? fileURLToPath(import.meta.url)
   : import.meta.url;

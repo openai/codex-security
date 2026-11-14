@@ -1494,6 +1494,31 @@ test("a late cancel preserves a previously committed hosted failure", async () =
   ]);
 });
 
+test("SDK cancellation retains an unknown executor acceptance receipt", async () => {
+  const controller = new AbortController();
+  let requestId = "";
+  const executor = {
+    run: mock(async (request: ScanExecutionRequest) => {
+      requestId = request.requestId;
+      controller.abort();
+      await Promise.resolve();
+      throw new Error("Synthetic response lost after dispatch");
+    }),
+  };
+  const result = await runHostedScan(await fixture(), {
+    signal: controller.signal,
+    executor,
+  });
+  expect(executor.run).toHaveBeenCalledTimes(1);
+  expect(requestId).not.toBe("");
+  expect(result.status).toBe("acceptance_unknown");
+  expect(result.execution).toEqual({
+    requestId,
+    status: "acceptance_unknown",
+    message: "Synthetic response lost after dispatch",
+  });
+});
+
 test.each([
   { status: "completed" as const, sessionId: "known-session" },
   { status: "failed" as const, sessionId: undefined },

@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import zlib from "node:zlib";
 import { createInterface } from "node:readline";
 import { pipeline, type Transform } from "node:stream";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { bundledPluginRoot } from "./runtime.js";
 
@@ -49,13 +49,15 @@ export async function firstNativeSessionLine(
   }
 }
 
-async function sessionDecompressor(): Promise<Transform> {
+export async function sessionDecompressor(): Promise<Transform> {
   // Decode every concatenated frame and reject truncated tails. Native Node
   // Zstandard streams can finish successfully after only the first frame.
+  // The standalone MCP bundle replaces import.meta.url with its own filename.
+  const mcpDirectory = import.meta.url.startsWith("file:")
+    ? join(await bundledPluginRoot(), "mcp")
+    : dirname(import.meta.url);
   const decoder = (await import(
-    pathToFileURL(
-      join(await bundledPluginRoot(), "mcp", "session-decompression.mjs"),
-    ).href
+    pathToFileURL(join(mcpDirectory, "session-decompression.mjs")).href
   )) as { createZstdDecompress: () => Transform };
   return decoder.createZstdDecompress();
 }
