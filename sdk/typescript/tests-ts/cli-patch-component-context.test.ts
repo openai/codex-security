@@ -394,7 +394,7 @@ test.each([
               ] as const) {
                 const entry = context.environment[key]!;
                 if (process.platform === "win32")
-                  expect(entry).toBe(environment[key]);
+                  expect(entry).toBe(environment[key]!);
                 else {
                   expect(isAbsolute(entry)).toBe(true);
                   expect(basename(entry)).toBe(environment[key]!);
