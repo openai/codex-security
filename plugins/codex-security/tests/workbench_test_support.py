@@ -74,13 +74,15 @@ def read_review_state(state_dir: Path | sqlite3.Connection, scan_dir: Path) -> d
             "SELECT * FROM deep_scan_workers WHERE scan_id = ? ORDER BY created_at, id",
             (summary["id"],),
         ).fetchall()
+        binding = db.workbench_completion_binding(
+            connection, scan, summary["completedAt"], manifest
+        )
     if summary["status"] == "completed" and scan["mode"] == "deep":
         # Deep completion saves the accepted parent aggregate before sealing,
         # including deadline recovery's validated records and pending tasks.
         head = json.loads((scan_dir / "checkpoint-head.json").read_text())
         checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
         return review.review_state({**summary, "reviewState": checkpoint["reviewState"]})
-    binding = db.workbench_completion_binding(scan, summary["completedAt"], manifest)
     # This read-only helper reconstructs bookkeeping rather than reusing a sealed publication.
     binding["status"] = "inspect-retained-review"
     documents = saved.merge_saved_results(

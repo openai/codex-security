@@ -123,6 +123,7 @@ EXPECTED_MIGRATIONS = [
     (73, "preserve finding decision append chronology"),
     (74, "bind new finding decisions to admitted scans"),
     (75, "record first scan result admission order"),
+    (76, "record scan and worker instruction digests"),
 ]
 
 
@@ -1419,6 +1420,8 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
             "log_completed_at": None,
             "windows_resume_output_identity": None,
             "windows_resume_target_identity": None,
+            "instruction_digest": None,
+            "prepared_instruction_digests_json": None,
             "repository_generation": None,
             "completion_sequence": 1 if row["status"] == "complete" else None,
         }

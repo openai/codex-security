@@ -274,7 +274,10 @@ def test_complete_sealed_deep_scan_with_inline_review_state(
     path.write_text(json.dumps(draft))
     (scan.scan_dir / "coverage.json").unlink()
     binding = workbench_api["workbench_completion_binding"](
-        workbench_api["require_scan"](workbench_db, scan.scan_id), workbench_api["now"](), draft
+        workbench_db,
+        workbench_api["require_scan"](workbench_db, scan.scan_id),
+        workbench_api["now"](),
+        draft,
     )
     sealed, _, _ = workbench_api["finalize_scan"](scan.scan_dir, completion_binding=binding)
     sealed["scan"]["reviewState"] = state
@@ -814,7 +817,7 @@ def test_resumed_sealed_out_of_scope_deep_scan_is_not_rewritten(
     workbench_api["finalize_scan"](
         scan.scan_dir,
         completion_binding=workbench_api["workbench_completion_binding"](
-            row, workbench_api["now"]()
+            workbench_db, row, workbench_api["now"]()
         ),
     )
     names = ["scan-manifest.json", "findings.json", "coverage.json", "report.md"]

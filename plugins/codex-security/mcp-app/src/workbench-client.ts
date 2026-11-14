@@ -10,6 +10,12 @@ import {
 import { WORKBENCH_PYTHON } from "./server/workbench-process.js";
 
 const execFileAsync = promisify(execFile);
+const INSTRUCTION_COMMANDS = new Set([
+  "begin-deep-scan",
+  "start-headless-standard-scan",
+  "start-prompt-only-scan",
+  "start-scan",
+]);
 const configuredScanRoot = process.env.CODEX_SECURITY_SCAN_ROOT;
 // A padded absolute or home-relative override must keep its original base.
 const CONFIGURED_SCAN_ROOT =
@@ -32,6 +38,8 @@ export async function scanRoot(): Promise<string> {
 
 interface WorkbenchOptions {
   isolatedPython?: boolean;
+  workerInstructionDigest?: string;
+  signal?: AbortSignal;
 }
 
 export async function runWorkbench(
@@ -115,11 +123,19 @@ async function executeWorkbench(
     ],
     {
       cwd: PLUGIN_ROOT,
+      signal: options.signal,
       windowsHide: true,
       env: {
         ...process.env,
         CODEX_MCP_NODE_PATH:
           process.env.CODEX_MCP_NODE_PATH || process.execPath,
+        _CODEX_SECURITY_INSTRUCTION_ROOT: INSTRUCTION_COMMANDS.has(
+          args[0] ?? "",
+        )
+          ? PLUGIN_ROOT
+          : undefined,
+        _CODEX_SECURITY_WORKER_INSTRUCTION_DIGEST:
+          options.workerInstructionDigest,
       },
       encoding: "utf8" as const,
       maxBuffer: Infinity,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import uuid
@@ -755,6 +756,7 @@ def begin_deep_scan_for_target(
     ):
         return {"newScanTarget": target_path}
     target_metadata = target.stat()
+    instruction_digest = dependencies().selected_instruction_digest()
     target_identity = dependencies().scan_target_identity(target, None, metadata=target_metadata)
     revision, target_snapshot_digest, target_device, target_inode = target_identity
     scope_file_count = directory_snapshot_regular_file_count(
@@ -853,6 +855,7 @@ def begin_deep_scan_for_target(
             target_root=target_root,
             target_summary=None,
             scope_file_count=scope_file_count,
+            instruction_digest=instruction_digest,
             timestamp=timestamp,
             handoff_status="delivered",
             model=model,
@@ -1157,6 +1160,11 @@ def require_worker_transition(current: str, requested: str) -> None:
         raise SystemExit(f"Deep Scan worker cannot transition from {current} to {requested}.")
 
 
+def reported_worker_instruction_digest() -> str | None:
+    value = os.environ.get("_CODEX_SECURITY_WORKER_INSTRUCTION_DIGEST", "")
+    return value if re.fullmatch(r"sha256:[0-9a-f]{64}", value) else None
+
+
 def upsert_deep_scan_worker(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
@@ -1216,6 +1224,13 @@ def upsert_deep_scan_worker(
             else None
         )
         timestamp = dependencies().now()
+        digest = existing["instruction_digest"] if existing else None
+        if (
+            args.status == "running"
+            and args.kind != "setup"
+            and (existing is None or existing["status"] == "queued")
+        ):
+            digest = reported_worker_instruction_digest()
         if existing is None:
             if args.kind == "dedup":
                 raise SystemExit(
@@ -1253,8 +1268,8 @@ def upsert_deep_scan_worker(
                 """
                 INSERT INTO deep_scan_workers (
                     id, scan_id, kind, status, prompt_path, artifact_dir, attempt,
-                    sdk_thread_id, error_message, created_at, started_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    sdk_thread_id, error_message, created_at, started_at, updated_at, instruction_digest
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     worker_id,
@@ -1269,6 +1284,7 @@ def upsert_deep_scan_worker(
                     timestamp,
                     timestamp if args.status == "running" else None,
                     timestamp,
+                    digest,
                 ),
             )
             connection.commit()
@@ -1378,7 +1394,7 @@ def upsert_deep_scan_worker(
                 sdk_thread_id = ?,
                 completion_sequence = ?, merge_state = ?,
                 error_message = ?,
-                started_at = ?, completed_at = ?, updated_at = ?
+                started_at = ?, completed_at = ?, updated_at = ?, instruction_digest = ?
             WHERE id = ?
             """,
             (
@@ -1392,6 +1408,7 @@ def upsert_deep_scan_worker(
                 started_at,
                 completed_at,
                 timestamp,
+                digest,
                 worker_id,
             ),
         )

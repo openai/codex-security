@@ -2615,7 +2615,7 @@ export class CodexSecurity {
           ? await pluginCapabilities(shellPluginRoot)
           : undefined;
       const standard = standardCapabilities?.["standardScanHandoff"] === 1;
-      const discoveryPrompt =
+      const customDiscovery =
         options.validationPrompt === undefined
           ? undefined
           : await customDiscoveryPrompt(
@@ -2623,7 +2623,7 @@ export class CodexSecurity {
               skillName,
               standard,
             );
-      if (discoveryPrompt !== undefined)
+      if (customDiscovery !== undefined)
         session.sessionConfig = await customValidationConfig(
           resolveCodexProfile(session.sessionConfig),
           runtime.plugin.installedRoot,
@@ -2910,7 +2910,7 @@ export class CodexSecurity {
               options.resumeScanId,
             ])
           : await workbench(
-              workbenchOptions,
+              { ...workbenchOptions, instructionRoot: shellPluginRoot },
               workbenchArgs("register-cli-scan", {
                 repository: repo,
                 scanDir,
@@ -2920,6 +2920,7 @@ export class CodexSecurity {
               }),
               JSON.stringify({
                 recipe,
+                customValidationSources: customDiscovery?.sourceDigests,
                 ...(hosted && { hosted }),
                 surface: this.#surface,
                 packageVersion: VERSION,
@@ -3414,7 +3415,7 @@ export class CodexSecurity {
           ? registration["userContext"]
           : options.scanPrompt,
         options.maxCostUsd !== undefined,
-        discoveryPrompt,
+        customDiscovery?.prompt,
         modelProvider,
         options.ownerSuggestions,
         severityRubric,

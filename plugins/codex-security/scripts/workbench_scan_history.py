@@ -18,6 +18,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import (
+    PRODUCER_NAME,
     ContractError,
     _prepare_scan_finalization,
     _read_scan_local_json_bytes,
@@ -27,9 +28,11 @@ from finalize_scan_contract import (
 from report_projection import SEVERITY_ORDER
 from review_state import review_state
 from workbench_constants import ARTIFACTS, DEFAULT_PAGE_SIZE, PRIMARY_FINDING_LOCATION_SQL
+from workbench_instruction_digest import scan_instruction_digests, verify_sealed_instruction_digests
 from workbench_scan_usage import stored_scan_cost_fields
-from workbench_source_scopes import public_scan_recipe
+from workbench_source_scopes import public_scan_recipe, requested_scan_paths
 from workbench_target import (
+    diff_snapshot_digest,
     has_windows_checkout_binding,
     require_remediation_target,
     require_scan_target_identity,
@@ -102,18 +105,63 @@ def expected_coverage_mode(scan: sqlite3.Row) -> str:
     return "deep_repository" if scan["mode"] == "deep" else "repository"
 
 
-def preserve_sealed_completion(
-    binding: dict[str, Any], manifest: dict[str, Any] | None
+def workbench_completion_binding(
+    wb: Any,
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    completed_at: str,
+    manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Copy the original timestamps and producer version from a sealed manifest into binding, then return it."""
+    """Build the scan ID, timestamps, producer, target, and scope used to bind output artifacts at completion."""
+    from workbench_scan_start import loaded_plugin_version
+
+    contract = wb.scan_contract(scan)
+    target_contract = contract["target"]
+    plugin_version = loaded_plugin_version()
+    target: dict[str, Any] = {
+        "targetId": target_contract["targetId"],
+        "displayName": target_contract["displayName"],
+    }
+    if scan["mode"] == "diff":
+        target["baseRevision"] = scan["diff_base_revision"]
+        target["headRevision"] = scan["diff_head_revision"]
+        if snapshot_digest := diff_snapshot_digest(scan, manifest):
+            target["snapshotDigest"] = snapshot_digest
+    else:
+        if scan["target_revision"] != "unversioned":
+            target["revision"] = scan["target_revision"]
+        if "requiredSnapshotDigest" in target_contract:
+            target["snapshotDigest"] = target_contract["requiredSnapshotDigest"]
+
+    scope: dict[str, Any] = {
+        "includePaths": requested_scan_paths(scan),
+        "excludePaths": contract["scope"]["requiredExcludePaths"],
+    }
+
+    binding: dict[str, Any] = {
+        "scanId": scan["id"],
+        "startedAt": scan["started_at"],
+        "completedAt": completed_at,
+        "producer": {"name": PRODUCER_NAME, "version": plugin_version},
+        "target": target,
+        "allowedTargetKinds": target_contract["allowedKinds"],
+        "scope": scope,
+        "coverageMode": expected_coverage_mode(scan),
+    }
+    if (digests := scan_instruction_digests(connection, scan)) is not None:
+        binding["producer"]["instructionDigests"] = digests
     manifest_scan = manifest.get("scan") if manifest is not None else None
     if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
-        # Keep the original producer; finalization still validates schema, seal and owner.
         binding["startedAt"] = manifest_scan.get("startedAt")
         binding["completedAt"] = manifest_scan.get("completedAt")
         producer = manifest_scan.get("producer")
+        verify_sealed_instruction_digests(scan, manifest_scan, connection)
         if isinstance(producer, dict):
             binding["producer"]["version"] = producer.get("version")
+            if "instructionDigests" in producer:
+                binding["producer"]["instructionDigests"] = producer["instructionDigests"]
+            else:
+                binding["producer"].pop("instructionDigests", None)
     return binding
 
 
@@ -232,7 +280,9 @@ def cli_scan_resume(
             manifest_scan = manifest.get("scan")
             if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
                 try:
-                    binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
+                    binding = wb.workbench_completion_binding(
+                        connection, scan, scan["started_at"], manifest
+                    )
                     _prepare_scan_finalization(
                         scan_dir,
                         expected_coverage_mode=binding["coverageMode"],
@@ -245,7 +295,10 @@ def cli_scan_resume(
 
 
 def coverage_summary_for_history(
-    wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
+    wb: Any,
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    canonical_scan_directory: Callable[[Path], Path],
 ) -> dict[str, Any]:
     """Return the coverage mode and path filters for history after verifying the sealed scan data."""
     scan_dir = canonical_scan_directory(Path(scan["scan_dir"]))
@@ -254,7 +307,7 @@ def coverage_summary_for_history(
         if scan["seal_manifest_digest"] is None:
             # Older workbench rows can have valid seals without a pinned digest.
             manifest, _, coverage, _ = _read_sealed_scan(scan_dir, None, "history coverage")
-            wb.verify_manifest_binding(scan, manifest)
+            wb.verify_manifest_binding(scan, manifest, connection)
             if coverage["mode"] != wb.expected_coverage_mode(scan):
                 raise ContractError("coverage.mode: must match the workbench scan")
         else:

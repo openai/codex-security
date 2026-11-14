@@ -48,6 +48,21 @@ def requested_scan_paths(scan: sqlite3.Row) -> list[str]:
     return [scan["scope"]]
 
 
+def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
+    # Older scans did not record path kinds. Retain their lexical scope semantics
+    # rather than infer the original target from a possibly changed checkout.
+    if scan["recipe_json"] is None:
+        return []
+    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
+    return recipe.get("scopeFilePaths", [])
+
+
+def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
+    """Return requested paths paired with whether the stored recipe identified each one as a file."""
+    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
+    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
+
+
 def public_scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
     """Return the decoded launch recipe with the internal file-scope metadata removed."""
     recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)

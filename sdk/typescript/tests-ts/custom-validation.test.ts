@@ -1280,15 +1280,20 @@ describe("custom validation", () => {
   });
 
   test("renders only the discovery portion of the shipped workflows", async () => {
-    const standard = await customDiscoveryPrompt(
+    const { prompt: standard, sourceDigests } = await customDiscoveryPrompt(
       PLUGIN_ROOT,
       "security-scan",
       true,
     );
-    const diff = await customDiscoveryPrompt(
+    const { prompt: diff } = await customDiscoveryPrompt(
       PLUGIN_ROOT,
       "security-diff-scan",
       false,
+    );
+    expect(sourceDigests["references/core-scan.md"]).toBe(
+      createHash("sha256")
+        .update(await readFile(join(PLUGIN_ROOT, "references/core-scan.md")))
+        .digest("hex"),
     );
     expect(standard).toContain("<plugin_dir>/references/core-scan.md");
     expect(standard).not.toContain("validate-scan-findings.md");

@@ -269,6 +269,56 @@ def test_stopped_model_selection_survives_publication_retry(
     assert recovered["findingCount"] == 1
 
 
+def test_recovery_checks_instruction_digests_after_stopped_seal_write(tmp_path: Path) -> None:
+    state, codex_home, _, folder, scan_id = deep_scan_fixture(tmp_path)
+    _, result = accepted_standard_worker(state, codex_home, folder, scan_id)
+    crashed = run_workbench_with_fault(
+        tmp_path / "crash_after_seal.py",
+        state,
+        codex_home,
+        "import os\n"
+        "workbench_db._WORKBENCH_DB_CONTEXT.published_manifest_digest = lambda *_: os._exit(73)\n",
+        "fail-deep-scan",
+        "--scan-id",
+        scan_id,
+        "--message",
+        "Worker stopped.",
+    )
+    assert crashed.returncode == 73, crashed.stderr
+    path = folder / "scan-manifest.json"
+    original = path.read_bytes()
+    manifest = json.loads(original)
+    assert manifest["scan"]["status"] == "failed"
+    assert result.relative_to(folder).as_posix() in manifest["scan"]["preservedSources"]
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        assert db.execute(
+            "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone() == (None,)
+
+    producer = manifest["scan"]["producer"]
+    assert "instructionDigests" not in producer  # The worker did not report a measurement.
+    producer["instructionDigests"] = ["sha256:" + "f" * 64]
+    changed = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+    path.write_bytes(changed)
+    env = {"CODEX_HOME": str(codex_home)}
+    for command, args in [
+        ("preserve-scan-results", ("--thread-id", "standard-worker-thread")),
+        ("recover-scan-results", ()),
+    ]:
+        rejected = scan_command(state, command, scan_id, *args, environment=env, check=False)
+        assert rejected["returncode"] != 0
+        assert "instructionDigests" in rejected["stderr"]
+        assert path.read_bytes() == changed
+
+    path.write_bytes(original)
+    preserve_scan_results(state, scan_id, "standard-worker-thread", environment=env)
+    assert path.read_bytes() == original
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        assert db.execute(
+            "SELECT seal_manifest_digest FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone() == ("sha256:" + hashlib.sha256(original).hexdigest(),)
+
+
 def test_scan_reads_require_explicit_late_result_recovery(tmp_path: Path) -> None:
     state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
     _, result_path = accepted_standard_worker(state_dir, codex_home, scan_dir, scan_id)

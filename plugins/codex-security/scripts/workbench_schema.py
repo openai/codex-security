@@ -118,6 +118,7 @@ def apply_migrations(
                     61,
                     69,
                     70,
+                    76,
                 ):
                     repair_schema(connection, version)
                 elif version == 11:

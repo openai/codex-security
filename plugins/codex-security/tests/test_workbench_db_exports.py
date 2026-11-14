@@ -1091,7 +1091,9 @@ def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = workbench_api["require_scan"](connection, scan_id)
-        binding = workbench_api["workbench_completion_binding"](scan, workbench_api["now"]())
+        binding = workbench_api["workbench_completion_binding"](
+            connection, scan, workbench_api["now"]()
+        )
     manifest, _, _ = workbench_api["finalize_scan"](scan_dir, completion_binding=binding)
     csv_path = scan_dir / "exports" / "findings.csv"
     sealed_csv = b"original,sealed,export\n"
@@ -1433,7 +1435,9 @@ def test_deep_draft_admission_survives_interrupted_projection(
             assert replay_head["inputCheckpoint"] != previous_head["inputCheckpoint"]
             assert replay_head["checkpoint"] == previous_head["checkpoint"]
         expected_findings = accepted_raw["findings"] if replay_accepted else raw["findings"]
-        binding = db.workbench_completion_binding(db.require_scan(connection, scan_id), db.now())
+        binding = db.workbench_completion_binding(
+            connection, db.require_scan(connection, scan_id), db.now()
+        )
         warnings = []
         recovered = results.merge_saved_results(
             scan_dir,
