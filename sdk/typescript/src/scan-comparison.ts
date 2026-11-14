@@ -33,6 +33,7 @@ import {
   AZURE_CODEX_PROVIDER,
   azureProviderEnvironment,
   azureHeaderEnvironment,
+  withoutAzureHeaders,
   externalProviderTable,
   deepMerge,
   hasCommandAuth,
@@ -681,7 +682,9 @@ async function startReadOnlyCodexThread(
   );
   // MCP discovery and permission preflight read provider metadata only.
   const startupSource =
-    modelProvider === "azure" ? withoutOpenAiApiKeys(environment) : environment;
+    modelProvider === "azure"
+      ? withoutAzureHeaders(withoutOpenAiApiKeys(environment), providerConfig)
+      : environment;
   const startupEnvironment =
     !commandAuth && providerKey?.toUpperCase() === AZURE_CODEX_PROVIDER.env_key
       ? startupSource

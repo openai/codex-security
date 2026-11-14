@@ -108,6 +108,21 @@ export function azureHeaderEnvironment(
   );
 }
 
+/** Local helper processes do not consume the selected Azure model headers. */
+export function withoutAzureHeaders<Value extends string | undefined>(
+  environment: Readonly<Record<string, Value>>,
+  config: Readonly<JsonObject>,
+): Record<string, Value> {
+  const declared = Object.keys(azureHeaderEnvironment(environment, config));
+  if (!declared.length) return environment;
+  const name = (key: string) =>
+    process.platform === "win32" ? key.toUpperCase() : key;
+  const headers = new Set(declared.map(name));
+  return Object.fromEntries(
+    Object.entries(environment).filter(([key]) => !headers.has(name(key))),
+  );
+}
+
 /** Keep the Azure key only for a model configuration that names it. */
 export function azureProviderEnvironment(
   environment: ProviderEnvironment,

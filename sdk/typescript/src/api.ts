@@ -106,6 +106,7 @@ import {
   scanProviderEnvKey,
   azureCredentialSource,
   azureHeaderEnvironment,
+  withoutAzureHeaders,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -900,9 +901,15 @@ export class CodexSecurity {
       { ...options, outputDir: undefined, archiveExisting: false },
       signal,
     );
+    const config = await mergedCodexConfig(
+      this.config,
+      scanCodexHome(this.#dependencies.environment),
+      this.#dependencies.environment,
+      "read-only",
+    );
     const workflow = new FindingWorkflow(
       workflowId,
-      this.#dependencies.environment,
+      withoutAzureHeaders(this.#dependencies.environment, config),
       this.#dependencies.runWorkbench,
       this.config.pythonPath,
     );
@@ -1096,7 +1103,7 @@ export class CodexSecurity {
         "git",
         withoutProviderKey(
           selectedScanEnvironment(
-            runtime.environment,
+            withoutAzureHeaders(runtime.environment, session.effectiveConfig),
             options.auth,
             session.modelProvider,
             session.providerEnvKey,
@@ -1216,7 +1223,7 @@ export class CodexSecurity {
       if (options.workflowId !== undefined && (await canCache())) {
         const workflow = new FindingWorkflow(
           options.workflowId,
-          this.#dependencies.environment,
+          git.environment,
           workbench,
           session.python,
           { workbenchOptions },
@@ -2427,7 +2434,7 @@ export class CodexSecurity {
         executable: null,
         environment: withoutProviderKey(
           selectedScanEnvironment(
-            runtime.environment,
+            withoutAzureHeaders(runtime.environment, effectiveConfig),
             options.auth,
             modelProvider,
             session.providerEnvKey,
@@ -5202,15 +5209,18 @@ export class CodexSecurity {
               providerEnvKey,
             )
           : null;
-      const scanEnvironment = selectedScanEnvironment(
-        commandAuth
-          ? withoutOpenAiApiKeys(this.#dependencies.environment)
-          : this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-        providerEnvKey,
+      const scanEnvironment = withoutAzureHeaders(
+        selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            : this.#dependencies.environment,
+          options.auth,
+          modelProvider,
+          providerEnvKey,
+          requestedConfig,
+          "selected",
+        ),
         requestedConfig,
-        "selected",
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5230,7 +5240,7 @@ export class CodexSecurity {
           temporaryRoot,
           (path) =>
             requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
-          options.auth,
+          scanEnvironment,
           requestedConfig,
         );
         this.#requireOpen();
@@ -5561,11 +5571,20 @@ export class CodexSecurity {
           "The selected plugin version does not match the expected plugin version.",
         );
       }
+      const config = await mergedCodexConfig(
+        this.config,
+        scanCodexHome(this.#dependencies.environment),
+        this.#dependencies.environment,
+      );
+      const helperEnvironment = withoutAzureHeaders(
+        this.#dependencies.environment,
+        config,
+      );
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
         configuredPath: this.config.pythonPath,
-        environment: this.#dependencies.environment,
+        environment: helperEnvironment,
         protectedRoot: local.protectedRoot,
         signal,
       });
@@ -5598,11 +5617,6 @@ export class CodexSecurity {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       const revision = await repositoryRevision(local.repository, signal);
-      const config = await mergedCodexConfig(
-        this.config,
-        scanCodexHome(this.#dependencies.environment),
-        this.#dependencies.environment,
-      );
       const { model } = scanModelConfiguration(config);
       const pricingContext = scanPricingContext(
         config,
@@ -5612,7 +5626,7 @@ export class CodexSecurity {
         python,
         pluginRoot,
         environment: {
-          ...this.#dependencies.environment,
+          ...helperEnvironment,
           CODEX_SECURITY_STATE_DIR: local.stateDirectory,
         },
         signal,
@@ -5903,7 +5917,7 @@ export class CodexSecurity {
     signal: AbortSignal,
     temporaryRoot: string | undefined,
     validateLocation: (path: string) => void,
-    auth: ScanAuthMode | undefined,
+    processEnvironment: ProcessEnvironment,
     requestedConfig: JsonObject,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
@@ -5911,16 +5925,6 @@ export class CodexSecurity {
     }
     const modelProvider = scanModelProvider(requestedConfig);
     const providerEnvKey = scanProviderEnvKey(requestedConfig);
-    const processEnvironment = selectedScanEnvironment(
-      hasCommandAuth(requestedConfig)
-        ? withoutOpenAiApiKeys(this.#dependencies.environment)
-        : this.#dependencies.environment,
-      auth,
-      modelProvider,
-      providerEnvKey,
-      requestedConfig,
-      "selected",
-    );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
     );

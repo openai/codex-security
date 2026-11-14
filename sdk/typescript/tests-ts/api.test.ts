@@ -14583,6 +14583,7 @@ if __name__ == "__main__":
             call.credentials = {
               GATEWAY_TOKEN: process.env.GATEWAY_TOKEN,
               AZURE_OPENAI_API_KEY: process.env.AZURE_OPENAI_API_KEY,
+              ...(${azureCommand} ? { comparisonHeader: process.env.SYNTHETIC_MATCH_HEADER } : {}),
               OPENAI_API_KEY: process.env.OPENAI_API_KEY,
               CODEX_API_KEY: process.env.CODEX_API_KEY,
             };
@@ -15006,9 +15007,13 @@ if __name__ == "__main__":
               if (call.kind === "exec") {
                 expect(call.credentials).toEqual({
                   GATEWAY_TOKEN: "synthetic-gateway-primary",
+                  ...(azureCommand
+                    ? { comparisonHeader: "synthetic-comparison-header" }
+                    : {}),
                   [nativeHeader]: " synthetic-required-header ",
                 });
               } else {
+                expect(call.credentials).not.toHaveProperty("comparisonHeader");
                 expect(call.credentials).not.toHaveProperty("OPENAI_API_KEY");
                 expect(call.credentials, call.kind).not.toHaveProperty(
                   "AZURE_OPENAI_API_KEY",

@@ -588,17 +588,20 @@ test.each([
                 SYNTHETIC_UNUSED_KEY: "synthetic-unused-key",
               },
               resolvePluginPython: async ({ environment } = {}) => {
-                if (selection === "file Azure") {
+                if (providerId === "azure") {
+                  expect(environment).not.toHaveProperty(
+                    "SYNTHETIC_CUSTOM_HEADER",
+                  );
                   expect(environment).not.toHaveProperty("OPENAI_API_KEY");
                   expect(environment).not.toHaveProperty("CODEX_API_KEY");
                 }
                 return "/managed/python";
               },
               runWorkbench: async (options, args, input) => {
-                if (
-                  selection === "file Azure" &&
-                  args[0] === "register-cli-scan"
-                ) {
+                if (providerId === "azure" && args[0] === "register-cli-scan") {
+                  expect(options.environment).not.toHaveProperty(
+                    "SYNTHETIC_CUSTOM_HEADER",
+                  );
                   expect(options.environment).not.toHaveProperty(
                     "OPENAI_API_KEY",
                   );
