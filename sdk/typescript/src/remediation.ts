@@ -5,7 +5,7 @@ import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
 
-const FindingPatchSchema = z.object({
+export const FindingPatchSchema = z.object({
   occurrenceId: z.string(),
   status: z.enum(["verified", "no_change", "blocked", "failed"]),
   files: z.array(z.string()),
