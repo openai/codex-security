@@ -25,7 +25,7 @@ test('node-ci owns pull requests and main pushes; forks can qualify their own pu
     ['schedule', upstream, 'refs/heads/main', undefined, true, true],
   ]) {
     const github = { event_name: event, repository, ref, event: { pull_request: { head: { repo: { full_name: headRepo } } } } };
-    for (const [id, expected] of [['validate', validate], ['dependencies', validate], ['smoke', smoke]]) {
+    for (const [id, expected] of [['validate', validate], ['windows', validate], ['dependencies', validate], ['smoke', smoke]]) {
       const condition = workflow.jobs[id].if ?? 'true';
       assert.equal(new Function('github', `return (${condition})`)(github), expected, `${event} ${repository} ${ref}: ${id}`);
     }
@@ -38,7 +38,7 @@ test('the called workflow requires every eligible job to finish successfully', (
   for (const headRepo of [upstream, fork]) {
     const github = { event_name: 'pull_request', repository: upstream, event: { pull_request: { head: { repo: { full_name: headRepo } } } } };
     // A skipped job never sets its outputs. Only fork PR smoke may be skipped.
-    const expected = { validate: 'success', dependencies: 'success', smoke: headRepo === fork ? '' : 'success' };
+    const expected = { validate: 'success', windows: 'success', dependencies: 'success', smoke: headRepo === fork ? '' : 'success' };
     for (const [id, expectedStatus] of Object.entries(expected)) {
       assert.equal(workflow.jobs[id].outputs.result, '${{ job.status }}');
       for (const status of ['success', 'failure', 'cancelled', '']) {
