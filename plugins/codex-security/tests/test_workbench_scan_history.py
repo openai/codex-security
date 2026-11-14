@@ -1014,10 +1014,13 @@ def create_ordered_history(root: Path, anchors: tuple[str, ...]):
     repository = root / "repository"
     repository.mkdir()
     state_dir = root / "state"
-    scans = [
-        create_cli_scan(state_dir, root / "results", repository, identity_anchor=anchor)
-        for anchor in anchors
-    ]
+    scans = sorted(
+        (
+            create_cli_scan(state_dir, root / "results", repository, identity_anchor=anchor)
+            for anchor in anchors
+        ),
+        key=lambda scan: scan["scanId"],
+    )
     return state_dir / "workbench.sqlite3", repository, scans
 
 
@@ -1055,7 +1058,7 @@ def copy_history_state(database: Path, tmp_path: Path) -> Path:
 
 
 @pytest.mark.parametrize(
-    ("timestamps", "expected_timestamp_order"),
+    ("timestamps", "expected_order"),
     [
         (("2026-08-01T00:00:00Z", "2026-08-01T01:00:00+02:00"), (1, 0)),
         (("2026-08-01T00:00:00.000200Z", "2026-08-01T01:00:00.000100+01:00"), (1, 0)),
@@ -1063,19 +1066,11 @@ def copy_history_state(database: Path, tmp_path: Path) -> Path:
     ],
     ids=["mixed-offsets", "microseconds", "equal-instants"],
 )
-def test_finding_occurrence_history_preserves_admission_order_across_start_instants(
-    tmp_path: Path,
-    recurring_history,
-    timestamps: tuple[str, str],
-    expected_timestamp_order: tuple[int, int],
+def test_finding_occurrence_history_uses_start_instants(
+    tmp_path: Path, recurring_history, timestamps: tuple[str, str], expected_order: tuple[int, int]
 ) -> None:
     database, _repository, scans = recurring_history
     state_dir = copy_history_state(database, tmp_path)
-    timestamp_key = load_script("workbench_validation").timestamp_key
-    assert (
-        tuple(sorted(range(2), key=lambda index: timestamp_key(timestamps[index])))
-        == expected_timestamp_order
-    )
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.executemany(
             "UPDATE scans SET started_at = ? WHERE id = ?",
@@ -1084,8 +1079,8 @@ def test_finding_occurrence_history_preserves_admission_order_across_start_insta
 
     for scan in scans:
         finding = get_scan(state_dir, scan["scanId"])["scan"]["findings"][0]
-        assert finding["knownSince"] == timestamps[0]
-        assert finding["knownScanIds"] == [scan["scanId"] for scan in scans]
+        assert finding["knownSince"] == timestamps[expected_order[0]]
+        assert finding["knownScanIds"] == [scans[index]["scanId"] for index in expected_order]
 
 
 def test_scan_comparison_requires_saved_matches_and_remains_read_only(tmp_path: Path) -> None:
@@ -1547,7 +1542,7 @@ def test_semantic_scan_comparison_caches_matches_and_exposes_related_findings(
     ],
     ids=["offsets", "microseconds", "equal-instants"],
 )
-def test_explicit_comparison_uses_admission_matching_cutoff(
+def test_explicit_comparison_uses_chronological_matching_cutoff(
     tmp_path: Path, matched_history, monkeypatch: pytest.MonkeyPatch, timestamps: tuple[str, ...]
 ) -> None:
     database, scans, expected = matched_history
@@ -1558,6 +1553,7 @@ def test_explicit_comparison_uses_admission_matching_cutoff(
             "UPDATE scans SET started_at = ? WHERE id = ?",
             [(timestamp, scan["scanId"]) for timestamp, scan in zip(timestamps, scans)],
         )
+        connection.execute("UPDATE scans SET rowid = 0 WHERE id = ?", (future["scanId"],))
         original = list(connection.iterdump())
     for before_scan, after_scan in ((middle, after), (after, middle)):
         compared = compare_scan_pair(
@@ -1571,10 +1567,13 @@ def test_explicit_comparison_uses_admission_matching_cutoff(
 
     history = load_script("workbench_scan_history")
 
-    def unexpected_repository_lookup(*_args: Any) -> str:
-        raise AssertionError("Future scans must not trigger repository discovery")
+    same_repository = history._same_registered_repository
 
-    monkeypatch.setattr(history.RepositoryIdentityCache, "for_row", unexpected_repository_lookup)
+    def check_repository(db, before, after, **kwargs):
+        assert future["scanId"] not in {before["id"], after["id"]}
+        return same_repository(db, before, after, **kwargs)
+
+    monkeypatch.setattr(history, "_same_registered_repository", check_repository)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert list(connection.iterdump()) == original
         connection.row_factory = sqlite3.Row

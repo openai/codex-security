@@ -703,6 +703,7 @@ def list_repositories(
         for row in scans_by_target.get(target_id, []):
             if not scan_history.scan_has_current_owner(connection, row, identities):
                 continue
+            summary = scan_history.scan_summary(row)
             repository["scanCount"] += 1
             if latest is None or (
                 latest["status"] == row["status"] == "complete"
@@ -710,8 +711,7 @@ def list_repositories(
                 > scan_history._scan_completion_order(latest)
             ):
                 latest = row
-        if latest is not None:
-            repository["latestScan"] = scan_history.scan_summary(latest)
+                repository["latestScan"] = summary
 
     legacy_generations = _legacy_generations(connection, identities)
 
