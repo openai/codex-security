@@ -1070,6 +1070,7 @@ function isolatedGitEnvironment(
     if (
       GIT_REPOSITORY_ENVIRONMENT.has(normalized) ||
       normalized === "GIT_ALLOW_PROTOCOL" ||
+      normalized === "MINIMAX_API_KEY" ||
       (!preserveGitConfiguration && normalized.startsWith("GIT_"))
     ) {
       delete environment[name];

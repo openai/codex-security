@@ -161,6 +161,7 @@ const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "FIREWORKS_API_KEY",
   "CHEAPER_INFERENCE_API_KEY",
   "HF_TOKEN",
+  "MINIMAX_API_KEY",
 ]);
 const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `
 from pathlib import Path
@@ -4677,7 +4678,7 @@ async function usablePython(
       command.executable,
       ["-I", "-c", PLUGIN_PYTHON_PROBE],
       {
-        env: command.environment,
+        env: pluginHelperEnvironment(command.environment),
         encoding: "utf8",
         timeout: PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
         windowsHide: true,

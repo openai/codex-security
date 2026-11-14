@@ -6,6 +6,8 @@ import path from "node:path";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { runPythonWithInput } from "../src/python_command.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { importSource } from "./import-module.ts";
@@ -57,6 +59,24 @@ async function fixtureWorkbench(root: string, source: string) {
   );
   return executeWorkbench as WorkbenchModule["executeWorkbench"];
 }
+
+await test("local Python helpers omit the MiniMax key while the host keeps it", async (t) => {
+  const root = await temporaryDirectory("workbench-helper-env-");
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const key = "MiniMax_API_Key";
+  const previous = process.env[key];
+  t.after(() => restoreEnv(key, previous));
+  process.env[key] = "fixture-model-key";
+  const check =
+    'import os\nif any(k.upper() == "MINIMAX_API_KEY" for k in os.environ):\n    raise SystemExit("unexpected MiniMax key")';
+  const execute = await fixtureWorkbench(
+    root,
+    `${check}\ndef main(): print("{}")\n`,
+  );
+  await execute(fixturePython, ["list-scans"]);
+  await runPythonWithInput(fixturePython, ["-c", check], "", "fixture helper");
+  assert.equal(process.env[key], "fixture-model-key");
+});
 
 await test("Python compressed-rollout reads inherit the plugin Node without Node on PATH", async () => {
   const root = await temporaryDirectory("workbench-node-runtime-");

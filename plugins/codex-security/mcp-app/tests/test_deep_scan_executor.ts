@@ -2908,6 +2908,7 @@ async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
+    ["native-minimax", "MINIMAX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
   ] as const) {
@@ -2950,7 +2951,10 @@ async function testExternalProviderCredentialsReachWorker() {
           },
         }),
       );
-      const prompt = "CAPTURE_SYNTHETIC_OPENAI_AUTH";
+      const prompt =
+        key === "MINIMAX_API_KEY"
+          ? "CAPTURE_SYNTHETIC_OPENAI_AUTH\nCAPTURE_SYNTHETIC_MINIMAX_AUTH"
+          : "CAPTURE_SYNTHETIC_OPENAI_AUTH";
       await writeFile(promptPath, prompt);
       const environment = {
         CODEX_HOME: fixture.root,
@@ -2961,6 +2965,7 @@ async function testExternalProviderCredentialsReachWorker() {
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
+        MINIMAX_API_KEY: undefined,
       };
       const saved = Object.keys(environment).map(
         (name) => [name, process.env[name]] as const,
