@@ -462,7 +462,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     });
     // Word stores drawing positions and relative sizes as character data.
     const appendCharacters = (value: string) => {
-      if (!layout.at(-1)) append(value);
+      if (layout.at(-1) === false) append(value);
     };
     parser.on("text", (value) => appendCharacters(decodeXml(value)));
     parser.on("cdata", (value) =>
