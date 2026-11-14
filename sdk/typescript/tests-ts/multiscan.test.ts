@@ -499,12 +499,14 @@ second,${source.path},${source.revision}
           );
           expect(scanOptions.postScanPrompt).toBe("Draft confirmed fixes.");
           expect(scanOptions.maxCostUsd).toBe(12.5);
+          expect(scanOptions.retainRolloutSessions).toBe(true);
           return await completedScan(scanOptions.outputDir!);
         }),
         {
           scanPrompt: "Review boundaries.",
           postScanPrompt: "Draft confirmed fixes.",
           maxCostUsd: 12.5,
+          retainRolloutSessions: true,
           scanOptionsByMode: {
             deep: { target: DiffTarget.workingTree() },
           },

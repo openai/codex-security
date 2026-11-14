@@ -27,6 +27,7 @@ export interface WorkerUsageReceipt {
   resumed: boolean;
   threadId?: string;
   turnId?: string;
+  inputSha256?: string;
   startedAt: string;
   observedAt: string;
   outcome: "running" | "succeeded" | "failed" | "canceled";

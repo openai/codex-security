@@ -116,9 +116,15 @@ import {
 import type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
-import { findScanSession } from "./scan-logs.js";
+import { findScanSession, scanRolloutSessions } from "./scan-logs.js";
+import { compareTimestamps } from "./timestamps.js";
+import {
+  rolloutDirectoryIdentity,
+  writeRolloutSessionIndex,
+} from "./rollout-session-index.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  deepScanContextPrompt,
   deepScanParentToolOverrides,
   readDeepScanParentConfig,
   runDeepScan,
@@ -403,6 +409,9 @@ const scanLifecycleSchema = z.object({
 export type ScanLifecycle = Readonly<z.infer<typeof scanLifecycleSchema>>;
 
 export interface ScanOptions extends ScanSettings {
+  /** Also retain scan-owned session events alongside the local rollout index. */
+  retainRolloutSessions?: boolean;
+
   /** @internal A bounded batch omits unmetered model calls after the scan. */
   skipFindingMatching?: boolean;
   /** Explicit policy for the initial scan and its workers. */
@@ -922,6 +931,7 @@ export class CodexSecurity {
           signal: undefined,
           auth: undefined,
           archiveExisting: undefined,
+          retainRolloutSessions: undefined,
         },
       }),
     });
@@ -2257,6 +2267,9 @@ export class CodexSecurity {
     const customValidation = {
       status: "pending" as "pending" | "running" | "complete",
     };
+    let turnEndedAt: string | undefined;
+    let saveRollouts: ((savedScan: unknown) => Promise<void>) | undefined;
+    let rolloutSessionIndexPath: string | undefined;
     let completionCost: ScanCost | ReturnType<typeof measuredScanCost> = null;
     let validationThreadId: string | undefined;
     let nativeTurnFailure: string | undefined;
@@ -3071,24 +3084,28 @@ export class CodexSecurity {
         );
       }
       const scanId = registeredScanId;
+      const rolloutIdentity =
+        this.#dependencies.hostedScan === undefined
+          ? await rolloutDirectoryIdentity(scanDir).catch(() => undefined)
+          : undefined;
+      const workerReceipts =
+        mode === "deep"
+          ? {
+              directory: join(
+                await canonicalConfigPath(join(stateDirectory, "codex-home")),
+                "worker-usage",
+                scanId,
+              ),
+              scanId,
+            }
+          : undefined;
       const tracker = new ScanCostTracker({
         codexHome: runtime.codexHome,
         model,
         pricingContext,
         repository: repo,
         scanDirectory: scanDir,
-        ...(mode === "deep"
-          ? {
-              workerReceipts: {
-                directory: join(
-                  await canonicalConfigPath(join(stateDirectory, "codex-home")),
-                  "worker-usage",
-                  scanId,
-                ),
-                scanId,
-              },
-            }
-          : {}),
+        ...(workerReceipts && { workerReceipts }),
         onObservationError: warnTrackingError,
         readBudgetUsage:
           options.maxCostUsd === undefined
@@ -3516,6 +3533,8 @@ export class CodexSecurity {
       const runtimePaths = {
         ...sqliteEnvironment,
         PYTHON: python,
+        CODEX_SECURITY_RETAIN_ROLLOUT_SESSIONS:
+          options.retainRolloutSessions === true ? "1" : "0",
         CODEX_SECURITY_STARTED_AT:
           options.resumeScanId !== undefined &&
           typeof registration["startedAt"] === "string"
@@ -3644,6 +3663,86 @@ export class CodexSecurity {
       checkOpen();
       const thread = openThread(parentCodex, resumeThreadId);
       let scanThreadId = thread.id;
+      // A resumed thread may contain unrelated turns entered before this attachment.
+      const startedAt =
+        resumeThreadId !== undefined
+          ? new Date().toISOString()
+          : isRecord(registration["lifecycle"])
+            ? registration["lifecycle"]["startedAt"]
+            : registration["startedAt"];
+      if (rolloutIdentity !== undefined && typeof startedAt === "string") {
+        saveRollouts = async (savedScan) => {
+          saveRollouts = undefined;
+          const saved =
+            isRecord(savedScan) && savedScan["scanId"] === scanId
+              ? savedScan
+              : {};
+          const lifecycle = saved["lifecycle"];
+          const progress = saved["progress"];
+          const recordedEnd =
+            (isRecord(lifecycle) ? lifecycle["finishedAt"] : undefined) ??
+            saved["canceledAt"] ??
+            (isTerminalScanProgress(progress)
+              ? progress["updatedAt"]
+              : undefined);
+          // A resumed run can still have its earlier sealed completion time.
+          // Bound the export by the first applicable terminal receipt or native turn end.
+          const completedAt = [recordedEnd, turnEndedAt]
+            .filter(
+              (time): time is string =>
+                typeof time === "string" &&
+                compareTimestamps(time, startedAt) >= 0,
+            )
+            .sort(compareTimestamps)[0];
+          if (completedAt === undefined) return;
+          const recorded = saved["executionThreadIds"];
+          const executionThreadIds = Array.isArray(recorded)
+            ? recorded.filter(
+                (id): id is string => typeof id === "string" && id.length > 0,
+              )
+            : [];
+          if (validationThreadId !== undefined)
+            executionThreadIds.push(validationThreadId);
+          const rootThreadId = scanThreadId ?? executionThreadIds[0];
+          if (!rootThreadId) return;
+          const onWarning = notifyObserver(options, "onWarning");
+          try {
+            const sessions = await scanRolloutSessions({
+              codexHome: runtimeHome,
+              ...(workerReceipts && { workerReceipts }),
+              rootThreadId,
+              executionThreadIds,
+              ...(scanThreadId
+                ? {
+                    rootPrompt: directDeepScan
+                      ? deepScanContextPrompt(prompt)
+                      : prompt,
+                  }
+                : {}),
+              startedAt,
+              completedAt,
+            });
+            if (sessions.length > 0) {
+              rolloutSessionIndexPath = await writeRolloutSessionIndex({
+                expectedDirectory: rolloutIdentity,
+                stateDirectory,
+                startedAt,
+                scanDir,
+                scanId,
+                rootThreadIds: [
+                  ...new Set([rootThreadId, ...executionThreadIds]),
+                ],
+                sessions,
+                retainEvents: options.retainRolloutSessions === true,
+                signal,
+                onWarning,
+              });
+            }
+          } catch {
+            onWarning("Could not save the rollout session index.");
+          }
+        };
+      }
       if (postScanPrompt?.trim()) {
         runPostScan = () => {
           if (
@@ -3711,6 +3810,7 @@ export class CodexSecurity {
         pricingContext,
         onTurnStatus: (status, message) => {
           scanTurnStatus = status;
+          turnEndedAt = new Date().toISOString();
           // A later caller abort during iterator cleanup cannot undo a reported failure.
           if (
             status === "failed" &&
@@ -3807,6 +3907,9 @@ export class CodexSecurity {
                       ...attempts,
                       reconnectDetails(message),
                     ),
+                }).finally(() => {
+                  // Custom validation is the last scan-owned turn, even if it fails.
+                  turnEndedAt = new Date().toISOString();
                 });
                 checkOpen();
                 if (turn.status !== "completed")
@@ -3912,6 +4015,7 @@ export class CodexSecurity {
       stopHeadDriftMonitor?.();
       activeScan = null;
       const completedScan = completion["scan"];
+      await saveRollouts?.(completedScan);
       notifyScanLifecycle(options, completedScan);
       await finalizeScanUsage(
         scanId,
@@ -4134,8 +4238,12 @@ export class CodexSecurity {
           "onWarning",
         )(`Could not update repository findings: ${errorMessage(error)}`);
       }
+      if (rolloutSessionIndexPath !== undefined)
+        result.rolloutSessionIndexPath = rolloutSessionIndexPath;
       return result;
     } catch (error) {
+      // A disconnected stream can leave the scan running without a terminal event.
+      if (scanTurnStatus !== null) turnEndedAt ??= new Date().toISOString();
       // Capture who stopped the scan before cleanup can fire another signal.
       const callerCancellation =
         callerSignal.aborted && Object.is(signal.reason, callerSignal.reason)
@@ -4214,6 +4322,7 @@ export class CodexSecurity {
               terminalTurnStatus,
             );
           activeScan = null;
+          await saveRollouts?.(completion["scan"]);
           notifyScanLifecycle(options, completion["scan"]);
           runPostScan = null;
           const result = await collectResult(
@@ -4256,9 +4365,12 @@ export class CodexSecurity {
                 : undefined,
             );
           }
+          if (rolloutSessionIndexPath !== undefined)
+            result.rolloutSessionIndexPath = rolloutSessionIndexPath;
           return result;
         } catch {}
       }
+      let savedScan: unknown;
       if (activeScan !== null && scanTurnStatus !== null) {
         try {
           const cleanupOptions = { ...activeScan.options, signal: undefined };
@@ -4266,19 +4378,26 @@ export class CodexSecurity {
             cleanupOptions,
             workbenchArgs("get-scan", { scanId: activeScan.id }),
           );
-          const completedScan = saved["scan"];
-          const progress = isRecord(completedScan)
-            ? completedScan["progress"]
+          savedScan = saved["scan"];
+          const progress = isRecord(savedScan)
+            ? savedScan["progress"]
             : undefined;
+          // An ended attachment can have its own cutoff while the scan remains resumable.
+          if (
+            isTerminalScanProgress(progress) ||
+            options.resumeScanId !== undefined
+          ) {
+            await saveRollouts?.(savedScan);
+          }
           if (isRecord(progress) && progress["status"] === "complete") {
             const scanId = activeScan.id;
             activeScan = null;
-            notifyScanLifecycle(options, completedScan);
+            notifyScanLifecycle(options, savedScan);
             if (terminalTurnStatus !== null)
               await finalizeScanUsage(
                 scanId,
                 cleanupOptions,
-                completedScan,
+                savedScan,
                 terminalTurnStatus,
               );
           }
@@ -4308,6 +4427,7 @@ export class CodexSecurity {
           }),
         ).catch(() => null);
         if (saved?.["scanId"] === activeScan.id) {
+          await saveRollouts?.(savedScan ?? saved);
           failure = new ScanInterruptedError(
             `${errorMessage(failure)}\nResume when connected: codex-security scans resume ${activeScan.id}`,
             scanDir,
@@ -4337,7 +4457,7 @@ export class CodexSecurity {
           const measured =
             measuredScanCost(snapshot?.measurement ?? latestMeasurement) ??
             snapshot?.cost;
-          await stopRegisteredScan(
+          const stopped = await stopRegisteredScan(
             workbench,
             activeScan,
             options,
@@ -4353,6 +4473,7 @@ export class CodexSecurity {
                 : snapshot?.cost),
           );
           activeScan = null;
+          await saveRollouts?.(stopped);
         } catch {}
       }
       stopHeadDriftMonitor?.();
@@ -7038,6 +7159,17 @@ export function selectedScanEnvironment(
   return selected;
 }
 
+function isTerminalScanProgress(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    isRecord(value) &&
+    (value["status"] === "complete" ||
+      value["status"] === "failed" ||
+      value["status"] === "canceled")
+  );
+}
+
 function notifyScanLifecycle(
   options: ScanOptions,
   saved: unknown,
@@ -7056,7 +7188,7 @@ async function stopRegisteredScan(
   canceled: boolean,
   error: unknown,
   cost?: Readonly<ScanCost> | ReturnType<typeof measuredScanCost>,
-): Promise<void> {
+): Promise<unknown> {
   const cleanupOptions = { ...activeScan.options, signal: undefined };
   const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
   if (canceled) {
@@ -7069,9 +7201,11 @@ async function stopRegisteredScan(
       ]);
       // A workspace can already display a replacement when cancellation returns.
       const results = stopped["results"];
-      if (isRecord(results) && results["scanId"] === activeScan.id)
+      if (isRecord(results) && results["scanId"] === activeScan.id) {
         notifyScanLifecycle(options, results, true);
-      else observeSettledScan(options, activeScan);
+        return results;
+      }
+      observeSettledScan(options, activeScan);
       return;
     } catch (cause) {
       // Older external workbenches can only persist cost on a failed scan.
@@ -7090,6 +7224,7 @@ async function stopRegisteredScan(
     ...costArgs,
   ]);
   notifyScanLifecycle(options, failed["scan"], true);
+  return failed["scan"];
 }
 
 function observeSettledScan(

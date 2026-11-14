@@ -478,10 +478,20 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ? (discovery.continuationPrompt ?? prompt)
         : prompt;
       const pluginRoot = this.modelSettings.artifactContext?.pluginRoot;
-      const input =
+      let input =
         discovery && pluginRoot
           ? `${workerPrompt}\n\nFor a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name and read <skill-name>/SKILL.md beneath ${JSON.stringify(join(pluginRoot, "skills"))}. Follow that file and resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow; this does not expand the worker's assigned role.`
           : workerPrompt;
+      if (
+        discovery?.onInputDigest &&
+        process.env.CODEX_SECURITY_RETAIN_ROLLOUT_SESSIONS === "1"
+      ) {
+        // Native exec omits turn IDs even on failure. Bind this exact input to the host receipt.
+        input += `\n\nWorker attempt ID: ${attemptId}`;
+        discovery.onInputDigest(
+          createHash("sha256").update(input).digest("hex"),
+        );
+      }
       const controller = new AbortController();
       const forwardAbort = () => controller.abort(request.signal.reason);
       if (request.signal.aborted) {
@@ -506,18 +516,26 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           events,
           stopOnCompletion: true,
           onEvent: async (event) => {
-            if (
+            const reportedTurnId =
               (event.type === "turn.started" ||
-                event.type === "turn.completed") &&
+                event.type === "turn.completed" ||
+                event.type === "turn.failed") &&
               "turn_id" in event &&
               typeof event.turn_id === "string"
-            )
-              turnId = event.turn_id;
-            if (event.type === "turn.completed") {
+                ? event.turn_id
+                : undefined;
+            if (reportedTurnId) turnId = reportedTurnId;
+            if (event.type === "turn.completed" || reportedTurnId) {
               try {
-                await request.onUsage?.(readUsage(event.usage), turnId);
+                // Persist an available ID even if the attempt never reports usage.
+                await request.onUsage?.(
+                  event.type === "turn.completed"
+                    ? readUsage(event.usage)
+                    : null,
+                  turnId,
+                );
               } catch {
-                // Retaining optional usage must not change turn acceptance.
+                // Retaining an optional receipt must not change turn acceptance.
               }
             }
             const item = event.type === "item.completed" ? event.item : event;

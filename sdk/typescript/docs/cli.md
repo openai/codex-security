@@ -2255,6 +2255,30 @@ History lives in `$CODEX_SECURITY_STATE_DIR/workbench.sqlite3`, or
 writable, and outside the target repository. Session logs may contain sensitive
 data even though scan recipes do not store credentials.
 
+For registered local scans, the SDK writes a private index of the available
+coordinator and worker sessions to `artifacts/rollout-sessions/index.json` in
+the scan directory. It records thread relationships and survives removal of the
+native logs. Sessions recorded by the scan or a worker receipt have
+`attribution: "recorded"`. A descendant discovered only from a parent thread
+and time window has `attribution: "inferred"` and may belong to another turn.
+Older index entries can lack attribution. The index can also be available after a failed scan. Look for
+`rolloutSessionIndexPath` in `scans show SCAN_ID --json`, scan JSON, or
+`--json --full-output` on failure. Older or interrupted scans may lack an index.
+
+Pass `--retain-rollout-sessions` to `scan` or `bulk-scan` to save private JSONL
+files of attributable scan events alongside the index. These files may include
+prompts, source code, and tool output. Sessions with ambiguous turn ownership
+can appear in the index without an event file. For retried Deep workers, the
+exporter accepts native turn IDs from the scan’s receipts. When the native
+launcher omits an ID, opted-in discovery workers add their attempt ID to the
+submitted prompt and record its SHA-256 digest in the receipt. A unique native
+user item matching the digest, thread, turn and attempt window allows the
+exporter to retain subsequent events. Ambiguous or missing evidence, including
+older retries with no native ID or digest, leaves those attempts metadata-only.
+The exporter omits submitted worker input from these event files. To retain events on a later invocation,
+pass the flag again to `scans rerun`, `scans resume`, or `bulk-scan --recover`.
+A retention failure leaves the original scan outcome intact.
+
 Keep the same state directory across linked worktrees. Changing it selects
 separate history, artifacts, and a dedicated Codex sign-in. `--scan-root`
 filters recorded artifact paths; it does not import another directory's scans.

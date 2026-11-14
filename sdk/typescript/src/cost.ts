@@ -3243,9 +3243,11 @@ export class ScanCostTracker {
   }
 }
 
-async function readWorkerReceipts(
+/** @internal */
+export async function readWorkerReceipts(
   store: ScanCostTrackerOptions["workerReceipts"],
   retained: Map<string, WorkerReceipt>,
+  observe?: (receipt: Record<string, unknown>) => void,
 ): Promise<{
   usages: Map<string, ScanTokenUsage | null>;
   unknownAttempts: number;
@@ -3294,6 +3296,7 @@ async function readWorkerReceipts(
       )
         continue;
       attempts.add(receipt["attemptId"]);
+      observe?.(receipt);
       retained.set(receipt["attemptId"], {
         threadId:
           typeof receipt["threadId"] === "string" ? receipt["threadId"] : null,

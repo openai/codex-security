@@ -195,6 +195,12 @@ const result = await security.run("/path/to/repository", {
 | `maxCostUsd`                                | Stop at an estimated model cost; see [cost limits](#progress-and-cost).        |
 | `signal`                                    | An `AbortSignal` to cancel the scan.                                           |
 
+Call `result.readRolloutSessionIndex()` to read coordinator and worker session metadata.
+Set `retainRolloutSessions: true` on a local run to retain attributable events as well.
+After a failure, pass the `scanDir` and `scanId` from `onScanRegistered` to
+`readRolloutSessionIndex(scanDir, scanId)`. See [saved scan logs](cli.md#scan-history-and-reruns)
+for retention and attribution details.
+
 The exported `ScanOptions` type describes all options and callbacks. For full
 CLI behavior, see [scan options and output](cli.md#scan-options-and-output).
 

@@ -1,6 +1,10 @@
 import type { ScanPricingContext } from "./cost-model.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import {
+  readRolloutSessionIndex,
+  type RolloutSessionIndex,
+} from "./rollout-session-index.js";
 import type {
   CoverageDocument,
   Finding,
@@ -68,6 +72,8 @@ export class ScanResult {
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
   public readonly threatModelPath: string | null;
+  /** Private session index published by this local invocation. */
+  public rolloutSessionIndexPath?: string;
   public repositoryFindings: readonly RepositoryFinding[] | undefined;
   public ownerSuggestionsPath: string | undefined;
   public ownerSuggestionsError: string | undefined;
@@ -137,6 +143,10 @@ export class ScanResult {
     return join(this.scanDir, "findings.json");
   }
 
+  public readRolloutSessionIndex(): Promise<RolloutSessionIndex | null> {
+    return readRolloutSessionIndex(this.scanDir, this.manifest.scan.id);
+  }
+
   public get artifactsDir(): string {
     return join(this.scanDir, "artifacts");
   }
@@ -166,6 +176,9 @@ export class ScanResult {
       threatModel: this.threatModel,
       threatModelPath: this.threatModelPath,
       artifactsDir: this.artifactsDir,
+      ...(this.rolloutSessionIndexPath === undefined
+        ? {}
+        : { rolloutSessionIndexPath: this.rolloutSessionIndexPath }),
       sarifPath: this.sarifPath,
       cost: this.cost,
       turn: this.turnResult,

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import {
   findScanSession,
   readSavedScanLogs,
+  scanRolloutSessions,
   readScanLogs,
 } from "../src/scan-logs.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -63,6 +64,28 @@ function commandEvent(command: string, id: string, timestamp?: string) {
   };
 }
 
+const at = (fraction: string) => "2026-08-11T12:00:00." + fraction + "Z";
+const task = (fraction: string, type: string) => ({
+  timestamp: at(fraction),
+  type: "event_msg",
+  payload: { type, started_at: Date.parse(at(fraction)) / 1000 },
+});
+
+const user = (message: string, fraction: string) => ({
+  type: "event_msg",
+  timestamp: at(fraction),
+  payload: { type: "user_message", message },
+});
+const injected = (text: string, fraction: string) => ({
+  type: "response_item",
+  timestamp: at(fraction),
+  payload: {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  },
+});
+
 function taskStarted(turnId: string, timestamp?: string) {
   return {
     type: "event_msg",
@@ -72,6 +95,494 @@ function taskStarted(turnId: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test("marks a worker from a later root turn as inferred without capturing its events", async () => {
+    const home = await temporaryHome();
+    await writeSession(
+      home,
+      "root",
+      [
+        task("001", "task_started"),
+        user("scan request", "002"),
+        task("003", "task_complete"),
+        task("004", "task_started"),
+        user("other work", "005"),
+      ],
+      undefined,
+      at("000"),
+    );
+    await writeSession(
+      home,
+      "other-child",
+      [
+        task("007", "task_started"),
+        commandEvent("other work", "call", at("008")),
+      ],
+      "root",
+      at("006"),
+    );
+    const sessions = await scanRolloutSessions({
+      codexHome: home,
+      rootThreadId: "root",
+      rootPrompt: "scan request",
+      startedAt: at("001"),
+      completedAt: at("010"),
+    });
+    expect(
+      sessions.map(({ threadId, attribution }) => [threadId, attribution]),
+    ).toEqual([
+      ["root", "recorded"],
+      ["other-child", "inferred"],
+    ]);
+    expect(await Array.fromAsync(sessions[1]!.events())).toEqual([]);
+  });
+
+  test("indexes execution threads and exports their finishing turns without unrelated history", async () => {
+    const home = await temporaryHome();
+    await writeSession(home, "desktop-owner", [], undefined, at("000"));
+    await writeSession(home, "sibling", [], "desktop-owner", at("002"));
+    await writeJsonLines(
+      join(home, "sessions", "2026", "08", "11", "rollout-personal-fork.jsonl"),
+      [
+        {
+          type: "session_meta",
+          payload: {
+            id: "personal-fork",
+            forked_from_id: "root",
+            timestamp: at("002"),
+          },
+        },
+        injected("unrelated user fork", "002"),
+      ],
+    );
+    await writeSession(home, "early", [], "root", at("000"));
+    await writeSession(home, "late", [], "root", at("0035"));
+    await writeSession(home, "late-grandchild", [], "late", at("0038"));
+    await writeSession(
+      home,
+      "root",
+      [
+        task("000", "task_started"),
+        commandEvent("earlier run", "old", at("0012")),
+        task("0015", "task_started"),
+        user(" SDK request ", "0015"),
+        commandEvent("primary", "main"),
+        commandEvent("final response", "final", at("004")),
+        task("0041", "task_complete"),
+        commandEvent("later unmarked event", "later", at("0042")),
+        task("005", "task_started"),
+        commandEvent("follow-up", "post"),
+      ],
+      "desktop-owner",
+      at("000"),
+    );
+    await writeSession(
+      home,
+      "worker",
+      [
+        { type: "session_meta", payload: { id: "root" } },
+        task("0018", "task_started"),
+        commandEvent("inherited from root", "copied"),
+        task("0022", "task_started"),
+        injected("native setup", "0022"),
+        user("own work", "0022"),
+        commandEvent("worker event", "work"),
+        injected("late steer", "0033"),
+        commandEvent("private steer result", "steer"),
+      ],
+      "root",
+      at("002"),
+    );
+    await writeSession(home, "grandchild", [], "worker", at("003"));
+    const sessions = await scanRolloutSessions({
+      rootThreadId: "root",
+      rootPrompt: " SDK request ",
+      codexHome: home,
+      startedAt: at("001"),
+      completedAt: at("0035"),
+    });
+    expect(sessions.map((s) => [s.threadId, s.parentThreadId])).toEqual([
+      ["root", null],
+      ["worker", "root"],
+      ["grandchild", "worker"],
+    ]);
+    const outputs = await Promise.all(
+      sessions.map(async (session) => {
+        const calls = [];
+        for await (const event of session.events()) {
+          if (event["type"] === "response_item") calls.push(event["payload"]);
+        }
+        return calls.map((payload) => (payload as { call_id: string }).call_id);
+      }),
+    );
+    expect(outputs).toEqual([["main", "final"], ["work"], []]);
+  });
+
+  test("isolates the submitted turn on a reused coordinator when native clock ticks collide", async () => {
+    const home = await temporaryHome();
+    await writeSession(
+      home,
+      "root",
+      [
+        task("000", "task_started"),
+        user("historical", "000"),
+        commandEvent("old", "old"),
+        task("001", "task_started"),
+        user("concurrent", "001"),
+        commandEvent("outside", "outside"),
+        task("001", "task_started"),
+        injected("scan", "001"),
+        user("scan", "001"),
+        commandEvent("inside", "inside"),
+        task("003", "task_complete"),
+        user("orphan", "003"),
+        commandEvent("outside", "orphan", "2026-08-11T12:00:00.003Z"),
+        task("003", "task_started"),
+        user("unrelated", "003"),
+        commandEvent("outside", "late"),
+        task("004", "task_started"),
+        user("follow-up", "004"),
+        commandEvent("outside", "post"),
+      ],
+      undefined,
+      at("000"),
+    );
+    for (const [id, created] of [
+      ["at-start", "001"],
+      ["good", "002"],
+      ["at-finish", "003"],
+    ] as const)
+      await writeSession(
+        home,
+        id,
+        [task("0025", "task_started"), commandEvent("child event", id)],
+        "root",
+        at(created),
+      );
+    const sessions = await scanRolloutSessions({
+      codexHome: home,
+      rootThreadId: "root",
+      rootPrompt: "scan",
+      startedAt: at("001"),
+      completedAt: at("004"),
+    });
+    const calls = [];
+    for (const session of sessions)
+      for await (const event of session.events()) {
+        const id = (event["payload"] as Record<string, unknown>)["call_id"];
+        if (id) calls.push(id);
+      }
+    expect(calls).toEqual(["inside", "good"]);
+  });
+
+  test("retains only the exact injected context without turn markers and withholds ambiguous inputs", async () => {
+    const home = await temporaryHome();
+    await writeSession(
+      home,
+      "injected",
+      [
+        injected("private", "001"),
+        injected("scan", "002"),
+        commandEvent("unmarked", "private", at("003")),
+        injected("post", "004"),
+      ],
+      undefined,
+      at("000"),
+    );
+    await writeSession(
+      home,
+      "ambiguous",
+      [
+        task("001", "task_started"),
+        user("scan", "001"),
+        commandEvent("ambiguous", "private"),
+        task("002", "task_started"),
+        user("scan", "002"),
+        commandEvent("ambiguous", "private2"),
+      ],
+      undefined,
+      at("000"),
+    );
+    for (const rootThreadId of ["injected", "ambiguous"]) {
+      const [session] = await scanRolloutSessions({
+        codexHome: home,
+        rootThreadId,
+        rootPrompt: "scan",
+        startedAt: at("001"),
+        completedAt: at("004"),
+      });
+      const output = [];
+      for await (const event of session!.events()) output.push(event);
+      expect(output).toEqual(
+        rootThreadId === "injected" ? [injected("scan", "002")] : [],
+      );
+    }
+  });
+
+  test("retains standalone Deep comparisons only for receipts belonging to this invocation", async () => {
+    const home = await temporaryHome();
+    const directory = join(home, "worker-usage", "scan");
+    await mkdir(directory, { recursive: true });
+    for (const [id, scanId, startedAt] of [
+      ["comparison", "scan", at("002")],
+      ["wrong-scan", "other", at("002")],
+      ["previous", "scan", at("000")],
+      ["post-scan", "scan", at("009")],
+    ] as const) {
+      await writeFile(
+        join(directory, id + ".json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          source: "codex_sdk",
+          usageScope: "thread_cumulative",
+          kind: "compare",
+          scanId,
+          attemptId: id,
+          threadId: id,
+          startedAt,
+        }),
+      );
+    }
+    for (const id of [
+      "comparison",
+      "wrong-scan",
+      "previous",
+      "post-scan",
+      "unrelated",
+    ]) {
+      await writeSession(
+        home,
+        id,
+        [
+          task("003", "task_started"),
+          commandEvent("native result", id, at("004")),
+          task("005", "task_complete"),
+          task("009", "task_started"),
+          commandEvent("later work", "later", at("010")),
+        ],
+        undefined,
+        at("002"),
+        join(home, "scan", "artifacts", "deep_discovery"),
+      );
+    }
+    const sessions = await scanRolloutSessions({
+      codexHome: home,
+      rootThreadId: "coordinator",
+      workerReceipts: { directory, scanId: "scan" },
+      startedAt: at("001"),
+      completedAt: at("009"),
+    });
+    expect(sessions.map(({ threadId }) => threadId)).toEqual(["comparison"]);
+    const calls = [];
+    for await (const event of sessions[0]!.events()) {
+      if (event["type"] === "response_item") calls.push(event["payload"]);
+    }
+    expect(calls).toEqual([
+      commandEvent("native result", "comparison")["payload"],
+    ]);
+  });
+
+  test.each([
+    ["both", ["failed-attempt", "first-child", "retry", "retry-child"]],
+    ["retry only", ["retry", "retry-child"]],
+    ["neither", []],
+    ["neither with only the manual turn retained", []],
+  ] as const)(
+    "exports only proven turns in a retried discovery session (receipt IDs for %s)",
+    async (receiptIds, expected) => {
+      const home = await temporaryHome();
+      const directory = join(home, "worker-usage", "scan");
+      await mkdir(directory, { recursive: true });
+      for (const [turnId, startedAt, scanId] of [
+        ["failed-attempt", at("001"), "scan"],
+        ["retry", at("005"), "scan"],
+        ["manual", at("003"), "other-scan"],
+      ] as const) {
+        await writeFile(
+          join(directory, turnId + ".json"),
+          JSON.stringify({
+            schemaVersion: 1,
+            source: "codex_sdk",
+            usageScope: "thread_cumulative",
+            kind: "discovery",
+            scanId,
+            attemptId: turnId,
+            threadId: "worker",
+            ...((receiptIds === "both" ||
+              (receiptIds === "retry only" && turnId === "retry")) && {
+              turnId,
+            }),
+            outcome: turnId === "failed-attempt" ? "failed" : "succeeded",
+            startedAt,
+          }),
+        );
+      }
+      const events = [];
+      for (const [turnId, start, end] of [
+        ["failed-attempt", "001", "003"],
+        ["manual", "003", "005"],
+        ["retry", "005", "009"],
+      ] as const) {
+        if (
+          receiptIds === "neither with only the manual turn retained" &&
+          turnId !== "manual"
+        )
+          continue;
+        const started = task(start, "task_started");
+        events.push(
+          { ...started, payload: { ...started.payload, turn_id: turnId } },
+          commandEvent("result", turnId, at(start)),
+          task(
+            end,
+            turnId === "failed-attempt" ? "turn_aborted" : "task_complete",
+          ),
+        );
+      }
+      await writeSession(home, "worker", events, undefined, at("001"));
+      for (const [id, start] of [
+        ["first-child", "002"],
+        ["manual-child", "004"],
+        ["retry-child", "006"],
+      ] as const) {
+        await writeSession(
+          home,
+          id,
+          [task(start, "task_started"), commandEvent("result", id, at(start))],
+          "worker",
+          at(start),
+        );
+      }
+      const sessions = await scanRolloutSessions({
+        codexHome: home,
+        rootThreadId: "coordinator",
+        executionThreadIds: ["worker"],
+        workerReceipts: { directory, scanId: "scan" },
+        startedAt: at("001"),
+        completedAt: at("010"),
+      });
+      expect(sessions.map(({ threadId }) => threadId)).toContain("worker");
+      const ids = [];
+      for (const session of sessions) {
+        for await (const event of session.events()) {
+          if (event["type"] === "response_item")
+            ids.push((event["payload"] as Record<string, unknown>)["call_id"]);
+        }
+      }
+      expect(ids.sort()).toEqual([...expected]);
+    },
+  );
+
+  test.each([
+    "distinct",
+    "replayed",
+    "late",
+    "wrong thread",
+    "outside receipt",
+  ] as const)(
+    "binds failed discovery retries to their native submitted input (%s)",
+    async (scenario) => {
+      const home = await temporaryHome();
+      const directory = join(home, "worker-usage", "scan");
+      await mkdir(directory, { recursive: true });
+      const events = [];
+      for (const [id, start, end] of [
+        ["first", "001", "003"],
+        ["manual", "004", "006"],
+        ["retry", "007", "009"],
+      ] as const) {
+        const attempt =
+          scenario === "replayed" && id === "manual" ? "first" : id;
+        const text = `private input\n\nWorker attempt ID: ${attempt}`;
+        const started = taskStarted(id, at(start));
+        if (id !== "manual")
+          await writeFile(
+            join(directory, id + ".json"),
+            JSON.stringify({
+              schemaVersion: 1,
+              source: "codex_sdk",
+              usageScope: "thread_cumulative",
+              kind: "discovery",
+              scanId: "scan",
+              attemptId: id,
+              threadId: "worker",
+              resumed: id === "retry",
+              outcome: "failed",
+              startedAt: at(start),
+              observedAt: at(
+                scenario === "outside receipt" && id === "first" ? start : end,
+              ),
+              inputSha256: createHash("sha256").update(text).digest("hex"),
+            }),
+          );
+        events.push(started, injected(text, start));
+        if (scenario === "late" && id === "first")
+          events.push(commandEvent("other work", "earlier", at(start)));
+        events.push(
+          {
+            type: "event_msg",
+            timestamp: at(start),
+            payload: {
+              type: "item_completed",
+              thread_id:
+                scenario === "wrong thread" && id === "first"
+                  ? "other"
+                  : "worker",
+              turn_id: id,
+              item: {
+                type: "UserMessage",
+                content: [{ type: "text", text, text_elements: [] }],
+              },
+            },
+          },
+          commandEvent("result", id, at(start)),
+          task(end, "task_complete"),
+        );
+      }
+      await writeSession(home, "worker", events, undefined, at("001"));
+      const sessions = await scanRolloutSessions({
+        codexHome: home,
+        rootThreadId: "root",
+        // Failed registration can leave the host receipts as the only thread binding.
+        workerReceipts: { directory, scanId: "scan" },
+        startedAt: at("001"),
+        completedAt: at("011"),
+      });
+      expect(
+        sessions.map(({ threadId, attribution }) => [threadId, attribution]),
+      ).toEqual([["worker", "recorded"]]);
+      const retained = await Array.fromAsync(sessions[0]!.events());
+      const ids = retained.flatMap(({ payload }) =>
+        typeof payload === "object" && payload && "call_id" in payload
+          ? [payload.call_id]
+          : [],
+      );
+      expect(ids).toEqual(
+        scenario === "distinct"
+          ? ["first", "retry"]
+          : scenario === "replayed"
+            ? []
+            : ["retry"],
+      );
+      expect(JSON.stringify(retained)).not.toContain("private input");
+    },
+  );
+
+  test("keeps registered worker lineages when the execution root rollout is missing", async () => {
+    const home = await temporaryHome();
+    const startedAt = "2026-08-11T12:00:00Z",
+      completedAt = "2026-08-11T12:03:00Z";
+    await writeSession(home, "worker", [], undefined, startedAt);
+    await writeSession(home, "child", [], "worker", startedAt);
+    await writeSession(home, "other", [], undefined, startedAt);
+    const sessions = await scanRolloutSessions({
+      rootThreadId: "missing",
+      executionThreadIds: ["worker"],
+      codexHome: home,
+      startedAt,
+      completedAt,
+    });
+    expect(sessions.map((s) => s.threadId)).toEqual(["worker", "child"]);
+  });
+
   test.each([
     ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
     ["complete first", [0, 1, 1, 2], [0], 0, false, false],
@@ -993,18 +1504,31 @@ describe("saved scan logs", () => {
       if (copied) {
         const copyHome = await temporaryHome();
         await writeSession(copyHome, "unrelated", [unrelated, unrelated]);
+        await writeSession(copyHome, "parent", [
+          commandEvent("included", "parent-call"),
+        ]);
         homes.push(copyHome);
       }
       const originalParse = JSON.parse;
       let unrelatedBodies = 0;
+      let includedBodies = 0;
       const parseSpy = spyOn(JSON, "parse").mockImplementation(
         (text, reviver) => {
           if (text.includes("UNRELATED_PRIVATE_EVENT_BODY")) unrelatedBodies++;
+          if (text.includes("parent-call")) includedBodies++;
           return originalParse(text, reviver);
         },
       );
 
       try {
+        const index = await scanRolloutSessions({
+          rootThreadId: "parent",
+          codexHome: homes,
+          startedAt: "2026-08-11T12:00:00Z",
+          completedAt: "2026-08-11T12:03:00Z",
+        });
+        expect(index.map((session) => session.threadId)).toEqual(["parent"]);
+        expect(includedBodies).toBe(0);
         const result = await readScanLogs({
           scanId: "scan-1",
           threadId: "parent",

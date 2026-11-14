@@ -15189,6 +15189,175 @@ if __name__ == "__main__":
   });
 
   test.each([
+    ["complete", false, false],
+    ["complete", true, false],
+    ["failed", true, false],
+    ["canceled", true, false],
+    ["complete", true, true],
+    ["failed", true, true],
+  ] as const)(
+    "indexes local rollouts before follow-up (%s, retain %p, blocked %p)",
+    async (outcome, retain, blocked) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const native = join(codexHome, "sessions");
+      const destination = join(scanDir, "artifacts", "rollout-sessions");
+      const indexPath = join(destination, "index.json");
+      const startedAt = new Date(Date.now() - 60_000).toISOString();
+      const timestamp = new Date(Date.now() - 45_000).toISOString();
+      const finishedAt = new Date(Date.now() - 30_000).toISOString();
+      const afterCompletion = new Date(Date.now() - 15_000).toISOString();
+      const event = (timestamp: string, payload: Record<string, string>) => ({
+        type: "event_msg",
+        timestamp,
+        payload,
+      });
+      await mkdir(native, { recursive: true });
+      if (blocked) {
+        await mkdir(join(scanDir, "artifacts"), { recursive: true });
+        await writeFile(destination, "existing file");
+      }
+      const controller = new AbortController();
+      let terminalCommand: string | undefined;
+      let turns = 0;
+      let indexAtFollowup = false;
+      const warnings: string[] = [];
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
+          const response = mockWorkbench(args, input);
+          if (args[0] === "register-cli-scan")
+            return { ...response, lifecycle: { startedAt } };
+          if (
+            args[0] === "complete-scan" ||
+            args[0] === "fail-scan" ||
+            args[0] === "cancel-scan"
+          ) {
+            terminalCommand = args[0];
+            return {
+              [args[0] === "cancel-scan" ? "results" : "scan"]: {
+                scanId: "scan_example_001",
+                lifecycle: { startedAt, finishedAt },
+                executionThreadIds: ["recorded-worker"],
+                threadIds: ["desktop-owner"],
+              },
+            };
+          }
+          return response;
+        },
+        createCodex: codexFactory(async (prompt: string) => {
+          if (++turns === 1) {
+            for (const id of ["thread-1", "recorded-worker", "desktop-owner"]) {
+              await writeFile(
+                join(native, `rollout-${id}.jsonl`),
+                jsonLines([
+                  {
+                    type: "session_meta",
+                    timestamp,
+                    payload: { id, timestamp },
+                  },
+                  event(timestamp, {
+                    type: "task_started",
+                    turn_id: "scan-turn",
+                  }),
+                  event(timestamp, {
+                    type: "user_message",
+                    message: id === "thread-1" ? prompt : "Worker prompt",
+                  }),
+                  event(timestamp, {
+                    type: "agent_message",
+                    message: `private-${id}`,
+                  }),
+                  event(timestamp, {
+                    type: "task_complete",
+                    turn_id: "scan-turn",
+                  }),
+                  event(afterCompletion, {
+                    type: "task_started",
+                    turn_id: "later-turn",
+                  }),
+                  event(afterCompletion, {
+                    type: "user_message",
+                    message: "already-present-manual-turn",
+                  }),
+                ]),
+              );
+            }
+            if (outcome === "canceled") {
+              controller.abort();
+              controller.signal.throwIfAborted();
+            }
+            if (outcome === "failed")
+              return { events: completedEvents("thread-1", failedEvents()) };
+            await copyCompletedScan(root);
+          } else {
+            indexAtFollowup = existsSync(indexPath);
+            await appendFile(
+              join(native, "rollout-thread-1.jsonl"),
+              "\n" +
+                JSON.stringify(
+                  event(timestamp, {
+                    type: "user_message",
+                    message: "private-follow-up",
+                  }),
+                ),
+            );
+          }
+          return { events: completedEvents() };
+        }, "thread-1"),
+      });
+      const result = client.run(repository, {
+        ...(retain ? { retainRolloutSessions: true } : {}),
+        signal: controller.signal,
+        postScanPrompt: "Run the configured follow-up.",
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (outcome === "failed")
+        await expect(result).rejects.toThrow("Could not draft fixes.");
+      else if (outcome === "canceled")
+        await expect(result).rejects.toThrow(/interrupted/iu);
+      else {
+        const scan = await result;
+        expect(scan.scanDir).toBe(scanDir);
+        expect(scan.rolloutSessionIndexPath).toBe(
+          blocked ? undefined : indexPath,
+        );
+        if (blocked)
+          expect(scan.toJSON()).not.toHaveProperty("rolloutSessionIndexPath");
+        else expect(scan.toJSON()["rolloutSessionIndexPath"]).toBe(indexPath);
+      }
+      if (outcome === "canceled") expect(terminalCommand).toBe("cancel-scan");
+      expect(turns).toBe(outcome === "canceled" ? 1 : 2);
+      expect(indexAtFollowup).toBe(!blocked && outcome !== "canceled");
+      if (blocked) {
+        expect(await readFile(destination, "utf8")).toBe("existing file");
+        expect(warnings).toContain("Could not save the rollout session index.");
+        return;
+      }
+      const index = JSON.parse(await readFile(indexPath, "utf8")) as {
+        sessions: {
+          threadId: string;
+          eventSegments?: { startedAt: string; path: string }[];
+        }[];
+      };
+      expect(index.sessions.map((session) => session.threadId).sort()).toEqual([
+        "recorded-worker",
+        "thread-1",
+      ]);
+      for (const session of index.sessions) {
+        if (retain) {
+          const events = await readFile(
+            join(destination, session.eventSegments![0]!.path),
+            "utf8",
+          );
+          expect(events).toContain(`private-${session.threadId}`);
+          expect(events).not.toContain("private-follow-up");
+          expect(events).not.toContain("already-present-manual-turn");
+        } else expect(session.eventSegments).toBeUndefined();
+      }
+    },
+  );
+
+  test.each([
     ["the follow-up turn", false, "Could not draft fixes."],
     ["artifact restoration setup", true, "restoration setup failed"],
   ] as const)(

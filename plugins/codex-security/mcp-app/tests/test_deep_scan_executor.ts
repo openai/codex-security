@@ -31,7 +31,7 @@ import {
   trustedParentSandboxWithDenials,
 } from "./support/fake-codex-fixture.ts";
 import { readJson, writeJson } from "./support/json.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   assertConfigOverrides,
   assertFlagPair,
@@ -3198,27 +3198,51 @@ async function testArtifactServerUsesExtendedStartupTimeout() {
 async function testSdkResumesExistingThread() {
   return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
     await writeFile(promptPath, "original worker prompt\n");
-    const result = await new CodexSdkWorkerExecutor({
+    const executor = new CodexSdkWorkerExecutor({
       model: "gpt-5.6-sol",
       reasoningEffort: "ultra",
       parentSandbox: trustedParentSandbox,
-    }).run(
-      workerRequest(promptPath, workingDirectory, {
-        subagents: 3,
-        resumeThreadId: "fixture-existing-thread",
-        continuationPrompt: "continue the existing worker\n",
-      }),
-    );
-    assert.equal(result.threadId, "fixture-existing-thread");
-    const invocation = await readJson(fixture.markerPath);
-    const resumeIndex = invocation.argv.indexOf("resume");
-    assert.notEqual(resumeIndex, -1);
-    assert.equal(invocation.argv[resumeIndex + 1], "fixture-existing-thread");
-    assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
-    assertConfigOverrides(invocation.argv, { model_reasoning_effort: "ultra" });
-    assertReadOnlyWorkerPolicy(invocation.argv);
-    assertWorkerSubagentPolicy(invocation.argv, 3);
-    assert.equal(invocation.stdin, "continue the existing worker\n");
+    });
+    const onInputDigest = mock.fn();
+    const attemptId = randomUUID();
+    const request = workerRequest(promptPath, workingDirectory, {
+      attemptId,
+      onInputDigest,
+      subagents: 3,
+      resumeThreadId: "fixture-existing-thread",
+      continuationPrompt: "continue the existing worker\n",
+    });
+    const retentionFlag = "CODEX_SECURITY_RETAIN_ROLLOUT_SESSIONS";
+    const previous = process.env[retentionFlag];
+    try {
+      process.env[retentionFlag] = "1";
+      await executor.run(request);
+      const marked = (await readJson(fixture.markerPath)).stdin;
+      assert.equal(
+        marked,
+        request.continuationPrompt + "\n\nWorker attempt ID: " + attemptId,
+      );
+      assert.deepEqual(onInputDigest.mock.calls[0]?.arguments, [
+        createHash("sha256").update(marked).digest("hex"),
+      ]);
+      process.env[retentionFlag] = "0";
+      const result = await executor.run(request);
+      assert.equal(onInputDigest.mock.callCount(), 1);
+      assert.equal(result.threadId, "fixture-existing-thread");
+      const invocation = await readJson(fixture.markerPath);
+      const resumeIndex = invocation.argv.indexOf("resume");
+      assert.notEqual(resumeIndex, -1);
+      assert.equal(invocation.argv[resumeIndex + 1], "fixture-existing-thread");
+      assertFlagPair(invocation.argv, "--model", "gpt-5.6-sol");
+      assertConfigOverrides(invocation.argv, {
+        model_reasoning_effort: "ultra",
+      });
+      assertReadOnlyWorkerPolicy(invocation.argv);
+      assertWorkerSubagentPolicy(invocation.argv, 3);
+      assert.equal(invocation.stdin, "continue the existing worker\n");
+    } finally {
+      restoreEnv(retentionFlag, previous);
+    }
   });
 }
 
@@ -3783,7 +3807,11 @@ async function testWorkerTerminalEvents() {
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
-      { type: "turn.failed", error: { message: wrappedQuota } },
+      {
+        type: "turn.failed",
+        turn_id: "fixture-failed-turn",
+        error: { message: wrappedQuota },
+      },
       { type: "turn.failed", error: { message: disconnect } },
       { type: "turn.failed", error: { message: policyMessage } },
       {
@@ -3808,17 +3836,21 @@ async function testWorkerTerminalEvents() {
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
       },
     ] as const) {
+      const reportsStartedTurn =
+        event?.type === "turn.failed" && event.error.message === disconnect;
       await writeFile(
         promptPath,
         event
-          ? `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n`
+          ? `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n${reportsStartedTurn ? "FIXTURE_WORKER_TURN_ID" : ""}`
           : "NULL_USAGE\n",
       );
       for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
         const onNonRetryableError = mock.fn();
+        const onUsage = mock.fn();
         const execution = runWorker(promptPath, workingDirectory, {
           resumeThreadId,
           onNonRetryableError,
+          onUsage,
         });
         if (event?.type === "turn.failed") {
           const permanent = terminalMessages.includes(event.error.message);
@@ -3826,6 +3858,15 @@ async function testWorkerTerminalEvents() {
             name: permanent ? "DeepScanNonRetryableError" : "Error",
             message: event.error.message,
           });
+          const turnId = reportsStartedTurn
+            ? "fixture-started-turn"
+            : "turn_id" in event
+              ? event.turn_id
+              : undefined;
+          assert.deepEqual(
+            onUsage.mock.calls.map((call) => call.arguments),
+            turnId ? [[null, turnId]] : [],
+          );
           assert.deepEqual(
             onNonRetryableError.mock.calls.map(
               ({ arguments: [error] }) => error.message,

@@ -485,7 +485,7 @@ test.each(["failed", "canceled", "running"] as const)(
   },
 );
 
-test.each(["ambient settings", "shipped defaults"])(
+test.each(["ambient settings", "shipped defaults", "rollout retention"])(
   "a deep workflow can resume after changing %s but rejects a different request",
   async (change) => {
     const root = await temporaryDirectory();
@@ -517,12 +517,17 @@ test.each(["ambient settings", "shipped defaults"])(
     const originalWorkers = defaults.workers;
     const request = { workflowId: "deep-resume", mode: "deep" } as const;
     try {
-      await expect(client.run(repository, request)).rejects.toThrow(
+      const initialRequest =
+        change === "rollout retention"
+          ? { ...request, retainRolloutSessions: true }
+          : request;
+      await expect(client.run(repository, initialRequest)).rejects.toThrow(
         "Synthetic stop before scan",
       );
       if (change === "ambient settings")
         await writeFile(source, "[deep_scan]\nworkers = 9\nsubagents = 2\n");
-      else defaults.workers = originalWorkers + 1;
+      else if (change === "shipped defaults")
+        defaults.workers = originalWorkers + 1;
       await expect(client.run(repository, request)).rejects.toThrow(
         "Synthetic stop before scan",
       );

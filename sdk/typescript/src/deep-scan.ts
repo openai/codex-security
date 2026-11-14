@@ -362,6 +362,13 @@ export const DIRECT_DEEP_SCAN_CONTROL_USAGE = {
   output_tokens: 0,
 } as const;
 
+export function deepScanContextPrompt(prompt: string): string {
+  return (
+    prompt +
+    "\n\nThe host runs this Deep Scan coordinator directly and owns finalization. This saved request supplies context for later follow-up; do not start a replacement scan."
+  );
+}
+
 /** Run the same coordinator as the plugin, without a parent model turn. */
 export async function* runDeepScan(
   options: DirectDeepScanOptions,
@@ -395,9 +402,7 @@ export async function* runDeepScan(
           "features.plugins=false",
         ],
         signal: options.signal,
-        prompt:
-          options.prompt +
-          "\n\nThe host runs this Deep Scan coordinator directly and owns finalization. This saved request supplies context for later follow-up; do not start a replacement scan.",
+        prompt: deepScanContextPrompt(options.prompt),
       }),
   )) as {
     threadId: string;
