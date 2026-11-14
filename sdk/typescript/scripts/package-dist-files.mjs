@@ -78,6 +78,7 @@ const distModules = [
   "wiz-csv",
   "veracode-findings",
   "tenable-findings",
+  "crowdstrike-findings",
   "wiz-findings",
   "codex-prompt",
   "codex-sdk-environment",
