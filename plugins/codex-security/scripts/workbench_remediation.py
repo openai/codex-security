@@ -112,7 +112,7 @@ def patch_artifact_preview(
                             hunk_lines -= 1 if chunk.startswith((b"+", b"-")) else 2
                     elif expect_hunk and (hunk := _HUNK_HEADER.match(chunk)):
                         try:
-                            hunk_lines = int(hunk[1] or b"1") + int(hunk[2] or b"1")
+                            hunk_lines = _hunk_count(hunk[1]) + _hunk_count(hunk[2])
                         except ValueError:
                             # Malformed counts must not prevent displaying the saved patch.
                             expect_hunk = False
@@ -285,6 +285,11 @@ _SUBMODULE_ERROR = (
 )
 
 
+def _hunk_count(digits: bytes | None) -> int:
+    # An omitted count means one. Git also accepts counts padded with leading zeros.
+    return 1 if digits is None else int(digits.lstrip(b"0") or b"0")
+
+
 def _git_path(field: bytes) -> bytes:
     if quoted := re.match(_QUOTED_GIT_PATH + rb"(?:\t|$)", field):
         return codecs.escape_decode(quoted[1])[0]
@@ -431,8 +436,8 @@ def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
                 continue
             git_paths = b""
         if hunk:
-            old_lines = int(hunk[1] or b"1")
-            new_lines = int(hunk[2] or b"1")
+            old_lines = _hunk_count(hunk[1])
+            new_lines = _hunk_count(hunk[2])
         elif (
             line.startswith((b"Binary files ", b"Files "))
             and line.endswith(b" differ")

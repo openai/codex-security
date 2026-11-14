@@ -3232,14 +3232,12 @@ def test_patch_preview_counts_hunk_lines_that_look_like_file_headers(tmp_path: P
         b"diff --git a/query.sql b/query.sql\n"
         b"--- a/query.sql\n"
         b"+++ b/query.sql\n"
-        b"@@ -1,2 +1,2 @@\n"
+        b"@@ -1," + b"0" * 5000 + b"2 +1,2 @@\n"
         b"--- returns every account\n"
         b"-SELECT * FROM accounts;\n"
         b"+++ returns the caller's accounts\n"
         b"+SELECT * FROM accounts WHERE owner_id = ?;\n"
-        b"-- \ndiff --git a/other b/other\n--- a/other\n+++ b/other\n@@ -1,"
-        + b"9" * 5000
-        + b" +1,1 @@\n"
+        b"-- \ndiff --git a/other b/other\n--- a/other\n+++ b/other\n"
     )
     digest = f"sha256:{hashlib.sha256(patch).hexdigest()}"
     _, stats = remediation.patch_artifact_preview(
