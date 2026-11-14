@@ -6,6 +6,7 @@ import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import {
+  adaptHuggingFaceProviders,
   providerPreflightCommand,
   restoreProviderProfile,
   withCodexPreflightLock,
@@ -213,6 +214,8 @@ import {
   DEFAULT_CODEX_CONFIG,
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
+  huggingFaceProviderDefaults,
+  huggingFaceCredentialSource,
   isExternalModelProvider,
   mergeCodexOverrides,
   hasCommandAuth,
@@ -562,6 +565,7 @@ const PROVIDER_OPTION = z
     "openrouter",
     "fireworks",
     "cheaperinference",
+    "huggingface",
     "amazon-bedrock",
   ])
   .default("openai")
@@ -1864,9 +1868,12 @@ async function runCodexSkillProcess(
   processEnvironment: NodeJS.ProcessEnv,
   input?: string,
 ): Promise<number> {
+  let closeAdapter: (() => Promise<void>) | undefined;
+  let validationHome: string | undefined;
   let releaseCredentialHome: (() => Promise<void>) | undefined;
   try {
     let apiKey: string | undefined;
+    let threadProviderConfig: JsonObject | undefined;
     let authentication: ScanAuthentication | null = null;
     let modelProvider: string | undefined;
     // runSkill selects auth; other process callers supply their own environment.
@@ -2031,6 +2038,74 @@ async function runCodexSkillProcess(
           ),
         ];
       }
+      if (provider === "huggingface") {
+        const definition = {
+          ...huggingFaceProviderDefaults(providerConfiguration),
+          ...providerConfiguration,
+        };
+        const adapted = await adaptHuggingFaceProviders({
+          huggingface: definition,
+        });
+        closeAdapter = adapted.cleanup;
+        const config: JsonObject = {
+          model_providers: adapted.providers,
+          web_search: resolved.config["web_search"] ?? "disabled",
+          model_reasoning_summary:
+            resolved.config["model_reasoning_summary"] ?? "none",
+        };
+        // The provider table can contain static credentials. Never put it in argv.
+        args = args.filter(
+          (value, index, all) =>
+            !(
+              value === "--config" &&
+              all[index + 1]?.startsWith("model_providers=")
+            ) &&
+            !(
+              all[index - 1] === "--config" &&
+              value.startsWith("model_providers=")
+            ),
+        );
+        if (output.appServer === undefined) {
+          // Native exec ignores file profiles with --ignore-user-config. Its
+          // isolated home contains only this invocation's provider settings.
+          const directory = await realpath(output.directory ?? process.cwd());
+          const checkout = await gitMarkerRoot(
+            directory,
+            output.signal,
+            "outermost",
+          );
+          validationHome = await createIsolatedHome(undefined, (path) =>
+            requireOutputOutsideRepositories(
+              [checkout ?? directory],
+              path,
+              "runtime",
+            ),
+          );
+          const homeConfig = resolveCommandAuthConfig(
+            config,
+            configuredCodexHome(selected),
+          );
+          await writeCodexConfig(
+            join(validationHome, "config.toml"),
+            homeConfig,
+          );
+          selected = { ...selected, CODEX_HOME: validationHome };
+          args = args.filter((value) => value !== "--ignore-user-config");
+        } else {
+          // App-server has no --profile option. Register the provider at startup
+          // and send its private transport definition over the thread/start pipe.
+          threadProviderConfig = config;
+          args = [
+            ...args,
+            "--config",
+            ...modelProviderConfigOverride({
+              model_providers: {
+                huggingface: { name: "Hugging Face", wire_api: "responses" },
+              },
+            }),
+          ];
+        }
+      }
       if (output.appServer === undefined) await releaseCredentialHome?.();
       processEnvironment = selected;
     }
@@ -2133,6 +2208,7 @@ async function runCodexSkillProcess(
                     ...output.appServer,
                     apiKey,
                     modelProvider,
+                    providerConfig: threadProviderConfig,
                     onThreadStarted: releaseCredentialHome,
                     input: invocation.stdin!,
                   },
@@ -2227,7 +2303,13 @@ async function runCodexSkillProcess(
       process.off("SIGTERM", onTerminate);
     }
   } finally {
-    await releaseCredentialHome?.();
+    await Promise.all([
+      closeAdapter?.(),
+      validationHome === undefined
+        ? undefined
+        : cleanupSdkDirectory(validationHome),
+      releaseCredentialHome?.(),
+    ]);
   }
 }
 
@@ -10906,6 +10988,7 @@ export async function readSkillCommandOutput(
   appServer?: {
     readonly apiKey?: string;
     readonly modelProvider?: string;
+    readonly providerConfig?: JsonObject;
     readonly onThreadStarted?: () => Promise<void>;
     readonly directory?: string;
     readonly prompt: string;
@@ -11005,7 +11088,9 @@ export async function readSkillCommandOutput(
           appServer?.sandbox === "read-only" ? "on-request" : "never",
         sandbox: appServer?.sandbox ?? "workspace-write",
         ...(config["daybreak"] === true ? { daybreakEnabled: true } : {}),
-        ...(threadConfig === undefined ? {} : { config: threadConfig }),
+        ...(appServer.providerConfig || threadConfig
+          ? { config: { ...appServer.providerConfig, ...threadConfig } }
+          : {}),
       },
     });
   };
@@ -11409,6 +11494,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     hasCommandAuth(config) ||
+    huggingFaceCredentialSource(config) ||
     scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
@@ -11686,9 +11772,18 @@ async function executeScan(
       )?.[provider];
       providerOptions = {
         provider,
-        providerConfiguration: isExternalModelProvider(provider)
-          ? { ...EXTERNAL_CODEX_PROVIDERS[provider], ...providerConfiguration }
-          : providerConfiguration,
+        providerConfiguration:
+          provider === "huggingface"
+            ? {
+                ...huggingFaceProviderDefaults(providerConfiguration),
+                ...providerConfiguration,
+              }
+            : isExternalModelProvider(provider)
+              ? {
+                  ...EXTERNAL_CODEX_PROVIDERS[provider],
+                  ...providerConfiguration,
+                }
+              : providerConfiguration,
       };
     }
     selectedAuthentication = arguments_.mock
@@ -11700,6 +11795,7 @@ async function executeScan(
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
           scanProviderEnvKey(effectiveConfiguration),
+          effectiveConfiguration,
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
@@ -13420,6 +13516,7 @@ async function parseScanCodexOverrides(
   const providers = profile["model_providers"];
   if (
     isExternalModelProvider(provider) &&
+    provider !== "huggingface" &&
     isJsonObject(providers) &&
     isJsonObject(providers[provider])
   ) {
@@ -13454,9 +13551,11 @@ export function parseCodexOverrides(
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
   if (isExternalModelProvider(provider)) {
     result["model_provider"] = provider;
-    result["model_providers"] = {
-      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-    };
+    if (provider !== "huggingface") {
+      result["model_providers"] = {
+        [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+      };
+    }
   } else if (provider === "amazon-bedrock") {
     result["model_provider"] = provider;
   }
@@ -13521,9 +13620,30 @@ export function parseCodexOverrides(
     cursor[final] = parsed;
   }
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
-    const selectedModel = scanModel(
-      mergeCodexOverrides(defaults ?? {}, result),
-    );
+    const selected = mergeCodexOverrides(defaults ?? {}, result);
+    const selectedModel = scanModel(selected);
+    if (provider === "huggingface") {
+      const declared = resolveCodexProfile(selected)["model_providers"];
+      const baseProviders = resolveCodexProfile(defaults ?? {})[
+        "model_providers"
+      ];
+      const base = isJsonObject(baseProviders)
+        ? baseProviders["huggingface"]
+        : undefined;
+      const preset = huggingFaceProviderDefaults(
+        isJsonObject(declared) ? declared["huggingface"] : undefined,
+      );
+      if (isJsonObject(base)) {
+        for (const key of Object.keys(base)) delete preset[key];
+      }
+      const explicit = result["model_providers"];
+      result["model_providers"] = mergeCodexOverrides(
+        {
+          huggingface: preset,
+        },
+        isJsonObject(explicit) ? explicit : {},
+      );
+    }
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
         selectedModel === undefined

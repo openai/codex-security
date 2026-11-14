@@ -14,6 +14,7 @@ import {
   scanPricingContext,
   scanModelConfiguration,
   scanModelProvider,
+  scanProviderEnvKey,
 } from "../src/config.js";
 import {
   ConfigurationError,
@@ -1665,5 +1666,69 @@ describe("Codex configuration", () => {
     };
     await writeCodexConfig(path, { hooks });
     expect(parse(await readFile(path, "utf8"))).toEqual({ hooks });
+  });
+});
+
+test("HF defaults disable hosted search without overriding explicit settings", async () => {
+  const config = await mergedCodexConfig({
+    codexOverrides: { model_provider: "huggingface" },
+  });
+  expect(config["web_search"]).toBe("disabled");
+  expect(config["model_reasoning_summary"]).toBe("none");
+  expect(scanProviderEnvKey(config)).toBe("HF_TOKEN");
+  const alternate = resolveCodexProfile(
+    await mergedCodexConfig({
+      codexOverrides: {
+        model_provider: "openrouter",
+        model_providers: { huggingface: { env_key: "WORKER_TOKEN" } },
+      },
+    }),
+  );
+  expect(alternate["model_providers"]).toMatchObject({
+    huggingface: {
+      wire_api: "responses",
+      base_url: "https://router.huggingface.co/v1",
+      env_key: "WORKER_TOKEN",
+    },
+  });
+  expect(alternate["web_search"]).toBeUndefined();
+  expect(config["model_providers"]).toMatchObject({
+    huggingface: {
+      name: "Hugging Face",
+      base_url: "https://router.huggingface.co/v1",
+      env_key: "HF_TOKEN",
+      wire_api: "responses",
+    },
+  });
+  const selected = resolveCodexProfile(
+    await mergedCodexConfig({
+      codexOverrides: {
+        profile: "selected",
+        profiles: {
+          selected: {
+            model_provider: "huggingface",
+            web_search: "live",
+            model_reasoning_summary: "auto",
+            model_providers: {
+              huggingface: {
+                base_url: "https://private.example.test/v1",
+                auth: { command: "private-token" },
+              },
+            },
+          },
+        },
+      },
+    }),
+  );
+  expect(selected["web_search"]).toBe("live");
+  expect(selected["model_reasoning_summary"]).toBe("auto");
+  expect(scanProviderEnvKey(selected)).toBeUndefined();
+  expect(selected["model_providers"]).toEqual({
+    huggingface: {
+      name: "Hugging Face",
+      wire_api: "responses",
+      base_url: "https://private.example.test/v1",
+      auth: { command: "private-token" },
+    },
   });
 });

@@ -2,10 +2,13 @@ import { codexFactory, completedEvents } from "./support/api-events.js";
 import { afterEach, expect, mock, test } from "bun:test";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import {
+  HUGGINGFACE_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   resolveCodexProfile,
   type JsonObject,
+  type JsonValue,
 } from "../src/config.js";
+import { selectedScanEnvironment } from "../src/api.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -153,6 +156,99 @@ async function effectiveProvider(
   );
   return config.model_providers?.[config.model_provider];
 }
+
+test("OpenAI scans omit ambient Hugging Face credentials", () => {
+  const environment = {
+    OPENAI_API_KEY: "synthetic-account-key",
+    Hf_Token: "synthetic-provider-key",
+  };
+  for (const auth of ["auto", "api-key", "chatgpt"] as const) {
+    for (const provider of [undefined, "openai"]) {
+      expect(
+        selectedScanEnvironment(environment, auth, provider),
+      ).not.toHaveProperty("Hf_Token");
+    }
+  }
+});
+
+const privateHuggingFaceCredentials: { field: string; value: JsonValue }[] = [
+  { field: "experimental_bearer_token", value: "synthetic-private-bearer" },
+  {
+    field: "http_headers",
+    value: { aUtHoRiZaTiOn: "Bearer synthetic-private-bearer" },
+  },
+  { field: "env_http_headers", value: { Authorization: "SYNTHETIC_HEADER" } },
+];
+test.each(privateHuggingFaceCredentials)(
+  "starts a Hugging Face scan using private $field authentication",
+  async ({ field, value }) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const home = join(root, "home");
+    await mkdir(repository);
+    await mkdir(home, { mode: 0o700 });
+    const ambient = {
+      OPENAI_API_KEY: "synthetic-unrelated-account",
+      HF_TOKEN: "synthetic-unrelated-hub",
+    };
+    const client = new TestClient(
+      {
+        codexOverrides: {
+          model_provider: "huggingface",
+          model_providers: {
+            huggingface: {
+              [field]: value,
+            },
+          },
+        },
+      },
+      {
+        environment: {
+          ...ambient,
+          SYNTHETIC_HEADER: "synthetic-extra-token",
+          CODEX_HOME: home,
+        },
+        prepareRuntime: async () => ({
+          ...preparedRuntime(home),
+          environment: ambient,
+          credentialsAvailable: false,
+        }),
+        resolvePluginPython: async (options) => {
+          if (field === "env_http_headers")
+            expect(options?.environment).not.toHaveProperty("SYNTHETIC_HEADER");
+          return "/managed/python";
+        },
+        createCodex: (options) => {
+          if (field === "env_http_headers")
+            expect(options.env?.["SYNTHETIC_HEADER"]).toBe(
+              "synthetic-extra-token",
+            );
+          expect(options.apiKey).toBeUndefined();
+          for (const name of ["HF_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY"])
+            expect(options.env).not.toHaveProperty(name);
+          expect(JSON.stringify(options)).not.toContain(
+            "synthetic-private-bearer",
+          );
+          throw new Error("private provider credential selected");
+        },
+      },
+    );
+    try {
+      expect(
+        (await client.preflight(repository, { auth: "api-key" }))
+          .authentication,
+      ).toEqual({ method: "api_key", source: field, verified: false });
+      await expect(
+        client.run(repository, {
+          auth: "api-key",
+          outputDir: join(root, "scan"),
+        }),
+      ).rejects.toThrow("private provider credential selected");
+    } finally {
+      await client.close();
+    }
+  },
+);
 
 test("native worker override tables retain inherited features and MCP servers", async () => {
   const root = await temporaryDirectory();
@@ -709,6 +805,8 @@ const fileProviderKeyCases = [
   ["gateway", "declared OpenAI account header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
+  ["openrouter", "alternate Hugging Face", "OPENROUTER_API_KEY"],
+  ["huggingface", "alternate OpenRouter", "HF_TOKEN"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -771,7 +869,10 @@ for (const mode of ["standard", "deep"] as const) {
       await mkdir(scan, { mode: 0o700 });
       await mkdir(sourceHome, { mode: 0o700 });
       const plugin = await createPluginProbe(root, report);
-      const canonicalKey = `${providerId.toUpperCase()}_API_KEY`;
+      const canonicalKey =
+        providerId === "huggingface"
+          ? "HF_TOKEN"
+          : `${providerId.toUpperCase()}_API_KEY`;
       const gatewayHeader = gatewayHeaders.get(_selection);
       const headerKey =
         gatewayHeader ??
@@ -780,12 +881,31 @@ for (const mode of ["standard", "deep"] as const) {
         headerKey || _selection === "missing custom primary"
           ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
           : {};
-      const inactiveKey = gatewayHeader
-        ? "CHEAPER_INFERENCE_API_KEY"
-        : "INACTIVE_GATEWAY_TOKEN";
-      const inactiveEnvironment = gatewayHeader
-        ? { [inactiveKey]: "synthetic-inactive-key" }
-        : {};
+      const alternateProvider =
+        _selection === "alternate Hugging Face"
+          ? "huggingface"
+          : _selection === "alternate OpenRouter"
+            ? "openrouter"
+            : undefined;
+      const inactiveKey =
+        alternateProvider === "huggingface"
+          ? "HF_TOKEN"
+          : alternateProvider
+            ? `${alternateProvider.toUpperCase()}_API_KEY`
+            : gatewayHeader
+              ? "CHEAPER_INFERENCE_API_KEY"
+              : "INACTIVE_GATEWAY_TOKEN";
+      const alternateAccountEnvironment: Record<string, string> =
+        providerId === "huggingface" && alternateProvider === "openrouter"
+          ? {
+              CODEX_API_KEY: "synthetic-worker-primary",
+              OPENAI_API_KEY: "synthetic-worker-header",
+            }
+          : {};
+      const inactiveEnvironment =
+        gatewayHeader || alternateProvider
+          ? { [inactiveKey]: "synthetic-inactive-key" }
+          : {};
       const inheritedEnvironment: Record<string, string> = {
         ...(_selection === "custom Codex key" ||
         _selection === "other external key" ||
@@ -803,6 +923,7 @@ for (const mode of ["standard", "deep"] as const) {
           : {}),
         ...headerEnvironment,
         ...inactiveEnvironment,
+        ...alternateAccountEnvironment,
         ...(_selection === "missing custom primary"
           ? {
               OPENAI_API_KEY: "synthetic-unrelated-account",
@@ -813,6 +934,7 @@ for (const mode of ["standard", "deep"] as const) {
       const workerEnvironment = {
         ...headerEnvironment,
         ...inactiveEnvironment,
+        ...alternateAccountEnvironment,
         [providerKey]: "synthetic-file-key",
       };
       const provider = {
@@ -832,12 +954,27 @@ for (const mode of ["standard", "deep"] as const) {
         model_provider: providerId,
         model_providers: {
           [providerId]: provider,
-          inactive: { ...provider, env_key: inactiveKey },
+          [alternateProvider ?? "inactive"]: {
+            ...provider,
+            env_key: inactiveKey,
+          },
+          ...("CODEX_API_KEY" in alternateAccountEnvironment
+            ? {
+                "account.gateway": {
+                  name: "Alternate account-named credentials",
+                  wire_api: "responses",
+                  base_url: "https://alternate.example.test/v1",
+                  env_key: "CODEX_API_KEY",
+                  env_http_headers: { "X-Alternate-Key": "OPENAI_API_KEY" },
+                },
+              }
+            : {}),
         },
         features: { shell_tool: false, unified_exec: false },
       });
       await writeFile(join(sourceHome, "review.config.toml"), original);
       let launched = false;
+      let expectedWorkerEnvironment = workerEnvironment;
       const client = new TestClient(
         { pluginPath: plugin, codexOverrides: { profile: "review" } },
         {
@@ -852,6 +989,8 @@ for (const mode of ["standard", "deep"] as const) {
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan") {
               expect(options.environment).not.toHaveProperty(providerKey);
+              for (const name of Object.keys(alternateAccountEnvironment))
+                expect(options.environment).not.toHaveProperty(name);
               if (gatewayHeader) {
                 expect(options.environment).not.toHaveProperty(gatewayHeader);
                 expect(options.environment).not.toHaveProperty(inactiveKey);
@@ -874,19 +1013,22 @@ for (const mode of ["standard", "deep"] as const) {
                     "OPENROUTER_API_KEY",
                     "FIREWORKS_API_KEY",
                     "CHEAPER_INFERENCE_API_KEY",
+                    "HF_TOKEN",
                   ]) {
                     expect(environment[name]).toBe(
                       name === providerKey ||
                         name === canonicalKey ||
                         name === headerKey ||
-                        name === inactiveKey
+                        (name === inactiveKey && !alternateProvider)
                         ? inheritedEnvironment[name]
                         : undefined,
                     );
                   }
                   if (mode === "deep") {
                     const settings = await workerRuntimeSettings(environment);
-                    expect(settings.environment).toEqual(workerEnvironment);
+                    expect(settings.environment).toEqual(
+                      expectedWorkerEnvironment,
+                    );
                     expect(
                       await effectiveProvider(
                         environment,
@@ -894,7 +1036,16 @@ for (const mode of ["standard", "deep"] as const) {
                         profileConfigOverrides(settings.config),
                         settings.nativeProfile,
                       ),
-                    ).toMatchObject(provider);
+                    ).toMatchObject(
+                      providerId === "huggingface"
+                        ? {
+                            ...provider,
+                            base_url: expect.stringMatching(
+                              /^http:\/\/127\.0\.0\.1:/,
+                            ),
+                          }
+                        : provider,
+                    );
                     const status = await nativeRequest(
                       environment,
                       repository,
@@ -911,7 +1062,7 @@ for (const mode of ["standard", "deep"] as const) {
                     );
                     expect(
                       JSON.parse(await readFile(report, "utf8")).recovered,
-                    ).toEqual(workerEnvironment);
+                    ).toEqual(expectedWorkerEnvironment);
                     const snapshot =
                       environment["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!;
                     if (process.platform !== "win32")
@@ -977,6 +1128,16 @@ for (const mode of ["standard", "deep"] as const) {
         await expect(client.run(repository, { mode })).rejects.toThrow(
           "synthetic file provider child checked",
         );
+        if (mode === "deep" && "CODEX_API_KEY" in alternateAccountEnvironment) {
+          expectedWorkerEnvironment = {
+            ...headerEnvironment,
+            ...inactiveEnvironment,
+            [providerKey]: "synthetic-file-key",
+          };
+          await expect(
+            client.run(repository, { mode, auth: "chatgpt" }),
+          ).rejects.toThrow("synthetic file provider child checked");
+        }
         expect(launched).toBe(true);
         expect(
           await readFile(join(sourceHome, "review.config.toml"), "utf8"),
@@ -1154,6 +1315,8 @@ test.each([
   ["profile", "openai"],
   ["root", "openrouter"],
   ["profile", "openrouter"],
+  ["root", "huggingface"],
+  ["profile", "huggingface"],
 ] as const)(
   "Deep workers, rerun and resume inherit the %s %s endpoint",
   async (selection, provider) => {
@@ -1173,7 +1336,9 @@ test.each([
             model_provider: provider,
             model_providers: {
               [provider]: {
-                ...OPENROUTER_CODEX_PROVIDER,
+                ...(provider === "huggingface"
+                  ? HUGGINGFACE_CODEX_PROVIDER
+                  : OPENROUTER_CODEX_PROVIDER),
                 base_url: endpoint,
                 query_params: { version: "preview" },
               },
@@ -1183,6 +1348,7 @@ test.each([
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-openai-key",
       OPENROUTER_API_KEY: "synthetic-openrouter-key",
+      HF_TOKEN: "synthetic-hf-key",
     };
     let recipe: JsonObject;
     const client = new TestClient(
@@ -1224,10 +1390,27 @@ test.each([
                     profile,
                   )
                 : {};
+            const expected = structuredClone(routing);
+            if (provider === "huggingface") {
+              const definitions = providerConfig[
+                "model_providers"
+              ] as JsonObject;
+              const hf = definitions["huggingface"] as JsonObject;
+              expect(hf["base_url"]).toMatch(/^http:\/\/127\.0\.0\.1:/);
+              (
+                (expected["model_providers"] as JsonObject)[
+                  "huggingface"
+                ] as JsonObject
+              )["base_url"] = hf["base_url"]!;
+              const settings = await workerRuntimeSettings(options.env!);
+              expect(profile).toBe(settings.nativeProfile);
+              expect(settings.config["model_provider"]).toBe("huggingface");
+              expect((await fetch(String(hf["base_url"]))).status).toBe(404);
+            }
             expect({ ...options.config, ...providerConfig }).toMatchObject(
-              routing,
+              expected,
             );
-            expect({ ...runtime, ...providerConfig }).toMatchObject(routing);
+            expect({ ...runtime, ...providerConfig }).toMatchObject(expected);
             throw new Error("synthetic endpoint inherited");
           })(),
       },
@@ -1280,7 +1463,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     await writeFile(process.argv[2], JSON.stringify({
       inherited: Object.fromEntries([
         "SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER",
-        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY",
+        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY", "HF_TOKEN",
       ].map((name) => [name, process.env[name] ?? null])),
       recovered: settings.environment,
     }));
@@ -1313,6 +1496,7 @@ test.each([
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
+  "HF_TOKEN",
 ])(
   "native plugin workers recover the selected %s and other provider variables",
   async (providerKey) => {
@@ -1325,12 +1509,21 @@ test.each([
     await mkdir(scan, { mode: 0o700 });
     await mkdir(sourceHome, { mode: 0o700 });
     const plugin = await createPluginProbe(root, report);
-    const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
-      providerKey,
-    );
-    const providerId = external
-      ? providerKey.split("_")[0]!.toLowerCase()
-      : "synthetic.gateway";
+    const external = [
+      "OPENROUTER_API_KEY",
+      "FIREWORKS_API_KEY",
+      "HF_TOKEN",
+    ].includes(providerKey);
+    const providerId =
+      providerKey === "HF_TOKEN"
+        ? "huggingface"
+        : external
+          ? providerKey.split("_")[0]!.toLowerCase()
+          : "synthetic.gateway";
+    const declaredKey =
+      process.platform === "win32" && providerId === "huggingface"
+        ? providerKey.toLowerCase()
+        : providerKey;
     const headerKey =
       process.platform === "win32"
         ? "synthetic_custom_header"
@@ -1352,7 +1545,7 @@ test.each([
               name: "Synthetic gateway",
               wire_api: "responses",
               base_url: "https://provider.example.test/v1",
-              env_key: providerKey,
+              env_key: declaredKey,
               env_http_headers: {
                 "X-Synthetic-Token": headerKey,
                 ...(!external ? { "X-Synthetic-Primary": providerKey } : {}),
@@ -1390,7 +1583,7 @@ test.each([
               const selectedKey = external
                 ? "synthetic-custom-key"
                 : providerEnvironment[providerKey];
-              expect(options.env![providerKey]).toBe(selectedKey);
+              expect(options.env![declaredKey]).toBe(selectedKey);
               const status = await nativeRequest(
                 options.env!,
                 repository,
@@ -1411,13 +1604,16 @@ test.each([
                   SYNTHETIC_CUSTOM_HEADER: null,
                   SYNTHETIC_REQUIRED_KEY: null,
                   SYNTHETIC_UNUSED_KEY: null,
+                  HF_TOKEN: null,
                 },
                 recovered: {
-                  ...providerEnvironment,
-                  ...(process.platform === "win32"
-                    ? { [headerKey]: " synthetic-child-header " }
-                    : {}),
-                  [providerKey]: selectedKey,
+                  [declaredKey]: selectedKey,
+                  [headerKey]:
+                    process.platform === "win32"
+                      ? " synthetic-child-header "
+                      : providerEnvironment[headerKey],
+                  SYNTHETIC_REQUIRED_KEY:
+                    providerEnvironment.SYNTHETIC_REQUIRED_KEY,
                 },
               });
               for (const text of [

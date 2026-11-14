@@ -16,6 +16,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
+import { startHuggingFaceResponsesAdapter } from "./huggingface-responses.js";
 import { nativeCodexLaunch } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
@@ -91,6 +92,21 @@ export function privateReplayOverrides(
   return result;
 }
 
+/** A worker can select the HF declaration even when its parent uses another provider. */
+export async function adaptHuggingFaceProviders(providers: JsonObject) {
+  const hf = providers["huggingface"];
+  if (!isRecord(hf) || typeof hf["base_url"] !== "string")
+    return { providers, cleanup: async () => {} };
+  const adapter = await startHuggingFaceResponsesAdapter(hf["base_url"]);
+  return {
+    providers: {
+      ...providers,
+      huggingface: { ...hf, base_url: adapter.baseUrl },
+    },
+    cleanup: adapter.close,
+  };
+}
+
 /** Provider definitions use a native file layer, never process arguments. */
 export async function createProviderProfile(
   codexHome: string,
@@ -112,15 +128,32 @@ export async function createProviderProfile(
       options,
     );
   }
+  let closeAdapter: (() => Promise<void>) | undefined;
   if (options.replay) {
     await writePrivateConfig(path, JSON.stringify(config));
   } else {
     const providers = resolveCodexProfile(config)["model_providers"];
-    await writeCodexConfig(path, {
-      model_providers: isRecord(providers) ? providers : {},
-    });
+    const adapted = await adaptHuggingFaceProviders(
+      isRecord(providers) ? providers : {},
+    );
+    closeAdapter = adapted.cleanup;
+    try {
+      await writeCodexConfig(path, {
+        model_providers: adapted.providers,
+      });
+    } catch (error) {
+      await closeAdapter();
+      throw error;
+    }
   }
-  return { name, path, cleanup: () => rm(path, { force: true }) };
+  return {
+    name,
+    path,
+    cleanup: async () => {
+      await closeAdapter?.();
+      await rm(path, { force: true });
+    },
+  };
 }
 
 /** Restore private replay settings from the credential home, never scan artifacts. */

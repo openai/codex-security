@@ -46,6 +46,39 @@ const config = {
   model_providers: { "synthetic.gateway": provider },
 };
 
+test("native profiles route a declared Hugging Face worker while replay keeps its upstream", async () => {
+  const home = await temporaryDirectory();
+  const upstream = "https://router.example.test/v1";
+  const selection = {
+    ...config,
+    model_providers: {
+      ...config.model_providers,
+      huggingface: {
+        name: "Hugging Face",
+        wire_api: "responses",
+        base_url: upstream,
+      },
+    },
+  };
+  const replay = await createProviderProfile(home, selection, { replay: true });
+  const native = await createProviderProfile(home, selection);
+  try {
+    expect(JSON.parse(await readFile(replay.path, "utf8"))).toEqual(selection);
+    const profile = parse(
+      await readFile(native.path, "utf8"),
+    ) as typeof selection;
+    const routing = profile.model_providers.huggingface.base_url;
+    expect(routing).toMatch(/^http:\/\/127\.0\.0\.1:/);
+    expect((await fetch(routing)).status).toBe(404);
+    expect(selection.model_providers.huggingface.base_url).toBe(upstream);
+    expect(profile.model_providers["synthetic.gateway"]).toEqual(provider);
+    await native.cleanup();
+    await expect(fetch(routing)).rejects.toThrow();
+  } finally {
+    await Promise.all([replay.cleanup(), native.cleanup()]);
+  }
+});
+
 const startupProvider = {
   ...provider,
   requires_openai_auth: true,
