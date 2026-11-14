@@ -1228,6 +1228,30 @@ the current checks. Sign in again if needed; a new state directory has separate
 scan history and does not migrate credentials or reports from the old state
 directory.
 
+#### Recover from a sandbox-writable Windows profile
+
+If a sandbox group or capability SID has Modify access on your profile, a
+protected child under that profile still has an unsafe ancestor. Leave the
+sandbox grants in place. When `ProgramData` has trusted ancestry and permits
+directory creation, run this once in PowerShell as the account that will use
+Codex Security:
+
+```powershell
+$sid = (whoami /user /fo csv /nh | ConvertFrom-Csv -Header Name, Sid).Sid
+$state = Join-Path $env:ProgramData "codex-security-$sid"
+New-Item -ItemType Directory -Path $state -ErrorAction Stop | Out-Null
+icacls $state /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'
+if ($LASTEXITCODE -ne 0) { throw 'Could not secure the new state directory' }
+$env:CODEX_SECURITY_STATE_DIR = $state
+codex-security login status
+```
+
+Creation stops if the destination already exists. If creation is denied or the
+ancestry check fails, ask an administrator to provision a new private directory
+under a trusted ancestor. A "not logged in" result (exit code 1) is expected
+for the new directory. Use `codex-security login` to sign in and set the same
+`CODEX_SECURITY_STATE_DIR` in subsequent shells and SDK processes.
+
 ### Progress and cost
 
 Interactive scans show full-screen progress. The dashboard title uses the resolved

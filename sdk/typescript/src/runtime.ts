@@ -326,6 +326,15 @@ export async function prepareCodexSecurityCredentialHome(
     });
     return canonical;
   } catch (error) {
+    if (
+      error instanceof OutputDirectoryError &&
+      error.cause instanceof UntrustedWindowsCredentialAncestorError
+    ) {
+      throw new OutputDirectoryError(
+        `${error.message}\nSet CODEX_SECURITY_STATE_DIR to a private, writable directory outside the rejected ancestor and the repository. The new directory has separate sign-in and scan history.`,
+        { cause: error.cause },
+      );
+    }
     if (error instanceof OutputDirectoryError) throw error;
     const code = nodeErrorCode(error);
     const recovery =
@@ -554,6 +563,8 @@ class UntrustedWindowsCredentialOwnerError extends Error {
     super(`Windows credential ACL owner is not a trusted principal: ${owner}`);
   }
 }
+
+class UntrustedWindowsCredentialAncestorError extends Error {}
 
 class RepairableWindowsCredentialAclError extends Error {
   public constructor(cause: unknown) {
@@ -952,7 +963,7 @@ export async function inspectWindowsCredentialAclSnapshot(
                   ? "This share root is unsupported. Choose a location outside this share with trusted ownership and permissions."
                   : "This volume root is unsupported. Choose a location on a volume with trusted ancestry; another directory on the same volume will not resolve this.";
               }
-              throw new Error(
+              throw new UntrustedWindowsCredentialAncestorError(
                 `Windows private-directory ancestor could not be trusted: ${ancestorPath}. ${errorMessage(error)}. ${guidance}`,
                 { cause: error },
               );

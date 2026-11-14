@@ -5838,13 +5838,15 @@ describe("runtime directories and plugin Python boundary", () => {
   );
 
   test.skipIf(process.platform !== "win32")(
-    "rejects attacker-writable Windows credential-home ancestry without changing it",
+    "recovers outside a writable Windows profile without changing existing state or ACLs",
     async () => {
       const root = await temporaryDirectory();
-      const state = join(root, "state");
-      await mkdir(state);
+      const profile = join(root, "profile");
+      const environment = { CODEX_HOME: join(profile, ".codex") };
+      const state = codexSecurityStateDirectory(environment);
+      await mkdir(state, { recursive: true });
       const sid = windowsUserSid();
-      for (const ancestor of [root, state]) {
+      for (const ancestor of [profile, state]) {
         const owned = windowsTestCommand("icacls.exe", [
           ancestor,
           "/setowner",
@@ -5859,15 +5861,26 @@ describe("runtime directories and plugin Python boundary", () => {
         expect(writable.status).toBe(0);
       }
 
-      await expect(
-        prepareCodexSecurityCredentialHome({
-          CODEX_SECURITY_STATE_DIR: state,
-        }),
-      ).rejects.toThrow(
-        `ancestor could not be trusted: ${root}. Windows credential-home ancestor allows another identity to replace the directory`,
+      const report = join(state, "saved-report.txt");
+      await writeFile(report, "saved report");
+      const failure = await prepareCodexSecurityCredentialHome(
+        environment,
+      ).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(
+        `ancestor could not be trusted: ${profile}. Windows credential-home ancestor allows another identity to replace the directory`,
       );
+      expect((failure as Error).message).toContain("CODEX_SECURITY_STATE_DIR");
+      const outside = join(root, "private-state");
+      expect(
+        await prepareCodexSecurityCredentialHome({
+          ...environment,
+          CODEX_SECURITY_STATE_DIR: outside,
+        }),
+      ).toBe(await realpath(join(outside, "codex-home")));
+      expect(await readFile(report, "utf8")).toBe("saved report");
 
-      for (const ancestor of [root, state]) {
+      for (const ancestor of [profile, state]) {
         const inspection = inspectWindowsTestAcl(
           [
             "$acl = [System.IO.Directory]::GetAccessControl($env:CODEX_SECURITY_TEST_ACL_PATH)",
