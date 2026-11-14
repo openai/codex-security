@@ -4332,8 +4332,8 @@ export class CodexSecurity {
         try {
           const budgetScanId = activeScan.id;
           const completionCost =
-            verifiedCost && verifiedCost.coverage !== "partial"
-              ? (measuredScanCost(snapshot.measurement) ?? verifiedCost)
+            snapshot.measurement.coverage === "complete" && verifiedCost
+              ? measuredScanCost(snapshot.measurement)
               : null;
           const budgetCost = completionCost ?? { lowerBound: failure.cost };
           const completionOptions = {

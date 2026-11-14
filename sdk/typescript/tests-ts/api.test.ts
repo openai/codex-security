@@ -16406,18 +16406,24 @@ if __name__ == "__main__":
         );
         expect(recovery?.includes("--cost-json")).toBe(true);
         const costIndex = recovery!.indexOf("--cost-json");
-        expect(JSON.parse(recovery![costIndex + 1]!)).toMatchObject({
-          usage: {
-            coverage: missingWorker ? "partial" : "complete",
-            threadCount: 1,
-            missingThreadCount: missingWorker ? 1 : 0,
-            inputTokens: 1_250,
-            cachedInputTokens: 200,
-            outputTokens: 30,
-            totalTokens: 1_280,
-          },
-          cost: { estimatedUsd: 0.00488 },
-        });
+        const savedCost = JSON.parse(recovery![costIndex + 1]!);
+        if (missingWorker) {
+          expect(Object.keys(savedCost)).toEqual(["lowerBound"]);
+          expect(savedCost.lowerBound.estimatedUsd).toBe(0.00488);
+        } else {
+          expect(savedCost).toMatchObject({
+            usage: {
+              coverage: "complete",
+              threadCount: 1,
+              missingThreadCount: 0,
+              inputTokens: 1_250,
+              cachedInputTokens: 200,
+              outputTokens: 30,
+              totalTokens: 1_280,
+            },
+            cost: { estimatedUsd: 0.00488 },
+          });
+        }
         expect(recovery?.some((value) => value.startsWith("--message="))).toBe(
           true,
         );
