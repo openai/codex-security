@@ -352,6 +352,10 @@ test.each(
     const scanDir = join(root, "scan");
     for (const path of [repository, home, runtimeHome, scanDir])
       await mkdir(path, { mode: 0o700 });
+    await writeFile(
+      join(root, "caller-catalog.json"),
+      JSON.stringify({ models: [] }),
+    );
     const profilePath = join(home, "review.config.toml");
     const ambientAuth = {
       cli_auth_credentials_store: "file",
@@ -447,7 +451,7 @@ test.each(
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "synthetic stop after registration",
       );
-      expect(recipe).toBeDefined();
+      expect(recipe!["sealedPricing"]).toEqual({ model: "initial-model" });
       await writeFile(profilePath, stringify(fileProfile("reloaded")));
       let replay: JsonObject | undefined;
       const out = capture(),

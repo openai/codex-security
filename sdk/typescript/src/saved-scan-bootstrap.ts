@@ -1,3 +1,4 @@
+import { executableSourceRoots } from "./deep-config.js";
 import { isRecord } from "./record.js";
 import type { JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
@@ -25,6 +26,8 @@ import {
 interface ScanTarget {
   id: string;
   target_path: string;
+  executableSourcePaths?: string[];
+  knowledgeRoots?: string[];
   repository_generation?: string | null;
   originFallback?: boolean;
   protectPython?: boolean;
@@ -52,6 +55,8 @@ export async function savedScanWorkbench(
   options: {
     environment: ProcessEnvironment;
     pluginRoot: string;
+    configuredPython?: string;
+    executableSourcePaths?: readonly string[];
     currentDirectory: string;
     signal?: AbortSignal;
   },
@@ -103,7 +108,21 @@ export async function savedScanWorkbench(
   const liveTargets = targets.filter(
     (target) => target.protectPython !== false,
   );
+  const configPaths = new Set([
+    ...(options.executableSourcePaths ?? []),
+    ...targets.flatMap((target) => target.executableSourcePaths ?? []),
+  ]);
+  const configRoots = await Promise.all(
+    Array.from(configPaths, (path) =>
+      executableSourceRoots(path, options.signal),
+    ),
+  );
+  const inputRoots = [
+    ...configRoots.flat(),
+    ...targets.flatMap((target) => target.knowledgeRoots ?? []),
+  ];
   const protectedRoots = [
+    ...inputRoots,
     ...callerRoots,
     ...liveTargets.flatMap((row) => {
       const root = checkouts.byTarget.get(row.target_path);
@@ -120,7 +139,11 @@ export async function savedScanWorkbench(
   ];
   const discoveryProtectedRoots = await savedDiscoveryRoots(
     checkouts,
-    [options.currentDirectory, ...targets.map((row) => row.target_path)],
+    [
+      options.currentDirectory,
+      ...inputRoots,
+      ...targets.map((row) => row.target_path),
+    ],
     options.signal,
   );
   let python: string | undefined;
@@ -144,6 +167,7 @@ export async function savedScanWorkbench(
       );
     // Pin one interpreter; ambient discovery also excludes historical candidate paths.
     python ??= await resolvePluginPython({
+      configuredPath: options.configuredPython,
       environment,
       protectedRoot: protectedRoots,
       discoveryProtectedRoots,
@@ -254,6 +278,40 @@ async function readTargets(
         const targets = latest
           ? completedScans(database)
           : exactTargets(database, requestedId);
+        if (
+          targets.length === 1 &&
+          tableColumns(database, "scans").has("recipe_json")
+        ) {
+          const target = targets[0]!;
+          const [row] = readRows<{ recipe_json: string | null }>(
+            database,
+            "SELECT recipe_json FROM scans WHERE id = ?",
+            target.id,
+          );
+          if (row?.recipe_json) {
+            const recipe: unknown = JSON.parse(row.recipe_json);
+            const paths = (key: string): string[] => {
+              const value = isRecord(recipe) ? recipe[key] : null;
+              if (value === undefined) return [];
+              if (
+                Array.isArray(value) &&
+                value.every(
+                  (path): path is string =>
+                    typeof path === "string" && isAbsolute(path),
+                )
+              )
+                return value;
+              throw new CodexSecurityError(
+                "Invalid executable source paths in saved scan history.",
+              );
+            };
+            target.executableSourcePaths = paths("executableSourcePaths");
+            target.knowledgeRoots = [
+              ...paths("knowledgeBasePaths"),
+              ...paths("knowledgeBaseProtectedRoots"),
+            ];
+          }
+        }
         const checkouts = savedCheckouts(database);
         return { targets, checkouts };
       },
@@ -470,7 +528,8 @@ function completedScans(database: RuntimeDatabase): ScanTarget[] {
         progress.updated_at AS progress_updated_at,
         ${columns.has("repository_generation") ? "scans.repository_generation" : "NULL"} AS repository_generation
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
-      WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}`,
+      WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
+        ${columns.has("parent_scan_role") ? "AND scans.parent_scan_role IS NOT 'deep_pass'" : ""}`,
   )
     .map((scan) => {
       const updated = timestampOrderKey(scan.updated_at);

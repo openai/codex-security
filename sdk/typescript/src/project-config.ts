@@ -44,12 +44,17 @@ const validateProjectConfig = new Ajv({
 
 export interface ProjectConfigSource {
   path?: string;
+  selectedPath?: string;
+  resolvedPath?: string;
   directory: string;
   input: ProjectConfigInput;
 }
 
 export interface ResolvedProjectConfig {
-  config: { codexOverrides: JsonObject };
+  config: {
+    codexOverrides: JsonObject;
+    executableSourcePaths?: readonly string[];
+  };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
   projectConfig?: ProjectConfigProvenance;
@@ -140,9 +145,11 @@ export async function readProjectConfig(
     ? selected
     : `${directory || "."}${sep}${selected}`;
   const traversesParent = sep === "/" && requested.split("/").includes("..");
-  let path = traversesParent ? requested : resolve(directory, selected);
+  const selectedPath = resolve(directory, selected);
+  let path = traversesParent ? requested : selectedPath;
   const extension = projectConfigExtension(path);
   let text: string;
+  let resolvedPath: string;
   try {
     // Resolve the parent through the filesystem while retaining the selected filename.
     if (traversesParent) {
@@ -153,7 +160,8 @@ export async function readProjectConfig(
         );
       path = resolve(parent.toString(), basename(path));
     }
-    text = await readFile(path, "utf8");
+    resolvedPath = await realpath(path);
+    text = await readFile(resolvedPath, "utf8");
   } catch (error) {
     throw new ConfigurationError(
       `Cannot read project configuration at ${path}: ${errorMessage(error)}`,
@@ -178,7 +186,13 @@ export async function readProjectConfig(
     );
   }
   requireProjectConfig(value, path);
-  return { path, directory: dirname(path), input: value };
+  return {
+    path,
+    ...(selectedPath === path ? {} : { selectedPath }),
+    ...(path === resolvedPath ? {} : { resolvedPath }),
+    directory: dirname(path),
+    input: value,
+  };
 }
 
 function projectConfigExtension(path: string): string {
@@ -455,7 +469,21 @@ export function resolveScanSettings(
   };
   const resolvedSources = configurationSources({ ...sources, ...scopeSources });
   return {
-    config: { codexOverrides },
+    config: {
+      codexOverrides,
+      ...(project?.path
+        ? {
+            executableSourcePaths: [
+              ...new Set([
+                ...(project.selectedPath ? [project.selectedPath] : []),
+                project.path,
+                resolve(project.directory, basename(project.path)),
+                ...(project.resolvedPath ? [project.resolvedPath] : []),
+              ]),
+            ],
+          }
+        : {}),
+    },
     options: settings,
     sources: resolvedSources,
     ...(project?.path === undefined

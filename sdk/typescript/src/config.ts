@@ -1,7 +1,7 @@
 import type { ScanPricingContext } from "./cost-model.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
@@ -13,6 +13,8 @@ export interface JsonObject {
 }
 
 export interface CodexSecurityConfig {
+  /** Configuration files whose checkouts cannot supply a native executable. */
+  executableSourcePaths?: readonly string[];
   pluginPath?: string;
   codexOverrides?: JsonObject;
   pythonPath?: string;
@@ -428,7 +430,8 @@ function resolveConfigPath(
 ): void {
   const path = config[key];
   if (typeof path === "string" && !/^~(?:[/\\]|$)/u.test(path)) {
-    config[key] = resolve(directory, path);
+    if (process.platform === "win32" || !isAbsolute(path))
+      config[key] = resolve(directory, path);
   }
 }
 

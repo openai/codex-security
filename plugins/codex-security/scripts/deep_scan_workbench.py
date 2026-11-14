@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import uuid
@@ -19,6 +20,7 @@ from workbench.handoff import require_current_continuation, require_tokenless_sc
 from workbench.storage import (
     archived_deep_path,
     create_private_directory,
+    require_host_deep_scan_output,
     saved_deep_workers,
     worker_usage_directory,
 )
@@ -336,12 +338,38 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
                 "A capped Deep Scan without completed discoveries requires an empty "
                 "candidate ledger."
             )
+    workspace = dependencies().require_workspace(connection, scan["workspace_id"])
+    setup = json.loads(workspace["deep_scan_config_json"] or "{}")
     recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] is not None else {}
+    source_paths = list(
+        dict.fromkeys(
+            [
+                *setup.get("projectConfigPaths", []),
+                *recipe.get("executableSourcePaths", []),
+                *(
+                    setup[key]
+                    for key in ("projectConfigPath", "legacyConfigPath", "legacyConfigResolvedPath")
+                    if setup.get(key)
+                ),
+            ]
+        )
+    )
+    if scan["recipe_json"] is not None:
+        inputs = recorded_recipe_model_files(recipe)
+    else:
+        saved_inputs = setup.get("modelFileInputs")
+        inputs = (
+            checked_model_file_inputs(saved_inputs, stored=True)
+            if saved_inputs is not None
+            else None
+        )
     return {
         "scanId": run["scan_id"],
+        **({"modelFileInputs": inputs} if inputs is not None else {}),
         "sdkOwnsCompletion": scan["recipe_json"] is not None,
         "serviceTier": run["service_tier"],
         **({"severityRubric": recipe["severityRubric"]} if "severityRubric" in recipe else {}),
+        **({"configSourcePaths": source_paths} if source_paths else {}),
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
         "includePaths": dependencies().requested_scan_paths(scan),
@@ -460,6 +488,65 @@ def deep_scan_result(
     return result
 
 
+MODEL_FILE_DIGEST_KEYS = {
+    "model_instructions_file": "modelInstructionsFileSha256",
+    "experimental_compact_prompt_file": "compactPromptFileSha256",
+    "model_catalog_json": "modelCatalogFileSha256",
+}
+
+
+def checked_model_file_inputs(value: Any, *, stored: bool = False) -> dict[str, Any]:
+    if not isinstance(value, dict) or (not stored and set(value) != set(MODEL_FILE_DIGEST_KEYS)):
+        raise SystemExit("Invalid Deep Scan model file inputs.")
+    known = {key: value[key] for key in MODEL_FILE_DIGEST_KEYS if key in value}
+    for receipt in known.values():
+        if receipt is None:
+            continue
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != {"path", "sha256"}
+            or not isinstance(receipt["path"], str)
+            or "\x00" in receipt["path"]
+            or not Path(receipt["path"]).is_absolute()
+            or not isinstance(receipt["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])
+        ):
+            raise SystemExit("Invalid Deep Scan model file input receipt.")
+    return known
+
+
+def recorded_recipe_model_files(recipe: dict[str, Any]) -> dict[str, Any] | None:
+    saved = recipe.get("scanInputs")
+    if not isinstance(saved, dict):
+        return None
+    inputs = (
+        checked_model_file_inputs(saved["modelFileInputs"], stored=True)
+        if "modelFileInputs" in saved
+        else {}
+    )
+    for setting, legacy_key in MODEL_FILE_DIGEST_KEYS.items():
+        if setting in inputs or legacy_key not in saved:
+            continue
+        digest = saved[legacy_key]
+        if digest is None:
+            inputs[setting] = None
+        elif isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+            inputs[setting] = {"sha256": digest}
+        else:
+            raise SystemExit("Invalid historical Deep Scan model file digest.")
+    return inputs or None
+
+
+def requested_model_file_inputs(args: argparse.Namespace) -> dict[str, Any] | None:
+    if (source := getattr(args, "model_file_inputs_json", None)) is None:
+        return None
+    try:
+        decoded = json.loads(source)
+    except ValueError as exc:
+        raise SystemExit("Invalid Deep Scan model file inputs JSON.") from exc
+    return checked_model_file_inputs(decoded)
+
+
 def effective_deep_scan_config(
     args: argparse.Namespace, workspace: sqlite3.Row | None = None
 ) -> dict[str, Any]:
@@ -549,6 +636,7 @@ def terminal_deep_scan_for_target_snapshot(
     snapshot_digest: str,
     target_device: int | str,
     target_inode: int | str,
+    model_file_inputs: dict[str, Any] | None,
 ) -> sqlite3.Row | None:
     """Recover a matching terminal headless result, including after the parent was sealed."""
     return connection.execute(
@@ -579,6 +667,15 @@ def terminal_deep_scan_for_target_snapshot(
             AND scans.handoff_claim_token IS NULL
             AND scans.continuation_thread_id IS NULL
             AND workspaces.active_scan_id = scans.id
+            AND NOT EXISTS (
+                SELECT 1 FROM json_each(?) AS requested
+                WHERE json_extract(requested.value, '$.path') IS NOT json_extract(
+                        workspaces.deep_scan_config_json,
+                        '$.modelFileInputs.' || requested.key || '.path')
+                   OR json_extract(requested.value, '$.sha256') IS NOT json_extract(
+                        workspaces.deep_scan_config_json,
+                        '$.modelFileInputs.' || requested.key || '.sha256')
+            )
             AND deep_scan_runs.status = 'succeeded'
             AND deep_scan_runs.phase = 'terminal'
             AND deep_scan_runs.cancel_requested = 0
@@ -599,6 +696,7 @@ def terminal_deep_scan_for_target_snapshot(
             snapshot_digest,
             target_device,
             target_inode,
+            json.dumps(model_file_inputs or dict.fromkeys(MODEL_FILE_DIGEST_KEYS)),
             thread_id,
         ),
     ).fetchone()
@@ -669,10 +767,17 @@ def begin_deep_scan_for_scan(
     )
     if scan["mode"] != "deep":
         raise SystemExit("Deep Scan orchestration requires a scan in deep mode.")
+    if scan["recipe_json"] is not None:
+        recorded_recipe_model_files(json.loads(scan["recipe_json"]))
     existing = connection.execute(
         "SELECT scan_id FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
     ).fetchone()
-    if args.join_only and existing is None and workspace["deep_scan_config_json"] is None:
+    if existing is None:
+        require_host_deep_scan_output(connection, scan)
+    if existing is None and (
+        getattr(args, "probe_model_file_inputs", False)
+        or (args.join_only and workspace["deep_scan_config_json"] is None)
+    ):
         return {"newScanTarget": scan["target_path"]}
     model = optional_text(args.model, maximum=200)
     reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
@@ -703,8 +808,18 @@ def begin_deep_scan_for_scan(
             args.claim_token,
             error_message="Deep Scan orchestration is owned by another continuation.",
         )
+        if (
+            connection.execute(
+                "SELECT 1 FROM deep_scan_runs WHERE scan_id = ?", (scan_id,)
+            ).fetchone()
+            is not None
+        ):
+            return deep_scan_result(connection, scan_id, start_disposition="joined")
+        inputs = requested_model_file_inputs(args)
+        if inputs is not None and scan["recipe_json"] is None:
+            configuration["modelFileInputs"] = inputs
         connection.execute(
-            "UPDATE workspaces SET deep_scan_config_json = ? WHERE id = ? AND deep_scan_config_json IS NULL",
+            "UPDATE workspaces SET deep_scan_config_json = ? WHERE id = ?",
             (json.dumps(configuration), workspace["id"]),
         )
         ensure_deep_scan_run(
@@ -728,6 +843,9 @@ def begin_deep_scan_for_target(
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
+    if getattr(args, "probe_model_file_inputs", False):
+        return {"newScanTarget": target_path}
+    inputs = requested_model_file_inputs(args)
     user_context = user_context_argument(args)
     # Keep the requested spelling so a continuation can match a removed file or symlink.
     # NULL means no result is pending. The empty string denotes a launch with no project file.
@@ -787,6 +905,7 @@ def begin_deep_scan_for_target(
             target_snapshot_digest,
             target_device,
             target_inode,
+            inputs,
         )
         if terminal is not None:
             require_scan_checkout_owner(connection, terminal)
@@ -814,6 +933,8 @@ def begin_deep_scan_for_target(
         reasoning_effort = optional_text(args.reasoning_effort, maximum=32)
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
+        if inputs is not None:
+            configuration["modelFileInputs"] = inputs
         timestamp = dependencies().now()
         registration = dependencies().register_security_target(connection, target_path)
         target_id = registration.target_id

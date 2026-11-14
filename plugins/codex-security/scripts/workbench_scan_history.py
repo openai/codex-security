@@ -25,6 +25,7 @@ from finalize_scan_contract import (
 )
 from report_projection import SEVERITY_ORDER
 from review_state import review_state
+from workbench.storage import require_host_deep_scan_output
 from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
@@ -162,30 +163,6 @@ def cli_scan_resume(
         run["status"] not in {"running", "succeeded"} or run["cancel_requested"]
     ):
         raise SystemExit("This Deep Scan has stopped and cannot resume.")
-    if os.name == "nt":
-        try:
-            repository = _windows_resume_checkout(scan)
-        except OSError as exc:
-            raise SystemExit(f"Cannot verify the original Windows checkout: {exc}") from exc
-    else:
-        from workbench_scan_start import scan_target_identity
-
-        try:
-            repository = require_scan_target_identity(scan)
-        except SystemExit as exc:
-            raise SystemExit(
-                "Cannot resume: the original checkout is missing or was replaced."
-            ) from exc
-        if scan_target_identity(
-            repository, None, expected_digest=scan["target_snapshot_digest"]
-        ) != (
-            scan["target_revision"],
-            scan["target_snapshot_digest"],
-            scan["target_device"],
-            scan["target_inode"],
-        ):
-            raise SystemExit("Cannot resume: the original checkout revision or contents changed.")
-    recipe = wb.parse_scan_recipe(scan["recipe_json"], repository)
     scan_dir = wb.require_canonical_scan_directory(Path(scan["scan_dir"]))
     if os.name == "nt":
         from windows_scan_local_files import DEEP_RESUME_DIRECTORY, deep_resume_output_identity
@@ -207,19 +184,9 @@ def cli_scan_resume(
                 "Cannot resume this empty Windows output because its original directory identity "
                 f"was not saved. Start a new scan with 'codex-security scans rerun {scan['id']}'."
             )
-    result = {
-        "contract": wb.scan_contract(scan),
-        "lifecycle": json.loads(scan["lifecycle_json"]),
-        "recipe": recipe,
-        "scanDir": str(scan_dir),
-        "scanId": scan["id"],
-        "scopeFileCount": scan["scope_file_count"],
-        "startedAt": scan["started_at"],
-        "targetId": scan["target_id"],
-        "targetRevision": scan["target_revision"],
-        "threadId": thread_id,
-        "userContext": scan["user_context"],
-    }
+    if run is None:
+        require_host_deep_scan_output(connection, scan)
+    sealed_version = None
     # Active coordinators may still be writing drafts. Validate sealed results
     # before attaching to a coordinator that has finished.
     if run is not None and run["status"] == "succeeded":
@@ -235,9 +202,56 @@ def cli_scan_resume(
                         expected_coverage_mode=binding["coverageMode"],
                         completion_binding=binding,
                     )
-                    result["sealedProducerVersion"] = manifest_scan["producer"]["version"]
+                    sealed_version = manifest_scan["producer"]["version"]
                 except ContractError as exc:
                     raise SystemExit(f"Cannot resume sealed scan: {exc}") from exc
+    if sealed_version is None:
+        if os.name == "nt":
+            try:
+                repository = _windows_resume_checkout(scan)
+            except OSError as exc:
+                raise SystemExit(f"Cannot verify the original Windows checkout: {exc}") from exc
+        else:
+            from workbench_scan_start import scan_target_identity
+
+            try:
+                repository = require_scan_target_identity(scan)
+            except SystemExit as exc:
+                raise SystemExit(
+                    "Cannot resume: the original checkout is missing or was replaced."
+                ) from exc
+            if scan_target_identity(
+                repository, None, expected_digest=scan["target_snapshot_digest"]
+            ) != (
+                scan["target_revision"],
+                scan["target_snapshot_digest"],
+                scan["target_device"],
+                scan["target_inode"],
+            ):
+                raise SystemExit(
+                    "Cannot resume: the original checkout revision or contents changed."
+                )
+    else:
+        repository = Path(scan["target_path"])
+    recipe = wb.parse_scan_recipe(
+        scan["recipe_json"], repository, sealed=sealed_version is not None
+    )
+    result = {
+        "contract": wb.scan_contract(scan),
+        "lifecycle": json.loads(scan["lifecycle_json"]),
+        "recipe": recipe,
+        "scanDir": str(scan_dir),
+        "scanId": scan["id"],
+        "scopeFileCount": scan["scope_file_count"],
+        "startedAt": scan["started_at"],
+        "targetId": scan["target_id"],
+        "targetRevision": scan["target_revision"],
+        "threadId": thread_id,
+        "userContext": scan["user_context"],
+    }
+    if sealed_version is not None:
+        result["sealedProducerVersion"] = sealed_version
+        result["targetPath"] = str(repository)
     return result
 
 

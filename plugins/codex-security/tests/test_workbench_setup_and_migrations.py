@@ -202,6 +202,47 @@ def create_historical_database(
     return connection, apply_migrations
 
 
+@pytest.mark.parametrize(
+    "last_preview",
+    ["persist scan target executable protection", "persist scan execution sessions"],
+)
+@pytest.mark.parametrize("first_version", [63, 64, 67])
+def test_composition_preview_keeps_receipts_across_released_migrations(
+    last_preview: str,
+    first_version: int,
+) -> None:
+    connection, migrate = create_historical_database(first_version)
+    preview = [
+        (63, "persist composition child membership", "membership"),
+        (64, "reuse scan severity assessments", "severity"),
+        (65, last_preview, "final"),
+        (66, "recover unindexed severity assessments", "unindexed"),
+        (67, "repair stored composition membership", "repair"),
+        (68, "repair archived composition paths", "paths"),
+    ]
+    with closing(connection):
+        connection.executemany(
+            "INSERT INTO schema_migrations VALUES (?, ?, ?)",
+            [(version + first_version - 63, name, stamp) for version, name, stamp in preview],
+        )
+        for _ in range(2):
+            migrate(connection)
+            rows = connection.execute(
+                "SELECT version, name, applied_at FROM schema_migrations WHERE version < 0 "
+                "ORDER BY version DESC"
+            )
+            assert [tuple(row) for row in rows] == [
+                (-(version + first_version - 63), name, timestamp)
+                for version, name, timestamp in preview
+            ]
+            assert [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT version, name FROM schema_migrations WHERE version > 0 ORDER BY version"
+                )
+            ] == EXPECTED_MIGRATIONS
+
+
 @pytest.mark.parametrize("reopened", [False, True])
 def test_repository_previews_52_and_53_preserve_classification_and_import_schema(reopened) -> None:
     connection, migrate = create_historical_database(52)
@@ -999,14 +1040,9 @@ def test_workbench_retries_writer_admission_and_legacy_backfill(tmp_path: Path) 
                 "updated-thread",
             )
             backfilled = pool.submit(run_workbench, state_dir, "get-scan", "--scan-id", scan_id)
-            assert started.result(timeout=15)["startDisposition"] == "created"
-            assert updated.result(timeout=15)["threadId"] == "updated-thread"
-            assert (
-                backfilled.result(timeout=15)["scan"]["findings"][0]["attackPath"]["impact"][
-                    "level"
-                ]
-                == "high"
-            )
+        assert started.result()["startDisposition"] == "created"
+        assert updated.result()["threadId"] == "updated-thread"
+        assert backfilled.result()["scan"]["findings"][0]["attackPath"]["impact"]["level"] == "high"
     finally:
         release.cancel()
         release.join()

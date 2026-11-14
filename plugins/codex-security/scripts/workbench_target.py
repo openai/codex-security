@@ -1684,7 +1684,7 @@ def require_remediation_target(value: str) -> Path:
     except NotADirectoryError:
         # A component of the recorded checkout path now names a non-directory.
         resolved = None
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc

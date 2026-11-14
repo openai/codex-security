@@ -1559,6 +1559,27 @@ for (const version of [1, 15]) {
   });
 }
 
+test("latest excludes completed discovery passes from historical scan databases", async () => {
+  const f = await fixture();
+  const database = new Database(
+    join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
+  );
+  try {
+    database
+      .query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?")
+      .run("2099-01-01T00:00:00Z", f.second.scanId);
+    expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+
+    database.exec("ALTER TABLE scans ADD COLUMN parent_scan_role TEXT");
+    database
+      .query("UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = ?")
+      .run(f.second.scanId);
+    expect((await latestFor(f, f.repository)).scanId).toBe(f.first.scanId);
+  } finally {
+    database.close();
+  }
+});
+
 test("latest orders uncanceled scans by update, start time, and ID", async () => {
   const older = "2026-08-01T03:00:00.000001+02:00";
   const newer = "2026-08-01T01:00:00.000002Z";

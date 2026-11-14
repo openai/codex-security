@@ -393,12 +393,14 @@ try {
       if (result.matches.length !== 0 || result.uncertain.length !== 0) {
         throw new Error("Empty finding comparison did not return an empty result.");
       }       const assert = await import("node:assert/strict");
-       const { writeFile } = await import("node:fs/promises");
+       const { realpath, writeFile } = await import("node:fs/promises");
        const input = { scan: { mode: "deep", deep: { subagents_per_worker: 0 } }, policy: { fail_on_severity: "high" } };
        await writeFile("scan.json", JSON.stringify(input));
        const loaded = await sdk.loadProjectConfig("scan.json");
        const resolved = sdk.resolveProjectConfig(input);
-       assert.deepEqual(loaded.config, resolved.config);
+       const { resolve } = await import("node:path");
+       const sourcePaths = [...new Set([resolve("scan.json"), await realpath("scan.json")])];
+       assert.deepEqual(loaded.config, { ...resolved.config, executableSourcePaths: sourcePaths });
        assert.deepEqual(loaded.options, resolved.options);
        assert.equal(loaded.options.subagents, 0);
        assert.equal(loaded.options.failureSeverity, "high");

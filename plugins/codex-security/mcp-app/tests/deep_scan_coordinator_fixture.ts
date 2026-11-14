@@ -25,6 +25,8 @@ export const {
   DeepScanCoordinatorRegistry,
   WorkbenchDeepScanStore,
   DeepScanNonRetryableError,
+  readModelFileInputs,
+  validateModelFileInputs,
   DeepScanRemoteCoordinator,
   AsyncLock,
   classifyCodexWorkerError,
@@ -35,6 +37,7 @@ export const {
   stdin: {
     contents: `
       export * from "./registry.ts";
+      export { readModelFileInputs, validateModelFileInputs } from "./model-file-inputs.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
       export { classifyCodexWorkerError, codexWorkerTurnError } from "./errors.ts";
       export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";

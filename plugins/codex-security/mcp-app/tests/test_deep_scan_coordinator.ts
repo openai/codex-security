@@ -45,6 +45,8 @@ import {
   codexWorkerTurnError,
   startOrJoinDeepScanCoordinator,
   iterationInputs,
+  readModelFileInputs,
+  validateModelFileInputs,
   recordSleeps,
   temporaryDirectories,
   fixtureRun,
@@ -64,6 +66,127 @@ import {
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
+
+test("restored model inputs resume the same host run without spending a discovery attempt", async () => {
+  const { fixture, store } = await coordinatorFixture();
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  const file = path.join(fixture.run.targetPath, "instructions.md");
+  await writeFile(file, "original");
+  const config: Record<string, string> = { model_instructions_file: file };
+  const saved = await readModelFileInputs(config);
+  const executor = Object.assign(new FakeExecutor(), {
+    validateModelFileInputs: (signal: AbortSignal) =>
+      validateModelFileInputs(saved, config, signal),
+  });
+  await writeFile(file, "changed");
+  await assert.rejects(
+    runCoordinator(fixture, store, executor),
+    /model_instructions_file changed/u,
+  );
+  assert.equal(store.run.status, "running");
+  assert.deepEqual(store.workerUpdates, []);
+  assert.deepEqual(store.failureMessages, []);
+  await writeFile(file, "original");
+  config.experimental_compact_prompt_file = file;
+  await assert.rejects(
+    runCoordinator(fixture, store, executor),
+    /experimental_compact_prompt_file changed/u,
+  );
+  delete config.experimental_compact_prompt_file;
+  assert.equal(
+    (await runCoordinator(fixture, store, executor)).status,
+    "succeeded",
+  );
+  assert.equal(executor.discoveryCalls, 1);
+});
+
+test("a changed comparison input leaves both accepted worker receipts resumable", async () => {
+  const { fixture, store } = await coordinatorFixture({
+    workers: 2,
+    maxDiscoveryRuns: 2,
+    stopAfterNoNew: 2,
+  });
+  const original = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
+  let comparisons = 0;
+  const settings: Record<string, string> = {};
+  const saved = await readModelFileInputs(settings);
+  const model = {
+    async run(request: CodexWorkerRequest) {
+      const result = await original.run(request);
+      const file = path.join(request.artifactContext!.root, "result.json");
+      const draft = await readJson(file);
+      draft.findings[0].title = (
+        await promptContext(request.promptPath)
+      ).workerLabel;
+      await writeJson(file, draft);
+      settings.model_instructions_file = file;
+      return result;
+    },
+    async compareFindings() {
+      comparisons++;
+      return "{}";
+    },
+    validateModelFileInputs: (signal: AbortSignal) =>
+      validateModelFileInputs(saved, settings, signal),
+  };
+  await assert.rejects(
+    runCoordinator(fixture, store, model),
+    /model_instructions_file changed/u,
+  );
+  assert.equal(comparisons, 0);
+  assert.equal(store.run.status, "running");
+  assert.equal(store.iterations.length, 0);
+  assert.equal(
+    [...store.workers.values()].filter((w) => w.status === "succeeded").length,
+    2,
+  );
+  delete settings.model_instructions_file;
+  assert.equal(
+    (await runCoordinator(fixture, store, model, { run: await store.get() }))
+      .status,
+    "succeeded",
+  );
+  assert.ok(comparisons > 0);
+  assert.equal(original.discoveryCalls, 2);
+});
+
+test("a historical digest or recorded absence gates execution without assuming an original path", async () => {
+  const { fixture, store } = await coordinatorFixture();
+  await mkdir(fixture.run.targetPath, { recursive: true });
+  const first = path.join(fixture.run.targetPath, "original.txt");
+  const second = path.join(fixture.run.targetPath, "other.txt");
+  await writeFile(first, "accepted");
+  await writeFile(second, "changed");
+  const { model_instructions_file: recorded } = await readModelFileInputs({
+    model_instructions_file: first,
+  });
+  const config = { model_instructions_file: second };
+  const executor = new FakeExecutor();
+  for (const saved of [
+    { model_instructions_file: null },
+    { model_instructions_file: { sha256: recorded.sha256 } },
+  ]) {
+    await assert.rejects(
+      runCoordinator(
+        fixture,
+        store,
+        Object.assign(executor, {
+          validateModelFileInputs: (signal: AbortSignal) =>
+            validateModelFileInputs(saved, config, signal),
+        }),
+      ),
+      /model_instructions_file changed/u,
+    );
+    assert.equal(store.run.status, "running");
+    assert.equal(executor.discoveryCalls, 0);
+  }
+  await writeFile(second, "accepted");
+  assert.equal(
+    (await runCoordinator(fixture, store, executor)).status,
+    "succeeded",
+  );
+  assert.equal(executor.discoveryCalls, 1);
+});
 
 function twoRunConfig(config: Partial<DeepScanConfig> = {}) {
   return { ...config, stopAfterNoNew: 2, maxDiscoveryRuns: 2 };
@@ -2261,7 +2384,11 @@ async function testResumedManifestPreservesCompletedReducer(
     ))
       await rm(worker.promptPath);
   }
-  const replacementExecutor = new FakeExecutor();
+  const replacementExecutor = Object.assign(new FakeExecutor(), {
+    validateModelFileInputs: async () => {
+      throw new Error("Sealed publication attempted to read model inputs");
+    },
+  });
   const published: ScanDraftInput[] = [];
   const terminal = await runCoordinator(fixture, store, replacementExecutor, {
     run: store.run,

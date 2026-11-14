@@ -1,3 +1,7 @@
+import {
+  outsideExecutableRoots,
+  workerExecutableRoots,
+} from "./executable-roots.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   type BigIntStats,
@@ -37,6 +41,13 @@ import {
   executablePathForSpawn,
   isExecutableFile,
 } from "../executable-path.js";
+import {
+  modelFileSettings,
+  modelFilePath,
+  readModelFileInputs,
+  validateModelFileInputs,
+  type ModelFileInputs,
+} from "./model-file-inputs.js";
 import { writePrivateFile } from "./artifacts.js";
 import { workerTokenUsage } from "./usage-receipt.js";
 import {
@@ -66,6 +77,8 @@ export interface CodexSdkWorkerModelSettings {
   reasoningEffort?: string;
   serviceTier?: string;
   deepScanConfig?: DeepScanConfig;
+  configSourcePaths?: readonly string[];
+  modelFileInputs?: ModelFileInputs;
   artifactContext?: CodexSdkWorkerArtifactContext;
   parentSandbox?: DeepWorkerParentSandbox;
   parentTurn?: DeepScanParentTurn;
@@ -105,12 +118,31 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     signal: AbortSignal;
     promise: Promise<BoundCodexExecutable>;
   };
+  private executableRoots?: Promise<string[]>;
   private parentCyberAccessProgram?: Promise<CyberAccessProgram | undefined>;
   private pluginVersion?: Promise<string | undefined>;
 
   constructor(
     private readonly modelSettings: CodexSdkWorkerModelSettings = {},
   ) {}
+
+  async validateModelFileInputs(signal: AbortSignal): Promise<void> {
+    const saved = this.modelSettings.modelFileInputs;
+    if (!saved) return;
+    const runtime = await this.getRuntimeSettings(
+      await snapshotWorkerEnvironment(),
+    );
+    await validateModelFileInputs(saved, runtime.config, signal);
+  }
+
+  private getRuntimeSettings(environment: Record<string, string>) {
+    return (this.runtimeSettings ??= workerRuntimeSettings(environment).catch(
+      (error: unknown) => {
+        this.runtimeSettings = undefined;
+        throw error;
+      },
+    ));
+  }
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
     const { threadId, turnId, usage, diagnostics } =
@@ -140,6 +172,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
     environment: NodeJS.ProcessEnv,
     cwd: string,
     signal: AbortSignal,
+    allow: (path: string) => boolean,
   ): Promise<BoundCodexExecutable> {
     while (true) {
       signal.throwIfAborted();
@@ -147,7 +180,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       if (!binding) {
         binding = {
           signal,
-          promise: bindCodexExecutable(environment, cwd, signal).catch(
+          promise: bindCodexExecutable(environment, cwd, allow, signal).catch(
             (error) => {
               // An unsuccessful snapshot has not pinned an executable yet.
               if (this.codexExecutable === binding)
@@ -215,12 +248,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       const originalCwd = process.cwd();
       const childEnv = await snapshotWorkerEnvironment();
       // Snapshot the SDK's per-scan config once for this coordinator, including resumes.
-      const runtimeSettings = await (this.runtimeSettings ??=
-        workerRuntimeSettings(childEnv).catch((error: unknown) => {
-          // A failed read produced no snapshot. Let the next worker retry it.
-          this.runtimeSettings = undefined;
-          throw error;
-        }));
+      const runtimeSettings = await this.getRuntimeSettings(childEnv);
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -380,10 +408,29 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         "CODEX_API_KEY",
         process.platform,
       )?.trim();
+      const sources = [
+        ...(this.modelSettings.configSourcePaths ?? []),
+        ...Object.values(this.modelSettings.modelFileInputs ?? {}).flatMap(
+          (input) => (input?.path ? [input.path] : []),
+        ),
+        ...modelFileSettings.flatMap((key) => {
+          const path = runtimeSettings.config[key];
+          return typeof path === "string" && path.length ? [path] : [];
+        }),
+      ];
+      const roots = await (this.executableRoots ??= workerExecutableRoots(
+        this.modelSettings.artifactContext?.repoRoot,
+        sources,
+      ).catch((error: unknown) => {
+        this.executableRoots = undefined;
+        throw error;
+      }));
+      const allow = (path: string) => outsideExecutableRoots(path, roots);
       const executable = await this.getCodexExecutable(
         childEnv,
         originalCwd,
         request.signal,
+        allow,
       );
       await verifyBoundCodexExecutable(executable, request.signal);
       const preflightOptions = {
@@ -830,6 +877,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function bindCodexExecutable(
   env: NodeJS.ProcessEnv,
   originalCwd: string,
+  allow: (path: string) => boolean,
   signal?: AbortSignal,
 ): Promise<BoundCodexExecutable> {
   signal?.throwIfAborted();
@@ -838,7 +886,17 @@ async function bindCodexExecutable(
     process.platform,
     process.arch,
     originalCwd,
+    allow,
   );
+  if (!allow(path))
+    throw new DeepScanNonRetryableError(
+      "The selected Codex executable is inside a protected scan or configuration checkout.",
+    );
+  const destination = await fs.realpath(path);
+  if (!allow(destination))
+    throw new DeepScanNonRetryableError(
+      "The selected Codex executable is inside a protected scan or configuration checkout.",
+    );
   const identity = await codexExecutableIdentity(path);
   signal?.throwIfAborted();
   if (process.platform !== "win32") return { path, identity };
@@ -1108,24 +1166,22 @@ export async function workerRuntimeSettings(
     "CODEX_SECURITY_SCAN_DIR",
     process.platform,
   );
-  if (parentScanDirectory) {
-    for (const key of [
-      "model_instructions_file",
-      "model_catalog_json",
-      "experimental_compact_prompt_file",
-    ]) {
-      const value = settings.config[key];
-      if (
-        typeof value === "string" &&
-        value.length > 0 &&
-        !isAbsolute(value) &&
-        !value.startsWith("~")
-      ) {
-        settings.config[key] = resolve(parentScanDirectory, value);
-      }
-    }
+  for (const key of modelFileSettings) {
+    const value = settings.config[key];
+    if (typeof value === "string" && value.length > 0)
+      settings.config[key] = modelFilePath(
+        value,
+        parentScanDirectory ?? dirname(configPath),
+      );
   }
   return settings;
+}
+
+export async function currentModelFileInputs(): Promise<ModelFileInputs> {
+  const settings = await workerRuntimeSettings(
+    await snapshotWorkerEnvironment(),
+  );
+  return readModelFileInputs(settings.config);
 }
 
 async function snapshotWorkerEnvironment(): Promise<Record<string, string>> {
@@ -1171,6 +1227,7 @@ export function resolveCodexPath(
   platform: NodeJS.Platform = process.platform,
   architecture: NodeJS.Architecture = process.arch,
   originalCwd: string = process.cwd(),
+  allow: (path: string) => boolean = () => true,
 ): string {
   const searchPath = searchPathForPlatform(env, platform);
   const configured = configuredExecutableValue(
@@ -1192,13 +1249,20 @@ export function resolveCodexPath(
                 searchPath,
                 architecture,
                 originalCwd,
+                allow,
               )
             : resolveWindowsDirectFromSearchPath(
                 searchPath,
                 executableName,
                 originalCwd,
+                allow,
               )
-          : resolveFromSearchPath(searchPath, executableName, originalCwd);
+          : resolveFromSearchPath(
+              searchPath,
+              executableName,
+              originalCwd,
+              allow,
+            );
       if (fromSearchPath) return fromSearchPath;
     }
     const configuredPath = absoluteCodexPath(configured, platform, originalCwd);
@@ -1220,7 +1284,7 @@ export function resolveCodexPath(
 
   if (platform !== "win32") {
     return (
-      resolveFromSearchPath(searchPath, "codex", originalCwd) ??
+      resolveFromSearchPath(searchPath, "codex", originalCwd, allow) ??
       resolve(originalCwd, "codex")
     );
   }
@@ -1235,7 +1299,11 @@ export function resolveCodexPath(
       absoluteCodexPath(managedPackageRoot, platform, originalCwd),
       architecture,
     );
-    if (managedBinary && !isWindowsAppsPath(managedBinary))
+    if (
+      managedBinary &&
+      !isWindowsAppsPath(managedBinary) &&
+      allow(managedBinary)
+    )
       return managedBinary;
   }
 
@@ -1243,6 +1311,7 @@ export function resolveCodexPath(
     searchPath,
     architecture,
     originalCwd,
+    allow,
   );
   if (pathBinary) return pathBinary;
 
@@ -1256,6 +1325,7 @@ export function resolveCodexPath(
       localAppData
         ? absoluteCodexPath(localAppData, platform, originalCwd)
         : undefined,
+      allow,
     ) ?? resolve(originalCwd, "codex.exe")
   );
 }
@@ -1290,10 +1360,11 @@ function resolveFromSearchPath(
   searchPath: string | undefined,
   executableName: string,
   originalCwd: string,
+  allow: (path: string) => boolean,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
     const candidate = `${absoluteCodexPath(directory, process.platform, originalCwd)}${sep}${executableName}`;
-    if (isExecutableFile(candidate)) return candidate;
+    if (isExecutableFile(candidate) && allow(candidate)) return candidate;
   }
   return undefined;
 }
@@ -1302,10 +1373,15 @@ function resolveWindowsDirectFromSearchPath(
   searchPath: string | undefined,
   executableName: string,
   originalCwd: string,
+  allow: (path: string) => boolean,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
     const candidate = join(resolve(originalCwd, directory), executableName);
-    if (!isWindowsAppsPath(candidate) && existsSync(candidate))
+    if (
+      !isWindowsAppsPath(candidate) &&
+      existsSync(candidate) &&
+      allow(candidate)
+    )
       return candidate;
   }
   return undefined;
@@ -1315,11 +1391,16 @@ function resolveWindowsCodexFromSearchPath(
   searchPath: string | undefined,
   architecture: NodeJS.Architecture,
   originalCwd: string,
+  allow: (path: string) => boolean,
 ): string | undefined {
   for (const directory of searchPath?.split(delimiter) ?? []) {
     const absoluteDirectory = resolve(originalCwd, directory);
     const directBinary = join(absoluteDirectory, "codex.exe");
-    if (!isWindowsAppsPath(directBinary) && existsSync(directBinary))
+    if (
+      !isWindowsAppsPath(directBinary) &&
+      existsSync(directBinary) &&
+      allow(directBinary)
+    )
       return directBinary;
 
     const packageRoot = join(
@@ -1329,7 +1410,8 @@ function resolveWindowsCodexFromSearchPath(
       "codex",
     );
     const nativeBinary = resolveWindowsPackageBinary(packageRoot, architecture);
-    if (nativeBinary && !isWindowsAppsPath(nativeBinary)) return nativeBinary;
+    if (nativeBinary && !isWindowsAppsPath(nativeBinary) && allow(nativeBinary))
+      return nativeBinary;
   }
   return undefined;
 }
@@ -1340,6 +1422,7 @@ function isWindowsAppsPath(candidate: string): boolean {
 
 function resolveWindowsCachedBinary(
   localAppData: string | undefined,
+  allow: (path: string) => boolean,
 ): string | undefined {
   const root = localAppData?.trim();
   if (!root) return undefined;
@@ -1358,6 +1441,7 @@ function resolveWindowsCachedBinary(
         continue;
       }
       if (
+        !allow(candidate) ||
         !metadata.isFile() ||
         metadata.size === 0 ||
         isWindowsAppsPath(candidate)
