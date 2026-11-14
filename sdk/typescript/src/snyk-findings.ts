@@ -4,12 +4,6 @@ import type {
   ExternalFindings,
   ExternalSourceRepository,
 } from "./external-findings.js";
-import {
-  encodeSnykV1File,
-  isSnykRestFormat,
-  parseSnykReport,
-  SNYK_REST_ISSUES_V1,
-} from "./snyk-rest-v1.js";
 import type { SnykIssuesFindings } from "./snyk-rest-findings.js";
 import { normalizeHostedGitRepositoryUrl } from "./hosted-git-repository.js";
 import { isRecord } from "./record.js";
@@ -20,6 +14,7 @@ import {
   optionalArray,
   readScannerJson,
   record,
+  reportableScannerSeverity,
   requiredText,
   sarifRunRepositories,
   sarifRunContextSelector,
@@ -118,9 +113,6 @@ export function normalizeSnykFindingsExport(
         finding["remediation"] ?? {},
         "Snyk remediation",
       );
-      const severity = text(
-        record(finding["severity"], "Snyk severity")["value"],
-      )?.toLowerCase();
       const revision = text(sourceTarget["revision"]);
       return validateExternalEvidence(
         {
@@ -128,11 +120,9 @@ export function normalizeSnykFindingsExport(
           description: text(
             record(finding["description"] ?? {}, "Snyk description")["text"],
           ),
-          severity: ["critical", "high", "medium", "low"].includes(
-            severity ?? "",
-          )
-            ? severity
-            : "unknown",
+          severity: reportableScannerSeverity(
+            record(finding["severity"], "Snyk severity")["value"],
+          ),
           advisory_ids: [
             ...new Set([
               requiredText(rule["id"], "Snyk advisory ID"),
@@ -485,7 +475,6 @@ export function normalizeSnykJson(
         vulnerability["identifiers"] ?? {},
         "Snyk identifiers",
       );
-      const severity = text(vulnerability["severity"])?.toLowerCase();
       return validateExternalEvidence(
         {
           title: requiredText(
@@ -493,11 +482,7 @@ export function normalizeSnykJson(
             "Snyk vulnerability title",
           ),
           description: text(vulnerability["description"]),
-          severity: ["critical", "high", "medium", "low"].includes(
-            severity ?? "",
-          )
-            ? severity
-            : "unknown",
+          severity: reportableScannerSeverity(vulnerability["severity"]),
           advisory_ids: [
             ...new Set([
               requiredText(vulnerability["id"], "Snyk advisory ID"),
@@ -543,9 +528,9 @@ export function normalizeSnykJson(
   );
 }
 
-/** @internal Keep the native JSON snapshot for catalog-bound file publication. */
-export function readSnykReport(path: string): Promise<unknown> {
-  return readScannerJson(path, parseSnykReport);
+export const SNYK_REST_ISSUES_FORMAT = "snyk-rest-issues/v2";
+export function isSnykRestFormat(format: unknown): boolean {
+  return typeof format === "string" && format.startsWith("snyk-rest-issues/");
 }
 
 export async function readSnykFindings(
@@ -553,7 +538,7 @@ export async function readSnykFindings(
   target: ExternalImportTarget = "cloud",
   references: readonly ExternalSourceRepository[] = [],
 ): Promise<ExternalFindings & Partial<SnykIssuesFindings>> {
-  return normalizeSnykFile(await readSnykReport(path), target, references);
+  return normalizeSnykFile(await readScannerJson(path), target, references);
 }
 
 /** @internal Dispatch a parsed Snyk file using the same rules as readSnykFindings. */
@@ -566,13 +551,7 @@ export async function normalizeSnykFile(
   const document = record(input, "Snyk findings");
   if (isSnykRestFormat(document["format"])) {
     const { normalizeSnykIssues } = await import("./snyk-rest-findings.js");
-    return normalizeSnykIssues(
-      document["format"] === SNYK_REST_ISSUES_V1
-        ? encodeSnykV1File(document)
-        : document,
-      target,
-      references,
-    );
+    return normalizeSnykIssues(document, target, references);
   }
   if (document["format"] === "snyk-findings-export/v1")
     return normalizeSnykFindingsExport(document, target);

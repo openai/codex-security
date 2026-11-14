@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   copyFile,
   mkdir,
@@ -51,21 +52,15 @@ async function fixture(
     ),
   );
   // Keep host-installed Node runtimes out of the simulated macOS runtime set.
-  const tools = path.join(root, "shell-tools");
-  await mkdir(tools);
-  for (const name of ["dirname", "od", "tr"]) {
-    const executable = spawnSync("/bin/sh", ["-c", `command -v ${name}`], {
-      encoding: "utf8",
-    }).stdout.trim();
-    await symlink(executable, path.join(tools, name));
-  }
+  const fallback = path.join(root, "fallback-bin");
+  await mkdir(fallback);
   const source = await readFile(
     path.join(sourcePluginRoot, "scripts", path.basename(launcher)),
     "utf8",
   );
   await writeFile(
     launcher,
-    source.replace(/^PATH=.*$/m, `PATH="\${PATH}:"${shellQuote(tools)}`),
+    source.replace(/^ *PATH=.*$/m, `  PATH="\${PATH}:"${shellQuote(fallback)}`),
   );
   for (const entry of await readdir(path.join(pluginRoot, "mcp"), {
     withFileTypes: true,
@@ -155,11 +150,14 @@ process.dlopen = function(module, filename, ...args) {
     "CODEX_ELECTRON_RESOURCES_PATH",
     "CODEX_CLI_PATH",
     "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_PLUGIN_ROOT",
   ])
     delete env[name];
   return {
     root,
     repo,
+    fallback,
+    launcher,
     addon,
     managed,
     ordinary,
@@ -190,6 +188,48 @@ process.dlopen = function(module, filename, ...args) {
     },
   };
 }
+
+launcherTest("SDK launches preserve the supplied search path", async () => {
+  const { repo, fallback, launcher } = await fixture(false);
+  const node = path.join(fallback, "node");
+  await writeFile(
+    node,
+    `#!/bin/sh
+if [ "\${2:-}" = --helper ]; then
+  [ -n "$(command -p cat <&3)" ] || exit 1
+fi
+printf '%s' "$PATH"
+`,
+    { mode: 0o755 },
+  );
+  const run = (args: string[], env: NodeJS.ProcessEnv = {}) =>
+    spawnSync("/bin/sh", [launcher, ...args], {
+      env: { PATH: repo, HOME: repo, XDG_CACHE_HOME: repo, ...env },
+      encoding: "utf8",
+    });
+
+  const plugin = {
+    CODEX_SECURITY_PLUGIN_ROOT: path.dirname(path.dirname(launcher)),
+  };
+  for (const environment of [{}, plugin]) {
+    const standalone = run(["--stdio"], environment);
+    assert.equal(standalone.status, 0, standalone.stderr);
+    assert.equal(standalone.stdout, `${repo}:${fallback}`);
+  }
+
+  const sdk = { ...plugin, _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: "" };
+  assert.equal(run(["--stdio"], sdk).status, 127);
+  for (const args of [["--stdio"], ["--helper", "probe"]]) {
+    for (const selection of [
+      { CODEX_MCP_NODE_PATH: node },
+      { _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: fallback },
+    ]) {
+      const selected = run(args, { ...sdk, ...selection });
+      assert.equal(selected.status, 0, selected.stderr);
+      assert.equal(selected.stdout, repo);
+    }
+  }
+});
 
 launcherTest(
   "macOS helpers skip managed runtimes that reject the packaged addon",
@@ -244,6 +284,84 @@ launcherTest(
       ["managed", "ordinary", "later"],
     );
     assert.deepEqual(await setup.helperRuntimes(), ["later"]);
+  },
+);
+
+test(
+  "Linux helpers use a system SQLite fallback without probing the checkout PATH",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const root = await directories.create("codex-security-linux-launcher-");
+    const withoutSqlite = path.join(root, "node-without-sqlite");
+    const marker = path.join(root, "path-node-ran");
+    await writeFile(
+      path.join(root, "node"),
+      `#!/bin/sh\n: > ${shellQuote(marker)}\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      withoutSqlite,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} --no-experimental-sqlite "$@"\n`,
+      { mode: 0o755 },
+    );
+    const launcher = path.join(
+      pluginRoot,
+      "scripts",
+      "launch_codex_security_mcp",
+    );
+    const installedNode = path.join(root, "installed-node");
+    const systemLink = path.join(root, "system Node's link");
+    await writeFile(
+      installedNode,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    await symlink(installedNode, systemLink);
+    const source = await readFile(launcher, "utf8");
+    // Relocate only the fixed system paths so the test can supply a system symlink.
+    const systemPaths = "/usr/local/bin/node /usr/bin/node /bin/node";
+    assert.ok(source.includes(systemPaths));
+    const fixtureLauncher = path.join(root, "scripts", "launch");
+    await mkdir(path.dirname(fixtureLauncher));
+    await symlink(path.join(pluginRoot, "mcp"), path.join(root, "mcp"));
+    await writeFile(
+      fixtureLauncher,
+      source.replace(systemPaths, '"$FIXTURE_SYSTEM_NODE"'),
+    );
+    const run = (candidate: string, inspected?: string) =>
+      spawnSync("/bin/sh", [fixtureLauncher, "--helper", "database-info"], {
+        cwd: root,
+        encoding: "utf8",
+        input: JSON.stringify(root),
+        env: {
+          HOME: root,
+          PATH: root,
+          NODE_DEBUG: "module",
+          CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
+          FIXTURE_SYSTEM_NODE: candidate,
+          ...(inspected === undefined
+            ? {}
+            : {
+                CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+                _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: inspected,
+              }),
+        },
+      });
+    const linked = run(systemLink);
+    assert.equal(linked.status, 0, linked.stderr);
+    assert.deepEqual(JSON.parse(linked.stdout), {
+      databasePath: path.join(root, "workbench.sqlite3"),
+    });
+    const missing = run(path.join(root, "missing-node"));
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /node:sqlite/);
+    const excluded = run(systemLink, "");
+    assert.notEqual(excluded.status, 0);
+    assert.match(excluded.stderr, /node:sqlite/);
+    const selected = run(systemLink, path.dirname(systemLink));
+    assert.equal(selected.status, 0, selected.stderr);
+    assert.deepEqual(JSON.parse(selected.stdout), JSON.parse(linked.stdout));
+    assert.equal(existsSync(marker), false);
   },
 );
 

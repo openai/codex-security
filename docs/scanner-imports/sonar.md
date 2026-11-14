@@ -1,7 +1,7 @@
 # Import SonarQube Cloud findings
 
 Use `import sonar` to collect security issues for one project and branch or
-pull request. A live `--dry-run` writes a private capture and returns its path.
+pull request. A `--dry-run` with either live issues or a saved capture writes a private evidence copy and returns its path. Pass that path to confirm the reviewed selection.
 Replay it without signing in to Sonar. If you already have issue-search JSON,
 [preview the native export](#use-a-native-json-export).
 
@@ -79,9 +79,12 @@ comparable remote must match if the checkout has any. Preview again if a
 fetch URL changes.
 
 Each issue key identifies one record within its source and repository.
-Reimport updates its evidence, including file ranges and available data flows.
-In a monorepo, repository-relative locations require a verified Sonar project
-base directory.
+The title is the rule name when available, otherwise the rule key. The
+description is the issue message. Severity comes from the security impact,
+or the native severity for a legacy vulnerability. The capture supplies a
+link to that issue on the selected branch or pull request. The primary file
+range requires a verified project base directory. Other flow locations and
+their messages remain in the original issue under `evidence.source_data.issue.flows`.
 
 ## Use a native JSON export
 

@@ -1160,6 +1160,14 @@ for (const layout of ["standard", "diff", "worker"] as const) {
         );
         assert.deepEqual(await snapshot(), beforeClosure);
       }
+
+      const submitted = f.draft({ deferred: [tasks[0]] }, true);
+      const receipt = draftApi.scanDraftToolResponse(
+        await f.write(submitted),
+        submitted,
+      );
+      assert.equal(receipt.deferredCount, 2);
+      assert.deepEqual(receipt.retainedDeferred, [tasks[1]]);
     });
   }
 
@@ -1707,6 +1715,31 @@ for (const layout of ["standard", "diff"] as const) {
 }
 
 for (const layout of ["standard", "diff", "worker"] as const) {
+  test(`${layout}: an empty checkpoint returns only retained follow-up surfaces`, async (t) => {
+    const f = await fixture(t, layout);
+    const followUp = {
+      label: "Upload handler",
+      disposition: "needs_follow_up",
+      notes: "Check the second caller.",
+      receiptRefs: ["artifacts/upload.md"],
+    };
+    const initial = draftApi.scanDraftInputSchema.parse(
+      f.draft({
+        surfaces: [followUp, { label: "API", disposition: "no_issue_found" }],
+      }),
+    );
+    const saved = await f.write(initial);
+    const initialReceipt = draftApi.scanDraftToolResponse(saved, initial);
+    assert.equal(initialReceipt.retainedSurfaces, undefined);
+    const id = initialReceipt.assignedSurfaces[0].id;
+
+    const empty = f.draft();
+    const receipt = draftApi.scanDraftToolResponse(await f.write(empty), empty);
+    assert.equal(receipt.surfaceCount, 2);
+    assert.equal(receipt.deferredCount, 0);
+    assert.deepEqual(receipt.retainedSurfaces, [{ ...followUp, id }]);
+  });
+
   for (const interrupted of [false, true]) {
     test(`${layout}: returned surface IDs support closeout after first-write interruption=${interrupted}`, async (t) => {
       const f = await fixture(t, layout);

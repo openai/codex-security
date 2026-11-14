@@ -203,7 +203,7 @@ jobs:
         name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: "1.4.4"
+          bun-version-file: .bun-version
       - *install-dependencies
       - &download-package-for-this-commit
         name: Download package for this commit
@@ -221,6 +221,16 @@ jobs:
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
         run: .github/scripts/install-ripgrep.sh
+      - name: Warm campaign executable lookup
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: sdk/typescript
+        # The first campaign reads tool headers across PATH on a cold runner.
+        # Do that I/O before Bun starts the first campaign test's timeout.
+        run: |
+          bun --eval '
+            import helpers from "./_bundled_plugin/mcp/helpers.mjs";
+            helpers.inventoryToolPath(process.env.PATH, process.cwd(), [], "campaign").cleanup();
+          '
       - name: Test
         working-directory: sdk/typescript
         env:
