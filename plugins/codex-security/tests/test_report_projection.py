@@ -100,16 +100,17 @@ def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> Non
 
 
 @pytest.mark.parametrize(
-    "marker", ["#", "######", "-", "+", "1.", "999999999)", "---", "--", "-- -", "-- - -"]
+    "marker",
+    ["#", "######", "-", "+", "1.", "999999999)", "--", "-- -", "1000000000. item", "١) item"],
 )
-def test_projection_prefixes_bare_block_markers(marker: str) -> None:
+def test_projection_prefixes_markdown_markers_and_existing_numbered_prose(marker: str) -> None:
     markdown = report_with_finding(remediation=marker)
 
     assert f"\nText: {marker}\n" in markdown
 
 
 @pytest.mark.parametrize(
-    "value", ["#foo", "-x", "-1 is invalid", "1.5 seconds", "1000000000.", "--flag"]
+    "value", ["#foo", "-x", "-1 is invalid", "1.5 seconds", "1000000000.", "١)", "--flag"]
 )
 def test_projection_keeps_ordinary_text_that_starts_with_marker_characters(value: str) -> None:
     markdown = report_with_finding(remediation=value)
