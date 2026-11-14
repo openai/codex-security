@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { spawnSync } from "node:child_process";
 import { ScanCostTracker } from "../src/cost.js";
 import { ScanCostLimitExceededError } from "../src/errors.js";
-import { TestClient, mockWorkbench } from "./support/api-client.js";
+import { TestClient } from "./support/api-client.js";
 import { scanRuntimeDependencies } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
@@ -120,37 +120,29 @@ test.each([false, true])(
       mkdir(home),
       mkdir(scanDir, { mode: 0o700 }),
     ]);
-    const client = new TestClient(
-      {},
-      {
-        ...scanRuntimeDependencies(home, scanDir),
-        runWorkbench: async (_options, args, input) => {
-          return mockWorkbench(args, input);
-        },
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(
-              _input: string,
-              options: { signal: AbortSignal },
-            ) {
-              async function* events() {
-                await rollout(home, receipt);
-                yield {
-                  type: "thread.started" as const,
-                  thread_id: "scan-thread",
-                };
-                await (options.signal.aborted
-                  ? undefined
-                  : once(options.signal, "abort"));
-                throw new DOMException("aborted", "AbortError");
-              }
-              return { events: events() };
-            },
-          }),
+    const client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(home, scanDir),
+      environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+      createCodex: () => ({
+        startThread: () => ({
+          id: null,
+          async runStreamed(_input: string, options: { signal: AbortSignal }) {
+            async function* events() {
+              await rollout(home, receipt);
+              yield {
+                type: "thread.started" as const,
+                thread_id: "scan-thread",
+              };
+              await (options.signal.aborted
+                ? undefined
+                : once(options.signal, "abort"));
+              throw new DOMException("aborted", "AbortError");
+            }
+            return { events: events() };
+          },
         }),
-      },
-    );
+      }),
+    });
     const keepAlive = setTimeout(() => {}, 10000);
     try {
       const failure = await client
