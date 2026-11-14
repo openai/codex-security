@@ -83,7 +83,7 @@ def finding_result(
     locations = []
     excerpt_locations = []
     try:
-        target = require_scan_target_identity(scan, target_path=scan["target_path"])
+        target = require_scan_target_identity(scan)
     except SystemExit:
         current_target = connection.execute(
             "SELECT current_path FROM security_targets WHERE id = ?", (scan["target_id"],)
