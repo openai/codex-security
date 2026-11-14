@@ -1,0 +1,32 @@
+{
+  "isError": false,
+  "content": [],
+  "structuredContent": {
+    "findings": [
+      {
+        "id": "9007199254740992",
+        "repository": { "name": "example/project" },
+        "ref": "refs/heads/main",
+        "issueType": "sast",
+        "rulePath": "demo.other-rule",
+        "message": "Another finding in the tool response",
+        "severity": "LOW",
+        "status": "open",
+        "filePath": "src/other.ts",
+        "line": 3
+      },
+      {
+        "id": "9007199254740993",
+        "repository": { "name": "example/project" },
+        "ref": "refs/heads/main",
+        "issueType": "sast",
+        "rulePath": "demo.unchecked-path",
+        "message": "A user-supplied path reaches the file reader",
+        "severity": "HIGH",
+        "status": "open",
+        "filePath": "src/read.ts",
+        "line": 12
+      }
+    ]
+  }
+}

@@ -444,7 +444,7 @@ with:
   max-time-hours: "1"
 ```
 
-Deep mode does not support diff scans. `max-time-hours` limits Deep discovery;
+Deep mode does not support diff scans. `max-time-hours` limits Deep discovery (the Action converts hours to CLI minutes);
 finalization can take additional time. It is unset by default, which uses the
 CLI's default of 96 hours. Set an explicit budget for Deep scans that leaves
 room for finalization within your job timeout. The one-hour discovery budget
@@ -459,6 +459,9 @@ source annotations, preserving scan order within each severity level. Set
 Anyone signed in to GitHub with read access to the repository can download the
 reports, which can contain source code and vulnerability details. Set
 `retention-days` to change the default of seven days.
+
+When the scan records scope limitations, the job summary displays them. For
+example, a time-limited Deep scan can finish before any source review completes.
 
 The job summary includes the configured provider, reported input/cached/output
 token usage, and estimated USD cost, including a range when supplied by the CLI.

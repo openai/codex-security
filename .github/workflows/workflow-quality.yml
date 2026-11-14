@@ -18,7 +18,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install ShellCheck and zizmor
-        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: shellcheck@0.11.0,zizmor@1.30.1
       - name: Install actionlint

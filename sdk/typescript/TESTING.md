@@ -12,6 +12,24 @@ pnpm --dir ../../plugins/codex-security/mcp-app install --frozen-lockfile
 
 The commands below run from `sdk/typescript` unless a different directory is named. For a test that builds or loads the bundled plugin, first [download the universal native payload](../../plugins/codex-security/native/README.md#package-inputs). The SDK’s `test`, `test:ci`, `test:mcp` and `prepack` scripts all build that bundle.
 
+## Run the CLI from your checkout
+
+From the repository root, use the source entry point to iterate on commands and help:
+
+```sh
+bun sdk/typescript/src/cli.ts scan --help
+```
+
+For the Node launcher that npm installs as `cs`, build the SDK first:
+
+```sh
+pnpm --dir sdk/typescript run build
+node sdk/typescript/bin/codex-security.mjs scan --help
+node sdk/typescript/bin/codex-security.mjs scan . --dry-run --json
+```
+
+Saved history, exports, and commands that run the bundled plugin also need the native payload described above and `pnpm --dir sdk/typescript run build:plugin`. The `build:ci` script compiles the repository’s CI helpers.
+
 ## Run a focused test
 
 Run the file for the behavior you changed. This example exercises progress parsing:
@@ -45,6 +63,10 @@ pnpm run test:mcp
 pnpm run test
 ```
 
+The release checker rejects tar archives with sparse entries. If you created a
+candidate archive with a sparse-aware tar tool, regenerate it from the source
+checkout with `pnpm pack` before signing or publishing it.
+
 To collect JUnit and coverage while running the SDK suite, use `pnpm run test:ci` in place of `pnpm run test`. To test what an npm consumer receives, pack the archive and pass its exact path to the inspection command:
 
 ```sh
@@ -54,13 +76,17 @@ pnpm run test:package
 ```
 
 Replace `X.Y.Z` with the version in the filename printed by `pnpm pack`.
+Packing regenerates SDK defaults and project schemas before building the MCP runtime.
+On Alpine Linux, install GNU tar with `apk add tar` before running `check:package`.
+The BusyBox tar applet lacks the archive options used by the release checker.
 
 The authored plugin lives in `plugins/codex-security`. `pnpm pack` generates
 the ignored `_bundled_plugin` runtime payload from `plugins/codex-security/plugin-files.json` during
 `prepack`, including the MCP runtime built from `mcp-app`; do not edit generated
 files there. Run `pnpm run build:plugin` when you need to inspect the staged
-payload locally. `plugins/codex-security` contains authored source and assets,
-not the generated `mcp/server.mjs` or compressed runtime chunks.
+payload locally. Rebuilding replaces the entire generated directory, including
+any numbered Brotli parts from earlier builds. Each MCP entrypoint now loads
+its matching `.mjs.br` file.
 `pnpm run check:plugin-source` fails if any file beneath `_bundled_plugin` is
 tracked by Git. Required CI runs the same check before installing dependencies.
 
