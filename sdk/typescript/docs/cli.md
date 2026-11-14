@@ -1034,11 +1034,12 @@ Cloud. See [deduplication](findings-service.md#deduplicate-a-scan) for scope,
 credentials, and workflow resume behavior.
 
 For `dedupe --scan latest`, matching across worktrees or clones requires a Git
-executable outside all saved scan targets. If a historical target includes the
-available Git installation, use `codex-security dedupe --scan SCAN_ID` with an
-explicit saved scan ID. Exact-path `latest` lookup works without Git for non-Git
-scan targets; recorded Git generations require a trusted Git executable to verify
-that the checkout still owns its saved history.
+executable outside all saved scan targets. Exact-path `latest` lookup works
+without Git for non-Git targets. If the saved targets include the available Git
+installation, use `codex-security dedupe --scan SCAN_ID` for an ordinary Git
+checkout. The explicit ID lets the workbench verify the original checkout
+directory and the recorded Git and object directories without launching Git.
+Linked worktrees and redirected Git directories require a trusted Git executable.
 
 Repeat `--codex KEY=VALUE` for supported native settings. For example,
 `--codex "model_reasoning_effort='high'"` passes the TOML string `high` in Bash,

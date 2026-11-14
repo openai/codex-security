@@ -1285,6 +1285,7 @@ test.each(
               scanId: manifest.scan.id,
               scanDir: fixture.scanDir,
               targetPath: fixture.repository,
+              checkoutAvailable: true,
               progress: { status: "complete" },
             },
           }),
@@ -1425,6 +1426,7 @@ test.each(
             scanId: manifest.scan.id,
             scanDir: fixture.scanDir,
             targetPath: fixture.repository,
+            checkoutAvailable: true,
             progress: { status: "complete" },
           },
         }),
@@ -1496,6 +1498,8 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
                   scan: {
                     scanId: "scan_example_001",
                     scanDir: directory,
+                    targetPath: fixture.repository,
+                    checkoutAvailable: true,
                     progress: { status: "complete" },
                   },
                 };
@@ -1526,6 +1530,7 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
         "get-scan",
         "--scan-id",
         requestedId === "latest" ? "scan_example_001" : requestedId,
+        "--metadata-only",
       ]);
       if (requestedId === "latest")
         expect(commands[0]).toEqual([
@@ -1551,6 +1556,8 @@ test("resolves a saved scan and retrieves its IDs without uploading or modifying
             scan: {
               scanId: "wrong-scan",
               scanDir: directory,
+              targetPath: fixture.repository,
+              checkoutAvailable: true,
               progress: { status: "complete" },
             },
           }),
@@ -1670,6 +1677,8 @@ test("writes accepted groups only after all reviews and fails on review or write
             scan: {
               scanId: "scan_example_001",
               scanDir: directory,
+              targetPath: fixture.repository,
+              checkoutAvailable: true,
               progress: { status: "complete" },
             },
           }),
