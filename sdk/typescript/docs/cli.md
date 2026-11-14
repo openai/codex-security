@@ -307,9 +307,9 @@ The adapter supports text, images, local function tools, and JSON-schema
 output. Hosted web search defaults to disabled. Hosted tools, remote
 compaction, and server-side Responses conversation state are unsupported.
 The adapter forwards reasoning effort and delivers generated output once the
-upstream completion finishes. Freeform tool input must satisfy the original
-grammar. HF model prices are not bundled, so token usage is available but
-`--max-cost` is unavailable for these model IDs.
+upstream completion finishes. For grammar-constrained tools, the adapter sends
+the grammar to the model as input guidance. The SDK reports token usage for
+these model IDs. `--max-cost` requires bundled prices.
 
 See [HF's Codex integration](https://huggingface.co/docs/inference-providers/integrations/codex)
 and [Responses API](https://huggingface.co/docs/inference-providers/guides/responses-api).

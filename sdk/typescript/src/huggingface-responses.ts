@@ -54,6 +54,7 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
       }
       const tool = identity(value, namespace);
       const name = alias(tool);
+      const format = value["format"];
       identities.set(name, tool);
       return [
         {
@@ -66,7 +67,10 @@ export function huggingFaceRequest(request: Record<string, unknown>) {
                 properties: {
                   input: {
                     type: "string",
-                    description: "The complete freeform tool input.",
+                    description:
+                      isRecord(format) && format["type"] === "grammar"
+                        ? `The complete freeform tool input, matching this ${format["syntax"]} grammar:\n${format["definition"]}`
+                        : "The complete freeform tool input.",
                   },
                 },
                 required: ["input"],

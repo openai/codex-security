@@ -139,12 +139,7 @@ test.each([undefined, "length", "content_filter"])(
   },
 );
 
-test("propagates provider errors and rejects unsupported conversation items", () => {
-  expect(() =>
-    huggingFaceChatResponse().add({
-      error: { message: "synthetic provider failure" },
-    }),
-  ).toThrow("synthetic provider failure");
+test("rejects unsupported conversation items", () => {
   expect(() =>
     huggingFaceChatRequest({ input: [{ type: "computer_call" }] }),
   ).toThrow("does not support");

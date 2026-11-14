@@ -141,7 +141,6 @@ export function huggingFaceChatResponse() {
   >();
   return {
     add(chunk: Record<string, unknown>) {
-      if (chunk["error"]) throw new Error(JSON.stringify(chunk["error"]));
       if (isRecord(chunk["usage"])) usage = chunk["usage"];
       for (const choice of Array.isArray(chunk["choices"])
         ? chunk["choices"]

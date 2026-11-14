@@ -131,6 +131,11 @@ test("rejects unsupported hosted tools rather than silently removing them", () =
 test("adapter forwards authentication, streams split UTF-8 events, and closes", async () => {
   let authorization: string | undefined;
   let billTo: string | undefined;
+  const grammar = {
+    type: "grammar",
+    syntax: "lark",
+    definition: 'start: "done"',
+  };
   await using upstream = await listen(async (req, res) => {
     authorization = req.headers.authorization;
     billTo = req.headers["x-hf-bill-to"] as string;
@@ -141,6 +146,9 @@ test("adapter forwards authentication, streams split UTF-8 events, and closes", 
     expect(
       body.tools.every((entry: { type: string }) => entry.type === "function"),
     ).toBe(true);
+    expect(
+      body.tools[1].function.parameters.properties.input.description,
+    ).toContain(grammar.definition);
     res.writeHead(200, { "content-type": "text/event-stream" });
     const item = {
       type: "function_call",
@@ -167,7 +175,10 @@ test("adapter forwards authentication, streams split UTF-8 events, and closes", 
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        tools: [{ type: "namespace", name: "review", tools: [tool] }],
+        tools: [
+          { type: "namespace", name: "review", tools: [tool] },
+          { type: "custom", name: "record", format: grammar },
+        ],
         input: "Review the fixture",
         stream: true,
       }),
