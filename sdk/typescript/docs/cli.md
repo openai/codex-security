@@ -1146,6 +1146,7 @@ For filesystem and approval behavior, see the
 | `CODEX_SECURITY_PROJECT_CONFIG`                                             | Selected project file; `-c` overrides it.                                                                            |
 | `CODEX_HOME`                                                                | Ambient Codex home; default `~/.codex`.                                                                              |
 | `CODEX_CLI_PATH`                                                            | Codex executable for login, setup, scans, and workers.                                                               |
+| `CODEX_MCP_NODE_PATH`                                                       | Node executable for the MCP plugin launcher. See [helper Node runtime](#helper-node-runtime).                        |
 | `PYTHON`                                                                    | Python interpreter unless an explicit option overrides it.                                                           |
 | `CODEX_SECURITY_LOG_LEVEL`                                                  | CLI diagnostics; `debug` enables verbose output.                                                                     |
 | `LOG_LEVEL`                                                                 | Fallback if `CODEX_SECURITY_LOG_LEVEL` is unset or blank.                                                            |
@@ -1227,6 +1228,21 @@ location is available, this layout cannot provision credentials safely under
 the current checks. Sign in again if needed; a new state directory has separate
 scan history and does not migrate credentials or reports from the old state
 directory.
+
+#### Helper Node runtime
+
+On macOS, the plugin launcher checks whether Node can load the bundled native
+addon. If a helper still reports that `unix.node` and Node have
+`different Team IDs`, set `CODEX_MCP_NODE_PATH` to the absolute path of a compatible Node
+executable. For example, if you have installed Homebrew's `node@24`:
+
+```sh
+export CODEX_MCP_NODE_PATH="$(brew --prefix node@24)/bin/node"
+```
+
+Start the CLI or plugin host from that terminal. The override applies to its
+MCP server and helpers. To restore automatic selection, run
+`unset CODEX_MCP_NODE_PATH` and restart the host from that terminal.
 
 ### Progress and cost
 
