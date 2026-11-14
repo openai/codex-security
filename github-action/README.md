@@ -21,9 +21,10 @@ distribution commit contains the Action bundles and CLI dependency lock.
 When updating the SHA, review the new release and run the workflow manually
 before relying on its scheduled runs. For a fork, use its owner and release.
 
-The [repository workflow](examples/repository.yml) below uses `gpt-6.1-sol` and
-an estimated $5 cost limit. Change `max-cost` to adjust the budget, or remove it
-for no estimated cost limit. Requests already in progress can exceed the limit.
+The [repository workflow](examples/repository.yml) below uses the default OpenAI
+model and effort with an estimated $5 cost limit. Adjust `max-cost` to change
+the budget, or remove it for no estimated cost limit. In-flight requests can
+exceed the limit.
 Daybreak is optional; see [Daybreak access and refusals](#daybreak-access-and-refusals).
 
 <!-- action-workflow:repository:start -->
@@ -52,8 +53,6 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: repository
-          model: gpt-6.1-sol
-          effort: high
           max-cost: "5"
           fail-on-severity: none
         env:
@@ -358,8 +357,6 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: diff
-          model: gpt-6.1-sol
-          effort: high
           max-cost: "5"
           fail-on-severity: high
         env:
@@ -444,7 +441,7 @@ with:
   max-time-hours: "1"
 ```
 
-Deep mode does not support diff scans. `max-time-hours` limits Deep discovery;
+Deep mode does not support diff scans. `max-time-hours` limits Deep discovery (the Action converts hours to CLI minutes);
 finalization can take additional time. It is unset by default, which uses the
 CLI's default of 96 hours. Set an explicit budget for Deep scans that leaves
 room for finalization within your job timeout. The one-hour discovery budget
@@ -459,6 +456,9 @@ source annotations, preserving scan order within each severity level. Set
 Anyone signed in to GitHub with read access to the repository can download the
 reports, which can contain source code and vulnerability details. Set
 `retention-days` to change the default of seven days.
+
+When the scan records scope limitations, the job summary displays them. For
+example, a time-limited Deep scan can finish before any source review completes.
 
 The job summary includes the configured provider, reported input/cached/output
 token usage, and estimated USD cost, including a range when supplied by the CLI.

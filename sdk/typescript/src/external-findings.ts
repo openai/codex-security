@@ -122,6 +122,7 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
   input: T,
   checkEvidenceNumber = (value: number) => requireJsonNumber(value, "Evidence"),
   target: ExternalImportTarget = "local",
+  provider?: string,
 ): T {
   const fields = new Map<string, unknown>();
   const errors: { path: string[]; error: Error }[] = [];
@@ -195,6 +196,19 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
     );
     parent[key] = error;
   }
+  // Reader scope can live on a getter. Do not evaluate enumerable getters twice.
+  if (provider !== undefined) {
+    const keys = ["sourceFormat", "semgrepPlatformScope", "snykRestContext"];
+    if (provider === "semgrep" || provider === "snyk")
+      keys.push("sourceRepositoryUrl", "sourceRepositoryPlatform");
+    for (const key of keys)
+      if (
+        !(key in result) &&
+        key in input &&
+        !Object.prototype.propertyIsEnumerable.call(input, key)
+      )
+        result[key] = structuredClone(Reflect.get(input, key));
+  }
   return result;
 }
 
@@ -207,25 +221,15 @@ export function cloneImportPreview<T extends ExternalFindings>(input: T): T {
   };
 }
 
-/** @internal Keep earlier provider projections only for immutable request replay. */
-export interface ExternalPublicationInput {
-  current: ExternalFindings;
-  legacy: ExternalFindings;
-  currentIdentity: unknown;
-  legacyIdentity: unknown;
-}
-
 /** Capture the caller's import settings before reading an export or resolving its destination. */
-export function snapshotImportOptions<
-  P extends LocalExternalImportOptions["provider"],
->({
+export function snapshotImportOptions<P extends string>({
   repository,
   provider,
   sourceKey,
   sourceRepositoryUrl,
   trivyScanRoot,
   inspectorProjectMap,
-}: LocalExternalImportOptions & { provider: P }) {
+}: Omit<LocalExternalImportOptions, "provider"> & { provider: P }) {
   if (provider === "trivy" && sourceRepositoryUrl !== undefined)
     throw new CodexSecurityError(
       "Trivy reads repository provenance from the report; do not supply --source-repository-url.",

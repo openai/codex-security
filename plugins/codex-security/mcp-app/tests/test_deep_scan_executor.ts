@@ -95,9 +95,9 @@ try {
     );
     await check(t, testWorkerTerminalEvents);
     await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
+    await check(t, testAbortPropagation);
     if (process.platform !== "win32") {
       await check(t, testStreamTerminationWithoutTerminalEventFails);
-      await check(t, testAbortPropagation);
     }
   });
 
@@ -1446,8 +1446,10 @@ async function testWorkerRuntimeSettings() {
   ];
   const saved = [
     "PYTHON",
+    "PYTHONIOENCODING",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
+    "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH",
     "HOME",
     "NODE_OPTIONS",
     "NODE_DEBUG",
@@ -1456,8 +1458,11 @@ async function testWorkerRuntimeSettings() {
     "CODEX_SECURITY_GIT",
     "GIT_SSH_COMMAND",
     "GIT_CONFIG_GLOBAL",
+    "GIT_DIFF_OPTS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
     "CODEX_CLI_PATH",
-    "CODEX_MCP_NODE_PATH",
+    "CODEX_BROWSER_USE_NODE_PATH",
     "CODEX_HOME",
     "CODEX_SECURITY_STATE_DIR",
     "CODEX_SECURITY_CONFIG_PATH",
@@ -1498,13 +1503,21 @@ async function testWorkerRuntimeSettings() {
         { account: null, requiresOpenaiAuth: false },
         process.platform === "win32" && configuration === "",
       );
-      const python = path.join(fixture.root, "selected venv", "bin", "python");
+      const browserNode = path.join(fixture.root, "browser node");
+      process.env.CODEX_BROWSER_USE_NODE_PATH = browserNode;
+      const systemPython = process.platform === "win32" ? "python" : "python3";
+      const python =
+        configuration === "" && process.platform !== "win32"
+          ? systemPython
+          : path.join(fixture.root, "selected venv", "bin", "python");
       const helperPython = path.join(
         fixture.root,
         "helper venv",
         "bin",
         "python",
       );
+      const workerPython = (index: number) =>
+        index === 0 ? systemPython : `${helperPython}-${index} `;
       process.env.PYTHON = python;
       const gitEnvironment = workerGitEnvironment(fixture.root);
       await writeFile(gitEnvironment.NODE_EXTRA_CA_CERTS, rootCertificates[0]!);
@@ -1532,7 +1545,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
         { model: "gpt-6.1-sol", reasoningEffort: "high" },
-        { model: "gpt-6-sol", reasoningEffort: "high" },
+        { model: "gpt-6-sol", reasoningEffort: "max" },
         {
           model: 'fixture-"future"\\模型',
           reasoningEffort: 'future-"effort"\\強度\u007f',
@@ -1639,16 +1652,27 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ? undefined
               : path.join(codexHome, `${nativeProfile}.config.toml`);
           const literalDeniedPath = `/repo/literal.key"\\雪\u007f-${index}`;
+          const nestedReceipts = index === 0;
           const workerUsageDirectory = path.join(
-            fixture.root,
-            `state-${index}`,
-            "codex-home",
+            nestedReceipts ? codexHome : `${codexHome}-sibling`,
             "worker-usage",
             `scan-${index}`,
           );
+          const receiptRoot = path.parse(workerUsageDirectory).root;
+          const pluginReadRoot =
+            index === 0
+              ? path.join(fixture.root, `plugin-${index}`)
+              : undefined;
+          const sourceReadRoot = path.join(
+            fixture.root,
+            `private source [${index}]`,
+          );
           const parentSandbox = {
+            pluginReadRoot,
+            sourceReadRoot,
             filesystemDenies: [
               ...trustedParentSandboxWithDenials.filesystemDenies,
+              ...(nestedReceipts ? [] : [workerUsageDirectory]),
             ],
             literalFilesystemDenies: [
               ...trustedParentSandboxWithDenials.literalFilesystemDenies,
@@ -1699,6 +1723,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           };
           return {
             nativePaths,
+            pythonIoEncoding: index % 2 === 0 ? "utf-16-le" : "utf-8-sig",
             knowledgePath: path.join(fixture.root, `knowledge-${index}`),
             knowledgeDocuments: {
               "1-architecture.md.txt": `Synthetic architecture for scan ${index}.`,
@@ -1714,10 +1739,27 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ...deniedWorkerPermissionProfile,
               filesystem: {
                 ...deniedWorkerPermissionProfile.filesystem,
+                [sourceReadRoot]: { ".": "read" },
+                ...(pluginReadRoot === undefined
+                  ? {}
+                  : { [pluginReadRoot]: { ".": "read" } }),
                 [deepPath]: { ".": "deny" },
                 [codexHome]: { ".": "deny" },
-                [workerUsageDirectory]: { ".": "deny" },
-                [literalDeniedPath]: { ".": "deny" },
+                ...(!nestedReceipts || process.platform !== "linux"
+                  ? { [workerUsageDirectory]: { ".": "deny" } }
+                  : {}),
+                ...(nestedReceipts
+                  ? {}
+                  : {
+                      [receiptRoot]: {
+                        ...(receiptRoot === "/"
+                          ? deniedWorkerPermissionProfile.filesystem["/"]
+                          : {}),
+                        [workerUsageDirectory.slice(receiptRoot.length)]:
+                          "deny",
+                      },
+                    }),
+                [literalDeniedPath]: "deny",
               },
             },
             provider,
@@ -1727,6 +1769,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ? undefined
                 : {
                     ...workerScanEnvironment(fixture.root, index),
+                    CODEX_BROWSER_USE_NODE_PATH: path.join(
+                      fixture.root,
+                      `scan browser node ${index}`,
+                    ),
                     SYNTHETIC_GATEWAY_KEY: providerKeys[index],
                     SYNTHETIC_HEADER_VALUE: providerHeaders[index],
                     [headerKey]: ` synthetic-canonical-header-${index}\t`,
@@ -2011,6 +2057,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
 
+      const scanGitEnvironments = settings.map((_, index) => {
+        const tools = path.join(fixture.root, `operator tools ${index}`);
+        return {
+          ...gitEnvironment,
+          PATH: [tools, gitEnvironment.PATH].join(path.delimiter),
+          CODEX_SECURITY_GIT: path.join(tools, "git"),
+        };
+      });
+
       await Promise.all(
         settings.map(async (_, index) => {
           const directory = path.join(
@@ -2046,7 +2101,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                   ? ["api", `background jobs ${index}`]
                   : undefined,
               filePaths: index % 2 === 0 ? [`background jobs ${index}`] : [],
-              pythonCommand: `${helperPython}-${index} `,
+              pythonCommand: workerPython(index),
             },
           }),
       );
@@ -2065,7 +2120,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         await Promise.all(
           executors.map((executor, index) => {
             // Snapshot each scan environment independently.
+            Object.assign(process.env, scanGitEnvironments[index]);
             process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
+            process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH = path.dirname(
+              nodePaths[index],
+            );
             Object.assign(process.env, temporaryEnvironments[index]);
             process.env.CODEX_SECURITY_STATE_DIR = path.join(
               fixture.root,
@@ -2086,6 +2145,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ]) {
               process.env[name] = path.join(fixture.root, `libraries-${index}`);
             }
+            process.env.PYTHONIOENCODING =
+              workerConfigurations[index].pythonIoEncoding;
             restoreEnv(
               "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
               workerConfigurations[index].workerConfigPath,
@@ -2143,7 +2204,12 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
-            path.join(fixture.root, "ambient-plugin"),
+            workerConfigurations[index].parentSandbox.pluginReadRoot ??
+              path.join(fixture.root, "ambient-plugin"),
+          );
+          assert.equal(
+            workerLaunch.environment!._CODEX_SECURITY_SDK_NODE_SEARCH_PATH,
+            path.dirname(nodePaths[index]),
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
@@ -2209,6 +2275,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             );
           }
           assert.equal(
+            invocation.runtimeEnvironment.PYTHONIOENCODING,
+            workerConfigurations[index].pythonIoEncoding,
+          );
+          assert.equal(
             invocation.knowledgePath,
             workerConfigurations[index].knowledgePath,
           );
@@ -2255,6 +2325,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               nodePaths[index],
           );
           assert.equal(process.env.CODEX_MCP_NODE_PATH, nodePaths.at(-1));
+          assert.equal(
+            invocation.runtimeEnvironment.CODEX_BROWSER_USE_NODE_PATH,
+            selectedProvider.environment?.CODEX_BROWSER_USE_NODE_PATH ??
+              browserNode,
+          );
           assert.equal(invocation.providerHeader, providerHeaders[index]);
 
           assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
@@ -2448,13 +2523,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.deepEqual(
             invocation.gitEnvironment,
             expectedGitEnvironment(
-              gitEnvironment,
+              scanGitEnvironments[index],
               nodePaths[index],
               selectedProvider.environment,
             ),
           );
           for (const [name, value] of Object.entries({
-            ...gitEnvironment,
+            ...scanGitEnvironments.at(-1),
             CODEX_MCP_NODE_PATH: nodePaths.at(-1),
           })) {
             assert.equal(process.env[name], value);
@@ -2465,7 +2540,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             "mcp_servers.cs_artifacts.command": process.execPath,
             "mcp_servers.cs_artifacts.env.CODEX_SECURITY_INCLUDE_PATHS_JSON":
               undefined,
-            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND": `${helperPython}-${index} `,
+            "mcp_servers.cs_artifacts.env.CODEX_SECURITY_PYTHON_COMMAND":
+              workerPython(index),
             "mcp_servers.cs_artifacts.args.0": path.join(
               fixture.root,
               `plugin-${index}`,
@@ -2563,7 +2639,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.deepEqual(
             preflight.gitEnvironment,
             expectedGitEnvironment(
-              gitEnvironment,
+              scanGitEnvironments[index],
               nodePaths[index],
               selectedProvider.environment,
             ),

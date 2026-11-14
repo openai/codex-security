@@ -122,7 +122,7 @@ def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> 
     assert workspace["userContext"] == user_context
     assert scan["mode"] == "standard"
     assert scan["progress"]["status"] == "running"
-    assert scan["progress"]["phase"] == "preflight"
+    assert scan["progress"]["phase"] == "threat_model"
     assert scan["handoffStatus"] == "delivered"
     assert scan["continuationThreadId"] == "thread-headless-standard-scan"
     assert str(uuid.UUID(str(scan["handoffClaimToken"]))) == scan["handoffClaimToken"]
@@ -190,6 +190,33 @@ def test_prompt_only_scan_creates_submitted_delivered_scan(
     assert workspace["id"]
     assert workspace["setup"] == {"submitted": True}
     assert workspace["results"]["scanId"] == scan["scanId"]
+
+
+def test_prompt_only_rejoin_follows_the_attached_continuation(tmp_path: Path) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    scan_root = tmp_path / "scans"
+    started = start_prompt_only_scan(state_dir, target, scan_root)
+    scan_id = str(started["scan"]["scanId"])
+    continuation = "attached-prompt-thread"
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", continuation)
+    context = "Review the password-reset flow."
+    scan_command(
+        state_dir,
+        "update-scan-context",
+        scan_id,
+        "--thread-id",
+        continuation,
+        "--user-context",
+        context,
+    )
+
+    replacement = start_prompt_only_scan(state_dir, target, scan_root)
+    assert replacement["startDisposition"] == "created"
+    assert replacement["scan"]["scanId"] != scan_id
+    joined = start_prompt_only_scan(state_dir, target, scan_root, thread_id=continuation)
+    assert joined["startDisposition"] == "joined"
+    assert joined["scan"]["scanId"] == scan_id
+    assert joined["scan"]["userContext"] == context
 
 
 def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
@@ -290,7 +317,7 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
     calls = 0
     args = prompt_scan_arguments(target, tmp_path)
 
-    acquiring = Event()
+    released = None
 
     def inspect_identity(*args, **kwargs):
         nonlocal calls
@@ -315,13 +342,14 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
                 return getattr(connection, name)
 
             def execute(self, sql, *parameters):
+                nonlocal released
                 if (
                     writer_arrival == "before_hash"
                     and sql == "BEGIN IMMEDIATE"
-                    and not acquiring.is_set()
+                    and released is None
                 ):
                     blocker.execute("BEGIN IMMEDIATE")
-                    acquiring.set()
+                    released = pool.submit(release_writer)
                 try:
                     return connection.execute(sql, *parameters)
                 except sqlite3.OperationalError:
@@ -331,7 +359,6 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
                     raise
 
         def release_writer():
-            assert acquiring.wait(timeout=10)
             if target_changes:
                 source.write_text("changed during lock acquisition\n")
             blocker.commit()
@@ -341,7 +368,6 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
                 ThreadPoolExecutor(max_workers=1) as pool,
                 mock.patch.dict(globals_, {"scan_target_identity": inspect_identity}),
             ):
-                released = pool.submit(release_writer) if writer_arrival == "before_hash" else None
                 if target_changes:
                     with pytest.raises(SystemExit, match="target changed"):
                         start(ContendedConnection(), args, headless_standard=False)
@@ -359,7 +385,6 @@ def test_prompt_scan_revalidates_target_after_database_lock_wait(
             assert not connection.in_transaction
             assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         finally:
-            acquiring.set()
             blocker.close()
             connection.close()
     assert calls == (2 if writer_arrival == "before_hash" else 3)

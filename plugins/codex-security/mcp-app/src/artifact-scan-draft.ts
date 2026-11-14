@@ -1,4 +1,5 @@
 import type { JsonObject } from "./types.js";
+import { normalizedScanRelativePath } from "./contract-values.js";
 import {
   coverageReceiptComponents,
   validateRetainedCoverage,
@@ -7,7 +8,7 @@ import {
 import { isRecord as isObject } from "./record.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { basename, dirname, isAbsolute, join, posix, sep } from "node:path";
+import { basename, dirname, join, posix, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import * as z from "zod/v4";
 import type { ArtifactContext } from "./artifact-context.js";
@@ -132,6 +133,69 @@ export interface ScanDraftResult {
   operation: "replace";
   status: "draft_written";
   warnings?: string[];
+}
+
+/** Keep the receipt compact while making saved work discoverable on resume. */
+export function scanDraftToolResponse(
+  { reviewState, ...receipt }: ScanDraftResult,
+  input: ScanDraftInput,
+) {
+  const assigned = (
+    rows: { id?: string }[],
+    normalized: { id?: string }[],
+    saved: { id: string }[],
+  ) => {
+    const savedIds = new Set(saved.map(({ id }) => id));
+    return normalized.flatMap(({ id }, index) =>
+      id !== undefined && id !== rows[index]!.id && savedIds.has(id)
+        ? [{ index, id }]
+        : [],
+    );
+  };
+  const omitted = <Row extends { id?: string }>(
+    saved: Row[],
+    submitted: Row[],
+  ) => {
+    if (!saved.length) return [];
+    const submittedById = new Map(submitted.map((row) => [row.id, row]));
+    return saved.filter(
+      (row) => !isDeepStrictEqual(submittedById.get(row.id), row),
+    );
+  };
+  const { surfaces, deferred } = input.reviewState;
+  const normalizedSurfaces = normalizeSurfaces(surfaces);
+  const savedSurfaces =
+    reviewState.surfaces as (DraftCoverage["surfaces"][number] & {
+      id: string;
+    })[];
+  const assignedSurfaces = assigned(
+    surfaces,
+    normalizedSurfaces,
+    savedSurfaces,
+  );
+  const retainedSurfaces = omitted(
+    savedSurfaces.filter((row) => row.disposition === "needs_follow_up"),
+    normalizedSurfaces,
+  );
+  const savedDeferred =
+    reviewState.deferred as (DraftCoverage["deferred"][number] & {
+      id: string;
+    })[];
+  const normalizedDeferred = normalizeDeferred(deferred);
+  const assignedDeferred = assigned(
+    deferred,
+    normalizedDeferred,
+    savedDeferred,
+  );
+  const retainedDeferred = omitted(savedDeferred, normalizedDeferred);
+  return {
+    ...receipt,
+    deferredCount: savedDeferred.length,
+    ...(retainedSurfaces.length ? { retainedSurfaces } : {}),
+    ...(retainedDeferred.length ? { retainedDeferred } : {}),
+    ...(assignedSurfaces.length ? { assignedSurfaces } : {}),
+    ...(assignedDeferred.length ? { assignedDeferred } : {}),
+  };
 }
 
 export interface CompletedScanResult {
@@ -273,6 +337,9 @@ export async function recordCodexSecurityScanDraftViaWorkbench(
         "--checkpoint-path",
         checkpointPath,
       ];
+      if (context.modelThreadId !== undefined) {
+        arguments_.push(`--model-thread-id=${context.modelThreadId}`);
+      }
       if (expectedDigest !== undefined) {
         arguments_.push("--expected-draft-digest", expectedDigest);
       }
@@ -2815,31 +2882,6 @@ export async function getCodexSecurityCompletedScan(
   };
 }
 
-function safeRelativePath(value: string, context: string): string {
-  const parts = value.split("/");
-  if (
-    value.length === 0 ||
-    Buffer.from(value, "utf8").toString("utf8") !== value ||
-    value === "." ||
-    value.startsWith("/") ||
-    /^[A-Za-z]:/.test(value) ||
-    parts.includes("..") ||
-    value.includes("\\") ||
-    /[\u0000-\u001f]/u.test(value)
-  ) {
-    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
-  }
-  const normalized = posix.normalize(value).replace(/\/+$/, "");
-  if (
-    normalized === "." ||
-    normalized.startsWith("../") ||
-    isAbsolute(normalized)
-  ) {
-    throw new Error(`${context}: expected a safe scan-relative POSIX path.`);
-  }
-  return normalized;
-}
-
 /** Admit file-authored drafts through the current contract after removing host fields. */
 export function parseCanonicalScanDraft(input: {
   scanId?: string;
@@ -2880,10 +2922,10 @@ function parseCanonicalCheckpoint(
       for (const [locationIndex, location] of (
         (finding[field] as JsonObject[] | undefined) ?? []
       ).entries()) {
-        safeRelativePath(
-          location.path as string,
-          `findings[${index}].${field}[${locationIndex}].path`,
-        );
+        if (normalizedScanRelativePath(location.path as string) === undefined)
+          throw new Error(
+            `findings[${index}].${field}[${locationIndex}].path: expected a safe scan-relative POSIX path.`,
+          );
       }
     }
   }
