@@ -3199,7 +3199,9 @@ def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_contex
         patch += b"@@ -1,3 +1,3 @@\n-old\n+new\n" + blank_context + b" last\n"
     (tmp_path / "patch.diff").write_bytes(patch)
     subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "apply", "patch.diff"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "core.autocrlf=false", "apply", "patch.diff"], cwd=tmp_path, check=True
+    )
     for filename in ("first.txt", "second.txt"):
         assert (tmp_path / filename).read_bytes() == b"new\n\nlast\n"
     preview, stats = namespace["patch_artifact_preview"](
@@ -3209,19 +3211,53 @@ def test_patch_statistics_count_blank_context_lines(tmp_path: Path, blank_contex
     assert stats == {"additions": 2, "deletions": 2, "fileCount": 2, "previewTruncated": False}
 
 
-def test_patch_preview_tolerates_integer_conversion_failure(tmp_path: Path) -> None:
-    namespace = runpy.run_path(str(SCRIPT))
-    count = b"0" * 5000 + b"1"
-    patch = (
-        b"--- a/file.txt\n+++ b/file.txt\n@@ -1," + count + b" +1," + count + b" @@\n-old\n+new\n"
-    )
-    (tmp_path / "file.txt").write_bytes(b"old\n")
-    (tmp_path / "patch.diff").write_bytes(patch)
-    subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "apply", "--check", "patch.diff"], cwd=tmp_path, check=True)
-    assert namespace["patch_artifact_preview"](
-        tmp_path, "patch.diff", f"sha256:{hashlib.sha256(patch).hexdigest()}"
-    ) == (None, None)
+@pytest.mark.parametrize("padded", [False, True])
+def test_saved_scan_remains_readable_with_large_hunk_counts(
+    tmp_path: Path, padded: bool, monkeypatch
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "source.txt").write_bytes(b"original\n")
+    scan_id, scan_dir = start_saved_scan(state_dir, target, tmp_path / "scans")
+    write_completed_contract(scan_dir, scan_id, target, relative_path="source.txt")
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+    occurrence_id = completed["findings"][0]["occurrenceId"]
+    digit_limit = 640  # Python's minimum configurable limit.
+    monkeypatch.setenv("PYTHONINTMAXSTRDIGITS", str(digit_limit))
+    count = "0" * digit_limit + "1" if padded else "9" * (digit_limit + 1)
+    patch = f"--- a/source.txt\n+++ b/source.txt\n@@ -1,{count} +1,{count} @@\n-original\n+fixed\n"
+    patch_path = scan_dir / "remediation.patch"
+    patch_path.write_bytes(patch.encode())
+    if padded:
+        subprocess.run(["git", "apply", "--check", str(patch_path)], cwd=target, check=True)
+    request = RemediationRequest(state_dir, occurrence_id)
+    token = str(uuid.uuid4())
+    request.start(token)
+    if padded:
+        request.update(token, "1", "generated", "--patch-stdin", input_text=patch)
+    else:
+        rejected = request.update(
+            token, "1", "generated", "--patch-stdin", input_text=patch, check=False
+        )
+        assert rejected["returncode"] != 0
+        assert "omits file content" in rejected["stderr"]
+        # Older clients recorded the path and digest of an existing patch.
+        request.generate(token, patch_path)
+    saved = get_scan(state_dir, scan_id)
+    remediation = saved["scan"]["findings"][0]["remediationState"]
+    assert remediation["state"] == "generated"
+    if padded or not hasattr(sys, "get_int_max_str_digits"):
+        assert remediation["patch"] == patch
+        assert remediation["patchStats"] == {
+            "additions": 1,
+            "deletions": 1,
+            "fileCount": 1,
+            "previewTruncated": False,
+        }
+    else:
+        assert remediation["patch"] is None
+        assert remediation["patchStats"] is None
 
 
 @pytest.mark.skipif(os.name != "posix", reason="changes permissions on an open patch")

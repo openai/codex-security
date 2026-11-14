@@ -50,6 +50,15 @@ COMMANDS = {
 SCAN_STATUS_ERROR = "Remediation is available only for successfully completed scans."
 
 
+_HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
+
+
+def _hunk_count(digits: bytes | None) -> int:
+    if digits is None:
+        return 1
+    return int(digits.lstrip(b"0") or b"0")
+
+
 def patch_artifact_preview(
     scan_dir: Path,
     relative_path: str | None,
@@ -77,10 +86,8 @@ def patch_artifact_preview(
                     if chunk.startswith(b"diff --git "):
                         file_count += 1
                         hunk_lines = 0
-                    elif match := re.match(rb"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", chunk):
-                        hunk_lines = sum(
-                            int(count) if count is not None else 1 for count in match.groups()
-                        )
+                    elif hunk := _HUNK_HEADER.match(chunk):
+                        hunk_lines = sum(map(_hunk_count, hunk.groups()))
                     elif hunk_lines == 0 and chunk.startswith(b"+++ "):
                         new_headers += 1
                     elif hunk_lines == 0 and chunk.startswith(b"--- "):
@@ -231,7 +238,6 @@ def latest_attempt(connection: sqlite3.Connection, occurrence_id: str) -> sqlite
     ).fetchone()
 
 
-_HUNK_HEADER = re.compile(rb"@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@")
 _QUOTED_GIT_PATH = rb'"((?:[^"\\]|\\(?:[abfnrtv"\\]|[0-3][0-7]{2}))*)"'
 _SUBMODULE_SUMMARY_END = re.compile(
     rb" (?:contains (?:modified|untracked) content|"
@@ -389,8 +395,10 @@ def _patch_file_sections(patch: bytes, incomplete: str) -> tuple[bytes, int]:
                 continue
             git_paths = b""
         if hunk:
-            old_lines = int(hunk[1] or b"1")
-            new_lines = int(hunk[2] or b"1")
+            try:
+                old_lines, new_lines = map(_hunk_count, hunk.groups())
+            except ValueError as exc:
+                raise SystemExit(incomplete) from exc
         elif (
             line.startswith((b"Binary files ", b"Files "))
             and line.endswith(b" differ")
