@@ -49,6 +49,26 @@ To scan only committed changes from `origin/main` to `HEAD`, run
 even when it finds vulnerabilities. Add `--fail-on-severity high` to exit with
 code `1` for high or critical findings.
 
+### Assess dependencies
+
+Install OSV-Scanner separately on PATH, then run:
+
+```bash
+cs scan dependencies . --max-cost 5
+cs scan dependencies /path/to/repository --json
+```
+
+Omit the repository to assess the current directory. The command saves scanner
+evidence, all advisory matches, static assessments, and a Markdown report outside
+the repository. Completed runs return `0`, including runs with advisory matches;
+partial or failed runs return `2`. Assessments never remove advisory matches.
+
+The SDK provides `scanDependencies()`. See the
+[dependency assessment guide](docs/cli.md#dependency-assessment-sca-mvp) for
+supported inputs, settings, artifacts, and limitations. `dependencies` is now a
+reserved scan command; use `cs scan ./dependencies` for a source scan of a
+directory with that name.
+
 ## Run a scan from TypeScript
 
 Run this ES module from the repository you want to scan.

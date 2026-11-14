@@ -1,0 +1,9 @@
+{
+  "name": "sca-synthetic-sca-006",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@sca-fixtures/template-view": "1.4.0"
+  }
+}

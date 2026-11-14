@@ -1,0 +1,15 @@
+{
+  "schema_version": "codex-security.sca-corpus-plan/v0",
+  "status": "awaiting_independent_adjudication",
+  "completed_human_cases": 0,
+  "development_target": 30,
+  "held_out_target": {
+    "affected": 30,
+    "not_affected": 15,
+    "unresolved": 15
+  },
+  "split_units": ["repository", "advisory_family_including_aliases"],
+  "reviewers_per_case": 2,
+  "cases": [],
+  "note": "Targets are a pilot plan, not completed work. Synthetic smoke fixtures are excluded from these counts."
+}

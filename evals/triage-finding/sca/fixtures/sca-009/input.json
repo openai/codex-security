@@ -1,0 +1,57 @@
+{
+  "input_id": "sca-009-match",
+  "source_type": "advisory",
+  "component": {
+    "source": "package-lock.json",
+    "ecosystem": "npm",
+    "name": "@sca-fixtures/shared-cache",
+    "version": "1.4.0"
+  },
+  "advisory_ids": [
+    "SCA-FIXTURE-003",
+    "SCA-ALIAS-003"
+  ],
+  "advisories": [
+    {
+      "id": "SCA-FIXTURE-003",
+      "aliases": [
+        "SCA-ALIAS-003"
+      ],
+      "modified": "2026-01-01T00:00:00Z",
+      "published": "2026-01-01T00:00:00Z",
+      "summary": "Fictional shared-cache advisory",
+      "details": "lookup uses shared keys when isolateTenants is false, so a multi-tenant caller can receive another tenant's cached value. With isolateTenants true the implementation includes the authenticated tenant in every lookup key.",
+      "affected": [
+        {
+          "package": {
+            "ecosystem": "npm",
+            "name": "@sca-fixtures/shared-cache"
+          },
+          "ranges": [
+            {
+              "type": "SEMVER",
+              "events": [
+                {
+                  "introduced": "0"
+                },
+                {
+                  "fixed": "1.4.1"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "references": [
+        {
+          "type": "ADVISORY",
+          "url": "https://example.invalid/advisories/SCA-FIXTURE-003"
+        }
+      ]
+    }
+  ],
+  "preconditions": [
+    "isolateTenants is false"
+  ],
+  "scanner_evidence": "osv.json"
+}
