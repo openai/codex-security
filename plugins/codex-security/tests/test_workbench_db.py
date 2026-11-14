@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import runpy
@@ -3191,6 +3192,18 @@ def test_patch_digest_accepts_file_becoming_read_only(tmp_path: Path, monkeypatc
             {"scan_dir": str(tmp_path)}, path.name, "sha256:" + hashlib.sha256(patch).hexdigest()
         )
     assert path.stat().st_mode & 0o777 == 0o400
+
+
+@pytest.mark.cross_platform
+def test_truncated_patch_preview_keeps_whole_characters(tmp_path: Path) -> None:
+    remediation = load_script("workbench_remediation")
+    prefix = b"+" * (remediation.PATCH_PREVIEW_BYTES - 1)
+    patch = prefix + "€".encode()
+    digest = f"sha256:{hashlib.sha256(patch).hexdigest()}"
+    preview, _ = remediation.patch_artifact_preview(
+        tmp_path, "remediation.patch", digest, lambda *_: io.BytesIO(patch)
+    )
+    assert preview == prefix.decode() + "\n... patch preview truncated ..."
 
 
 @pytest.mark.cross_platform
