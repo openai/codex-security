@@ -12471,10 +12471,18 @@ async function patchCommandContext(
       (name) =>
         [name, environmentEntry(dependencies.environment, name)] as const,
     )
-    .filter(
-      (entry): entry is readonly [string, string] =>
-        Boolean(entry[1]) && !isAbsolute(entry[1]!),
-    );
+    .filter((entry): entry is readonly [string, string] => {
+      const [name, path] = entry;
+      // Git for Windows accepts a bare NUL config device. Prefixing it with
+      // the checkout turns it into an invalid config pathname.
+      if (
+        process.platform === "win32" &&
+        (name === "GIT_CONFIG_GLOBAL" || name === "GIT_CONFIG_SYSTEM") &&
+        path?.toUpperCase() === "NUL"
+      )
+        return false;
+      return Boolean(path) && !isAbsolute(path!);
+    });
   if (configurationPaths.length) {
     const configurationDirectory = (
       await dependencies.runRepositoryCommand(
