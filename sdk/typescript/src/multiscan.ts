@@ -835,12 +835,10 @@ async function runCampaign(
                 options,
                 task,
                 scanDir,
+                checkout,
                 knowledge?.snapshot,
               ),
               telemetryContext: { operationId },
-              ...(task.scope === undefined
-                ? {}
-                : { target: [resolve(checkout, task.scope)] }),
               ...budget,
               maxCostUsd,
               ...observers,
@@ -1527,6 +1525,7 @@ function campaignScanOptions(
   options: MultiscanOptions,
   task: MultiscanTask,
   scanDir: string,
+  checkout: string,
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot,
 ): ScanOptions {
   const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
@@ -1535,7 +1534,9 @@ function campaignScanOptions(
   return {
     ...options.scanOptionsByMode?.[task.mode],
     knowledgeBaseSnapshot,
-    ...(task.scope === undefined ? {} : { target: [task.scope] }),
+    ...(task.scope === undefined
+      ? {}
+      : { target: [resolve(checkout, task.scope)] }),
     ...(options.knowledgeBasePaths?.length
       ? { knowledgeBasePaths: options.knowledgeBasePaths }
       : {}),
@@ -1568,6 +1569,7 @@ function matchesRegisteredRequest(
     options,
     task,
     scanDir,
+    checkout,
     knowledgeBaseSnapshot,
   );
   const matches = (settings: ScanOptions): boolean => {
