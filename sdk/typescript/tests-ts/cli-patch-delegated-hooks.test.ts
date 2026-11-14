@@ -221,7 +221,8 @@ test.each(["workspace", "read-only", "named", "danger-full-access"])(
             ? ""
             : "sandbox_mode=" + JSON.stringify(selection) + "\n") +
         '\nmodel_provider="hook-fixture"\n' +
-        '[model_providers.hook-fixture]\nname="Synthetic"\nbase_url="http://127.0.0.1:1/v1"\nenv_key="SYNTHETIC_MODEL_ACCESS"\n' +
+        '[model_providers.hook-fixture]\nname="Synthetic"\nbase_url="http://127.0.0.1:1/v1"\nenv_key="Synthetic_Model_Access"\n' +
+        '[shell_environment_policy.set]\nSynthetic_Model_Access="synthetic policy credential"\n' +
         "[sandbox_workspace_write]\n" +
         "exclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n" +
         "writable_roots=[" +
@@ -236,7 +237,7 @@ test.each(["workspace", "read-only", "named", "danger-full-access"])(
     const environment = patchSnapshotEnvironment(temporary, {
       ...process.env,
       CODEX_HOME: home,
-      SYNTHETIC_MODEL_ACCESS: "synthetic fixture credential",
+      Synthetic_Model_Access: "synthetic fixture credential",
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
     });
@@ -247,7 +248,7 @@ test.each(["workspace", "read-only", "named", "danger-full-access"])(
         "#!/bin/sh",
         "set -eu",
         'test "$1" = origin',
-        'test -z "${SYNTHETIC_MODEL_ACCESS-}"',
+        'if test -n "${Synthetic_Model_Access+x}"; then echo "Hook received the configured provider credential" >&2; exit 15; fi',
         `grep -F 'refs/heads/${branch}' >/dev/null`,
         "echo 'Entered synthetic resumed hook' >&2",
         "echo reached > " + shell(join(allowed, "ran")),

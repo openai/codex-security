@@ -99,7 +99,12 @@ import {
   withPatchGitIndex,
   type PatchGitAdministrationReference,
 } from "./patch-git-controls.js";
-import { writePublicationHooks } from "./patch-publication-hooks.js";
+import {
+  filterCommandConfig,
+  proxyUserinfo,
+  removePatchCredentials,
+  writePublicationHooks,
+} from "./patch-publication-hooks.js";
 import {
   ARTIFACT_EXPORT_FILENAMES,
   exportEnvironment,
@@ -1846,8 +1851,6 @@ interface CliDependencies {
 }
 
 // Apply coordinator-owned Git bindings after native shell environment filtering.
-const snapshotCredentialName =
-  /^(?:DATABASE_URL|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu;
 export const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
 const { readSync, writeSync } = require("node:fs");
@@ -1873,18 +1876,18 @@ if (process.platform === "win32") {
       nativeGitOptions.push("-c", "safe.directory=" + value);
   }
 }
-const { bindings, stripAwsCredentials, stripHookProxyCredentials } = JSON.parse(header.toString());
+const { bindings, credentialNames = [], stripAwsCredentials } = JSON.parse(header.toString());
+// Only replay coordinator-approved Git command config after native shell policy.
+for (const name of Object.keys(process.env))
+  if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\\d+)$/i.test(name))
+    delete process.env[name];
 for (const [name, value] of bindings) {
   if (value === null) delete process.env[name];
   else process.env[name] = value;
 }
+const removeCredentials = ${removePatchCredentials};
+removeCredentials(process.env, credentialNames, stripAwsCredentials, ${proxyUserinfo});
 // Inherit sandbox handles so Git does not need an inner runtime pipe.
-for (const name of Object.keys(process.env)) {
-  if (${snapshotCredentialName}.test(name) || (stripAwsCredentials && /^AWS_/i.test(name)) ||
-      (stripHookProxyCredentials && /^(?:https?|all)_proxy$/i.test(name) &&
-       ${/^(?:[a-z][\w+.-]*:\/\/)?[^/@\s]+@/iu}.test(process.env[name])))
-    delete process.env[name];
-}
 const child = spawn(command, [...nativeGitOptions, ...args], { stdio: "inherit" });
 child.on("error", (error) => { writeSync(2, require("node:util").format(error) + "\\n"); process.exitCode = 1; });
 child.on("exit", (code, signal) => {
@@ -2142,11 +2145,16 @@ export async function runRepositoryCommand(
       }
     }
     const environment = { ...executable.environment, ...options?.environment };
-    const credentialVariables = [
+    const credentialNames = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
-      ...(sandbox?.providerKeyVariable ? [sandbox.providerKeyVariable] : []),
+      "GIT_ASKPASS",
+      "SSH_ASKPASS",
+      ...(sandbox?.providerKeyVariable
+        ? [sandbox.providerKeyVariable.toUpperCase()]
+        : []),
     ];
+    let bindings: Buffer | undefined;
     if (hooks && hookDirectory && sandbox && codex) {
       hostArgs = [
         ...(await writePublicationHooks(hookDirectory, hooks, {
@@ -2161,45 +2169,50 @@ export async function runRepositoryCommand(
           data: hookDataDirectory!,
           messageDirectory,
           runner: PATCH_GIT_ENVIRONMENT_RUNNER,
-          credentialPattern: snapshotCredentialName.source,
-          credentialNames: [
-            ...credentialVariables.map((name) => name.toUpperCase()),
-            "GIT_ASKPASS",
-            "SSH_ASKPASS",
-          ],
+          credentialNames,
           stripAwsCredentials: sandbox.stripAwsCredentials === true,
         })),
         ...args,
       ];
     } else if (sandbox !== undefined) {
-      for (const name of Object.keys(environment)) {
-        if (
-          name.toUpperCase() === "CODEX_HOME" ||
-          snapshotCredentialName.test(name) ||
-          (sandbox.stripAwsCredentials && /^AWS_/i.test(name)) ||
-          credentialVariables.some(
-            (key) => key.toUpperCase() === name.toUpperCase(),
-          )
-        )
-          delete environment[name];
-      }
+      removePatchCredentials(
+        environment,
+        [...credentialNames, "CODEX_HOME"],
+        sandbox.stripAwsCredentials,
+      );
       environment["CODEX_HOME"] = configuredCodexHome(sandbox.environment);
+      const gitEnvironment: NodeJS.ProcessEnv = {};
+      const commandConfig =
+        /^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\d+)$/iu;
+      // Overlay captured bindings with Windows case-insensitive unset semantics.
+      // The config parser needs the selected Git's PATH and OS environment.
+      const effective: NodeJS.ProcessEnv = {};
+      for (const source of [environment, sandbox.gitEnvironment ?? {}]) {
+        for (const [name, value] of Object.entries(source))
+          effective[process.platform === "win32" ? name.toUpperCase() : name] =
+            value;
+      }
+      filterCommandConfig(effective, executable.executable);
+      for (const name of Object.keys(environment))
+        if (commandConfig.test(name)) delete environment[name];
+      for (const [name, value] of Object.entries(sandbox.gitEnvironment ?? {}))
+        if (!commandConfig.test(name)) gitEnvironment[name] = value;
+      for (const [name, value] of Object.entries(effective))
+        if (value !== undefined && commandConfig.test(name)) {
+          environment[name] = value;
+          gitEnvironment[name] = value;
+        }
+      bindings = Buffer.from(
+        JSON.stringify({
+          credentialNames,
+          stripAwsCredentials: sandbox.stripAwsCredentials,
+          bindings: Object.entries(gitEnvironment).map(([key, value]) => [
+            key,
+            value ?? null,
+          ]),
+        }),
+      );
     }
-    const bindings =
-      sandbox === undefined || hooks
-        ? undefined
-        : Buffer.from(
-            JSON.stringify({
-              // Reapply credential exclusions after the native shell policy.
-              stripAwsCredentials: sandbox.stripAwsCredentials,
-              bindings: Object.entries({
-                ...sandbox.gitEnvironment,
-                ...Object.fromEntries(
-                  credentialVariables.map((key) => [key, null]),
-                ),
-              }).map(([key, value]) => [key, value ?? null]),
-            }),
-          );
     const execution = spawn(
       codex === undefined || hooks
         ? executable.executable
