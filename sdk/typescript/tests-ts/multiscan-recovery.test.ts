@@ -608,12 +608,22 @@ describe("multiscan", () => {
     ["malformed middle record", "{", true],
     ["malformed final record", "{", false],
     ["non-object", "null", false],
-    ["missing ID", "{}", false],
-    ["non-string ID", '{"id":42}', false],
-    ["missing attempt", '{"id":"receipt"}', false],
-    ["string attempt", '{"id":"receipt","attempt":"1"}', false],
-    ["zero attempt", '{"id":"receipt","attempt":0}', false],
-    ["fractional attempt", '{"id":"receipt","attempt":1.5}', true],
+    ["missing ID", { id: undefined }, false],
+    ["non-string ID", { id: 42 }, false],
+    ["missing attempt", { attempt: undefined }, false],
+    ["string attempt", { attempt: "1" }, false],
+    ["zero attempt", { attempt: 0 }, false],
+    ["fractional attempt", { attempt: 1.5 }, true],
+    ["blank ID", { id: " " }, false],
+    ["padded ID", { id: " receipt " }, false],
+    ["ID ending in a period", { id: "receipt." }, false],
+    ["reserved device ID", { id: "CON" }, false],
+    ["unknown status", { status: "pending" }, true],
+    ["missing output directory", { outputDir: undefined }, false],
+    ["non-boolean knowledge failure", { knowledgeBaseFailure: "false" }, false],
+    ["invalid pending checkout cleanup", { cleanupPending: "recover" }, false],
+    ["non-boolean checkout flag", { checkoutOccupied: "false" }, false],
+    ["non-boolean policy outcome", { policyFailed: "true" }, false],
   ] as const)(
     "CLI identifies the %s and preserves committed history",
     async (_name, bad, middle) => {
@@ -634,8 +644,13 @@ describe("multiscan", () => {
       expect(await createCliTest(main).runCli(args, configured)).toBe(0);
       const ledger = join(paths.output, "results.jsonl");
       const valid = await readFile(ledger, "utf8");
+      const receipt = JSON.parse(valid);
+      const report = join(receipt.outputDir, "report.md");
+      const originalReport = await readFile(report);
+      const record =
+        typeof bad === "string" ? bad : JSON.stringify({ ...receipt, ...bad });
       const damaged = Buffer.concat([
-        Buffer.from(`${valid}\n${bad}\n`),
+        Buffer.from(`${valid}\n${record}\n`),
         ...(middle ? [Buffer.from(valid), Buffer.from([0xe2, 0x82])] : []),
       ]);
       await writeFile(ledger, damaged);
@@ -643,9 +658,12 @@ describe("multiscan", () => {
         const cli = createCliTest(main);
         expect(await cli.runCli([...args, ...flags], configured)).toBe(2);
         expect(cli.stderr.text()).toContain(`${ledger}:3:`);
+        if (typeof bad !== "string")
+          expect(cli.stderr.text()).toContain(Object.keys(bad)[0]!);
         expect(cli.stderr.text()).toContain("Restore a complete");
         expect(cli.stderr.text()).toContain("new --output-dir");
         expect(await readFile(ledger)).toEqual(damaged);
+        expect(await readFile(report)).toEqual(originalReport);
         expect(
           (await readdir(paths.output)).filter((name) =>
             name.startsWith("results.jsonl.interrupted-"),

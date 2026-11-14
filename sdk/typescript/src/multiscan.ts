@@ -459,9 +459,12 @@ async function runCampaign(
           }
         } catch {}
       }
-      if (receipt.status !== "failed" && receipt.warnings?.length) {
-        warnings.push({ repository: task.id, warnings: receipt.warnings });
-        for (const warning of receipt.warnings) {
+      const savedWarnings = Array.isArray(receipt.warnings)
+        ? receipt.warnings.filter((warning) => typeof warning === "string")
+        : [];
+      if (receipt.status !== "failed" && savedWarnings.length > 0) {
+        warnings.push({ repository: task.id, warnings: savedWarnings });
+        for (const warning of savedWarnings) {
           notifyProgress(options, {
             repository: task.id,
             status: "completed",
@@ -1268,18 +1271,38 @@ async function readReceipts(
     let saved;
     try {
       saved = JSON.parse(line);
-      if (typeof saved?.id !== "string")
-        throw new Error("Expected a receipt with a string id");
+      if (!isValidTaskId(saved?.id))
+        throw new Error("Expected a receipt with a valid task id");
       if (!Number.isSafeInteger(saved.attempt) || saved.attempt < 1)
         throw new Error("Expected a positive integer receipt attempt");
+      if (saved.status === "completed_with_incomplete_coverage")
+        saved.status = "completed";
+      if (saved.status !== "completed" && saved.status !== "failed")
+        throw new Error("Expected a completed or failed receipt status");
+      if (typeof saved.outputDir !== "string" || !saved.outputDir.trim())
+        throw new Error("Expected a nonempty string outputDir");
+      if (
+        saved.cleanupPending !== undefined &&
+        saved.cleanupPending !== "checkout" &&
+        saved.cleanupPending !== "recovery-checkout"
+      )
+        throw new Error(
+          "Expected cleanupPending to be checkout or recovery-checkout",
+        );
+      for (const flag of [
+        "knowledgeBaseFailure",
+        "checkoutOccupied",
+        "policyFailed",
+      ]) {
+        if (saved[flag] !== undefined && typeof saved[flag] !== "boolean")
+          throw new Error(`Expected a boolean ${flag}`);
+      }
     } catch (cause) {
       throw new Error(
         `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,
         { cause },
       );
     }
-    if (saved.status === "completed_with_incomplete_coverage")
-      saved.status = "completed";
     const receipt = saved as MultiscanReceipt;
     const id = receipt.id.toLowerCase();
     const previous = receipts.get(id);
@@ -1333,6 +1356,15 @@ async function hasCompletedContract(
   }
 }
 
+function isValidTaskId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) &&
+    !id.endsWith(".") &&
+    !WINDOWS_DEVICE_PATH_NAME.test(id)
+  );
+}
+
 function parseInventory(
   source: string,
   directory: string,
@@ -1365,11 +1397,7 @@ function parseInventory(
     const get = (name: string): string =>
       fields[headers.indexOf(name)]?.trim() ?? "";
     const id = get("id");
-    if (
-      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(id) ||
-      id.endsWith(".") ||
-      WINDOWS_DEVICE_PATH_NAME.test(id)
-    ) {
+    if (!isValidTaskId(id)) {
       throw new Error("Multiscan task IDs must be safe, unique path names.");
     }
     if (seen.has(id.toLowerCase()))
