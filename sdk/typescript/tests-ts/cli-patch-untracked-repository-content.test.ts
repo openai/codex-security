@@ -15,8 +15,16 @@ import {
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
-for (const copied of [false, true]) {
-  test(`preserves staged-only content during publication, copied: ${copied}`, async () => {
+for (const [indexState, stage] of [
+  ["staged", undefined],
+  ["staged", 0],
+  ["unmerged", undefined],
+  ["unmerged", 1],
+  ["unmerged", 2],
+  ["unmerged", 3],
+] as const) {
+  test(`preserves ${indexState} content during publication, copied stage: ${stage ?? "none"}`, async () => {
+    const copied = stage !== undefined;
     const { directory, git, remote } = await publicationRepository(fixtures);
     const file = join(directory, "unrelated.txt");
     const baseline = "Committed fixture baseline\n";
@@ -25,8 +33,25 @@ for (const copied of [false, true]) {
     git("add", "--", "unrelated.txt");
     git("commit", "-m", "Add independent fixture file");
     await writeFile(file, marker);
-    git("add", "--", "unrelated.txt");
+    if (indexState === "staged") {
+      git("add", "--", "unrelated.txt");
+    } else {
+      git("update-index", "--force-remove", "--", "unrelated.txt");
+      const entries: string[] = [];
+      for (const indexStage of [1, 2, 3]) {
+        await writeFile(file, `Synthetic unmerged stage ${indexStage}\n`);
+        const blob = git("hash-object", "-w", "--", "unrelated.txt");
+        entries.push(`100644 ${blob} ${indexStage}\tunrelated.txt\n`);
+      }
+      await runGitRepositoryCommand(
+        "git",
+        ["update-index", "--index-info"],
+        directory,
+        { input: entries.join("") },
+      );
+    }
     await writeFile(file, baseline);
+    const before = git("ls-files", "--stage", "unrelated.txt");
     const head = git("rev-parse", "HEAD");
     let pushes = 0;
     const result = await runWorkflow(
@@ -38,7 +63,12 @@ for (const copied of [false, true]) {
         onCodex: async (_args, output) => {
           await writeFile(
             join(directory, "selected.txt"),
-            copied ? marker : "Independent change\n",
+            stage === undefined
+              ? "Independent change\n"
+              : git(
+                  "show",
+                  stage === 0 ? ":unrelated.txt" : `:${stage}:unrelated.txt`,
+                ) + "\n",
           );
           output!.stdout.write(
             JSON.stringify({
@@ -69,7 +99,7 @@ for (const copied of [false, true]) {
         },
       },
     );
-    expect(git("show", ":unrelated.txt")).toBe(marker.trim());
+    expect(git("ls-files", "--stage", "unrelated.txt")).toBe(before);
     expect(await readFile(file, "utf8")).toBe(baseline);
     expect(pushes).toBe(copied ? 0 : 1);
     expect(result.exitCode, result.stderr).toBe(copied ? 2 : 0);
@@ -93,6 +123,7 @@ for (const kind of [
   "tracked edit in initialized submodule",
   "staged-only edit in initialized submodule",
   "sha256 staged-only edit in initialized submodule",
+  "sha256 unmerged edit in initialized submodule",
   "raw",
   "scrubbed",
   "directory link",
@@ -123,8 +154,12 @@ for (const kind of [
         const stagedEdit = kind.endsWith(
           "staged-only edit in initialized submodule",
         );
+        const unmergedEdit =
+          kind === "sha256 unmerged edit in initialized submodule";
         const trackedEdit =
-          stagedEdit || kind === "tracked edit in initialized submodule";
+          stagedEdit ||
+          unmergedEdit ||
+          kind === "tracked edit in initialized submodule";
         const committedContent = "Committed fixture baseline\n";
         const ordinarySubmoduleFile =
           kind === "untracked file in initialized submodule";
@@ -174,7 +209,19 @@ for (const kind of [
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
           if (trackedEdit) await writeFile(source, content);
-          if (stagedEdit) {
+          if (unmergedEdit) {
+            // A DD conflict has only stage 1, with no stage-0 worktree match.
+            const object = nestedGit("hash-object", "-w", "--", "local.txt");
+            nestedGit("update-index", "--force-remove", "--", "local.txt");
+            await runGitRepositoryCommand(
+              "git",
+              ["update-index", "--index-info"],
+              nested,
+              { input: `100644 ${object} 1\tlocal.txt\n` },
+            );
+            await writeFile(source, committedContent);
+            expect(nestedGit("status", "--porcelain=v1")).toBe("DD local.txt");
+          } else if (stagedEdit) {
             nestedGit("add", "--", "local.txt");
             await writeFile(source, committedContent);
           }
@@ -273,8 +320,11 @@ for (const kind of [
               await writeFile(
                 join(directory, "selected.txt"),
                 copied
-                  ? stagedEdit
-                    ? nestedGit("show", ":local.txt") + "\n"
+                  ? stagedEdit || unmergedEdit
+                    ? nestedGit(
+                        "show",
+                        unmergedEdit ? ":1:local.txt" : ":local.txt",
+                      ) + "\n"
                     : await readFile(source)
                   : "New independent content\n",
               );
@@ -336,7 +386,7 @@ for (const kind of [
           configuration,
         );
         expect(await readFile(source, "utf8")).toBe(
-          stagedEdit ? committedContent : content,
+          stagedEdit || unmergedEdit ? committedContent : content,
         );
         if (stagedEdit)
           expect(nestedGit("show", ":local.txt")).toBe(content.trim());
