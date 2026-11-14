@@ -46,6 +46,8 @@ const {
   repositoryFixture,
   completedScan,
   completeRun,
+  recordFixtureRequest,
+  recordFixtureAuthority,
   reseal,
   options,
 } = createMultiscanFixtures();
@@ -1904,6 +1906,12 @@ test.each(["checkouts", "recovery-checkouts"] as const)(
     );
     await mkdir(dirname(checkout), { recursive: true });
     git(paths.root, "clone", "--quiet", source.path, checkout);
+    await recordFixtureRequest(checkout, {
+      outputDir: dir,
+      mode: "standard",
+      target: [join(checkout, "src")],
+    });
+    await recordFixtureAuthority(dir);
     const marker = join(checkout, "retained.txt");
     await writeFile(marker, "Preserved interrupted checkout data.\n");
     const identity = await lstat(checkout);

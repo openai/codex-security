@@ -1990,6 +1990,8 @@ describe("multiscan", () => {
     ]);
     const moved = join(paths.root, "retained-checkout");
     await rename(checkout, moved);
+    // Ordinary retries also accept an already prepared empty output directory.
+    await mkdir(join(paths.output, "artifacts", "occupied-retry", "attempt-3"));
     expect(await runMultiscan(campaign)).toMatchObject({
       completed: 1,
       failed: 0,
