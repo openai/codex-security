@@ -482,6 +482,32 @@ test("historical reviews carry the saved occurrence revision instead of the curr
   expect(calls).toBe(1);
 });
 
+test("saved-scan dedupe rejects a replacement checkout while its artifacts remain readable", async () => {
+  const f = await fixture(true);
+  await rename(f.repository, join(f.root, "previous-checkout"));
+  await mkdir(f.repository);
+  git(f.repository, "init", "-q");
+  const environment = { ...f.environment, PYTHON: f.python };
+  const workbench = await savedScanWorkbench(f.first.scanId, {
+    environment,
+    pluginRoot: PLUGIN_ROOT,
+    currentDirectory: f.repository,
+  });
+  const scan = await resolveCompletedScan(f.first.scanId, {
+    currentDirectory: () => f.repository,
+    runWorkbench: workbench,
+  });
+  expect(scan).toMatchObject({ ...f.first, remediationAvailable: false });
+  await expect(
+    deduplicateScanInternal(
+      f.first.scanId,
+      { embedding: f.embedding },
+      { environment, reviewer: f.reviewer },
+    ),
+  ).rejects.toThrow("current checkout owner");
+  expect(f.embed).not.toHaveBeenCalled();
+});
+
 for (const source of ["PYTHON", "PATH", "linked PYTHON"] as const) {
   for (const resumed of [false, true]) {
     test.skipIf(process.platform === "win32")(

@@ -154,13 +154,17 @@ export async function deduplicateScanInternal(
         currentDirectory: dependencies.currentDirectory?.() ?? process.cwd(),
         signal: options.signal,
       });
-  const scan = await resolveCompletedScan(scanId, {
-    currentDirectory: dependencies.currentDirectory ?? (() => process.cwd()),
-    runWorkbench:
-      bootstrap ??
-      ((args, input) =>
-        dependencies.runWorkbench!(args, input, options.signal)),
-  });
+  const scan = await resolveCompletedScan(
+    scanId,
+    {
+      currentDirectory: dependencies.currentDirectory ?? (() => process.cwd()),
+      runWorkbench:
+        bootstrap ??
+        ((args, input) =>
+          dependencies.runWorkbench!(args, input, options.signal)),
+    },
+    "checkout",
+  );
   return await deduplicateResolvedScan(
     scan.scanDir,
     scan["targetPath"] as string,
