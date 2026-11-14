@@ -7,6 +7,7 @@ import {
   cp,
   mkdir,
   readFile,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -15,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import {
   loadContract,
   loadContractWithScanDirectory,
+  hasSealedReport,
 } from "../src/contract.js";
 import { normalizeTarget } from "../src/targets.js";
 import { scanRequestDigest, workflowDigest } from "../src/finding-workflow.js";
@@ -42,6 +44,10 @@ async function fixture(registerOnly = false) {
   git(source, "init", "--quiet");
   await mkdir(join(source, "src"));
   await writeFile(join(source, "src/app.ts"), "export const value = 1;\n");
+  await writeFile(
+    join(source, ".gitattributes"),
+    "src/*.ts text eol=lf filter=codexCampaignFixture\n",
+  );
   git(source, "add", ".");
   git(source, "commit", "--no-gpg-sign", "-qm", "Synthetic baseline");
   const revision = git(source, "rev-parse", "HEAD");
@@ -153,12 +159,35 @@ async function fixture(registerOnly = false) {
       ],
       { env: environment, stdio: ["ignore", "pipe", "pipe"] },
     );
+    const sealed = JSON.parse(
+      await readFile(join(scanDir, "scan-manifest.json"), "utf8"),
+    );
+    sealed.scan.artifacts.push({
+      path: "report.md",
+      mediaType: "text/markdown",
+      sha256: createHash("sha256")
+        .update(await readFile(join(scanDir, "report.md")))
+        .digest("hex"),
+    });
+    await writeFile(
+      join(scanDir, "scan-manifest.json"),
+      execFileSync(
+        python,
+        [
+          "-I",
+          "-c",
+          "import json,sys; sys.stdout.buffer.write((json.dumps(json.load(sys.stdin), indent=2, sort_keys=True) + '\\n').encode('utf-8'))",
+        ],
+        { input: JSON.stringify(sealed), env: environment },
+      ),
+    );
     await workbench([
       "complete-scan",
       "--scan-id",
       String(registered["scanId"]),
     ]);
     const result = await loadContract(scanDir, { pluginRoot });
+    expect(await hasSealedReport(scanDir, result.manifest)).toBe(true);
     return {
       ...result,
       scanDir,
@@ -168,6 +197,20 @@ async function fixture(registerOnly = false) {
   }
   return { root, source, state, options, runs: () => runs, registeredResult };
 }
+
+test("registered sealed campaign reuse does not need report Python", async () => {
+  const value = await fixture();
+  value.options.config.pythonPath = join(value.root, "unavailable-python");
+  expect(await runMultiscan(value.options)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  expect(await runMultiscan(value.options)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(value.runs()).toBe(1);
+});
 
 for (const recovery of [false, true]) {
   test(`concurrent campaigns retain independent invocation authority with recovery=${recovery}`, async () => {
@@ -662,3 +705,69 @@ test.each([
   }
   expect(await readFile(join(scanDir, "findings.json"))).toEqual(before);
 });
+
+test.each(["local", "include", "worktree", "host"] as const)(
+  "retained restoration isolates %s configuration while preserving trusted host filters",
+  async (kind) => {
+    const value = await fixture();
+    value.options.scanOptionsByMode = { standard: { target: ["src/app.ts"] } };
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    const checkout = join(value.options.outputDir, "checkouts/repo");
+    git(value.root, "clone", "--quiet", value.source, checkout);
+    const marker = join(value.root, "filter-called");
+    const script = join(value.root, "filter.cjs");
+    await writeFile(
+      script,
+      `const fs = require("node:fs"); fs.writeFileSync(${JSON.stringify(marker)}, "called"); process.stdout.write(fs.readFileSync(0));`,
+    );
+    const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+    const filter = `${quote(process.execPath)} ${quote(script)}`;
+    const configured =
+      kind === "host" || kind === "include"
+        ? join(value.root, "synthetic.gitconfig")
+        : join(
+            checkout,
+            ".git",
+            kind === "worktree" ? "config.worktree" : "config",
+          );
+    git(
+      checkout,
+      "config",
+      "--file",
+      configured,
+      "filter.codexCampaignFixture.smudge",
+      filter,
+    );
+    if (kind === "include") git(checkout, "config", "include.path", configured);
+    if (kind === "worktree")
+      git(checkout, "config", "extensions.worktreeConfig", "true");
+    const originalConfig = await readFile(join(checkout, ".git/config"));
+    const configuredBytes = await readFile(configured);
+    await rm(join(checkout, "src/app.ts"));
+    const hostConfig = process.env["GIT_CONFIG_GLOBAL"];
+    if (kind === "host") process.env["GIT_CONFIG_GLOBAL"] = configured;
+    try {
+      expect(await runMultiscan(value.options)).toMatchObject({
+        completed: 1,
+        skipped: 1,
+      });
+      expect(value.runs()).toBe(1);
+      expect(await readFile(join(checkout, "src/app.ts"), "utf8")).toBe(
+        "export const value = 1;\n",
+      );
+      if (kind === "host")
+        expect(await readFile(marker, "utf8")).toBe("called");
+      else await expect(readFile(marker)).rejects.toThrow();
+      expect(await readFile(join(checkout, ".git/config"))).toEqual(
+        originalConfig,
+      );
+      expect(await readFile(configured)).toEqual(configuredBytes);
+    } finally {
+      if (hostConfig === undefined) delete process.env["GIT_CONFIG_GLOBAL"];
+      else process.env["GIT_CONFIG_GLOBAL"] = hostConfig;
+    }
+  },
+);

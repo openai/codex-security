@@ -1485,6 +1485,13 @@ failed or interrupted attempt:
 - An unavailable, failed, or canceled scan starts a new attempt at the pinned
   revision, preserving old artifacts and checkouts.
 
+When reusing a verified scan, the CLI regenerates an unsealed `report.md` from
+the sealed findings. This replaces edits to the generated report. A sealed
+report keeps its original bytes. If a retained checkout lacks a requested
+path or the configured Python interpreter, recovery can restore the missing
+tracked files from the pinned revision. It uses local Git objects when available
+and fetches the revision if necessary.
+
 Each nonempty committed line in `results.jsonl` must be valid JSON with a string
 task ID and a positive safe integer attempt number. If a line fails these checks,
 the command reports its line number and preserves the ledger. Restore a complete

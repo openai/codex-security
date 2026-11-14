@@ -805,15 +805,9 @@ describe("multiscan", () => {
     const identity = await lstat(checkout);
 
     const recovered = await runMultiscan(options(paths, security));
-    expect(recovered).toMatchObject({ completed: 0, failed: 1, skipped: 0 });
-    const receipts = await results(recovered.resultsPath);
-    expect(receipts).toHaveLength(2);
-    expect(receipts[0]).toEqual(receipt);
-    expect(receipts[1]).toMatchObject({
-      attempt: 2,
-      status: "failed",
-      error: expect.stringContaining("move the retained checkout"),
-    });
+    expect(recovered).toMatchObject({ completed: 1, failed: 0, skipped: 1 });
+    expect(await results(recovered.resultsPath)).toEqual([receipt!]);
+    await access(join(receipt!["outputDir"] as string, "report.md"));
     expect(await readdir(join(paths.output, "checkouts"))).toEqual([
       "exclusive",
     ]);
