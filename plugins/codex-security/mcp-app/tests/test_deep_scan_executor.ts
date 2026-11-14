@@ -6,7 +6,6 @@ import {
   parseDeepScan,
   temporaryDirectories,
   fakeCodexFixture,
-  bundledCodexSdkEnvironment,
   workerRequest,
   assertReadOnlyWorkerPolicy,
   workerPermissionProfileOverride,
@@ -904,9 +903,9 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
       else process.env.CODEX_CLI_PATH = configured;
       const hasBundledTools = expectedExecutable === codexPath;
       if (hasBundledTools) {
-        process.env.PATH = bundledCodexSdkEnvironment(resolveCodexPath(), {
-          PATH: process.env.PATH,
-        }).PATH;
+        process.env.PATH = [bundledTools, process.env.PATH].join(
+          path.delimiter,
+        );
       }
       await writeFile(
         promptPath,

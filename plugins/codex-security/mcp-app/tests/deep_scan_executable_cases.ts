@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 import type {
@@ -54,7 +55,8 @@ export async function testExecutorExecutablePinning({
       if (script) nativeLaunches.push(command);
       return originalSpawn(
         script ? command : process.execPath,
-        [script ?? command, ...args],
+        // Node resolves script entry points from ordinary drive or UNC paths.
+        [script ?? fileURLToPath(pathToFileURL(command)), ...args],
         options,
       );
     }) as typeof childProcess.spawn;
