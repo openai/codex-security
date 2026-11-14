@@ -20,6 +20,8 @@ async function isolatedCli(root: string, environment: NodeJS.ProcessEnv = {}) {
     ...process.env,
     HOME: home,
     USERPROFILE: home,
+    APPDATA: join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: join(home, "AppData", "Local"),
     XDG_CACHE_HOME: join(root, "cache"),
     XDG_CONFIG_HOME: join(root, "config"),
     XDG_DATA_HOME: join(root, "data"),
@@ -27,15 +29,17 @@ async function isolatedCli(root: string, environment: NodeJS.ProcessEnv = {}) {
     CI: "1",
     ...environment,
   };
+  const runFrom = (cwd: string, ...args: string[]) =>
+    runCommand(
+      process.execPath,
+      [join(import.meta.dir, "../src/cli.ts"), ...args],
+      { env, cwd, timeout: 30_000 },
+    );
   return {
     home,
     project,
-    run: (...args: string[]) =>
-      runCommand(
-        process.execPath,
-        [join(import.meta.dir, "../src/cli.ts"), ...args],
-        { env, cwd: project, timeout: 30_000 },
-      ),
+    runFrom,
+    run: (...args: string[]) => runFrom(project, ...args),
   };
 }
 
@@ -61,6 +65,19 @@ describe("integration command dispatch", () => {
     },
     { args: ["mcp", "add", "--command", "--no-global"], mode: "error" },
     { args: ["skills", "add", "surplus"], mode: "error" },
+    { args: ["skills", "add", "--scope=user", "--no-global"], mode: "error" },
+    { args: ["mcp", "add", "--agent=cursor", "--all"], mode: "error" },
+    {
+      args: [
+        "mcp",
+        "add",
+        "--agent=cursor",
+        "--exec=server",
+        "--package=server",
+      ],
+      mode: "error",
+    },
+    { args: ["mcp", "add", "--agent=cursor", "--arg=--mcp"], mode: "error" },
     {
       args: ["mcp", "add", "--agent=amp", "--filter-output", "--llms"],
       mode: "error",
@@ -296,6 +313,109 @@ describe("integration command dispatch", () => {
     });
   }, 30_000);
 
+  test("empty scopes require explicit targets and --all registers compatible project clients", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-mcp-targets-");
+    const { project, home, run } = await isolatedCli(temp.path, {
+      PATH: join(temp.path, "no-executables"),
+    });
+    for (const scope of ["project", "user"]) {
+      const result = await run("mcp", "add", "--scope", scope);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("--agent");
+      expect(result.stderr).toContain("--all");
+      expect(await readdir(project)).toEqual([]);
+      expect(await readdir(home)).toEqual([]);
+    }
+    const result = await run(
+      "mcp",
+      "add",
+      "--scope=project",
+      "--all",
+      "--json",
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).agents).toContain("Cursor");
+    expect(JSON.parse(result.stdout).agents.length).toBeGreaterThan(1);
+    expect(await readdir(home)).toEqual([]);
+  }, 30_000);
+
+  test("user detection follows the configured Codex profile", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-mcp-codex-home-");
+    const profile = join(temp.path, "custom-profile");
+    const { home, run } = await isolatedCli(temp.path, { CODEX_HOME: profile });
+    await mkdir(profile);
+    const result = await run("mcp", "add", "--json");
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).agents).toEqual(["Codex"]);
+    expect(await readFile(join(profile, "config.toml"), "utf8")).toContain(
+      "mcp_servers.codex-security",
+    );
+    expect(await readdir(home)).toEqual([]);
+  }, 30_000);
+
+  test("MCP launchers preserve literal arguments and use npm only when selected", async () => {
+    await using temp = await scopedTemporaryDirectory("cli-mcp-launcher-");
+    const { home, run } = await isolatedCli(temp.path);
+    const executable = String.raw`C:\Program Files\tool's "server".exe`;
+    const existingExecutable = join(temp.path, "server with spaces");
+    await writeFile(existingExecutable, "", { mode: 0o700 });
+    const args = ["--mcp", "", "two words", "--json", "one=two"];
+    for (const [launcher, expected] of [
+      [
+        ["--exec", executable, ...args.map((value) => `--arg=${value}`)],
+        { command: executable, args },
+      ],
+      [
+        ["--package=@acme/server", "--arg=--mcp"],
+        { command: "npx", args: ["--yes", "--", "@acme/server", "--mcp"] },
+      ],
+      [
+        [
+          String.raw`--command=node C:\tools\server.js --label="two words" --mcp`,
+        ],
+        {
+          command: "node",
+          args: [String.raw`C:\tools\server.js`, "--label=two words", "--mcp"],
+        },
+      ],
+      [["--command=local-server"], { command: "local-server", args: [] }],
+      [
+        [`--command=${existingExecutable}`],
+        { command: existingExecutable, args: [] },
+      ],
+      [
+        ["--command=/usr/bin/node /opt/server.js --mcp"],
+        { command: "/usr/bin/node", args: ["/opt/server.js", "--mcp"] },
+      ],
+      [
+        ['--command=/usr/bin/node "server entry.js"'],
+        { command: "/usr/bin/node", args: ["server entry.js"] },
+      ],
+      [
+        ["--command=/opt/tools/server --mcp"],
+        { command: "/opt/tools/server", args: ["--mcp"] },
+      ],
+    ] as const) {
+      const result = await run(
+        "mcp",
+        "add",
+        "--agent=cursor",
+        "--agent=amp",
+        "--json",
+        ...launcher,
+      );
+      expect(result.status, result.stderr).toBe(0);
+      const cursor = JSON.parse(
+        await readFile(join(home, ".cursor", "mcp.json"), "utf8"),
+      );
+      const amp = JSON.parse(
+        await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
+      );
+      expect(cursor.mcpServers["codex-security"]).toEqual(expected);
+      expect(amp["amp.mcpServers"]["codex-security"]).toEqual(expected);
+    }
+  }, 30_000);
+
   test("project registration keeps linked configurations inside the project", async () => {
     await using temp = await scopedTemporaryDirectory("cli-project-links-");
     const { home, project, run } = await isolatedCli(temp.path);
@@ -342,7 +462,7 @@ describe("integration command dispatch", () => {
 
   test("lists installed guidance at the selected grouping depth", async () => {
     await using temp = await scopedTemporaryDirectory("cli-skill-grouping-");
-    const { project, run } = await isolatedCli(temp.path);
+    const { project, home, run, runFrom } = await isolatedCli(temp.path);
     const skills = await run(
       "skill",
       "add",
@@ -357,11 +477,43 @@ describe("integration command dispatch", () => {
     const list = await run("skill", "ls", "--depth=0", "--json");
     expect(list.status).toBe(0);
     expect(JSON.parse(list.stdout)).toMatchObject([
-      { name: "codex-security", installed: true },
+      {
+        name: "codex-security",
+        installed: true,
+        locations: [{ scope: "project", path: join(installed[0], "SKILL.md") }],
+      },
     ]);
     const human = await run("skills", "list", "--depth", "0");
     expect(human.status).toBe(0);
     expect(human.stdout).toContain("1 skill (1 installed)");
+    const other = join(temp.path, "other-project");
+    await mkdir(other);
+    const elsewhere = await runFrom(
+      other,
+      "skills",
+      "list",
+      "--depth=0",
+      "--json",
+    );
+    expect(JSON.parse(elsewhere.stdout)).toMatchObject([
+      { installed: false, locations: [] },
+    ]);
+    const user = await run(
+      "skills",
+      "add",
+      "--scope=user",
+      "--depth=0",
+      "--json",
+    );
+    expect(user.status, user.stderr).toBe(0);
+    const combined = await run("skills", "list", "--depth=0", "--json");
+    expect(JSON.parse(combined.stdout)[0].locations).toEqual([
+      { scope: "project", path: join(installed[0], "SKILL.md") },
+      {
+        scope: "user",
+        path: join(home, ".agents", "skills", "codex-security", "SKILL.md"),
+      },
+    ]);
     const defaultList = await run("skills", "list");
     expect(defaultList.stdout).toContain("Skill grouping depth: 1");
   }, 30_000);

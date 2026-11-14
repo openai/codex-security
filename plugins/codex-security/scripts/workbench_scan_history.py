@@ -8,11 +8,11 @@ import os
 import sqlite3
 import sys
 from collections.abc import Iterable, Iterator
+from fractions import Fraction
 from functools import cache
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
-from urllib.parse import urlsplit
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,13 +30,35 @@ from workbench_constants import ARTIFACTS, DEFAULT_PAGE_SIZE, PRIMARY_FINDING_LO
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
 from workbench_target import (
-    git_output,
     has_windows_checkout_binding,
     require_remediation_target,
     require_scan_target_identity,
     verified_windows_checkout,
 )
+from workbench_target_state import (
+    RepositoryIdentityCache,
+    _timestamp_ns,
+    repository_relative_path,
+    same_repository_worktree,
+    scan_repository_generation,
+)
 from workbench_validation import timestamp_key
+
+
+def reads_missing_history(args: argparse.Namespace, path: Path) -> bool:
+    """Select an in-memory database only for history reads on a fresh profile."""
+    if args.command not in {"list-scans", "list-repositories", "list-global-findings"} and not (
+        args.command == "get-scan" and not (args.request_id or args.action_token)
+    ):
+        return False
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        # The ordinary connection reports inaccessible storage.
+        pass
+    return False
 
 
 def rename_scan(connection: sqlite3.Connection, scan: sqlite3.Row, name: str) -> dict[str, Any]:
@@ -118,9 +140,10 @@ def cli_scan_resume(
     scan: sqlite3.Row,
     workspace: sqlite3.Row,
 ) -> dict[str, Any]:
+
     scan = scan_with_progress(connection, scan["id"])
-    if scan["mode"] != "deep" or scan["recipe_json"] is None:
-        raise SystemExit("Resume requires a Deep Scan with a saved CLI launch recipe.")
+    if scan["mode"] not in {"standard", "deep"} or scan["recipe_json"] is None:
+        raise SystemExit("Resume requires a Standard or Deep Scan with a saved CLI launch recipe.")
     if scan["status"] != "running" or scan["canceled_at"] is not None:
         raise SystemExit(
             "Resume requires a running scan; completed, failed, and canceled scans cannot resume."
@@ -309,137 +332,59 @@ def _checkout_matches(scan: sqlite3.Row, path: Path, metadata: os.stat_result) -
 
 
 def _same_repository(
+    connection: sqlite3.Connection,
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    before_target_path: str | None = None,
-    after_target_path: str | None = None,
-    require_ownership: bool = False,
-    probe_git: Callable[..., str | None] | None = None,
+    identities: RepositoryIdentityCache | None = None,
 ) -> bool:
-    probe_git = probe_git or git_output
-    before_target_id = before["target_id"]
-    after_target_id = after["target_id"]
-    for scan in (before, after):
-        if not scan["target_id"] or not all(
-            field in scan.keys() for field in ("target_device", "target_inode")
-        ):
-            if require_ownership:
-                return False
-            continue
-        device, inode = scan["target_device"], scan["target_inode"]
-        if device is None and inode is None:
-            if require_ownership:
-                return False
-            continue
-        target = (
-            before_target_path
-            if scan is before and before_target_path is not None
-            else after_target_path
-            if scan is after and after_target_path is not None
-            else scan["target_path"]
-        )
-        try:
-            metadata = Path(target).stat()
-        except OSError:
-            return False
-        if not _checkout_matches(scan, Path(target), metadata):
-            return False
-    if before_target_id and before_target_id == after_target_id:
-        fields = ("target_device", "target_inode")
-        if all(field in row.keys() for row in (before, after) for field in fields):
-            before_identity = tuple(before[field] for field in fields)
-            after_identity = tuple(after[field] for field in fields)
-            if any(value is not None for value in (*before_identity, *after_identity)):
-                return before_identity == after_identity and None not in before_identity
+    before_stored = scan_repository_generation(before)
+    after_stored = scan_repository_generation(after)
+    if before_stored is not None and before_stored == after_stored:
         return True
-    before_target = Path(
-        before["target_path"] if before_target_path is None else before_target_path
-    )
-    after_target = Path(after["target_path"] if after_target_path is None else after_target_path)
-    if before_target.resolve() == after_target.resolve():
-        return not before_target_id and not after_target_id
-    before_git_dir = probe_git(
-        before_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
-    )
-    probe_git_dir = probe_git(
-        after_target, "rev-parse", "--path-format=absolute", "--git-common-dir"
-    )
-    if before_git_dir is None or probe_git_dir is None:
-        return False
-    if Path(before_git_dir).resolve() != Path(probe_git_dir).resolve():
-        if not before_target_id or not after_target_id:
-            return False
-        if not all(
-            field in scan.keys() and scan[field] is not None
-            for scan in (before, after)
-            for field in ("target_device", "target_inode")
-        ):
-            return False
-        before_origin = _repository_origin(probe_git(before_target, "remote", "get-url", "origin"))
-        return before_origin is not None and before_origin == _repository_origin(
-            probe_git(after_target, "remote", "get-url", "origin")
-        )
-    before_worktree = probe_git(before_target, "rev-parse", "--show-toplevel")
-    after_worktree = probe_git(after_target, "rev-parse", "--show-toplevel")
-    registered_worktrees = probe_git(before_target, "worktree", "list", "--porcelain", "-z")
-    if before_worktree is None or after_worktree is None or registered_worktrees is None:
-        return False
-    before_worktree_path = Path(before_worktree).resolve()
-    after_worktree_path = Path(after_worktree).resolve()
-    if before_worktree_path == after_worktree_path and not (
-        before_target.resolve().is_relative_to(after_target.resolve())
-        or after_target.resolve().is_relative_to(before_target.resolve())
+    if before["target_id"] and before["target_id"] == after["target_id"]:
+        return before_stored is None or after_stored is None
+    identities = identities or RepositoryIdentityCache(connection)
+    before_state = identities.for_row(before)
+    after_state = identities.for_row(after)
+    if (
+        not before_state.ownership_matches
+        or not after_state.ownership_matches
+        or before_stored is not None
+        and before_stored != before_state.live_identity
+        or after_stored is not None
+        and after_stored != after_state.live_identity
     ):
         return False
-    registered_paths = {
-        Path(record.removeprefix("worktree ")).resolve()
-        for record in registered_worktrees.split("\0")
-        if record.startswith("worktree ")
-    }
+    if (
+        before_state.resolved_path is not None
+        and before_state.resolved_path == after_state.resolved_path
+    ):
+        return before_stored is None or after_stored is None
+    if before_state.repository is None or after_state.repository is None:
+        if same_repository_worktree(Path(before_state.target_path), Path(after_state.target_path)):
+            return True
+        before_relative = repository_relative_path(Path(before_state.target_path))
+        after_relative = repository_relative_path(Path(after_state.target_path))
+        after_origin = identities.origin(after_state)
+        return (
+            before_relative is not None
+            and before_relative == after_relative
+            and after_origin is not None
+            and identities.origin(before_state) == after_origin
+        )
+    before_identity = before_state.live_identity
+    after_identity = after_state.live_identity
+    if before_identity is not None and before_identity == after_identity:
+        return True
+    if before_identity is None or after_identity is None:
+        return False
+    after_origin = identities.origin(after_state)
     return (
-        before_target.resolve().is_relative_to(before_worktree_path)
-        and after_target.resolve().is_relative_to(after_worktree_path)
-        and {before_worktree_path, after_worktree_path} <= registered_paths
+        after_origin is not None
+        and identities.origin(before_state) == after_origin
+        and before_state.repository.relative_path == after_state.repository.relative_path
     )
-
-
-def _repository_origin(remote: str | None) -> tuple[str, str] | None:
-    if remote is None:
-        return None
-    account = None
-    if "://" in remote:
-        try:
-            parsed = urlsplit(remote)
-            port = parsed.port
-        except ValueError:
-            return None
-        if parsed.scheme not in {"https", "ssh"} or parsed.hostname is None:
-            return None
-        if parsed.query or parsed.fragment:
-            return None
-        if parsed.scheme == "ssh" and (parsed.path == "/~" or parsed.path.startswith("/~/")):
-            account = parsed.username
-        host = parsed.hostname
-        if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
-            host = f"{host}:{port}"
-        path = parsed.path
-    else:
-        authority, separator, path = remote.partition(":")
-        if not separator or "?" in path or "#" in path:
-            return None
-        account, at, host = authority.rpartition("@")
-        if not at:
-            account, host = None, authority
-        elif path.startswith("/") or (
-            path.startswith("~") and path != "~" and not path.startswith("~/")
-        ):
-            account = None
-    path = path.strip("/").removesuffix(".git")
-    host = host.lower()
-    if account and not (account == "git" and host in {"github.com", "gitlab.com", "bitbucket.org"}):
-        host = f"{account}@{host}"
-    return (host, path) if host and path else None
 
 
 SCAN_SUMMARY_COLUMNS = """
@@ -556,370 +501,129 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _requested_repository(
-    connection: sqlite3.Connection, repository: Path
-) -> tuple[sqlite3.Row, str | None]:
-    requested = connection.execute(
-        """
-        SELECT COALESCE((SELECT id FROM security_targets WHERE current_path = ?), '') AS target_id,
-            ? AS target_path
-        """,
-        (str(repository), str(repository)),
-    ).fetchone()
-    target_id = requested["target_id"]
-    if not target_id:
-        # Exact saved paths take precedence. Case-preserving filesystems can
-        # resolve another spelling to this same directory without normalizing it.
-        try:
-            metadata = repository.stat()
-        except OSError:
-            return requested, None
-        for target in connection.execute("SELECT id, current_path FROM security_targets"):
-            current_path = Path(target["current_path"])
-            try:
-                same_directory = os.path.samestat(metadata, current_path.stat())
-            except OSError:
-                continue
-            if same_directory:
-                # This recursive lookup is exact and keeps the saved owner's
-                # device/inode validation before accepting its directory alias.
-                matched, replaced = _requested_repository(connection, current_path)
-                if replaced is None and matched["target_id"] == target["id"]:
-                    return matched, None
-        return requested, None
-    recorded = connection.execute(
-        """
-        SELECT ? AS target_path, scans.*
-        FROM scans
-        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
-        ORDER BY rowid DESC
-        LIMIT 1
-        """,
-        (str(repository), target_id),
-    ).fetchone()
-    if recorded is None:
-        return requested, None
-    try:
-        metadata = repository.stat()
-    except FileNotFoundError:
-        return requested, None
-    except OSError:
-        metadata = None
-    if metadata is not None and _checkout_matches(recorded, repository, metadata):
-        return recorded, None
-    return (
-        connection.execute(
-            "SELECT '' AS target_id, ? AS target_path", (str(repository),)
-        ).fetchone(),
-        target_id,
+def _unclaimed_path(identities: RepositoryIdentityCache, path: str) -> bool:
+    resolved = Path(path).resolve()
+    return not any(
+        str(parent) in identities.targets_by_path for parent in (resolved, *resolved.parents)
     )
 
 
-def _verified_target_metadata(
-    connection: sqlite3.Connection, target_id: str, repository: Path
-) -> tuple[CheckoutIdentity | None, bool] | None:
-    requested, _ = _requested_repository(connection, repository)
-    if requested["target_id"] != target_id:
-        return None
-    try:
-        metadata = repository.stat()
-    except OSError:
-        return None, False
-    if "target_device" in requested.keys():
-        return (requested["target_device"], requested["target_inode"]), True
-    return _stat_identity(metadata), False
+def _legacy_owner(identities: RepositoryIdentityCache, target_id: str):
+    current = identities.for_row(identities.targets[target_id])
+    ownership = identities.recorded_owner(target_id)
+    valid = current.ownership_matches
+    if (
+        ownership
+        and ownership[1] is not None
+        and not valid
+        and current.stored_identity is None
+        and current.metadata is not None
+    ):
+        # A legacy DB may contain several owners. Only its latest owner can match today.
+        valid = _checkout_matches(ownership[0], Path(current.target_path), current.metadata)
+    return valid, ownership
 
 
-def _ownership_epoch_start(
-    connection: sqlite3.Connection, target_id: str, identity: CheckoutIdentity
-) -> int | None:
-    previous_owner = connection.execute(
-        """
-        SELECT rowid AS ownership_sequence
-        FROM scans
-        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
-            AND (target_device != ? OR target_inode != ?)
-        ORDER BY rowid DESC
-        LIMIT 1
-        """,
-        (target_id, *identity),
-    ).fetchone()
-    return previous_owner["ownership_sequence"] if previous_owner is not None else None
-
-
-def _recorded_target_ownership(
-    connection: sqlite3.Connection, target_id: str
-) -> tuple[sqlite3.Row, int | None] | None:
-    recorded = connection.execute(
-        """
-        SELECT target_device, target_inode
-        FROM scans
-        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
-        ORDER BY rowid DESC
-        LIMIT 1
-        """,
-        (target_id,),
-    ).fetchone()
-    if recorded is None:
-        return None
-    previous_owner = connection.execute(
-        """
-        SELECT rowid AS ownership_sequence
-        FROM scans
-        WHERE target_id = ? AND target_device IS NOT NULL AND target_inode IS NOT NULL
-            AND (target_device != ? OR target_inode != ?)
-        ORDER BY rowid DESC
-        LIMIT 1
-        """,
-        (target_id, recorded["target_device"], recorded["target_inode"]),
-    ).fetchone()
-    return recorded, previous_owner["ownership_sequence"] if previous_owner is not None else None
+def _legacy_owner_clause(identities: RepositoryIdentityCache, target_id: str) -> tuple[str, tuple]:
+    valid, ownership = _legacy_owner(identities, target_id)
+    if not valid:
+        return "0", ()
+    if ownership is None:
+        return "scans.target_id = ?", (target_id,)
+    latest, epoch = ownership
+    owner = "scans.target_device = ? AND scans.target_inode = ?"
+    values = (target_id, latest["target_device"], latest["target_inode"])
+    if epoch is None:
+        return (
+            f"scans.target_id = ? AND (({owner}) OR (scans.target_device IS NULL AND scans.target_inode IS NULL))",
+            values,
+        )
+    return f"scans.target_id = ? AND {owner} AND scans.rowid > ?", (*values, epoch)
 
 
 def repository_scan_scope(
-    connection: sqlite3.Connection, repository: str | Path
-) -> tuple[list[str], list[Any], list[str], list[str]]:
-    clauses: list[str] = []
-    values: list[Any] = []
-    related_target_ids: list[str] = []
-    repository_paths: list[str] = []
-    if repository:
-        connection.create_function(
-            "codex_security_path_contains",
-            2,
-            lambda root, path: Path(path).is_relative_to(root),
-            deterministic=True,
-        )
-        repository = Path(repository).expanduser().resolve()
-        requested_repository, replaced_target_id = _requested_repository(connection, repository)
-        requested_target_id = requested_repository["target_id"]
-        verified_targets: dict[str, tuple[CheckoutIdentity | None, bool]] = {}
-        if requested_target_id:
-            requested_metadata = _verified_target_metadata(
-                connection, requested_target_id, repository
-            )
-            if requested_metadata is None:
-                replaced_target_id = requested_target_id
-                requested_repository = connection.execute(
-                    "SELECT '' AS target_id, ? AS target_path", (str(repository),)
-                ).fetchone()
-                requested_target_id = ""
-            else:
-                related_target_ids.append(requested_target_id)
-                verified_targets[requested_target_id] = requested_metadata
-        requested_git = cache(git_output)
-        repository_root = requested_git(repository, "rev-parse", "--show-toplevel")
-        checkout_boundary = Path(repository_root).resolve() if repository_root is not None else None
-        if checkout_boundary is None:
-            for candidate in (repository, *repository.parents):
-                marker = candidate / ".git"
-                if marker.is_dir() or marker.is_file() or marker.is_symlink():
-                    checkout_boundary = candidate
-                    break
-        requested_git_directory = (
-            requested_git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
-            if checkout_boundary is not None
-            else None
-        )
-        repository_paths = [str(repository)]
-        registered_repository = (
-            connection.execute(
-                "SELECT 1 FROM scans WHERE target_id = ? LIMIT 1",
-                (requested_target_id,),
-            ).fetchone()
-            if requested_target_id
-            else connection.execute(
-                "SELECT 1 FROM scans WHERE target_path = ? AND target_id IS NULL LIMIT 1",
-                (str(repository),),
-            ).fetchone()
-        )
-        registered_parent = None
-        if registered_repository is not None and not requested_target_id:
-            for parent in repository.parents:
-                if checkout_boundary is not None and not parent.is_relative_to(checkout_boundary):
-                    break
-                owner = connection.execute(
-                    """
-                    SELECT owner.id
-                    FROM security_targets AS owner
-                    JOIN scans ON scans.target_id = owner.id
-                    WHERE owner.current_path = ?
-                    LIMIT 1
-                    """,
-                    (str(parent),),
-                ).fetchone()
-                if owner is None:
-                    continue
-                metadata = _verified_target_metadata(connection, owner["id"], parent)
-                if metadata is None:
-                    continue
-                repository_paths.append(str(parent))
-                related_target_ids.append(owner["id"])
-                verified_targets[owner["id"]] = metadata
+    connection: sqlite3.Connection,
+    repository: str | Path,
+    *,
+    identities: RepositoryIdentityCache | None = None,
+) -> tuple[list[str], list[Any]]:
+    identities = identities or RepositoryIdentityCache(connection)
+    path = identities.history_path(str(Path(repository).expanduser().absolute()))
+    requested = identities.for_path(path)
+    if (
+        not requested.target_id
+        and requested.repository is None
+        and requested.resolved_path is not None
+    ):
+        # Older plain-directory records may name a child of a registered checkout.
+        # Stop at a nested Git boundary, including an unavailable worktree marker.
+        for directory in (Path(requested.resolved_path), *Path(requested.resolved_path).parents):
+            owner = identities.targets_by_path.get(str(directory))
+            if owner is not None:
+                requested = identities.for_row(owner)
+                path = requested.target_path
                 break
-        if registered_repository is None:
-            for parent in repository.parents:
-                if checkout_boundary is not None and not parent.is_relative_to(checkout_boundary):
-                    break
-                repository_paths.append(str(parent))
-                registered_parent = connection.execute(
-                    """
-                    SELECT scans.target_id
-                    FROM scans
-                    LEFT JOIN security_targets AS owner ON owner.current_path = ?
-                    WHERE scans.target_id = owner.id
-                        OR (scans.target_path = ? AND owner.id IS NULL)
-                    LIMIT 1
-                    """,
-                    (str(parent), str(parent)),
-                ).fetchone()
-                if registered_parent is not None:
-                    if registered_parent["target_id"] is not None:
-                        parent_target_id = registered_parent["target_id"]
-                        parent_metadata = _verified_target_metadata(
-                            connection, parent_target_id, parent
-                        )
-                        if parent_metadata is None:
-                            repository_paths.pop()
-                            registered_parent = None
-                            continue
-                        related_target_ids.append(parent_target_id)
-                        verified_targets[parent_target_id] = parent_metadata
-                    break
-        if registered_repository is None and registered_parent is None:
-            repository_prefix = str(repository).rstrip(os.sep) + os.sep
-            for scan in connection.execute(
-                "SELECT target_id, target_path FROM scans WHERE substr(target_path, 1, ?) = ?",
-                (len(repository_prefix), repository_prefix),
-            ):
-                target_path = Path(scan["target_path"])
-                if target_path == repository or not target_path.is_relative_to(repository):
-                    continue
-                if requested_git_directory is not None:
-                    if scan["target_id"] is not None or not _same_repository(
-                        scan, requested_repository, probe_git=requested_git
-                    ):
-                        continue
-                elif checkout_boundary is not None:
-                    continue
-                else:
-                    if scan["target_id"] is not None:
-                        owner = connection.execute(
-                            "SELECT current_path FROM security_targets WHERE id = ?",
-                            (scan["target_id"],),
-                        ).fetchone()
-                        if owner is None or Path(owner["current_path"]).resolve() != target_path:
-                            continue
-                        descendant_metadata = _verified_target_metadata(
-                            connection, scan["target_id"], target_path
-                        )
-                        if descendant_metadata is None:
-                            continue
-                        verified_targets[scan["target_id"]] = descendant_metadata
-                    candidate = target_path
-                    while candidate != repository:
-                        marker = candidate / ".git"
-                        if marker.is_dir() or marker.is_file() or marker.is_symlink():
-                            break
-                        candidate = candidate.parent
-                    if candidate != repository:
-                        continue
-                repository_paths.append(str(target_path))
-        checkout_target = (
-            connection.execute(
-                "SELECT id FROM security_targets WHERE current_path = ?",
-                (str(checkout_boundary),),
-            ).fetchone()
-            if checkout_boundary is not None
-            else None
+            if os.path.lexists(directory / ".git"):
+                break
+    if requested.target_id:
+        scope = identities.scope_for_path(path)
+        if requested.stored_identity is not None or scope.generation is not None:
+            clause, values = scope.sql(supports_generation=identities.supports_generation)
+        else:
+            clause, values = _legacy_owner_clause(identities, requested.target_id)
+    else:
+        clause, values = identities.scope_for_path(path).sql(
+            supports_generation=identities.supports_generation
         )
-        checkout_metadata = (
-            _verified_target_metadata(connection, checkout_target["id"], checkout_boundary)
-            if checkout_target is not None and checkout_boundary is not None
-            else None
-        )
-        if checkout_metadata is not None and checkout_target is not None:
-            related_target_ids.append(checkout_target["id"])
-            verified_targets[checkout_target["id"]] = checkout_metadata
-        comparison_repository = requested_repository
-        if not requested_target_id and checkout_metadata is not None:
-            comparison_repository, _ = _requested_repository(connection, checkout_boundary)
-        if requested_git_directory is not None:
-            for target in connection.execute(
-                "SELECT id AS target_id, current_path AS target_path FROM security_targets"
-            ):
-                if target["target_id"] in verified_targets:
-                    continue
-                target_metadata = _verified_target_metadata(
-                    connection, target["target_id"], Path(target["target_path"])
-                )
-                if target_metadata is None:
-                    continue
-                verified_target, _ = _requested_repository(connection, Path(target["target_path"]))
-                if not _same_repository(
-                    verified_target,
-                    comparison_repository,
-                    probe_git=requested_git,
-                ):
-                    continue
-                related_target_ids.append(target["target_id"])
-                verified_targets[target["target_id"]] = target_metadata
-        repository_paths = list(dict.fromkeys(repository_paths))
-        related_target_ids = list(dict.fromkeys(related_target_ids))
-        repository_placeholders = ", ".join("?" for _ in repository_paths)
-        repository_clauses = [
-            (
-                f"scans.target_path IN ({repository_placeholders}) "
-                "AND NOT EXISTS ("
-                "SELECT 1 FROM security_targets AS path_owner "
-                "WHERE path_owner.id IS NOT scans.target_id AND ("
-                "path_owner.current_path = scans.target_path OR ("
-                "scans.target_id IS NULL "
-                "AND codex_security_path_contains(path_owner.current_path, scans.target_path))))"
+        if _unclaimed_path(identities, path):
+            clause = (
+                f"({clause} OR (scans.target_id IS NULL AND CAST(scans.target_path AS BLOB) = ?))"
             )
-        ]
-        values.extend(repository_paths)
-        if replaced_target_id is not None:
-            repository_clauses[0] += " AND scans.target_id IS NOT ?"
-            values.append(replaced_target_id)
-        if related_target_ids:
-            placeholders = ", ".join("?" for _ in related_target_ids)
-            repository_clauses.append(f"scans.target_id IN ({placeholders})")
-            values.extend(related_target_ids)
-        clauses.append(f"({' OR '.join(repository_clauses)})")
-        for target_id, (metadata, recorded) in verified_targets.items():
-            if metadata is None:
-                ownership = _recorded_target_ownership(connection, target_id)
-                if ownership is None:
-                    continue
-                identity, epoch_start = ownership
-                target_inode = identity["target_inode"]
-                target_device = identity["target_device"]
-            elif recorded:
-                epoch_start = _ownership_epoch_start(connection, target_id, metadata)
-                target_device, target_inode = metadata
-            else:
-                continue
-            legacy_history = (
-                "OR (scans.target_inode IS NULL AND scans.target_device IS NULL) "
-                if epoch_start is None
-                else ""
-            )
-            clauses.append(
-                "(scans.target_id IS NOT ? "
-                f"{legacy_history}OR (scans.target_inode = ? AND scans.target_device = ?))"
-            )
-            values.extend(
-                (
-                    target_id,
-                    target_inode,
-                    target_device,
-                )
-            )
-            if epoch_start is not None:
-                clauses.append("(scans.target_id IS NOT ? OR scans.rowid > ?)")
-                values.extend((target_id, epoch_start))
-    return clauses, values, related_target_ids, repository_paths
+            # SQLite TEXT paths are UTF-8. Comparing encoded bytes also permits
+            # querying a valid alias that resolves to a non-UTF-8 POSIX path.
+            values = (*values, os.fsencode(Path(path).resolve()))
+    return [clause], list(values)
+
+
+def scan_has_current_owner(
+    connection: sqlite3.Connection, scan: sqlite3.Row, identities: RepositoryIdentityCache
+) -> bool:
+    target_id = scan["target_id"]
+    if target_id is None:
+        return _unclaimed_path(identities, scan["target_path"])
+    target = identities.targets.get(target_id)
+    if target is None:
+        return False
+    current = identities.for_row(target)
+    generation = scan_repository_generation(scan)
+    if generation is not None and not current.missing:
+        return current.ownership_matches and current.live_identity == generation
+    valid, ownership = _legacy_owner(identities, target_id)
+    if not valid or ownership is None:
+        return valid
+    latest, epoch = ownership
+    saved = scan["target_device"], scan["target_inode"]
+    if saved == (None, None):
+        return epoch is None
+    if saved != (latest["target_device"], latest["target_inode"]):
+        return False
+    if epoch is None:
+        return True
+    sequence = (
+        scan["scan_sequence"]
+        if "scan_sequence" in scan.keys()
+        else connection.execute("SELECT rowid FROM scans WHERE id = ?", (scan["id"],)).fetchone()[0]
+    )
+    return sequence > epoch
+
+
+def require_finding_checkout_owner(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> sqlite3.Row | None:
+    identities = RepositoryIdentityCache(connection)
+    if not scan_has_current_owner(connection, scan, identities):
+        raise SystemExit("Codex Security finding is unavailable for the current checkout owner.")
+    return identities.targets.get(scan["target_id"])
 
 
 def list_scans(
@@ -927,11 +631,27 @@ def list_scans(
 ) -> dict[str, Any]:
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
-    clauses, values, related_target_ids, repository_paths = (
+    clauses, values = (
         repository_scan_scope(connection, args.repository)
         if args is not None and args.repository
-        else ([], [], [], [])
+        else ([], [])
     )
+    worktree_order = ""
+    if args is not None and args.repository and getattr(args, "prefer_worktree", False):
+        identities = RepositoryIdentityCache(connection)
+        selected_path = Path(
+            identities.history_path(str(Path(args.repository).expanduser().absolute()))
+        )
+
+        @cache
+        def in_worktree(target_path: str) -> bool:
+            try:
+                return selected_path.samefile(target_path)
+            except OSError:
+                return False
+
+        connection.create_function("in_worktree", 1, in_worktree)
+        worktree_order = "in_worktree(scans.target_path) DESC,"
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -979,9 +699,10 @@ def list_scans(
         f"""
         {SCAN_SUMMARY_QUERY}
         {where}
-        ORDER BY
+        ORDER BY {worktree_order}
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
-            scans.rowid DESC
+            MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
+            julianday(upper(scans.started_at)) DESC, scans.id
         {pagination}
         """,
         values,
@@ -991,12 +712,7 @@ def list_scans(
             {
                 **scan_summary(row),
                 **(
-                    {"relatedCheckout": True}
-                    if args is not None
-                    and args.repository
-                    and row["target_id"] in related_target_ids
-                    and row["target_path"] not in repository_paths
-                    else {}
+                    {"inCurrentWorktree": in_worktree(row["target_path"])} if worktree_order else {}
                 ),
                 **(
                     {"currentTargetPath": row["current_target_path"]}
@@ -1019,8 +735,15 @@ def list_scans(
     return result
 
 
-def _legacy_scan_before_ownership_transition(scan: sqlite3.Row, epoch_start: int | None) -> bool:
-    return epoch_start is None and scan["target_device"] is None and scan["target_inode"] is None
+def _scan_completion_order(scan: sqlite3.Row) -> tuple[int, int | Fraction, str]:
+    sequence = scan["completion_sequence"] if "completion_sequence" in scan.keys() else None
+    if sequence is not None:
+        return (1, sequence, scan["id"])
+    completed_at = scan["completed_at"] if "completed_at" in scan.keys() else None
+    timestamp = _timestamp_ns(completed_at)
+    if timestamp is None:
+        timestamp = _timestamp_ns(scan["started_at"])
+    return (0, timestamp if timestamp is not None else 0, scan["id"])
 
 
 _FindingSites = dict[tuple[str, str | None, PurePosixPath, int, int], dict[str, Any] | None]
@@ -1085,78 +808,23 @@ def list_unmatched_scan_pairs(
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
 ) -> dict[str, Any]:
-    repository = Path(args.repository).expanduser().resolve()
-    requested, _replaced_target_id = _requested_repository(connection, repository)
-    if not requested["target_id"]:
-        _, _, related_target_ids, _ = repository_scan_scope(connection, repository)
-        for owner in connection.execute(
-            "SELECT current_path FROM security_targets "
-            "WHERE id IN (SELECT value FROM json_each(?)) ORDER BY length(current_path) DESC",
-            (json.dumps(related_target_ids),),
-        ):
-            if repository.is_relative_to(Path(owner["current_path"])):
-                requested, _replaced_target_id = _requested_repository(
-                    connection, Path(owner["current_path"])
-                )
-                break
-    try:
-        metadata = repository.stat()
-    except OSError:
-        metadata = None
-    verified_targets: dict[str, tuple[CheckoutIdentity | None, bool] | None] = {}
-    ownership_epochs: dict[str, int | None] = {}
-
-    def belongs_to_current_owner(scan: sqlite3.Row) -> bool:
-        target_id = scan["target_id"]
-        if not target_id:
-            return False
-        if target_id not in verified_targets:
-            target = connection.execute(
-                "SELECT current_path FROM security_targets WHERE id = ?", (target_id,)
-            ).fetchone()
-            verified_targets[target_id] = (
-                None
-                if target is None
-                else _verified_target_metadata(connection, target_id, Path(target["current_path"]))
-            )
-        target_metadata = verified_targets[target_id]
-        if target_metadata is None or target_metadata[0] is None:
-            return False
-        if target_id not in ownership_epochs:
-            ownership_epochs[target_id] = _ownership_epoch_start(
-                connection, target_id, target_metadata[0]
-            )
-        epoch_start = ownership_epochs[target_id]
-        if _legacy_scan_before_ownership_transition(scan, epoch_start):
-            return True
-        return (
-            target_metadata[1]
-            and (scan["target_device"], scan["target_inode"]) == target_metadata[0]
-            and (epoch_start is None or scan["ownership_sequence"] > epoch_start)
-        )
-
-    selected = []
-    requested_git = cache(git_output)
-    for scan in connection.execute(
-        "SELECT scans.*, scans.rowid AS ownership_sequence, "
-        "targets.current_path AS current_target_path "
-        "FROM scans LEFT JOIN security_targets AS targets ON targets.id = scans.target_id "
-        "WHERE scans.status = 'complete' ORDER BY scans.rowid"
-    ):
+    requested_repository = Path(args.repository).expanduser().absolute()
+    repository = requested_repository.resolve()
+    identities = RepositoryIdentityCache(connection)
+    requested = identities.for_path(str(requested_repository))
+    if identities.supports_identity and not requested.ownership_matches:
         if (
-            metadata is not None
-            and belongs_to_current_owner(scan)
-            and (
-                scan["target_id"] == requested["target_id"]
-                or _same_repository(
-                    scan,
-                    requested,
-                    before_target_path=scan["current_target_path"],
-                    probe_git=requested_git,
-                )
-            )
+            requested.stored_identity is not None
+            or not requested.target_id
+            or identities.recorded_owner(requested.target_id) is None
         ):
-            selected.append(scan)
+            requested.require_owner()
+    clauses, values = repository_scan_scope(connection, requested_repository, identities=identities)
+    selected = connection.execute(
+        f"SELECT * FROM scans WHERE status = 'complete' AND {' AND '.join(clauses)}",
+        values,
+    ).fetchall()
+    selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
 
     available = []
     for scan in selected:
@@ -1167,29 +835,33 @@ def list_unmatched_scan_pairs(
         available.append(scan)
 
     saved_pairs = {
-        (row["before_scan_id"], row["after_scan_id"])
+        frozenset((row["before_scan_id"], row["after_scan_id"]))
         for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
     }
+    focus_scan_id = getattr(args, "after_scan_id", None)
+    if focus_scan_id is not None and not any(scan["id"] == focus_scan_id for scan in selected):
+        raise SystemExit("The scan to match is not a completed scan in this repository.")
+    if focus_scan_id is not None:
+        available.sort(key=_scan_completion_order)
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
     sites: dict[str, _FindingSites] = {}
     known_links: list[sqlite3.Row] | None = None
-    checkout_relationships = {}
     for index, after in enumerate(available):
-        previous = [
+        if focus_scan_id is not None and after["id"] != focus_scan_id:
+            continue
+        candidates = [
             before
             for before in available[:index]
-            if (args.force or (before["id"], after["id"]) not in saved_pairs)
-            and _same_registered_repository(
-                connection,
-                before,
-                after,
-                checkout_relationships=checkout_relationships,
-                probe_git=requested_git,
-            )
+            if _same_registered_repository(connection, before, after, identities=identities)
         ]
-        skipped += index - len(previous)
+        previous = [
+            before
+            for before in candidates
+            if args.force or frozenset((before["id"], after["id"])) not in saved_pairs
+        ]
+        skipped += len(candidates) - len(previous)
         if not previous:
             continue
         if known_links is None:
@@ -1209,7 +881,12 @@ def list_unmatched_scan_pairs(
             {
                 scan["id"]
                 for scan in selected
-                if scan["ownership_sequence"] <= after["ownership_sequence"]
+                if (
+                    _scan_completion_order(scan) <= _scan_completion_order(after)
+                    if focus_scan_id is not None
+                    else (timestamp_key(scan["started_at"]), scan["id"])
+                    <= (timestamp_key(after["started_at"]), after["id"])
+                )
             },
         )
         batches.append(
@@ -1241,133 +918,49 @@ def _same_registered_repository(
     before: sqlite3.Row,
     after: sqlite3.Row,
     *,
-    checkout_relationships: dict[tuple[str, ...], bool] | None = None,
-    probe_git: Callable[..., str | None] | None = None,
+    identities: RepositoryIdentityCache | None = None,
 ) -> bool:
-    if before["target_id"] is None and after["target_id"] is None:
-        for scan in (before, after):
-            path = Path(scan["target_path"]).expanduser().resolve()
-            if any(
-                connection.execute(
-                    "SELECT 1 FROM security_targets WHERE current_path = ?", (str(candidate),)
-                ).fetchone()
-                is not None
-                for candidate in (path, *path.parents)
-            ):
-                return False
-        return _same_repository(before, after, probe_git=probe_git)
-    paths = []
-    verified_scans = []
-    missing_checkout = False
-    for scan in (before, after):
-        target = connection.execute(
-            "SELECT current_path FROM security_targets WHERE id = ?",
-            (scan["target_id"],),
-        ).fetchone()
-        if target is None:
-            return False
-        if "started_at" in scan.keys() and "id" in scan.keys():
-            try:
-                metadata = Path(target["current_path"]).stat()
-            except FileNotFoundError:
-                ownership = _recorded_target_ownership(connection, scan["target_id"])
-                if ownership is None:
-                    if before["target_id"] == after["target_id"] and (
-                        _legacy_scan_before_ownership_transition(scan, None)
-                    ):
-                        missing_checkout = True
-                        continue
-                    return False
-                recorded, epoch_start = ownership
-                if not (
-                    before["target_id"] == after["target_id"]
-                    and _legacy_scan_before_ownership_transition(scan, epoch_start)
-                ) and any(
-                    scan[field] != recorded[field] for field in ("target_device", "target_inode")
-                ):
-                    return False
-                missing_checkout = True
-            except OSError:
-                return False
-            else:
-                has_identity = scan["target_device"] is not None or scan["target_inode"] is not None
-                if has_identity and not _checkout_matches(
-                    scan, Path(target["current_path"]), metadata
-                ):
-                    return False
-                identity = (
-                    (scan["target_device"], scan["target_inode"])
-                    if has_identity
-                    else _stat_identity(metadata)
-                )
-                epoch_start = _ownership_epoch_start(connection, scan["target_id"], identity)
-                # Migrated seals predate filesystem identity; retain the existing
-                # legacy allowance only before a recorded ownership transition.
-                if (
-                    _legacy_scan_before_ownership_transition(scan, epoch_start)
-                    and before["target_id"] == after["target_id"]
-                ):
-                    scan = {
-                        **dict(scan),
-                        "target_device": serialize_filesystem_identity(metadata.st_dev),
-                        "target_inode": serialize_filesystem_identity(metadata.st_ino),
-                    }
-                elif not has_identity:
-                    return False
-            if epoch_start is not None:
-                sequence = connection.execute(
-                    "SELECT rowid AS ownership_sequence FROM scans WHERE id = ?",
-                    (scan["id"],),
-                ).fetchone()
-                if sequence is None or sequence["ownership_sequence"] <= epoch_start:
-                    return False
-        paths.append(target["current_path"])
-        verified_scans.append(scan)
-    if missing_checkout:
+    identities = identities or RepositoryIdentityCache(connection)
+    if before["target_id"] is None or after["target_id"] is None:
         return (
-            before["target_id"] == after["target_id"]
-            or connection.execute(
-                "SELECT 1 FROM scan_comparisons "
-                "WHERE (before_scan_id = ? AND after_scan_id = ?) "
-                "OR (before_scan_id = ? AND after_scan_id = ?)",
+            before["target_id"] is None
+            and after["target_id"] is None
+            and _unclaimed_path(identities, before["target_path"])
+            and _unclaimed_path(identities, after["target_path"])
+            and _same_repository(connection, before, after, identities=identities)
+        )
+    if (
+        scan_repository_generation(before) is not None
+        or scan_repository_generation(after) is not None
+    ):
+        return _same_repository(connection, before, after, identities=identities)
+    if (
+        before["target_id"] == after["target_id"]
+        and identities.recorded_owner(before["target_id"]) is None
+    ):
+        return True
+    if not all(scan_has_current_owner(connection, row, identities) for row in (before, after)):
+        return False
+    if before["target_id"] == after["target_id"]:
+        return True
+    targets = [identities.targets[scan["target_id"]] for scan in (before, after)]
+    if any(identities.for_row(target).missing for target in targets):
+        return (
+            connection.execute(
+                "SELECT 1 FROM scan_comparisons WHERE (before_scan_id = ? AND after_scan_id = ?) OR "
+                "(before_scan_id = ? AND after_scan_id = ?)",
                 (before["id"], after["id"], after["id"], before["id"]),
             ).fetchone()
             is not None
         )
-    # Ownership and admission epochs above remain scan-specific. Only reuse the
-    # relationship between the currently verified checkouts within this lookup.
-    relationship_key = (
-        tuple(
-            str(value)
-            for scan, path in zip(verified_scans, paths, strict=True)
-            for value in (path, scan["target_id"], scan["target_device"], scan["target_inode"])
-        )
-        if checkout_relationships is not None and before["target_id"] != after["target_id"]
-        else None
-    )
-    if (
-        checkout_relationships is not None
-        and relationship_key is not None
-        and relationship_key in checkout_relationships
-    ):
-        return checkout_relationships[relationship_key]
-    related = _same_repository(
-        *verified_scans,
-        before_target_path=paths[0],
-        after_target_path=paths[1],
-        require_ownership=True,
-        probe_git=probe_git,
-    )
-    if checkout_relationships is not None and relationship_key is not None:
-        checkout_relationships[relationship_key] = related
-    return related
+    return _same_repository(connection, *targets, identities=identities)
 
 
 def saved_repository_target_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
     target_ids = {scan["target_id"]}
     pending = list(target_ids)
     checked_pairs = set()
-    checkout_relationships: dict[tuple[str, ...], bool] = {}
+    identities = RepositoryIdentityCache(connection)
     while pending:
         target_id = pending.pop()
         for pair in connection.execute(
@@ -1390,9 +983,7 @@ def saved_repository_target_ids(connection: sqlite3.Connection, scan: sqlite3.Ro
                 connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
                 for scan_id in scan_ids
             ]
-            if not _same_registered_repository(
-                connection, *scans, checkout_relationships=checkout_relationships
-            ):
+            if not _same_registered_repository(connection, *scans, identities=identities):
                 continue
             for related in scans:
                 if related["target_id"] not in target_ids:
@@ -1485,7 +1076,7 @@ def compare_scans(
                 f"'codex-security scans compare {after['id']} {before['id']}'."
             )
         raise SystemExit(
-            "No saved matches for these scans. Run 'codex-security scans match BEFORE AFTER' first."
+            "No saved matches for these scans. Run 'codex-security scans compare BEFORE AFTER' first."
         )
     if include_matching_inputs and backfill_finding_details is not None:
         backfill_finding_details(connection, before)
@@ -1744,8 +1335,10 @@ def save_scan_comparison(
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            "DELETE FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
-            (before["id"], after["id"]),
+            "DELETE FROM scan_comparisons "
+            "WHERE (before_scan_id = ? AND after_scan_id = ?) "
+            "OR (before_scan_id = ? AND after_scan_id = ?)",
+            (before["id"], after["id"], after["id"], before["id"]),
         )
         connection.execute(
             """
@@ -1862,7 +1455,7 @@ def finding_relations(
     if not selected:
         return {}
     pairs = []
-    checkout_relationships: dict[tuple[str, ...], bool] = {}
+    identities = RepositoryIdentityCache(connection)
     for comparison in connection.execute(
         "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
         "WHERE before_scan_id = ? OR after_scan_id = ? "
@@ -1873,9 +1466,7 @@ def finding_relations(
             connection.execute("SELECT * FROM scans WHERE id = ?", (comparison[key],)).fetchone()
             for key in ("before_scan_id", "after_scan_id")
         ]
-        if not _same_registered_repository(
-            connection, *compared_scans, checkout_relationships=checkout_relationships
-        ):
+        if not _same_registered_repository(connection, *compared_scans, identities=identities):
             continue
         side = "before" if comparison["before_scan_id"] == scan_id else "after"
         other = "after" if side == "before" else "before"
@@ -1920,6 +1511,41 @@ def finding_relations(
             }
         )
     return result
+
+
+def finding_management_updated_at(connection: sqlite3.Connection, scan_id: str) -> str | None:
+    return connection.execute(
+        """
+        SELECT MAX(updated_at)
+        FROM (
+            SELECT triage.updated_at
+            FROM finding_triage AS triage
+            JOIN finding_occurrences AS occurrences ON occurrences.id = triage.occurrence_id
+            WHERE occurrences.scan_id = ?
+            UNION ALL
+            SELECT remediation.updated_at
+            FROM finding_remediation_attempts AS remediation
+            JOIN finding_occurrences AS occurrences ON occurrences.id = remediation.occurrence_id
+            WHERE occurrences.scan_id = ?
+        )
+        """,
+        (scan_id, scan_id),
+    ).fetchone()[0]
+
+
+def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT status, close_reason, note, updated_at FROM finding_triage WHERE occurrence_id = ?",
+        (occurrence_id,),
+    ).fetchone()
+    if row is None:
+        return {"status": "open"}
+    return {
+        "closeReason": row["close_reason"],
+        "note": row["note"],
+        "status": row["status"],
+        "updatedAt": row["updated_at"],
+    }
 
 
 def finding_matches(

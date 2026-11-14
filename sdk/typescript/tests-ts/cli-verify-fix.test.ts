@@ -473,10 +473,16 @@ describe("read-only finding verification", () => {
         expect(
           await runCli(["verify-fix", "--scan", "scan", ...flags], deps),
         ).toBe(2);
-        if (flags.includes("--token-count"))
-          expect(stdout.text()).toMatch(/^\d+\n$/u);
-        else expect(stdout.text()).toContain("[truncated:");
-        expect(stdout.text()).not.toContain(message);
+        const value = JSON.parse(stdout.text());
+        if (flags.includes("--full-output")) {
+          expect(value).toMatchObject({ ok: false, error: { message } });
+        } else if (flags.includes("--token-count")) {
+          expect(typeof value).toBe("number");
+        } else {
+          expect(typeof value).toBe("string");
+          expect(value).toContain("[truncated:");
+          expect(value).not.toContain(message);
+        }
         expect(stderr.text().split(message)).toHaveLength(2);
       }
     },

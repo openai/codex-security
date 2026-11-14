@@ -40,8 +40,7 @@ def test_previous_owner_cannot_mutate_or_replay_finding_actions(tmp_path, comman
     )
     run_workbench(state, *arguments)
     repository.rename(tmp_path / "previous-checkout")
-    replacement_revision = initialize_git_repository(repository)
-    create_cli_scan(state, root, repository, target_revision=replacement_revision)
+    initialize_git_repository(repository)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         before = connection.execute("SELECT * FROM finding_triage").fetchall()
     result = run_workbench(state, *arguments, check=False)
@@ -67,9 +66,9 @@ def test_replacement_checkout_does_not_receive_previous_owner_feedback(tmp_path)
         "--note",
         "Synthetic previous-owner rationale.",
     )
+    current = create_cli_scan(state, root, repository, complete=False)
     repository.rename(tmp_path / "previous-checkout")
     repository.mkdir()
-    current = create_cli_scan(state, root, repository, complete=False)
     feedback = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])
     assert feedback["falsePositives"] == []
 
@@ -108,18 +107,20 @@ def test_related_findings_respect_the_current_owner_of_both_scans(tmp_path, repl
     if replaced:
         repository.rename(tmp_path / "previous-checkout")
         repository.mkdir()
-        replacement = create_cli_scan(state, root, repository, identity_anchor="replacement")
+        # A saved database from before registration enforced checkout ownership can
+        # contain a scan from each owner. Keep the selected occurrence on the live one.
+        from filesystem_identity import serialize_filesystem_identity
+
+        metadata = repository.stat()
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
-            replacement_identity = connection.execute(
-                "SELECT target_device, target_inode FROM scans WHERE id = ?",
-                (replacement["scanId"],),
-            ).fetchone()
-            # Keep the selected occurrence in the new owner; only its related peer is stale.
             connection.execute(
                 "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
-                (*replacement_identity, after["scanId"]),
+                (
+                    serialize_filesystem_identity(metadata.st_dev),
+                    serialize_filesystem_identity(metadata.st_ino),
+                    after["scanId"],
+                ),
             )
-            connection.execute("DELETE FROM scans WHERE id = ?", (replacement["scanId"],))
     detail = run_workbench(
         state, "get-finding", "--occurrence-id", current_finding["occurrenceId"]
     )["scan"]["findings"][0]
@@ -134,14 +135,19 @@ def test_targetless_legacy_comparisons_require_unclaimed_paths(tmp_path, claimed
         create_cli_scan(state, root, repository, identity_anchor=anchor)
         for anchor in ("before", "after")
     ]
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET target_id = NULL, target_device = NULL, target_inode = NULL"
-        )
-        connection.execute("UPDATE workspaces SET target_id = NULL")
-        connection.execute("DELETE FROM security_targets")
     if claimed:
         create_cli_scan(state, root, repository)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.executemany(
+            "UPDATE scans SET target_id = NULL, target_device = NULL, target_inode = NULL, repository_generation = NULL WHERE id = ?",
+            ((scan["scanId"],) for scan in scans),
+        )
+        if not claimed:
+            connection.execute("UPDATE workspaces SET target_id = NULL")
+            connection.execute("DELETE FROM security_targets")
+    plan = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repository))
+    assert plan["scanCount"] == (1 if claimed else 2)
+    assert len(plan["batches"]) == (0 if claimed else 1)
     result = compare_scan_pair(state, *scans, check=False)
     assert (result["returncode"] != 0) if claimed else result["returncode"] == 0
 
@@ -246,7 +252,7 @@ def test_finding_artifacts_include_all_safe_files_and_directories(tmp_path):
         ("https://git.example/group/project.git", "git@git.example:group/project.git", False),
     ],
 )
-def test_registered_clone_scope_preserves_ssh_accounts(
+def test_explicit_clone_comparison_preserves_ssh_accounts(
     tmp_path, left_remote, right_remote, related
 ):
     state, root = tmp_path / "state", tmp_path / "scans"
@@ -261,6 +267,6 @@ def test_registered_clone_scope_preserves_ssh_accounts(
     pending = run_workbench(
         state, "list-unmatched-scan-pairs", "--repository", str(repositories[0])
     )
-    assert pending["scanCount"] == (2 if related else 1)
+    assert pending["scanCount"] == 1
     compared = compare_scan_pair(state, *scans, check=False)
     assert compared["returncode"] == 0 if related else compared["returncode"] != 0

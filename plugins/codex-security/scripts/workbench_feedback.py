@@ -18,9 +18,8 @@ from workbench_constants import (
     FINDING_TITLE_BYTES,
     PRIMARY_FINDING_LOCATION_SQL,
 )
-from workbench_finding_results import finding_triage_result
 from workbench_native_indexes import _indexed_findings
-from workbench_scan_history import _same_registered_repository, saved_repository_target_ids
+from workbench_target_state import RepositoryIdentityCache
 from workbench_validation import bounded_output_text
 
 
@@ -30,88 +29,40 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
     For each finding, include the latest decision only if it closes the finding as a
     false positive with a nonblank reason. Prefer the root-control location in its preview.
     """
-    connection.create_function(
-        "codex_security_finding_group",
-        2,
-        lambda occurrence_id, finding_id: f"finding:{finding_id}",
-        deterministic=True,
-    )
-    checkout_relationships: dict[tuple[str, ...], bool] = {}
-    source_ids = {
-        row["id"]
-        for row in connection.execute(
-            "SELECT * FROM scans WHERE (status = 'complete' "
-            "OR (status = 'failed' AND seal_manifest_digest IS NOT NULL)) AND id != ? "
-            "AND target_id IN (SELECT value FROM json_each(?))",
-            (scan["id"], json.dumps(sorted(saved_repository_target_ids(connection, scan)))),
+    identities = RepositoryIdentityCache(connection)
+    scope = identities.scope_for_scan(scan)
+    if not scope.available:
+        return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": []}
+
+    reviewed = {
+        finding["decision_occurrence_id"]
+        for finding in _indexed_findings(
+            connection,
+            identities=identities,
+            scan_scope=scope,
+            exclude_scan_id=scan["id"],
         )
-        if _same_registered_repository(
-            connection, scan, row, checkout_relationships=checkout_relationships
-        )
+        if finding["status"] == "closed" and finding["close_reason"] == "false_positive"
     }
-    closed_decisions = {}
-    for finding in _indexed_findings(connection, source_ids, allow_cross_target_matches=True):
-        triage = finding_triage_result(connection, finding["occurrence_id"], finding)
-        if triage["status"] == "closed" and triage.get("closeReason") == "false_positive":
-            closed_decisions.update(
-                (finding_id, triage) for finding_id in finding["matched_finding_ids"]
-            )
-    connection.create_function(
-        "codex_security_feedback_note",
-        1,
-        lambda finding_id: closed_decisions.get(finding_id, {}).get("note"),
-        deterministic=True,
-    )
-    connection.create_function(
-        "codex_security_feedback_updated_at",
-        1,
-        lambda finding_id: closed_decisions.get(finding_id, {}).get("updatedAt"),
-        deterministic=True,
-    )
     rows = connection.execute(
         f"""
-        WITH ranked_decisions AS (
-            SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
-                findings.identity_anchor, findings.identity_instance, occurrences.title,
-                occurrences.summary, codex_security_feedback_note(findings.id) AS note,
-                COALESCE(codex_security_feedback_updated_at(findings.id),
-                    source_scans.completed_at) AS updated_at,
-                source_scans.id AS source_scan_id,
-                source_scans.completed_at AS source_completed_at,
-                locations.relative_path, locations.start_line, locations.end_line, locations.role,
-                ROW_NUMBER() OVER (
-                    PARTITION BY findings.id
-                    ORDER BY julianday(upper(COALESCE(codex_security_feedback_updated_at(findings.id),
-                            source_scans.completed_at))) DESC,
-                        julianday(upper(source_scans.completed_at)) DESC,
-                        source_scans.id DESC, occurrences.id DESC
-                ) AS decision_rank
-            FROM finding_occurrences AS occurrences
-            JOIN findings ON findings.id = occurrences.finding_id
-            JOIN scans AS source_scans ON source_scans.id = occurrences.scan_id
-            JOIN finding_locations AS locations ON locations.id = (
-                SELECT id {PRIMARY_FINDING_LOCATION_SQL}
-            )
-            WHERE source_scans.target_id = ?
-                AND source_scans.id != ?
-                AND source_scans.id IN (SELECT value FROM json_each(?))
-                AND findings.id IN (SELECT value FROM json_each(?))
-        )
-        SELECT *
-        FROM ranked_decisions
-        WHERE decision_rank = 1
-            AND note IS NOT NULL
-            AND trim(note) != ''
-        ORDER BY julianday(upper(updated_at)) DESC,
-            julianday(upper(source_completed_at)) DESC,
-            source_scan_id DESC, finding_id DESC
+        SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
+            findings.identity_anchor, findings.identity_instance, occurrences.title,
+            occurrences.summary, triage.note, triage.updated_at,
+            source_scans.id AS source_scan_id,
+            locations.relative_path, locations.start_line, locations.end_line, locations.role
+        FROM finding_occurrences AS occurrences
+        JOIN findings ON findings.id = occurrences.finding_id
+        JOIN scans AS source_scans ON source_scans.id = occurrences.scan_id
+        JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
+        JOIN finding_locations AS locations ON locations.id = (SELECT id {PRIMARY_FINDING_LOCATION_SQL})
+        WHERE occurrences.id IN (SELECT value FROM json_each(?)) AND source_scans.id != ?
+            AND (source_scans.status = 'complete' OR (source_scans.status = 'failed' AND source_scans.seal_manifest_digest IS NOT NULL))
+            AND trim(triage.note) != ''
+        ORDER BY julianday(upper(triage.updated_at)) DESC,
+            julianday(upper(source_scans.completed_at)) DESC, source_scans.id DESC, findings.id DESC
         """,
-        (
-            scan["target_id"],
-            scan["id"],
-            json.dumps(sorted(source_ids)),
-            json.dumps(sorted(closed_decisions)),
-        ),
+        (json.dumps(sorted(reviewed)), scan["id"]),
     )
     false_positives = []
     for row in rows:

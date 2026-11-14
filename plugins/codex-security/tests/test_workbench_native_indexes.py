@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import test_workbench_scan_history as producer
 from workbench_test_support import (
     create_saved_workspace,
     create_workspace,
+    initialize_git_repository,
     run_workbench,
     save_workspace,
     scan_command,
@@ -97,49 +101,6 @@ def test_later_scans_preserve_global_findings_and_repository_counts(
     )
 
 
-def test_global_findings_apply_pagination_to_historical_findings(
-    tmp_path: Path,
-) -> None:
-    state_dir = tmp_path / "state"
-    historical_target = tmp_path / "historical-repo"
-    first_active_target = tmp_path / "first-active-repo"
-    second_active_target = tmp_path / "second-active-repo"
-    for target in (historical_target, first_active_target, second_active_target):
-        target.mkdir()
-
-    historical = complete_scan(state_dir, historical_target, identity_anchor="historical-finding")
-    complete_scan(
-        state_dir,
-        historical_target,
-        identity_anchor="incomplete-follow-up",
-        finding=False,
-        follow_up=True,
-    )
-    first_active = complete_scan(
-        state_dir, first_active_target, identity_anchor="first-active-finding"
-    )
-    second_active = complete_scan(
-        state_dir, second_active_target, identity_anchor="second-active-finding"
-    )
-
-    first_page = run_workbench(state_dir, "list-global-findings", "--limit", "1")
-    second_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "1")
-    third_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "2")
-
-    assert first_page["nextOffset"] == 1
-    assert second_page["nextOffset"] == 2
-    assert third_page["nextOffset"] is None
-    assert {
-        first_page["findings"][0]["scanId"],
-        second_page["findings"][0]["scanId"],
-        third_page["findings"][0]["scanId"],
-    } == {
-        historical["scanId"],
-        first_active["scanId"],
-        second_active["scanId"],
-    }
-
-
 def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     first_target = tmp_path / "first-repo"
@@ -151,7 +112,6 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     first_target_id = stable_target_id(first_target)
     second_target_id = stable_target_id(second_target)
     older_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
-    latest_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
     set_triage(
         state_dir,
         str(older_first["findings"][0]["occurrenceId"]),
@@ -161,6 +121,7 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
         "--note",
         "Fixture close decision.",
     )
+    latest_first = complete_scan(state_dir, first_target, identity_anchor="shared-finding")
     distinct_first = complete_scan(
         state_dir,
         first_target,
@@ -224,7 +185,7 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     assert first["scanId"] == latest_first["scanId"]
     assert first["occurrenceId"] == latest_first_occurrence
     assert first["occurrenceCount"] == 2
-    assert first["status"] == "closed"
+    assert first["status"] == "open"
     assert first["targetPath"] == str(first_target.resolve())
     assert first["locationPath"] == "src/control.py"
     assert distinct["scanId"] == distinct_first["scanId"]
@@ -253,6 +214,16 @@ def test_repository_index_probes_draft_checkout(
         "--scope",
         "missing-directory",
     )
+
+    if target_path == ".":
+        assert run_workbench(state_dir, "list-repositories")["repositories"] == []
+        # Older clients registered relative draft paths before validation.
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) "
+                "SELECT ?, target_path, target_path, created_at, updated_at FROM workspaces",
+                (stable_target_id(Path(target_path)),),
+            )
 
     (repository,) = run_workbench(state_dir, "list-repositories")["repositories"]
     assert repository["targetPath"] == target_path
@@ -332,6 +303,413 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     assert second["scanCount"] == 1
 
 
+@pytest.mark.parametrize("legacy", (False, True))
+@pytest.mark.parametrize("same_target", (False, True))
+def test_native_completion_reopens_same_target_recurrence_without_matching(
+    tmp_path: Path, legacy: bool, same_target: bool
+) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    first = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        identity_anchor="same-stable-finding",
+        target_revision=revision,
+    )
+    first = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT repository_generation FROM scans WHERE id = ?", (first["scanId"],)
+            ).fetchone()[0]
+            is not None
+        )
+        if legacy:
+            connection.execute(
+                "UPDATE scans SET repository_generation = NULL WHERE id = ?",
+                (first["scanId"],),
+            )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        str(first["findings"][0]["occurrenceId"]),
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic checked guard.",
+    )
+    next_target = repository
+    if not same_target:
+        next_target = tmp_path / "other"
+        revision = initialize_git_repository(next_target)
+    producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        next_target,
+        identity_anchor="same-stable-finding",
+        target_revision=revision,
+    )
+    findings = run_workbench(state, "list-global-findings")["findings"]
+    assert len(findings) == (1 if same_target else 2)
+    current = next(row for row in findings if row["targetId"] == stable_target_id(next_target))
+    assert current["status"] == "open"
+    assert current["occurrenceCount"] == (2 if same_target else 1)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("saved_comparison", [False, True])
+def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
+    tmp_path: Path, saved_comparison: bool
+) -> None:
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)],
+        check=True,
+    )
+    first = producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision
+    )
+    later = producer.create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+    first_finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"][
+        "findings"
+    ][0]
+    later_finding = run_workbench(state, "get-scan", "--scan-id", later["scanId"])["scan"][
+        "findings"
+    ][0]
+    assert first_finding["findingId"] != later_finding["findingId"]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation=NULL WHERE id IN (?,?)",
+            (first["scanId"], later["scanId"]),
+        )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        first_finding["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic checked guard.",
+    )
+    if saved_comparison:
+        match = producer.save_scan_matches(
+            state,
+            first,
+            later,
+            producer.confirmed_match(first_finding["occurrenceId"], later_finding["occurrenceId"]),
+        )
+        assert match["summary"]["reopened"] == 1
+    producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision, finding=False
+    )
+    producer.create_cli_scan(
+        state, tmp_path / "results", linked, target_revision=revision, finding=False
+    )
+    global_findings = run_workbench(state, "list-global-findings")["findings"]
+    scoped_findings = run_workbench(state, "list-global-findings", "--repository", str(linked))[
+        "findings"
+    ]
+    for findings in (global_findings, scoped_findings):
+        finding = next(row for row in findings if row["findingId"] == later_finding["findingId"])
+        assert finding["status"] == "open"
+
+
+@pytest.mark.parametrize("legacy_first", [False, True])
+@pytest.mark.parametrize("saved_current_match", [False, True])
+def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
+    tmp_path, monkeypatch, legacy_first, saved_current_match
+):
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    linked = tmp_path / "linked"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    original_write = producer.write_completed_contract
+
+    def write_current_completion(scan_dir, scan_id, target, **values):
+        original_write(scan_dir, scan_id, target, **values)
+        p = scan_dir / "scan-manifest.json"
+        manifest = json.loads(p.read_text())
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            started_at = connection.execute(
+                "SELECT started_at FROM scans WHERE id=?", (scan_id,)
+            ).fetchone()[0]
+        manifest["scan"]["startedAt"] = started_at
+        manifest["scan"]["completedAt"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        p.write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(producer, "write_completed_contract", write_current_completion)
+    first = producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision
+    )
+    first_finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"][
+        "findings"
+    ][0]
+    if legacy_first:
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET repository_generation=NULL WHERE id=?", (first["scanId"],)
+            )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        first_finding["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic checked guard.",
+    )
+    # This decision predates scan admission watermarks. Its propagation depends on
+    # the saved repository generation and occurrence matches.
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE finding_decisions SET admission_sequence=NULL, scan_sequence=NULL"
+        )
+
+    current = producer.create_cli_scan(
+        state, tmp_path / "results", repository, target_revision=revision
+    )
+    current_finding = run_workbench(state, "get-scan", "--scan-id", current["scanId"])["scan"][
+        "findings"
+    ][0]
+    later = producer.create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
+    later_finding = run_workbench(state, "get-scan", "--scan-id", later["scanId"])["scan"][
+        "findings"
+    ][0]
+    assert first_finding["findingId"] == current_finding["findingId"]
+    assert first_finding["findingId"] != later_finding["findingId"]
+    assert current_finding["triage"]["status"] == later_finding["triage"]["status"] == "open"
+    if saved_current_match:
+        result = producer.save_scan_matches(
+            state,
+            current,
+            later,
+            producer.confirmed_match(
+                current_finding["occurrenceId"], later_finding["occurrenceId"]
+            ),
+        )
+        assert result["summary"]["persisting"] == 1
+    global_rows = run_workbench(state, "list-global-findings")["findings"]
+    scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(linked))[
+        "findings"
+    ]
+    open_rows = run_workbench(state, "list-global-findings", "--status", "open")["findings"]
+    global_b = next(
+        row for row in global_rows if later_finding["findingId"] in row["matchedFindingIds"]
+    )
+    scoped_b = next(
+        row for row in scoped_rows if later_finding["findingId"] in row["matchedFindingIds"]
+    )
+    local_rows = run_workbench(state, "list-global-findings", "--repository", str(repository))[
+        "findings"
+    ]
+    local_current = next(row for row in local_rows if current["scanId"] in row["knownScanIds"])
+    assert local_current["status"] == "closed"
+    expected = "closed" if saved_current_match and not legacy_first else "open"
+    assert scoped_b["status"] == expected
+    assert global_b["status"] == expected
+    assert any(later_finding["findingId"] in row["matchedFindingIds"] for row in open_rows) == (
+        expected == "open"
+    )
+
+
+@pytest.mark.parametrize("saved_legacy_alias", [False, True])
+@pytest.mark.parametrize("saved_current_match", [False, True])
+def test_saved_legacy_alias_survives_current_linked_match(
+    tmp_path, monkeypatch, saved_legacy_alias, saved_current_match
+):
+    state = tmp_path / "state"
+    repository = tmp_path / "repository"
+    linked = tmp_path / "linked"
+    revision = initialize_git_repository(repository)
+    subprocess.run(
+        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
+    )
+    original_write = producer.write_completed_contract
+
+    def write_current_completion(scan_dir, scan_id, target, **values):
+        original_write(scan_dir, scan_id, target, **values)
+        p = scan_dir / "scan-manifest.json"
+        manifest = json.loads(p.read_text())
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            started_at = connection.execute(
+                "SELECT started_at FROM scans WHERE id=?", (scan_id,)
+            ).fetchone()[0]
+        manifest["scan"]["startedAt"] = started_at
+        manifest["scan"]["completedAt"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        p.write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(producer, "write_completed_contract", write_current_completion)
+    first = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-first-control",
+    )
+    first_finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"][
+        "findings"
+    ][0]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation=NULL WHERE id=?", (first["scanId"],)
+        )
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        first_finding["occurrenceId"],
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic checked guard.",
+    )
+    # This decision predates scan admission watermarks. Its propagation depends on
+    # the saved repository generation and occurrence matches.
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE finding_decisions SET admission_sequence=NULL, scan_sequence=NULL"
+        )
+
+    second = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-second-control",
+    )
+    second_finding = run_workbench(state, "get-scan", "--scan-id", second["scanId"])["scan"][
+        "findings"
+    ][0]
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation=NULL WHERE id=?", (second["scanId"],)
+        )
+    assert first_finding["findingId"] != second_finding["findingId"]
+    if saved_legacy_alias:
+        result = producer.save_scan_matches(
+            state,
+            first,
+            second,
+            producer.confirmed_match(first_finding["occurrenceId"], second_finding["occurrenceId"]),
+        )
+        assert result["summary"]["persisting"] == 1
+    current = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        repository,
+        target_revision=revision,
+        identity_anchor="synthetic-second-control",
+    )
+    current_finding = run_workbench(state, "get-scan", "--scan-id", current["scanId"])["scan"][
+        "findings"
+    ][0]
+    later = producer.create_cli_scan(
+        state,
+        tmp_path / "results",
+        linked,
+        target_revision=revision,
+        identity_anchor="synthetic-second-control",
+    )
+    later_finding = run_workbench(state, "get-scan", "--scan-id", later["scanId"])["scan"][
+        "findings"
+    ][0]
+    assert second_finding["findingId"] == current_finding["findingId"]
+    assert current_finding["findingId"] != later_finding["findingId"]
+    if saved_current_match:
+        result = producer.save_scan_matches(
+            state,
+            current,
+            later,
+            producer.confirmed_match(
+                current_finding["occurrenceId"], later_finding["occurrenceId"]
+            ),
+        )
+        assert result["summary"]["persisting"] == 1
+    global_rows = run_workbench(state, "list-global-findings")["findings"]
+    scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(repository))[
+        "findings"
+    ]
+    linked_rows = run_workbench(state, "list-global-findings", "--repository", str(linked))[
+        "findings"
+    ]
+    for rows in [global_rows, scoped_rows]:
+        first_row = next(row for row in rows if first["scanId"] in row["knownScanIds"])
+        second_row = next(row for row in rows if second["scanId"] in row["knownScanIds"])
+        assert first_row["status"] == "closed"
+        assert second_row["status"] == ("closed" if saved_legacy_alias else "open")
+        assert (first["scanId"] in second_row["knownScanIds"]) == saved_legacy_alias
+    for rows in [global_rows, linked_rows]:
+        linked_row = next(row for row in rows if later["scanId"] in row["knownScanIds"])
+        assert linked_row["status"] == "open"
+
+
+def test_global_findings_apply_pagination_to_historical_findings(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    historical_target = tmp_path / "historical-repo"
+    first_active_target = tmp_path / "first-active-repo"
+    second_active_target = tmp_path / "second-active-repo"
+    for target in (historical_target, first_active_target, second_active_target):
+        target.mkdir()
+
+    historical = complete_scan(state_dir, historical_target, identity_anchor="historical-finding")
+    complete_scan(
+        state_dir,
+        historical_target,
+        identity_anchor="incomplete-follow-up",
+        finding=False,
+        follow_up=True,
+    )
+    first_active = complete_scan(
+        state_dir, first_active_target, identity_anchor="first-active-finding"
+    )
+    second_active = complete_scan(
+        state_dir, second_active_target, identity_anchor="second-active-finding"
+    )
+
+    first_page = run_workbench(state_dir, "list-global-findings", "--limit", "1")
+    second_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "1")
+    third_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "2")
+
+    assert first_page["nextOffset"] == 1
+    assert second_page["nextOffset"] == 2
+    assert third_page["nextOffset"] is None
+    assert {
+        first_page["findings"][0]["scanId"],
+        second_page["findings"][0]["scanId"],
+        third_page["findings"][0]["scanId"],
+    } == {
+        historical["scanId"],
+        first_active["scanId"],
+        second_active["scanId"],
+    }
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_repository_index_excludes_previous_checkout_owner(tmp_path: Path, legacy: bool) -> None:
     state_dir = tmp_path / "state"
@@ -356,25 +734,25 @@ def test_repository_index_excludes_previous_checkout_owner(tmp_path: Path, legac
     target.rename(tmp_path / "previous-checkout")
     target.mkdir()
     remaining = run_workbench(state_dir, "list-repositories")["repositories"]
-    assert len(remaining) == 1
+    assert len(remaining) == 2
+    replacement = next(r for r in remaining if r["targetId"] == stable_target_id(target))
+    assert (
+        replacement["latestScan"],
+        replacement["scanCount"],
+        replacement["openFindingsCount"],
+    ) == (None, 0, 0)
     assert remaining[0]["latestScan"]["scanId"] == other["scanId"]
     assert remaining[0]["scanCount"] == 1
     assert remaining[0]["openFindingsCount"] == 1
 
-    current = complete_scan(state_dir, target, identity_anchor="current-finding")
-    repositories = run_workbench(state_dir, "list-repositories")["repositories"]
-    assert len(repositories) == 2
-    assert repositories[0]["latestScan"]["scanId"] == current["scanId"]
-    assert repositories[0]["scanCount"] == 1
-    assert repositories[0]["openFindingsCount"] == 1
-
-    target.rename(tmp_path / "unavailable-checkout")
-    offline = run_workbench(state_dir, "list-repositories")["repositories"]
-    assert len(offline) == 2
-    assert offline[0]["checkoutAvailable"] is False
-    assert offline[0]["latestScan"]["scanId"] == current["scanId"]
-    assert offline[0]["scanCount"] == 1
-    assert offline[0]["openFindingsCount"] == 1
+    # Modern registration rejects a different owner at a saved path.
+    # Restore the saved checkout to verify that the persisted history remains available.
+    target.rmdir()
+    (tmp_path / "previous-checkout").rename(target)
+    restored = run_workbench(state_dir, "list-repositories")["repositories"]
+    original_target = next(row for row in restored if row["targetId"] == stable_target_id(target))
+    assert original_target["latestScan"]["scanId"] == previous["scanId"]
+    assert original_target["scanCount"] == 2
 
 
 def test_repository_index_preserves_unclaimed_legacy_scan(tmp_path: Path) -> None:

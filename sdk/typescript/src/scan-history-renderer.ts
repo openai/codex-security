@@ -2,7 +2,8 @@ import { basename, join, relative } from "node:path";
 import stringWidth from "string-width";
 import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
-import type { JsonObject } from "./config.js";
+import type { JsonObject, JsonValue } from "./config.js";
+import { isRecord } from "./record.js";
 import {
   formatCoverageScopeParts,
   type CoverageSummary,
@@ -520,45 +521,21 @@ export function renderScanHistory(
         for (const section of sections) wrap(section, 4);
       }
     }
-    const codeEvidence = [
-      result["codeEvidence"],
-      result["code_evidence"],
-    ].flatMap((catalog) => (Array.isArray(catalog) ? catalog : []));
-    const evidenceEntries: JsonObject[] = codeEvidence.filter(
-      (entry): entry is JsonObject =>
-        typeof entry === "object" && entry !== null && !Array.isArray(entry),
-    );
-    const appendEmbeddedCodeEvidence = (section: unknown): void => {
-      if (
-        typeof section !== "object" ||
-        section === null ||
-        Array.isArray(section)
-      ) {
-        return;
-      }
-      for (const key of ["codeEvidence", "code_evidence"] as const) {
-        const embedded = (section as JsonObject)[key];
-        if (!Array.isArray(embedded)) continue;
-        for (const entry of embedded) {
-          if (
-            typeof entry === "object" &&
-            entry !== null &&
-            !Array.isArray(entry)
-          ) {
-            evidenceEntries.push(entry);
-          }
+    const evidenceEntries: JsonObject[] = [];
+    const appendCodeEvidence = (section: JsonValue | undefined): void => {
+      if (!isRecord(section)) return;
+      for (const key of ["codeEvidence", "code_evidence"]) {
+        const catalog = section[key];
+        if (!Array.isArray(catalog)) continue;
+        for (const entry of catalog) {
+          if (isRecord(entry)) evidenceEntries.push(entry);
         }
       }
     };
+    appendCodeEvidence(result);
     for (const rootCause of [result["rootCause"], result["root_cause"]]) {
-      if (
-        typeof rootCause !== "object" ||
-        rootCause === null ||
-        Array.isArray(rootCause)
-      ) {
-        continue;
-      }
-      appendEmbeddedCodeEvidence(rootCause);
+      if (!isRecord(rootCause)) continue;
+      appendCodeEvidence(rootCause);
       if (
         typeof rootCause["code"] === "string" &&
         !evidenceEntries.some((entry) => entry["code"] === rootCause["code"])
@@ -569,16 +546,12 @@ export function renderScanHistory(
         });
       }
     }
-    appendEmbeddedCodeEvidence(result["validation"]);
+    appendCodeEvidence(result["validation"]);
     const attackPath = result["attackPath"];
-    appendEmbeddedCodeEvidence(attackPath);
-    if (
-      typeof attackPath === "object" &&
-      attackPath !== null &&
-      !Array.isArray(attackPath)
-    ) {
+    appendCodeEvidence(attackPath);
+    if (isRecord(attackPath)) {
       for (const key of ["dataflow", "dataFlow", "data_flow", "reachability"]) {
-        appendEmbeddedCodeEvidence(attackPath[key]);
+        appendCodeEvidence(attackPath[key]);
       }
     }
     if (evidenceEntries.length > 0) {
@@ -729,7 +702,7 @@ export function renderScanHistory(
       ) {
         lines.push(`    ${dim(`Last activity: ${clean(updatedAt)}`)}`);
         if (
-          scan["mode"] === "deep" &&
+          (scan["mode"] === "deep" || scan["mode"] === "standard") &&
           scan["recipeAvailable"] === true &&
           scan["handoffStatus"] === "delivered" &&
           scan["continuationThreadId"]

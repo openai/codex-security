@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import ntpath
 import sqlite3
+import sys
 from argparse import Namespace
 from contextlib import closing
-from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -108,10 +109,7 @@ def indexed_collections(workbench_db, tmp_path):
 
 def test_global_finding_filters_apply_before_pagination(workbench_api, indexed_collections):
     connection, targets = indexed_collections
-    query = partial(
-        workbench_api["native_indexes"].list_global_findings,
-        read_coverage=workbench_api["coverage_for_comparison"],
-    )
+    query = workbench_api["native_indexes"].list_global_findings
     filters = {"query": "NeEdLe", "severity": "high", "status": "open"}
     first = query(connection, query_args(**filters, limit=1))
     second = query(connection, query_args(**filters, limit=1, offset=1))
@@ -126,7 +124,8 @@ def test_global_finding_filters_apply_before_pagination(workbench_api, indexed_c
     assert [finding["scanId"] for finding in targeted["findings"]] == [SCAN_IDS[0]]
     assert query(connection, query_args(query="needle", severity="low"))["findings"] == []
     unfiltered = query(connection, query_args())
-    assert set(unfiltered) == {"findings", "limit", "nextOffset", "offset"}
+    assert set(unfiltered) == {"findings", "limit", "nextOffset", "offset", "projectionAvailable"}
+    assert unfiltered["projectionAvailable"] is True
     assert len(unfiltered["findings"]) == 3
 
 
@@ -156,13 +155,10 @@ def test_latest_scan_confirmation_uses_group_membership(
         connection.execute(
             "UPDATE finding_occurrences SET finding_id = 'finding-0' WHERE id = 'occurrence-1'"
         )
-    query = partial(
-        workbench_api["native_indexes"].list_global_findings,
-        read_coverage=workbench_api["coverage_for_comparison"],
-    )
+    query = workbench_api["native_indexes"].list_global_findings
     args = query_args(target_id=stable_target_id(targets[0]))
     (finding,) = query(connection, args)["findings"]
-    assert finding["scanId"] == SCAN_IDS[1]
+    assert finding["scanId"] == SCAN_IDS[0]
     assert finding["knownScanIds"] == SCAN_IDS[:2]
     assert finding["confirmedInLatestScan"] is True
     connection.execute("DELETE FROM finding_occurrences WHERE id = 'occurrence-1'")
@@ -189,14 +185,12 @@ def test_global_findings_compare_decisions_and_return_original_update_text(
         "UPDATE finding_occurrences SET finding_id = 'finding-0' WHERE id = 'occurrence-1'"
     )
     connection.execute(
-        "UPDATE finding_occurrences SET created_at = ? WHERE id = 'occurrence-1'", (completion,)
+        "UPDATE finding_occurrences SET created_at = ? WHERE id = 'occurrence-0'", (completion,)
     )
-    connection.execute(
-        "UPDATE scans SET started_at = ?, updated_at = ? WHERE id = ?",
-        (completion, completion, SCAN_IDS[1]),
-    )
+    connection.execute("UPDATE scans SET updated_at = ? WHERE id = ?", (completion, SCAN_IDS[0]))
     for index, timestamp, reason in [
-        (0, "2026-10-08T01:00:01.000001Z", "already_fixed"),
+        (0, "2026-10-08T01:00:01Z", "false_positive"),
+        (1, "2026-10-08T01:00:01.000001Z", "already_fixed"),
     ]:
         connection.execute(
             "INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at) VALUES (?, 'closed', ?, 'Synthetic decision', ?)",
@@ -204,9 +198,7 @@ def test_global_findings_compare_decisions_and_return_original_update_text(
         )
     before = connection.execute("SELECT id, updated_at FROM scans ORDER BY id").fetchall()
     (finding,) = workbench_api["native_indexes"].list_global_findings(
-        connection,
-        query_args(target_id=stable_target_id(targets[0])),
-        read_coverage=workbench_api["coverage_for_comparison"],
+        connection, query_args(target_id=stable_target_id(targets[0]))
     )["findings"]
     assert finding["status"] == status
     assert finding["updatedAt"] == updated
@@ -243,10 +235,7 @@ def test_global_finding_pages_follow_completion_order(
             "UPDATE finding_occurrences SET created_at = ? WHERE id = ?",
             (timestamp, f"occurrence-{index}"),
         )
-    query = partial(
-        workbench_api["native_indexes"].list_global_findings,
-        read_coverage=workbench_api["coverage_for_comparison"],
-    )
+    query = workbench_api["native_indexes"].list_global_findings
     pages = [query(connection, query_args(limit=1, offset=index)) for index in range(3)]
     assert [page["findings"][0]["occurrenceId"] for page in pages] == [
         f"occurrence-{index}" for index in order
@@ -303,10 +292,7 @@ def test_collection_filters_apply_before_pagination(
     query = (
         workbench_api["scan_history"].list_scans
         if command == "list-scans"
-        else partial(
-            workbench_api["native_indexes"].list_repositories,
-            read_coverage=workbench_api["coverage_for_comparison"],
-        )
+        else workbench_api["native_indexes"].list_repositories
     )
     filters = {"query": "NeEdLe", "status": status}
     if command == "list-scans":
@@ -342,12 +328,12 @@ def test_scan_list_returns_lightweight_running_first_summaries(workbench_api, in
     )
     scans = workbench_api["scan_history"].list_scans(connection)["scans"]
 
-    assert [scan["scanId"] for scan in scans] == [SCAN_IDS[1], SCAN_IDS[2], SCAN_IDS[0]]
+    assert [scan["scanId"] for scan in scans] == [SCAN_IDS[1], SCAN_IDS[0], SCAN_IDS[2]]
     assert scans[0]["targetPath"] == str(targets[1])
     assert scans[0]["targetRevision"] == "synthetic-revision"
     assert scans[0]["progress"]["status"] == "running"
     assert scans[0]["progress"]["phase"] == "preflight"
-    assert scans[2]["progress"]["status"] == "canceled"
+    assert scans[1]["progress"]["status"] == "canceled"
     assert "artifacts" not in scans[0]
     assert "findings" not in scans[0]
 
@@ -380,24 +366,111 @@ def test_scan_root_filter_matches_windows_path_aliases(
 def test_scan_list_probes_requested_repository_once(
     workbench_api, indexed_collections, monkeypatch
 ):
+    import workbench_target as target_module
+
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
+    git_command = target_module.git_command
 
-    def record_git_output(target, *arguments):
+    def record_git_command(target, *arguments, **kwargs):
         probes.append((target, arguments))
-        if arguments[0] == "rev-parse":
-            return str(target / ".git")
-        return f"https://example.test/{target.name}.git"
+        return git_command(target, *arguments, **kwargs)
 
-    monkeypatch.setattr(history, "git_output", record_git_output)
+    monkeypatch.setattr(target_module, "git_command", record_git_command)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
 
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
     assert [arguments for target, arguments in probes if target == targets[0]] == [
-        ("rev-parse", "--show-toplevel"),
         ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+        ("rev-parse", "--show-toplevel"),
     ]
+    assert all(target == targets[0] for target, _ in probes)
+
+
+@pytest.mark.parametrize("exact_saved", [False, True])
+@pytest.mark.parametrize("stale_exact", [False, True])
+@pytest.mark.parametrize("device_changed", [False, True])
+def test_repository_findings_match_directory_aliases_after_exact_paths(
+    workbench_api,
+    indexed_collections,
+    tmp_path,
+    monkeypatch,
+    exact_saved,
+    stale_exact,
+    device_changed,
+):
+    connection, targets = indexed_collections
+    alias = tmp_path / "alias"
+    alias.symlink_to(targets[0], target_is_directory=True)
+    resolve = Path.resolve
+
+    def preserve_alias(self, *args, **kwargs):
+        return self if self == alias else resolve(self, *args, **kwargs)
+
+    # Exercise preserved case-alias spelling with an actual directory link.
+    monkeypatch.setattr(Path, "resolve", preserve_alias)
+    if exact_saved:
+        connection.execute(
+            "UPDATE security_targets SET current_path = ? WHERE id = ?",
+            (str(alias), stable_target_id(targets[1])),
+        )
+    selected = 1 if exact_saved else 0
+    if stale_exact or device_changed:
+        metadata = targets[0].stat()
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (
+                str(metadata.st_dev + 1 if device_changed else metadata.st_dev),
+                str(metadata.st_ino + 1 if stale_exact else metadata.st_ino),
+                SCAN_IDS[selected],
+            ),
+        )
+    result = workbench_api["native_indexes"].list_global_findings(
+        connection, query_args(repository=str(alias))
+    )
+    available = not stale_exact and (not device_changed or sys.platform == "linux")
+    assert result["projectionAvailable"] is available
+    assert [item["scanId"] for item in result["findings"]] == (
+        [SCAN_IDS[selected]] if available else []
+    )
+
+
+@pytest.mark.parametrize("operation", ["list", "matching"])
+@pytest.mark.parametrize("requested_kind", ["saved_alias", "canonical", "unsaved_alias"])
+def test_requested_alias_keeps_its_own_legacy_scan_history(
+    workbench_api, indexed_collections, tmp_path, operation, requested_kind
+):
+    connection, targets = indexed_collections
+    alias = tmp_path / "saved-alias"
+    alias.symlink_to(targets[0], target_is_directory=True)
+    unsaved_alias = tmp_path / "unsaved-alias"
+    unsaved_alias.symlink_to(targets[0], target_is_directory=True)
+    connection.execute(
+        "UPDATE security_targets SET current_path = ? WHERE id = ?",
+        (str(alias), stable_target_id(targets[1])),
+    )
+    connection.execute("UPDATE scans SET target_path = ? WHERE id = ?", (str(alias), SCAN_IDS[1]))
+    selected, requested = {
+        "saved_alias": (SCAN_IDS[1], alias),
+        "canonical": (SCAN_IDS[0], targets[0]),
+        "unsaved_alias": (SCAN_IDS[0], unsaved_alias),
+    }[requested_kind]
+    history = workbench_api["scan_history"]
+    args = query_args(repository=str(requested), limit=None, force=False, after_scan_id=selected)
+    if operation == "list":
+        assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
+            selected
+        ]
+    else:
+        result = history.list_unmatched_scan_pairs(
+            connection,
+            args,
+            backfill_finding_details=lambda *args: None,
+            read_coverage=lambda *args: {},
+        )
+        assert result["scanCount"] == 1
+        assert result["repository"] == str(targets[0])
 
 
 @pytest.mark.parametrize("collection", ["scans", "repositories", "findings"])
@@ -409,9 +482,7 @@ def test_collection_pages_honor_the_advertised_limit(
     if collection == "scans":
         page = workbench_api["scan_history"].list_scans(connection, arguments)
     elif collection == "repositories":
-        page = workbench_api["native_indexes"].list_repositories(
-            connection, arguments, read_coverage=workbench_api["coverage_for_comparison"]
-        )
+        page = workbench_api["native_indexes"].list_repositories(connection, arguments)
     else:
         page = workbench_api["list_findings"](connection, arguments)["findingsPage"]
     assert page["limit"] == 50
@@ -423,9 +494,7 @@ def test_unscanned_repositories_follow_scanned_rows_and_paginate(
 ):
     connection, _ = indexed_collections
     indexes = workbench_api["native_indexes"]
-    query = partial(
-        indexes.list_repositories, read_coverage=workbench_api["coverage_for_comparison"]
-    )
+    query = indexes.list_repositories
     scanned = query(connection)["repositories"]
     unscanned = sorted(
         workbench_api["ensure_security_target"](connection, str(tmp_path / name))
@@ -463,7 +532,7 @@ def test_unscanned_repositories_follow_scanned_rows_and_paginate(
                 "2026-10-08T01:00:00Z",
                 "2026-10-08t03:00:00.000000+02:00",
             ],
-            [2, 1, 0],
+            [0, 1, 2],
         ),
     ],
 )
@@ -501,7 +570,6 @@ def test_scan_pages_compare_updates_and_preserve_ties(
         ("2026-10-08T03:00:00+02:00", "2026-10-08T01:00:00.100000Z", False),
         ("2026-10-08T03:00:00.100000+02:00", "2026-10-08t01:00:00.100z", True),
         ("2026-10-08T01:00:00.1Z", "2026-10-08T01:00:00.12Z", False),
-        ("2026-10-08T01:00:01Z", "2026-10-08T01:00:00Z", False),
         ("2026-10-08T01:00:00.1234Z", "2026-10-08T01:00:00.23456Z", False),
         ("2026-10-08T03:00:00.1+02:00", "2026-10-08t01:00:00.100000z", True),
         ("2026-10-08T01:00:00.1234567Z", "2026-10-08T01:00:00.2345678Z", False),
@@ -513,7 +581,7 @@ def test_scan_pages_compare_updates_and_preserve_ties(
         ),
     ],
 )
-def test_scan_admission_order_keeps_latest_and_first_seen_queries_consistent(
+def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
     workbench_api, indexed_collections, older, newer, equal
 ):
     connection, targets = indexed_collections
@@ -538,30 +606,43 @@ def test_scan_admission_order_keeps_latest_and_first_seen_queries_consistent(
     )
     before = list(connection.iterdump())
     indexes = workbench_api["native_indexes"]
-    connection.create_function(
-        "codex_security_finding_group",
-        2,
-        lambda _occurrence, finding: f"finding:{finding}",
-        deterministic=True,
-    )
-    findings = {
-        finding["finding_id"]: finding
-        for finding in indexes._indexed_findings(connection, allowed_scan_ids=set(SCAN_IDS))
-    }
+    findings = {finding["finding_id"]: finding for finding in indexes._indexed_findings(connection)}
     assert findings["finding-1"]["confirmed_in_latest_scan"] is True
     assert findings["finding-0"]["known_since"] == older
     assert findings["finding-0"]["known_scan_ids"] == SCAN_IDS[:2]
-    repository = indexes.list_repositories(
-        connection,
-        query_args(target_id=target_id),
-        read_coverage=workbench_api["coverage_for_comparison"],
-    )["repositories"][0]
+    repository = indexes.list_repositories(connection, query_args(target_id=target_id))[
+        "repositories"
+    ][0]
     assert repository["latestScan"]["scanId"] == SCAN_IDS[1]
     history = workbench_api["scan_history"].list_scans(connection, query_args(target_id=target_id))[
         "scans"
     ]
-    assert [scan["scanId"] for scan in history] == SCAN_IDS[1::-1]
+    assert [scan["scanId"] for scan in history] == (SCAN_IDS[:2] if equal else SCAN_IDS[1::-1])
     assert list(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("newer_status", ["complete", "running", "failed"])
+def test_repository_latest_scan_uses_completion_order_without_hiding_active_scans(
+    workbench_api, indexed_collections, newer_status
+):
+    connection, targets = indexed_collections
+    target_id = stable_target_id(targets[0])
+    connection.execute("UPDATE scans SET completion_sequence = completion_sequence + 100")
+    for index, sequence in [(0, 2), (1, 1)]:
+        connection.execute(
+            "UPDATE scans SET target_id = ?, started_at = ?, completion_sequence = ?, status = ? WHERE id = ?",
+            (
+                target_id,
+                f"2026-08-01T00:{index * 10:02d}:00Z",
+                sequence if index == 0 or newer_status == "complete" else None,
+                "complete" if index == 0 else newer_status,
+                SCAN_IDS[index],
+            ),
+        )
+    repository = workbench_api["native_indexes"].list_repositories(
+        connection, query_args(target_id=target_id)
+    )["repositories"][0]
+    assert repository["latestScan"]["scanId"] == SCAN_IDS[0 if newer_status == "complete" else 1]
 
 
 def _linked_history_fixture(connection, targets):
@@ -586,11 +667,14 @@ def _linked_history_fixture(connection, targets):
         "Synthetic history",
     )
     git("-C", str(targets[0]), "worktree", "add", "--quiet", "--detach", str(targets[1]), "HEAD")
+    from datetime import datetime, timezone
+
+    scanned_at = datetime.now(timezone.utc).isoformat()
     for index in range(2):
         metadata = targets[index].stat()
         connection.execute(
-            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
-            (str(metadata.st_dev), str(metadata.st_ino), SCAN_IDS[index]),
+            "UPDATE scans SET target_device = ?, target_inode = ?, started_at = ?, created_at = ? WHERE id = ?",
+            (str(metadata.st_dev), str(metadata.st_ino), scanned_at, scanned_at, SCAN_IDS[index]),
         )
     return [
         connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
@@ -600,6 +684,7 @@ def _linked_history_fixture(connection, targets):
 
 def _copy_history_scan(connection, template, index):
     row = dict(template)
+    row["completion_sequence"] = None
     row["id"] = f"20000000-0000-4000-8000-{index:012d}"
     row["scan_dir"] = f"{template['scan_dir']}-copy-{index}"
     columns = ",".join(row)
@@ -619,14 +704,16 @@ def test_connected_history_git_probes_scale_with_checkouts_not_saved_pairs(
     connection, targets = indexed_collections
     scans = _linked_history_fixture(connection, targets)
     history = workbench_api["scan_history"]
-    original_git = history.git_output
+    import workbench_target_state as target_state
+
+    inspect = target_state._inspect_repository_target
     probes = []
 
-    def counted_git(target, *arguments):
-        probes.append((target, arguments))
-        return original_git(target, *arguments)
+    def counted_inspect(*arguments, **kwargs):
+        probes.append(arguments[1])
+        return inspect(*arguments, **kwargs)
 
-    monkeypatch.setattr(history, "git_output", counted_git)
+    monkeypatch.setattr(target_state, "_inspect_repository_target", counted_inspect)
     connection.execute(
         "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
         (scans[0]["id"], scans[1]["id"]),
@@ -656,113 +743,13 @@ def test_cached_checkout_relationship_still_checks_each_scan_owner_and_epoch(
     connection, targets = indexed_collections
     before, after = _linked_history_fixture(connection, targets)
     history = workbench_api["scan_history"]
-    cache = {}
-    assert history._same_registered_repository(
-        connection, before, after, checkout_relationships=cache
-    )
+    assert history._same_registered_repository(connection, before, after)
     stale = {**dict(after), "target_inode": str(int(after["target_inode"]) + 1)}
-    assert not history._same_registered_repository(
-        connection, before, stale, checkout_relationships=cache
-    )
+    assert not history._same_registered_repository(connection, before, stale)
     _copy_history_scan(
         connection, {**dict(before), "target_inode": str(int(before["target_inode"]) + 1)}, 99
     )
-    assert not history._same_registered_repository(
-        connection, before, after, checkout_relationships=cache
-    )
-
-
-def test_matched_findings_reuse_checkout_probes_across_saved_scan_pairs(
-    workbench_api, indexed_collections, monkeypatch
-):
-    connection, targets = indexed_collections
-    scans = _linked_history_fixture(connection, targets)
-    history = workbench_api["scan_history"]
-    original_git = history.git_output
-    probes = []
-
-    def counted_git(target, *arguments):
-        probes.append((target, arguments))
-        return original_git(target, *arguments)
-
-    monkeypatch.setattr(history, "git_output", counted_git)
-    assert history._same_registered_repository(connection, *scans)
-    one_relationship_probes = len(probes)
-    assert one_relationship_probes > 0
-    occurrences = ["occurrence-0", "occurrence-1"]
-    for index in range(22):
-        scan = _copy_history_scan(connection, scans[index % 2], index)
-        scans.append(scan)
-        occurrence = dict(
-            connection.execute(
-                "SELECT * FROM finding_occurrences WHERE id = ?", (occurrences[index % 2],)
-            ).fetchone()
-        )
-        occurrence.update(id=f"copied-occurrence-{index}", scan_id=scan["id"])
-        connection.execute(
-            f"INSERT INTO finding_occurrences ({','.join(occurrence)}) "
-            f"VALUES ({','.join('?' for _ in occurrence)})",
-            tuple(occurrence.values()),
-        )
-        occurrences.append(occurrence["id"])
-    for index, before in enumerate(scans):
-        for after_index, after in enumerate(scans[index + 1 :], index + 1):
-            if before["target_id"] == after["target_id"]:
-                continue
-            connection.execute(
-                "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
-                (before["id"], after["id"]),
-            )
-            connection.execute(
-                "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'same issue')",
-                (before["id"], after["id"], occurrences[index], occurrences[after_index]),
-            )
-    connection.create_function(
-        "codex_security_finding_group",
-        2,
-        lambda _occurrence, finding: f"finding:{finding}",
-        deterministic=True,
-    )
-    probes.clear()
-    (finding,) = list(
-        workbench_api["native_indexes"]._indexed_findings(
-            connection,
-            allowed_scan_ids={scan["id"] for scan in scans},
-            allow_cross_target_matches=True,
-        )
-    )
-    assert set(finding["known_scan_ids"]) == {scan["id"] for scan in scans}
-    assert finding["occurrence_count"] == len(scans)
-    assert len(probes) <= 2 * one_relationship_probes
-
-
-def test_indexed_history_expands_each_connected_target_group_once(
-    workbench_api, indexed_collections, monkeypatch
-):
-    connection, targets = indexed_collections
-    before, after = _linked_history_fixture(connection, targets)
-    connection.execute(
-        "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
-        (before["id"], after["id"]),
-    )
-    history = workbench_api["scan_history"]
-    original = history.saved_repository_target_ids
-    traversals = []
-
-    def counted_traversal(connection, scan):
-        traversals.append(scan["target_id"])
-        return original(connection, scan)
-
-    monkeypatch.setattr(history, "saved_repository_target_ids", counted_traversal)
-    findings = list(
-        workbench_api["native_indexes"]._indexed_active_findings(
-            connection,
-            workbench_api["coverage_for_comparison"],
-            target_ids={before["target_id"], after["target_id"]},
-        )
-    )
-    assert findings
-    assert len(traversals) == 1
+    assert not history._same_registered_repository(connection, before, after)
 
 
 @pytest.mark.parametrize("in_transaction", [False, True])
@@ -791,9 +778,7 @@ def test_repository_index_keeps_one_scan_cohort(
         source.backup(reader)
         reader.row_factory = sqlite3.Row
         assert reader.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
-        before = indexes.list_repositories(
-            reader, read_coverage=workbench_api["coverage_for_comparison"]
-        )
+        before = indexes.list_repositories(reader)
         if in_transaction:
             reader.execute("BEGIN")
 
@@ -827,25 +812,18 @@ def test_repository_index_keeps_one_scan_cohort(
             return cursor
 
         proxy = SimpleNamespace(execute=execute, create_function=reader.create_function)
-        assert (
-            indexes.list_repositories(proxy, read_coverage=workbench_api["coverage_for_comparison"])
-            == before
-        )
+        assert indexes.list_repositories(proxy) == before
         assert reader.in_transaction is in_transaction
         reader.commit()
-        after = indexes.list_repositories(
-            reader, read_coverage=workbench_api["coverage_for_comparison"]
-        )["repositories"]
-        renamed = next(row for row in after if row["displayName"] == "renamed")
-        assert renamed["latestScan"]["scanId"] == new_id
-        assert renamed["scanCount"] == 2
+        after = indexes.list_repositories(reader)["repositories"]
+        assert after[0]["latestScan"]["scanId"] == new_id
+        assert after[0]["displayName"] == "renamed"
+        assert after[0]["scanCount"] == 2
         first = next(row for row in after if row["latestScan"]["scanId"] == SCAN_IDS[1])
         assert (first["scanCount"], first["openFindingsCount"]) == (1, 1)
 
 
-def test_repository_latest_preserves_admission_order_with_submillisecond_timestamps(
-    workbench_api, indexed_collections
-):
+def test_repository_latest_keeps_sqlite_millisecond_ties(workbench_api, indexed_collections):
     connection, targets = indexed_collections
     target_id = stable_target_id(targets[0])
     for scan_id, fraction in zip(SCAN_IDS[:2], ("123200", "123100")):
@@ -853,14 +831,10 @@ def test_repository_latest_preserves_admission_order_with_submillisecond_timesta
             "UPDATE scans SET target_id = ?, started_at = ? WHERE id = ?",
             (target_id, f"2026-10-08T01:00:00.{fraction}Z", scan_id),
         )
-    query = partial(
-        workbench_api["native_indexes"].list_repositories,
-        read_coverage=workbench_api["coverage_for_comparison"],
-    )
+    query = workbench_api["native_indexes"].list_repositories
     repositories = query(connection)["repositories"]
-    repository = next(item for item in repositories if item["targetId"] == target_id)
-    assert repository["latestScan"]["scanId"] == SCAN_IDS[1]
-    assert repository["scanCount"] == 2
+    assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[1]
+    assert repositories[0]["scanCount"] == 2
 
     connection.execute("UPDATE scans SET cost_json = '{' WHERE id = ?", (SCAN_IDS[0],))
     with pytest.raises(ValueError, match="Expecting property name"):
@@ -872,10 +846,7 @@ def test_repository_summary_excludes_scans_without_progress(workbench_api, index
     target_id = stable_target_id(targets[0])
     connection.execute("UPDATE scans SET target_id = ? WHERE id = ?", (target_id, SCAN_IDS[1]))
     connection.execute("DELETE FROM scan_progress WHERE scan_id = ?", (SCAN_IDS[1],))
-    query = partial(
-        workbench_api["native_indexes"].list_repositories,
-        read_coverage=workbench_api["coverage_for_comparison"],
-    )
+    query = workbench_api["native_indexes"].list_repositories
     repositories = query(connection, query_args(target_id=target_id))["repositories"]
     assert len(repositories) == 1
     assert repositories[0]["latestScan"]["scanId"] == SCAN_IDS[0]

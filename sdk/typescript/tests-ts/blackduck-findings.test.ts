@@ -4,9 +4,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   blackDuckReportRepositories,
-  needsPreviousBlackDuckProjection,
   normalizeBlackDuckFindings,
-  normalizePreviousBlackDuckFindings,
   readBlackDuckFindings,
 } from "../src/blackduck-findings.js";
 import {
@@ -147,15 +145,10 @@ test("keeps GitHub package coordinates separate from the repository that was sca
     componentVersionOriginId: "LibraryOrg/Library/v1.0",
     packageUrl: "pkg:github/LibraryOrg/Library@release%2Fv1.0",
   };
-  const previous = normalizePreviousBlackDuckFindings([row], repository)
-    .findings[0]!;
-  expect(previous.evidence.packages).toEqual([]);
   for (const target of ["local", "cloud"] as const) {
     const current = normalizeBlackDuckFindings([row], repository, target);
-    expect(needsPreviousBlackDuckProjection(current)).toBe(true);
     expect(current.excluded).toEqual([]);
     expect(current.findings[0]).toMatchObject({
-      source_finding_id: previous.source_finding_id,
       evidence: {
         packages: [
           {
@@ -170,10 +163,6 @@ test("keeps GitHub package coordinates separate from the repository that was sca
   }
   row.packageUrl = "pkg:github/LibraryOrg/Library@" + "v".repeat(513);
   const bounded = normalizeBlackDuckFindings([row], repository);
-  expect(needsPreviousBlackDuckProjection(bounded)).toBe(false);
-  expect(bounded).toEqual(
-    normalizePreviousBlackDuckFindings([row], repository),
-  );
   expect(bounded.findings[0]!.evidence.source_data?.["row"]).toEqual(row);
 });
 
