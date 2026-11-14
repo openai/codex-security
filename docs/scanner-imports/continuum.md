@@ -12,8 +12,8 @@ For a finding from another scanner, you can also check its repository in that
 scanner. [AWS Continuum code sources](https://docs.aws.amazon.com/continuum/latest/userguide/cv-getting-started.html)
 
 **Saved report.** Set `report` to a saved issue export, a finding capture with
-patches, a native finding detail, an array of captures or details, or a complete
-finding list. Then [preview the report](#preview-and-import).
+validation evidence or patches, a native finding detail, an array of captures
+or details, or a complete finding list. Then [preview the report](#preview-and-import).
 
 ```sh
 report=/private/path/continuum.json
@@ -180,13 +180,16 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   report="$out/continuum.json"
 ```
 
-### Collect a finding with patches
+<a id="collect-a-finding-with-patches"></a>
+
+### Collect one finding with validation evidence and patches
 
 Pass the verified short finding ID to `import continuum --finding-id`. The CLI
 uses your signed-in AWS CLI to read the finding, follow its created or duplicate
-issue ID, and retrieve its `PATCH` artifacts. This mode needs
-`continuum:GetCodeFinding`, `continuum:ListCodeIssueArtifacts`, and
-`continuum:GetCodeIssueArtifact`.
+issue ID, and retrieve matching `VALIDATION_EVIDENCE` and `PATCH` artifacts.
+This mode needs `continuum:GetCodeFinding`, `continuum:ListCodeIssueArtifacts`, and
+`continuum:GetCodeIssueArtifact`. When validation has no per-finding breakdown,
+the CLI uses `continuum:GetCodeIssue` to check which findings the issue covers.
 [AWS issue artifacts](https://docs.aws.amazon.com/continuum/latest/APIReference/API_ListCodeIssueArtifacts.html)
 
 Pass the absolute path of the local checkout that owns the finding as
@@ -199,8 +202,9 @@ repository and no S3 sources. The CLI verifies this with
 `continuum:GetEnvironment` before collecting the finding and can then include
 patches that have no repository name.
 
-For other environments, pass `--repository-name "$AWS_SOURCE_NAME"` with
-the exact source name AWS assigns to the repository. The collector keeps
+For other environments, including S3-only environments, pass
+`--repository-name "$AWS_SOURCE_NAME"` with the exact source name AWS assigns
+to the repository. The collector keeps
 patches with that exact name and prints the IDs of unnamed patches to stderr.
 [AWS patch fields](https://docs.aws.amazon.com/continuum/latest/APIReference/API_PatchBody.html)
 
@@ -209,20 +213,32 @@ report=
 source_root=/absolute/path/to/checkout
 out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   codex-security import continuum "$ENVIRONMENT_ID" --finding-id "$FINDING_ID" \
-    --source-root "$source_root" --format json > "$out/continuum.tmp" &&
+    --source-root "$source_root" --repository-name "$AWS_SOURCE_NAME" \
+    --format json > "$out/continuum.tmp" &&
   mv "$out/continuum.tmp" "$out/continuum.json" &&
   report="$out/continuum.json"
 ```
 
-If the finding has no linked issue or no matching patches, the collector saves
-the native finding detail. If an AWS read fails, retry the export before import.
+When AWS supplies `perFindingResults`, the capture retains the selected finding's
+result, including its verdict and any flow or HTTP proof. Without that breakdown,
+the collector can attach the whole validation artifact when the selected finding
+is the issue's sole contributor. The capture records the issue ARN, issue ID,
+and its `findingIds` in `validationIssue` so a saved import can verify that
+association. Evidence shared by several findings without an identified subject
+is omitted. If no artifacts match, the collector saves the
+native finding detail. If an AWS read fails, retry the export before import.
 
 Publish this report with `publish findings --provider continuum` and the verified
 `--source-repository-url`. The record is identified by the finding ARN.
 
-The local import retains exact patch bytes and artifact descriptors in
-`evidence.source_data.patches`. Cloud retains the descriptors and marks
-oversized bodies with `contentOmitted: "cloud_evidence_limit"`.
+Attack-path scoring reads the imported validation artifacts from
+`evidence.source_data.evidence_artifacts`. Matching patches are in
+`evidence.source_data.patches`. Local imports keep the full validation and
+patch bodies. Cloud keeps the validation bodies that fit, then uses the
+remaining space for patches. Each omitted body's descriptor keeps the
+artifact ID and records `contentOmitted: "cloud_evidence_limit"`. If the
+validation descriptors themselves exceed the remaining space, Cloud publishes
+the finding with its usual patch projection and omits the validation metadata.
 
 ## Use imported evidence in the matching checkout
 
@@ -240,7 +256,7 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
 
 ```mermaid
 flowchart LR
-    A[Continuum finding and linked patches] --> C[Selected finding capture]
+    A[Continuum finding with matching validation evidence and patches] --> C[Selected finding capture]
     C --> F[One finding file]
     C --> I[Import to local workbench]
     E[Issue export with validation evidence and eligible patches] --> I
@@ -252,16 +268,18 @@ flowchart LR
     F --> V
 ```
 
-### Score an imported issue
+<a id="score-an-imported-issue"></a>
+
+### Score an imported issue or finding
 
 From the matching checkout with the Codex Security plugin enabled, pass the
-selected issue to the standalone attack-path skill. It can use observations
+selected record to the standalone attack-path skill. It can use observations
 in the AWS artifacts to establish or rule out reachability for the affected
 flow.
 
 ```sh
 codex exec --ephemeral -s read-only \
-  "Use \$codex-security:attack-path-analysis to score the imported issue at $finding"
+  "Use \$codex-security:attack-path-analysis to score the imported finding at $finding"
 ```
 
 To rescore a matching finding in an existing Codex Security scan, use the

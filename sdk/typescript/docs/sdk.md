@@ -772,7 +772,7 @@ If you know the source repository, pass its Git URL in `options.sourceRepository
 to check the Sonar binding before fetching issues.
 
 For AWS Continuum, use `readContinuumFindings(path, sourceRepositoryUrl)` with a
-saved issue export or finding response. Use
+saved issue export, single-finding capture, or native finding response. Use
 `normalizeContinuumFindings(input, sourceRepositoryUrl)` with parsed JSON.
 Issue exports with a saved repository URL can omit the second argument.
 For other reports, pass the verified source repository URL.
@@ -781,7 +781,11 @@ For other reports, pass the verified source repository URL.
 Pass `"local"` as the third argument to retain full patch contents in collector
 captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
 when the patch contents exceed the evidence budget. Available patches are in
-`evidence.source_data.patches`.
+`evidence.source_data.patches`. Single-finding captures provide their matching
+validation artifacts in `evidence.source_data.evidence_artifacts`. The local
+projection retains each validation body, and Cloud marks omitted bodies with
+the same `contentOmitted` value. When even the validation descriptors exceed
+the budget, Cloud omits them and preserves the finding and its fitting patches.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.

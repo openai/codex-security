@@ -483,7 +483,16 @@ test("Cloud publication of a stored capture keeps fitting patches and identifies
   const finding = { ...continuumDetail(), duplicateOfIssueId: "otherissue" };
   const big = patchArtifact("bigpatch", "+example\n".repeat(32 * 1024));
   const small = patchArtifact("smallpatch", "+ok\n");
-  const input = { finding, patches: [big, small] };
+  // Saved scanner reports can contain a matching result without a verdict.
+  const proof = {
+    ...continuumValidationArtifact(),
+    body: {
+      validationEvidence: {
+        perFindingResults: [{ findingId: finding.findingId }],
+      },
+    },
+  };
+  const input = { finding, patches: [big, small], evidenceArtifacts: [proof] };
   const local = normalizeContinuumFindings(input, continuumRepository, "local");
   expect(local.excluded).toEqual([]);
   const stored = local.findings[0]!;
@@ -496,16 +505,190 @@ test("Cloud publication of a stored capture keeps fitting patches and identifies
     { ...descriptor, contentOmitted: "cloud_evidence_limit" },
     small,
   ]);
-  expect(
-    projectStoredFinding(
-      {
-        provider: "continuum",
-        sourceFindingId: stored.source_finding_id,
-        evidence: stored.evidence,
-      },
-      [],
-    ).findings,
-  ).toEqual(cloud.findings);
+  expect(publishStoredCapture(stored).findings).toEqual(cloud.findings);
+});
+
+// Local storage round-trips through JSON before a later Cloud publication.
+function publishStoredCapture(
+  stored: ReturnType<typeof normalize>["findings"][number],
+) {
+  return projectStoredFinding(
+    {
+      provider: "continuum",
+      sourceFindingId: stored.source_finding_id,
+      evidence: JSON.parse(JSON.stringify(stored.evidence)),
+    },
+    [],
+  );
+}
+
+// The first UTF-8 body fits the Cloud limit alone. The second exceeds it alone.
+test.each([87_300, 90_000])(
+  "Cloud keeps a selected finding, fitting validation and patch when a %i-character proof exceeds the available space",
+  (proofLength) => {
+    const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+    const finding = { ...continuumDetail(), createdIssueId: issueId };
+    const validationIssue = {
+      issueId,
+      issueArn,
+      findingIds: [finding.findingId],
+    };
+    const { body: _, ...descriptor } = continuumValidationArtifact();
+    const large = { ...descriptor, body: { raw: "界".repeat(proofLength) } };
+    const small = {
+      ...descriptor,
+      artifactId: "smallproof",
+      body: { validationEvidence: { exploitable: "UNCERTAIN" } },
+    };
+    const patches = [patchArtifact("firstpatch", "+checkedExample(input)\n")];
+    const report = {
+      finding,
+      validationIssue,
+      patches,
+      evidenceArtifacts: [large, small],
+    };
+    const local = normalizeContinuumFindings(
+      report,
+      continuumRepository,
+      "local",
+    );
+    expect(local.excluded).toEqual([]);
+    const stored = local.findings[0]!;
+    expect(stored.evidence.source_data).toEqual({
+      format: "aws-continuum-code-findings/v1",
+      sourceRepositoryUrl: continuumRepository,
+      finding,
+      validation_issue: validationIssue,
+      patches,
+      evidence_artifacts: [large, small],
+    });
+
+    const cloud = normalize(report);
+    expect(cloud.excluded).toEqual([]);
+    expect(cloud.findings[0]!.evidence.source_data).toEqual({
+      ...stored.evidence.source_data,
+      evidence_artifacts: [
+        { ...descriptor, contentOmitted: "cloud_evidence_limit" },
+        small,
+      ],
+    });
+    expect(publishStoredCapture(stored).findings).toEqual(cloud.findings);
+  },
+);
+
+test("adding oversized validation preserves a fitting proof when its patch body competes for Cloud space", () => {
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const finding = { ...continuumDetail(), createdIssueId: issueId };
+  const validationIssue = {
+    issueId,
+    issueArn,
+    findingIds: [finding.findingId],
+  };
+  const { body: _, ...descriptor } = continuumValidationArtifact();
+  const large = { ...descriptor, body: { raw: "x".repeat(270_000) } };
+  const medium = {
+    ...descriptor,
+    artifactId: "matchingproof",
+    body: { raw: "v".repeat(120_000) },
+  };
+  const patch = patchArtifact("matchingpatch", `+${"p".repeat(180_000)}\n`);
+  const { patch: _diff, ...patchDescriptor } = patch;
+  const marker = { contentOmitted: "cloud_evidence_limit" };
+
+  for (const [evidenceArtifacts, expected] of [
+    [[medium], [medium]],
+    [
+      [large, medium],
+      [{ ...descriptor, ...marker }, medium],
+    ],
+  ] as const) {
+    const report = {
+      finding,
+      validationIssue,
+      evidenceArtifacts,
+      patches: [patch],
+    };
+    const local = normalizeContinuumFindings(
+      report,
+      continuumRepository,
+      "local",
+    );
+    expect(local.excluded).toEqual([]);
+    const stored = local.findings[0]!;
+    expect(stored.evidence.source_data?.["evidence_artifacts"]).toEqual(
+      evidenceArtifacts,
+    );
+    expect(stored.evidence.source_data?.["patches"]).toEqual([patch]);
+
+    const cloud = normalize(report);
+    expect(cloud.excluded).toEqual([]);
+    expect(cloud.findings[0]!.evidence.source_data).toEqual({
+      ...stored.evidence.source_data,
+      evidence_artifacts: expected,
+      patches: [{ ...patchDescriptor, ...marker }],
+    });
+    expect(publishStoredCapture(stored).findings).toEqual(cloud.findings);
+  }
+});
+
+test("validation descriptors cannot exclude a selected finding and patches that already fit Cloud", () => {
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const finding = {
+    ...continuumDetail(),
+    createdIssueId: issueId,
+    stepsToReproduce: Array<string>(31).fill("x".repeat(8192)).concat(""),
+  };
+  const validationIssue = {
+    issueId,
+    issueArn,
+    findingIds: [finding.findingId],
+  };
+  const evidenceArtifacts = [
+    { ...continuumValidationArtifact(), body: { raw: "Validation trace" } },
+  ];
+  const large = patchArtifact("largepatch", `+${"p".repeat(270_000)}\n`);
+  const { patch: _, ...descriptor } = large;
+  const small = patchArtifact("smallpatch", "+checked\n");
+  const patches = [large, small];
+  const initial = normalize({ finding, patches }).findings[0]!.evidence;
+  const remaining = 256 * 1024 - Buffer.byteLength(JSON.stringify(initial));
+  finding.stepsToReproduce[31] = "x".repeat(remaining);
+  const baseline = normalize({ finding, patches });
+  expect(baseline.findings[0]!.evidence.source_data?.["patches"]).toEqual([
+    { ...descriptor, contentOmitted: "cloud_evidence_limit" },
+    small,
+  ]);
+
+  const oversized = {
+    ...finding,
+    stepsToReproduce: [...finding.stepsToReproduce, "x".repeat(8192)],
+  };
+  const excluded = normalize({ finding: oversized, patches });
+  expect(excluded.excluded).toMatchObject([
+    { reason: "Evidence exceeds the Cloud limit of 256 KiB." },
+  ]);
+  for (const [native, expected] of [
+    [finding, baseline],
+    [oversized, excluded],
+  ] as const) {
+    const report = {
+      finding: native,
+      validationIssue,
+      evidenceArtifacts,
+      patches,
+    };
+    expect(normalize(report)).toEqual(expected);
+    const local = normalizeContinuumFindings(
+      report,
+      continuumRepository,
+      "local",
+    );
+    const stored = local.findings[0]!;
+    expect(stored.evidence.source_data?.["evidence_artifacts"]).toEqual(
+      evidenceArtifacts,
+    );
+    expect(publishStoredCapture(stored)).toEqual(expected);
+  }
 });
 
 test("preserves dependency and posture evidence without classifying it as a code flaw", () => {
@@ -639,26 +822,101 @@ test("retains status timestamps without inventing an update time from other AWS 
   );
 });
 
-test("Cloud projects packages within its limits and retains all AWS package evidence", () => {
+test("Cloud reprojects packages and retains selected finding validation without a patch", () => {
   const valid = Array.from({ length: 101 }, (_, i) => ({
     name: `package-${i}`,
   }));
   const finding = {
     ...continuumSummary(),
+    createdIssueId: "issue1",
     affectedPackages: [{ name: "界".repeat(200) }, ...valid],
   };
-  const cloud = normalize(finding);
+  const artifact = {
+    ...continuumValidationArtifact(),
+    body: {
+      validationEvidence: {
+        exploitable: "EXPLOITABLE",
+        sourceAnalysis: { summary: "Example proof" },
+      },
+    },
+  };
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const validationIssue = {
+    issueId,
+    issueArn,
+    findingIds: [finding.findingId],
+  };
+  const evidenceArtifacts = [
+    artifact,
+    { ...artifact, artifactId: "validation2", body: { raw: "Example proof" } },
+  ];
+  const report = { finding, evidenceArtifacts, validationIssue };
+  const cloud = normalize(report);
   expect(cloud.excluded).toEqual([]);
   expect(cloud.findings[0]!.evidence.packages?.map((pkg) => pkg.name)).toEqual(
     valid.slice(0, 100).map((pkg) => pkg.name),
   );
   expect(cloud.findings[0]!.evidence.source_data?.["finding"]).toEqual(finding);
   const local = normalizeContinuumFindings(
-    finding,
+    report,
     continuumRepository,
     "local",
   );
-  expect(local.findings[0]!.evidence.packages).toHaveLength(102);
+  const stored = local.findings[0]!;
+  expect(stored.evidence.packages).toHaveLength(102);
+  for (const evidence of [stored.evidence, cloud.findings[0]!.evidence]) {
+    expect(evidence.source_data?.["evidence_artifacts"]).toEqual(
+      evidenceArtifacts,
+    );
+    expect(evidence.source_data?.["validation_issue"]).toEqual(validationIssue);
+  }
+  expect(
+    projectStoredFinding(
+      {
+        provider: "continuum",
+        sourceFindingId: stored.source_finding_id,
+        evidence: stored.evidence,
+      },
+      [],
+    ).findings,
+  ).toEqual(cloud.findings);
+});
+
+test("a selected capture keeps its patches and omits issue-wide proof without a matching single-finding issue", () => {
+  const { issueId, issueArn } = continuumIssueExport().issues[0]!.issue;
+  const finding = { ...continuumDetail(), duplicateOfIssueId: issueId };
+  const report = { finding, patches: [patchArtifact("firstpatch", "+ok\n")] };
+  const expected = normalizeContinuumFindings(
+    report,
+    continuumRepository,
+    "local",
+  );
+  expect(expected.excluded).toEqual([]);
+  expect(expected.findings[0]!.evidence.source_data?.["patches"]).toEqual(
+    report.patches,
+  );
+  const artifact = continuumValidationArtifact();
+  const evidenceArtifacts = [
+    { ...artifact, body: { validationEvidence: { exploitable: "UNCERTAIN" } } },
+    { ...artifact, artifactId: "validation2", body: { raw: "Example proof" } },
+  ];
+  const single = { issueArn, issueId, findingIds: [finding.findingId] };
+  for (const validationIssue of [
+    undefined,
+    {
+      ...single,
+      issueId: "other",
+      issueArn: issueArn.replace(issueId, "other"),
+    },
+    { ...single, issueArn: issueArn.replace("us-east-1", "us-west-2") },
+    { ...single, findingIds: ["two"] },
+    { ...single, findingIds: [finding.findingId, "two"] },
+  ]) {
+    const capture = { ...report, evidenceArtifacts, validationIssue };
+    expect(
+      normalizeContinuumFindings(capture, continuumRepository, "local"),
+    ).toEqual(expected);
+  }
 });
 
 test.each(["plain finding", "patch capture"])(
@@ -748,9 +1006,12 @@ test("local replay enriches one unassessed occurrence when the detailed record a
     const previous = await createAndReplayFinding(fixture);
     const finding = { ...continuumDetail(), createdIssueId: "oneissue" };
     const patches = [patchArtifact("firstpatch", "+checkedExample(input)\n")];
+    const artifact = continuumValidationArtifact();
     await writeFile(
       fixture.file,
-      gzipSync(JSON.stringify({ finding, patches })),
+      gzipSync(
+        JSON.stringify({ finding, patches, evidenceArtifacts: [artifact] }),
+      ),
     );
     const updated = await updateStoredFinding(fixture, previous);
     const normalized = normalize(continuumDetail());
@@ -766,6 +1027,19 @@ test("local replay enriches one unassessed occurrence when the detailed record a
     expect(updated.provider).toBe("continuum");
     expect(updated.evidence.details?.scanner_verdict).toBe("TRUE_POSITIVE");
     expect(updated.evidence.source_data?.["patches"]).toEqual(patches);
+    expect(updated.evidence.source_data?.["evidence_artifacts"]).toEqual([
+      {
+        ...artifact,
+        body: {
+          validationEvidence: {
+            exploitable: "EXPLOITABLE",
+            perFindingResults: [
+              { findingId: finding.findingId, exploitable: "EXPLOITABLE" },
+            ],
+          },
+        },
+      },
+    ]);
     await expect(
       fixture.prepare({
         sourceRepositoryUrl: "https://github.com/example/other",

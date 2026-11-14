@@ -3,6 +3,7 @@ import { CodexSecurityError } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import {
   CLOUD_EVIDENCE_BYTES,
+  CloudEvidenceSizeError,
   DEFAULT_CLOUD_STRING_BYTES,
   type ExternalImportTarget,
   repositoryUrlKey,
@@ -17,6 +18,7 @@ import {
   awsTimestampSeconds,
   concreteVersion,
   normalizeRecords,
+  optionalArray,
   scannerJsonReader,
   record,
   repositoryFilePath,
@@ -195,7 +197,7 @@ function reportRows(input: unknown) {
     "finding" in document
   ))
     throw new Error(
-      "Expected a Continuum ListCodeFindings, GetCodeFinding, or finding with patch artifacts.",
+      "Expected a Continuum ListCodeFindings, GetCodeFinding, or finding with artifacts.",
     );
   const summary = "items" in document;
   return {
@@ -204,7 +206,7 @@ function reportRows(input: unknown) {
   };
 }
 
-function isPatchCapture(value: unknown): value is Record<string, unknown> {
+function isFindingCapture(value: unknown): value is Record<string, unknown> {
   return isRecord(value) && !("findingArn" in value) && "finding" in value;
 }
 
@@ -240,37 +242,75 @@ export function readPatch(value: unknown) {
   };
 }
 
-function projectPatches(
-  patches: ReturnType<typeof readPatch>[],
+interface ArtifactGroups {
+  evidence_artifacts?: Record<string, unknown>[];
+  patches?: Record<string, unknown>[];
+}
+
+function projectArtifactBodies(
+  artifacts: ArtifactGroups,
   target: ExternalImportTarget,
-  project: (artifacts: object[]) => ExternalFinding["evidence"],
+  project: (artifacts: ArtifactGroups) => ExternalFinding["evidence"],
 ) {
-  if (!patches.length || target === "local") return project(patches);
+  if (!Object.keys(artifacts).length || target === "local")
+    return project(artifacts);
   try {
-    return project(patches);
-  } catch {
-    // Complete patches can exceed the Cloud evidence budget.
+    return project(artifacts);
+  } catch (error) {
+    if (!(error instanceof CloudEvidenceSizeError)) throw error;
   }
 
-  // Reserve each artifact's lookup information, then include whole patches that fit.
+  // Reserve all descriptors. Fit whole validation bodies before optional patches.
   const marker = { contentOmitted: "cloud_evidence_limit" };
-  const markerBytes = Buffer.byteLength(JSON.stringify(marker));
-  const sizes = patches.map(
-    ({ patch }) => Buffer.byteLength(JSON.stringify({ patch })) - markerBytes,
-  );
-  const projected = patches.map(({ patch, ...descriptor }, index) =>
-    sizes[index]! > 0 ? { ...descriptor, ...marker } : patches[index]!,
-  );
-  const result = project(projected);
-  let remaining =
-    CLOUD_EVIDENCE_BYTES - validateExternalEvidenceJson(result, target);
-  for (const [index, bytes] of sizes.entries()) {
-    if (bytes > 0 && bytes <= remaining) {
-      projected[index] = patches[index]!;
-      remaining -= bytes;
+  const projected: ArtifactGroups = {};
+  const omitted = [];
+  for (const key of ["evidence_artifacts", "patches"] as const) {
+    const group = artifacts[key];
+    if (!group) continue;
+    const bodyKey = key === "patches" ? "patch" : "body";
+    const wireBytes = (entry: object) =>
+      validateExternalEvidenceJson({ source_data: { [key]: [entry] } }, target);
+    const markerBytes = wireBytes(marker);
+    const compact: Record<string, unknown>[] = [];
+    projected[key] = compact;
+    for (const [index, artifact] of group.entries()) {
+      const { [bodyKey]: body, ...descriptor } = artifact;
+      try {
+        const bytes = wireBytes({ [bodyKey]: body }) - markerBytes;
+        if (bytes <= 0) {
+          compact.push(artifact);
+          continue;
+        }
+        omitted.push({ compact, index, bytes, artifact });
+      } catch (error) {
+        if (!(error instanceof CloudEvidenceSizeError)) throw error;
+      }
+      compact.push({ ...descriptor, ...marker });
     }
   }
-  result.source_data!["patches"] = projected;
+  let result: ExternalFinding["evidence"];
+  try {
+    result = project(projected);
+  } catch (error) {
+    if (
+      !(error instanceof CloudEvidenceSizeError) ||
+      !artifacts.evidence_artifacts?.length
+    )
+      throw error;
+    // Even the validation descriptors exceed the budget. Retry the original finding and patches.
+    return projectArtifactBodies(
+      artifacts.patches ? { patches: artifacts.patches } : {},
+      target,
+      project,
+    );
+  }
+  let remaining =
+    CLOUD_EVIDENCE_BYTES - validateExternalEvidenceJson(result, target);
+  for (const { compact, index, bytes, artifact } of omitted) {
+    if (bytes > remaining) continue;
+    compact[index] = artifact;
+    remaining -= bytes;
+  }
   return result;
 }
 
@@ -412,29 +452,73 @@ function issueEvidenceBody(artifact: Record<string, unknown>) {
   return { prevalidationSignals: { ...projection, signals } };
 }
 
+function issueEvidenceDescriptor(artifact: Record<string, unknown>) {
+  return {
+    artifactId: requiredText(
+      artifact["artifactId"],
+      "Continuum evidence artifact ID",
+    ),
+    artifactType: artifact["artifactType"],
+    ...(artifact["createdAt"] != null && { createdAt: artifact["createdAt"] }),
+    ...(artifact["mediaType"] != null && { mediaType: artifact["mediaType"] }),
+    ...(artifact["producer"] != null && { producer: artifact["producer"] }),
+  };
+}
+
+export function singleFindingValidationIssue(
+  issue: unknown,
+  issueId: unknown,
+  finding: ReturnType<typeof findingIdentity>,
+) {
+  if (!isRecord(issue) || typeof issueId !== "string") return null;
+  const arn = `${finding.scope}/code-issues/${issueId}`;
+  const ids = issue["findingIds"];
+  if (
+    issue["issueArn"] !== arn ||
+    issue["issueId"] !== issueId ||
+    !Array.isArray(ids) ||
+    ids.length !== 1 ||
+    ids[0] !== finding.id
+  )
+    return null;
+  return { issueArn: arn, issueId, findingIds: [finding.id] };
+}
+
+export function selectFindingValidationArtifact(
+  artifact: Record<string, unknown>,
+  findingId: unknown,
+) {
+  if (artifact["artifactType"] !== "VALIDATION_EVIDENCE") return;
+  const body = issueEvidenceBody(artifact);
+  if (!body) return;
+  const results = body.validationEvidence?.["perFindingResults"];
+  if (results === undefined) return { scope: "issue", artifact };
+  // A bundle's top-level proof can belong to a different finding.
+  const matches = array(results, "Continuum per-finding results")
+    .map((value) => record(value, "Continuum per-finding result"))
+    .filter((result) => result["findingId"] === findingId);
+  if (matches.length === 0) return;
+  return {
+    scope: "finding",
+    artifact: {
+      ...issueEvidenceDescriptor(artifact),
+      body: {
+        validationEvidence: {
+          ...(matches.length === 1 &&
+            "exploitable" in matches[0]! && {
+              exploitable: matches[0]!["exploitable"],
+            }),
+          perFindingResults: matches,
+        },
+      },
+    },
+  };
+}
+
 function issueEvidenceArtifacts(artifacts: Record<string, unknown>[]) {
   return artifacts.flatMap((artifact) => {
     const body = issueEvidenceBody(artifact);
-    if (!body) return [];
-    return [
-      {
-        artifactId: requiredText(
-          artifact["artifactId"],
-          "Continuum evidence artifact ID",
-        ),
-        artifactType: artifact["artifactType"],
-        ...(artifact["createdAt"] != null && {
-          createdAt: artifact["createdAt"],
-        }),
-        ...(artifact["mediaType"] != null && {
-          mediaType: artifact["mediaType"],
-        }),
-        ...(artifact["producer"] != null && {
-          producer: artifact["producer"],
-        }),
-        body,
-      },
-    ];
+    return body ? [{ ...issueEvidenceDescriptor(artifact), body }] : [];
   });
 }
 
@@ -609,9 +693,12 @@ function normalizeContinuumIssues(
       );
       if (!patches.length) return evidence;
       // Fit optional patch bodies after selecting the scanner evidence to retain.
-      return projectPatches(patches, target, (patches) =>
+      return projectArtifactBodies({ patches }, target, (artifacts) =>
         validateExternalEvidence(
-          { ...evidence, source_data: { ...evidence.source_data, patches } },
+          {
+            ...evidence,
+            source_data: { ...evidence.source_data, ...artifacts },
+          },
           target,
         ),
       );
@@ -676,20 +763,43 @@ export function normalizeContinuumFindings(
   const output = normalizeRecords(
     rows,
     (value) => {
-      const capture = !summary && isPatchCapture(value) ? value : undefined;
+      const capture = !summary && isFindingCapture(value) ? value : undefined;
       const row = record(
         capture ? capture["finding"] : value,
         "Continuum finding",
       );
-      const patches = capture
-        ? array(capture["patches"], "Continuum patches").map(readPatch)
-        : [];
-      if (
-        patches.length &&
-        !(text(row["createdIssueId"]) || text(row["duplicateOfIssueId"]))
-      )
+      const patches = optionalArray(
+        capture?.["patches"],
+        "Continuum patches",
+      ).map(readPatch);
+      const linkedIssue =
+        text(row["createdIssueId"]) ?? text(row["duplicateOfIssueId"]);
+      let validationIssue:
+        ReturnType<typeof singleFindingValidationIssue> | undefined;
+      const evidenceArtifacts = issueEvidenceArtifacts(
+        optionalArray(
+          capture?.["evidenceArtifacts"],
+          "Continuum evidence artifacts",
+        ).flatMap((value) => {
+          const selected = selectFindingValidationArtifact(
+            record(value, "Continuum validation artifact"),
+            row["findingId"],
+          );
+          if (!selected) return [];
+          if (selected.scope === "issue") {
+            validationIssue ??= singleFindingValidationIssue(
+              capture?.["validationIssue"],
+              linkedIssue,
+              findingIdentity(row),
+            );
+            if (!validationIssue) return [];
+          }
+          return [selected.artifact];
+        }),
+      );
+      if ((patches.length || evidenceArtifacts.length) && !linkedIssue)
         throw new Error(
-          "Continuum patches require a finding linked to an issue.",
+          `Continuum ${patches.length ? "patches" : "validation artifacts"} require a finding linked to an issue.`,
         );
       if (
         row["type"] !== "CONTINUUM_CODE_VULN" &&
@@ -773,27 +883,40 @@ export function normalizeContinuumFindings(
         ? { details: { ...evidence.details, weakness_ids: [namedCwe] } }
         : undefined;
       // Keep previously admissible evidence if an optional projection exceeds the Cloud budget.
-      return projectPatches(patches, target, (artifacts) =>
-        validateEnrichedExternalEvidence(
-          artifacts.length
-            ? {
-                ...evidence,
-                source_data: { ...evidence.source_data, patches: artifacts },
-              }
-            : evidence,
-          target,
-          inferred ? { ...enrichment, ...inferred } : undefined,
-          enrichment,
-          packages.length && updatedAt !== null
-            ? { source_updated_at: updatedAt }
-            : undefined,
-          inferred,
-        ),
+      return projectArtifactBodies(
+        {
+          ...(evidenceArtifacts.length && {
+            evidence_artifacts: structuredClone(evidenceArtifacts),
+          }),
+          ...(patches.length && { patches }),
+        },
+        target,
+        (artifacts) =>
+          validateEnrichedExternalEvidence(
+            {
+              ...evidence,
+              source_data: {
+                ...evidence.source_data,
+                ...(validationIssue &&
+                  artifacts.evidence_artifacts?.length && {
+                    validation_issue: validationIssue,
+                  }),
+                ...artifacts,
+              },
+            },
+            target,
+            inferred ? { ...enrichment, ...inferred } : undefined,
+            enrichment,
+            packages.length && updatedAt !== null
+              ? { source_updated_at: updatedAt }
+              : undefined,
+            inferred,
+          ),
       );
     },
     (value) => {
       const { arn, scope } = findingIdentity(
-        !summary && isPatchCapture(value) ? value["finding"] : value,
+        !summary && isFindingCapture(value) ? value["finding"] : value,
       );
       scopes.add(scope);
       return arn;
