@@ -459,9 +459,12 @@ async function runCampaign(
           }
         } catch {}
       }
-      if (receipt.status !== "failed" && receipt.warnings?.length) {
-        warnings.push({ repository: task.id, warnings: receipt.warnings });
-        for (const warning of receipt.warnings) {
+      const savedWarnings = Array.isArray(receipt.warnings)
+        ? receipt.warnings.filter((warning) => typeof warning === "string")
+        : [];
+      if (receipt.status !== "failed" && savedWarnings.length > 0) {
+        warnings.push({ repository: task.id, warnings: savedWarnings });
+        for (const warning of savedWarnings) {
           notifyProgress(options, {
             repository: task.id,
             status: "completed",
