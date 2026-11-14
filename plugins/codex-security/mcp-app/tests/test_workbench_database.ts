@@ -1726,6 +1726,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
           name !== "external_finding_imports" &&
           name !== "external_finding_import_members" &&
           name !== "external_finding_publications" &&
+          name !== "scan_admissions" &&
           name !== "sqlite_sequence",
       )
       .map(([name, rows]) => {
@@ -1761,6 +1762,10 @@ with sqlite3.connect(sys.argv[2]) as connection:
     ),
   );
   assert.deepEqual(
+    initialized.prepare("SELECT * FROM scan_admissions").all(),
+    [],
+  );
+  assert.deepEqual(
     initialized.prepare("SELECT * FROM deep_scan_worker_threads").all(),
     [],
   );
@@ -1778,10 +1783,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   );
   assert.deepEqual(
     initialized
-      .prepare("SELECT name, seq FROM sqlite_sequence")
+      .prepare("SELECT name, seq FROM sqlite_sequence ORDER BY name")
       .all()
       .map((row) => ({ ...row })),
-    [{ name: "finding_issue_receipts", seq: 0 }],
+    [
+      { name: "finding_issue_receipts", seq: 0 },
+      { name: "scan_admissions", seq: 0 },
+    ],
   );
   assert.equal(
     initialized

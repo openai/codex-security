@@ -497,7 +497,8 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
     ][0]
     assert first_finding["findingId"] == current_finding["findingId"]
     assert first_finding["findingId"] != later_finding["findingId"]
-    assert current_finding["triage"]["status"] == later_finding["triage"]["status"] == "open"
+    assert current_finding["triage"]["status"] == "closed"
+    assert later_finding["triage"]["status"] == "open"
     if saved_current_match:
         result = producer.save_scan_matches(
             state,
@@ -507,7 +508,7 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
                 current_finding["occurrenceId"], later_finding["occurrenceId"]
             ),
         )
-        assert result["summary"]["persisting"] == 1
+        assert result["summary"]["reopened" if legacy_first else "persisting"] == 1
     global_rows = run_workbench(state, "list-global-findings")["findings"]
     scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(linked))[
         "findings"
@@ -648,7 +649,7 @@ def test_saved_legacy_alias_survives_current_linked_match(
                 current_finding["occurrenceId"], later_finding["occurrenceId"]
             ),
         )
-        assert result["summary"]["persisting"] == 1
+        assert result["summary"]["reopened" if saved_legacy_alias else "persisting"] == 1
     global_rows = run_workbench(state, "list-global-findings")["findings"]
     scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(repository))[
         "findings"

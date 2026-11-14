@@ -37,6 +37,7 @@ from workbench_target import (
 )
 from workbench_target_state import (
     RepositoryIdentityCache,
+    RepositoryTargetState,
     _timestamp_ns,
     repository_relative_path,
     same_repository_worktree,
@@ -502,9 +503,17 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _unclaimed_path(identities: RepositoryIdentityCache, path: str) -> bool:
-    resolved = Path(path).resolve()
-    return not any(
-        str(parent) in identities.targets_by_path for parent in (resolved, *resolved.parents)
+    target = Path(path)
+    try:
+        resolved = target.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return (
+        not any(
+            str(parent) in identities.targets_by_path
+            for parent in (target, *target.parents, resolved, *resolved.parents)
+        )
+        and not identities.for_path(path).target_id
     )
 
 
@@ -512,15 +521,17 @@ def _legacy_owner(identities: RepositoryIdentityCache, target_id: str):
     current = identities.for_row(identities.targets[target_id])
     ownership = identities.recorded_owner(target_id)
     valid = current.ownership_matches
-    if (
-        ownership
-        and ownership[1] is not None
-        and not valid
-        and current.stored_identity is None
-        and current.metadata is not None
-    ):
-        # A legacy DB may contain several owners. Only its latest owner can match today.
-        valid = _checkout_matches(ownership[0], Path(current.target_path), current.metadata)
+    if ownership and not valid and current.stored_identity is None:
+        path = Path(current.target_path)
+        metadata = current.metadata
+        if current.resolved_path is None:
+            # A saved comparison can still check its recorded file ID when realpath fails.
+            try:
+                metadata = path.stat()
+            except OSError:
+                pass
+        if metadata is not None and (ownership[1] is not None or current.resolved_path is None):
+            valid = _checkout_matches(ownership[0], path, metadata)
     return valid, ownership
 
 
@@ -541,6 +552,32 @@ def _legacy_owner_clause(identities: RepositoryIdentityCache, target_id: str) ->
     return f"scans.target_id = ? AND {owner} AND scans.rowid > ?", (*values, epoch)
 
 
+def _legacy_parent(
+    identities: RepositoryIdentityCache, requested: RepositoryTargetState
+) -> RepositoryTargetState | None:
+    if requested.repository is not None or requested.resolved_path is None:
+        return None
+    if requested.target_id and (
+        requested.stored_identity is not None or identities.recorded_owner(requested.target_id)
+    ):
+        return None
+    path = Path(requested.resolved_path)
+    for directory in (path, *path.parents):
+        if directory != path and (owner := identities.targets_by_path.get(str(directory))):
+            parent = identities.for_row(owner)
+            if not requested.target_id:
+                return parent
+            # Target backfill can bind a legacy descendant using only its path.
+            # A transition at the parent makes that unverified child ambiguous.
+            previous = identities.recorded_owner(parent.target_id)
+            if previous and (previous[1] is not None or not parent.ownership_matches):
+                return parent
+            break
+        if os.path.lexists(directory / ".git"):
+            break
+    return None
+
+
 def repository_scan_scope(
     connection: sqlite3.Connection,
     repository: str | Path,
@@ -550,21 +587,10 @@ def repository_scan_scope(
     identities = identities or RepositoryIdentityCache(connection)
     path = identities.history_path(str(Path(repository).expanduser().absolute()))
     requested = identities.for_path(path)
-    if (
-        not requested.target_id
-        and requested.repository is None
-        and requested.resolved_path is not None
-    ):
-        # Older plain-directory records may name a child of a registered checkout.
-        # Stop at a nested Git boundary, including an unavailable worktree marker.
-        for directory in (Path(requested.resolved_path), *Path(requested.resolved_path).parents):
-            owner = identities.targets_by_path.get(str(directory))
-            if owner is not None:
-                requested = identities.for_row(owner)
-                path = requested.target_path
-                break
-            if os.path.lexists(directory / ".git"):
-                break
+    parent = _legacy_parent(identities, requested)
+    if parent is not None:
+        requested = parent
+        path = requested.target_path
     if requested.target_id:
         scope = identities.scope_for_path(path)
         if requested.stored_identity is not None or scope.generation is not None:
@@ -577,7 +603,7 @@ def repository_scan_scope(
         )
         if _unclaimed_path(identities, path):
             clause = (
-                f"({clause} OR (scans.target_id IS NULL AND CAST(scans.target_path AS BLOB) = ?))"
+                f"({clause} OR (scans.target_id IS NULL AND scans.target_path = CAST(? AS TEXT)))"
             )
             # SQLite TEXT paths are UTF-8. Comparing encoded bytes also permits
             # querying a valid alias that resolves to a non-UTF-8 POSIX path.
@@ -595,6 +621,8 @@ def scan_has_current_owner(
     if target is None:
         return False
     current = identities.for_row(target)
+    if _legacy_parent(identities, current) is not None:
+        return False
     generation = scan_repository_generation(scan)
     if generation is not None and not current.missing:
         return current.ownership_matches and current.live_identity == generation
@@ -631,14 +659,13 @@ def list_scans(
 ) -> dict[str, Any]:
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
-    clauses, values = (
-        repository_scan_scope(connection, args.repository)
-        if args is not None and args.repository
-        else ([], [])
-    )
-    worktree_order = ""
-    if args is not None and args.repository and getattr(args, "prefer_worktree", False):
+    clauses, values = [], []
+    identities = None
+    if args is not None and args.repository:
         identities = RepositoryIdentityCache(connection)
+        clauses, values = repository_scan_scope(connection, args.repository, identities=identities)
+    worktree_order = ""
+    if identities is not None and getattr(args, "prefer_worktree", False):
         selected_path = Path(
             identities.history_path(str(Path(args.repository).expanduser().absolute()))
         )
@@ -812,13 +839,16 @@ def list_unmatched_scan_pairs(
     repository = requested_repository.resolve()
     identities = RepositoryIdentityCache(connection)
     requested = identities.for_path(str(requested_repository))
-    if identities.supports_identity and not requested.ownership_matches:
-        if (
-            requested.stored_identity is not None
+    if (
+        identities.supports_identity
+        and not requested.ownership_matches
+        and (
+            requested.resolved_path is None
             or not requested.target_id
-            or identities.recorded_owner(requested.target_id) is None
-        ):
-            requested.require_owner()
+            or not _legacy_owner(identities, requested.target_id)[0]
+        )
+    ):
+        requested.require_owner()
     clauses, values = repository_scan_scope(connection, requested_repository, identities=identities)
     selected = connection.execute(
         f"SELECT * FROM scans WHERE status = 'complete' AND {' AND '.join(clauses)}",
@@ -927,18 +957,16 @@ def _same_registered_repository(
             and after["target_id"] is None
             and _unclaimed_path(identities, before["target_path"])
             and _unclaimed_path(identities, after["target_path"])
-            and _same_repository(connection, before, after, identities=identities)
+            and (
+                Path(before["target_path"]).resolve() == Path(after["target_path"]).resolve()
+                or same_repository_worktree(Path(before["target_path"]), Path(after["target_path"]))
+            )
         )
     if (
         scan_repository_generation(before) is not None
         or scan_repository_generation(after) is not None
     ):
         return _same_repository(connection, before, after, identities=identities)
-    if (
-        before["target_id"] == after["target_id"]
-        and identities.recorded_owner(before["target_id"]) is None
-    ):
-        return True
     if not all(scan_has_current_owner(connection, row, identities) for row in (before, after)):
         return False
     if before["target_id"] == after["target_id"]:
@@ -1205,14 +1233,13 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
+        after_key = (timestamp_key(after["started_at"]), after["id"])
+        identities = RepositoryIdentityCache(connection)
         known_scan_ids = {
             scan["id"]
-            for scan in connection.execute(
-                "SELECT * FROM scans WHERE status = 'complete' "
-                "AND rowid <= (SELECT rowid FROM scans WHERE id = ?)",
-                (after["id"],),
-            )
-            if _same_registered_repository(connection, scan, after)
+            for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
+            if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
+            and _same_registered_repository(connection, scan, after, identities=identities)
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
@@ -1571,10 +1598,12 @@ def finding_matches(
         FROM finding_occurrences AS occurrences
         JOIN scans ON scans.id = occurrences.scan_id
         WHERE occurrences.id IN (SELECT id FROM selected_occurrences)
-        ORDER BY scans.rowid, occurrences.id
         """,
         (json.dumps(sorted(occurrence_ids)), occurrence_id, occurrence_id),
     ).fetchall()
+    rows.sort(
+        key=lambda row: (timestamp_key(row["started_at"]), row["scan_id"], row["occurrence_id"])
+    )
     return (
         [
             {

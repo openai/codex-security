@@ -109,6 +109,45 @@ def link(db, previous, current, reason="Confirmed link."):
     )
 
 
+@pytest.mark.parametrize("claimed", [False, True])
+def test_targetless_legacy_comparisons_require_unclaimed_paths(
+    workbench_api, workbench_db, tmp_path, claimed
+):
+    history = workbench_api["scan_history"]
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for scan_id in ("legacy-before", "legacy-after"):
+        add_scan(workbench_db, scan_id, repository)
+    if claimed:
+        add_scan(workbench_db, "current", repository, target_id="current", checkout=repository)
+
+    # A CLI process can migrate these rows before querying. Exercise the same saved
+    # records in both readers, while the pre-target rows still have their original IDs.
+    plan = history.list_unmatched_scan_pairs(
+        workbench_db,
+        Namespace(repository=str(repository), force=False),
+        backfill_finding_details=lambda *_: None,
+        read_coverage=lambda _: {},
+    )
+    assert plan["scanCount"] == (1 if claimed else 2)
+    assert len(plan["batches"]) == (0 if claimed else 1)
+
+    def compare():
+        return history.compare_scans(
+            workbench_db,
+            Namespace(before_scan_id="legacy-before", after_scan_id="legacy-after"),
+            require_scan=workbench_api["require_scan"],
+            finding_triage=lambda *_: {},
+            read_coverage=lambda _: {},
+        )
+
+    if claimed:
+        with pytest.raises(SystemExit, match="repository"):
+            compare()
+    else:
+        assert compare()["afterScanId"] == "legacy-after"
+
+
 def test_legacy_repository_matching_excludes_confirmed_links_from_another_checkout(
     workbench_api, workbench_db, tmp_path
 ):
@@ -709,7 +748,7 @@ def test_confirmed_history_follows_recurring_ids_and_reverts_after_unlink(
     link(db, occurrences["b"], occurrences["c"], reason="Second confirmed link.")
 
     def assert_history(group):
-        # Both the group and its matches follow scan registration order.
+        # Both the group and its matches follow scan start time.
         for scan in group:
             row = db.execute("SELECT * FROM scans WHERE id = ?", (scan,)).fetchone()
             indexed = workbench_api["_indexed_scan_findings"](db, row)[occurrences[scan]]

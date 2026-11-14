@@ -74,7 +74,9 @@ def test_replacement_checkout_does_not_receive_previous_owner_feedback(tmp_path)
 
 
 @pytest.mark.parametrize("replaced", [False, True])
-def test_related_findings_respect_the_current_owner_of_both_scans(tmp_path, replaced):
+def test_related_findings_respect_the_current_owner_of_both_scans(
+    tmp_path, replaced, workbench_api
+):
     state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
     repository.mkdir()
     before = create_cli_scan(state, root, repository, identity_anchor="before")
@@ -109,47 +111,16 @@ def test_related_findings_respect_the_current_owner_of_both_scans(tmp_path, repl
         repository.mkdir()
         # A saved database from before registration enforced checkout ownership can
         # contain a scan from each owner. Keep the selected occurrence on the live one.
-        from filesystem_identity import serialize_filesystem_identity
-
-        metadata = repository.stat()
+        identity = workbench_api["scan_history"]._stat_identity(repository.stat())
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute(
                 "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
-                (
-                    serialize_filesystem_identity(metadata.st_dev),
-                    serialize_filesystem_identity(metadata.st_ino),
-                    after["scanId"],
-                ),
+                (*identity, after["scanId"]),
             )
     detail = run_workbench(
         state, "get-finding", "--occurrence-id", current_finding["occurrenceId"]
     )["scan"]["findings"][0]
     assert len(detail.get("related", [])) == (0 if replaced else 1)
-
-
-@pytest.mark.parametrize("claimed", [False, True])
-def test_targetless_legacy_comparisons_require_unclaimed_paths(tmp_path, claimed):
-    state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
-    repository.mkdir()
-    scans = [
-        create_cli_scan(state, root, repository, identity_anchor=anchor)
-        for anchor in ("before", "after")
-    ]
-    if claimed:
-        create_cli_scan(state, root, repository)
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.executemany(
-            "UPDATE scans SET target_id = NULL, target_device = NULL, target_inode = NULL, repository_generation = NULL WHERE id = ?",
-            ((scan["scanId"],) for scan in scans),
-        )
-        if not claimed:
-            connection.execute("UPDATE workspaces SET target_id = NULL")
-            connection.execute("DELETE FROM security_targets")
-    plan = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repository))
-    assert plan["scanCount"] == (1 if claimed else 2)
-    assert len(plan["batches"]) == (0 if claimed else 1)
-    result = compare_scan_pair(state, *scans, check=False)
-    assert (result["returncode"] != 0) if claimed else result["returncode"] == 0
 
 
 def test_finding_artifacts_include_all_safe_files_and_directories(tmp_path):

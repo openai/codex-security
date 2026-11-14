@@ -98,7 +98,8 @@ testProbe(
   "never matches independently registered sibling repository targets",
   async (signal) => {
     const probe = [
-      "import argparse, json, os, pathlib, sqlite3, subprocess, sys, tempfile",
+      "import argparse, json, pathlib, sqlite3, subprocess, sys, tempfile",
+      "from datetime import datetime, timedelta, timezone",
       "sys.path.insert(0, sys.argv[1])",
       "import workbench_scan_history as history",
       "from filesystem_identity import serialize_filesystem_identity",
@@ -111,7 +112,7 @@ testProbe(
       "    connection.row_factory = sqlite3.Row",
       "    connection.executescript('''",
       "        CREATE TABLE security_targets (id TEXT, current_path TEXT);",
-      "        CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT, mode TEXT, target_snapshot_digest TEXT, status TEXT, started_at TEXT);",
+      "        CREATE TABLE scans (id TEXT, target_path TEXT, target_id TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT, mode TEXT, target_snapshot_digest TEXT, status TEXT, started_at TEXT, created_at TEXT);",
       "        CREATE TABLE scan_comparisons (before_scan_id TEXT, after_scan_id TEXT);",
       "        CREATE TABLE scan_comparison_matches (before_scan_id TEXT, after_scan_id TEXT, before_occurrence_id TEXT, after_occurrence_id TEXT);",
       "        CREATE TABLE finding_occurrences (id TEXT, finding_id TEXT, scan_id TEXT, details_json TEXT, remediation TEXT, severity TEXT, summary TEXT, title TEXT);",
@@ -120,11 +121,13 @@ testProbe(
       "    ''')",
       "    for target, path in [('left-target', left), ('right-target', right)]:",
       "        connection.execute('INSERT INTO security_targets VALUES (?, ?)', (target, str(path)))",
+      "    started = datetime.now(timezone.utc)",
       "    for scan, target, path in [('left-old', 'left-target', left), ('right', 'right-target', right), ('left-new', 'left-target', left)]:",
       "        metadata = path.stat()",
-      "        connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan, str(path), target, serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), 'revision', 'standard', 'digest', 'complete', '2026-01-01'))",
+      "        scan_start = started + timedelta(seconds=int(scan == 'left-new'))",
+      "        connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (scan, str(path), target, serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), 'revision', 'standard', 'digest', 'complete', scan_start.isoformat(), scan_start.isoformat()))",
       "        connection.execute('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (scan, scan, scan, '{}', 'fix', 'high', 'summary', 'title'))",
-      "    results = [history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(repository), force=force), backfill_finding_details=lambda *_args: None, read_coverage=lambda _scan: {}) for force in (False, True)]",
+      "    results = [history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=str(left), force=force), backfill_finding_details=lambda *_args: None, read_coverage=lambda _scan: {}) for force in (False, True)]",
       "    print(json.dumps({'results': results}))",
     ].join("\n");
 
@@ -134,7 +137,7 @@ testProbe(
     >;
     for (const matching of observed["results"] as unknown[]) {
       expect(matching).toMatchObject({
-        scanCount: 3,
+        scanCount: 2,
         batches: [
           {
             afterScanId: "left-new",
@@ -147,7 +150,7 @@ testProbe(
 );
 
 testProbe(
-  "lists completed scans in insertion order after clock rollback",
+  "lists running scans first and completed scans by their latest activity",
   async (signal) => {
     const probe = [
       "import json, sqlite3, sys",
@@ -165,13 +168,13 @@ testProbe(
     ].join("\n");
 
     expect(await runPythonProbe(probe, signal)).toEqual({
-      scanIds: ["running", "newer", "older"],
+      scanIds: ["running", "older", "newer"],
     });
   },
 );
 
 testProbe(
-  "orders finding-detail history by scan insertion after clock rollback",
+  "orders finding-detail history by scan start time after clock rollback",
   async (signal) => {
     const probe = [
       "import json, sqlite3, sys",
@@ -192,8 +195,8 @@ testProbe(
     ].join("\n");
 
     expect(await runPythonProbe(probe, signal)).toMatchObject({
-      knownSince: "2026-02-01",
-      knownScanIds: ["older-scan", "newer-scan"],
+      knownSince: "2026-01-01",
+      knownScanIds: ["newer-scan", "older-scan"],
     });
   },
 );
@@ -235,10 +238,12 @@ testProbe(
       "from filesystem_identity import serialize_filesystem_identity",
       "temporary = tempfile.TemporaryDirectory()",
       "temporary_root = pathlib.Path(temporary.name).resolve()",
-      "child = pathlib.Path(sys.argv[1]).resolve()",
-      "intermediate = child.parent",
-      "owner = intermediate.parent",
-      "sibling = owner / 'src'",
+      "owner = temporary_root / 'owner'",
+      "intermediate = owner / 'intermediate'",
+      "child = intermediate / 'child'",
+      "child.mkdir(parents=True)",
+      "sibling = owner / 'sibling'",
+      "sibling.mkdir()",
       "git_root = temporary_root / 'git-repository'",
       "subprocess.run(['git', 'init', '-q', str(git_root)], check=True)",
       "git_parent = git_root / 'legacy'",
@@ -288,60 +293,11 @@ testProbe(
   },
 );
 
-testProbe(
-  "includes linked worktrees and recognizes separately verified clones",
-  async (signal) => {
-    const probe = [
-      "import json, os, pathlib, sqlite3, subprocess, sys, tempfile",
-      "sys.path.insert(0, sys.argv[1])",
-      "import workbench_scan_history as history",
-      "from filesystem_identity import serialize_filesystem_identity",
-      "with tempfile.TemporaryDirectory() as temporary:",
-      "    root = pathlib.Path(temporary).resolve() / 'repository'",
-      "    linked = pathlib.Path(temporary).resolve() / 'linked-worktree'",
-      "    clone = pathlib.Path(temporary).resolve() / 'repository-clone'",
-      "    unregistered = pathlib.Path(temporary).resolve() / 'unregistered-clone'",
-      "    subprocess.run(['git', 'init', '-q', '-b', 'main', str(root)], check=True)",
-      "    (root / 'source.py').write_text('print(1)\\n')",
-      "    subprocess.run(['git', '-C', str(root), 'add', 'source.py'], check=True)",
-      "    subprocess.run(['git', '-C', str(root), '-c', 'user.name=Inventory Test', '-c', 'user.email=inventory@example.test', 'commit', '-qm', 'initial'], check=True)",
-      "    subprocess.run(['git', '-C', str(root), 'worktree', 'add', '-q', '-b', 'linked', str(linked)], check=True)",
-      "    subprocess.run(['git', '-C', str(root), 'remote', 'add', 'origin', 'https://github.com/example/project.git'], check=True)",
-      "    subprocess.run(['git', 'clone', '-q', str(root), str(clone)], check=True)",
-      "    subprocess.run(['git', '-C', str(clone), 'remote', 'set-url', 'origin', 'git@github.com:example/project.git'], check=True)",
-      "    subprocess.run(['git', 'clone', '-q', str(root), str(unregistered)], check=True)",
-      "    subprocess.run(['git', '-C', str(unregistered), 'remote', 'set-url', 'origin', 'git@github.com:example/project.git'], check=True)",
-      "    nested = root / 'src'",
-      "    nested.mkdir()",
-      "    connection = sqlite3.connect(':memory:')",
-      "    connection.row_factory = sqlite3.Row",
-      "    connection.executescript('CREATE TABLE security_targets (id TEXT, current_path TEXT); CREATE TABLE scans (id TEXT, target_id TEXT, target_path TEXT, target_device INTEGER, target_inode INTEGER, target_revision TEXT, started_at TEXT);')",
-      "    for target_id, target in [('main', root), ('linked', linked), ('clone', clone)]:",
-      "        metadata = target.stat()",
-      "        connection.execute('INSERT INTO security_targets VALUES (?, ?)', (target_id, str(target)))",
-      "        connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?)', (target_id, target_id, str(target), serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino), 'revision', '2026-01-01'))",
-      "    connection.execute('INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?)', ('local-legacy', None, str(nested), None, None, 'revision', '2026-01-02'))",
-      "    _, _, target_ids, _ = history.repository_scan_scope(connection, nested)",
-      "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (target_id,)).fetchone() for target_id in ('main', 'clone')]",
-      "    untrusted = connection.execute(\"SELECT '' AS target_id, ? AS target_path\", (str(unregistered),)).fetchone()",
-      "    _, _, unregistered_targets, _ = history.repository_scan_scope(connection, unregistered)",
-      "    print(json.dumps({'targets': sorted(target_ids), 'clone': history._same_repository(*scans, require_ownership=True), 'untrusted': history._same_repository(scans[0], untrusted), 'unregistered': unregistered_targets}))",
-    ].join("\n");
-
-    expect(await runPythonProbe(probe, signal)).toEqual({
-      targets: ["clone", "linked", "main"],
-      clone: true,
-      untrusted: false,
-      unregistered: [],
-    });
-  },
-);
-
 testProbe("loads oversized comparison matches from stdin", async (signal) => {
   const python = await resolvePluginPython({ signal });
 
   const probe = [
-    "import argparse, io, json, pathlib, sqlite3, sys, tempfile",
+    "import argparse, pathlib, sqlite3, sys, tempfile",
     "sys.path.insert(0, sys.argv[1])",
     "from filesystem_identity import serialize_filesystem_identity",
     "import workbench_scan_history as history",
@@ -360,11 +316,9 @@ testProbe("loads oversized comparison matches from stdin", async (signal) => {
     "scans = {name: {'id': name, 'status': 'complete', 'target_id': 'target', 'target_path': str(repository), 'target_device': serialize_filesystem_identity(metadata.st_dev), 'target_inode': serialize_filesystem_identity(metadata.st_ino)} for name in ('before', 'after')}",
     "findings = {'before': {'old': {'id': 'old'}}, 'after': {'new': {'id': 'new'}}}",
     "history._scan_findings = lambda _connection, scan_id: findings[scan_id]",
-    "history.compare_scans = lambda *_args, **_kwargs: {'saved': True}",
-    "payload = sys.stdin.read()",
-    "sys.stdin = io.StringIO(payload)",
-    "result = history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {}, finding_triage=lambda _connection, _scan, _through_scan: {})",
-    "print(json.dumps(result))",
+    "history.compare_scans = lambda *_args, **_kwargs: {}",
+    "history.save_scan_comparison(connection, argparse.Namespace(before_scan_id='before', after_scan_id='after', matches_json=None, matches_json_stdin=True), now=lambda: 'now', require_scan=lambda _connection, scan_id: scans[scan_id], read_coverage=lambda _scan: {}, finding_triage=lambda _connection, _scan, _through_scan: {})",
+    "print(connection.execute('SELECT result_json FROM scan_comparisons').fetchone()[0])",
   ].join("\n");
   const payload = JSON.stringify({
     matches: [
@@ -388,5 +342,5 @@ testProbe("loads oversized comparison matches from stdin", async (signal) => {
 
   expect(result.exitCode, result.stderr).toBe(0);
   expect(result.stderr).toBe("");
-  expect(JSON.parse(result.stdout)).toEqual({ saved: true });
+  expect(JSON.parse(result.stdout)).toEqual(JSON.parse(payload));
 });

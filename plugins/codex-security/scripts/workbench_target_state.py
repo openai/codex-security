@@ -322,10 +322,7 @@ def repository_identity(target: Path | str) -> str | None:
 
 
 def repository_origin(target: Path) -> tuple[str, str] | None:
-    return _repository_origin(git_output(target, "remote", "get-url", "origin"))
-
-
-def _repository_origin(remote: str | None) -> tuple[str, str] | None:
+    remote = git_output(target, "remote", "get-url", "origin")
     if remote is None:
         return None
     account = None
@@ -667,6 +664,8 @@ class RepositoryIdentityCache:
 
     def recorded_owner(self, target_id: str) -> tuple[sqlite3.Row, int | None] | None:
         """Read the latest stored checkout owner and the row preceding its ownership epoch."""
+        if not {"target_device", "target_inode"} <= self.scan_columns:
+            return None
         if target_id not in self._owners:
             latest = self.connection.execute(
                 "SELECT * FROM scans WHERE target_id = ? AND target_device IS NOT NULL "

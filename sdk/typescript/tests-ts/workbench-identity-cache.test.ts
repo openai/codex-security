@@ -1414,8 +1414,7 @@ with ExitStack() as stack:
             add_target(name, stored)
         for scan_id, target in (("legacy-before", "legacy"), ("legacy-after", "legacy"), ("first-scan", "first"), ("second-scan", "second")):
             add_scan(scan_id, target)
-        missing.add(paths["legacy"])
-        resolution_errors.update({paths["first"]: OSError, paths["second"]: RuntimeError})
+        resolution_errors.update({paths["legacy"]: RuntimeError, paths["first"]: OSError, paths["second"]: RuntimeError})
         connection.commit()
         require_scan = lambda database, scan_id: database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
         coverage = lambda scan: {"completeness": "complete"}

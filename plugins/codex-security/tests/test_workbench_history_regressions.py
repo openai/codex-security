@@ -47,7 +47,9 @@ def linked_history(history):
 
 def record_replacement_owner(state: Path, scan: dict, repository: Path) -> None:
     # Databases from before registration verified owners can contain both generations.
-    from filesystem_identity import serialize_filesystem_identity
+    serialize_filesystem_identity = runpy.run_path(str(SCRIPT.with_name("filesystem_identity.py")))[
+        "serialize_filesystem_identity"
+    ]
 
     metadata = repository.stat()
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
@@ -271,16 +273,15 @@ def test_explicit_triage_updates_every_matched_worktree_occurrence(linked_histor
                 else []
             ),
         )
-        scopes = [
-            ([], 2),
-            (["--repository", str(repository)], 1),
-            (["--repository", str(linked)], 1),
-            *((["--target-id", target], 1) for target in targets),
-        ]
-        for scope, count in scopes:
-            findings = run_workbench(state, "list-global-findings", *scope)["findings"]
-            assert len(findings) == count
-            assert {finding["status"] for finding in findings} == {status}
+        for scope in (
+            [],
+            ["--repository", str(repository)],
+            ["--repository", str(linked)],
+            *(["--target-id", target] for target in targets),
+        ):
+            (finding,) = run_workbench(state, "list-global-findings", *scope)["findings"]
+            assert finding["status"] == status
+            assert set(finding["knownScanIds"]) == {before["scanId"], after["scanId"]}
 
 
 @pytest.mark.parametrize("checkout", ["missing", "replaced", "previous-epoch-missing"])
@@ -440,16 +441,12 @@ def test_late_worktree_comparison_keeps_index_and_detail_decision_consistent(
         ]["status"]
         == "closed"
     )
-    for scope, count in (
-        ([], 2),
-        (["--repository", str(repository)], 1),
-        (["--repository", str(linked)], 1),
-    ):
-        findings = run_workbench(state, "list-global-findings", *scope, "--include-resolved")[
+    for scope in ([], ["--repository", str(repository)], ["--repository", str(linked)]):
+        (finding,) = run_workbench(state, "list-global-findings", *scope, "--include-resolved")[
             "findings"
         ]
-        assert len(findings) == count
-        assert {row["status"] for row in findings} == {"closed"}
+        assert finding["status"] == "closed"
+        assert set(finding["knownScanIds"]) == {before["scanId"], after["scanId"]}
 
 
 def test_late_comparison_does_not_reopen_scans_started_before_decision(history) -> None:
@@ -752,7 +749,7 @@ def test_clock_rollback_keeps_a_new_decision_until_a_new_scan_is_admitted(
         )
     findings = run_workbench(state, "list-global-findings", "--include-resolved")["findings"]
     assert len(findings) == 1
-    assert findings[0]["scanId"] == later["scanId"]
+    assert findings[0]["knownScanIds"] == [later["scanId"], first["scanId"]]
     assert findings[0]["status"] == "open"
 
 
@@ -1219,6 +1216,12 @@ def test_unrelated_uncertainty_does_not_change_unobserved_alias(
     save_scan_matches(
         state, before, after, confirmed_match(rows[0]["occurrenceId"], rows[1]["occurrenceId"])
     )
+    # The two reports have identical fixture times. Make the covered alias the latest occurrence.
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE finding_occurrences SET created_at = ? WHERE id = ?",
+            ("2026-06-02T18:08:00Z", rows[0]["occurrenceId"]),
+        )
     custom_scan("src/b.py", "clean-scope", paths=["src/b.py"], finding=False)
     target = before["targetId"]
     unobserved = run_workbench(state, "list-global-findings", "--target-id", target)["findings"]
@@ -1434,13 +1437,16 @@ def test_bulk_matching_preserves_legacy_seals(tmp_path, identity):
         record_replacement_owner(state, newer, repo)
         repo.rename(repo.with_name("replacement-owner"))
         repo.with_name("previous-owner").rename(repo)
-    result = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repo))
-    assert result["scanCount"] == (
-        0 if identity == "transition" else 3 if identity == "mixed" else 2
-    )
-    assert len(result["batches"]) == (
-        0 if identity == "transition" else 2 if identity == "mixed" else 1
-    )
+    if identity == "transition":
+        result = run_workbench(
+            state, "list-unmatched-scan-pairs", "--repository", str(repo), check=False
+        )
+        assert result["returncode"] != 0
+        assert "no longer matches" in result["stderr"]
+    else:
+        result = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repo))
+        assert result["scanCount"] == (3 if identity == "mixed" else 2)
+        assert len(result["batches"]) == (2 if identity == "mixed" else 1)
 
 
 @pytest.mark.parametrize("legacy", [False, True, "all-legacy"])
@@ -2151,7 +2157,7 @@ def test_unverified_alias_actions_do_not_read_newer_coverage(history, action):
 
 
 @pytest.mark.parametrize("selection", ["inherited", "unmatched", "local"])
-def test_false_positive_feedback_projects_inherited_linked_decision(linked_history, selection):
+def test_false_positive_feedback_keeps_the_reviewed_linked_occurrence(linked_history, selection):
     state, root, repository, linked, revision = linked_history
     first = create_cli_scan(
         state, root, repository, identity_anchor="reviewed", target_revision=revision
@@ -2184,9 +2190,9 @@ def test_false_positive_feedback_projects_inherited_linked_decision(linked_histo
     feedback = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])[
         "falsePositives"
     ]
-    assert bool(feedback) is (selection != "unmatched")
-    if feedback:
-        assert feedback[0]["reason"] == "Synthetic inherited dismissal."
+    assert [(item["sourceScanId"], item["reason"]) for item in feedback] == [
+        (first["scanId"], "Synthetic inherited dismissal.")
+    ]
 
 
 @pytest.mark.parametrize("terminal", ["failed", "complete-control", "no-recurrence"])

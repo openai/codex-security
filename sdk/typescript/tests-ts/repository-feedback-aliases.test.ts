@@ -16,10 +16,12 @@ connection = sqlite3.connect(":memory:")
 connection.row_factory = sqlite3.Row
 connection.executescript("""
 CREATE TABLE security_targets(id TEXT, current_path TEXT, display_name TEXT, origin TEXT);
-CREATE TABLE scans(id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, status TEXT, completed_at TEXT, started_at TEXT, updated_at TEXT, scope TEXT);
+CREATE TABLE scans(id TEXT, target_id TEXT, target_path TEXT, repository_generation TEXT, status TEXT, completed_at TEXT, started_at TEXT, updated_at TEXT, scope TEXT, seal_manifest_digest TEXT, target_device INTEGER, target_inode INTEGER);
 CREATE TABLE findings(id TEXT PRIMARY KEY, fingerprint TEXT, rule_id TEXT, identity_anchor TEXT, identity_instance TEXT);
 CREATE TABLE finding_occurrences(id TEXT, finding_id TEXT, scan_id TEXT, title TEXT, summary TEXT, severity TEXT, created_at TEXT);
 CREATE TABLE finding_triage(occurrence_id TEXT, status TEXT, close_reason TEXT, note TEXT, updated_at TEXT);
+CREATE TABLE finding_decisions(occurrence_id TEXT, decision_sequence INTEGER NOT NULL, scan_sequence INTEGER, admission_sequence INTEGER);
+CREATE TABLE scan_admissions(sequence INTEGER PRIMARY KEY, scan_id TEXT NOT NULL UNIQUE);
 CREATE TABLE finding_locations(id INTEGER PRIMARY KEY, occurrence_id TEXT, relative_path TEXT, start_line INTEGER, end_line INTEGER, role TEXT, sort_order INTEGER);
 CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence_id TEXT);
 """)
@@ -58,7 +60,7 @@ def add_scan(scan_id, target, day, status="complete"):
     timestamp = f"2026-03-{day:02d}T00:00:00Z"
     completed_at = timestamp if status == "complete" else None
     generation = connection.execute("SELECT repository_identity FROM security_targets WHERE id = ?", (target,)).fetchone()[0] if scenario == "identities" else None
-    connection.execute("INSERT INTO scans VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (scan_id, target, f"/{target}", generation, status, completed_at, timestamp, timestamp, "repository"))
+    connection.execute("INSERT INTO scans (id, target_id, target_path, repository_generation, status, completed_at, started_at, updated_at, scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (scan_id, target, f"/{target}", generation, status, completed_at, timestamp, timestamp, "repository"))
 
 def add_finding(scan_id, finding_id, day, *, status="closed", reason="false_positive", note="Reviewed and safe"):
     occurrence_id = f"{scan_id}:{finding_id}"
