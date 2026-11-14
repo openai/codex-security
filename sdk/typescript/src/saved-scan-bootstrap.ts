@@ -1,10 +1,10 @@
 import { executableSourceRoots } from "./deep-config.js";
 import { isRecord } from "./record.js";
-import { compareTimestamps } from "./timestamps.js";
+import type { JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
-import { realpath } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { access } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -16,6 +16,7 @@ import {
   codexSecurityStateDirectory,
   resolvePluginPython,
   runWorkbench,
+  sameFile,
   workbenchEnvironment,
   type ProcessEnvironment,
   sqliteDatabaseOpener,
@@ -25,11 +26,30 @@ import {
 interface ScanTarget {
   id: string;
   target_path: string;
-  target_id?: string | null;
   executableSourcePaths?: string[];
+  knowledgeRoots?: string[];
+  repository_generation?: string | null;
+  originFallback?: boolean;
+  protectPython?: boolean;
 }
 
-/** Read only enough history to protect Python discovery; the workbench still validates the scan. */
+interface SavedCheckout {
+  target_path: string;
+  checkout_root: string | null;
+}
+
+interface SavedBoundaries {
+  byTarget: Map<string, string | null>;
+  roots: string[];
+  complete: boolean;
+}
+
+export interface SavedToolDiscovery {
+  protectedRoots: readonly string[];
+  allowPathLookup: boolean;
+}
+
+/** Read saved checkout boundaries before starting tools. The workbench validates the scan. */
 export async function savedScanWorkbench(
   requestedId: string | { workflowId: string },
   options: {
@@ -44,13 +64,14 @@ export async function savedScanWorkbench(
   SavedScanDependencies["runWorkbench"] & {
     environment: ProcessEnvironment;
     readonly protectedRoots: readonly string[];
+    readonly nodeDiscovery: SavedToolDiscovery;
   }
 > {
   options.signal?.throwIfAborted();
   const environment: ProcessEnvironment = workbenchEnvironment(
     options.environment,
   );
-  const targets = await readTargets(
+  const { targets, checkouts } = await readTargets(
     requestedId,
     environment,
     options.currentDirectory,
@@ -84,43 +105,47 @@ export async function savedScanWorkbench(
     options.currentDirectory,
     options.signal,
   );
-  const sourcePaths = new Set([
+  const liveTargets = targets.filter(
+    (target) => target.protectPython !== false,
+  );
+  const configPaths = new Set([
     ...(options.executableSourcePaths ?? []),
     ...targets.flatMap((target) => target.executableSourcePaths ?? []),
   ]);
-  const sourceRoots = await Promise.all(
-    Array.from(sourcePaths, (path) =>
+  const configRoots = await Promise.all(
+    Array.from(configPaths, (path) =>
       executableSourceRoots(path, options.signal),
     ),
   );
+  const inputRoots = [
+    ...configRoots.flat(),
+    ...targets.flatMap((target) => target.knowledgeRoots ?? []),
+  ];
   const protectedRoots = [
+    ...inputRoots,
     ...callerRoots,
-    ...sourceRoots.flat(),
+    ...liveTargets.flatMap((row) => {
+      const root = checkouts.byTarget.get(row.target_path);
+      return root ? [root] : [];
+    }),
+    ...liveTargets.map((row) => row.target_path),
     ...(
       await Promise.all(
-        targets.map(async ({ target_path: target }) => {
-          let candidate = target;
-          for (;;) {
-            try {
-              return [
-                candidate,
-                ...(await gitProtectionRoots(candidate, options.signal)),
-              ];
-            } catch (error) {
-              const parent = dirname(candidate);
-              if (
-                (error as NodeJS.ErrnoException).code !== "ELOOP" ||
-                parent === candidate
-              )
-                throw error;
-              // The old target cannot resolve. Protect its containing directory before choosing Python.
-              candidate = parent;
-            }
-          }
-        }),
+        liveTargets.map((row) =>
+          gitProtectionRoots(row.target_path, options.signal),
+        ),
       )
     ).flat(),
   ];
+  const discoveryProtectedRoots = await savedDiscoveryRoots(
+    checkouts,
+    [
+      options.currentDirectory,
+      ...inputRoots,
+      ...targets.map((row) => row.target_path),
+    ],
+    options.signal,
+  );
   let python: string | undefined;
   const workbench: SavedScanDependencies["runWorkbench"] = async (
     args,
@@ -128,9 +153,8 @@ export async function savedScanWorkbench(
     signal = options.signal,
   ) => {
     signal?.throwIfAborted();
-    // Return the selected ID directly: probing Python must not revisit unrelated history.
-    if (requestedId === "latest" && args[0] === "list-scans")
-      return { scans: targets.map((target) => ({ scanId: target.id })) };
+    const selectingLatest =
+      requestedId === "latest" && args[0] === "list-scans";
     const target =
       args[0] === "get-scan"
         ? latest
@@ -141,27 +165,73 @@ export async function savedScanWorkbench(
       throw new CodexSecurityError(
         "Saved scan history changed during lookup. Retry the command.",
       );
-    // Pin the interpreter selected with every candidate and the caller checkout protected.
+    // Pin one interpreter; ambient discovery also excludes historical candidate paths.
     python ??= await resolvePluginPython({
       configuredPath: options.configuredPython,
       environment,
       protectedRoot: protectedRoots,
+      discoveryProtectedRoots,
+      allowPathLookup: checkouts.complete,
       currentDirectory: options.currentDirectory,
       signal,
     });
     environment["PYTHON"] = python;
-    const result = await runWorkbench(
-      {
-        environment,
-        pluginRoot: options.pluginRoot,
-        python,
-        signal,
-        protectedRoot: protectedRoots,
-        currentDirectory: options.currentDirectory,
-        failureMessage: "Could not read Codex Security scan history",
-      },
+    const execute = (command: readonly string[]) =>
+      runWorkbench(
+        {
+          environment,
+          pluginRoot: options.pluginRoot,
+          python,
+          signal,
+          protectedRoot: protectedRoots,
+          currentDirectory: options.currentDirectory,
+          failureMessage: "Could not read Codex Security scan history",
+        },
+        command,
+        input,
+      );
+    if (selectingLatest) {
+      // Let the workbench enforce the caller's persisted generation and component scope,
+      // including history whose original linked worktree has since been removed.
+      const scoped = new Map<string, JsonValue[]>();
+      const scansAt = async (repository: string): Promise<JsonValue[]> => {
+        let scans = scoped.get(repository);
+        if (scans === undefined) {
+          const result = await execute([
+            "list-scans",
+            "--repository",
+            repository,
+            "--status",
+            "complete",
+          ]);
+          scans = Array.isArray(result["scans"]) ? result["scans"] : [];
+          scoped.set(repository, scans);
+        }
+        return scans;
+      };
+      const callerScans = await scansAt(options.currentDirectory);
+      for (const candidate of targets) {
+        let selected = callerScans.find(
+          (scan) => isRecord(scan) && scan["scanId"] === candidate.id,
+        );
+        // Dedupe also accepts the same component of an independent same-origin clone.
+        // Validate that clone's current ownership before using its saved history.
+        if (selected === undefined && candidate.originFallback) {
+          selected = (await scansAt(candidate.target_path)).find(
+            (scan) => isRecord(scan) && scan["scanId"] === candidate.id,
+          );
+        }
+        if (selected !== undefined) return { scans: [selected] };
+      }
+      if (environment["CODEX_SECURITY_GIT"] === "") {
+        throw new CodexSecurityError(
+          "Could not verify the saved checkout automatically without a trusted Git executable. Use an explicit saved scan ID: codex-security dedupe --scan SCAN_ID",
+        );
+      }
+      return { scans: [] };
+    }
+    const result = await execute(
       target ? ["get-scan", "--scan-id", target.id] : args,
-      input,
     );
     if (typeof requestedId !== "string" && args[0] === "finding-workflow") {
       const workflow = result["workflow"];
@@ -187,35 +257,11 @@ export async function savedScanWorkbench(
   return Object.assign(workbench, {
     environment,
     protectedRoots: [options.currentDirectory, ...protectedRoots],
+    nodeDiscovery: {
+      protectedRoots: discoveryProtectedRoots,
+      allowPathLookup: checkouts.complete,
+    },
   });
-}
-
-function openSavedScanDatabase(
-  environment: ProcessEnvironment,
-): RuntimeDatabase {
-  const openDatabase = sqliteDatabaseOpener("read-existing");
-  return openDatabase(
-    join(codexSecurityStateDirectory(environment), "workbench.sqlite3"),
-  );
-}
-
-export function readSavedScanLifecycle(
-  environment: ProcessEnvironment,
-  scanId: string,
-): unknown {
-  const database = openSavedScanDatabase(environment);
-  try {
-    database.exec("PRAGMA busy_timeout = 0");
-    database.exec("PRAGMA query_only = ON");
-    const [row] = readRows<{ snapshot: string }>(
-      database,
-      "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?",
-      scanId,
-    );
-    return row && JSON.parse(row.snapshot);
-  } finally {
-    database.close();
-  }
 }
 
 async function readTargets(
@@ -223,27 +269,62 @@ async function readTargets(
   environment: ProcessEnvironment,
   currentDirectory: string,
   signal?: AbortSignal,
-): Promise<ScanTarget[]> {
-  let database: RuntimeDatabase | undefined;
+): Promise<{ targets: ScanTarget[]; checkouts: SavedBoundaries }> {
   try {
-    database = openSavedScanDatabase(environment);
-    database.exec("PRAGMA busy_timeout = 5000");
-    database.exec("PRAGMA query_only = ON");
-    const targets = await selectTargets(
-      database,
-      requestedId,
-      environment,
-      currentDirectory,
-      signal,
-    );
-    const [target] = targets;
-    if (targets.length !== 1 || !target) return targets;
-    return [
-      {
-        ...target,
-        executableSourcePaths: readRecipeSourcePaths(database, target.id),
+    const latest = requestedId === "latest";
+    const snapshot = readSnapshot(
+      workbenchDatabasePath(environment),
+      (database) => {
+        const targets = latest
+          ? completedScans(database)
+          : exactTargets(database, requestedId);
+        if (
+          targets.length === 1 &&
+          tableColumns(database, "scans").has("recipe_json")
+        ) {
+          const target = targets[0]!;
+          const [row] = readRows<{ recipe_json: string | null }>(
+            database,
+            "SELECT recipe_json FROM scans WHERE id = ?",
+            target.id,
+          );
+          if (row?.recipe_json) {
+            const recipe: unknown = JSON.parse(row.recipe_json);
+            const paths = (key: string): string[] => {
+              const value = isRecord(recipe) ? recipe[key] : null;
+              if (value === undefined) return [];
+              if (
+                Array.isArray(value) &&
+                value.every(
+                  (path): path is string =>
+                    typeof path === "string" && isAbsolute(path),
+                )
+              )
+                return value;
+              throw new CodexSecurityError(
+                "Invalid executable source paths in saved scan history.",
+              );
+            };
+            target.executableSourcePaths = paths("executableSourcePaths");
+            target.knowledgeRoots = [
+              ...paths("knowledgeBasePaths"),
+              ...paths("knowledgeBaseProtectedRoots"),
+            ];
+          }
+        }
+        const checkouts = savedCheckouts(database);
+        return { targets, checkouts };
       },
-    ];
+    );
+    if (latest)
+      snapshot.targets = await latestTargets(
+        snapshot.targets,
+        currentDirectory,
+        environment,
+        snapshot.checkouts,
+        signal,
+      );
+    return snapshot;
   } catch (error) {
     signal?.throwIfAborted();
     if (error instanceof CodexSecurityError) throw error;
@@ -251,72 +332,90 @@ async function readTargets(
       `Could not read saved scan targets before Python discovery: ${errorMessage(error)}`,
       { cause: error },
     );
+  }
+}
+
+function workbenchDatabasePath(environment: ProcessEnvironment): string {
+  return join(codexSecurityStateDirectory(environment), "workbench.sqlite3");
+}
+
+/** @internal Read executable exclusions before launching an ordinary history command. */
+export async function savedCheckoutBoundaries(
+  environment: ProcessEnvironment,
+): Promise<SavedBoundaries | undefined> {
+  const path = workbenchDatabasePath(environment);
+  try {
+    await access(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  return readSnapshot(path, (database) => savedCheckouts(database));
+}
+
+/** @internal Exclude both recorded checkout roots and the currently visible checkouts. */
+export async function savedDiscoveryRoots(
+  checkouts: SavedBoundaries | undefined,
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const targets = [...new Set([...paths, ...(checkouts?.roots ?? [])])];
+  const currentRoots = await Promise.all(
+    targets.map((path) => gitProtectionRoots(path, signal)),
+  );
+  return [...new Set([...targets, ...currentRoots.flat()])];
+}
+
+export function readSavedScanLifecycle(
+  environment: ProcessEnvironment,
+  scanId: string,
+): unknown {
+  return readSnapshot(
+    workbenchDatabasePath(environment),
+    (database) => {
+      const [row] = readRows<{ snapshot: string }>(
+        database,
+        "SELECT snapshot FROM scan_lifecycles WHERE scan_id = ?",
+        scanId,
+      );
+      return row && JSON.parse(row.snapshot);
+    },
+    0,
+  );
+}
+
+function readSnapshot<T>(
+  path: string,
+  select: (database: RuntimeDatabase) => T,
+  timeout: 0 | 5000 = 5000,
+): T {
+  const database = sqliteDatabaseOpener("read-existing")(path);
+  try {
+    database.exec(`PRAGMA busy_timeout = ${timeout}`);
+    database.exec("PRAGMA query_only = ON");
+    // Select scans and their saved boundaries from the same snapshot.
+    database.exec("BEGIN");
+    return select(database);
   } finally {
-    database?.close();
+    database.close();
   }
 }
 
-function readRecipeSourcePaths(
-  database: RuntimeDatabase,
-  id: string,
-): string[] {
-  // Older workbenches predate saved launch recipes.
-  const columns = readRows<{ name: string }>(
-    database,
-    "PRAGMA table_info(scans)",
-  );
-  if (!columns.some((column) => column.name === "recipe_json")) return [];
-  const [row] = readRows<{ recipe_json: string | null }>(
-    database,
-    "SELECT recipe_json FROM scans WHERE id = ?",
-    id,
-  );
-  if (!row)
-    throw new CodexSecurityError(
-      "Saved scan history changed during lookup. Retry the command.",
-    );
-  if (row.recipe_json === null) return [];
-  const recipe: unknown = JSON.parse(row.recipe_json);
-  if (isRecord(recipe)) {
-    const paths = recipe["executableSourcePaths"];
-    if (paths === undefined) return [];
-    if (
-      Array.isArray(paths) &&
-      paths.every(
-        (path): path is string => typeof path === "string" && isAbsolute(path),
-      )
-    )
-      return paths;
-  }
-  throw new CodexSecurityError(
-    "Invalid executable source paths in saved scan history.",
-  );
-}
-
-async function selectTargets(
+function exactTargets(
   database: RuntimeDatabase,
   requestedId: string | { workflowId: string },
-  environment: ProcessEnvironment,
-  currentDirectory: string,
-  signal?: AbortSignal,
-): Promise<ScanTarget[]> {
+): ScanTarget[] {
   if (typeof requestedId !== "string") {
-    const columns = readRows<{ name: string }>(
-      database,
-      "PRAGMA table_info(finding_workflows)",
-    );
-    const scanId = columns.some((column) => column.name === "scan_id")
+    const scanId = tableColumns(database, "finding_workflows").has("scan_id")
       ? "workflow.scan_id"
       : "json_extract(workflow.state_json, '$.scanId')";
     return readRows<ScanTarget>(
       database,
       `SELECT scans.id, scans.target_path FROM scans
-      JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
+        JOIN finding_workflows AS workflow ON scans.id = ${scanId} WHERE workflow.id = ?`,
       requestedId.workflowId,
     );
   }
-  if (requestedId === "latest")
-    return await latestTargets(database, currentDirectory, environment, signal);
   // Match uuid.UUID's accepted full-ID spellings before considering a prefix.
   const compact = trimBoundary(
     requestedId.replaceAll("urn:", "").replaceAll("uuid:", ""),
@@ -345,6 +444,61 @@ async function selectTargets(
   );
 }
 
+function tableColumns(database: RuntimeDatabase, table: string): Set<string> {
+  return new Set(
+    readRows<{ name: string }>(database, `PRAGMA table_info(${table})`).map(
+      (row) => row.name,
+    ),
+  );
+}
+
+/** Read registered boundaries without assuming an unversioned scan was outside Git. */
+function savedCheckouts(database: RuntimeDatabase): SavedBoundaries {
+  const scan = tableColumns(database, "scans");
+  const registry = tableColumns(database, "security_targets");
+  const workspace = tableColumns(database, "workspaces");
+  const sources = [];
+  if (scan.has("target_path"))
+    sources.push("SELECT target_path, NULL AS checkout_root FROM scans");
+  if (workspace.has("target_path")) {
+    const validated = workspace.has("target_path_unvalidated")
+      ? " AND (target_path_unvalidated = 0 OR target_id IS NOT NULL)"
+      : "";
+    sources.push(`SELECT target_path, NULL AS checkout_root FROM workspaces
+      WHERE target_path IS NOT NULL${validated}`);
+  }
+  if (registry.has("current_path")) {
+    sources.push(`SELECT current_path AS target_path,
+      ${registry.has("git_checkout_root") ? "git_checkout_root" : "NULL"} AS checkout_root
+      FROM security_targets`);
+  }
+  const rows =
+    sources.length === 0
+      ? []
+      : readRows<SavedCheckout>(
+          database,
+          `SELECT target_path, MAX(checkout_root) AS checkout_root
+     FROM (${sources.join(" UNION ALL ")}) GROUP BY target_path`,
+        );
+  const saved = workspace.has("rejected_checkout_roots_json")
+    ? "rejected_checkout_roots_json"
+    : "NULL";
+  const rejected = workspace.has("target_path_unvalidated")
+    ? readRows<{ root: string | null }>(
+        database,
+        `SELECT DISTINCT value AS root FROM workspaces LEFT JOIN json_each(${saved})
+         WHERE ${saved} IS NOT NULL OR
+             (target_path IS NOT NULL AND target_path_unvalidated = 1 AND target_id IS NULL)`,
+      ).map((row) => row.root)
+    : [];
+  const roots = [...rows.map((row) => row.checkout_root), ...rejected];
+  return {
+    byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
+    roots: roots.filter((root): root is string => root !== null),
+    complete: !roots.includes(null),
+  };
+}
+
 function readRows<T>(
   database: RuntimeDatabase,
   sql: string,
@@ -360,93 +514,9 @@ function readRows<T>(
   }
 }
 
-async function latestTargets(
-  database: RuntimeDatabase,
-  directory: string,
-  environment: ProcessEnvironment,
-  signal?: AbortSignal,
-): Promise<ScanTarget[]> {
-  const current = await pathKey(directory);
-  const columns = new Set(
-    readRows<{ name: string }>(database, "PRAGMA table_info(scans)").map(
-      (column) => column.name,
-    ),
-  );
-  // The workbench migrates after discovery; schemas before v16 have no target registry.
-  const hasTargets =
-    readRows(database, "PRAGMA table_info(security_targets)").length > 0;
-  const registered = readRows<ScanTarget>(
-    database,
-    hasTargets
-      ? "SELECT id, current_path AS target_path FROM security_targets"
-      : "SELECT DISTINCT target_path AS id, target_path FROM scans",
-  );
-  const related = new Set<string>();
-  for (const target of registered)
-    if ((await pathKey(target.target_path)) === current) related.add(target.id);
-  let gitMatchingUnavailable = false;
-  const caller = await gitMarkerRoot(directory, signal, "outermost");
-  if (caller !== null) {
-    // Resolve metadata with a host Git, never a Git executable from any candidate checkout.
-    const roots = await Promise.all(
-      registered.map((target) =>
-        gitProtectionRoots(target.target_path, signal),
-      ),
-    );
-    const protectedRoots = [
-      ...(await gitProtectionRoots(directory, signal)),
-      ...registered.map((target) => target.target_path),
-      ...roots.flat(),
-    ];
-    const configured = environmentEntry(environment, "CODEX_SECURITY_GIT");
-    const inspected =
-      configured === ""
-        ? { executable: null, environment }
-        : await inspectTrustedExecutable(
-            configured ?? "git",
-            environment,
-            protectedRoots,
-          );
-    // Keep subsequent workbench operations on this host Git without changing Python's PATH.
-    for (const key of Object.keys(environment))
-      if (key.toUpperCase() === "CODEX_SECURITY_GIT") delete environment[key];
-    environment["CODEX_SECURITY_GIT"] = inspected.executable ?? "";
-    gitMatchingUnavailable = inspected.executable === null;
-    const git =
-      inspected.executable === null
-        ? null
-        : {
-            executable: inspected.executable,
-            environment: inspected.environment,
-          };
-    const identity =
-      git === null
-        ? { commonDirectory: null, origin: null }
-        : await gitHistoryIdentity(directory, git, signal);
-    const common =
-      identity.commonDirectory === null
-        ? null
-        : await pathKey(identity.commonDirectory);
-    const origin = repositoryOrigin(identity.origin);
-    for (const [index, target] of registered.entries()) {
-      signal?.throwIfAborted();
-      if (related.has(target.id) || roots[index] === null || git === null)
-        continue;
-      const candidate = await gitHistoryIdentity(
-        target.target_path,
-        git,
-        signal,
-      );
-      if (
-        (common !== null &&
-          candidate.commonDirectory !== null &&
-          (await pathKey(candidate.commonDirectory)) === common) ||
-        (origin !== null && repositoryOrigin(candidate.origin) === origin)
-      )
-        related.add(target.id);
-    }
-  }
-  const scans = readRows<
+function completedScans(database: RuntimeDatabase): ScanTarget[] {
+  const columns = tableColumns(database, "scans");
+  return readRows<
     ScanTarget & {
       updated_at: string;
       progress_updated_at: string;
@@ -456,42 +526,158 @@ async function latestTargets(
     database,
     `SELECT scans.id, scans.target_path, scans.updated_at, scans.started_at,
         progress.updated_at AS progress_updated_at,
-        ${columns.has("target_id") ? "scans.target_id" : "scans.target_path"} AS target_id
+        ${columns.has("repository_generation") ? "scans.repository_generation" : "NULL"} AS repository_generation
       FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
       WHERE scans.status = 'complete' ${columns.has("canceled_at") ? "AND scans.canceled_at IS NULL" : ""}
-        ${columns.has("parent_scan_role") ? "AND scans.parent_scan_role IS NOT 'deep_pass'" : ""}
-      ORDER BY scans.id`,
+        ${columns.has("parent_scan_role") ? "AND scans.parent_scan_role IS NOT 'deep_pass'" : ""}`,
   )
-    .map((scan) => ({
-      ...scan,
-      updatedAt:
-        compareTimestamps(scan.updated_at, scan.progress_updated_at) > 0
-          ? scan.updated_at
-          : scan.progress_updated_at,
-    }))
+    .map((scan) => {
+      const updated = timestampOrderKey(scan.updated_at);
+      const progress = timestampOrderKey(scan.progress_updated_at);
+      return {
+        ...scan,
+        updatedKey: updated > progress ? updated : progress,
+        startedKey: timestampOrderKey(scan.started_at),
+      };
+    })
     .sort(
-      (a, b) =>
-        compareTimestamps(b.updatedAt, a.updatedAt) ||
-        compareTimestamps(b.started_at, a.started_at),
+      (left, right) =>
+        compareOrderKeys(right.updatedKey, left.updatedKey) ||
+        compareOrderKeys(right.startedKey, left.startedKey) ||
+        compareOrderKeys(left.id, right.id),
     );
+}
+
+async function latestTargets(
+  scans: ScanTarget[],
+  directory: string,
+  environment: ProcessEnvironment,
+  checkouts: SavedBoundaries,
+  signal?: AbortSignal,
+): Promise<ScanTarget[]> {
+  const paths = [...new Set(scans.map((scan) => scan.target_path))];
+  const related = new Map<string, { originFallback: boolean }>();
+  for (const path of paths)
+    if (await sameFile(path, directory))
+      related.set(path, { originFallback: false });
+  const protectedAncestorPaths = new Set<string>();
+  let gitMatchingUnavailable = false;
+  const caller = await gitMarkerRoot(directory, signal, "outermost");
+  if (caller !== null) {
+    // Resolve metadata with a host Git, never a Git executable from any candidate checkout.
+    const protectedRoots = await savedDiscoveryRoots(
+      checkouts,
+      [directory, ...checkouts.byTarget.keys()],
+      signal,
+    );
+    const configured = environmentEntry(environment, "CODEX_SECURITY_GIT");
+    const inspected =
+      configured === "" ||
+      (!checkouts.complete && !isAbsolute(configured ?? ""))
+        ? { executable: null, environment }
+        : await inspectTrustedExecutable(
+            configured ?? "git",
+            environment,
+            protectedRoots,
+          );
+    for (const key of Object.keys(environment))
+      if (key.toUpperCase() === "CODEX_SECURITY_GIT") delete environment[key];
+    environment["CODEX_SECURITY_GIT"] = inspected.executable ?? "";
+    gitMatchingUnavailable = inspected.executable === null;
+    if (inspected.executable !== null) {
+      const git = {
+        executable: inspected.executable,
+        environment: inspected.environment,
+      };
+      const identity = await gitHistoryIdentity(directory, git, signal);
+      const origin = repositoryOrigin(identity.origin);
+      for (const path of paths) {
+        signal?.throwIfAborted();
+        if (related.has(path)) continue;
+        const candidate = await gitHistoryIdentity(path, git, signal);
+        if (
+          candidate.commonDirectory === null &&
+          identity.commonDirectory !== null
+        ) {
+          const enclosing = await gitMarkerRoot(path, signal, "outermost");
+          if (enclosing !== null) {
+            const ancestor = await gitHistoryIdentity(enclosing, git, signal);
+            if (
+              ancestor.commonDirectory !== null &&
+              (await sameFile(
+                identity.commonDirectory,
+                ancestor.commonDirectory,
+              ))
+            )
+              protectedAncestorPaths.add(path);
+          }
+        }
+        if (
+          identity.relativePath === null ||
+          candidate.relativePath !== identity.relativePath
+        )
+          continue;
+        const common =
+          identity.commonDirectory !== null &&
+          candidate.commonDirectory !== null &&
+          (await sameFile(identity.commonDirectory, candidate.commonDirectory));
+        const clone =
+          !common &&
+          identity.commonDirectory !== null &&
+          candidate.commonDirectory !== null &&
+          origin !== null &&
+          repositoryOrigin(candidate.origin) === origin;
+        if (common || clone) related.set(path, { originFallback: clone });
+      }
+    }
+  }
+  const selected: ScanTarget[] = [];
   for (const scan of scans) {
     signal?.throwIfAborted();
-    if (
-      related.has(scan.target_id ?? "") ||
-      (await pathKey(scan.target_path)) === current
-    )
-      return [scan];
+    const match = related.get(scan.target_path);
+    // Scan generations survive legacy unbound registry rows and removed or reused paths.
+    // The caller-scoped workbench query remains authoritative for membership.
+    if (match || (caller !== null && scan.repository_generation != null))
+      selected.push({
+        ...scan,
+        originFallback: match?.originFallback ?? false,
+        // An existing path unrelated to the caller no longer supplies its source.
+        // Keep the historical binding for lookup without trusting it as a live target.
+        protectPython:
+          match !== undefined || protectedAncestorPaths.has(scan.target_path),
+      });
   }
-  if (gitMatchingUnavailable)
+  if (related.size === 0 && gitMatchingUnavailable)
     throw new CodexSecurityError(
       "No completed saved scan matched this exact path, and Git-based matching across worktrees or clones is unavailable. Use an explicit saved scan ID: codex-security dedupe --scan SCAN_ID",
     );
-  return [];
+  return selected;
 }
 
-async function pathKey(path: string): Promise<string> {
-  const canonical = await realpath(path).catch(() => resolve(path));
-  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+function timestampOrderKey(value: string): string {
+  const match =
+    /^(\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2})(?:\.([0-9]+))?([Zz]|[+-]\d{2}:\d{2})$/.exec(
+      value,
+    );
+  const seconds = match
+    ? Date.parse(`${match[1]}${match[3]}`.toUpperCase())
+    : NaN;
+  // Legacy naive or malformed rows retain opaque text ordering. The scoped
+  // workbench query still owns their diagnostics, without using the host timezone.
+  if (!Number.isFinite(seconds)) return `0${value}`;
+  const instant = new Date(seconds);
+  const whole = instant.toISOString().slice(0, -5);
+  // An offset can carry a supported four-digit local year into UTC year 10000.
+  const year = String(instant.getUTCFullYear()).padStart(5, "0");
+  const digits = match![2] ?? "";
+  let fractionEnd = digits.length;
+  while (fractionEnd > 0 && digits[fractionEnd - 1] === "0") fractionEnd--;
+  const fraction = digits.slice(0, fractionEnd);
+  return `${year}${whole.slice(whole.indexOf("-"))}${fraction ? `.${fraction}` : ""}`;
+}
+
+function compareOrderKeys(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 // Match the workbench history's host/path identity across HTTPS and SSH origins.
