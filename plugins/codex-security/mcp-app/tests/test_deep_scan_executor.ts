@@ -124,6 +124,7 @@ try {
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
+    await check(t, testReadOnlyEvidenceRepair);
     await check(t, testRuntimeSnapshotReadRetry);
     if (process.platform !== "win32") {
       await check(
@@ -1126,6 +1127,82 @@ async function testReportOnlyComparison() {
     assert.equal(server.enabled, false);
     assert.equal(server.transport.command, "fixture-command");
   });
+}
+
+async function testReadOnlyEvidenceRepair() {
+  return withWorkerFixture(async (fixture, _promptPath, workingDirectory) => {
+    const configPath = path.join(fixture.root, "host.toml");
+    const deepPath = path.join(fixture.root, "scan.toml");
+    await writeFile(configPath, 'model_reasoning_effort = "low"\n');
+    await writeFile(
+      deepPath,
+      stringifyToml({
+        worker_runtime: {
+          model_reasoning_effort: "high",
+          features: { shell_tool: true, unified_exec: false, view_image: true },
+          environment: { SYNTHETIC_GATEWAY_KEY: "fixture-scan-value" },
+        },
+      }),
+    );
+    const previousConfig = process.env.CODEX_SECURITY_CONFIG_PATH;
+    const previousDeepConfig = process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+    try {
+      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = deepPath;
+      const executor = new CodexSdkWorkerExecutor({
+        parentSandbox: trustedParentSandbox,
+        artifactContext: {
+          pluginRoot: fixture.root,
+          repoRoot: fixture.root,
+          scanId: "fixture-scan",
+        },
+      });
+      const workerUsageDirectory = path.join(fixture.root, "private-usage");
+      const attemptId = randomUUID();
+      const prompt = "Document the saved finding's evidence.";
+      const response = await executor.repairFindingEvidence(
+        prompt,
+        workingDirectory,
+        new AbortController().signal,
+        { type: "object", properties: { codeEvidence: { type: "array" } } },
+        { attemptId, workerUsageDirectory },
+      );
+      assert.deepEqual(JSON.parse(response), { codeEvidence: [] });
+      const invocation = await readJson(fixture.markerPath);
+      assert.equal(invocation.stdin, prompt);
+      assert.equal(invocation.providerKey, "fixture-scan-value");
+      const permissions = JSON.parse(
+        JSON.stringify(
+          parseToml(workerPermissionProfileOverride(invocation.argv))
+            .permissions,
+        ),
+      );
+      assert.deepEqual(
+        permissions.codex_security_deep_scan_worker.filesystem[
+          workerUsageDirectory
+        ],
+        { ".": "deny" },
+      );
+      assertFlagPair(invocation.argv, "--cd", workingDirectory);
+      assertReadOnlyWorkerPolicy(invocation.argv);
+      assertConfigOverrides(invocation.argv, {
+        model_reasoning_effort: "high",
+        "responses_api_metadata.codex_security_worker_role": "evidence",
+        "responses_api_metadata.codex_security_attempt_id": attemptId,
+        "features.shell_tool": true,
+        "features.unified_exec": false,
+        "features.view_image": false,
+        "features.request_permissions_tool": false,
+        "features.multi_agent_v2": false,
+        "mcp_servers.cs_artifacts": undefined,
+        "mcp_servers.codex-security.enabled": false,
+        web_search: "disabled",
+      });
+    } finally {
+      restoreEnv("CODEX_SECURITY_CONFIG_PATH", previousConfig);
+      restoreEnv("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", previousDeepConfig);
+    }
+  }, null);
 }
 
 async function testOpenAiCredentialsReachWorker() {

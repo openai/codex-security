@@ -115,6 +115,7 @@ export interface CodexWorkerDiagnostic {
 
 export interface CodexWorkerExecutor {
   run(request: CodexWorkerRequest): Promise<CodexWorkerResult>;
+  repairFindingEvidence?: CodexWorkerExecutor["compareFindings"];
   compareFindings?(
     prompt: string,
     workingDirectory: string,

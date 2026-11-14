@@ -6,6 +6,8 @@ For every reportable finding in `findings.json`, preserve the validated reasonin
 
 New drafts and imports use `codeEvidence`, `rootCause`, `attackPath.dataflow`, and `evidenceRefs`. Legacy aliases (`code_evidence`, `root_cause`, `dataFlow`, `data_flow`, and `evidence_refs`) are rejected on writes. Optional fields must match the current schema; invalid values are not silently repaired or removed. Historical sealed reports remain readable without changing their saved bytes.
 
+Before completing a new scan, each finding must include at least one genuine `codeEvidence` snippet, a `rootCause` explanation, `attackPath.dataflow`, and `validation.method`, a `validation.summary` or `validation.result`, and supporting `validation.evidence` or `validation.evidenceRefs`. Dataflow may be concise text, an object with `summary`, or an object identifying `source` and `sink`. Static source tracing is a valid method; state what was observed and any runtime or deployment uncertainty in `validation.limitations`. Read and verify the snippets against the reviewed source while it is available; a location label is not code. These are completion requirements, not a requirement to run an exploit or lengthen the prose. Incomplete checkpoints and stopped scans can retain partial evidence. Completion reports missing fields without discarding the draft so a continuation can repair them.
+
 - Lead the title and `summary` with the user action and product impact.
 - Use `attackPath.summary` to briefly explain how to reproduce the issue.
 - Explain how the code causes that product behavior in `rootCause.summary`. Use plain language and avoid repetition.

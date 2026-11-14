@@ -10,6 +10,17 @@
           "summary": "The caller must be able to supply an archive for extraction. The service account must have write access to the destination."
         }
       },
+      "codeEvidence": [
+        {
+          "code": "destination = output_dir / entry.name\nwith archive.open(entry) as source:\n    destination.parent.mkdir(parents=True, exist_ok=True)\n    destination.write_bytes(source.read())",
+          "endLine": 44,
+          "explanation": "The destination incorporates an untrusted archive entry name and is written without a containment check.",
+          "id": "archive-write",
+          "label": "Unchecked archive write",
+          "path": "src/extract.py",
+          "startLine": 41
+        }
+      ],
       "confidence": {
         "level": "high",
         "rationale": "The destination passed to the file writer is visible in the reviewed code."
@@ -42,6 +53,9 @@
       "remediationTests": [
         "Assert that extracting an archive entry named `../escape.txt` fails without writing outside the extraction root."
       ],
+      "rootCause": {
+        "summary": "The extractor joins the entry name to the output directory without checking whether the destination stays inside it."
+      },
       "ruleId": "path-traversal.archive-extraction",
       "severity": {
         "changeConditions": "A filesystem policy that confines writes to a disposable import directory would limit the impact.",
@@ -59,6 +73,12 @@
       },
       "title": "Unsafe archive extraction can escape the output directory",
       "validation": {
+        "evidence": [
+          "The untrusted entry name reaches the filesystem write without normalization or a containment check."
+        ],
+        "limitations": [
+          "The extraction route was not exercised dynamically."
+        ],
         "method": "Static source review",
         "summary": "The extractor combines the output directory with the entry name and passes the resulting path to the writer. It never checks that the destination stays inside the output directory."
       }

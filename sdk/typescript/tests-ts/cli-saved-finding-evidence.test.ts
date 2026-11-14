@@ -5,7 +5,10 @@ import { exportEnvironment, main } from "../src/cli.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { resolvePluginPython } from "../src/runtime.js";
 import { dependencies } from "./cli-fixtures.js";
-import { copyCompletedScanFixture } from "./plugin-root.js";
+import {
+  readCompletedFindingsFixture,
+  copyCompletedScanFixture,
+} from "./plugin-root.js";
 import { createCliTest } from "./support/cli-run.js";
 import { setFindingIdentity } from "./support/finding-identity.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -42,9 +45,7 @@ async function savedEvidence() {
     manifest.scan.target.targetId = registered["targetId"] as string;
     Reflect.deleteProperty(manifest.scan, "sealedAt");
     Reflect.deleteProperty(manifest.scan, "artifacts");
-    const document = JSON.parse(
-      await readFile(join(scanDir, "findings.json"), "utf8"),
-    ) as FindingsDocument;
+    const document = await readCompletedFindingsFixture();
     document.scanId = scanId;
     const finding = document.findings[0]!;
     const slug = "synthetic".repeat(28);
@@ -58,6 +59,8 @@ async function savedEvidence() {
       explanation: "Synthetic source-to-sink evidence.",
     }));
     finding.validation = {
+      method: "synthetic fixture",
+      evidenceRefs: ["evidence-0"],
       summary: "Synthetic validation evidence.",
       counterEvidence: ["A mitigation remains unverified. ".repeat(300)],
     };

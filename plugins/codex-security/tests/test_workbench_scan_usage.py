@@ -3038,7 +3038,7 @@ def test_worker_receipts_preserve_cumulative_totals_and_known_cache_writes(
                     "usageScope": "thread_cumulative",
                     "scanId": fixture.scan_id,
                     "workerId": thread_id,
-                    "kind": "discovery",
+                    "kind": "evidence" if thread_id == "second-worker" else "discovery",
                     "attemptId": attempt_id,
                     "attempt": index + 1,
                     "resumed": index > 0,

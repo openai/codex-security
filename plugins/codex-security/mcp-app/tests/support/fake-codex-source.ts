@@ -119,7 +119,7 @@ if (stdin.includes('ARTIFACT_TOOL_')) {
 }
 const schemaIndex = process.argv.indexOf('--output-schema');
 const schema = schemaIndex < 0 ? undefined : JSON.parse(readFileSync(process.argv[schemaIndex + 1], 'utf8'));
-const text = schema?.properties?.reviews ? '{"reviews":[]}' : schema?.properties?.defects ? JSON.stringify({defects: [{operation: 'Check ownership', failure: 'foreign object', path: 'fixture.py', reports: [{id: 0, evidence: 0}]}], uncertain: []}) : 'fixture final response';
+const text = schema?.properties?.codeEvidence ? '{"codeEvidence":[]}' : schema?.properties?.reviews ? '{"reviews":[]}' : schema?.properties?.defects ? JSON.stringify({defects: [{operation: 'Check ownership', failure: 'foreign object', path: 'fixture.py', reports: [{id: 0, evidence: 0}]}], uncertain: []}) : 'fixture final response';
 console.log(JSON.stringify({ type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text } }));
 const completedTurns = stdin.includes('COMPLETE_THEN_HANG') && process.argv.includes('resume') ? 2 : 1;
 console.log(JSON.stringify({ type: 'turn.completed', usage: stdin.includes('NULL_USAGE') ? null : { input_tokens: completedTurns, cached_input_tokens: 0, output_tokens: completedTurns } }));

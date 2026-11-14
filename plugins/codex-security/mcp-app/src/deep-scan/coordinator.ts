@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { repairAcceptedEvidence } from "./evidence-repair.js";
 import {
   writeWorkerUsageReceipt,
   type WorkerUsageReceipt,
@@ -62,6 +63,7 @@ interface LoopResult {
   reason: DeepScanTerminalReason;
   result?: ScanUnion;
   resultPath?: string;
+  omittedWorkerIds?: string[];
 }
 
 export interface ParentScanState {
@@ -405,7 +407,7 @@ export class DeepScanCoordinator {
         scanId: this.state.scanId,
         reason: loopResult.reason,
         manifestPath: join(this.state.scanDir, "scan-manifest.json"),
-        omittedWorkerIds: [],
+        omittedWorkerIds: loopResult.omittedWorkerIds ?? [],
       });
       if (this.canceled || this.externallyFailed) return;
       this.state = completed;
@@ -713,7 +715,20 @@ export class DeepScanCoordinator {
   private async runIterations(): Promise<LoopResult> {
     const { scanId, config } = this.state;
     const signal = this.abortController.signal;
-    const accepted = await this.recoverAcceptedDiscoveries();
+    const selectedReason = this.state.manifestPath
+      ? this.state.terminalReason
+      : undefined;
+    const omitted = new Set(
+      selectedReason === "saturated"
+        ? (this.state.persistedWorkers ?? [])
+            .filter(
+              (worker) =>
+                worker.kind === "discovery" && worker.mergeState === "buffered",
+            )
+            .map((worker) => worker.id)
+        : [],
+    );
+    const accepted = await this.recoverAcceptedDiscoveries(omitted);
     let acceptedCount = accepted.length;
     const persisted = this.state.persistedWorkers ?? [];
     const merged = new Set(
@@ -793,17 +808,42 @@ export class DeepScanCoordinator {
 
     this.logProgress(acceptedCount);
 
+    // Later merges can restore pre-upgrade source reports from the saved aggregate.
+    const hasRecoveredFindings =
+      result.findings.length > 0 ||
+      batch.some((worker) => worker.result.findings.length > 0);
     for (;;) {
       signal.throwIfAborted();
-      if (batch.length) {
-        // Newly dispatched scans arrive in launch order. Recovery uses the same labels.
-        const { counts: newCounts, stop } = await this.mergeAcceptedBatch(
-          result,
-          batch,
-        );
-        for (const count of newCounts) {
-          streak = count ? 0 : streak + 1;
-        }
+      // Newly dispatched scans arrive in launch order. Recovery uses the same labels.
+      const { counts: newCounts, stop } = batch.length
+        ? await this.mergeAcceptedBatch(result, batch)
+        : { counts: [], stop: undefined };
+      for (const count of newCounts) {
+        streak = count ? 0 : streak + 1;
+      }
+      // Only recovery can introduce findings that predate the worker evidence gate.
+      const repaired =
+        hasRecoveredFindings &&
+        !stop &&
+        (await repairAcceptedEvidence(
+          result.findings,
+          this.state,
+          (prompt, schema) => this.runReportWorker("evidence", prompt, schema),
+          () => this.options.store.checkRepairTarget(scanId),
+          async (attempt, error) => {
+            signal.throwIfAborted();
+            const delayMs = (this.options.retryDelaysMs ?? RETRY_DELAYS_MS)[
+              attempt
+            ];
+            if (
+              delayMs === undefined ||
+              error instanceof DeepScanNonRetryableError
+            )
+              throw error;
+            await this.clock.sleep(delayMs, signal);
+          },
+        ));
+      if (batch.length || repaired) {
         resultPath = join(
           await reserveWorkerDirectory(
             this.artifacts.dedupRoot,
@@ -835,6 +875,14 @@ export class DeepScanCoordinator {
         });
         this.logProgress(acceptedCount);
         if (stop) throw stop;
+      }
+      if (selectedReason) {
+        return {
+          reason: selectedReason,
+          result,
+          resultPath,
+          omittedWorkerIds: [...omitted],
+        };
       }
       if (errors >= config.stopAfterConsecutiveErrors && failure) {
         throw discoveryErrorLimitError(
@@ -916,7 +964,7 @@ export class DeepScanCoordinator {
       async (prompt, schema) => {
         if (stop) throw stop;
         try {
-          return await this.compareReports(prompt, schema);
+          return await this.runReportWorker("compare", prompt, schema);
         } catch (error) {
           // Finish checkpointing accepted workers before stopping discovery.
           if (error instanceof DeepScanNonRetryableError) stop = error;
@@ -935,13 +983,23 @@ export class DeepScanCoordinator {
     return { counts, stop };
   }
 
-  private async compareReports(
+  private async runReportWorker(
+    kind: "compare" | "evidence",
     prompt: string,
     schema: Record<string, unknown>,
   ): Promise<string> {
     const { executor } = this.options;
-    if (!executor.compareFindings)
-      throw new Error("No Deep Scan finding comparison executor");
+    const run =
+      kind === "compare"
+        ? executor.compareFindings
+        : executor.repairFindingEvidence;
+    if (!run) {
+      if (kind === "compare")
+        throw new Error("No Deep Scan finding comparison executor");
+      throw new DeepScanNonRetryableError(
+        "No Deep Scan finding evidence repair executor",
+      );
+    }
     const { scanId, workerUsageDirectory } = this.state;
     const signal = this.abortController.signal;
     const startedAt = new Date(this.clock.now()).toISOString();
@@ -952,7 +1010,7 @@ export class DeepScanCoordinator {
       usageScope: "thread_cumulative",
       scanId,
       workerId: attemptId,
-      kind: "compare",
+      kind,
       attemptId,
       attempt: 1,
       resumed: false,
@@ -977,7 +1035,8 @@ export class DeepScanCoordinator {
     };
     await persist();
     try {
-      const report = await executor.compareFindings(
+      const report = await run.call(
+        executor,
         prompt,
         this.artifacts.deepRoot,
         signal,
@@ -1072,10 +1131,16 @@ export class DeepScanCoordinator {
     });
   }
 
-  private async recoverAcceptedDiscoveries(): Promise<AcceptedDiscovery[]> {
+  private async recoverAcceptedDiscoveries(
+    omitted: Set<string>,
+  ): Promise<AcceptedDiscovery[]> {
     const recovered: AcceptedDiscovery[] = [];
     for (const worker of this.state.persistedWorkers ?? []) {
-      if (worker.kind !== "discovery" || worker.status !== "succeeded")
+      if (
+        worker.kind !== "discovery" ||
+        worker.status !== "succeeded" ||
+        omitted.has(worker.id)
+      )
         continue;
       if (!worker.resultManifestPath || !worker.completionSequence) {
         throw new Error(

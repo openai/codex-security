@@ -14,7 +14,10 @@ import {
   temporaryDirectories,
 } from "./deep_scan_coordinator_fixture.ts";
 import { draftFixture } from "./scan-draft-recovery-fixture.ts";
-import { finding, workerDraft } from "./scan-draft-fixture.ts";
+import {
+  completedFinding as finding,
+  workerDraft,
+} from "./scan-draft-fixture.ts";
 
 const { startDeepScanEngine } = await importSource("src/deep-scan/engine.ts", {
   loader: { ".md": "text" },

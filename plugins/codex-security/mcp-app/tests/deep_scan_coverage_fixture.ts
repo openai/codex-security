@@ -108,6 +108,14 @@ const {
   },
   loader: { ".md": "text" },
 })) as FixtureRuntime;
+
+export {
+  createScanArtifactContext,
+  DeepScanCoordinator,
+  recordCodexSecurityScanDraftViaWorkbench,
+  WorkbenchDeepScanStore,
+};
+
 async function writeReceipt(file: string, contents: string) {
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, contents);
