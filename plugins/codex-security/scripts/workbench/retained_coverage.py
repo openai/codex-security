@@ -39,7 +39,6 @@ from workbench.finding_identity import (
 from workbench.retained_records import (
     _competing_rejection_receipts,
     _conflicting_outcome_receipts,
-    _coverage_row_is_retained,
     _ensure_finding_identities,
     _ensure_finding_identity,
     _finding_identity,
@@ -2258,15 +2257,47 @@ def merge_saved_results(
         worker_id: str | None,
         selection: tuple[bool, set[str], bool, bool, bool],
     ) -> bool:
-        return _coverage_row_is_retained(
-            field,
-            item,
-            worker_id,
-            selection,
-            resolved=resolved,
-            ambiguous_deferred=ambiguous_deferred,
-            coverage_candidate=coverage_candidate,
-        )
+        (
+            selected_coverage_superseded,
+            selected_candidates,
+            superseded,
+            retain_pending,
+            coverage_superseded,
+        ) = selection
+        # A selected terminal checkpoint replaces ordinary coverage, while
+        # candidate evidence and pending tasks retain their own reconciliation.
+        if (
+            selected_coverage_superseded
+            and field != "deferred"
+            and not (isinstance(item, dict) and _has_candidate_metadata(item))
+        ):
+            return False
+        # A selected outcome must retain its evidence even if its result write failed.
+        if coverage_superseded and not (
+            isinstance(item, dict)
+            and (
+                (field == "deferred" and retain_pending)
+                or (
+                    isinstance(item.get("candidateId"), str)
+                    and item["candidateId"] in selected_candidates
+                    and item.get("disposition") == resolved.get((worker_id, item["candidateId"]))
+                )
+            )
+        ):
+            return False
+        if (
+            isinstance(item, dict)
+            and isinstance(
+                identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
+                if field == "deferred"
+                else item.get("candidateId"),
+                str,
+            )
+            and (coverage_candidate(worker_id, item) or (worker_id, identity)) in resolved
+            and (field == "deferred" or item.get("disposition") == "needs_follow_up")
+        ):
+            return False
+        return True
 
     def source_surface_receipts(relative: str, row: dict[str, Any]) -> Any:
         worker = workers_by_id.get(source_owners.get(relative))

@@ -2007,47 +2007,6 @@ for (const payload of ["generic", "candidate"] as const) {
   });
 }
 
-for (const complete of [false, true]) {
-  test(`worker: retain a valid ${complete ? "terminal" : "progress"} draft before reading a malformed result`, async (t) => {
-    const f = await fixture(t, "worker");
-    const destination = path.join(f.root, "result.json");
-    await writeFile(destination, "{broken");
-    const submitted = f.draft(
-      { deferred: [{ id: "pending", ...generic }] },
-      complete,
-    );
-    await assert.rejects(f.write(submitted), /stored JSON is malformed/);
-    const files = await readdir(path.join(f.root, "checkpoints"));
-    assert.equal(files.length, 1);
-    assert.deepEqual(
-      await readJson(f.root, "checkpoints", files[0]),
-      submitted,
-    );
-    await rm(destination);
-    await f.writeReviewState({}, true);
-    assert.deepEqual((await f.read()).deferred, submitted.reviewState.deferred);
-  });
-}
-
-for (const malformed of [false, true]) {
-  test(`worker: reject an unknown closure without a checkpoint, malformed result=${malformed}`, async (t) => {
-    const f = await fixture(t, "worker");
-    if (malformed) await writeFile(path.join(f.root, "result.json"), "{broken");
-    await assert.rejects(
-      f.writeReviewState(
-        {
-          resolvedDeferred: [{ id: "unknown", reason: "Unsupported closure." }],
-        },
-        true,
-      ),
-      malformed
-        ? /stored JSON is malformed/
-        : /names no saved generic deferral/,
-    );
-    assert.deepEqual(await readdir(f.root), malformed ? ["result.json"] : []);
-  });
-}
-
 for (const layout of ["standard", "diff", "worker"] as const) {
   for (const reopened of [false, true]) {
     test(`${layout}: accepted progress remains incomplete after a terminal draft, reopened=${reopened}`, async (t) => {

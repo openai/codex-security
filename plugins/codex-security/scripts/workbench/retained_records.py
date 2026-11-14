@@ -21,9 +21,9 @@ from finalize_scan_contract import (
     finding_candidate_id,
 )
 from finalize_scan_contract import _schema_values_equal as same_raw_value
-from workbench.saved_coverage import _coverage_rows, _has_candidate_metadata, _saved_coverage_id
+from workbench.saved_coverage import _coverage_rows, _saved_coverage_id
 from workbench.saved_sources import _digest, _encoded
-from workbench_coverage_receipts import _deferred_candidate_id, resolve_coverage_receipts
+from workbench_coverage_receipts import resolve_coverage_receipts
 from workbench_validation import javascript_utf8
 
 _FINDING_IDENTITY_SCHEMA = _read_json(
@@ -626,59 +626,6 @@ def _project_missing_record(
                 for value in item["surfaceIds"]
             ]
     return result
-
-
-def _coverage_row_is_retained(
-    field: str,
-    item: Any,
-    worker_id: str | None,
-    selection: tuple[bool, set[str], bool, bool, bool],
-    *,
-    resolved,
-    ambiguous_deferred,
-    coverage_candidate,
-) -> bool:
-    (
-        selected_coverage_superseded,
-        selected_candidates,
-        superseded,
-        retain_pending,
-        coverage_superseded,
-    ) = selection
-    # A selected terminal checkpoint replaces ordinary coverage, while
-    # candidate evidence and pending tasks retain their own reconciliation.
-    if (
-        selected_coverage_superseded
-        and field != "deferred"
-        and not (isinstance(item, dict) and _has_candidate_metadata(item))
-    ):
-        return False
-    # A selected outcome must retain its evidence even if its result write failed.
-    if coverage_superseded and not (
-        isinstance(item, dict)
-        and (
-            (field == "deferred" and retain_pending)
-            or (
-                isinstance(item.get("candidateId"), str)
-                and item["candidateId"] in selected_candidates
-                and item.get("disposition") == resolved.get((worker_id, item["candidateId"]))
-            )
-        )
-    ):
-        return False
-    if (
-        isinstance(item, dict)
-        and isinstance(
-            identity := _deferred_candidate_id(item, worker_id, ambiguous_deferred)
-            if field == "deferred"
-            else item.get("candidateId"),
-            str,
-        )
-        and (coverage_candidate(worker_id, item) or (worker_id, identity)) in resolved
-        and (field == "deferred" or item.get("disposition") == "needs_follow_up")
-    ):
-        return False
-    return True
 
 
 def _recovered_model(
