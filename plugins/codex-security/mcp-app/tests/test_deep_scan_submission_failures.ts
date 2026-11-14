@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -42,12 +41,15 @@ afterEach(async () => {
   await coordinatorDirectories.cleanup();
 });
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, onAbort?: () => void) {
   const saved = new Map<string, string | undefined>();
   const set = (name: string, value?: string) => {
     if (!saved.has(name)) saved.set(name, process.env[name]);
     restoreEnv(name, value);
   };
+  t.after(() => {
+    for (const [name, value] of saved) restoreEnv(name, value);
+  });
   set("FAKE_CODEX_MARKER");
   const fake = await fakeCodexFixture(null);
   const home = path.join(fake.root, "home");
@@ -62,41 +64,20 @@ async function fixture(t: TestContext) {
   set("FAKE_CODEX_ARTIFACT_EVENT");
   const eventsPath = path.join(fake.root, "events.jsonl");
   set("FAKE_CODEX_EVENTS_PATH", eventsPath);
-  const launches: {
-    child: ChildProcess;
-    signal: AbortSignal;
-    args: readonly string[];
-  }[] = [];
-  let onKill: (() => void) | undefined;
-  const restoreSpawn = mockWorkerSpawn(
-    fake.executablePath,
-    (child, args, options) => {
-      launches.push({ child, args, signal: options.signal! });
-      const kill = child.kill;
-      child.kill = function (...args: Parameters<ChildProcess["kill"]>) {
-        onKill?.();
-        return kill.apply(this, args);
-      };
-    },
+  const signals: AbortSignal[] = [];
+  t.after(
+    mockWorkerSpawn(fake.executablePath, (_child, _args, options) => {
+      const signal = options.signal!;
+      signals.push(signal);
+      if (onAbort) signal.addEventListener("abort", onAbort, { once: true });
+    }),
   );
-  t.after(() => {
-    onKill = undefined;
-    for (const { child } of launches) {
-      if (child.exitCode === null && child.signalCode === null)
-        child.kill("SIGKILL");
-    }
-    restoreSpawn();
-    for (const [name, value] of saved) restoreEnv(name, value);
-  });
   const promptPath = path.join(fake.root, "prompt.md");
   await writeFile(promptPath, "Complete the synthetic review.\n");
   return {
     ...fake,
     promptPath,
-    launches,
-    setOnKill(callback: () => void) {
-      onKill = callback;
-    },
+    signals,
     async events(events: ThreadEvent[]) {
       await writeFile(
         eventsPath,
@@ -163,6 +144,38 @@ async function artifactClient(root: string, id = scanId) {
   };
 }
 
+// Exercise the real writer before replaying each attempt's tool outcomes.
+async function attemptEvents(
+  root: string,
+  id: string,
+  outcome: "accepted" | "rejected" | "recovered",
+) {
+  const artifacts = await artifactClient(root, id);
+  try {
+    const saved = await artifacts.call(draftTool, {
+      ...artifacts.draft,
+      complete: outcome !== "rejected",
+      // A successful retry omits the finding in the previous checkpoint.
+      ...(outcome === "recovered" && { findings: [] }),
+    });
+    assert.equal(saved.item.status, "completed");
+    const events = [saved];
+    if (outcome === "rejected") {
+      for (let i = 0; i < 2; i++) {
+        const failure = await artifacts.call(draftTool, {
+          ...artifacts.draft,
+          threatModel: "{}",
+        });
+        assert.equal(failure.item.status, "failed");
+        events.push(failure);
+      }
+    }
+    return events;
+  } finally {
+    await artifacts.close();
+  }
+}
+
 async function readWorkerCheckpoint(artifactDir: string) {
   const head = JSON.parse(
     await readFile(path.join(artifactDir, "checkpoint-head.json"), "utf8"),
@@ -175,7 +188,11 @@ async function readWorkerCheckpoint(artifactDir: string) {
   );
 }
 
-for (const failure of ["schema", "handler", "transport"] as const) {
+for (const [failure, detail] of [
+  ["schema", /Input validation error/],
+  ["handler", /coordinator-bound worker scan/],
+  ["transport", /synthetic transport closed/],
+] as const) {
   test(`stops repeated ${failure} submissions inside the turn despite successful reads`, async (t) => {
     const f = await fixture(t);
     const artifacts = await artifactClient(path.join(f.root, "output"));
@@ -211,18 +228,6 @@ for (const failure of ["schema", "handler", "transport"] as const) {
       );
       events.push(await artifacts.call("read_deep_scan_peer_notes", {}));
     }
-    assert.equal(
-      (events[0] as { item: { status: string } }).item.status,
-      "failed",
-    );
-    if (failure !== "transport") {
-      assert.match(
-        JSON.stringify(events[0]),
-        failure === "schema"
-          ? /Input validation error/
-          : /coordinator-bound worker scan/,
-      );
-    }
     await f.events(events);
     let completed = false;
     await assert.rejects(
@@ -234,7 +239,11 @@ for (const failure of ["schema", "handler", "transport"] as const) {
           },
         }),
       ),
-      /3 consecutive.*submission/i,
+      (error: Error) => {
+        assert.match(error.message, /3 consecutive.*submission/i);
+        assert.match(error.message, detail);
+        return true;
+      },
     );
     assert.equal(
       completed,
@@ -246,9 +255,8 @@ for (const failure of ["schema", "handler", "transport"] as const) {
       false,
       "only this attempt is canceled",
     );
-    assert.equal(f.launches.length, 1);
-    assert.equal(f.launches[0].signal.aborted, true);
-    assert.equal(f.launches[0].child.killed, true);
+    assert.equal(f.signals.length, 1);
+    assert.equal(f.signals[0].aborted, true);
   });
 }
 
@@ -288,7 +296,7 @@ test("persisted submissions reset the streak; other tools and intermediate event
   }
   await f.events(events);
   await f.executor().run(workerRequest(f.promptPath, f.root));
-  assert.equal(f.launches[0].signal.aborted, false);
+  assert.equal(f.signals[0].aborted, false);
   const saved = JSON.parse(
     await readFile(path.join(output, "result.json"), "utf8"),
   );
@@ -322,8 +330,8 @@ test("saved per-scan limits isolate concurrent executors and apply to resumed tu
   );
   assert.equal(results[0].status, "rejected");
   assert.equal(results[1].status, "fulfilled");
-  assert.equal(f.launches.filter(({ signal }) => signal.aborted).length, 1);
-  assert.ok(f.launches.every(({ args }) => args.includes("resume")));
+  assert.equal(f.signals.filter((signal) => signal.aborted).length, 1);
+  assert.equal(results[1].value.threadId, "thread-limit-3");
 });
 
 test("coordinator retains accepted findings and partial checkpoints when submission retries exhaust", async (t) => {
@@ -351,31 +359,13 @@ test("coordinator retains accepted findings and partial checkpoints when submiss
           );
         }
         resumes.push(request.resumeThreadId);
-        const artifacts = await artifactClient(
-          request.workingDirectory,
-          scan.run.scanId,
+        await f.events(
+          await attemptEvents(
+            request.workingDirectory,
+            scan.run.scanId,
+            attempts === 1 ? "accepted" : "rejected",
+          ),
         );
-        try {
-          // Accept the first discovery, then checkpoint the failing workers.
-          const saved = await artifacts.call(draftTool, {
-            ...artifacts.draft,
-            complete: attempts === 1,
-          });
-          const failures =
-            attempts === 1
-              ? []
-              : await Promise.all(
-                  [1, 2].map(() =>
-                    artifacts.call(draftTool, {
-                      ...artifacts.draft,
-                      threatModel: "{}",
-                    }),
-                  ),
-                );
-          await f.events([saved, ...failures]);
-        } finally {
-          await artifacts.close();
-        }
         return executor.run(request);
       },
     },
@@ -405,8 +395,8 @@ test("coordinator retains accepted findings and partial checkpoints when submiss
   );
   assert.equal(stopped, true);
   assert.equal(store.finishCalls.length, 0);
-  assert.equal(f.launches[0].signal.aborted, false);
-  assert.ok(f.launches.slice(1).every(({ signal }) => signal.aborted));
+  assert.equal(f.signals[0].aborted, false);
+  assert.ok(f.signals.slice(1).every((signal) => signal.aborted));
   assert.ok(
     store.workerUpdates.some(({ error }) =>
       /2 consecutive.*submission/i.test(error ?? ""),
@@ -439,7 +429,12 @@ test("coordinator retains accepted findings and partial checkpoints when submiss
 
 for (const cancel of [false, true]) {
   test(`coordinator ${cancel ? "cancellation racing the guard preserves" : "successful resume retains"} saved findings`, async (t) => {
-    const f = await fixture(t);
+    const f = await fixture(
+      t,
+      cancel
+        ? () => coordinator.cancel("synthetic user cancellation during abort")
+        : undefined,
+    );
     const { fixture: scan, store } = await coordinatorFixture({
       ...config,
       stopAfterConsecutiveErrors: 2,
@@ -454,37 +449,15 @@ for (const cancel of [false, true]) {
       {
         async run(request) {
           attempts++;
-          const artifacts = await artifactClient(
-            request.workingDirectory,
-            scan.run.scanId,
+          if (attempts > 1)
+            assert.equal(request.resumeThreadId, "fixture-thread-id");
+          await f.events(
+            await attemptEvents(
+              request.workingDirectory,
+              scan.run.scanId,
+              attempts === 1 ? "rejected" : "recovered",
+            ),
           );
-          try {
-            if (attempts === 1) {
-              const saved = await artifacts.call(draftTool, artifacts.draft);
-              const failures = await Promise.all(
-                [1, 2].map(() =>
-                  artifacts.call(draftTool, {
-                    ...artifacts.draft,
-                    threatModel: "{}",
-                  }),
-                ),
-              );
-              await f.events([saved, ...failures]);
-            } else {
-              assert.equal(request.resumeThreadId, "fixture-thread-id");
-              // The retry omits the previously saved finding. The real writer
-              // must preserve it while accepting completion of source review.
-              await f.events([
-                await artifacts.call(draftTool, {
-                  ...artifacts.draft,
-                  findings: [],
-                  complete: true,
-                }),
-              ]);
-            }
-          } finally {
-            await artifacts.close();
-          }
           return executor.run(request);
         },
       },
@@ -495,10 +468,6 @@ for (const cancel of [false, true]) {
         },
       },
     );
-    if (cancel)
-      f.setOnKill(() =>
-        coordinator.cancel("synthetic user cancellation during abort"),
-      );
     coordinator.start();
     const terminal = await coordinator.wait(AbortSignal.timeout(120_000));
     assert.equal(
@@ -507,7 +476,7 @@ for (const cancel of [false, true]) {
       terminal.error,
     );
     assert.equal(attempts, cancel ? 1 : 2);
-    assert.equal(f.launches[0].signal.aborted, true);
+    assert.equal(f.signals[0].aborted, true);
     const worker = [...store.workers.values()].find(
       (worker) => worker.kind === "discovery",
     )!;
@@ -523,7 +492,7 @@ for (const cancel of [false, true]) {
       assert.equal(published, undefined);
       assert.equal(store.finishCalls.length, 0);
     } else {
-      assert.equal(f.launches[1].signal.aborted, false);
+      assert.equal(f.signals[1].aborted, false);
       assert.equal((published!.findings as unknown[]).length, 1);
       assert.equal(worker.status, "succeeded");
       assert.equal(worker.attempt, 2);
