@@ -1859,10 +1859,13 @@ describe("semantic scan comparison", () => {
     "experimental_bearer_token",
     "http_headers",
     "env_http_headers",
+    "auth",
   ] as const)(
     "retains inherited Azure %s and endpoint for a comparison",
     async (credential) => {
       const home = await temporaryDirectory();
+      const usesHeaderVariable =
+        credential === "auth" || credential === "env_http_headers";
       const native = {
         name: "Inherited name",
         base_url: "https://resource.example.test",
@@ -1872,7 +1875,11 @@ describe("semantic scan comparison", () => {
           experimental_bearer_token: "synthetic-private-bearer",
           http_headers: { "api-key": "synthetic-private-bearer" },
           env_http_headers: { Authorization: "OPENAI_API_KEY" },
+          auth: { command: "synthetic-helper", cwd: home },
         }[credential],
+        ...(credential === "auth"
+          ? { env_http_headers: { "X-Gateway-Key": "OPENAI_API_KEY" } }
+          : {}),
       };
       await writeFile(
         join(home, "config.toml"),
@@ -1923,11 +1930,12 @@ describe("semantic scan comparison", () => {
             },
           },
         });
+        expect(preflight.mock.calls[0]?.[0].env).not.toHaveProperty(
+          "OPENAI_API_KEY",
+        );
         expect(captured?.env).not.toHaveProperty("AZURE_OPENAI_API_KEY");
         expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
-          credential === "env_http_headers"
-            ? "synthetic-declared-header"
-            : undefined,
+          usesHeaderVariable ? "synthetic-declared-header" : undefined,
         );
         expect(captured?.apiKey).toBeUndefined();
         expect(JSON.stringify(captured?.configOverrides)).not.toContain(

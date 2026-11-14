@@ -32,6 +32,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   AZURE_CODEX_PROVIDER,
   azureProviderEnvironment,
+  azureHeaderEnvironment,
   externalProviderTable,
   deepMerge,
   hasCommandAuth,
@@ -678,16 +679,18 @@ async function startReadOnlyCodexThread(
     nativeKey,
     options.auth,
   );
-  // Startup reads provider metadata. Restore credentials for header-only use at exec.
+  // MCP discovery and permission preflight read provider metadata only.
+  const startupSource =
+    modelProvider === "azure" ? withoutOpenAiApiKeys(environment) : environment;
   const startupEnvironment =
     !commandAuth && providerKey?.toUpperCase() === AZURE_CODEX_PROVIDER.env_key
-      ? environment
-      : definedEnvironment(azureProviderEnvironment(environment, {}));
+      ? startupSource
+      : definedEnvironment(azureProviderEnvironment(startupSource, {}));
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
     configOverrides: [requestContext.configOverride],
     codexPathOverride: executablePathForSpawn(command.command),
-    env: environment,
+    env: { ...environment, ...azureHeaderEnvironment(source, providerConfig) },
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
       nativeKey !== undefined || modelProvider === "azure"

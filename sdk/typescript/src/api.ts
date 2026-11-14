@@ -4149,6 +4149,13 @@ export class CodexSecurity {
                 },
               ),
             ...inferenceOptions,
+            environment: {
+              ...environment,
+              ...azureHeaderEnvironment(
+                this.#dependencies.environment,
+                effectiveConfig,
+              ),
+            },
           });
         }
         if (previousFindings !== undefined || options.skipFindingMatching) {
