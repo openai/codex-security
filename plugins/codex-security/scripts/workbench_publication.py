@@ -28,7 +28,6 @@ from finalize_scan_contract import (
 )
 from snapshot_sqlite import readonly_sqlite_uri
 from validate_scan_contract import validate_contract
-from windows_scan_local_files import _extended_path
 from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
 
@@ -212,10 +211,12 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "storeExists": True,
         "receipts": [],
     }
-    path = db.database_path()
-    if os.name == "nt":
-        path = Path(_extended_path(path))
     if payload["action"] == "inspect" or require_history:
+        path = db.database_path()
+        if os.name == "nt":
+            from windows_scan_local_files import _extended_path
+
+            path = Path(_extended_path(path))
         try:
             path.stat()
         except FileNotFoundError:
