@@ -5078,15 +5078,10 @@ describe("CLI", () => {
     const deps = dependencies();
     deps.createSecurity = () => failingSecurity(message);
     expect(await runCli(["scan", ".", "--json"], deps)).toBe(2);
-    // A classified policy refusal keeps the refusal verbatim and appends the
-    // preserved-bundle guidance (see #56).
     expect(JSON.parse(stdout.text())).toEqual({
       status: "failed",
       code: "SCAN_FAILED",
-      message:
-        `${message}\nThe model refused the security review, so the scan stopped before finishing. ` +
-        `Inspect the output directory shown below for the preserved incomplete bundle, if any; absence of findings there is inconclusive. ` +
-        `To authorize security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber`,
+      message,
     });
     expect(stderr.text()).toContain(message);
   });

@@ -1431,8 +1431,9 @@ overrides them with a path scope. `--output-dir` requires CSV input.
 
 Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--scan-prompt-file` adds shared instructions before each row's prompt.
-`--post-scan-prompt-file` runs a follow-up even after failure, but not after
-cancellation or a cost stop.
+`--post-scan-prompt-file` runs a follow-up after ordinary failures. Cancellation,
+a cost stop, or a policy refusal from the primary local Standard scan turn skips
+the follow-up.
 
 Concurrency defaults to four repositories. `--max-attempts` defaults to one
 attempt per pending repository per invocation. Repeating the command continues

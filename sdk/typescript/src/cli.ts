@@ -166,7 +166,6 @@ import {
   resolvePatchReviewPublisher,
 } from "./patch-publication.js";
 import { DEFAULT_DEDUPE_CONCURRENCY } from "./deduplication/deduplication.js";
-import { isReviewRefusal } from "./deduplication/refusal.js";
 import {
   savedCheckoutBoundaries,
   savedDiscoveryRoots,
@@ -12786,7 +12785,6 @@ function isLocalScanFailure(
 
 function classifyScanFailure(error: unknown) {
   if (isLocalScanFailure(error)) return "local";
-  if (isReviewRefusal(errorMessage(error))) return "policy_refusal";
   const classification = classifyConnectionFailure(error);
   // Installing the plugin can be denied filesystem access before any model request.
   if (classification === "forbidden" && error instanceof PluginBootstrapError)
@@ -12923,12 +12921,6 @@ function scanFailureMessage(
             "Use an account or API key with model access.";
     case "rate_limited":
       return `${detail}The configured account reached its rate limit. Wait and retry.`;
-    case "policy_refusal":
-      return (
-        `${detail}The model refused the security review, so the scan stopped before finishing. ` +
-        `Inspect the output directory shown below for the preserved incomplete bundle, if any; absence of findings there is inconclusive. ` +
-        `To authorize security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber`
-      );
     case "network_error":
     case "plugin_bootstrap":
     case "timeout":

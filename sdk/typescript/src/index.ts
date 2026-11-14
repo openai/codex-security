@@ -148,7 +148,6 @@ export {
   SandboxUnavailableError,
   ScanCostLimitExceededError,
   ScanInterruptedError,
-  ScanPolicyRefusalError,
 } from "./errors.js";
 export type {
   DeduplicationReviewFailureCategory,

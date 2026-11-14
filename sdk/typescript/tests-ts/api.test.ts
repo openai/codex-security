@@ -4437,6 +4437,45 @@ if __name__ == "__main__":
     await client.close();
   });
 
+  test("records the observed Standard phase and stops further turns after a refusal", async () => {
+    const { repository, codexHome, scanDir } = await scanDirectories();
+    const message = "This content was flagged for possible cybersecurity risk.";
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield { type: "thread.started", thread_id: "thread-1" };
+      yield { type: "turn.started" };
+      yield {
+        type: "item.completed",
+        item: {
+          id: "worker-1",
+          type: "agent_message",
+          text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}',
+        },
+      };
+      yield { type: "turn.failed", error: { message } };
+    }
+    const runStreamed = mock(async () => ({ events: events() }));
+    const calls: (readonly string[])[] = [];
+    await using client = TestClient.withDependencies({
+      ...scanRuntimeDependencies(codexHome, scanDir),
+      createCodex: codexFactory(runStreamed),
+      runWorkbench: async (_options, args, input) => {
+        if (args[0] === "update-progress" || args[0] === "fail-scan")
+          calls.push(args);
+        return mockWorkbench(args, input);
+      },
+    });
+    await expect(
+      client.run(repository, { postScanPrompt: "Summarize the scan." }),
+    ).rejects.toThrow(message);
+    expect(runStreamed).toHaveBeenCalledTimes(1);
+    expect(calls.map(([command]) => command)).toEqual([
+      "update-progress",
+      "fail-scan",
+    ]);
+    expect(calls[0]).toContain("validation");
+    expect(calls[1]).toContain(`--message=${message}`);
+  });
+
   test.each([true, false])(
     "records a native failure only when its terminal event preceded cancellation (failure first: %p)",
     async (failureFirst) => {
