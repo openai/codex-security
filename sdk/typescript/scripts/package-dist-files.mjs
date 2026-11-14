@@ -146,6 +146,7 @@ const distModules = [
   "scan-archive-path",
   "scan-comparison",
   "scan-dashboard",
+  "scan-diff",
   "scan-history-renderer",
   "scan-inputs",
   "scan-logs",
