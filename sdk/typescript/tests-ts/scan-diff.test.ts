@@ -1,13 +1,10 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  SCAN_DIFF_IDENTITY_FIELD,
-  SCAN_DIFF_IDENTITY_RULE,
   diffScanFindings,
   findingIdentityKey,
-  parseSavedScanFindings,
   tryLoadScanDiffFromPath,
 } from "../src/scan-diff.js";
 import { CodexSecurityError } from "../src/errors.js";
@@ -15,13 +12,6 @@ import { CodexSecurityError } from "../src/errors.js";
 const fixtureRoot = join(import.meta.dir, "fixtures", "scan-diff");
 const scanAPath = join(fixtureRoot, "scan-a");
 const scanBPath = join(fixtureRoot, "scan-b");
-
-async function loadFixture(name: "scan-a" | "scan-b") {
-  return parseSavedScanFindings(
-    await readFile(join(fixtureRoot, name, "findings.json"), "utf8"),
-    join(fixtureRoot, name, "findings.json"),
-  );
-}
 
 describe("scan finding identity", () => {
   test("uses findingId and ignores blank values", () => {
@@ -35,36 +25,6 @@ describe("scan finding identity", () => {
 });
 
 describe("diffScanFindings", () => {
-  test("classifies new, resolved, and unchanged findings from saved scan fixtures", async () => {
-    const before = await loadFixture("scan-a");
-    const after = await loadFixture("scan-b");
-    const diff = diffScanFindings(before, after);
-
-    expect(diff.beforeScanId).toBe("scan_diff_fixture_a");
-    expect(diff.afterScanId).toBe("scan_diff_fixture_b");
-    expect(diff.identity).toEqual({
-      field: SCAN_DIFF_IDENTITY_FIELD,
-      rule: SCAN_DIFF_IDENTITY_RULE,
-    });
-    expect(diff.summary).toEqual({ new: 1, resolved: 1, unchanged: 1 });
-    expect(
-      diff.findings.map(({ status, findingId }) => [status, findingId]),
-    ).toEqual([
-      ["new", "csf_222222222222222222222222"],
-      ["resolved", "csf_111111111111111111111111"],
-      ["unchanged", "csf_852f90d6e1177502ff113d4a"],
-    ]);
-
-    const unchanged = diff.findings.find(
-      (finding) => finding.status === "unchanged",
-    )!;
-    expect(unchanged.title).toBe(
-      "Archive extraction writes outside the output directory",
-    );
-    expect(unchanged.beforeOccurrenceId).toBe("occ_aaaaaaaaaaaaaaaaaaaaaaaa");
-    expect(unchanged.afterOccurrenceId).toBe("occ_cccccccccccccccccccccccc");
-  });
-
   test("does not treat a rewritten title as a new finding", () => {
     const diff = diffScanFindings(
       {
@@ -175,6 +135,35 @@ describe("saved scan fixtures", () => {
       "csf_852f90d6e1177502ff113d4a",
       "csf_222222222222222222222222",
     ]);
+  });
+
+  test("reads the selected scan directory when a parent follows a directory link", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "codex-security-scan-diff-"),
+    );
+    tempDirs.push(directory);
+    const physical = join(directory, "physical");
+    const child = join(physical, "child");
+    await mkdir(child, { recursive: true });
+    const link = join(directory, "link");
+    await symlink(
+      child,
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const [parent, scanId] of [
+      [directory, "lexical"],
+      [physical, "physical"],
+    ] as const) {
+      await writeFile(
+        join(parent, "findings.json"),
+        JSON.stringify({ scanId, findings: [] }),
+      );
+    }
+    const scan = await tryLoadScanDiffFromPath(`${link}/..`, directory);
+    expect(scan?.scanId).toBe(
+      process.platform === "win32" ? "lexical" : "physical",
+    );
   });
 
   test("leaves scan identifiers to the workbench", async () => {

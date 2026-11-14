@@ -144,6 +144,9 @@ describe("CLI scans diff", () => {
     ).toBe(0);
     expect(stdout.text()).toContain("SCAN DIFF");
     expect(stdout.text()).toContain("findingId");
+    for (const status of ["new", "resolved", "unchanged"]) {
+      expect(stdout.text()).toContain(`1 ${status}`);
+    }
     expect(stdout.text()).toContain(
       "Archive extraction writes outside the output directory",
     );
@@ -172,6 +175,7 @@ describe("CLI scans diff", () => {
     );
     expect(code).toBe(0);
     expect(stdout.text()).toContain("Legacy finding");
+    expect(stdout.text()).not.toContain("undefined");
   });
 
   test("reports an incomplete saved scan without calling the model", async () => {

@@ -1,5 +1,4 @@
 import { lstat } from "node:fs/promises";
-import { join } from "node:path";
 import { readRegularInputFile } from "./prompt-files.js";
 import { resolveInputPath, type ProcessEnvironment } from "./runtime.js";
 import { CodexSecurityError } from "./errors.js";
@@ -154,7 +153,9 @@ export async function tryLoadScanDiffFromPath(
       `Saved scan ${reference} is not a findings.json file or scan directory.`,
     );
   }
-  const findingsPath = directory ? join(path, "findings.json") : path;
+  const findingsPath = directory
+    ? resolveInputPath("findings.json", path)
+    : path;
   const text = await readRegularInputFile(
     findingsPath,
     cwd,
@@ -171,10 +172,7 @@ export async function tryLoadScanDiffFromPath(
   return parseSavedScanFindings(text, findingsPath);
 }
 
-export function parseSavedScanFindings(
-  text: string,
-  source: string,
-): ScanDiffInput {
+function parseSavedScanFindings(text: string, source: string): ScanDiffInput {
   let document: unknown;
   try {
     document = JSON.parse(text);

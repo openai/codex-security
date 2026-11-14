@@ -153,8 +153,12 @@ export function renderScanHistory(
     const path =
       entry["path"] ??
       entry["locationPath"] ??
-      `${location?.["path"]}${location?.["startLine"] ? `:${location["startLine"]}` : ""}`;
-    lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
+      (location?.["path"]
+        ? `${location["path"]}${location["startLine"] ? `:${location["startLine"]}` : ""}`
+        : "");
+    if (path || grouped || knownSince) {
+      lines.push(`              ${dim(clean(path))}${grouped}${knownSince}`);
+    }
     const showLinkedFindings = command !== "show" || options.showLinkedFindings;
     if (matches?.length && showLinkedFindings) {
       lines.push(`              ${accent("↔")} ${strong("LINKED FINDINGS")}`);
