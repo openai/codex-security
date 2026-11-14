@@ -30,7 +30,7 @@
     "pf:view": "PROMPTFOO_CONFIG_DIR=.promptfoo PROMPTFOO_DISABLE_WAL_MODE=true node --experimental-strip-types scripts/run-promptfoo.mts view"
   },
   "dependencies": {
-    "@openai/codex-sdk": "0.167.1",
+    "@openai/codex-sdk": "0.169.0",
     "promptfoo": "0.124.1"
   },
   "devDependencies": {
