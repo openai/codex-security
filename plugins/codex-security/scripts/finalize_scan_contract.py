@@ -3184,6 +3184,8 @@ def _prepare_scan_finalization(
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
+    if not was_sealed and completion_binding is not None:
+        scan.pop("coverageRef", None)
     provisional_manifest = copy.deepcopy(manifest)
     provisional_manifest["scan"]["artifacts"] = [
         {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
