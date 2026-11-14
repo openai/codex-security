@@ -1301,12 +1301,11 @@ export async function runOsvScan(
   let localReferences: DependencyLocalReference[] = [];
   let repository = options.repositoryPath;
   let selected: ScaInput[] = [];
-  let inputsProcessed = 0;
   const reportMatching = (currentInput: string | null = null): void => {
     const progress: DependencyScanProgress = {
       phase: "matching",
       inputsTotal: selected.length,
-      inputsProcessed,
+      inputsProcessed: scanner.invocations!.length,
       inputsFailed: selected.filter((input) => input.status === "failed")
         .length,
       currentInput,
@@ -1453,10 +1452,10 @@ export async function runOsvScan(
         writeFile(invocation.rawOutputPath, ""),
         writeFile(invocation.stderrPath, ""),
       ]);
+      reportMatching(input.path);
       scanner.invocations!.push(invocation);
       if (index === 0) scanner.argv = invocation.argv;
       pending = { input, invocation };
-      reportMatching(input.path);
       const output = await run(executable.executable, invocation.argv, {
         ...processOptions,
         stdoutPath: invocation.rawOutputPath,
@@ -1541,7 +1540,6 @@ export async function runOsvScan(
         input.reason =
           "Scanner execution or matching was incomplete; inspect diagnostics and retained output.";
       }
-      inputsProcessed++;
       reportMatching();
     }
     try {
@@ -1628,7 +1626,6 @@ export async function runOsvScan(
         input.status = "failed";
         input.reason = errorMessage(error);
       }
-    if (pending !== null) inputsProcessed++;
     reportMatching();
     if (options.signal?.aborted)
       throw Object.assign(new Error(errorMessage(error), { cause: error }), {

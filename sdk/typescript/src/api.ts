@@ -1296,7 +1296,6 @@ export class CodexSecurity {
         const reportCost = (
           cost: Readonly<ScanCost>,
           complete = true,
-          notify = true,
         ): void => {
           result!.model.costUsd = complete ? cost.estimatedUsd : null;
           if (
@@ -1311,7 +1310,6 @@ export class CodexSecurity {
               ),
             );
           }
-          if (complete && notify) onCost(cost, options.maxCostUsd);
         };
         const reportTrackingError = (error: unknown): void => {
           if (options.maxCostUsd !== undefined) stopForBudget(error);
@@ -1327,7 +1325,7 @@ export class CodexSecurity {
                   "Could not verify the dependency assessment cost limit.",
                 ),
               );
-          } else reportCost(cost, true, false);
+          } else reportCost(cost);
         };
         const tracker = new ScanCostTracker({
           codexHome: runtime.codexHome,
@@ -1336,7 +1334,10 @@ export class CodexSecurity {
           repository: inputs.repository,
           scanDirectory: outputDir,
           maxCostUsd: options.maxCostUsd,
-          onCost: reportCost,
+          onCost: (cost, complete) => {
+            reportCost(cost, complete);
+            if (complete) onCost(cost, options.maxCostUsd);
+          },
           onUsage: notifyObserver(options, "onUsage"),
           onError: reportTrackingError,
         });
