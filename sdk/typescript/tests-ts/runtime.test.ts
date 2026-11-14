@@ -1269,8 +1269,6 @@ for await (const line of createInterface({ input: process.stdin })) {
         );
       }
     },
-    // Four real clients each allow 20s startup plus shutdown and registration.
-    120_000,
   );
 
   test("copies configured plugins with more than 4,096 entries", async () => {
@@ -4211,28 +4209,25 @@ describe("runtime directories and plugin Python boundary", () => {
       const { root, home } = await credentialHome(false);
       await requireSecureCredentialHome(home);
       const cache = join(home, ".tmp", "plugins");
-      await mkdir(join(cache, ".git"), { recursive: true });
-      await writeFile(
-        join(cache, ".git", "HEAD"),
-        "synthetic cache metadata\n",
-      );
+      const metadata = join(cache, ".git");
+      await mkdir(metadata, { recursive: true });
+      expect(
+        windowsTestCommand("attrib.exe", ["+H", metadata, "/D"]).status,
+      ).toBe(0);
+      await writeFile(join(metadata, "HEAD"), "synthetic cache metadata\n");
       for (let index = 0; index < 8; index++)
         await writeFile(join(cache, `entry-${index}.txt`), "fixture\n");
       const trace = join(root, "acl-queries.txt");
-      const providerTrace = join(root, "provider-queries.txt");
-      await writeFile(providerTrace, "");
       const append = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${trace.replaceAll("'", "''")}' -Value`;
-      const recordProvider = `Microsoft.PowerShell.Management\\Add-Content -LiteralPath '${providerTrace.replaceAll("'", "''")}' -Value`;
       const restore = instrumentCredentialAcl(home, (script) =>
         [
           language === "ConstrainedLanguage"
             ? "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'"
             : "",
-          `function Read-TestProviderAcl { param($LiteralPath); ${recordProvider} 'acl'; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $LiteralPath }`,
           script
             .replaceAll(
               "Microsoft.PowerShell.Security\\Get-Acl -LiteralPath",
-              "Read-TestProviderAcl -LiteralPath",
+              `${append} 'provider'; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath`,
             )
             .replace(
               credentialAclFunction,
@@ -4246,14 +4241,14 @@ describe("runtime directories and plugin Python boundary", () => {
         const rows = (await readFile(trace, "utf8")).trim().split(/\r?\n/u);
         const expected = credentialAncestors(home, "").length + 13;
         expect(rows.pop()).toBe(`complete:${expected}`);
-        const queries = rows.map(Number);
+        expect(rows.includes("provider")).toBe(
+          language === "ConstrainedLanguage",
+        );
+        const queries = rows.filter((row) => row !== "provider").map(Number);
         expect(queries).toContain(9);
         expect(queries.reduce((total, count) => total + count, 0)).toBe(
           expected,
         );
-        const providerQueries = await readFile(providerTrace, "utf8");
-        if (language === "FullLanguage") expect(providerQueries).toBe("");
-        else expect(providerQueries).toContain("acl");
       } finally {
         restore();
       }
