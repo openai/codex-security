@@ -1,0 +1,13 @@
+{
+  "sourceKey": "demo/guardian/example/project/main/sast",
+  "sourceRepositoryUrl": "https://github.com/example/project",
+  "request": {
+    "name": "get_semgrep_sast_findings",
+    "arguments": {
+      "deployment_name": "demo",
+      "repository_name": "example/project",
+      "ref": "refs/heads/main"
+    }
+  },
+  "findingIds": ["9007199254740993"]
+}

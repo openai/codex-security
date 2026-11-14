@@ -32,7 +32,7 @@ function correspondsToMatch(
       hasIdentity(
         `${input.vulnerable_component} ${input.affected_version_or_path}`,
         component.version,
-        "A-Za-z0-9_.+-",
+        "A-Za-z0-9_.!+-",
       )) &&
     hasIdentity(
       input.affected_version_or_path,

@@ -227,8 +227,8 @@ for (const [name, caseIndex, expectedFailure, mutate] of [
     0,
     "Wrong or absent resolved version",
     (finding, fixture) => {
-      finding.normalized_input.vulnerable_component = `${fixture.input.component.name} 99.0.0`;
-      finding.normalized_input.affected_version_or_path = `99.0.0 in ${fixture.input.component.source}`;
+      finding.normalized_input.vulnerable_component = fixture.input.component.name;
+      finding.normalized_input.affected_version_or_path = `${fixture.input.component.version}+other in ${fixture.input.component.source}`;
     },
   ],
   [

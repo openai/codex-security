@@ -617,6 +617,8 @@ async function repositoryFiles(
   }
   const files: string[] = [];
   const nestedRepositories: string[] = [];
+  const diagnostics: string[] = [];
+  const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const pending = [repository];
   while (pending.length) {
     signal?.throwIfAborted();
@@ -635,12 +637,41 @@ async function repositoryFiles(
         continue;
       }
     }
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (entry.name === ".git" || entry.name === "node_modules") continue;
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (installedDependencyDirectory(entry.name, basename(directory)))
-          continue;
+    for (const entry of await readdir(directory, {
+      withFileTypes: true,
+      encoding: "buffer",
+    })) {
+      const bytes = Buffer.from(
+        entry instanceof Uint8Array ? entry : entry.name,
+      );
+      const metadata =
+        entry instanceof Uint8Array
+          ? await lstat(Buffer.concat([Buffer.from(directory + sep), bytes]))
+          : entry;
+      let name: string;
+      try {
+        name = utf8.decode(bytes);
+      } catch {
+        if (
+          metadata.isDirectory() ||
+          primaryScaFormat(bytes.toString("latin1")) !== null ||
+          additionalScaFormat(bytes.toString("latin1")) !== null
+        ) {
+          const prefix = slash(relative(repository, directory));
+          const pathBytes = Buffer.concat([
+            Buffer.from(prefix ? prefix + "/" : ""),
+            bytes,
+          ]);
+          diagnostics.push(
+            `Dependency path bytes ${pathBytes.toString("hex")} cannot be decoded as UTF-8; coverage is incomplete.`,
+          );
+        }
+        continue;
+      }
+      if (name === ".git" || name === "node_modules") continue;
+      const path = join(directory, name);
+      if (metadata.isDirectory()) {
+        if (installedDependencyDirectory(name, basename(directory))) continue;
         pending.push(path);
       } else files.push(relative(repository, path));
     }
@@ -650,7 +681,7 @@ async function repositoryFiles(
     submodules: [],
     nestedRepositories,
     skipWorktree: [],
-    diagnostics: [],
+    diagnostics: diagnostics.sort(),
   };
 }
 
@@ -1365,12 +1396,11 @@ export async function runOsvScan(
   let localReferences: DependencyLocalReference[] = [];
   let repository = options.repositoryPath;
   let selected: ScaInput[] = [];
-  let inputsProcessed = 0;
   const reportMatching = (currentInput: string | null = null): void => {
     const progress: DependencyScanProgress = {
       phase: "matching",
       inputsTotal: selected.length,
-      inputsProcessed,
+      inputsProcessed: scanner.invocations!.length,
       inputsFailed: selected.filter((input) => input.status === "failed")
         .length,
       currentInput,
@@ -1541,10 +1571,10 @@ export async function runOsvScan(
         writeFile(invocation.rawOutputPath, ""),
         writeFile(invocation.stderrPath, ""),
       ]);
+      reportMatching(input.path);
       scanner.invocations!.push(invocation);
       if (index === 0) scanner.argv = invocation.argv;
       pending = { input, invocation };
-      reportMatching(input.path);
       const output = await run(executable.executable, invocation.argv, {
         ...processOptions,
         stdoutPath: invocation.rawOutputPath,
@@ -1629,7 +1659,6 @@ export async function runOsvScan(
         input.reason =
           "Scanner execution or matching was incomplete; inspect diagnostics and retained output.";
       }
-      inputsProcessed++;
       reportMatching();
     }
     try {
@@ -1716,7 +1745,6 @@ export async function runOsvScan(
         input.status = "failed";
         input.reason = errorMessage(error);
       }
-    if (pending !== null) inputsProcessed++;
     reportMatching();
     if (options.signal?.aborted)
       throw Object.assign(new Error(errorMessage(error), { cause: error }), {

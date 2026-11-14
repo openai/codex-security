@@ -1,8 +1,9 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { retryWindowsRename } from "./retry-windows-rename.js";
 import { renderScaReport } from "./sca-report.js";
 import type { OsvScanResult } from "./sca-osv.js";
 import type { ScaResult } from "./sca-types.js";
@@ -86,9 +87,14 @@ export async function writeDependencyArtifact(
 ): Promise<void> {
   const path = join(outputDir, name);
   const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporary, content, { flag: "wx", mode: 0o600 });
+  const file = await open(temporary, "wx", 0o600);
   try {
-    await rename(temporary, path);
+    try {
+      await file.writeFile(content);
+    } finally {
+      await file.close();
+    }
+    await retryWindowsRename(() => rename(temporary, path));
   } finally {
     await rm(temporary, { force: true });
   }

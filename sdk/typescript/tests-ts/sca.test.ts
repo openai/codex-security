@@ -184,6 +184,10 @@ function triage(): TriageFinding {
 async function fixture(
   options: {
     chooseDependencyAuthentication?: DependencyAuthChooser;
+    beforeSourceSnapshot?: () => Promise<void>;
+    afterThreadEvent?: (
+      event: "thread.started" | "turn.completed",
+    ) => Promise<void>;
     matched?: boolean;
     severities?: string[];
     turns?: (
@@ -342,6 +346,7 @@ process.exit(child.status ?? 1);
   };
   const sourceSnapshot = async (path: string) => {
     expect(path).toBe(repository);
+    if (options.beforeSourceSnapshot) await options.beforeSourceSnapshot();
     if (options.abortAt === "source")
       options.controller!.abort("cancel during source snapshot");
     if (++snapshotCalls === options.snapshotErrorAt)
@@ -524,6 +529,8 @@ process.exit(child.status ?? 1);
                       type: "thread.started",
                       thread_id: threadId,
                     };
+                    if (options.afterThreadEvent)
+                      await options.afterThreadEvent("thread.started");
                     if (options.commandActivity) {
                       for (const status of [
                         "in_progress",
@@ -604,6 +611,8 @@ process.exit(child.status ?? 1);
                             },
                           }),
                     } as ThreadEvent;
+                    if (options.afterThreadEvent)
+                      await options.afterThreadEvent("turn.completed");
                   })(),
                 };
               },
@@ -1688,6 +1697,52 @@ test("dependency triage preserves scanner evidence when MCP configuration cannot
   );
 });
 
+test.each(["setup", "source snapshot", "source drift"] as const)(
+  "dependency observers report saved bulk assessment failures after %s",
+  async (failure) => {
+    const f = await fixture({
+      turns: ["completed", "source_changed", "completed"],
+      ...(failure === "setup" ? { runtimeError: true } : {}),
+      ...(failure === "source snapshot" ? { snapshotErrorAt: 1 } : {}),
+    });
+    await using security = f.client;
+    const progress: DependencyScanProgress[] = [];
+    const persisted: ScaResult[] = [];
+    const result = await security.scanDependencies({
+      repositoryPath: f.repository,
+      outputDir: f.outputDir,
+      onProgress(event) {
+        progress.push(event);
+        if (event.phase === "assessing" && event.current === null)
+          persisted.push(
+            JSON.parse(
+              readFileSync(join(f.outputDir, "sca-result.json"), "utf8"),
+            ),
+          );
+      },
+    });
+    const completed = failure === "source drift" ? 1 : 0;
+    expect(result.status).toBe("partial");
+    expect(progress.slice(-2)).toEqual([
+      {
+        phase: "assessing",
+        assessmentsTotal: 3,
+        assessmentsCompleted: completed,
+        assessmentsFailed: 3 - completed,
+        current: null,
+      },
+      { phase: "saving" },
+    ]);
+    expect(persisted.at(-1)).toEqual(result);
+    expect(result.assessments.map((assessment) => assessment.status)).toEqual(
+      completed === 1
+        ? ["completed", "failed", "failed"]
+        : ["failed", "failed", "failed"],
+    );
+    expect(f.calls.model).toBe(failure === "source drift" ? 1 : 0);
+  },
+);
+
 test("dependency observers report saved assessments, activity, usage, and total cost", async () => {
   const f = await fixture({
     turns: ["completed", "malformed", "completed"],
@@ -2177,6 +2232,67 @@ test("requested cost limit interrupts while retaining completed evidence", async
   expect(saved.model.costUsd).toBeGreaterThan(0.000001);
 });
 
+test("dependency assessments accept a budget for a managed Vertex model", async () => {
+  const model = "openai/gpt-oss-120b-maas";
+  const { client, repository, outputDir } = await fixture({
+    model,
+    codexOverrides: {
+      openai_base_url:
+        "https://us-central1-aiplatform.googleapis.com/v1/projects/synthetic/locations/us-central1/endpoints/openapi",
+    },
+  });
+  await using security = client;
+  const result = await security.scanDependencies({
+    repositoryPath: repository,
+    outputDir,
+    maxCostUsd: 1,
+  });
+  expect(result.status).toBe("completed");
+  expect(result.model.costUsd).toBe(
+    estimateScanCost(
+      model,
+      { input_tokens: 1000, output_tokens: 1000 },
+      { provider: "gcp" },
+    )!.estimatedUsd,
+  );
+});
+
+test("dependency assessments enforce regional Bedrock pricing before the next match", async () => {
+  const model = "openai.gpt-5.6-terra";
+  const region = "us-gov-west-1";
+  const { client, repository, outputDir, turns } = await fixture({
+    model,
+    codexOverrides: {
+      model_provider: "amazon-bedrock",
+      model_providers: { "amazon-bedrock": { aws: { region } } },
+    },
+    turns: ["completed", "completed"],
+  });
+  const usage = { input_tokens: 1000, output_tokens: 1000 };
+  const standard = estimateScanCost(model, usage)!.estimatedUsd;
+  const regional = estimateScanCost(model, usage, {
+    provider: "amazon-bedrock",
+    region,
+  })!.estimatedUsd;
+  await using security = client;
+  await expect(
+    security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      maxCostUsd: (standard + regional) / 2,
+    }),
+  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+  expect(turns).toHaveLength(1);
+  const saved = JSON.parse(
+    await readFile(join(outputDir, "sca-result.json"), "utf8"),
+  ) as ScaResult;
+  expect(saved.model.costUsd).toBe(regional);
+  expect(saved.assessments.map(({ status }) => status)).toEqual([
+    "completed",
+    "cancelled",
+  ]);
+});
+
 test("a response describing another selected match fails only its own assessment", async () => {
   const { client, repository, outputDir, turns } = await fixture({
     turns: ["completed", "mismatched_identity", "completed"],
@@ -2298,37 +2414,157 @@ test.each(["unauthorized", "source_changed", "cancelled"] as const)(
   },
 );
 
-test("cumulative match costs stop the next thread without discarding completed assessments", async () => {
-  const { client, repository, outputDir, turns } = await fixture({
-    turns: ["completed", "completed", "completed"],
-  });
-  const perTurn = estimateScanCost("gpt-5.6-sol", {
-    input_tokens: 1000,
-    cached_input_tokens: 0,
-    cache_write_input_tokens: 0,
-    output_tokens: 1000,
-    reasoning_output_tokens: 0,
-  })!.estimatedUsd;
-  await using security = client;
-  await expect(
-    security.scanDependencies({
+test.each(["stable source", "changed source", "user cancellation"] as const)(
+  "a live budget poll after turn completion checkpoints only verified assessments: %s",
+  async (scenario) => {
+    const controller = new AbortController();
+    const record = ScanCostTracker.prototype.recordUsage;
+    let receipts = 0;
+    let poll: Promise<unknown> | undefined;
+    using usage = spyOn(
+      ScanCostTracker.prototype,
+      "recordUsage",
+    ).mockImplementation(function (this: ScanCostTracker, value, threadId) {
+      record.call(this, value, threadId);
+      if (value && ++receipts === 2) poll = this.refresh(true);
+    });
+    const { client, repository, outputDir, turns } = await fixture({
+      turns: ["completed", "completed", "completed"],
+      beforeSourceSnapshot: async () => {
+        if (poll === undefined) return;
+        await poll;
+        if (scenario === "changed source") {
+          await writeFile(
+            join(repository, "usage.txt"),
+            "changed during verification",
+          );
+        } else if (scenario === "user cancellation") {
+          controller.abort("cancel during verification");
+        }
+      },
+    });
+    const perTurn = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      output_tokens: 1000,
+      reasoning_output_tokens: 0,
+    })!.estimatedUsd;
+    await using security = client;
+    const operation = security.scanDependencies({
       repositoryPath: repository,
       outputDir,
       maxCostUsd: perTurn * 1.5,
-    }),
-  ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
-  expect(turns).toHaveLength(2);
-  const saved = JSON.parse(
-    await readFile(join(outputDir, "sca-result.json"), "utf8"),
-  ) as ScaResult;
-  expect(saved.status).toBe("partial");
-  expect(saved.model.costUsd).toBeCloseTo(perTurn * 2);
-  expect(saved.assessments.map((item) => item.status)).toEqual([
-    "completed",
-    "completed",
-    "cancelled",
-  ]);
-});
+      signal: controller.signal,
+    });
+    if (scenario === "user cancellation") {
+      await expect(operation).rejects.toMatchObject({
+        cause: "cancel during verification",
+      });
+    } else {
+      await expect(operation).rejects.toBeInstanceOf(
+        ScanCostLimitExceededError,
+      );
+    }
+    expect(usage).toHaveBeenCalled();
+    expect(poll).toBeDefined();
+    expect(turns).toHaveLength(2);
+    const saved = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    ) as ScaResult;
+    expect(saved.status).toBe("partial");
+    expect(saved.model.costUsd).toBeCloseTo(perTurn * 2);
+    expect(saved.assessments.map((item) => item.status)).toEqual([
+      "completed",
+      scenario === "stable source" ? "completed" : "cancelled",
+      "cancelled",
+    ]);
+  },
+);
+
+test.each([
+  "active tracking error",
+  "terminal overage",
+  "checkpoint tracking error",
+] as const)(
+  "budget enforcement preserves the dependency turn boundary: %s",
+  async (scenario) => {
+    const fault = new Error("synthetic cost tracking failure");
+    const delivered = Promise.withResolvers<void>();
+    let pollRequested = false;
+    let terminal = false;
+    const waitForPoll = () => {
+      pollRequested = true;
+      return delivered.promise;
+    };
+    const refresh = ScanCostTracker.prototype.refresh;
+    using polls = spyOn(
+      ScanCostTracker.prototype,
+      "refresh",
+    ).mockImplementation(async function (
+      this: ScanCostTracker,
+      polling = false,
+    ) {
+      if (!pollRequested || !polling) return await refresh.call(this, polling);
+      pollRequested = false;
+      try {
+        if (scenario !== "terminal overage") throw fault;
+        // The native usage receipt can become visible before the SDK finishes draining.
+        this.recordUsage(
+          { input_tokens: 1000, output_tokens: 1000 },
+          "sca-thread",
+        );
+        return await refresh.call(this, true);
+      } finally {
+        // Let the background poll deliver its result or error before the fixture advances.
+        setImmediate(delivered.resolve);
+      }
+    });
+    const { client, repository, outputDir, turns } = await fixture({
+      turns: ["completed", "completed"],
+      afterThreadEvent: async (event) => {
+        if (event === "turn.completed") terminal = true;
+        if (
+          (scenario === "active tracking error" &&
+            event === "thread.started") ||
+          (scenario === "terminal overage" && terminal)
+        )
+          await waitForPoll();
+      },
+      beforeSourceSnapshot: async () => {
+        if (scenario === "checkpoint tracking error" && terminal)
+          await waitForPoll();
+      },
+    });
+    await using security = client;
+    const perTurn = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 1000,
+      output_tokens: 1000,
+    })!.estimatedUsd;
+    const operation = security.scanDependencies({
+      repositoryPath: repository,
+      outputDir,
+      maxCostUsd: perTurn * (scenario === "terminal overage" ? 0.5 : 5),
+    });
+    if (scenario === "terminal overage") {
+      await expect(operation).rejects.toBeInstanceOf(
+        ScanCostLimitExceededError,
+      );
+    } else {
+      await expect(operation).rejects.toMatchObject({ cause: fault });
+    }
+    expect(polls).toHaveBeenCalled();
+    expect(turns).toHaveLength(1);
+    const saved: ScaResult = JSON.parse(
+      await readFile(join(outputDir, "sca-result.json"), "utf8"),
+    );
+    expect(saved.status).toBe("partial");
+    expect(saved.assessments.map((assessment) => assessment.status)).toEqual([
+      scenario === "active tracking error" ? "cancelled" : "completed",
+      "cancelled",
+    ]);
+  },
+);
 
 test.each(["unauthorized", "forbidden"] as const)(
   "a later %s event stops assessment without retrying the remaining matches",
