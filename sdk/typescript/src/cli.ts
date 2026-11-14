@@ -1753,6 +1753,7 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
+  patchTransportExecutables?: Map<string, string>;
   patchCallerDirectory?: string;
   patchTransportContext?: { root: string; caller: string; directory: string };
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
@@ -3287,6 +3288,7 @@ export async function main(
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
   const parentDependencies = dependencies;
+  const patchTransportExecutables = new Map<string, string>();
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let publicationHooks: PatchPublicationHooks | undefined;
   let snapshotConfigPaths: readonly string[] | undefined;
@@ -3294,6 +3296,7 @@ export async function main(
   let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
+    patchTransportExecutables,
     sparsePatchSnapshots: new Map(),
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
@@ -3459,6 +3462,21 @@ export async function main(
             },
           },
         };
+      }
+      // The local SSH hostname probe also executes the previously selected launcher.
+      if (
+        options.patchTransport ||
+        command !== "git" ||
+        (args[0] === "-c" &&
+          args[1]?.startsWith("alias.codex-security-ssh-config=!") &&
+          args[2] === "codex-security-ssh-config")
+      ) {
+        for (const [launcher, selected] of patchTransportExecutables) {
+          if ((await patchTransportIdentity(launcher)) !== selected)
+            throw new CodexSecurityError(
+              "Patch transport executable changed before publication.",
+            );
+        }
       }
       return parentDependencies.runRepositoryCommand(
         command,
@@ -11664,6 +11682,13 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
+// Compare both the selected launcher target and the file behind that path.
+async function patchTransportIdentity(launcher: string): Promise<string> {
+  const target = await realpath(launcher);
+  const entry = await stat(target, { bigint: true });
+  return JSON.stringify([target, `${entry.dev}:${entry.ino}:${entry.ctimeNs}`]);
+}
+
 async function inspectPatchGitExecutable(
   command: string,
   repository: string,
@@ -11689,9 +11714,21 @@ async function inspectPatchGitExecutable(
       )
     ).replace(/\n$/u, "");
   const path = [execPath, hostPath].filter(Boolean).join(delimiter);
-  return inspectTrustedExecutable(command, { PATH: path }, protectedRoots, {
-    gitTransportDirectory: transportDirectory,
-  });
+  const result = await inspectTrustedExecutable(
+    command,
+    { PATH: path },
+    protectedRoots,
+    {
+      gitTransportDirectory: transportDirectory,
+    },
+  );
+  const launchers = dependencies.patchTransportExecutables;
+  if (launchers && result.executable && !launchers.has(result.executable))
+    launchers.set(
+      result.executable,
+      await patchTransportIdentity(result.executable),
+    );
+  return result;
 }
 
 async function runPatchTransport(
