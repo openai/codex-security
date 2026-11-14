@@ -149,6 +149,7 @@ from workbench_target_state import (
     ensure_security_target,
     register_security_target,
     require_scan_checkout_owner,
+    saved_checkout_available,
 )
 from workbench_validation import (
     optional_text,
@@ -2787,6 +2788,7 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
                 "scanDir": scan["scan_dir"],
                 "targetPath": scan["target_path"],
                 "progress": {"status": "canceled" if scan["canceled_at"] else scan["status"]},
+                "checkoutAvailable": saved_checkout_available(connection, scan, owner),
                 "remediationAvailable": owner and remediation_availability(scan)[0],
             }
         }

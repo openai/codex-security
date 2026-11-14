@@ -26,7 +26,10 @@ import { inspectTrustedExecutable } from "../src/trusted-executable.js";
 import { resolveCompletedScan } from "../src/saved-scan.js";
 import { resolvePluginPython, runWorkbench } from "../src/runtime.js";
 import { SqliteFindingsStore } from "../src/server/sqlite-store.js";
-import type { FindingEmbeddingBinding } from "../src/deduplication/local.js";
+import {
+  LocalDeduplication,
+  type FindingEmbeddingBinding,
+} from "../src/deduplication/local.js";
 import type { Finding } from "../src/models.js";
 import type { JsonObject } from "../src/config.js";
 import type { CodexReview } from "../src/deduplication/codex-review.js";
@@ -561,43 +564,46 @@ for (const source of ["PYTHON", "PATH", "linked PYTHON"] as const) {
 }
 
 test.skipIf(process.platform === "win32")(
-  "saved-scan dedupe excludes Node from the saved checkout when invoking native findings helpers",
+  "local dedupe helpers exclude the saved checkout when discovering Node",
   async () => {
-    const f = await fixture(true);
-    const component = join(f.repository, "component");
-    await mkdir(join(component, "src"), { recursive: true });
-    await writeFile(
-      join(component, "src", "extract.py"),
-      "# Synthetic fixture\n",
+    const f = await workspace(true);
+    const component = join(f.repository, "src");
+    const scanId = await registerScan(
+      { ...f, repository: component },
+      join(f.root, "component-scan"),
     );
-    git(f.repository, "add", ".");
-    git(f.repository, "commit", "-qm", "Add component");
-    const scan = await f.scan("component-scan", component);
     await rename(join(f.repository, ".git"), join(f.root, "old-git"));
     git(component, "init", "--quiet");
-    const executable = join(f.repository, "node");
     const marker = join(f.root, "node-probed");
     await writeFile(
-      executable,
+      join(f.repository, "node"),
       '#!/bin/sh\nprintf probed > "$TEST_NODE_PROBE"\nexit 1\n',
+      { mode: 0o700 },
     );
-    await chmod(executable, 0o700);
-    const deduplicate = () =>
-      deduplicateScanInternal(
-        scan.scanId,
-        { embedding: f.embedding },
-        {
-          environment: {
-            ...f.environment,
-            PYTHON: f.python,
-            PATH: [f.repository, f.environment.PATH].join(delimiter),
-            TEST_NODE_PROBE: marker,
-          },
-          reviewer: f.reviewer,
-          fetch: rejecting("Unexpected HTTP request"),
+    const runHelper = async () => {
+      const bootstrap = await savedScanWorkbench(scanId, {
+        environment: {
+          ...f.environment,
+          PYTHON: f.python,
+          PATH: [f.repository, f.environment.PATH].join(delimiter),
+          TEST_NODE_PROBE: marker,
         },
+        pluginRoot: PLUGIN_ROOT,
+        currentDirectory: f.root,
+      });
+      const local = new LocalDeduplication(
+        bootstrap.environment,
+        { allRepositories: true },
+        component,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        bootstrap.nodeDiscovery,
       );
-    expect((await deduplicate()).deduplicationStatus).toBe("completed");
+      await local.storeDedupeGroups([]);
+    };
+    await runHelper();
     const db = new Database(
       join(f.environment.CODEX_SECURITY_STATE_DIR, "workbench.sqlite3"),
     );
@@ -608,7 +614,7 @@ test.skipIf(process.platform === "win32")(
     } finally {
       db.close();
     }
-    await expect(deduplicate()).rejects.toThrow(
+    await expect(runHelper()).rejects.toThrow(
       "Run local deduplication with Node.js",
     );
     expect(existsSync(marker)).toBe(false);

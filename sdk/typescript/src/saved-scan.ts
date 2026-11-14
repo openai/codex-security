@@ -42,7 +42,6 @@ export async function resolveWorkflowScan(
 export async function resolveCompletedScan(
   requestedId: string,
   dependencies: SavedScanDependencies,
-  access: "artifacts" | "checkout" = "artifacts",
 ): Promise<SavedScan> {
   let scanId = requestedId;
   if (scanId === "latest") {
@@ -62,7 +61,7 @@ export async function resolveCompletedScan(
     scanId = latest["scanId"];
   }
   const context = await dependencies.runWorkbench(
-    workbenchArgs("get-scan", { scanId, metadataOnly: access === "artifacts" }),
+    workbenchArgs("get-scan", { scanId, metadataOnly: true }),
   );
   const scan = context["scan"];
   if (!isJsonObject(scan) || typeof scan["scanId"] !== "string") {

@@ -268,6 +268,12 @@ def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | 
     )
     if object_directory is None:
         return None
+    return _filesystem_repository_identity(common_directory, object_directory, relative)
+
+
+def _filesystem_repository_identity(
+    common_directory: Path, object_directory: Path, relative: str
+) -> GitRepositoryIdentity | None:
     canonical_directory = str(common_directory)
     try:
         metadata = common_directory.stat()
@@ -321,6 +327,45 @@ def repository_identity(target: Path | str) -> str | None:
     """Identify matching Git worktree targets without storing remote credentials."""
     identity = _repository_identity_details(target)
     return identity.value if identity is not None else None
+
+
+def saved_checkout_available(
+    connection: sqlite3.Connection, scan: sqlite3.Row, owner: bool
+) -> bool:
+    try:
+        target = require_scan_target_identity(scan)
+        if owner:
+            return True
+        generation = scan_repository_generation(scan)
+        if os.environ.get("CODEX_SECURITY_GIT") != "" or generation is None:
+            return False
+        # An explicit saved ID can be used when executable discovery excluded Git.
+        # Only an ordinary checkout can prove its layout here without consulting Git.
+        row = connection.execute(
+            "SELECT git_checkout_root FROM security_targets WHERE id = ? AND current_path = ?",
+            (scan["target_id"], str(target)),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return False
+        root = Path(row[0])
+        relative = target.relative_to(root)
+        for directory in (target, *target.parents):
+            if directory == root:
+                break
+            if os.path.lexists(directory / ".git"):
+                return False
+        common = root / ".git"
+        objects = common / "objects"
+        if (
+            not stat.S_ISDIR(common.lstat().st_mode)
+            or not stat.S_ISDIR(objects.lstat().st_mode)
+            or os.path.lexists(common / "commondir")
+        ):
+            return False
+        identity = _filesystem_repository_identity(common, objects, relative.as_posix())
+        return identity is not None and generation in (identity.value, identity.previous_value)
+    except (OSError, ValueError, SystemExit):
+        return False
 
 
 def repository_origin(target: Path) -> tuple[str, str] | None:

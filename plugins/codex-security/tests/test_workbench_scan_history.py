@@ -2668,6 +2668,35 @@ def test_portable_identity_decodes_git_line_protocol_without_changing_path_bytes
     )
 
 
+@pytest.mark.parametrize("replacement", ["repository", "nested", "commondir"])
+def test_saved_checkout_requires_original_generation_without_git(tmp_path: Path, replacement: str):
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    target = repository / "component"
+    target.mkdir()
+    scan = create_cli_scan(tmp_path / "state", tmp_path / "scans", target, target_revision=revision)
+
+    def metadata():
+        return run_workbench(
+            tmp_path / "state",
+            "get-scan",
+            "--scan-id",
+            scan["scanId"],
+            "--metadata-only",
+            environment={"CODEX_SECURITY_GIT": ""},
+        )["scan"]
+
+    assert metadata()["checkoutAvailable"] is True
+    if replacement == "repository":
+        (repository / ".git").rename(tmp_path / "old-git")
+        subprocess.run(["git", "init", "-q", repository], check=True)
+    elif replacement == "nested":
+        subprocess.run(["git", "init", "-q", target], check=True)
+    else:
+        (repository / ".git" / "commondir").write_text(str(tmp_path / "another") + "\n")
+    assert metadata()["checkoutAvailable"] is False
+
+
 @pytest.mark.parametrize("reopen", (False, True))
 def test_portable_identity_history_lookup_uses_indexes(tmp_path: Path, reopen: bool) -> None:
     state = tmp_path / "state"
