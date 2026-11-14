@@ -105,6 +105,7 @@ import {
 import {
   estimateScanCost,
   readScanBudgetUsage,
+  workbenchTokenUsage,
   ScanCostTracker,
   type ScanCost,
   type ScanUsageMeasurement,
@@ -119,6 +120,7 @@ import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
 import { findScanSession } from "./scan-logs.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  DirectDeepScanInputRecoveryError,
   deepScanParentToolOverrides,
   readDeepScanParentConfig,
   runDeepScan,
@@ -132,7 +134,9 @@ import {
   type SeverityRubricSnapshot,
 } from "./severity-rubric.js";
 import {
+  absoluteModelFilePaths,
   deepScanOptions,
+  requireDeepScanExecutable,
   resolveDeepScanConfig,
   writeDeepScanConfig,
   type DeepScanSources,
@@ -192,7 +196,12 @@ import {
   type PreparedKnowledgeBase,
   type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
-import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
+import {
+  deepModelFileInputs,
+  validateDeepModelFileInputs,
+  scanInputIdentity,
+  saveScanKnowledge,
+} from "./scan-inputs.js";
 import {
   FindingWorkflow,
   scanArtifactDigest,
@@ -250,7 +259,10 @@ import {
   VERSION,
 } from "./version.js";
 import { SCAN_MODES } from "./scan-modes.js";
-import { readSavedScanLifecycle } from "./saved-scan-bootstrap.js";
+import {
+  readSavedScanLifecycle,
+  savedScanWorkbench,
+} from "./saved-scan-bootstrap.js";
 import {
   bundledCodexSdkEnvironment,
   definedEnvironment,
@@ -299,6 +311,7 @@ import {
   resolveCodexCommand,
   resolvePluginPath,
   resolvePluginSource,
+  resolveParentTraversal,
   resolvePluginPython,
   resolveScanOutputPath,
   runWorkbench,
@@ -319,6 +332,7 @@ import {
   gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
+  resolveTargetPath,
   type NormalizedTarget,
   type ScanMode,
   validatedGitEnvironment,
@@ -387,6 +401,22 @@ interface PreparedSession {
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
 
+const savedPricingSchema = z.object({
+  model: z.string(),
+  context: z
+    .discriminatedUnion("provider", [
+      z.object({
+        provider: z.literal("amazon-bedrock"),
+        region: z.string().nullable(),
+      }),
+      z.object({
+        provider: z.literal("gcp"),
+        managedEndpoint: z.boolean().optional(),
+      }),
+    ])
+    .optional(),
+});
+
 const scanLifecycleSchema = z.object({
   scanId: z.string(),
   mode: z.enum([...SCAN_MODES, "diff", "import"]),
@@ -413,6 +443,8 @@ export interface ScanOptions extends ScanSettings {
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Resume a CLI Deep Scan with its saved launch recipe. */
   resumeScanId?: string;
+  /** @internal A workbench-verified sealed CLI selection must never dispatch a replacement turn. */
+  requireSealedResume?: boolean;
   /** Save synthetic Standard scan results without calling Codex or a model. */
   mock?: boolean;
   /** Opt into a durable scan -> custom publication -> dedupe workflow. */
@@ -2221,6 +2253,270 @@ export class CodexSecurity {
     }
   }
 
+  /** Recover only a sealed host run, before any Codex or model-input preparation. */
+  async #readSealedDeepResult(
+    repository: string,
+    scanId: string,
+    outputDir: string,
+    options: ScanOptions,
+    signal: AbortSignal,
+  ): Promise<ScanResult | undefined> {
+    const selectedScanDir = resolve(
+      expandHome(outputDir, this.#dependencies.environment),
+    );
+    // A manifest is only a hint. The workbench verifies the host ledger, producer,
+    // owner and sealed artifact digests before this path can publish anything.
+    try {
+      const manifest: unknown = JSON.parse(
+        (
+          await readScanFile(
+            selectedScanDir,
+            "scan-manifest.json",
+            "scan-manifest.json",
+            signal,
+          )
+        ).toString("utf8"),
+      );
+      if (
+        !isRecord(manifest) ||
+        !isRecord(manifest["scan"]) ||
+        typeof manifest["scan"]["sealedAt"] !== "string"
+      )
+        return undefined;
+    } catch (error) {
+      if (
+        error instanceof SyntaxError ||
+        (error instanceof Error &&
+          isRecord(error.cause) &&
+          error.cause["code"] === "ENOENT")
+      )
+        return undefined;
+      throw error;
+    }
+    // The reader checked the directory itself. Resolve only its parent so an
+    // aliased output path matches the canonical scan registration.
+    const scanDir = join(
+      await realpath(dirname(selectedScanDir)),
+      basename(selectedScanDir),
+    );
+    const requestedRepository = resolve(
+      expandHome(repository, this.#dependencies.environment),
+    );
+    const pluginRoot = await bundledPluginRoot();
+    const saved = await savedScanWorkbench(scanId, {
+      environment: this.#dependencies.environment,
+      pluginRoot,
+      currentDirectory: process.cwd(),
+      configuredPython: this.config.pythonPath,
+      executableSourcePaths: this.config.executableSourcePaths,
+      signal,
+    });
+    const context = await saved(
+      workbenchArgs("get-cli-scan-resume", { scanId }),
+    );
+    const producer = context["sealedProducerVersion"];
+    if (typeof producer !== "string") return undefined;
+    const repo = context["targetPath"];
+    const recipe = context["recipe"];
+    const threadId = context["threadId"];
+    if (
+      !isRecord(recipe) ||
+      recipe["mode"] !== "deep" ||
+      context["scanId"] !== scanId ||
+      context["scanDir"] !== scanDir ||
+      typeof recipe["repository"] !== "string" ||
+      typeof repo !== "string" ||
+      !isAbsolute(repo) ||
+      (requestedRepository !== repo &&
+        requestedRepository !== recipe["repository"] &&
+        (await canonicalConfigPath(requestedRepository)) !== repo) ||
+      typeof threadId !== "string" ||
+      !threadId ||
+      !isRecord(recipe["target"])
+    ) {
+      throw new CodexSecurityError(
+        "The workbench returned mismatched scan resume context.",
+      );
+    }
+    const target = recipe["target"];
+    if (options.target !== undefined) {
+      // The workbench has already verified the manifest against the registered scope.
+      // Match the original input or its canonical saved spelling without reopening it.
+      const requested = options.target;
+      const paths = target["paths"];
+      const samePathScope =
+        Array.isArray(requested) &&
+        target["kind"] === "paths" &&
+        Array.isArray(paths) &&
+        paths.every((path) => typeof path === "string") &&
+        requested.every(
+          (path) => typeof path === "string" && path.length > 0,
+        ) &&
+        (isDeepStrictEqual(requested, recipe["requestedPaths"]) ||
+          isDeepStrictEqual(
+            new Set(
+              requested.map((path) =>
+                resolveTargetPath(expandHome(path), requestedRepository),
+              ),
+            ),
+            new Set(
+              paths.map((path) => resolveTargetPath(path, requestedRepository)),
+            ),
+          ));
+      if (
+        !(requested === "repository" && target["kind"] === "repository") &&
+        !samePathScope
+      )
+        throw new CodexSecurityError(
+          "The requested target differs from the sealed scan.",
+        );
+    }
+    if (
+      options.scanPrompt !== undefined ||
+      options.knowledgeBaseSnapshot !== undefined
+    ) {
+      const identity = scanInputIdentity(
+        options.scanPrompt,
+        options.knowledgeBaseSnapshot,
+      );
+      const savedInputs = recipe["scanInputs"];
+      if (
+        isRecord(savedInputs) &&
+        ((options.scanPrompt !== undefined &&
+          identity["scanPromptSha256"] !== savedInputs["scanPromptSha256"]) ||
+          (options.knowledgeBaseSnapshot !== undefined &&
+            !isDeepStrictEqual(
+              identity["knowledgeBase"],
+              savedInputs["knowledgeBase"],
+            )))
+      )
+        throw new CodexSecurityError(
+          "The requested inputs differ from the sealed scan.",
+        );
+    }
+    const limit =
+      options.maxCostUsd ??
+      (typeof recipe["maxCostUsd"] === "number"
+        ? recipe["maxCostUsd"]
+        : undefined);
+    const config = isRecord(recipe["config"])
+      ? (recipe["config"] as JsonObject)
+      : {};
+    const pricing = savedPricingSchema
+      .optional()
+      .parse(recipe["sealedPricing"]);
+    const savedModel = pricing?.model ?? resolveCodexProfile(config)["model"];
+    const model = typeof savedModel === "string" ? savedModel : undefined;
+    const pricingContext = pricing
+      ? pricing.context
+      : scanPricingContext(config, this.#dependencies.environment);
+    if (limit !== undefined) {
+      if (!model)
+        throw new IncompleteScanError(
+          "The saved model is unavailable; the scan cost limit cannot be verified.",
+        );
+      validateScanCostLimit(limit, model, pricingContext);
+    }
+    const measurement = await readScanBudgetUsage(
+      saved,
+      scanId,
+      threadId,
+      undefined,
+      limit !== undefined,
+    ).catch((error: unknown) => {
+      if (limit !== undefined || signal.aborted) throw error;
+      notifyObserver(
+        options,
+        "onWarning",
+      )(`Could not track scan activity: ${errorMessage(error)}`);
+      return null;
+    });
+    const usage = measurement?.usage ?? null;
+    const cost = estimateScanCost(model, usage, pricingContext);
+    if (limit !== undefined) {
+      if (!measurement?.complete || cost === null)
+        throw new IncompleteScanError(
+          "Could not verify the requested scan cost limit because scan-owned token usage is incomplete.",
+        );
+      if (cost.estimatedUsd > limit)
+        throw new ScanCostLimitExceededError(limit, cost, scanDir);
+    }
+    const expectation: ScanExpectation = {
+      mode: "deep",
+      repository: repo,
+      target: target as unknown as NormalizedTarget,
+      repositoryRevision:
+        typeof context["targetRevision"] === "string"
+          ? context["targetRevision"]
+          : null,
+      pluginVersion: producer,
+    };
+    const result = await collectResult(
+      {
+        status: "completed",
+        ...(usage === null
+          ? {}
+          : { model, usage, ...turnPricingMetadata(pricingContext) }),
+        finalResponse: (
+          await readScanFile(scanDir, "report.md", "report.md", signal)
+        ).toString("utf8"),
+      },
+      threadId,
+      scanDir,
+      pluginRoot,
+      expectation,
+      signal,
+      false,
+      saved.environment["PYTHON"],
+      repo,
+    );
+    if (result.manifest.scan.id !== scanId)
+      throw new CodexSecurityError(
+        "The sealed artifacts belong to another scan.",
+      );
+    await this.#operationTelemetry?.bindScan(scanId);
+    const completion = await completeScanWithReceipt(
+      saved,
+      scanId,
+      cost,
+      signal,
+    );
+    const scan = completion["scan"];
+    notifyObserver(
+      options,
+      "onScanRegistered",
+    )({
+      scanId,
+      scanDir,
+      ...(typeof context["startedAt"] === "string"
+        ? { startedAt: context["startedAt"] }
+        : {}),
+    });
+    notifyObserver(options, "onOutputDirReady")(scanDir);
+    notifyScanLifecycle(options, scan);
+    if (isRecord(scan) && Array.isArray(scan["warnings"])) {
+      for (const warning of scan["warnings"])
+        if (typeof warning === "string")
+          notifyObserver(options, "onWarning")(warning);
+    }
+    if (this.#operationTelemetry !== null)
+      this.#operationTelemetry.reusedResult = true;
+    const storedUsage =
+      isRecord(scan) && isRecord(scan["usage"])
+        ? workbenchTokenUsage(scan["usage"])
+        : null;
+    return new ScanResult({
+      ...result,
+      turnResult: {
+        ...result.turnResult,
+        ...(storedUsage === null ? {} : { usage: storedUsage }),
+      },
+      ...(isRecord(scan) && isRecord(scan["cost"])
+        ? { recordedCost: scan["cost"] as unknown as ScanCost }
+        : {}),
+    });
+  }
+
   async #run(
     repository: string,
     options: ScanOptions,
@@ -2330,6 +2626,29 @@ export class CodexSecurity {
         throwIfAborted(signal, scanDir);
       };
 
+      if (
+        options.resumeScanId !== undefined &&
+        options.outputDir !== undefined &&
+        options.mode === "deep" &&
+        !options.postScanPrompt?.trim() &&
+        options.postScanPromptFile === undefined &&
+        !options.ownerSuggestions &&
+        this.#dependencies.hostedScan === undefined
+      ) {
+        const restored = await this.#readSealedDeepResult(
+          repository,
+          options.resumeScanId,
+          options.outputDir,
+          options,
+          signal,
+        );
+        if (restored !== undefined) return restored;
+      }
+
+      if (options.requireSealedResume)
+        throw new CodexSecurityError(
+          "The saved host scan is no longer sealed.",
+        );
       // Workflows reuse the prepared prompts and deep settings, but validate the
       // output only when starting new work; a completed workflow may already own it.
       const inputs =
@@ -2510,6 +2829,19 @@ export class CodexSecurity {
           scanDir,
           workerProviderEnvironment,
           session.nativeProviderEnvironment,
+        );
+      const modelFilePaths =
+        mode === "deep"
+          ? MODEL_FILE_SETTINGS.flatMap((key) => {
+              const value = workerRuntimeConfig[key];
+              return typeof value === "string" && value ? [value] : [];
+            })
+          : [];
+      if (modelFilePaths.length && this.#dependencies.hostedScan === undefined)
+        await requireDeepScanExecutable(
+          this.#codexCommand().command,
+          modelFilePaths,
+          signal,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -2870,6 +3202,34 @@ export class CodexSecurity {
         knowledgeBasePaths: knowledgeBase?.sources,
         deepScan: deepScanConfiguration?.settings,
       });
+      const executableSources = [
+        ...(this.config.executableSourcePaths ?? []),
+        ...(inputs.deepScanConfiguration?.sourcePaths ?? []),
+        ...modelFilePaths,
+        ...(await Promise.all(
+          modelFilePaths.map(async (path) =>
+            canonicalConfigPath(
+              await resolveParentTraversal(path, { allowMissing: true }),
+            ),
+          ),
+        )),
+      ];
+      if (mode === "deep") {
+        recipe["sealedPricing"] = {
+          model,
+          ...(pricingContext && { context: pricingContext }),
+        };
+        if (knowledgeBase?.protectedRoots.length)
+          recipe["knowledgeBaseProtectedRoots"] = knowledgeBase.protectedRoots;
+        if (executableSources.length)
+          recipe["executableSourcePaths"] = [...new Set(executableSources)];
+        if (
+          Array.isArray(options.target) &&
+          !isDeepStrictEqual(options.target, normalized.paths)
+        )
+          recipe["requestedPaths"] = [...options.target];
+      }
+
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,
@@ -2879,10 +3239,13 @@ export class CodexSecurity {
       if (options.scanPrompt?.trim()) recipe["requiresScanPrompt"] = true;
       if (severityRubric !== undefined)
         recipe["severityRubric"] = severityRubric;
-      recipe["scanInputs"] = scanInputIdentity(
-        options.scanPrompt,
-        scanKnowledge,
-      );
+      const scanInputs = scanInputIdentity(options.scanPrompt, scanKnowledge);
+      if (mode === "deep" && options.resumeScanId === undefined)
+        scanInputs["modelFileInputs"] = await deepModelFileInputs(
+          workerRuntimeConfig,
+          signal,
+        );
+      recipe["scanInputs"] = scanInputs;
       if (options.safetyIdentifier !== undefined)
         recipe["safetyIdentifier"] = options.safetyIdentifier;
       if (options.postScanPrompt !== undefined)
@@ -3012,6 +3375,15 @@ export class CodexSecurity {
           expectation.pluginVersion = registration["sealedProducerVersion"];
         }
         const savedInputs = savedRecipe["scanInputs"];
+        if (
+          mode === "deep" &&
+          registration["sealedProducerVersion"] === undefined
+        )
+          await validateDeepModelFileInputs(
+            savedInputs,
+            workerRuntimeConfig,
+            signal,
+          );
         severityRubric = severityRubricSchema
           .optional()
           .parse(savedRecipe["severityRubric"]);
@@ -3901,14 +4273,12 @@ export class CodexSecurity {
         onObserverError: options.onObserverError,
       });
       checkOpen();
-      const completion = await workbench(workbenchOptions, [
-        "complete-scan",
-        "--scan-id",
+      const completion = await completeScanWithReceipt(
+        (args) => workbench(workbenchOptions, args),
         scanId,
-        ...(completionCost === null
-          ? []
-          : ["--cost-json", JSON.stringify(completionCost)]),
-      ]);
+        completionCost,
+        signal,
+      );
       stopHeadDriftMonitor?.();
       activeScan = null;
       const completedScan = completion["scan"];
@@ -4167,6 +4537,12 @@ export class CodexSecurity {
         ?.stop(measuredExecution?.usage)
         .catch(() => null);
       if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
+      // The coordinator deliberately kept its accepted worker receipts and run open.
+      if (
+        failure instanceof DirectDeepScanInputRecoveryError &&
+        !signal.aborted
+      )
+        throw failure;
       const terminalTurnStatus = terminalScanTurnStatus();
       const verifiedCost = snapshot?.measurement.cost;
       if (
@@ -5135,6 +5511,18 @@ export class CodexSecurity {
         ),
         scanCodexHome(this.#dependencies.environment),
       );
+      if (deepScan) {
+        const files = absoluteModelFilePaths(
+          requestedConfig,
+          this.#dependencies.environment,
+        );
+        if (files.length)
+          await requireDeepScanExecutable(
+            this.#codexCommand().command,
+            files,
+            signal,
+          );
+      }
       const commandAuth = hasCommandAuth(requestedConfig);
       const modelProvider = scanModelProvider(requestedConfig);
       const providerEnvKey = commandAuth
@@ -5825,6 +6213,33 @@ export class CodexSecurity {
       canonicalStateDirectory,
       "state",
     );
+    const deepScanConfiguration =
+      mode === "deep"
+        ? await resolveDeepScanConfig(
+            deep,
+            join(
+              scanCodexHome(this.#dependencies.environment),
+              "codex-security",
+              "config.toml",
+            ),
+            signal,
+          )
+        : undefined;
+    const executableSources = [
+      ...(this.config.executableSourcePaths ?? []),
+      ...(deepScanConfiguration?.sourcePaths ?? []),
+    ];
+    if (
+      mode === "deep" &&
+      this.#dependencies.hostedScan === undefined &&
+      executableSources.length
+    ) {
+      await requireDeepScanExecutable(
+        this.#codexCommand().command,
+        executableSources,
+        signal,
+      );
+    }
     return {
       repository: repo,
       target: normalized,
@@ -5834,19 +6249,7 @@ export class CodexSecurity {
       protectedRoots,
       stateDirectory,
       prompts,
-      ...(mode === "deep"
-        ? {
-            deepScanConfiguration: await resolveDeepScanConfig(
-              deep,
-              join(
-                scanCodexHome(this.#dependencies.environment),
-                "codex-security",
-                "config.toml",
-              ),
-              signal,
-            ),
-          }
-        : {}),
+      ...(deepScanConfiguration ? { deepScanConfiguration } : {}),
     };
   }
 
@@ -6796,6 +7199,36 @@ async function requireScanArtifacts(
   }
 }
 
+/** A subprocess can lose its reply after committing. Revalidate via the existing completion command. */
+async function completeScanWithReceipt(
+  workbench: (args: readonly string[]) => Promise<JsonObject>,
+  scanId: string,
+  cost: ScanCost | ReturnType<typeof measuredScanCost>,
+  signal: AbortSignal,
+): Promise<JsonObject> {
+  const args = ["complete-scan", "--scan-id", scanId];
+  try {
+    return await workbench(
+      cost === null ? args : [...args, "--cost-json", JSON.stringify(cost)],
+    );
+  } catch (error) {
+    if (signal.aborted) throw error;
+    const saved = await workbench(["get-scan", "--scan-id", scanId]).catch(
+      () => undefined,
+    );
+    const scan = saved?.["scan"];
+    if (
+      !isRecord(scan) ||
+      scan["scanId"] !== scanId ||
+      !isRecord(scan["progress"]) ||
+      scan["progress"]["status"] !== "complete"
+    )
+      throw error;
+    // Omit cost on replay so that the workbench preserves the durable receipt.
+    return await workbench(args);
+  }
+}
+
 async function collectResult(
   turnResult: TurnResultMetadata,
   threadId: string,
@@ -7702,7 +8135,11 @@ function selectedWorkerRuntimeConfig(
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
     if (typeof file === "string") {
-      resolved[key] = resolve(workingDirectory, expandHome(file, environment));
+      const path = expandHome(file, environment);
+      resolved[key] =
+        process.platform !== "win32" && isAbsolute(path)
+          ? path
+          : resolve(workingDirectory, path);
     }
   }
   return {

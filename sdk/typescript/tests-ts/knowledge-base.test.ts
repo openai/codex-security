@@ -1055,6 +1055,10 @@ describe("scan knowledge bases", () => {
     const escape = join(repository, "outside");
     const viaRepository = join(external, "via-repository");
     const operatorAlias = join(external, "current");
+    const aliasRoot = await temporaryDirectory();
+    await mkdir(join(aliasRoot, ".git"));
+    const checkoutAlias = join(aliasRoot, "current");
+    await symlink(external, checkoutAlias, "junction");
     await symlink(external, escape, "junction");
     await symlink(escape, viaRepository, "junction");
     await symlink(external, operatorAlias, "junction");
@@ -1064,6 +1068,9 @@ describe("scan knowledge bases", () => {
         undefined,
         checkout,
       );
+    expect((await read(checkoutAlias, external)).protectedRoots).toContain(
+      await filesystem.realpath(aliasRoot),
+    );
     await expect(read(viaRepository, repository)).rejects.toThrow(
       "repository directory links",
     );

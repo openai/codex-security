@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import {
   readProjectConfig,
+  loadProjectConfig,
   resolveScanSettings,
 } from "../src/project-config.js";
 import {
@@ -14,12 +15,98 @@ import {
 } from "../src/project-config-schema.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { mergedCodexConfig, type JsonValue } from "../src/config.js";
+import { TestClient } from "./support/api-client.js";
 import { ConfigurationError } from "../src/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } =
   createApiTestFixtures("project-config-");
 afterEach(cleanup);
+
+test.skipIf(process.platform === "win32")(
+  "project config resolves relative settings from its symlink-traversed parent",
+  async () => {
+    const root = await temporaryDirectory();
+    const selected = join(root, "selected");
+    const documents = join(root, "documents");
+    await mkdir(documents);
+    const physical = join(root, "physical");
+    await mkdir(selected);
+    await mkdir(join(physical, "nested"), { recursive: true });
+    await symlink(join(physical, "nested"), join(selected, "link"));
+    const file = "scan.json";
+    await writeFile(
+      join(selected, file),
+      JSON.stringify({ scan: { instructions_file: "unrelated.md" } }),
+    );
+    await writeFile(
+      join(documents, file),
+      JSON.stringify({
+        scan: {
+          instructions_file: "instructions.md",
+          knowledge_base: ["context.md"],
+        },
+      }),
+    );
+    await symlink(join(documents, file), join(physical, file));
+    const loaded = await loadProjectConfig(`link/../${file}`, selected);
+    expect<string | undefined>(loaded.options.scanPromptFile).toBe(
+      join(physical, "instructions.md"),
+    );
+    expect<readonly string[] | undefined>(
+      loaded.options.knowledgeBasePaths,
+    ).toEqual([join(physical, "context.md")]);
+    expect(loaded.config.executableSourcePaths).toEqual([
+      join(selected, file),
+      join(physical, file),
+      join(documents, file),
+    ]);
+  },
+);
+
+test("Deep preflight excludes executables from each checkout supplying its config", async () => {
+  const root = await temporaryDirectory();
+  const repo = join(root, "target");
+  await mkdir(repo);
+  await writeFile(join(repo, "example.txt"), "fixture");
+  const selected = join(root, "selected");
+  const canonical =
+    process.platform === "win32" ? selected : join(root, "canonical");
+  const sources = [...new Set([selected, canonical])];
+  for (const path of sources) {
+    await mkdir(join(path, ".git"), { recursive: true });
+    await mkdir(join(path, "settings"));
+    await mkdir(join(path, "bin"));
+  }
+  const file = join(selected, "settings", "project.json");
+  await writeFile(
+    join(canonical, "settings", "project.json"),
+    JSON.stringify({ scan: { mode: "deep" } }),
+  );
+  if (selected !== canonical)
+    await symlink(join(canonical, "settings", "project.json"), file);
+  const { config, options } = await loadProjectConfig(file);
+  const commands = sources.map((path) => join(path, "bin", "codex.exe"));
+  for (const command of commands)
+    await writeFile(command, "inert fixture", { mode: 0o700 });
+  if (process.platform !== "win32") {
+    const alias = join(root, "config-link");
+    await symlink(join(canonical, "settings"), alias);
+    commands.push(`${alias}/../bin/codex.exe`);
+  }
+  for (const command of commands) {
+    await using client = new TestClient(config, {
+      environment: {
+        CODEX_HOME: join(root, "codex-home"),
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+      resolveCodexCommand: () => ({ command }),
+    });
+    await expect(client.preflight(repo, options)).rejects.toThrow(
+      "protected configuration checkout",
+    );
+  }
+});
 
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
@@ -520,6 +607,7 @@ describe("project configuration resolution", () => {
       workers: 8,
     });
     expect(config).toEqual({
+      executableSourcePaths: [project.path],
       codexOverrides: {
         model: "gpt-5.6-sol",
         profile: "reviewCase",

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 
+import pytest
 from workbench_test_support import (
     begin_deep_scan,
     create_workspace,
@@ -16,14 +18,26 @@ from workbench_test_support import (
 )
 
 
-def test_native_setup_snapshots_limits_before_first_coordinator(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "link_legacy",
+    [
+        False,
+        pytest.param(
+            True, marks=pytest.mark.skipif(os.name == "nt", reason="requires file symlinks")
+        ),
+    ],
+)
+def test_native_setup_snapshots_limits_before_first_coordinator(tmp_path, monkeypatch, link_legacy):
     state = tmp_path / "state"
     target = tmp_path / "repository"
     target.mkdir()
     (target / "fixture.py").write_text("print('fixture')\n")
     legacy = tmp_path / "defaults.toml"
     legacy.write_text("[deep_scan]\nworkers=7\nsubagents=2\nmax_time_hours=4\n")
-    monkeypatch.setenv("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", str(legacy))
+    selected = tmp_path / "selected.toml" if link_legacy else legacy
+    if link_legacy:
+        selected.symlink_to(legacy)
+    monkeypatch.setenv("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", str(selected))
     project = {
         "path": str(target / "security.yaml"),
         "settings": {
@@ -55,9 +69,15 @@ def test_native_setup_snapshots_limits_before_first_coordinator(tmp_path, monkey
     saved = save_workspace(state, workspace_id, str(target), ".", "deep", *selection)
     assert saved["deepScanConfig"] == preview
     # The original settings survive changes even before the coordinator starts.
+    if link_legacy:
+        selected.unlink()
+        selected.symlink_to(tmp_path / "missing-after-selection.toml")
     legacy.write_text("invalid TOML")
     scan_id, _ = start_workspace_scan(state, workspace_id, tmp_path / "scans")
     initial = resume_deep_scan(state, scan_id, "project-owner")["deepScan"]
+    assert initial["configSourcePaths"] == list(
+        dict.fromkeys([project["path"], str(selected), str(legacy)])
+    )
     assert initial["config"] == preview["settings"]
     assert (
         resume_deep_scan(state, scan_id, "project-owner")["deepScan"]["config"] == initial["config"]

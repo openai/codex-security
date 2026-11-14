@@ -448,7 +448,12 @@ import {
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
-import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
+import {
+  absoluteModelFilePaths,
+  deepScanOptions,
+  requireDeepScanExecutable,
+  resolveDeepScanConfig,
+} from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import {
   DEEP_SCAN_SETTINGS,
@@ -1255,6 +1260,8 @@ export function resolveCliPath(directory: string, value: string): AbsolutePath {
 }
 
 interface ScanArguments extends ResolvedScanSettings {
+  requireSealedResume?: boolean;
+  executableSourcePaths?: readonly string[];
   rubricPath?: string;
   severityRubric?: ScanOptions["severityRubric"];
   rerunInputIdentity?: JsonValue;
@@ -3160,6 +3167,8 @@ export async function main(
             "resume",
             dependencies.currentDirectory(),
             dependencies.environment,
+            {},
+            canReadSealedScan(saved),
           );
           scanArguments.resumeScanId = saved["scanId"];
           scanArguments.outputDir = resolveCliPath(
@@ -5700,6 +5709,7 @@ export async function main(
                 ? undefined
                 : resolveCliPath(directory, options.rubric),
             codexOverrides: config.codexOverrides,
+            executableSourcePaths: config.executableSourcePaths,
             projectConfig: provenance,
             workflowId: options.workflowId,
             safetyIdentifier: options.safetyIdentifier,
@@ -6795,6 +6805,7 @@ export async function main(
             validationPromptFile: settings.validationPromptFile,
             postScanPromptFile: settings.postScanPromptFile,
             config: {
+              ...resolved.config,
               codexOverrides: mergeCodexOverrides(
                 resolved.config.codexOverrides,
                 await parseScanCodexOverrides(
@@ -6852,8 +6863,11 @@ export async function main(
                       );
                       return undefined;
                     }
+                    const passive =
+                      canReadSealedScan(saved) &&
+                      !prompts.postScanPrompt?.trim();
                     const session =
-                      typeof saved["threadId"] === "string"
+                      !passive && typeof saved["threadId"] === "string"
                         ? await findScanSession(
                             codexSecurityCredentialHome(
                               dependencies.environment,
@@ -6861,7 +6875,7 @@ export async function main(
                             saved["threadId"],
                           )
                         : null;
-                    if (session?.workingDirectory !== scanDir) {
+                    if (!passive && session?.workingDirectory !== scanDir) {
                       errorOutput.write(
                         `codex-security: ${scan.scanId}: Original session logs are unavailable. Preserving this attempt and starting a new one.\n`,
                       );
@@ -6872,15 +6886,21 @@ export async function main(
                       "resume",
                       currentDirectory,
                       dependencies.environment,
+                      {},
+                      passive,
                     );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
                       pythonPath: options.python,
                       codexOverrides: recipe.codexOverrides,
+                      executableSourcePaths: recipe.executableSourcePaths,
                     });
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        ...(passive
+                          ? { requireSealedResume: true, target: undefined }
+                          : {}),
                         ...batchScanBudget(
                           prompts.maxTotalCostShareUsd,
                           recipe,
@@ -8817,6 +8837,19 @@ async function runScanImport(
   }
 }
 
+function canReadSealedScan(saved: JsonObject): boolean {
+  const recipe = saved["recipe"];
+  return (
+    typeof saved["sealedProducerVersion"] === "string" &&
+    isJsonObject(recipe) &&
+    recipe["ownerSuggestions"] !== true &&
+    !(
+      typeof recipe["postScanPrompt"] === "string" &&
+      recipe["postScanPrompt"].trim()
+    )
+  );
+}
+
 async function prepareScanArgumentsFromRecipe(
   { recipe, userContext }: JsonObject,
   operation: "resume" | "rerun",
@@ -8826,6 +8859,7 @@ async function prepareScanArgumentsFromRecipe(
     scanPromptFile,
     validationPromptFile,
   }: Pick<ScanPromptSettings, "scanPromptFile" | "validationPromptFile"> = {},
+  passive = false,
 ): Promise<ScanArguments> {
   if (recipe === undefined || !isJsonObject(recipe)) {
     throw new CodexSecurityError(
@@ -8861,6 +8895,18 @@ async function prepareScanArgumentsFromRecipe(
   if (!Array.isArray(paths) || !paths.every(isNonEmptyString)) {
     throw new CodexSecurityError(
       "The saved scan recipe contains invalid paths.",
+    );
+  }
+  const executableSourcePaths = recipe["executableSourcePaths"];
+  if (
+    executableSourcePaths !== undefined &&
+    (!Array.isArray(executableSourcePaths) ||
+      !executableSourcePaths.every(
+        (path): path is string => isNonEmptyString(path) && isAbsolute(path),
+      ))
+  ) {
+    throw new CodexSecurityError(
+      "The saved scan recipe contains invalid executable source paths.",
     );
   }
   const knowledgeBasePaths = recipe["knowledgeBasePaths"] ?? [];
@@ -8994,12 +9040,16 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
-  const replayConfig = await restoreProviderProfile(
-    config,
-    recipe["providerProfile"],
-    environment,
-  );
+  const replayConfig = passive
+    ? {}
+    : await restoreProviderProfile(
+        config,
+        recipe["providerProfile"],
+        environment,
+      );
   return {
+    ...(passive ? { requireSealedResume: true } : {}),
+    ...(executableSourcePaths ? { executableSourcePaths } : {}),
     repository,
     auth: auth ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram,
@@ -9018,9 +9068,9 @@ async function prepareScanArgumentsFromRecipe(
           : kind === "working_tree"
             ? DiffTarget.workingTree({ base: reference ?? "HEAD" })
             : "repository",
-    knowledgeBasePaths: knowledgeBasePaths.map((path) =>
-      resolveInputPath(path, directory),
-    ),
+    knowledgeBasePaths: passive
+      ? []
+      : knowledgeBasePaths.map((path) => resolveInputPath(path, directory)),
     ...prompts,
     safetyIdentifier,
     postScanPrompt,
@@ -11399,6 +11449,7 @@ async function chooseInteractiveAuthentication(
   options: {
     auth: ScanAuthMode | undefined;
     config: JsonObject;
+    deepScan?: ScanArguments;
     command: "scan" | "policy";
     signal: AbortSignal;
   },
@@ -11422,12 +11473,30 @@ async function chooseInteractiveAuthentication(
   const prompt =
     dependencies.scanAuthenticationPrompt ?? createTerminalPrompt(errorOutput);
   const hasStoredSignIn = dependencies.hasStoredChatGPTSignIn;
-  if (
-    !prompt.isInteractive() ||
-    hasStoredSignIn === undefined ||
-    !(await abortable(() => hasStoredSignIn(signal), signal))
-  )
-    return auth;
+  if (!prompt.isInteractive() || hasStoredSignIn === undefined) return auth;
+  if (options.deepScan) {
+    const legacy = await resolveDeepScanConfig(
+      deepScanOptions(options.deepScan),
+      join(
+        scanCodexHome(dependencies.environment),
+        "codex-security",
+        "config.toml",
+      ),
+      signal,
+    );
+    const paths = [
+      ...(options.deepScan.executableSourcePaths ?? []),
+      ...(legacy.sourcePaths ?? []),
+      ...absoluteModelFilePaths(config, dependencies.environment),
+    ];
+    if (paths.length)
+      await requireDeepScanExecutable(
+        resolveCodexCommand(dependencies.environment).command,
+        paths,
+        signal,
+      );
+  }
+  if (!(await abortable(() => hasStoredSignIn(signal), signal))) return auth;
   const source = authentication.source;
   try {
     errorOutput.write(
@@ -11620,6 +11689,9 @@ async function executeScan(
     const config: CodexSecurityConfig = {
       pluginPath: arguments_.pluginPath,
       pythonPath: arguments_.pythonPath,
+      ...(arguments_.executableSourcePaths
+        ? { executableSourcePaths: arguments_.executableSourcePaths }
+        : {}),
       codexOverrides: arguments_.codexOverrides,
     };
     const selectedProfileName = config.codexOverrides?.["profile"];
@@ -11666,12 +11738,15 @@ async function executeScan(
     };
     const otel = resolvedConfiguration["otel"];
     if (isJsonObject(otel)) patchOtel = otel;
+    const needsModelAuthentication =
+      !arguments_.mock && !arguments_.requireSealedResume;
     auth =
-      !arguments_.dryRun && !arguments_.mock && interactive
+      !arguments_.dryRun && needsModelAuthentication && interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
               config: effectiveConfiguration,
+              ...(arguments_.mode === "deep" ? { deepScan: arguments_ } : {}),
               command: "scan",
               signal: preparationAbortController.signal,
             },
@@ -11691,16 +11766,16 @@ async function executeScan(
           : providerConfiguration,
       };
     }
-    selectedAuthentication = arguments_.mock
-      ? null
-      : scanAuthentication(
+    selectedAuthentication = needsModelAuthentication
+      ? scanAuthentication(
           dependencies.environment,
           auth,
           provider,
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
           scanProviderEnvKey(effectiveConfiguration),
-        );
+        )
+      : null;
     diagnostic("scan.configuration", {
       cli_version: VERSION,
       bundled_plugin_version: BUNDLED_PLUGIN_VERSION,
@@ -11826,6 +11901,9 @@ async function executeScan(
         ? {}
         : { severityRubric: arguments_.severityRubric }),
       knowledgeBaseSnapshot: arguments_.knowledgeBaseSnapshot,
+      ...(arguments_.requireSealedResume
+        ? { requireSealedResume: true, target: undefined }
+        : {}),
       ...(arguments_.resumeScanId === undefined
         ? {}
         : { resumeScanId: arguments_.resumeScanId }),

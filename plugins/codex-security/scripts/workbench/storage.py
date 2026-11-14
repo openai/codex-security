@@ -6,6 +6,7 @@ import hashlib
 import os
 import sqlite3
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,45 @@ def resolve_scan_root(scan_root: str | None) -> Path:
 def worker_usage_directory(scan_id: str) -> Path:
     """Bind host-observed receipts beneath the persistent protected native home."""
     return state_dir() / "codex-home" / "worker-usage" / scan_id
+
+
+def require_host_deep_scan_output(connection: sqlite3.Connection, scan: sqlite3.Row) -> None:
+    """Keep a running SDK composition from being adopted as a fresh host run."""
+    from finalize_scan_contract import (
+        ContractError,
+        MissingScanLocalFileError,
+        open_scan_local_file_descriptor,
+        scan_root_identity,
+    )
+
+    scan_dir = Path(scan["scan_dir"])
+    try:
+        with suppress(MissingScanLocalFileError):
+            descriptor = open_scan_local_file_descriptor(
+                scan_dir, "artifacts/deep-scan/checkpoint.json", "Deep Scan preview checkpoint"
+            )
+            os.close(descriptor)
+            raise SystemExit(
+                "This scan has a Deep Scan preview checkpoint. Finish it with its original "
+                "SDK version or start a new scan in another output directory."
+            )
+        # A native missing-path error can also mean the root vanished while opening the file.
+        scan_root_identity(scan_dir)
+    except (ContractError, OSError) as exc:
+        raise SystemExit(f"Cannot inspect the saved Deep Scan checkpoint: {exc}") from exc
+    # A lost checkpoint can still have persisted preview child membership.
+    if (
+        connection.execute(
+            "SELECT 1 FROM pragma_table_info('scans') WHERE name = 'parent_scan_role'"
+        ).fetchone()
+        and connection.execute(
+            "SELECT 1 FROM scans WHERE parent_scan_id = ? AND parent_scan_role = 'deep_pass' LIMIT 1",
+            (scan["id"],),
+        ).fetchone()
+    ):
+        raise SystemExit(
+            "This scan contains work from the Deep Scan preview. Recover it with its original SDK version."
+        )
 
 
 def short_archive_prefix(original_name: str) -> str:

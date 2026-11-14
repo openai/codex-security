@@ -1,9 +1,20 @@
 import { isRecord } from "./record.js";
-import { lstat, readFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { parse as parseToml, type TomlTable } from "smol-toml";
-import { writeCodexConfig, type JsonObject } from "./config.js";
-import { canonicalConfigPath } from "./runtime.js";
+import {
+  MODEL_FILE_SETTINGS,
+  resolveCodexProfile,
+  writeCodexConfig,
+  type JsonObject,
+} from "./config.js";
+import { gitProtectionRoots } from "./targets.js";
+import { isWithin } from "./trusted-executable.js";
+import {
+  canonicalConfigPath,
+  expandHome,
+  type ProcessEnvironment,
+} from "./runtime.js";
 import {
   DEEP_SCAN_SETTINGS,
   DEFAULT_DEEP_SCAN_SETTINGS,
@@ -26,7 +37,54 @@ export interface ResolvedDeepScanConfig {
   settings: Required<DeepScanOptions>;
   sources: DeepScanSources;
   source: string;
+  sourcePaths?: readonly string[];
   document: TomlTable;
+}
+
+export function absoluteModelFilePaths(
+  config: JsonObject,
+  environment: ProcessEnvironment,
+): string[] {
+  const selected = resolveCodexProfile(config);
+  return MODEL_FILE_SETTINGS.flatMap((key) => {
+    const value = selected[key];
+    if (typeof value !== "string" || !value) return [];
+    const path = expandHome(value, environment);
+    return isAbsolute(path) ? [path] : [];
+  });
+}
+
+export async function executableSourceRoots(
+  path: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const directory = dirname(path);
+  return [
+    directory,
+    await canonicalConfigPath(directory),
+    ...(await gitProtectionRoots(path, signal)),
+  ];
+}
+
+export async function requireDeepScanExecutable(
+  command: string,
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  const canonical = await realpath(command).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return canonicalConfigPath(command);
+  });
+  for (const path of paths) {
+    const roots = await executableSourceRoots(path, signal);
+    if (
+      roots.some((root) => isWithin(root, command) || isWithin(root, canonical))
+    ) {
+      throw new CodexSecurityError(
+        "The selected Codex executable is inside a protected configuration checkout.",
+      );
+    }
+  }
 }
 
 export function deepScanOptions(
@@ -95,9 +153,19 @@ export async function resolveDeepScanConfig(
 ): Promise<ResolvedDeepScanConfig> {
   const explicit = deepScanOptions({ ...options, mode: "deep" });
   let document: TomlTable = {};
+  let sourcePaths: string[] | undefined;
   // Complete saved settings do not depend on today's ambient configuration.
   if (!DEEP_SCAN_SETTINGS.every(([name]) => explicit[name] !== undefined)) {
-    document = await readDeepScanDocument(source, signal);
+    let destination: string | undefined;
+    try {
+      destination = await realpath(source);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (destination !== undefined) {
+      sourcePaths = source === destination ? [source] : [source, destination];
+      document = await readDeepScanDocument(destination, signal);
+    }
   }
   const existing = document["deep_scan"];
   if (
@@ -141,6 +209,7 @@ export async function resolveDeepScanConfig(
     settings,
     sources,
     source,
+    ...(sourcePaths ? { sourcePaths } : {}),
     document,
   };
 }

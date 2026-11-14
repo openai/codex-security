@@ -11,6 +11,7 @@ import {
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
 } from "./errors.js";
+import { DeepScanModelInputRecoveryError } from "./model-file-inputs.js";
 import { renderDiscoveryPrompt } from "./templates.js";
 import {
   writeWorkerUsageReceipt,
@@ -75,6 +76,22 @@ type WorkerAttemptOutcome =
 /** Owns prompt rendering, retries, validation, and persistence for each worker. */
 export class DeepScanWorkerRunner {
   constructor(private readonly options: DeepScanWorkerRunnerOptions) {}
+
+  /** Discovery can stop while a model-input file is being read. */
+  async validateModelFileInputs(): Promise<boolean> {
+    const { executor, signal } = this.options;
+    try {
+      await executor.validateModelFileInputs?.(signal);
+    } catch (error) {
+      if (
+        !signal.aborted ||
+        (error !== signal.reason &&
+          !(error instanceof Error && error.name === "AbortError"))
+      )
+        throw error;
+    }
+    return !signal.aborted;
+  }
 
   async runDiscoveryWorker(
     workerId: string,
@@ -230,6 +247,10 @@ export class DeepScanWorkerRunner {
       if (signal.aborted) {
         return await this.cancelAttempt(input, attempt, lastThreadId);
       }
+      // The coordinator checks the initial batch before reserving work. Retry
+      // delays may outlive the captured file contents.
+      if (attempt > 1 && !(await this.validateModelFileInputs()))
+        return await this.cancelAttempt(input, attempt - 1, lastThreadId);
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;
@@ -551,8 +572,7 @@ export class DeepScanWorkerRunner {
     attempt: number,
     threadId: string | undefined,
   ): Promise<WorkerAttemptOutcome> {
-    const coordinatorShutdown =
-      this.options.signal.reason === "mcp_transport_closed";
+    const reason: unknown = this.options.signal.reason;
     await this.options.store.updateWorker({
       id: input.workerId,
       scanId: this.options.run.scanId,
@@ -562,8 +582,11 @@ export class DeepScanWorkerRunner {
       artifactDir: input.artifactDir,
       attempt,
       threadId,
-      ...(coordinatorShutdown
-        ? { error: "coordinator_shutdown: mcp_transport_closed" }
+      ...(reason === "mcp_transport_closed" ||
+      reason instanceof DeepScanModelInputRecoveryError
+        ? {
+            error: `coordinator_shutdown: ${reason instanceof Error ? reason.message : reason}`,
+          }
         : {}),
     });
     return { status: "canceled" };

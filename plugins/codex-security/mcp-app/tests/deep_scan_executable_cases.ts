@@ -62,6 +62,7 @@ export async function testExecutorExecutablePinning({
   }
   try {
     await testWindowsExecutableSuffixes();
+    await testConfigCheckoutExcluded();
     await testExecutorRetriesInitialMissingExecutable();
     await testExecutorPinsCodexExecutableAcrossWorkers();
     await testExecutorRejectsChangedPinnedExecutable();
@@ -71,6 +72,76 @@ export async function testExecutorExecutablePinning({
   } finally {
     childProcess.spawn = originalSpawn;
     syncBuiltinESMExports();
+  }
+
+  async function testConfigCheckoutExcluded() {
+    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+      await writeFile(promptPath, "synthetic executable selection");
+      const selected = path.join(fixture.root, "selected-checkout");
+      const destination = path.join(fixture.root, "config-checkout");
+      for (const checkout of [selected, destination]) {
+        await mkdir(path.join(checkout, ".git"), { recursive: true });
+        await mkdir(path.join(checkout, "config"));
+        await mkdir(path.join(checkout, "bin"));
+      }
+      const sources = [selected, destination].map((dir) =>
+        path.join(dir, "config", "settings.yaml"),
+      );
+      await writeFile(sources[1]!, "scan: {mode: deep}");
+      const request = workerRequest(promptPath, workingDirectory);
+      const trusted =
+        process.platform === "win32"
+          ? path.join(fixture.root, "trusted-codex.exe")
+          : fixture.executablePath;
+      if (process.platform === "win32") {
+        await copyFile(process.execPath, trusted);
+        nativeScripts.set(
+          path.toNamespacedPath(trusted),
+          fixture.executablePath,
+        );
+      }
+      const name = path.basename(trusted);
+      const previousPath = process.env.PATH;
+      try {
+        for (const checkout of [selected, destination]) {
+          const blocked = path.join(checkout, "bin", name);
+          await copyFile(trusted, blocked);
+          process.env.CODEX_CLI_PATH = blocked;
+          const executor = new CodexSdkWorkerExecutor({
+            parentSandbox,
+            configSourcePaths: sources,
+          });
+          await assert.rejects(
+            executor.run(request),
+            /protected scan or configuration checkout/,
+          );
+          await assert.rejects(readFile(fixture.preflightMarkerPath), {
+            code: "ENOENT",
+          });
+        }
+        process.env.CODEX_CLI_PATH = name;
+        process.env.PATH = [
+          ...[selected, destination].map((dir) => path.join(dir, "bin")),
+          path.dirname(trusted),
+          previousPath,
+        ].join(path.delimiter);
+        const executor = new CodexSdkWorkerExecutor({
+          parentSandbox,
+          configSourcePaths: sources,
+        });
+        assert.equal(
+          (await executor.run(request)).threadId,
+          "fixture-thread-id",
+        );
+        const invocation = await readJson(fixture.markerPath);
+        assert.equal(
+          await realpath(invocation.executablePath),
+          fixture.executablePath,
+        );
+      } finally {
+        restoreEnv("PATH", previousPath);
+      }
+    });
   }
 
   async function testWindowsExecutableSuffixes() {
