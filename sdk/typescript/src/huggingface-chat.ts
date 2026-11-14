@@ -49,6 +49,29 @@ export function huggingFaceChatRequest(request: Record<string, unknown>) {
         tool_call_id: item["call_id"],
         content: typeof output === "string" ? output : content(output),
       });
+    } else if (item["type"] === "agent_message") {
+      // Chat has no agent-to-agent item. Keep the sender and recipient with
+      // the assistant's text so a worker reply retains its provenance.
+      const parts = item["content"];
+      if (!Array.isArray(parts)) throw new Error("Invalid HF agent message.");
+      const text = parts.map((part: unknown) => {
+        if (
+          !isRecord(part) ||
+          part["type"] !== "input_text" ||
+          typeof part["text"] !== "string"
+        )
+          throw new Error("HF chat can replay only plaintext agent messages.");
+        return part["text"];
+      });
+      messages.push({
+        role: "assistant",
+        content: JSON.stringify({
+          type: "agent_message",
+          author: item["author"],
+          recipient: item["recipient"],
+          text: text.join("\n"),
+        }),
+      });
     } else if (typeof item["role"] === "string") {
       messages.push({
         role: item["role"] === "developer" ? "system" : item["role"],

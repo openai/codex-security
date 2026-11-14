@@ -304,8 +304,10 @@ including patches generated after a scan, close their adapter when the command
 finishes.
 
 The adapter supports text, images, local function tools, and JSON-schema
-output. Hosted web search defaults to disabled. Hosted tools, remote
-compaction, and server-side Responses conversation state are unsupported.
+output. Plaintext messages between agents keep their sender and recipient.
+Encrypted agent messages cannot be replayed. Hosted web search defaults to
+disabled. Hosted tools, remote compaction, and server-side Responses
+conversation state are unsupported.
 The adapter forwards reasoning effort and delivers generated output once the
 upstream completion finishes. For grammar-constrained tools, the adapter sends
 the grammar to the model as input guidance. The SDK reports token usage for

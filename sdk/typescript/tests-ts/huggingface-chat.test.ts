@@ -70,6 +70,39 @@ test("preserves parallel calls, outputs, and output schemas", () => {
   });
 });
 
+test("preserves plaintext subagent replies and rejects encrypted replay", () => {
+  const reply = {
+    type: "agent_message",
+    author: "/root/worker",
+    recipient: "/root",
+    content: [
+      { type: "input_text", text: "First" },
+      { type: "input_text", text: "Second" },
+    ],
+  };
+  const message = huggingFaceChatRequest({ input: [reply] }).messages.at(-1)!;
+  expect(message["role"]).toBe("assistant");
+  expect(JSON.parse(String(message["content"]))).toEqual({
+    type: "agent_message",
+    author: reply.author,
+    recipient: reply.recipient,
+    text: "First\nSecond",
+  });
+  expect(() =>
+    huggingFaceChatRequest({
+      input: [
+        {
+          ...reply,
+          content: [
+            ...reply.content,
+            { type: "encrypted_content", encrypted_content: "opaque" },
+          ],
+        },
+      ],
+    }),
+  ).toThrow("only plaintext agent messages");
+});
+
 test("assembles interleaved tool deltas and preserves cached and reasoning usage", () => {
   const response = huggingFaceChatResponse();
   response.add({
