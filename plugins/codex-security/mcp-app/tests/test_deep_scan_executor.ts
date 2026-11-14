@@ -903,7 +903,9 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
       else process.env.CODEX_CLI_PATH = configured;
       const hasBundledTools = expectedExecutable === codexPath;
       if (hasBundledTools) {
-        process.env.PATH = [bundledTools, process.env.PATH].join(path.delimiter);
+        process.env.PATH = [bundledTools, process.env.PATH].join(
+          path.delimiter,
+        );
       }
       await writeFile(
         promptPath,
