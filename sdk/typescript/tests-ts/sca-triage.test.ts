@@ -255,6 +255,10 @@ describe("SCA static triage contract", () => {
       { affected_version_or_path: "11.0.0 in package-lock.json" },
     ],
     [
+      "version epoch",
+      { affected_version_or_path: "1!1.0.0 in package-lock.json" },
+    ],
+    [
       "version build",
       { affected_version_or_path: "1.0.0+other in package-lock.json" },
     ],
