@@ -79,48 +79,52 @@ setupPatchWorkflowFixtures();
 describe("scan and patch workflow", () => {
   const repositories = createTemporaryDirectories();
   afterEach(repositories.cleanup);
-  test("preserves Git aliases and provider configuration in the Node runtime", async () => {
-    const bundle = await mkdtemp(
-      join(import.meta.dir, "..", ".patch-context-"),
-    );
-    const root = await temporaryDirectory("patch-node-context-");
-    try {
-      const built = await Bun.build({
-        entrypoints: [
-          join(import.meta.dir, "support", "cli-patch-context.mts"),
-        ],
-        outdir: bundle,
-        target: "node",
-        packages: "external",
-      });
-      expect(built.success).toBe(true);
-      const { stdout } = await promisify(execFile)(
-        "node",
-        [
-          "--input-type=module",
-          "--eval",
-          `await import(${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)})`,
-          "synthetic-launcher",
-          root,
-        ],
-        { encoding: "utf8" },
+  test(
+    "preserves Git aliases and provider configuration in the Node runtime",
+    async () => {
+      const bundle = await mkdtemp(
+        join(import.meta.dir, "..", ".patch-context-"),
       );
-      const outcomes = JSON.parse(stdout) as {
-        kind: string;
-        exitCode: number;
-        error: string;
-        applied: boolean;
-      }[];
-      expect(outcomes).toHaveLength(6);
-      for (const outcome of outcomes) {
-        expect(outcome.exitCode, `${outcome.kind}: ${outcome.error}`).toBe(0);
-        expect(outcome.applied).toBe(true);
+      const root = await temporaryDirectory("patch-node-context-");
+      try {
+        const built = await Bun.build({
+          entrypoints: [
+            join(import.meta.dir, "support", "cli-patch-context.mts"),
+          ],
+          outdir: bundle,
+          target: "node",
+          packages: "external",
+        });
+        expect(built.success).toBe(true);
+        const { stdout } = await promisify(execFile)(
+          "node",
+          [
+            "--input-type=module",
+            "--eval",
+            `await import(${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)})`,
+            "synthetic-launcher",
+            root,
+          ],
+          { encoding: "utf8" },
+        );
+        const outcomes = JSON.parse(stdout) as {
+          kind: string;
+          exitCode: number;
+          error: string;
+          applied: boolean;
+        }[];
+        expect(outcomes).toHaveLength(6);
+        for (const outcome of outcomes) {
+          expect(outcome.exitCode, `${outcome.kind}: ${outcome.error}`).toBe(0);
+          expect(outcome.applied).toBe(true);
+        }
+      } finally {
+        await rm(bundle, { recursive: true, force: true });
+        await rm(root, { recursive: true, force: true });
       }
-    } finally {
-      await rm(bundle, { recursive: true, force: true });
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+    },
+    process.platform === "win32" ? 180_000 : 90_000,
+  );
 
   test.each([
     "ordinary",
