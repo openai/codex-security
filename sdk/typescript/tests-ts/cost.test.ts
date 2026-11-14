@@ -428,7 +428,7 @@ test.each(
             ],
       );
       const event = completedCommand(
-        changedDisplay ? "printf [REDACTED_SECRET]" : command.join(" "),
+        changedDisplay ? "printf [REDACTED_SECRET]" : command.join(" \\\n "),
         fullOutput,
         "item_0",
       );
