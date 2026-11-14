@@ -405,7 +405,7 @@ describe("custom validation", () => {
         );
         expect(prompt).toContain(f.prompt);
         expect(prompt).toMatch(/never use the discovered credential/i);
-        expect(prompt).toMatch(/validity as unchecked/i);
+        expect(prompt).toContain("“Validity unchecked” in validation.evidence");
         // Structured outputs cannot resolve plugin URIs or use regex lookaround.
         expect(JSON.stringify(schema)).not.toContain("codex-security://");
         expect(JSON.stringify(schema)).not.toMatch(/\(\?[=!<]/);
@@ -770,6 +770,9 @@ describe("custom validation", () => {
         );
       }
       const workflow = "Run the synthetic validation script, then clean up.";
+      const scanInstructions = "Review the integration entry point first.";
+      const ownerEvidence =
+        "The issuer confirmed that the integration token was disabled on 2025-12-10.";
       const markdown = "# Custom severity policy\nGrade by verified impact.";
       const severityRubric = {
         markdown,
@@ -777,7 +780,8 @@ describe("custom validation", () => {
         sha256: createHash("sha256").update(markdown).digest("hex"),
       };
       const workflowFile = join(root, "validation.md");
-      if (scenario === "standard") await writeFile(workflowFile, workflow);
+      if (scenario === "standard")
+        await writeFile(workflowFile, `${workflow}\n${ownerEvidence}`);
       const falsePositive = {
         reason: "The fixture is not included in the deployed application.",
       };
@@ -901,6 +905,10 @@ describe("custom validation", () => {
                         maxTimeMinutes !== undefined,
                       );
                       expect(prompt).not.toContain(workflow);
+                      if (scenario === "standard") {
+                        expect(prompt).toContain(scanInstructions);
+                        expect(prompt).not.toContain(ownerEvidence);
+                      }
                       expect(prompt).toContain("SDK-owned discovery workflow");
                       expect(prompt).not.toContain(
                         "Independently validate each unique finding",
@@ -992,6 +1000,10 @@ describe("custom validation", () => {
                       expect(progress.at(-1)?.phase).toBe("validation");
                     }
                     expect(prompt).toContain(workflow);
+                    if (scenario === "standard") {
+                      expect(prompt).toContain(ownerEvidence);
+                      expect(prompt).not.toContain(scanInstructions);
+                    }
                     expect(prompt).not.toContain("2026-01-01T00:05:00.000Z");
                     const pendingManifest = await json<ScanManifest>(
                       join(scanDir, "scan-manifest.json"),
@@ -1020,6 +1032,10 @@ describe("custom validation", () => {
                     const output = result(
                       scenario === "dismissed" ? "suppressed" : "reportable",
                     );
+                    if (scenario === "standard")
+                      output.validations[0]!.validation.evidence = [
+                        ownerEvidence,
+                      ];
                     output.validations[0]!.validation.counterevidence_or_proof_gap =
                       "Synthetic counterevidence from validation.";
                     output.validations[0]!.validation.remaining_uncertainty =
@@ -1130,7 +1146,10 @@ describe("custom validation", () => {
           cyberAccessProgram: "daybreak_blue",
           maxTimeMinutes,
           ...(scenario === "standard"
-            ? { validationPromptFile: workflowFile }
+            ? {
+                validationPromptFile: workflowFile,
+                scanPrompt: scanInstructions,
+              }
             : { validationPrompt: workflow }),
           onActivity: (activity) => activities.push(activity),
           ...(progressScenario
@@ -1222,6 +1241,10 @@ describe("custom validation", () => {
             "Synthetic counterevidence from validation.",
           );
           expect(report).toContain("Synthetic limitation from validation.");
+          expect(report).toContain(ownerEvidence);
+          expect(completed.findings.findings[0]?.validation?.summary).toBe(
+            ownerEvidence,
+          );
           expect(
             activities.filter(
               ({ description }) => description === validationActivity,
@@ -1302,7 +1325,15 @@ describe("custom validation", () => {
       "Independently validate each unique finding",
     );
     expect(diff).toContain("Run `$finding-discovery`");
-    expect(diff).toContain("Validity unchecked");
+    const core = await readFile(
+      join(PLUGIN_ROOT, "references/core-scan.md"),
+      "utf8",
+    );
+    expect(core).toContain("dated evidence from the issuer or owner");
+    expect(core).toContain("Otherwise state “Validity unchecked”");
+    expect(diff).toContain(
+      "<plugin_dir>/references/core-scan.md#secrets-exposed-in-source",
+    );
     expect(diff).toContain(
       "Immediately save a `complete: false` semantic draft",
     );
@@ -1311,6 +1342,9 @@ describe("custom validation", () => {
     expect(diff).not.toContain("Call `complete_codex_security_scan` once");
     for (const prompt of [standard, diff]) {
       expect(prompt).toContain("custom_pending");
+      expect(prompt).toContain(
+        "Leave credential status out of provisional titles and summaries",
+      );
       expect(prompt).toContain("extensions.customValidationSurfaceIds");
       expect(prompt).not.toContain("finalize_scan_contract.py");
     }

@@ -10,14 +10,14 @@ export const FindingPatchSchema = z.object({
   status: z.enum(["verified", "no_change", "blocked", "failed"]),
   files: z.array(z.string()),
   verification: z.string().optional(),
-  credentialRevocationPending: z
-    .boolean()
-    .transform((pending) => pending || undefined)
-    .optional(),
+  credentialRevocationPending: z.boolean().optional(),
   reason: z.string().optional(),
 });
 
-export type FindingPatch = z.infer<typeof FindingPatchSchema>;
+export type FindingPatch = Omit<
+  z.infer<typeof FindingPatchSchema>,
+  "credentialRevocationPending"
+> & { credentialRevocationPending?: true };
 
 export const FindingVerificationSchema = z.object({
   id: z.string(),
@@ -28,6 +28,9 @@ export const FindingVerificationSchema = z.object({
 export type FindingVerification = z.infer<typeof FindingVerificationSchema>;
 
 export const VerificationModeSchema = z.enum(["static", "standard"]);
+
+export const CREDENTIAL_PATCH_INSTRUCTIONS =
+  "For a verified or no_change code repair, set credentialRevocationPending to true for a committed credential or a confirmed runtime disclosure unless dated, caller-supplied issuer or owner evidence identifies each affected credential and confirms its retirement. For a repaired runtime leak path with no confirmed disclosure, set the field to false and ask the owner to check deployment history. Set it to false for other findings. Explain any outstanding owner action in the verification text. A replacement in use or a comment in the scanned code alone cannot establish retirement. Never try the credential or contact its issuer.";
 
 export const STATIC_VERIFICATION_INSTRUCTIONS =
   "Verification mode: static. Follow the bundled skill's static scope throughout patch generation and verification, including repository and validation instructions. Do not install dependencies or run builds, tests, reproducers, or the application. Report source evidence and state that runtime checks were not performed. Missing runtime tooling alone is not a blocker; report material gaps in source evidence.";
@@ -104,8 +107,9 @@ export async function remediationPrompt(
     );
     if (input.structuredPatch) {
       prompt.push(
-        'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the source change or current code closes the reported code path and preserves legitimate behavior","reason":"required for blocked or failed outcomes"}. ' +
-          "Include the boolean credentialRevocationPending. Set it to true for verified or no_change repairs of committed credentials or confirmed runtime disclosures unless dated, caller-supplied issuer or owner evidence identifies the affected credential and confirms its retirement. For a possible leak with no confirmed disclosure, verify the repaired path and ask the owner to check deployment history. A replacement in use or a comment in the scanned code alone cannot establish retirement. Set the field to false otherwise. State any outstanding owner action in verification. Never try the credential or contact the issuer for status. " +
+        'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"credentialRevocationPending":false,"verification":"required for verified and no_change outcomes: proof that the source change or current code closes the reported code path and preserves legitimate behavior","reason":"required for blocked or failed outcomes"}. ' +
+          CREDENTIAL_PATCH_INSTRUCTIONS +
+          " " +
           (staticVerification
             ? 'Use "verified" only when static evidence establishes that the original attack path is closed and legitimate behavior is preserved. '
             : 'Use "verified" only after the original issue no longer reproduces and relevant checks pass. ') +
@@ -194,20 +198,22 @@ export function parseFindingPatch(
       "No complete patch result was returned for this finding.",
     );
   }
-  const patch = parsed.data.patches[0]!;
-  if (
-    (patch.status === "verified" || patch.status === "no_change") &&
-    !patch.verification?.trim()
-  ) {
-    throw new CodexSecurityError("Patch verification was not reported.");
-  }
-  if (
-    (patch.status === "blocked" || patch.status === "failed") &&
-    !patch.reason?.trim()
-  ) {
+  const { credentialRevocationPending, ...patch } = parsed.data.patches[0]!;
+  if (patch.status === "verified" || patch.status === "no_change") {
+    if (!patch.verification?.trim())
+      throw new CodexSecurityError("Patch verification was not reported.");
+    if (credentialRevocationPending === undefined)
+      throw new CodexSecurityError(
+        "Credential retirement status was not reported.",
+      );
+    if (patch.status === "no_change" && patch.files.length > 0)
+      throw new CodexSecurityError("A no-change patch listed modified files.");
+  } else if (!patch.reason?.trim()) {
     throw new CodexSecurityError(
       "The patch failure or blocker was not explained.",
     );
   }
-  return patch;
+  return credentialRevocationPending
+    ? { ...patch, credentialRevocationPending: true }
+    : patch;
 }

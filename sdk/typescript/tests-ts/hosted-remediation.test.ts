@@ -79,8 +79,16 @@ test.each([
           ? "$codex-security:fix-finding"
           : "$codex-security:verify-fix",
       );
-      if (operation === "verify")
+      if (operation === "verify") {
         expect(request.prompt).not.toContain('"checks"');
+      } else {
+        expect(request.prompt).toContain(
+          "true for a committed credential or a confirmed runtime disclosure",
+        );
+        expect(request.prompt).toContain(
+          "no confirmed disclosure, set the field to false",
+        );
+      }
       options.onEvent?.({ type: "activity", description: "Checking guard" });
       if (!staticVerification) return receipt(request);
       expect(request.prompt).toContain("Verification mode: static");
@@ -100,6 +108,7 @@ test.each([
                     occurrenceId: input.finding.id,
                     status: "verified",
                     files: ["guard.ts"],
+                    credentialRevocationPending: false,
                     verification: evidence,
                   },
                 ],
@@ -234,6 +243,13 @@ test.each([true, false])(
 );
 
 test.each([
+  { status: "verified", verification: "Only source cleanup was verified." },
+  {
+    status: "no_change",
+    verification: "Already configured.",
+    files: ["app.ts"],
+    credentialRevocationPending: false,
+  },
   { status: "verified", verification: undefined },
   { status: "no_change", verification: " " },
   { status: "blocked", reason: undefined },

@@ -27,8 +27,8 @@ Use `standard` verification unless the caller explicitly selects `verificationMo
 4. In standard mode, run the original reproducer, focused regression checks, or legitimate-behavior checks only when they can run without modifying the repository. Preserve exact static evidence when runtime checks are unavailable.
 5. Return one result per supplied finding, in the requested order. Treat closed tickets, unrelated passing tests, and the absence of a new scan finding as insufficient proof.
 
-For a credential finding, verify the code change without trying the credential or contacting its issuer. If only a runtime leak path is established, a verified repair can be `fixed`. State what the code proves and ask the owner to check any unknown deployment history. For a committed credential or a confirmed runtime disclosure, verify retirement separately using issuer or owner evidence that the affected credentials were disabled, revoked, or expired. A known usable credential that remains exposed is `still_vulnerable`. If cleanup is complete but the affected credentials or their retirement status are unknown, return `inconclusive` and name the missing evidence.
-A replacement in use or an ambiguous denial alone cannot establish retirement.
+For a credential finding, verify the code change without trying the credential or contacting its issuer. If only a runtime leak path is established, a verified repair can be `fixed`. State what the code proves and ask the owner to check any unknown deployment history. For a committed credential or a confirmed runtime disclosure, verify retirement separately using dated, caller-supplied issuer or owner evidence identifying the affected credentials and confirming they were disabled, revoked, or expired. Return `still_vulnerable` if a plausibly usable credential remains exposed or supplied evidence shows the exposed credential still works. If cleanup is complete but the affected credentials or their retirement status are unknown, return `inconclusive` and name the missing evidence.
+A source comment, a replacement in use, or an ambiguous denial alone cannot establish retirement.
 
 ## Result Contract
 

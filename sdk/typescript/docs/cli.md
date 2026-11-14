@@ -405,8 +405,10 @@ the replacement can affect their guidance too.
 
 Codex looks for credentials in the selected source, including tests and unused
 code. It assesses exposure offline. Severity reflects who can read the value
-and what access the evidence supports. Live status stays unknown unless the
-issuer or credential owner provides evidence.
+and what access the evidence supports. Findings say “Validity unchecked”
+unless you supply dated evidence from the issuer or owner that establishes
+the status of that specific credential. If you use custom validation, include
+the confirmation in your validation workflow.
 
 If another scanner handles known-format API keys and tokens, add one line to
 the repository’s root `SECURITY.md`:
@@ -2636,9 +2638,10 @@ execution. Both `validate` and `patch` accept files or literal text in the
 current directory. Patching by saved finding or occurrence ID selects the
 original repository.
 
-For a checked-in credential, patch results distinguish the code change from
-retirement of the old value. A saved finding can return `verified` after a code
-change or `no_change` if the source was already clean. If
+For a checked-in credential or a confirmed runtime disclosure, patch results
+distinguish the code change from retirement of the old value. A saved finding
+can return `verified` after a code change or `no_change` if the source was
+already clean. If
 `credentialRevocationPending` is `true`, follow the [credential owner steps](#checked-in-credentials).
 You can review the diff or use `--create-pr` with a verified source change while
 the owner retires the old credential.
@@ -2809,6 +2812,9 @@ The assessment does not change the patch or merge state.
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
+For a direct patch request, `--json` includes the agent's `report` even when no
+files change. Read it for any setup or credential retirement steps. With
+`--full-output --json`, the report is under `data.report`.
 File changes alone do not prove a fix; saved findings require a verified result.
 
 For a controlled container providing its own isolation:
@@ -2829,9 +2835,10 @@ scan saves the findings and skips the interactive patch offer. Use
 and add instructions. The interactive finding browser lists critical, high,
 medium, then low findings, preserving scan order within each severity.
 Patch results are `verified`, `no_change`, `blocked`, or `failed`. A verified
-patch or an already-fixed finding clears the severity threshold unless an
-exposed credential still needs retirement. In that case the code change is
-available for review and the finding still counts toward the threshold.
+patch or an already-fixed finding clears the severity threshold for that run
+unless an exposed credential still needs retirement. A later scan evaluates the
+source as it exists then. To [verify retirement](#verify-fixes), use the original
+finding and the issuer’s or owner’s confirmation that the old credential was disabled.
 
 ### Create or resume a draft pull request
 
@@ -2893,10 +2900,13 @@ SDK's local `validate()` and `patch()` methods use the same fallback.
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
-For a checked-in credential, verified source cleanup with unknown retirement
-returns `inconclusive`. To verify again, put the original finding, source location,
-and issuer or owner confirmation that the specific old credential was disabled
-in one file, omitting the credential value.
+For a checked-in credential or a confirmed runtime disclosure, verified code
+cleanup with unknown retirement returns `inconclusive`. If only a vulnerable
+endpoint is known, verifying that it no longer discloses a credential can yield
+`fixed`. Check the deployment history to determine whether any credential was
+exposed. To verify retirement, put the original finding, source location, and
+dated issuer or owner confirmation identifying the old credential and when it
+was disabled in one file. Omit the credential value.
 Run `codex-security verify-fix finding.md` from the affected checkout.
 
 Without output options, each finding prints a verdict and its evidence.

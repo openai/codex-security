@@ -271,6 +271,7 @@ test("native patch overrides disable repository MCP while preserving host MCP", 
                   text: JSON.stringify({
                     status: "no_change",
                     changedFiles: [],
+                    credentialRevocationPending: false,
                     verificationReport: "Synthetic patch result",
                     reason: null,
                   }),

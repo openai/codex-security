@@ -133,11 +133,13 @@ lines.on("line", (line) => {
       await writeFile(join(fixture.directory, "app.ts"), "unstaged change\n");
       await writeFile(join(fixture.directory, "local.txt"), "untracked\n");
       const index = await fixture.git("write-tree");
+      const report =
+        "Source is already clean. Ask the issuer to retire the old token.";
       const outcome = await fixture.patch(
         ["Synthetic issue", ...(fullOutput ? ["--full-output"] : [])],
         {
           onCodex: (_args, output) => {
-            output?.stdout.write("I could not run the patch commands.");
+            output?.stdout.write(report);
             return 0;
           },
         },
@@ -146,6 +148,11 @@ lines.on("line", (line) => {
       expect(outcome.result).toMatchObject({
         ok: false,
         error: { code: "NO_PATCH_APPLIED" },
+      });
+      expect(fullOutput ? outcome.result.data : outcome.result).toMatchObject({
+        applied: false,
+        files: [],
+        report,
       });
       expect(await fixture.git("write-tree")).toBe(index);
       expect(await readFile(join(fixture.directory, "app.ts"), "utf8")).toBe(
@@ -606,6 +613,7 @@ lines.on("line", (line) => {
                 occurrenceId: "occ_1",
                 status: "verified",
                 files: ["app.ts"],
+                credentialRevocationPending: false,
                 verification: "The checks pass.",
               },
             ],

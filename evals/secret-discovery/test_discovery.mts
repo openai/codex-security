@@ -137,6 +137,37 @@ test("runtime disclosure needs its own finding even when token alerts are delega
   }
 });
 
+test("a source credential finding cannot cover the independent public endpoint", () => {
+  for (const data of [fixture, createFixture(true)]) {
+    const result = retainedResult(data);
+    const password =
+      result.findings[
+        data.positives.findIndex(({ id }) => id === "dotenv-url")
+      ];
+    const runtimeIndex = data.positives.findIndex(
+      ({ id }) => id === "runtime-disclosure",
+    );
+    const [runtime] = result.findings.splice(runtimeIndex, 1);
+    password.taxonomy = {
+      category: "credential exposure",
+      cwe: ["CWE-200", "CWE-798"],
+    };
+    password.locations.push(...runtime.locations);
+    password.codeEvidence.push(...runtime.codeEvidence);
+    const merged = gradeResult(result, data);
+    assert.equal(merged.cases[runtimeIndex].found, false);
+    assert.equal(merged.passed, false);
+
+    // A separate endpoint finding can cite the password location as context.
+    password.locations.pop();
+    password.codeEvidence.pop();
+    runtime.taxonomy = { category: "credential exposure", cwe: ["CWE-200"] };
+    runtime.locations.push({ ...password.locations[0], role: "supporting" });
+    result.findings.push(runtime);
+    assert.equal(gradeResult(result, data).passed, true);
+  }
+});
+
 test("resolved, deferred, and intermediate findings do not satisfy final recall", () => {
   const result = retainedResult();
   result.coverage.deferred = result.findings;
