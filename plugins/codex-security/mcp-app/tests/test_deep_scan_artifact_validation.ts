@@ -1,4 +1,4 @@
-import { readJson, writeJsonLine as writeResult } from "./support/json.ts";
+import { writeJsonLine as writeResult } from "./support/json.ts";
 import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
@@ -1395,13 +1395,6 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
       );
     }
   }
-}
-
-function reduction<Finding extends Record<string, unknown>>(
-  findings: Finding[],
-  extra = {},
-) {
-  return { scanId, findings, ...extra };
 }
 
 function workerReceiptRef(
