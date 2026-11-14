@@ -1729,6 +1729,7 @@ test.each(["setup", "source snapshot", "source drift"] as const)(
         assessmentsTotal: 3,
         assessmentsCompleted: completed,
         assessmentsFailed: 3 - completed,
+        assessmentsInconclusive: completed,
         current: null,
       },
       { phase: "saving" },
@@ -2777,6 +2778,7 @@ test("unknown model with a requested budget cannot silently assess without cost 
     maxCostUsd: 1,
   });
   expect(result.status).toBe("partial");
+  expect(result.model.model).toBe("unknown-model");
   expect(calls.model).toBe(0);
   expect(result.matches).toHaveLength(1);
 });
@@ -3142,6 +3144,7 @@ test.each([
   "provider",
   "endpoint",
   "environment endpoint",
+  "Bedrock region",
 ] as const)(
   "refuses continuation after changed %s and preserves saved artifacts",
   async (change) => {
@@ -3154,23 +3157,29 @@ test.each([
     const f = await fixture({
       turns: ["completed", "malformed"],
       codexOverrides:
-        change === "endpoint"
-          ? { openai_base_url: "https://provider.example.invalid/v1" }
-          : change === "environment endpoint"
-            ? {}
-            : {
-                model_provider: "synthetic.provider",
-                model_providers: { "synthetic.provider": provider },
-              },
+        change === "Bedrock region"
+          ? { model_provider: "amazon-bedrock", model: "openai.gpt-5.6-terra" }
+          : change === "endpoint"
+            ? { openai_base_url: "https://provider.example.invalid/v1" }
+            : change === "environment endpoint"
+              ? {}
+              : {
+                  model_provider: "synthetic.provider",
+                  model_providers: { "synthetic.provider": provider },
+                },
     });
     await using security = f.client;
-    if (change === "environment endpoint")
+    if (change === "Bedrock region")
+      Object.assign(f.environment, { AWS_REGION: "us-east-1" });
+    else if (change === "environment endpoint")
       Object.assign(f.environment, {
         OPENAI_BASE_URL: "https://provider.example.invalid/v1",
       });
     const options = { repositoryPath: f.repository, outputDir: f.outputDir };
     await security.scanDependencies(options);
-    if (change === "environment endpoint")
+    if (change === "Bedrock region")
+      Object.assign(f.environment, { AWS_REGION: "us-gov-west-1" });
+    else if (change === "environment endpoint")
       Object.assign(f.environment, {
         OPENAI_BASE_URL: "https://changed.example.invalid/v1",
       });

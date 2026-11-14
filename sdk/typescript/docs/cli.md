@@ -3047,14 +3047,16 @@ unfinished or failed assessments. If matching was incomplete and every recorded
 advisory has already been assessed, start a new run in a new output directory to
 repeat matching. Continuation verifies the original source snapshot
 (including dirty and ignored files), model, reasoning effort, other native
-`model_*` settings (such as verbosity and context limits), provider,
+`model_*` settings (such as verbosity and context limits), provider and Bedrock region,
 developer, model, and compaction instructions (including selected file paths
 and contents), and assessment skill before updating results.
-A changed branch or source requires
+A changed revision or source content requires
 restoring the original source or starting a new run. A completed run, a legacy
 run without a continuation checkpoint, or an unrelated nonempty directory is
 not reusable. Omit `--output-dir` or choose a new directory to refresh advisory
-matching. The command rejects concurrent use of the same artifact directory.
+matching. A Bedrock checkpoint created before the region was recorded requires
+a new run if more assessments remain. The command rejects concurrent use of
+the same artifact directory.
 With `--max-cost`, assessment stops if the latest usage cannot be verified,
 even when earlier cost estimates are available. Completed results remain saved.
 If earlier model usage is unavailable, a cost-limited continuation cannot
@@ -3177,9 +3179,9 @@ with explicit tarball URLs outside the public npm registry leave those origins
 unresolved.
 
 A Cargo lock entry with no registry source whose name and version match the
-adjacent manifest's own package is recorded as first-party code, separately
-from unresolved dependency origins. Other workspace and path dependencies
-remain unresolved unless their origin can be established.
+adjacent manifest’s package or an inventoried, declared workspace member is
+recorded as first-party code. A matching source-bearing lock entry keeps its
+scanner evidence. Other workspace and path dependencies remain unresolved.
 
 Advisory matching uses observed package names and versions; it does not establish
 registry origin. Gradle and NuGet locks do not record the selected repository or

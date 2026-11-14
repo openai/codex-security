@@ -702,6 +702,91 @@ class ScaInputDiscoveryError extends Error {
   }
 }
 
+/** Use inventoried manifests so workspace patterns cannot expand the selected scan scope. */
+async function cargoWorkspacePackages(
+  repository: string,
+  lockPath: string,
+  files: string[],
+  diagnostics: string[],
+): Promise<Map<string, string>> {
+  const rootDir = dirname(lockPath);
+  async function readManifest(path: string) {
+    try {
+      if (
+        !(await lstat(path)).isFile() ||
+        relativePathIsOutside(relative(repository, await realpath(path)))
+      )
+        return;
+      return parseToml(await readFile(path, "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+        diagnostics.push(
+          `Could not identify the local package from ${slash(relative(repository, path))}: ${errorMessage(error)}`,
+        );
+      return;
+    }
+  }
+  const rootPath = join(rootDir, "Cargo.toml");
+  const root = await readManifest(rootPath);
+  const workspace = root?.["workspace"];
+  const shared = record(workspace) ? workspace["package"] : undefined;
+  const packages = new Map<string, string>();
+  function remember(
+    manifest: Record<string, unknown> | undefined,
+    path: string,
+  ) {
+    const pkg = manifest?.["package"];
+    if (!record(pkg) || typeof pkg["name"] !== "string") return;
+    const declared = pkg["version"];
+    const version =
+      record(declared) && declared["workspace"] === true && record(shared)
+        ? shared["version"]
+        : declared;
+    if (typeof version === "string")
+      packages.set(
+        `${pkg["name"]}@${version}`,
+        slash(relative(repository, path)),
+      );
+  }
+  remember(root, rootPath);
+  if (!record(workspace)) return packages;
+  const normalize = (pattern: string) =>
+    posix.normalize(pattern).replace(/\/$/u, "");
+  const members = strings(workspace["members"]).map(normalize);
+  const excluded = strings(workspace["exclude"]).map(normalize);
+  if (members.length === 0) return packages;
+  // Prefix path components so Node includes dot directories as Cargo does.
+  // Preserve recursive ** and Cargo's literal braces and parentheses.
+  const patterns = members.map((member) =>
+    member
+      .split("/")
+      .map((part) =>
+        part === "**" ? part : "_" + part.replace(/[{}()]/gu, "\\$&"),
+      )
+      .join("/"),
+  );
+  for (const file of files) {
+    if (scaInputBasename(file) !== scaInputBasename("Cargo.toml")) continue;
+    const path = join(repository, file);
+    const dir = slash(relative(rootDir, dirname(path)));
+    if (!dir) continue;
+    // Cargo treats exclusions and their explicit-member overrides as literal path prefixes.
+    const contains = (prefix: string) =>
+      prefix === "." || dir === prefix || dir.startsWith(prefix + "/");
+    if (excluded.some(contains) && !members.some(contains)) continue;
+    const subject = dir
+      .split("/")
+      .map((part) => "_" + part)
+      .join("/");
+    if (
+      members.includes(dir) ||
+      patterns.some((pattern) => posix.matchesGlob(subject, pattern))
+    )
+      remember(await readManifest(path), path);
+  }
+  return packages;
+}
+
 /** Select effective lockfiles before invoking OSV, which itself gives shrinkwrap precedence. */
 export async function discoverScaInputs(
   repositoryPath: string,
@@ -829,84 +914,58 @@ export async function discoverScaInputs(
               (reference) => reference.resolution === "workspace-or-path",
             )
           ) {
-            const manifestPath = join(dirname(path), "Cargo.toml");
-            const metadata = await lstat(manifestPath).catch(
-              (error: NodeJS.ErrnoException) => {
-                if (error.code === "ENOENT") return null;
-                throw error;
-              },
+            const declared = await cargoWorkspacePackages(
+              repository,
+              path,
+              files,
+              diagnostics,
             );
-            if (
-              metadata?.isFile() &&
-              !relativePathIsOutside(
-                relative(repository, await realpath(manifestPath)),
-              )
-            ) {
-              let manifest: Record<string, unknown> | undefined;
-              try {
-                manifest = parseToml(await readFile(manifestPath, "utf8"));
-              } catch (error) {
-                diagnostics.push(
-                  `Could not identify the local package from ${slash(relative(repository, manifestPath))}: ${errorMessage(error)}`,
+            if (declared.size > 0) {
+              const packages = parseToml(content.toString("utf8"))["package"];
+              for (
+                let index = inspected.references.length - 1;
+                index >= 0;
+                index--
+              ) {
+                const reference = inspected.references[index]!;
+                const manifestPath = declared.get(
+                  `${reference.name}@${reference.version}`,
                 );
-              }
-              const pkg = manifest?.["package"];
-              if (record(pkg)) {
-                const declaredVersion = pkg["version"];
-                const workspace = manifest?.["workspace"];
-                const workspacePackage = record(workspace)
-                  ? workspace["package"]
-                  : undefined;
-                const version =
-                  record(declaredVersion) &&
-                  declaredVersion["workspace"] === true &&
-                  record(workspacePackage)
-                    ? workspacePackage["version"]
-                    : declaredVersion;
-                const packages = parseToml(content.toString("utf8"))["package"];
-                for (
-                  let index = inspected.references.length - 1;
-                  index >= 0;
-                  index--
+                if (
+                  reference.resolution === "workspace-or-path" &&
+                  reference.version !== null &&
+                  manifestPath !== undefined
                 ) {
-                  const reference = inspected.references[index]!;
-                  if (
-                    reference.resolution === "workspace-or-path" &&
-                    reference.name === pkg["name"] &&
-                    reference.version !== null &&
-                    reference.version === version
-                  ) {
-                    const sources = Array.isArray(packages)
-                      ? packages.flatMap((candidate) =>
-                          record(candidate) &&
-                          candidate["name"] === reference.name &&
-                          candidate["version"] === reference.version &&
-                          typeof candidate["source"] === "string" &&
-                          candidate["source"] !== ""
-                            ? [candidate["source"]]
-                            : [],
-                        )
-                      : [];
-                    const unresolvedSource = sources.find(
-                      (source) =>
-                        source !==
-                        "registry+https://github.com/rust-lang/crates.io-index",
-                    );
-                    if (unresolvedSource === undefined)
-                      inspected.references.splice(index, 1);
-                    else reference.resolution = unresolvedSource;
-                    const sourceBearingTwin = sources.length > 0;
-                    if (!sourceBearingTwin)
-                      firstPartyPackages.push({
-                        name: reference.name,
-                        version: reference.version,
-                        sourcePath: input.path,
-                        manifestPath: slash(relative(repository, manifestPath)),
-                      });
-                    limitations.push(
-                      `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${slash(relative(repository, manifestPath))}; ${sourceBearingTwin ? "a source-bearing package shares its name and version, so scanner components and advisory matches are retained." : "registry advisory coverage does not apply to that local package."}`,
-                    );
-                  }
+                  const sources = Array.isArray(packages)
+                    ? packages.flatMap((candidate) =>
+                        record(candidate) &&
+                        candidate["name"] === reference.name &&
+                        candidate["version"] === reference.version &&
+                        typeof candidate["source"] === "string" &&
+                        candidate["source"] !== ""
+                          ? [candidate["source"]]
+                          : [],
+                      )
+                    : [];
+                  const unresolvedSource = sources.find(
+                    (source) =>
+                      source !==
+                      "registry+https://github.com/rust-lang/crates.io-index",
+                  );
+                  if (unresolvedSource === undefined)
+                    inspected.references.splice(index, 1);
+                  else reference.resolution = unresolvedSource;
+                  const sourceBearingTwin = sources.length > 0;
+                  if (!sourceBearingTwin)
+                    firstPartyPackages.push({
+                      name: reference.name,
+                      version: reference.version,
+                      sourcePath: input.path,
+                      manifestPath,
+                    });
+                  limitations.push(
+                    `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${manifestPath}; ${sourceBearingTwin ? "a source-bearing package shares its name and version, so scanner components and advisory matches are retained." : "registry advisory coverage does not apply to that local package."}`,
+                  );
                 }
               }
             }

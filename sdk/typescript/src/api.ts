@@ -1327,7 +1327,8 @@ export class CodexSecurity {
             (item) => item.status === "failed",
           ).length,
           assessmentsInconclusive: result!.assessments.filter(
-            (item) => item.status === "completed" && item.verdict === "needs_review",
+            (item) =>
+              item.status === "completed" && item.verdict === "needs_review",
           ).length,
           current:
             match === null
@@ -1396,6 +1397,7 @@ export class CodexSecurity {
         const { model, reasoningEffort } = scanModelConfiguration(
           session.effectiveConfig,
         );
+        result.model.model = model;
         validateScanCostLimit(options.maxCostUsd, model, pricingContext);
         const contract = await dependencyTriageContract(
           runtime.plugin.pluginRoot,
@@ -1449,6 +1451,9 @@ export class CodexSecurity {
           },
           provider,
           providerConfiguration,
+          ...(pricingContext?.provider === "amazon-bedrock"
+            ? { bedrockRegion: pricingContext.region }
+            : {}),
           endpoint:
             provider === "openai"
               ? (resolvedConfig["openai_base_url"] ??
@@ -1504,7 +1509,6 @@ export class CodexSecurity {
               });
           notifyObserver(options, "onOutputDirReady")(outputDir);
         }
-        result.model.model = model;
         result.model.skillDigest = contract.skillDigest;
         result.assessmentContext!.configurationDigest = configurationDigest;
         await saveDependencyScan(result);
@@ -1618,7 +1622,8 @@ export class CodexSecurity {
           maxCostUsd: options.maxCostUsd,
           onCost: (cost, complete) => {
             reportCost(cost, complete);
-            if (complete && !previousUsageUnknown) onCost(result!.model.cost!, options.maxCostUsd);
+            if (complete && !previousUsageUnknown)
+              onCost(result!.model.cost!, options.maxCostUsd);
           },
           onUsage: notifyObserver(options, "onUsage"),
           onError: reportTrackingError,

@@ -242,15 +242,30 @@ test.each(["missing", "external", "mismatched"] as const)(
   },
 );
 
-test("first-party Cargo exclusion preserves other sources, names, versions, and ecosystems", async () => {
+test("workspace member exclusion preserves other Cargo sources, names, versions, and ecosystems", async () => {
   const { repository, output } = await setup();
   await writeFile(
     join(repository, "Cargo.toml"),
-    '[package]\nname="synthetic-lib"\nversion="1.2.0"\n',
+    '[workspace]\nmembers=["crates/*/*", "crates/vendor/synthetic-lib"]\nexclude=["crates/vendor"]\n[workspace.package]\nversion="1.2.0"\n',
   );
+  const crates = ["synthetic-lib", "synthetic-other"];
+  for (const name of crates) {
+    const directory = join(repository, "crates/vendor", name);
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "Cargo.toml"),
+      `[package]\nname="${name}"\n` +
+        (name === "synthetic-lib"
+          ? 'version.workspace=true\n[dependencies]\nsynthetic-other={path="../synthetic-other"}\n'
+          : 'version="1.2.0"\n'),
+    );
+  }
   await writeFile(
     join(repository, "Cargo.lock"),
-    'version=4\n[[package]]\nname="synthetic-lib"\nversion="1.2.0"\n',
+    "version=4\n" +
+      crates
+        .map((name) => `[[package]]\nname="${name}"\nversion="1.2.0"\n`)
+        .join(""),
   );
   await mkdir(join(repository, "nested"));
   await writeFile(
@@ -323,7 +338,11 @@ test("first-party Cargo exclusion preserves other sources, names, versions, and 
   expect(result.matches.map((match) => match.componentId).sort()).toEqual(
     result.components.map((component) => component.id).sort(),
   );
-  expect(result.status).toBe("completed");
+  expect(
+    result.coverage.firstPartyPackages?.map((pkg) => pkg.manifestPath),
+  ).toEqual(["crates/vendor/synthetic-lib/Cargo.toml"]);
+  expect(result.coverage.unresolvedPackages).toBe(1);
+  expect(result.status).toBe("partial");
   expect(
     JSON.parse(await readFile(result.scanner.rawOutputPath, "utf8")),
   ).toEqual({ results: rawSources });
