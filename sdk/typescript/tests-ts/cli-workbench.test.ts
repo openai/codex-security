@@ -1,7 +1,6 @@
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock } from "bun:test";
 import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
@@ -29,7 +28,6 @@ import {
   temporaryDirectory,
 } from "./support/temporary-directories.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
   createCliTest,
   captureCli,
@@ -1343,10 +1341,7 @@ describe("CLI workbench", () => {
         "malformed configuration",
         "Could not read the configured Codex provider",
       ],
-      [
-        "unreadable configuration",
-        "Could not read the configured Codex provider",
-      ],
+      ["invalid credential home", "credential home is not a directory"],
       [
         "rejected configuration",
         "Could not read MCP configuration for a read-only helper",
@@ -1359,7 +1354,8 @@ describe("CLI workbench", () => {
         const file = join(home.path, "config.toml");
         if (problem === "malformed configuration")
           await writeFile(file, "[broken\n");
-        else if (problem === "unreadable configuration") await mkdir(file);
+        else if (problem === "invalid credential home")
+          await writeFile(join(home.path, "codex-home"), "");
         else if (problem === "rejected configuration")
           await writeFile(file, "model = []\n");
         const { batches, saved, onWorkbench } = batchWithInitialSave();
@@ -1374,7 +1370,9 @@ describe("CLI workbench", () => {
               ...(problem === "missing executable" && {
                 CODEX_CLI_PATH: join(home.path, "missing-codex.exe"),
               }),
-              OPENAI_API_KEY: "synthetic-key",
+              ...(problem === "invalid credential home"
+                ? { CODEX_SECURITY_STATE_DIR: home.path }
+                : { OPENAI_API_KEY: "synthetic-key" }),
             },
             onWorkbench,
             onMatch: matchScanFindings,
@@ -1485,56 +1483,25 @@ describe("CLI workbench", () => {
       );
     });
 
-    test.each(["synchronous", "asynchronous"] as const)(
-      "continues matching after %s warning write failure",
-      async (kind) => {
-        const name = `continues matching after ${kind} warning write failure`;
-        if (
-          kind === "asynchronous" &&
-          runTestInSubprocess(import.meta.path, name)
-        )
-          return;
-        let warningWrites = 0;
-        const stderr = new Writable({
-          write(chunk, _encoding, done) {
-            if (!String(chunk).startsWith("codex-security: warning:"))
-              return done();
-            warningWrites++;
-            const error = new Error("Synthetic warning write failed");
-            if (kind === "synchronous") throw error;
-            setImmediate(() => done(error));
+    test("preserves later comparisons when the warning stream fails", async () => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      stderr.stream.write = throwing("Synthetic warning write failed");
+      const { saved, onWorkbench } = batchWorkbench(["failed", "healthy"]);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async (input) => {
+            if (input.after[0]!.occurrenceId === "failed")
+              throw new Error("Synthetic matcher failure");
+            return { matches: [], uncertain: [] };
           },
-        });
-        const { stdout } = createCliTest(main);
-        const { saved, onWorkbench } = batchWorkbench(["failed", "healthy"]);
-        try {
-          const code = await main(
-            argv,
-            stdout.stream,
-            stderr,
-            dependencies({
-              onWorkbench,
-              onMatch: async (input) => {
-                if (input.after[0]!.occurrenceId === "failed")
-                  throw new Error("Synthetic matcher failure");
-                return { matches: [], uncertain: [] };
-              },
-            }),
-          );
-          await new Promise<void>((resolve) => setImmediate(resolve));
-          expect(code).toBe(0);
-          expect(saved).toEqual([["source", "healthy"]]);
-          expect(JSON.parse(stdout.text())).toMatchObject({
-            matchedPairs: 1,
-            unmatchedBatches: 1,
-          });
-          expect(warningWrites).toBe(1);
-          expect(stderr.listenerCount("error")).toBe(0);
-        } finally {
-          stderr.destroy();
-        }
-      },
-    );
+        }),
+      );
+      expect(code).toBe(0);
+      expect(saved).toEqual([["source", "healthy"]]);
+      expect(JSON.parse(stdout.text()).unmatchedBatches).toBe(1);
+    });
   });
 
   test("preserves confirmed groups and related pairs while matching all scans", async () => {

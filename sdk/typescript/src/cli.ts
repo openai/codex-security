@@ -9364,8 +9364,8 @@ async function matchAllScans(
     } catch (error) {
       options.signal?.throwIfAborted();
       if (
+        isLocalScanFailure(error) ||
         error instanceof PluginBootstrapError ||
-        error instanceof ConfigurationError ||
         error instanceof AuthenticationRequiredError
       )
         throw error;
