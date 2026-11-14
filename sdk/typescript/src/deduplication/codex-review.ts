@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { JsonObject } from "../config.js";
 import {
   comparisonEnvironment,
+  comparisonHelperEnvironment,
   disabledMcpServers,
   environmentEntry,
 } from "../scan-comparison.js";
@@ -238,19 +239,23 @@ export class CodexReviewRunner {
         undefined,
         this.signal,
       );
-      const command = resolveCodexCommand(environment);
+      const config = await readCodexHomeConfig(environment, this.signal);
+      const helperEnvironment = comparisonHelperEnvironment(
+        environment,
+        config,
+      );
+      const command = resolveCodexCommand(helperEnvironment);
       const servers = await disabledMcpServers(
         command,
         undefined,
-        environment,
+        helperEnvironment,
         { workingDirectory: this.workingDirectory, signal: this.signal },
       );
       const apiKey = [
-        environmentEntry(environment, "OPENAI_API_KEY"),
-        environmentEntry(environment, "CODEX_API_KEY"),
+        environmentEntry(helperEnvironment, "OPENAI_API_KEY"),
+        environmentEntry(helperEnvironment, "CODEX_API_KEY"),
       ].find((value) => value?.trim());
       const args = ["app-server", "--stdio", "--disable", "plugins"];
-      const config = await readCodexHomeConfig(environment, this.signal);
       const executionConfig = resolveCodexProfile(config);
       normalizeLegacyWindowsSandboxOverride(executionConfig);
       // Reuse native state instead of importing the caller's history into a new

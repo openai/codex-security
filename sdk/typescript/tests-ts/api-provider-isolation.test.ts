@@ -174,6 +174,10 @@ const standardComputeCredentials: JsonObject[] = [
   { env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" } },
   { experimental_bearer_token: "synthetic-bearer" },
   {
+    auth: { command: "synthetic-auth", cwd: process.cwd() },
+    env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" },
+  },
+  {
     env_key: "ROUTER_KEY",
     env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" },
   },
@@ -198,6 +202,7 @@ test.each(standardComputeCredentials)(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       STANDARDCOMPUTE_API_KEY: "unrelated-preset-key",
       OPENAI_API_KEY: "synthetic-header-value",
+      CODEX_API_KEY: "unrelated-account-key",
       ROUTER_KEY: "synthetic-primary",
     };
     await using client = new TestClient(
@@ -216,10 +221,17 @@ test.each(standardComputeCredentials)(
         }),
         resolvePluginPython: async () => "/managed/python",
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (_options, args, input) =>
-          mockWorkbench(args, input),
+        runWorkbench: async (options, args, input) => {
+          expect(options.environment).not.toHaveProperty("OPENAI_API_KEY");
+          expect(options.environment).not.toHaveProperty("CODEX_API_KEY");
+          expect(options.environment).not.toHaveProperty(
+            "STANDARDCOMPUTE_API_KEY",
+          );
+          return mockWorkbench(args, input);
+        },
         createCodex: async (options) => {
           expect(options.apiKey).toBeUndefined();
+          expect(options.env).not.toHaveProperty("CODEX_API_KEY");
           expect(options.env).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
           expect(options.env!["OPENAI_API_KEY"]).toBe(
             "env_http_headers" in credential
@@ -241,10 +253,14 @@ test.each(standardComputeCredentials)(
         },
       },
     );
-    expect((await client.preflight(repository)).authentication).toMatchObject({
-      method: "api_key",
-      source: credential["env_key"] ?? Object.keys(credential)[0],
-    });
+    expect((await client.preflight(repository)).authentication).toMatchObject(
+      "auth" in credential
+        ? { method: "command" }
+        : {
+            method: "api_key",
+            source: credential["env_key"] ?? Object.keys(credential)[0],
+          },
+    );
     await expect(
       client.run(repository, { outputDir: join(root, "scan") }),
     ).rejects.toThrow("checked native provider launch");

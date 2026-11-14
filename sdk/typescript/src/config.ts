@@ -338,7 +338,8 @@ export function scanProviderEnvKey(
   const provider = selectedProviderTable(config, selected);
   if (
     selected === "standardcompute" &&
-    standardComputeTableCredential(provider) !== undefined
+    (provider?.["auth"] != null ||
+      standardComputeTableCredential(provider) !== undefined)
   )
     return undefined;
   return typeof provider?.["env_key"] === "string"

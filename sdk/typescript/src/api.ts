@@ -1094,6 +1094,8 @@ export class CodexSecurity {
             options.auth,
             session.modelProvider,
             session.providerEnvKey,
+            session.effectiveConfig,
+            "selected",
           ),
           session.providerEnvKey,
         ),
@@ -2424,6 +2426,8 @@ export class CodexSecurity {
             options.auth,
             modelProvider,
             session.providerEnvKey,
+            session.effectiveConfig,
+            "selected",
           ),
           session.providerEnvKey,
         ),
@@ -5337,7 +5341,7 @@ export class CodexSecurity {
         providerEnvKey,
       );
       let nativeProviderEnvironment: Record<string, string> | undefined;
-      if (modelProvider === "standardcompute" && !commandAuth) {
+      if (modelProvider === "standardcompute") {
         nativeProviderEnvironment = declaredProviderEnvironment(
           { standardcompute: selectedProviderTable(requestedConfig) },
           this.#dependencies.environment,
@@ -7086,18 +7090,18 @@ export function selectedScanEnvironment(
       ),
     );
   }
-  if (
-    config !== undefined &&
-    modelProvider === "standardcompute" &&
-    !hasCommandAuth(config)
-  ) {
+  if (config !== undefined && modelProvider === "standardcompute") {
     const credentials = declaredProviderEnvironment(
       { standardcompute: selectedProviderTable(config) },
       environment,
     );
     // Native credentials are restored at the model launch, after helper setup.
     if (providerKeys === "selected")
-      return withoutProviderKeys(selected, ...Object.keys(credentials));
+      return withoutProviderKeys(
+        selected,
+        EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key,
+        ...Object.keys(credentials),
+      );
     Object.assign(selected, credentials);
   }
   return selected;
