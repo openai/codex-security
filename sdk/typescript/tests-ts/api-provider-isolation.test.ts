@@ -173,6 +173,10 @@ const standardComputeCredentials: JsonObject[] = [
   { http_headers: { aUtHoRiZaTiOn: "Bearer synthetic-static" } },
   { env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" } },
   { experimental_bearer_token: "synthetic-bearer" },
+  {
+    env_key: "ROUTER_KEY",
+    env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" },
+  },
 ];
 
 test.each(standardComputeCredentials)(
@@ -194,6 +198,7 @@ test.each(standardComputeCredentials)(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       STANDARDCOMPUTE_API_KEY: "unrelated-preset-key",
       OPENAI_API_KEY: "synthetic-header-value",
+      ROUTER_KEY: "synthetic-primary",
     };
     await using client = new TestClient(
       {
@@ -221,6 +226,8 @@ test.each(standardComputeCredentials)(
               ? environment.OPENAI_API_KEY
               : undefined,
           );
+          if (credential["env_key"] === "ROUTER_KEY")
+            expect(options.env!["ROUTER_KEY"]).toBe(environment.ROUTER_KEY);
           const native = parseToml(
             await readFile(
               join(home, `${options.nativeProfile}.config.toml`),
@@ -236,7 +243,7 @@ test.each(standardComputeCredentials)(
     );
     expect((await client.preflight(repository)).authentication).toMatchObject({
       method: "api_key",
-      source: Object.keys(credential)[0],
+      source: credential["env_key"] ?? Object.keys(credential)[0],
     });
     await expect(
       client.run(repository, { outputDir: join(root, "scan") }),

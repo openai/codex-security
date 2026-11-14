@@ -5337,7 +5337,7 @@ export class CodexSecurity {
         providerEnvKey,
       );
       let nativeProviderEnvironment: Record<string, string> | undefined;
-      if (tableCredential !== undefined) {
+      if (modelProvider === "standardcompute" && !commandAuth) {
         nativeProviderEnvironment = declaredProviderEnvironment(
           { standardcompute: selectedProviderTable(requestedConfig) },
           this.#dependencies.environment,
@@ -7088,7 +7088,8 @@ export function selectedScanEnvironment(
   }
   if (
     config !== undefined &&
-    standardComputeCredentialSource(config) !== undefined
+    modelProvider === "standardcompute" &&
+    !hasCommandAuth(config)
   ) {
     const credentials = declaredProviderEnvironment(
       { standardcompute: selectedProviderTable(config) },

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { scanRuntimeCodexConfig } from "../src/api.js";
 import {
+  STANDARDCOMPUTE_CODEX_PROVIDER,
   type JsonObject,
   inlineToml,
   quoteTomlString,
@@ -18,7 +19,6 @@ import {
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
-  STANDARDCOMPUTE_CODEX_PROVIDER,
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
@@ -1686,7 +1686,7 @@ test("SDK Standard Compute selection supplies the native provider table", async 
       model_provider: "standardcompute",
       model_providers: {
         standardcompute: {
-          base_url: "https://api.stdcmpt.com/v1",
+          base_url: "https://api.stdcmpt.com/v1/",
           http_headers: { "X-Trace": "synthetic" },
         },
       },
@@ -1695,6 +1695,7 @@ test("SDK Standard Compute selection supplies the native provider table", async 
   expect(partial["model_providers"]).toEqual({
     standardcompute: {
       ...STANDARDCOMPUTE_CODEX_PROVIDER,
+      base_url: "https://api.stdcmpt.com/v1/",
       http_headers: { "X-Trace": "synthetic" },
     },
   });

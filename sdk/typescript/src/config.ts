@@ -76,7 +76,8 @@ function standardComputeTableCredential(table: unknown): string | undefined {
     return Object.keys(headers).some(
       (name) =>
         (typeof table["base_url"] === "string" &&
-          table["base_url"] !== STANDARDCOMPUTE_CODEX_PROVIDER.base_url) ||
+          URL.parse(table["base_url"])?.href.replace(/\/+$/u, "") !==
+            STANDARDCOMPUTE_CODEX_PROVIDER.base_url) ||
         /^(?:authorization|proxy-authorization|(?:x-)?api-key)$/iu.test(name),
     );
   });
