@@ -2360,9 +2360,7 @@ export class CodexSecurity {
               ),
             ),
             new Set(
-              paths.map((path) =>
-                resolveTargetPath(path, requestedRepository),
-              ),
+              paths.map((path) => resolveTargetPath(path, requestedRepository)),
             ),
           ));
       if (
