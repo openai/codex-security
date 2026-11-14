@@ -334,10 +334,12 @@ export const runLocalHostingTransport: typeof runGitRepositoryCommand = (
 
 export async function publicationRepository(
   fixtures: ReturnType<typeof createTemporaryDirectories>,
+  objectFormat?: "sha1" | "sha256",
 ) {
   const directory = await fixtures.create("patch-destination-");
   const git = repositoryGit(directory);
-  git("init", "--initial-branch=main");
+  const format = objectFormat ? [`--object-format=${objectFormat}`] : [];
+  git("init", ...format, "--initial-branch=main");
   git("config", "user.name", "Synthetic User");
   git("config", "user.email", "synthetic@example.test");
   await mkdir(join(directory, "src"));
@@ -345,7 +347,7 @@ export async function publicationRepository(
   git("add", ".");
   git("commit", "-m", "Synthetic baseline");
   const remote = await fixtures.create("patch-destination-origin-");
-  git("init", "--bare", remote);
+  git("init", ...format, "--bare", remote);
   git("remote", "add", "origin", remote);
   return { directory, git, remote };
 }
