@@ -12204,6 +12204,23 @@ async function preparePatchPublication(
             ...NESTED_PATCH_GIT_ENVIRONMENT,
             GIT_INDEX_FILE: undefined,
           };
+    const captureBlob = async (mode: string, object: string) => {
+      if (mode === "160000") return;
+      if (object.length === parent.length) stagedBlobs.add(object);
+      else {
+        // A nested checkout with a different Git object format needs a
+        // content digest comparable with the parent publication.
+        nestedRepositoryDigests.add(
+          await publicationBlobDigest(
+            root,
+            object,
+            dependencies,
+            source,
+            environment,
+          ),
+        );
+      }
+    };
     const staged = await patchGitRecords(
       root,
       [
@@ -12213,7 +12230,7 @@ async function preparePatchPublication(
         "--raw",
         "--no-abbrev",
         "--no-renames",
-        "--diff-filter=AMT",
+        "--diff-filter=AMTU",
         "-z",
         checkout === undefined ? parent : "HEAD",
         "--",
@@ -12221,22 +12238,24 @@ async function preparePatchPublication(
       dependencies,
       { environment },
     );
+    let unmerged = false;
     for (let i = 0; i + 1 < staged.length; i += 2) {
-      const [, mode, previous, object] = staged[i]!.split(" ");
-      if (mode === "160000" || previous === object) continue;
-      if (object!.length === parent.length) stagedBlobs.add(object!);
-      else {
-        // A nested checkout with a different Git object format needs a
-        // content digest comparable with the parent publication.
-        nestedRepositoryDigests.add(
-          await publicationBlobDigest(
-            root,
-            object!,
-            dependencies,
-            source,
-            environment,
-          ),
-        );
+      const [, mode, previous, object, status] = staged[i]!.split(" ");
+      if (status === "U") unmerged = true;
+      else if (previous !== object) await captureBlob(mode!, object!);
+    }
+    if (unmerged) {
+      // A raw U record has no blob. Each side lives in a separate index stage.
+      const stages = await patchGitRecords(
+        root,
+        [...source, "ls-files", "--unmerged", "-z"],
+        dependencies,
+        { environment },
+      );
+      for (const entry of stages) {
+        if (!entry) continue;
+        const [mode, object] = entry.split(" ", 2);
+        await captureBlob(mode!, object!);
       }
     }
   };
@@ -12275,7 +12294,8 @@ async function preparePatchPublication(
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
-      if (entries.some((entry) => /^[AMT]/u.test(entry)))
+      // A conflict can also be reported as DD (both sides deleted).
+      if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);
     }
   }
