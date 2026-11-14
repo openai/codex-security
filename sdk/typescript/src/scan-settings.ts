@@ -53,7 +53,8 @@ export const DeepScanSettingsSchema = z.strictObject({
   }),
   stopAfterConsecutiveErrors: positiveInteger.optional().meta({
     default: DEFAULT_DEEP_SCAN_SETTINGS.stopAfterConsecutiveErrors,
-    description: "Stop after this many consecutive discovery errors.",
+    description:
+      "Stop after this many consecutive discovery errors; also limits consecutive failed draft submissions within each Deep worker attempt.",
   }),
   maxDiscoveryRuns: positiveInteger.optional().meta({
     default: DEFAULT_DEEP_SCAN_SETTINGS.maxDiscoveryRuns,

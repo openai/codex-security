@@ -97,6 +97,9 @@ const threadId = resumeIndex === -1 ? 'fixture-thread-id' : process.argv[resumeI
 console.log(JSON.stringify({ type: 'thread.started', thread_id: threadId }));
 if (stdin.includes('IPC_DIAGNOSTIC_EVENT')) console.log(stdin.split('\\n')[1]);
 if (process.env.FAKE_CODEX_ARTIFACT_EVENT) console.log(process.env.FAKE_CODEX_ARTIFACT_EVENT);
+if (process.env.FAKE_CODEX_EVENTS_PATH) {
+  process.stdout.write(readFileSync(process.env.FAKE_CODEX_EVENTS_PATH, 'utf8'));
+}
 if (stdin.includes('MALFORMED_COMMAND_EVENT')) {
   const output = JSON.parse(stdin.split('\\n')[1]);
   const event = { type: 'item.completed', item: { id: 'fixture-command', type: 'command_execution', command: 'cat example.ts', aggregated_output: output, exit_code: 0, status: 'completed' } };
