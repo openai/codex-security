@@ -2578,6 +2578,13 @@ for (const partial of [false, true, "refs", "blob", "tree", "umask"] as const) {
         "Preserve interrupted data.\n",
       );
       await expectReused(campaign);
+      expect(
+        await realpath(git(checkout, "rev-parse", "--show-toplevel")),
+      ).toBe(await realpath(checkout));
+      expect(git(checkout, "log", "-1", "--format=%H")).toBe(source.revision);
+      expect(git(checkout, "show", ":src/app.ts")).toBe(
+        git(source.path, "show", "HEAD:src/app.ts"),
+      );
       expect(runs).toHaveBeenCalledTimes(1);
     } finally {
       process.umask(previousUmask);
@@ -2865,13 +2872,15 @@ test("final native recovery refuses a linked pack directory before fetching miss
 for (const selection of [
   "configured",
   "inherited",
+  "literal",
+  "padded",
   "parent",
   "chain",
   "external",
   "external-parent",
-  "path",
 ] as const) {
-  const inherited = selection === "inherited";
+  const inherited = ["inherited", "literal", "padded"].includes(selection);
+  const aliasName = selection === "literal" ? "python-alias " : "python-alias";
   testPosix(
     `current native recovery retains an unscoped tracked interpreter alias selection=${selection}`,
     async () => {
@@ -2882,7 +2891,7 @@ for (const selection of [
         await symlink(python, join(source.path, "middle"));
       await symlink(
         selection === "chain" ? "middle" : python,
-        join(source.path, "python-alias"),
+        join(source.path, aliasName),
       );
       git(source.path, "add", ".");
       commitFixture(source.path, "Tracked interpreter alias");
@@ -2895,25 +2904,21 @@ for (const selection of [
         selection === "parent" ? parentAlias : paths.output,
         "checkouts",
         "repo",
-        "python-alias",
+        aliasName,
       );
       const externalDirectory = join(paths.root, "external-python-directory");
-      const tools = join(paths.root, "trusted-python-tools");
       const alias =
         selection === "external"
           ? join(paths.root, "external-python")
           : selection === "external-parent"
             ? join(externalDirectory, "python-alias")
-            : selection === "path"
-              ? join(tools, "scan-python")
-              : checkoutAlias;
+            : checkoutAlias;
       if (selection === "external-parent") {
         await symlink(dirname(checkoutAlias), externalDirectory);
-      } else if (selection === "external" || selection === "path") {
-        if (selection === "path") await mkdir(tools);
+      } else if (selection === "external") {
         await symlink(checkoutAlias, alias);
       }
-      const requestedPython = selection === "path" ? "scan-python" : alias;
+      const requestedPython = alias;
       const runs = mock(
         async (checkout: string, settings: ScanSettings = {}) => {
           const selected = await runtime.resolvePluginPythonCommand({
@@ -2921,9 +2926,7 @@ for (const selection of [
             protectedRoot: checkout,
             environment: runtime.pluginHelperEnvironment(process.env),
           });
-          expect(selected.executable).toBe(
-            ["external", "path"].includes(selection) ? alias : python,
-          );
+          expect(selected.executable).toBe(python);
           return completedScan(settings.outputDir!, "complete", checkout);
         },
       );
@@ -2931,10 +2934,8 @@ for (const selection of [
         config: inherited ? {} : { pythonPath: requestedPython },
       });
       const previousPython = process.env["PYTHON"];
-      const previousPath = process.env["PATH"];
-      if (inherited) process.env["PYTHON"] = alias;
-      if (selection === "path")
-        process.env["PATH"] = `${tools}${delimiter}${previousPath ?? ""}`;
+      if (inherited)
+        process.env["PYTHON"] = selection === "padded" ? alias + " " : alias;
       try {
         const initialSummary = await runMultiscan(campaign);
         expect(initialSummary).toMatchObject({
@@ -2955,8 +2956,6 @@ for (const selection of [
       } finally {
         if (previousPython === undefined) delete process.env["PYTHON"];
         else process.env["PYTHON"] = previousPython;
-        if (previousPath === undefined) delete process.env["PATH"];
-        else process.env["PATH"] = previousPath;
       }
     },
   );
@@ -4015,78 +4014,6 @@ for (const linked of [false, true]) {
       }
       expect(await readFile(initial.resultsPath)).toEqual(ledger);
       expect(runs).toHaveBeenCalledTimes(1);
-    },
-  );
-}
-
-for (const automatic of [false, true]) {
-  testPosix(
-    `whole recovery preserves automatically selected tracked Python automatic=${automatic}`,
-    async () => {
-      const paths = await fixture();
-      const source = await repository(paths.root, "automatic-python-source");
-      const python = await realpath(PYTHON);
-      await symlink(python, join(source.path, "python-alias"));
-      git(source.path, "add", ".");
-      commitFixture(source.path, "Tracked automatic interpreter alias");
-      source.revision = git(source.path, "rev-parse", "HEAD");
-      await writeRecoveryTask(paths, source);
-      const alias = join(paths.output, "checkouts", "repo", "python-alias");
-      const bin = join(paths.root, "tools");
-      await mkdir(bin);
-      await symlink(alias, join(bin, "python3"));
-      const selectedGit = await resolveTrustedExecutable(
-        "git",
-        process.env,
-        paths.root,
-      );
-      expect(selectedGit).not.toBeNull();
-      await symlink(selectedGit!.executable, join(bin, "git"));
-      const runs = mock(
-        async (checkout: string, settings: ScanSettings = {}) => {
-          const selected = await runtime.resolvePluginPythonCommand({
-            environment: { ...process.env, PATH: bin, PYTHON: undefined },
-            protectedRoot: checkout,
-            homeDirectory: paths.root,
-            managedRuntimeRoots: [],
-          });
-          expect(await realpath(selected.executable)).toBe(python);
-          return completedScan(settings.outputDir!, "complete", checkout);
-        },
-      );
-      const initial = await runMultiscan(
-        options(paths, client(runs), {
-          config: automatic ? {} : { pythonPath: "python3" },
-        }),
-      );
-      const rows = await results(initial.resultsPath);
-      expect(initial).toMatchObject({ completed: 1, skipped: 0 });
-      const receipt = rows.find((row) => row["status"] === "completed")!;
-      await appendFile(
-        join(receipt["outputDir"] as string, "report.md"),
-        "Refresh this synthetic report.\n",
-      );
-      const ledger = await readFile(initial.resultsPath);
-      const code = `import {runMultiscan} from ${JSON.stringify(join(dirname(import.meta.path), "..", "src", "multiscan.ts"))};
-        const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config: automatic ? {} : { pythonPath: "python3" } })};
-        options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
-        options.recoverScan=async()=>undefined;
-        console.log(JSON.stringify(await runMultiscan(options)));`;
-      const summary = JSON.parse(
-        execFileSync(process.execPath, ["-e", code], {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            PATH: bin,
-            PYTHON: undefined,
-            HOME: paths.root,
-            USERPROFILE: paths.root,
-          },
-        }),
-      );
-      expect(summary).toMatchObject({ completed: 1, skipped: 1 });
-      expect(runs).toHaveBeenCalledTimes(1);
-      expect(await readFile(initial.resultsPath)).toEqual(ledger);
     },
   );
 }

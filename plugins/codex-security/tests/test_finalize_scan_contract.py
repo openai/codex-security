@@ -1171,8 +1171,9 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     self.assertEqual(output.read_bytes(), protected_contents)
 
     def test_export_entrypoint_rejects_orphaned_or_conflicting_flags(self) -> None:
-        self.write_scan()
-        before = self.scan_file_bytes(*CANONICAL_FILES)
+        self.write_sealed_scan()
+        (self.scan_dir / "report.md").write_bytes(b"Retained report\n")
+        before = self.scan_file_bytes(*CANONICAL_FILES, "report.md")
         for arguments, error in (
             (
                 ("--export-output", "exports/findings.csv"),
@@ -1186,6 +1187,9 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                 ("--sarif-only", "--export-format", "sarif"),
                 "--sarif-only cannot be combined with --export-format",
             ),
+            (("--report-only", "--export-artifact", "threat-model"), "--report-only cannot"),
+            (("--report-only", "--describe-threat-model"), "--report-only cannot"),
+            (("--report-only", "--write-threat-model"), "--report-only cannot"),
         ):
             with self.subTest(arguments=arguments):
                 result = self.run_finalizer(*arguments)

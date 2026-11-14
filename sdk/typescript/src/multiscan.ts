@@ -23,7 +23,6 @@ import { hostname } from "node:os";
 import {
   basename,
   dirname,
-  delimiter,
   extname,
   isAbsolute,
   join,
@@ -52,10 +51,10 @@ import {
   ContractValidationError,
   OutputDirectoryNotEmptyError,
   InvalidTargetError,
-  PluginPythonUnavailableError,
   errorMessage,
   ScanCostLimitExceededError,
 } from "./errors.js";
+import { isExplicitPathWithTrailingWhitespace } from "./executable-path.js";
 import { isRecord } from "./record.js";
 import {
   readKnowledgeBaseSnapshot,
@@ -101,7 +100,6 @@ import {
   type RegisteredScanAuthority,
 } from "./saved-scan-bootstrap.js";
 import {
-  inspectTrustedExecutable,
   resolveTrustedExecutable,
   withProtectedExecutableRoots,
 } from "./trusted-executable.js";
@@ -1932,90 +1930,41 @@ async function loadResumableScan(
       recoverScan === undefined
     )
       return undefined;
-    let pythonPath: string | undefined;
     if (!reportSealed) {
+      const helperEnvironment = pluginHelperEnvironment(environment);
+      const inherited = environmentValue(helperEnvironment, "PYTHON", true);
       const configuredPythonPath =
-        options.config.pythonPath ??
-        environmentValue(pluginHelperEnvironment(environment), "PYTHON");
-      const automaticAvailable =
-        configuredPythonPath === undefined
-          ? await resolvePluginPythonCommand({
-              protectedRoot: matchedRoot,
-              environment: pluginHelperEnvironment(environment),
-              signal,
-            }).then(
-              () => true,
-              (error: unknown) => {
-                if (error instanceof PluginPythonUnavailableError) return false;
-                signal?.throwIfAborted();
-                throw new Error(
-                  `Multiscan report recovery is required: ${errorMessage(error)}`,
-                );
-              },
-            )
-          : false;
-      const selections =
-        configuredPythonPath !== undefined
-          ? [configuredPythonPath]
-          : automaticAvailable
-            ? []
-            : process.platform === "win32"
-              ? ["python", "python3", "py"]
-              : ["python3", "python"];
-      for (const configuredPythonPath of selections) {
-        let candidates: string[];
-        if (isPythonPathCandidate(configuredPythonPath)) {
-          candidates = [
-            expandHomeForLookup(configuredPythonPath, environment) +
-              (process.platform === "win32" &&
-              extname(configuredPythonPath) === ""
-                ? ".exe"
-                : ""),
-          ];
-        } else {
-          const inspected = await inspectTrustedExecutable(
-            configuredPythonPath,
-            pluginHelperEnvironment(environment),
-            matchedRoot,
-          );
-          const suffixes =
-            process.platform !== "win32" ||
-            /\.(?:exe|com)$/iu.test(configuredPythonPath)
-              ? [""]
-              : [".exe", ".com"];
-          candidates =
-            inspected.executable !== null
-              ? []
-              : (inspected.environment["PATH"]?.split(delimiter) ?? []).flatMap(
-                  (entry) =>
-                    suffixes.map((suffix) =>
-                      join(entry, configuredPythonPath + suffix),
-                    ),
-                );
+        options.config.pythonPath ?? inherited?.trim();
+      // PATH discovery excludes campaign sources. Only an explicit executable
+      // path can refer to an alias that needs restoring in the pinned checkout.
+      if (configuredPythonPath && isPythonPathCandidate(configuredPythonPath)) {
+        const paths = [configuredPythonPath];
+        if (
+          options.config.pythonPath === undefined &&
+          inherited &&
+          isExplicitPathWithTrailingWhitespace(inherited, process.platform)
+        ) {
+          paths.unshift(inherited);
         }
-        for (const candidate of candidates) {
+        for (const pythonPath of paths) {
+          const candidate =
+            expandHomeForLookup(pythonPath, environment) +
+            (process.platform === "win32" && extname(pythonPath) === ""
+              ? ".exe"
+              : "");
+          if (await realpath(candidate).catch(undefinedIfMissingFile)) break;
           const selected = relative(
             matchedRoot,
             await canonicalPythonPath(candidate),
           );
           if (!relativePathIsOutside(selected)) {
-            pythonPath = selected;
-            break;
+            await restorePaths(matchedRoot, [selected]);
+            if (await realpath(candidate).catch(undefinedIfMissingFile)) break;
           }
         }
-        if (pythonPath !== undefined) break;
       }
+      await restoreReport(path, pluginRoot, matchedRoot);
     }
-
-    if (
-      pythonPath !== undefined &&
-      !(await realpath(join(matchedRoot, pythonPath)).catch(
-        undefinedIfMissingFile,
-      ))
-    ) {
-      await restorePaths(matchedRoot, [pythonPath]);
-    }
-    if (!reportSealed) await restoreReport(path, pluginRoot, matchedRoot);
     if (!(await hasCampaignReport(path))) return undefined;
     // The ledger can request cleanup only of the checkout bound to this scan.
     const cleanupKind =
@@ -2319,6 +2268,22 @@ async function checkoutRevision(
   if (command === null) {
     throw new Error("Git is not available on a trusted PATH.");
   }
+  const gitDirectory = join(path, ".git");
+  const retained =
+    restoreIncomplete &&
+    (await lstat(gitDirectory).catch(undefinedIfMissingFile));
+  // The retained repository's configuration must remain usable throughout repair.
+  // Use a private Git directory for configuration and refs, sharing only its objects and index.
+  await using repair = retained
+    ? {
+        directory: await mkdtemp(join(dirname(path), ".repair-git-")),
+        async [Symbol.asyncDispose]() {
+          await rm(this.directory, { recursive: true, force: true });
+        },
+      }
+    : undefined;
+  const gitOptions: string[] = [];
+  const gitEnvironment = { ...command.environment };
   const gitOutput = async (
     args: string[],
     input?: string | Buffer,
@@ -2334,10 +2299,11 @@ async function checkoutRevision(
         ...buildGitHubCredentialArgs(githubHost),
         "-C",
         path,
+        ...gitOptions,
         ...args,
       ],
       {
-        env: command.environment,
+        env: gitEnvironment,
         signal,
         maxBuffer: Infinity,
         encoding: "buffer",
@@ -2356,11 +2322,8 @@ async function checkoutRevision(
   };
   const git = async (...args: string[]): Promise<string> =>
     (await gitOutput(args)).toString("utf8").trim();
-  const gitDirectory = join(path, ".git");
-  if (
-    restoreIncomplete &&
-    (await lstat(gitDirectory).catch(undefinedIfMissingFile))
-  ) {
+  let retainedHead: string | undefined;
+  if (repair) {
     const canonicalGit = await ensureOutputDirectory(gitDirectory, {
       privateGitMetadata: true,
     });
@@ -2403,13 +2366,9 @@ async function checkoutRevision(
         );
       }
     }
-    const refs = await lstat(join(gitDirectory, "refs")).catch(
-      undefinedIfMissingFile,
-    );
-    if (refs !== undefined)
-      await ensureOutputDirectory(join(gitDirectory, "refs"), {
-        privateGitMetadata: true,
-      });
+    await ensureOutputDirectory(join(gitDirectory, "refs"), {
+      privateGitMetadata: true,
+    });
     const commonBinding = await readFile(
       join(gitDirectory, "commondir"),
       "utf8",
@@ -2423,23 +2382,30 @@ async function checkoutRevision(
         "The retained campaign checkout has Git bindings outside its own directory.",
       );
 
-    // Retained repository configuration is data, not permission to run filters.
-    // Preserve it outside Git's active config filenames before the first command.
-    const savedConfig = new Map<string, string>();
-    for (const name of ["config", "config.worktree"]) {
-      const selected = join(gitDirectory, name);
-      if (await lstat(selected).catch(undefinedIfMissingFile)) {
-        const saved = `${selected}.retained-${randomUUID()}`;
-        await rename(selected, saved);
-        savedConfig.set(name, saved);
-      }
+    // Reading the ref needs neither a worktree checkout nor the retained filters.
+    if (await lstat(join(canonicalGit, "HEAD")).catch(undefinedIfMissingFile)) {
+      retainedHead = await git(
+        "--git-dir",
+        canonicalGit,
+        "--work-tree",
+        path,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "HEAD",
+      ).catch((error: unknown) => {
+        if ((error as { code?: number }).code === 1) return undefined;
+        throw error;
+      });
     }
+    gitOptions.push("--git-dir", repair.directory, "--work-tree", path);
+    gitEnvironment["GIT_OBJECT_DIRECTORY"] = canonicalObjects;
+    gitEnvironment["GIT_INDEX_FILE"] = join(canonicalGit, "index");
     const configured = async (
-      file: string | undefined,
+      file: string,
       key: string,
       type: "bool" | "path",
     ): Promise<string | undefined> => {
-      if (file === undefined) return undefined;
       try {
         const value = await gitOutput([
           "config",
@@ -2457,15 +2423,14 @@ async function checkoutRevision(
         throw error;
       }
     };
-    const local = savedConfig.get("config");
+    const local = join(canonicalGit, "config");
     const layers = [
       local,
       ...((await configured(local, "extensions.worktreeConfig", "bool")) ===
       "true"
-        ? [savedConfig.get("config.worktree")]
+        ? [join(canonicalGit, "config.worktree")]
         : []),
     ];
-    const structural = new Map<string, string>();
     for (const file of layers) {
       const worktree = await configured(file, "core.worktree", "path");
       if (
@@ -2479,33 +2444,16 @@ async function checkoutRevision(
         );
       for (const key of ["core.ignorecase", "core.filemode", "core.symlinks"]) {
         const value = await configured(file, key, "bool");
-        if (value !== undefined) structural.set(key, value);
+        if (value !== undefined) gitOptions.push("-c", key + "=" + value);
       }
     }
     await git("init", "--quiet", "--template=");
-    for (const [key, value] of structural)
-      await git(
-        "config",
-        "--file",
-        join(gitDirectory, "config"),
-        "--type=bool",
-        key,
-        value,
-      );
-    const [common, objects, worktree] = await Promise.all([
-      git("rev-parse", "--path-format=absolute", "--git-common-dir"),
-      git("rev-parse", "--path-format=absolute", "--git-path", "objects"),
-      git("rev-parse", "--show-toplevel"),
-    ]);
-    if (
-      (await realpath(common)) !== canonicalGit ||
-      (await realpath(objects)) !== canonicalObjects ||
-      (await realpath(worktree)) !== (await realpath(path))
-    ) {
-      throw new Error(
-        "The retained campaign checkout has Git bindings outside its own directory.",
-      );
-    }
+    if (retainedHead)
+      await writeFile(join(repair.directory, "HEAD"), retainedHead + "\n");
+    const shallow = await readFile(join(canonicalGit, "shallow")).catch(
+      undefinedIfMissingFile,
+    );
+    if (shallow) await writeFile(join(repair.directory, "shallow"), shallow);
   } else {
     await git("init", "--quiet");
   }
@@ -2547,15 +2495,17 @@ async function checkoutRevision(
       task.repository,
       task.revision,
     );
+    if (
+      repair &&
+      (await lstat(join(repair.directory, "shallow")).catch(
+        undefinedIfMissingFile,
+      ))
+    )
+      await rename(
+        join(repair.directory, "shallow"),
+        join(gitDirectory, "shallow"),
+      );
   }
-  const retainedHead =
-    restoreIncomplete &&
-    (await git("rev-parse", "--verify", "--quiet", "HEAD").catch(
-      (error: unknown) => {
-        if ((error as { code?: number }).code === 1) return undefined;
-        throw error;
-      },
-    ));
   if (
     restoreIncomplete &&
     !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
@@ -2735,6 +2685,10 @@ async function checkoutRevision(
     (retainedHead || task.revision)
   ) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
+  }
+  if (repair && !retainedHead) {
+    // Publish the recovered detached HEAD only after the worktree is ready.
+    await rename(join(repair.directory, "HEAD"), join(gitDirectory, "HEAD"));
   }
 }
 

@@ -7,7 +7,6 @@ import {
   cp,
   mkdir,
   readFile,
-  readdir,
   rm,
   symlink,
   writeFile,
@@ -746,6 +745,7 @@ test.each(["local", "include", "worktree", "host"] as const)(
     if (kind === "worktree")
       git(checkout, "config", "extensions.worktreeConfig", "true");
     const originalConfig = await readFile(join(checkout, ".git/config"));
+    const configuredBytes = await readFile(configured);
     await rm(join(checkout, "src/app.ts"));
     const hostConfig = process.env["GIT_CONFIG_GLOBAL"];
     if (kind === "host") process.env["GIT_CONFIG_GLOBAL"] = configured;
@@ -761,13 +761,10 @@ test.each(["local", "include", "worktree", "host"] as const)(
       if (kind === "host")
         expect(await readFile(marker, "utf8")).toBe("called");
       else await expect(readFile(marker)).rejects.toThrow();
-      const archived = (await readdir(join(checkout, ".git"))).filter((name) =>
-        name.startsWith("config.retained-"),
-      );
-      expect(archived).toHaveLength(1);
-      expect(await readFile(join(checkout, ".git", archived[0]!))).toEqual(
+      expect(await readFile(join(checkout, ".git/config"))).toEqual(
         originalConfig,
       );
+      expect(await readFile(configured)).toEqual(configuredBytes);
     } finally {
       if (hostConfig === undefined) delete process.env["GIT_CONFIG_GLOBAL"];
       else process.env["GIT_CONFIG_GLOBAL"] = hostConfig;

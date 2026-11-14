@@ -3375,11 +3375,14 @@ def main() -> int:
     try:
         args.scan_dir = args.scan_dir.resolve()
         if args.report_only and (
-            args.sarif_only or args.export_format is not None or args.source_root is not None
+            args.sarif_only
+            or args.export_format is not None
+            or args.source_root is not None
+            or args.export_artifact == "threat-model"
+            or args.describe_threat_model
+            or args.write_threat_model
         ):
-            parser.error(
-                "--report-only cannot be combined with SARIF, export, or source-root options"
-            )
+            parser.error("--report-only cannot be combined with another action or --source-root")
         if args.avit_template is not None:
             if args.export_format != "servicenow-avit":
                 parser.error(
