@@ -288,9 +288,10 @@ and [request schema](https://github.com/huggingface/responses.js/blob/0e3e84c469
 
 ### MiniMax compatibility
 
-The default plugin-backed scan on Codex 0.166.0 sends namespaced tools even
-with web search disabled. MiniMax's optional `code_mode_only` setup also sends
-a custom tool. MiniMax's global Responses schema lists only function tools.
+In compatibility testing with Codex 0.166.0, the default plugin-backed scan
+sent namespaced tools even with web search disabled. MiniMax's optional
+`code_mode_only` setup also sent a custom tool. MiniMax's global Responses
+schema lists only function tools.
 A named scan preset is deferred until plugin-backed scans are verified on both
 regional services. [MiniMax Codex setup guide](https://platform.minimax.io/docs/m-plan/codex),
 [global Responses reference](https://platform.minimax.io/docs/api-reference/responses-create),

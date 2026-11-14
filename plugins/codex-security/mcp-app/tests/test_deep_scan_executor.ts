@@ -2951,7 +2951,10 @@ async function testExternalProviderCredentialsReachWorker() {
           },
         }),
       );
-      const prompt = "CAPTURE_SYNTHETIC_OPENAI_AUTH";
+      const prompt =
+        key === "MINIMAX_API_KEY"
+          ? "CAPTURE_SYNTHETIC_OPENAI_AUTH\nCAPTURE_SYNTHETIC_MINIMAX_AUTH"
+          : "CAPTURE_SYNTHETIC_OPENAI_AUTH";
       await writeFile(promptPath, prompt);
       const environment = {
         CODEX_HOME: fixture.root,

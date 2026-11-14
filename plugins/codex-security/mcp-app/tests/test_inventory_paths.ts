@@ -6,6 +6,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { importSource } from "./import-module.ts";
+import { restoreEnv } from "./support/fake-codex-source.ts";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
 
 const helperUrl = new URL(
@@ -19,10 +20,7 @@ const { git, runTool } = await importSource("src/helpers/inventory-git.ts", {
 test("inventory subprocesses omit the MiniMax credential", async (t) => {
   const key = "MiniMax_API_Key";
   const saved = process.env[key];
-  t.after(() => {
-    if (saved === undefined) delete process.env[key];
-    else process.env[key] = saved;
-  });
+  t.after(() => restoreEnv(key, saved));
   process.env[key] = "fixture-value";
   for (const argument of ["ordinary", "raw-\udcff"]) {
     const result = await runTool(process.execPath, [
