@@ -1543,7 +1543,7 @@ process.exit(result.status ?? 1);
       await writeFile(config, "");
       const configOption =
         transport === "scp-command" ? (resume ? "NoNe" : "none") : config;
-      const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60`;
+      const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60 -o IdentityFile=none -oUserKnownHostsFile=NoNe`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")
@@ -1559,7 +1559,7 @@ process.exit(result.status ?? 1);
       environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] || coreCommand
-          ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60'`
+          ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60' '-o' 'IdentityFile=none' '-oUserKnownHostsFile=NoNe'`
           : `'${ssh}'`;
       const alias =
         transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"

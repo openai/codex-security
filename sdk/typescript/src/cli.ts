@@ -12046,6 +12046,7 @@ async function pinPublicationSshCommand(
           value,
         );
         if (pathSetting) {
+          if (pathSetting[2]!.toLowerCase() === "none") continue;
           // OpenSSH parses -o as another configuration line. A path with
           // whitespace could name more than one known-hosts file there.
           const physical = await bindFile(pathSetting[2]);
