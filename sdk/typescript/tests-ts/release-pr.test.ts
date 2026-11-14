@@ -28,12 +28,17 @@ type History = {
   packageText: string;
   actionPackageText?: string | null;
   actionLockText?: string | null;
+  citationText?: string | null;
   exampleWorkflowText?: string | null;
   changes: Change[];
 };
 type Plan = Omit<
   History,
-  "packageText" | "actionPackageText" | "actionLockText" | "exampleWorkflowText"
+  | "packageText"
+  | "actionPackageText"
+  | "actionLockText"
+  | "citationText"
+  | "exampleWorkflowText"
 > & {
   version: string;
   branch: string;
@@ -80,6 +85,7 @@ const {
   packagePath,
   actionPackagePath,
   actionLockPath,
+  citationPath,
   exampleWorkflowPath,
   notesPath,
   statePath,
@@ -94,6 +100,7 @@ const {
   packagePath: string;
   actionPackagePath: string;
   actionLockPath: string;
+  citationPath: string;
   exampleWorkflowPath: string;
   notesPath: string;
   statePath: string;
@@ -1467,6 +1474,47 @@ test("previews a pending release from the maintainer CLI without writing to Git 
 });
 
 describe("rolling release reconciliation", () => {
+  test("refreshes only the citation's software version and preserves manual metadata edits", async () => {
+    const { fixture, first } = await Fixture.withInitialPull();
+    expect(fixture.repo.readFile(first.headSha!, citationPath)).toBeNull();
+    const citation = (version: string) =>
+      [
+        "cff-version: 1.2.0",
+        "title: Example tool",
+        `version: "${version}" # Software release`,
+        "message: Please cite this software.",
+        "authors:",
+        "  - name: Example project",
+        "references:",
+        "  - type: software",
+        "    title: Example library",
+        "    authors:",
+        "      - name: Example project",
+        '    version: "0.1.23"',
+        "",
+      ].join("\n");
+    fixture.merge("docs: add software citation", {
+      [citationPath]: citation("0.1.23"),
+    });
+    const updated = await fixture.run();
+    expect(updated.pull).toBe(first.pull);
+    expect(fixture.repo.readFile(updated.headSha!, citationPath)).toBe(
+      citation("0.1.24"),
+    );
+    expect((await fixture.run()).action).toBe("unchanged");
+
+    const humanSha = fixture.commit(
+      first.plan.branch,
+      {
+        [citationPath]: citation("0.1.24").replace("Example tool", "New title"),
+      },
+      "docs: revise the citation title",
+    );
+    fixture.merge("feat!: change interface");
+    expect((await fixture.run()).action).toBe("held");
+    expect(fixture.head(first.plan.branch)).toBe(humanSha);
+  });
+
   test("adds and refreshes the example pin from current main without introducing it into earlier history", async () => {
     const fixture = new Fixture();
     fixture.merge("fix: initial fix");
