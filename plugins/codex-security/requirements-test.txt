@@ -8,4 +8,4 @@ PyYAML==6.0.3
 # jsonschema uses these to check timestamps in artifacts and URIs in schemas.
 rfc3339-validator==0.1.4
 rfc3986-validator==0.1.1
-ruff==0.17.3
+ruff==0.17.4
