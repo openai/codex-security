@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createWorkerDispatchMonitor,
   scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
 } from "../src/worker-progress.js";
@@ -304,5 +305,113 @@ describe("worker progress events", () => {
     ]) {
       expect(workerStatusFromEvent(event)).toBeNull();
     }
+  });
+});
+
+function spawnEvent(
+  type: "item.started" | "item.completed",
+  id: string,
+  options: { tool?: string; status?: string; error?: unknown } = {},
+): Record<string, unknown> {
+  return {
+    type,
+    item: {
+      id,
+      type: "mcp_tool_call",
+      tool: options.tool ?? "spawn_agent",
+      arguments: { message: "Review routes/login.ts" },
+      status:
+        options.status ??
+        (type === "item.started" ? "in_progress" : "completed"),
+      ...(options.error === undefined ? {} : { error: options.error }),
+    },
+  };
+}
+
+describe("runtime worker dispatch monitor", () => {
+  test("counts live spawn_agent starts without model status markers", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(
+      monitor.observe(
+        messageEvent(
+          'CODEX_SECURITY_WORKER_STATUS {"phase":"file_review","planned":6,"started":3}',
+        ),
+      ),
+    ).toBeNull();
+    expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toEqual({
+      kind: "dispatch",
+      phase: "file_review",
+      planned: 1,
+      started: 1,
+    });
+    expect(
+      monitor.observe(
+        spawnEvent("item.started", "spawn-2", {
+          tool: "multi_agent_v1__spawn_agent",
+        }),
+      ),
+    ).toEqual({
+      kind: "dispatch",
+      phase: "file_review",
+      planned: 2,
+      started: 2,
+    });
+    expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toBeNull();
+    expect(monitor.observe(spawnEvent("item.completed", "spawn-1"))).toBeNull();
+    expect(
+      monitor.observe(
+        spawnEvent("item.started", "wait-1", { tool: "wait_agent" }),
+      ),
+    ).toBeNull();
+  });
+
+  test("reports a failed spawn and counts an unseen failed item as an attempt", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(
+      monitor.observe(
+        spawnEvent("item.completed", "spawn-fail", {
+          status: "failed",
+          error: "capacity exhausted",
+        }),
+      ),
+    ).toEqual({
+      kind: "failed",
+      phase: "file_review",
+      planned: 1,
+      started: 1,
+      reason: "capacity exhausted",
+    });
+    expect(
+      monitor.observe(
+        spawnEvent("item.completed", "spawn-fail", {
+          status: "failed",
+          error: "capacity exhausted",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("emits dispatch then failed when a started spawn later fails", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toEqual({
+      kind: "dispatch",
+      phase: "file_review",
+      planned: 1,
+      started: 1,
+    });
+    expect(
+      monitor.observe(
+        spawnEvent("item.completed", "spawn-1", {
+          status: "failed",
+          error: { message: "thread spawn rejected" },
+        }),
+      ),
+    ).toEqual({
+      kind: "failed",
+      phase: "file_review",
+      planned: 1,
+      started: 1,
+      reason: "thread spawn rejected",
+    });
   });
 });

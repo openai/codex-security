@@ -17,6 +17,7 @@ import {
   type ScanActivity,
   type ScanProgress,
   type ScanTrustedAccessStatus,
+  type ScanWorkerEvent,
   type ScanWorkerStatus,
 } from "../src/index.js";
 import {
@@ -860,6 +861,102 @@ describe("one-shot scan events", () => {
     ).resolves.toBeDefined();
     expect(statuses).toEqual([
       { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
+    ]);
+  });
+
+  test("reports runtime dispatch from spawn_agent without a status marker", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const events: ScanWorkerEvent[] = [];
+    const statuses: ScanWorkerStatus[] = [];
+    async function* spawnEvents(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "item.started",
+        item: {
+          id: "spawn-1",
+          type: "mcp_tool_call",
+          server: "collaboration",
+          tool: "spawn_agent",
+          arguments: { message: "Review routes/login.ts" },
+          status: "in_progress",
+        },
+      };
+      yield {
+        type: "item.started",
+        item: {
+          id: "spawn-2",
+          type: "mcp_tool_call",
+          server: "collaboration",
+          tool: "multi_agent_v1__spawn_agent",
+          arguments: { message: "Review routes/auth.ts" },
+          status: "in_progress",
+        },
+      };
+      yield {
+        type: "item.completed",
+        item: {
+          id: "message-1",
+          type: "agent_message",
+          text: "Delegated two file reviews.",
+        },
+      };
+    }
+
+    await expect(
+      runEvents(scanDir, completedEvents("thread-1", spawnEvents()), {
+        onWorkerEvent: (event) => events.push(event),
+        onWorkerStatus: (status) => statuses.push(status),
+      }),
+    ).resolves.toBeDefined();
+    expect(events).toEqual([
+      { kind: "dispatch", phase: "file_review", planned: 1, started: 1 },
+      { kind: "dispatch", phase: "file_review", planned: 2, started: 2 },
+    ]);
+    expect(statuses).toEqual([]);
+  });
+
+  test("reports a failed spawn_agent start as a runtime worker event", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const events: ScanWorkerEvent[] = [];
+    async function* failedSpawn(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "item.started",
+        item: {
+          id: "spawn-1",
+          type: "mcp_tool_call",
+          server: "collaboration",
+          tool: "spawn_agent",
+          arguments: { message: "Review routes/login.ts" },
+          status: "in_progress",
+        },
+      };
+      yield {
+        type: "item.completed",
+        item: {
+          id: "spawn-1",
+          type: "mcp_tool_call",
+          server: "collaboration",
+          tool: "spawn_agent",
+          arguments: { message: "Review routes/login.ts" },
+          status: "failed",
+          error: { message: "capacity exhausted" },
+        },
+      };
+    }
+
+    await expect(
+      runEvents(scanDir, completedEvents("thread-1", failedSpawn()), {
+        onWorkerEvent: (event) => events.push(event),
+      }),
+    ).resolves.toBeDefined();
+    expect(events).toEqual([
+      { kind: "dispatch", phase: "file_review", planned: 1, started: 1 },
+      {
+        kind: "failed",
+        phase: "file_review",
+        planned: 1,
+        started: 1,
+        reason: "capacity exhausted",
+      },
     ]);
   });
 

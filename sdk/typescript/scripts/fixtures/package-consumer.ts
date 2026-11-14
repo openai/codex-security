@@ -143,8 +143,14 @@ const options: ScanOptions = {
     progress.filesCompleted satisfies number;
   },
   onWorkerEvent(event: ScanWorkerEvent) {
-    event.kind satisfies "observed";
-    event.worker satisfies number;
+    if (event.kind === "observed") {
+      event.worker satisfies number;
+    } else {
+      event.phase satisfies
+        "file_review" | "ranking" | "validation" | "attack_path";
+      event.started satisfies number;
+      event.planned satisfies number;
+    }
   },
 };
 
