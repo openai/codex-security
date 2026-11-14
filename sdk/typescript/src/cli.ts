@@ -1836,7 +1836,7 @@ interface CliDependencies {
 
 // Apply coordinator-owned Git bindings after native shell environment filtering.
 const snapshotCredentialName =
-  /^OPENAI_FEDERATION_RULE_ID$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu;
+  /^(?:OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu;
 export const PATCH_GIT_ENVIRONMENT_RUNNER = `
 const { spawn } = require("node:child_process");
 const { readSync, writeSync } = require("node:fs");
@@ -12157,34 +12157,40 @@ async function preparePatchPublication(
   const ignored = ignoredFiles.size
     ? await patchGitRecords(root, listIgnored, dependencies)
     : [];
-  // The parent records a gitlink. Inventory the child's untracked files,
-  // including ignored files, before the patch can copy their contents.
+  // The parent records a gitlink. Inventory local files in each initialized
+  // checkout, including tracked edits and ignored files, before patching.
   if (gitControls?.nestedCheckouts.length) {
     const canonicalRoot = await realpath(root);
     for (const checkout of gitControls.nestedCheckouts) {
       signal?.throwIfAborted();
       const prefix = patchPathKey(relative(canonicalRoot, checkout));
-      const paths = await patchGitRecords(
+      const entries = await patchGitRecords(
         root,
         [
           "-C",
           checkout,
           "-c",
           "core.fsmonitor=false",
-          "ls-files",
-          "--others",
+          "status",
+          "--porcelain=v1",
+          "--no-renames",
+          "--untracked-files=all",
+          "--ignored=traditional",
+          "--ignore-submodules=all",
           "-z",
         ],
         dependencies,
         {
+          patchSnapshot: [],
           environment: {
             ...NESTED_PATCH_GIT_ENVIRONMENT,
             GIT_INDEX_FILE: undefined,
+            GIT_OPTIONAL_LOCKS: "0",
           },
         },
       );
-      for (const path of paths)
-        if (path) nestedRepositoryPaths.push(`${prefix}/${path}`);
+      for (const entry of entries)
+        if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
     }
   }
   const ignoredDigests = await publicationContentDigests(

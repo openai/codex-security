@@ -90,6 +90,7 @@ for (const kind of [
   "committed",
   "initialized submodule",
   "untracked file in initialized submodule",
+  "tracked edit in initialized submodule",
   "raw",
   "scrubbed",
   "directory link",
@@ -113,6 +114,7 @@ for (const kind of [
         nestedGit("config", "user.name", "Synthetic User");
         nestedGit("config", "user.email", "synthetic@example.test");
         nestedGit("config", "commit.gpgsign", "false");
+        const trackedEdit = kind === "tracked edit in initialized submodule";
         const ordinarySubmoduleFile =
           kind === "untracked file in initialized submodule";
         await writeFile(
@@ -156,9 +158,12 @@ for (const kind of [
           );
           source = join(nested, "linked", "local.txt");
         } else await writeFile(source, content);
-        if (kind === "committed") {
+        if (kind === "committed" || trackedEdit) {
+          if (trackedEdit)
+            await writeFile(source, "Committed fixture baseline\n");
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
+          if (trackedEdit) await writeFile(source, content);
         }
         if (kind.endsWith("initialized submodule")) {
           const childRemote = await fixtures.create(
@@ -195,7 +200,7 @@ for (const kind of [
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
           kind.startsWith("ignored") || kind === "initialized submodule"
             ? ""
-            : ordinarySubmoduleFile
+            : ordinarySubmoduleFile || trackedEdit
               ? "M nested"
               : "?? nested/",
         );
@@ -226,7 +231,7 @@ for (const kind of [
               if (command === "git") {
                 if (args.includes("push")) {
                   pushes++;
-                  if (ordinarySubmoduleFile && copied)
+                  if ((ordinarySubmoduleFile || trackedEdit) && copied)
                     throw new Error("Unexpected push of pre-existing content");
                 }
                 return runGitRepositoryCommand(command, args, cwd, options);
