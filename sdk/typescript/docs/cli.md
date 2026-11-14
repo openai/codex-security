@@ -325,12 +325,18 @@ codex-security scan . --auth api-key --model grok-4.7 --effort low \
   --codex "model_providers.xai.name='xAI'" \
   --codex "model_providers.xai.base_url='http://127.0.0.1:8317/v1'" \
   --codex "model_providers.xai.wire_api='responses'" \
-  --codex "model_providers.xai.env_key='CODEX_API_KEY'"
+  --codex "model_providers.xai.env_key='CODEX_API_KEY'" \
+  --codex 'features.multi_agent_v2.max_concurrent_threads_per_session=1'
 ```
 
-A local test completed a Standard scan through this gateway against a scripted
-xAI-compatible endpoint. The SDK has no built-in price for `grok-4.7`, so it
-rejects `--max-cost` for this model before starting a scan.
+The one-thread setting keeps Standard scans from spawning subagents. Without it,
+the gateway can forward a subagent's `agent_message` on a later request, which
+xAI rejects with HTTP 422. A contributor completed a live Standard scan with
+this setting. Deep Scan workers have separate concurrency settings and remain
+unverified with this gateway.
+
+The SDK has no built-in price for `grok-4.7`, so it rejects `--max-cost` for this
+model before starting a scan.
 
 ### Hugging Face compatibility
 
