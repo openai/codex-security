@@ -133,8 +133,11 @@ for (const kind of [
     test.skipIf(kind === "raw" && process.platform !== "linux")(
       `preserves embedded repository content during ${kind} publication, copied: ${copied}`,
       async () => {
-        const { directory, git, remote } =
-          await publicationRepository(fixtures);
+        const objectFormat = kind.startsWith("sha256") ? "sha256" : "sha1";
+        const { directory, git, remote } = await publicationRepository(
+          fixtures,
+          objectFormat,
+        );
         if (kind.startsWith("ignored")) {
           await writeFile(join(directory, ".gitignore"), "nested/\n");
           git("add", ".gitignore");
@@ -146,7 +149,7 @@ for (const kind of [
         nestedGit(
           "init",
           "--initial-branch=main",
-          ...(kind.startsWith("sha256") ? ["--object-format=sha256"] : []),
+          `--object-format=${objectFormat}`,
         );
         nestedGit("config", "user.name", "Synthetic User");
         nestedGit("config", "user.email", "synthetic@example.test");
