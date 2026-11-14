@@ -12,7 +12,7 @@ root, install the SDK dependencies, compile the fixture, and run its test:
 ```bash
 pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir sdk/typescript run build:examples
-node examples/custom-validation/validate.mjs --output reports/vulnerable-proof.json
+node examples/custom-validation/validate.mjs --output reports/http-proof.json
 node examples/custom-validation/validate.mjs --mode repaired --output reports/repaired-proof.json
 ```
 

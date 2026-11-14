@@ -16,14 +16,7 @@ test("compiled validation example distinguishes vulnerable and repaired ownershi
       { cwd: packageRoot, timeout: 30_000 },
     );
     expect(build.status, build.stdout + build.stderr).toBe(0);
-    for (const [mode, otherInvoice, crossAccountRead] of [
-      [
-        "vulnerable",
-        { status: 200, body: { id: "1002", owner: "bob", amount: 80 } },
-        true,
-      ],
-      ["repaired", { status: 403, body: { error: "forbidden" } }, false],
-    ] as const) {
+    for (const mode of ["vulnerable", "repaired"] as const) {
       const proofPath = join(output, "artifacts", `${mode}-http-proof.json`);
       const result = await runCommand(
         "node",
@@ -38,23 +31,27 @@ test("compiled validation example distinguishes vulnerable and repaired ownershi
       // A server left listening would prevent this process from exiting normally.
       expect(result.status, result.stderr).toBe(0);
       expect(result.stderr).toBe("");
-      const proof = {
+      const proof = JSON.parse(result.stdout);
+      expect(JSON.parse(await readFile(proofPath, "utf8"))).toEqual(proof);
+      const targetInvoice = {
+        status: 200,
+        body: { id: "1002", owner: "bob", amount: 80 },
+      };
+      expect(proof).toEqual({
         mode,
         anonymous: { status: 401, body: { error: "unauthorized" } },
         own_invoice: {
           status: 200,
           body: { id: "1001", owner: "alice", amount: 25 },
         },
-        target_owner_invoice: {
-          status: 200,
-          body: { id: "1002", owner: "bob", amount: 80 },
-        },
-        other_invoice: otherInvoice,
-        cross_account_read: crossAccountRead,
+        target_owner_invoice: targetInvoice,
+        other_invoice:
+          mode === "vulnerable"
+            ? targetInvoice
+            : { status: 403, body: { error: "forbidden" } },
+        cross_account_read: mode === "vulnerable",
         server_stopped: true,
-      };
-      expect(JSON.parse(result.stdout)).toEqual(proof);
-      expect(JSON.parse(await readFile(proofPath, "utf8"))).toEqual(proof);
+      });
     }
   } finally {
     await Promise.all([
