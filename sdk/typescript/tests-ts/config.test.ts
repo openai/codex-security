@@ -18,6 +18,7 @@ import {
 import {
   ConfigurationError,
   DEFAULT_CODEX_CONFIG,
+  STANDARDCOMPUTE_CODEX_PROVIDER,
   mergedCodexConfig,
   writeCodexConfig,
 } from "../src/index.js";
@@ -1680,15 +1681,23 @@ test("SDK Standard Compute selection supplies the native provider table", async 
       env_key: "STANDARDCOMPUTE_API_KEY",
     },
   });
-  const next = await mergedCodexConfig({
-    codexOverrides: { model_provider: "standardcompute" },
+  const partial = await mergedCodexConfig({
+    codexOverrides: {
+      model_provider: "standardcompute",
+      model_providers: {
+        standardcompute: {
+          base_url: "https://api.stdcmpt.com/v1",
+          http_headers: { "X-Trace": "synthetic" },
+        },
+      },
+    },
   });
-  const firstProvider = (bare["model_providers"] as JsonObject)[
-    "standardcompute"
-  ];
-  expect((next["model_providers"] as JsonObject)["standardcompute"]).not.toBe(
-    firstProvider,
-  );
+  expect(partial["model_providers"]).toEqual({
+    standardcompute: {
+      ...STANDARDCOMPUTE_CODEX_PROVIDER,
+      http_headers: { "X-Trace": "synthetic" },
+    },
+  });
   const native = {
     name: "Private gateway",
     base_url: "http://localhost:1234/v1",

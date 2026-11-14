@@ -63,9 +63,7 @@ export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
 );
 
 /** Native bearer and header profiles supply credentials directly to the transport. */
-export function standardComputeTableCredential(
-  table: unknown,
-): string | undefined {
+function standardComputeTableCredential(table: unknown): string | undefined {
   if (!isObject(table) || table["auth"] != null || table["env_key"] != null)
     return undefined;
   if (typeof table["experimental_bearer_token"] === "string")
@@ -77,7 +75,8 @@ export function standardComputeTableCredential(
     // preset override, ancillary headers should still allow its normal API key.
     return Object.keys(headers).some(
       (name) =>
-        typeof table["base_url"] === "string" ||
+        (typeof table["base_url"] === "string" &&
+          table["base_url"] !== STANDARDCOMPUTE_CODEX_PROVIDER.base_url) ||
         /^(?:authorization|proxy-authorization|(?:x-)?api-key)$/iu.test(name),
     );
   });
@@ -91,6 +90,21 @@ export function selectedProviderTable(
   const providers = resolveCodexProfile(config)["model_providers"];
   const table = isObject(providers) ? providers[selected] : undefined;
   return isObject(table) ? table : undefined;
+}
+
+/** Supply only missing preset fields so a native profile retains its own credentials. */
+export function standardComputeDefaults(
+  config: Readonly<JsonObject>,
+): JsonObject {
+  const native = selectedProviderTable(config, "standardcompute") ?? {};
+  const preset: JsonObject = { ...STANDARDCOMPUTE_CODEX_PROVIDER };
+  for (const field of Object.keys(native)) delete preset[field];
+  if (
+    native["auth"] != null ||
+    standardComputeTableCredential(native) !== undefined
+  )
+    delete preset["env_key"];
+  return preset;
 }
 
 export function standardComputeCredentialSource(
@@ -579,13 +593,9 @@ export async function mergedCodexConfig(
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   if (scanModelProvider(effectiveOverrides) === "standardcompute") {
-    const providers =
-      resolveCodexProfile(effectiveOverrides)["model_providers"];
-    if (!isObject(providers) || providers["standardcompute"] === undefined) {
-      defaults["model_providers"] = {
-        standardcompute: { ...STANDARDCOMPUTE_CODEX_PROVIDER },
-      };
-    }
+    defaults["model_providers"] = {
+      standardcompute: standardComputeDefaults(effectiveOverrides),
+    };
   }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {

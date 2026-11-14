@@ -230,7 +230,7 @@ import {
   scanModelProvider,
   scanProviderEnvKey,
   standardComputeCredentialSource,
-  standardComputeTableCredential,
+  standardComputeDefaults,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -13543,17 +13543,7 @@ export function parseCodexOverrides(
       );
     }
     if (provider === "standardcompute") {
-      const tables = resolveCodexProfile(configured)["model_providers"];
-      const native = isJsonObject(tables) ? tables[provider] : undefined;
-      const preset: JsonObject = { ...EXTERNAL_CODEX_PROVIDERS[provider] };
-      if (isJsonObject(native)) {
-        for (const field of Object.keys(native)) delete preset[field];
-        if (
-          native["auth"] != null ||
-          standardComputeTableCredential(native) !== undefined
-        )
-          delete preset["env_key"];
-      }
+      const preset = standardComputeDefaults(configured);
       if (Object.keys(preset).length > 0)
         return mergeCodexOverrides(
           { model_providers: { [provider]: preset } },
