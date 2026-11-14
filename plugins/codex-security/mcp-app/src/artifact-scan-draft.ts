@@ -2347,7 +2347,17 @@ async function readSavedCheckpoints(
 ): Promise<Array<SavedScanDraft & { name: string; snapshot: JsonObject }>> {
   let checkpointRoot = join(context.root, "checkpoints");
   const checkpointRootMetadata = await lstatIfExists(checkpointRoot);
-  if (checkpointRootMetadata === undefined) return [];
+  if (checkpointRootMetadata === undefined && kind === "current") return [];
+  const head = await readCheckpointHead(context, kind).catch((error) => {
+    if (!skipInvalid) throw error;
+    return undefined;
+  });
+  const checkpointHead = head?.checkpoint;
+  if (checkpointRootMetadata === undefined) {
+    if (checkpointHead && !skipInvalid)
+      throw new Error(`scan checkpoint: ${kind} checkpoint head is missing.`);
+    return [];
+  }
   if (!checkpointRootMetadata.isDirectory()) {
     throw new Error(
       `scan checkpoint: ${kind} checkpoint set is not a safe directory.`,
@@ -2365,15 +2375,6 @@ async function readSavedCheckpoints(
     }
     checkpointRoot = canonicalCheckpointRoot;
   }
-
-  const head =
-    kind === "current"
-      ? await readCheckpointHead(context, kind).catch((error) => {
-          if (!skipInvalid) throw error;
-          return undefined;
-        })
-      : undefined;
-  const checkpointHead = head?.checkpoint;
 
   const checkpoints: Array<
     SavedScanDraft & { name: string; snapshot: JsonObject }
@@ -2401,7 +2402,7 @@ async function readSavedCheckpoints(
     checkpointHead !== excludedCheckpoint &&
     !checkpoints.some(({ head }) => head)
   ) {
-    throw new Error("scan checkpoint: current checkpoint head is missing.");
+    throw new Error(`scan checkpoint: ${kind} checkpoint head is missing.`);
   }
   if (kind === "current")
     checkpoints.sort(
@@ -2442,7 +2443,7 @@ async function readSavedCheckpoints(
         entry.name === checkpointHead
           ? head!.modifiedMs
           : Number(checkpointMetadata.mtimeMs),
-      ...(kind === "current" ? { head: entry.name === checkpointHead } : {}),
+      head: entry.name === checkpointHead,
       name: entry.name,
     };
   }
@@ -2629,64 +2630,55 @@ export async function readArchivedWorkerCheckpoints(
     const drafts: Array<SavedScanDraft & { result: boolean; name: string }> =
       [];
     const attemptContext = { ...context, root: attemptRoot };
-    const head = await readCheckpointHead(attemptContext, "archived");
-    let checkpointHead: ScanDraftInput | undefined;
-    if (head) {
-      checkpointHead = parsePersistedScanDraft(
-        parseJsonObject(
-          await readArtifactText(
-            attemptContext,
-            ["checkpoints", head.checkpoint],
-            "archived scan checkpoint head",
-          ),
-          "archived scan checkpoint head",
-        ),
+    // A direct result can reuse each valid checkpoint independently.
+    const checkpoints = await readSavedCheckpoints(
+      attemptContext,
+      "archived",
+      undefined,
+      skipInvalidAttempts,
+    ).catch((error) => {
+      if (!skipInvalidAttempts) throw error;
+      return [];
+    });
+    drafts.push(...checkpoints.map((draft) => ({ ...draft, result: false })));
+    try {
+      const resultMetadata = await lstatIfExists(
+        join(attemptRoot, "result.json"),
       );
-      requireMatchingScan(context, checkpointHead);
-    }
-    const resultMetadata = await lstatIfExists(
-      join(attemptRoot, "result.json"),
-    );
-    if (resultMetadata !== undefined) {
-      if (!resultMetadata.isFile()) {
-        throw new Error("scan checkpoint: archived result is not a safe file.");
+      if (resultMetadata !== undefined) {
+        if (!resultMetadata.isFile()) {
+          throw new Error(
+            "scan checkpoint: archived result is not a safe file.",
+          );
+        }
+        const saved = await readArtifactTextWithMetadata(
+          attemptContext,
+          ["result.json"],
+          "archived scan result",
+        );
+        let result: ScanDraftInput | undefined;
+        try {
+          const stored = parseJsonObject(
+            saved.contents,
+            "archived scan result",
+          );
+          await retainRecordedReceiptOwnership(attemptContext, stored);
+          result = parsePersistedScanDraft(stored);
+        } catch {
+          // A failed attempt may leave an invalid replaceable result after valid checkpoints.
+        }
+        if (result !== undefined) {
+          requireMatchingScan(context, result);
+          drafts.push({
+            input: result,
+            modifiedMs: saved.modifiedMs,
+            result: true,
+            name: "result.json",
+          });
+        }
       }
-      const saved = await readArtifactTextWithMetadata(
-        attemptContext,
-        ["result.json"],
-        "archived scan result",
-      );
-      let result: ScanDraftInput | undefined;
-      try {
-        const stored = parseJsonObject(saved.contents, "archived scan result");
-        await retainRecordedReceiptOwnership(attemptContext, stored);
-        result = parsePersistedScanDraft(stored);
-      } catch {
-        // A failed attempt may leave an invalid replaceable result after valid checkpoints.
-      }
-      if (result !== undefined) {
-        requireMatchingScan(context, result);
-        drafts.push({
-          input: result,
-          modifiedMs: saved.modifiedMs,
-          result: true,
-          name: "result.json",
-        });
-      }
-    }
-    drafts.push(
-      ...(
-        await readSavedCheckpoints(attemptContext, "archived", head?.checkpoint)
-      ).map((draft) => ({ ...draft, result: false })),
-    );
-    if (checkpointHead !== undefined) {
-      drafts.push({
-        input: checkpointHead,
-        modifiedMs: head!.modifiedMs,
-        head: true,
-        result: false,
-        name: head!.checkpoint,
-      });
+    } catch (error) {
+      if (!skipInvalidAttempts) throw error;
     }
     drafts.sort(
       (left, right) =>

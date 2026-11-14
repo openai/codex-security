@@ -243,8 +243,9 @@ for (const history of [
   "current",
   "malformed optional current history",
   "archived",
+  "malformed optional archived history",
 ]) {
-  const archived = history === "archived";
+  const archived = history.includes("archived");
   test(`an accepted direct-file result retains ${history} checkpoint coverage without rewriting artifacts`, async (t) => {
     const f = await workerHistoryFixture(t, 2);
     await recordCodexSecurityWorkerScanDraft(
@@ -276,17 +277,21 @@ for (const history of [
         },
       }),
     );
-    if (archived) {
-      await archiveDirectory(
-        f.output,
-        path.join(f.workerRoot, "attempts/attempt-01"),
-      );
-    }
-    if (history === "malformed optional current history") {
-      await writeFile(path.join(f.output, "checkpoints/unusable.json"), "{");
-      const head = path.join(f.output, "checkpoint-head.json");
+    const saved = archived
+      ? path.join(f.workerRoot, "attempts/attempt-01")
+      : f.output;
+    if (archived) await archiveDirectory(f.output, saved);
+    if (history.startsWith("malformed")) {
+      await writeFile(path.join(saved, "checkpoints/unusable.json"), "{");
+      const head = path.join(saved, "checkpoint-head.json");
       await rm(head);
       await mkdir(head);
+      if (archived) {
+        // Only the older immutable checkpoint is usable after an interrupted retry.
+        const result = path.join(saved, "result.json");
+        await rm(result, { force: true });
+        await mkdir(result);
+      }
     }
     await mkdir(f.output, { recursive: true });
     const terminal = workerDraft([], { complete: true });
