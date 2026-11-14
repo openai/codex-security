@@ -5,9 +5,10 @@ import {
   type ScanAuthMode,
   type ScanAuthentication,
 } from "./api.js";
-import { environmentEntry } from "./auth.js";
+import { environmentEntry, withoutOpenAiApiKeys } from "./auth.js";
 import {
   deepMerge,
+  azureCredentialSource,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
   modelProviderConfigOverride,
@@ -31,7 +32,9 @@ export function resolveSkillAuthentication(
     stringifyToml(options.codexOverrides ?? {}),
   ) as JsonObject;
   const config = deepMerge(structuredClone(ambientConfig), overrides);
-  const provider = options.modelProvider ?? scanModelProvider(config);
+  if (options.modelProvider !== undefined)
+    config["model_provider"] = options.modelProvider;
+  const provider = scanModelProvider(config);
   // Native Codex ignores configured tables for these built-in providers.
   const providerConfiguration =
     typeof provider === "string" &&
@@ -49,7 +52,10 @@ export function resolveSkillAuthentication(
     options.auth === "chatgpt" && !isExternalModelProvider(provider);
   const providerBearer =
     typeof providerConfiguration?.["experimental_bearer_token"] === "string";
-  const providerKeyConfigured = providerEnvKey !== undefined || providerBearer;
+  const providerKeyConfigured =
+    providerEnvKey !== undefined ||
+    providerBearer ||
+    azureCredentialSource(config) !== undefined;
   const requiresOpenAiAuth =
     !commandAuth &&
     (explicitChatgpt || !providerKeyConfigured) &&
@@ -75,6 +81,9 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
+      false,
+      undefined,
+      config,
     );
   }
   if (
@@ -87,9 +96,16 @@ export function resolveSkillAuthentication(
     );
   }
   let selected = selectedScanEnvironment(
-    processEnvironment,
-    authentication.method === "command" ? "chatgpt" : options.auth,
+    commandAuth ? withoutOpenAiApiKeys(processEnvironment) : processEnvironment,
+    commandAuth ? "auto" : options.auth,
     provider,
+    explicitChatgpt ? undefined : providerEnvKey,
+    typeof provider === "string"
+      ? {
+          model_provider: provider,
+          model_providers: { [provider]: providerConfiguration ?? {} },
+        }
+      : {},
   );
   if (
     explicitChatgpt &&

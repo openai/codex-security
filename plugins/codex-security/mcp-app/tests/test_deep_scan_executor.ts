@@ -2907,6 +2907,11 @@ async function testBedrockCredentialsReachWorker(
 async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
+    ["openrouter", "CODEX_API_KEY", "OPENAI_API_KEY"],
+    ["azure", "AZURE_OPENAI_API_KEY"],
+    ["azure", "SYNTHETIC_AZURE_KEY"],
+    ["azure", undefined],
+    ["azure", undefined, "OPENAI_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
@@ -2923,23 +2928,49 @@ async function testExternalProviderCredentialsReachWorker() {
       const accountHeaders = headerKey
         ? { [headerKey]: "private-scan-header" }
         : {};
+      const expectedAccount = {
+        ...accountHeaders,
+        ...(key === "CODEX_API_KEY" ? { [key]: selectedKey } : {}),
+      };
       const settings = {
         model_provider: provider,
         native_profile: profile,
-        environment: { [key]: selectedKey, ...accountHeaders },
+        environment: {
+          ...(key === undefined ? {} : { [key]: selectedKey }),
+          ...accountHeaders,
+        },
       };
-      await writeFile(configPath, stringifyToml({ model_provider: provider }));
+      // A managed discovery override can choose OpenRouter for an Azure parent.
+      const parentProvider = provider === "openrouter" ? "azure" : provider;
+      await writeFile(
+        configPath,
+        stringifyToml({ model_provider: parentProvider }),
+      );
       await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
       await writeFile(
         path.join(fixture.root, `${profile}.config.toml`),
         stringifyToml({
-          model_provider: provider,
+          model_provider: parentProvider,
           model_providers: {
+            ...(parentProvider !== provider
+              ? {
+                  azure: {
+                    name: "Azure",
+                    wire_api: "responses",
+                    base_url: "https://resource.example.test/openai/v1",
+                    env_key: "AZURE_OPENAI_API_KEY",
+                  },
+                }
+              : {}),
             [provider]: {
               name: provider,
               base_url: `https://${provider}.example.test/v1`,
               wire_api: "responses",
-              env_key: key,
+              ...(key !== undefined
+                ? { env_key: key }
+                : headerKey === undefined
+                  ? { experimental_bearer_token: selectedKey }
+                  : {}),
               ...(headerKey === "OPENAI_API_KEY"
                 ? { requires_openai_auth: true }
                 : {}),
@@ -2960,6 +2991,8 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
+        AZURE_OPENAI_API_KEY: undefined,
+        SYNTHETIC_AZURE_KEY: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
       };
       const saved = Object.keys(environment).map(
@@ -2972,7 +3005,7 @@ async function testExternalProviderCredentialsReachWorker() {
           parentSandbox: trustedParentSandbox,
         });
         for (const turn of ["fresh", "resume", "compare"]) {
-          process.env[key] = "changed-ambient-key";
+          process.env[key ?? "AZURE_OPENAI_API_KEY"] = "changed-ambient-key";
           if (headerKey) process.env[headerKey] = "changed-ambient-header";
           if (turn === "compare") {
             await executor.compareFindings(
@@ -2990,11 +3023,41 @@ async function testExternalProviderCredentialsReachWorker() {
             );
           }
           const invocation = await readJson(fixture.markerPath);
-          assert.equal(
-            invocation.providerKey ?? invocation.providerHeaders[key],
-            selectedKey,
-          );
-          assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
+          if (key === undefined) {
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(
+                  parseToml(invocation.profileContents).model_providers,
+                ),
+              ),
+              {
+                azure: {
+                  name: provider,
+                  base_url: `https://${provider}.example.test/v1`,
+                  wire_api: "responses",
+                  ...(headerKey === undefined
+                    ? { experimental_bearer_token: selectedKey }
+                    : {
+                        env_http_headers: { "X-Scan-Header": headerKey },
+                        requires_openai_auth: true,
+                      }),
+                },
+              },
+            );
+            assert.equal(
+              invocation.providerHeaders.AZURE_OPENAI_API_KEY,
+              undefined,
+            );
+            assert.ok(!invocation.argv.join(" ").includes(selectedKey));
+          } else {
+            assert.equal(
+              invocation.providerKey ??
+                invocation.providerHeaders[key] ??
+                invocation.openaiAuthentication[key],
+              selectedKey,
+            );
+          }
+          assert.deepEqual(invocation.openaiAuthentication, expectedAccount);
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {
             model_provider: provider,
@@ -3008,7 +3071,8 @@ async function testExternalProviderCredentialsReachWorker() {
             stringifyToml({
               worker_runtime: {
                 ...settings,
-                environment: { [key]: "changed-snapshot-key" },
+                environment:
+                  key === undefined ? {} : { [key]: "changed-snapshot-key" },
               },
             }),
           );

@@ -10,6 +10,7 @@ import {
 } from "./owner-evidence.js";
 import {
   mergedCodexConfig,
+  withoutAzureHeaders,
   scanModelConfiguration,
   type ScanModelConfiguration,
 } from "./config.js";
@@ -93,17 +94,19 @@ export async function suggestOwnersInternal(
 ): Promise<OwnerSuggestions> {
   options.signal?.throwIfAborted();
   const inputs = z.array(findingSchema).parse(findings);
+  const environment = options.environment ?? process.env;
+  const config = await mergedCodexConfig(
+    options.config ?? {},
+    scanCodexHome(environment),
+    environment,
+    "read-only",
+  );
   const git = await ownerRepository(
     repository,
-    options.environment ?? process.env,
+    withoutAzureHeaders(environment, config),
     options.signal,
   );
-  const configured = scanModelConfiguration(
-    await mergedCodexConfig(
-      options.config ?? {},
-      scanCodexHome(options.environment ?? process.env),
-    ),
-  );
+  const configured = scanModelConfiguration(config);
   const model = options.model ?? configured.model;
   const reasoningEffort = options.reasoningEffort ?? configured.reasoningEffort;
   const report: OwnerSuggestions = {

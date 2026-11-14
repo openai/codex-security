@@ -3,8 +3,9 @@ import { execFile as execFileCallback } from "node:child_process";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join, relative } from "node:path";
 import { promisify } from "node:util";
-import type { ThreadOptions, TurnOptions } from "@openai/codex-sdk";
-import { afterEach, expect, test } from "bun:test";
+import type { Codex, ThreadOptions, TurnOptions } from "@openai/codex-sdk";
+import * as profiles from "../src/provider-profile.js";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { InvalidTargetError } from "../src/errors.js";
 import type { OwnerContext } from "../src/owner-evidence.js";
 import {
@@ -94,6 +95,72 @@ function chooseAlex(context: OwnerContext) {
       .map(({ id }) => id),
   };
 }
+
+test("uses Azure's saved endpoint for model-assisted and CODEOWNERS suggestions", async () => {
+  const repo = await repository();
+  const home = await temporaryDirectory();
+  await writeFile(
+    join(home, "config.toml"),
+    [
+      "[model_providers.azure]",
+      'name = "Saved Azure"',
+      'wire_api = "responses"',
+      'base_url = "https://resource.example.test/openai/v1"',
+      'env_key = "SELECTED_AZURE_KEY"',
+    ].join("\n"),
+  );
+  const options = {
+    config: {
+      codexOverrides: { model_provider: "azure", model: "deployment" },
+    },
+    environment: {
+      PATH: process.env["PATH"],
+      SystemRoot: process.env["SystemRoot"],
+      CODEX_HOME: home,
+      SELECTED_AZURE_KEY: "synthetic-key",
+    },
+  };
+  const { codex, calls } = fakeCodex();
+  const preflight = spyOn(
+    profiles,
+    "preflightReadOnlyProfileCodex",
+  ).mockImplementation(async (options) => ({
+    permissionProfileId: "fixture-read-only",
+    configOverrides: options.configOverrides ?? [],
+  }));
+  const client = spyOn(profiles, "createProfileCodex").mockResolvedValue(
+    codex as Codex,
+  );
+  try {
+    const model = await suggestOwners(repo.path, [finding], options);
+    expect(model.results[0]).toMatchObject({
+      status: "identified",
+      owner: { email: "alex@example.test" },
+    });
+    expect(calls[0]?.thread.model).toBe("deployment");
+    expect(preflight.mock.calls[0]?.[2]).toMatchObject({
+      model_providers: {
+        azure: {
+          base_url: "https://resource.example.test/openai/v1",
+          env_key: "SELECTED_AZURE_KEY",
+        },
+      },
+    });
+
+    await writeFile(join(repo.path, "CODEOWNERS"), "* @example/maintainers\n");
+    await repo.git("add", "CODEOWNERS");
+    await repo.git("commit", "-qm", "Declare maintainers");
+    const declared = await suggestOwners(repo.path, [finding], options);
+    expect(declared.results[0]).toMatchObject({
+      status: "identified",
+      owner: { handle: "example/maintainers" },
+    });
+    expect(client).toHaveBeenCalledTimes(1);
+  } finally {
+    client.mockRestore();
+    preflight.mockRestore();
+  }
+});
 
 test.each(["ISO-8859-1", "UTF-16LE"])(
   "preserves blame and history identities with %s Git output configured",

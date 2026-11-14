@@ -1,7 +1,10 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 import { workbenchArgs } from "./workbench-arguments.js";
 
-import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
+import {
+  childEnvironmentEntry,
+  isSafeNonNegativeInteger as safeInteger,
+} from "./value.js";
 import {
   explicitlyCanceled,
   hostedScanFailureStatus,
@@ -82,6 +85,11 @@ import {
 import {
   CODEX_AUTH_CONFIG_KEYS,
   EXTERNAL_CODEX_PROVIDERS,
+  EXTERNAL_PROVIDER_KEYS,
+  AZURE_CODEX_PROVIDER,
+  azureBaseUrl,
+  azureProviderEnvironment,
+  codexFileProfileName,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -96,6 +104,9 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
+  azureCredentialSource,
+  azureHeaderEnvironment,
+  withoutAzureHeaders,
   structuredCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -890,9 +901,15 @@ export class CodexSecurity {
       { ...options, outputDir: undefined, archiveExisting: false },
       signal,
     );
+    const config = await mergedCodexConfig(
+      this.config,
+      scanCodexHome(this.#dependencies.environment),
+      this.#dependencies.environment,
+      "read-only",
+    );
     const workflow = new FindingWorkflow(
       workflowId,
-      this.#dependencies.environment,
+      withoutAzureHeaders(this.#dependencies.environment, config),
       this.#dependencies.runWorkbench,
       this.config.pythonPath,
     );
@@ -1086,7 +1103,7 @@ export class CodexSecurity {
         "git",
         withoutProviderKey(
           selectedScanEnvironment(
-            runtime.environment,
+            withoutAzureHeaders(runtime.environment, session.effectiveConfig),
             options.auth,
             session.modelProvider,
             session.providerEnvKey,
@@ -1206,7 +1223,7 @@ export class CodexSecurity {
       if (options.workflowId !== undefined && (await canCache())) {
         const workflow = new FindingWorkflow(
           options.workflowId,
-          this.#dependencies.environment,
+          git.environment,
           workbench,
           session.python,
           { workbenchOptions },
@@ -1773,6 +1790,7 @@ export class CodexSecurity {
     const configuration = await mergedCodexConfig(
       this.config,
       scanCodexHome(this.#dependencies.environment),
+      this.#dependencies.environment,
     );
     const model = scanModelConfiguration(configuration);
     const modelProvider = scanModelProvider(configuration);
@@ -1807,6 +1825,7 @@ export class CodexSecurity {
         hasCommandAuth(configuration),
         true,
         scanProviderEnvKey(configuration),
+        configuration,
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -2415,7 +2434,7 @@ export class CodexSecurity {
         executable: null,
         environment: withoutProviderKey(
           selectedScanEnvironment(
-            runtime.environment,
+            withoutAzureHeaders(runtime.environment, effectiveConfig),
             options.auth,
             modelProvider,
             session.providerEnvKey,
@@ -2488,20 +2507,24 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const workerProviderEnvironment = {
-        ...withoutOpenAiApiKeys(
-          selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-            session.providerEnvKey,
-          ),
+      const workerProviderEnvironment = withoutOpenAiApiKeys(
+        selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          modelProvider,
+          session.providerEnvKey,
+          effectiveConfig,
         ),
+      );
+      const selectedWorkerCredentials = {
+        ...azureHeaderEnvironment(
+          this.#dependencies.environment,
+          effectiveConfig,
+        ),
+        ...session.nativeProviderEnvironment,
         ...(session.apiKey === null
           ? {}
-          : {
-              [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
-            }),
+          : { [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey }),
       };
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
@@ -2509,7 +2532,13 @@ export class CodexSecurity {
           modelProvider,
           scanDir,
           workerProviderEnvironment,
-          session.nativeProviderEnvironment,
+          selectedWorkerCredentials,
+          mode === "deep" &&
+            (options.auth !== "chatgpt" ||
+              authentication.method !== "stored_credentials")
+            ? this.#dependencies.environment
+            : undefined,
+          options.auth !== "chatgpt" && authentication.method === "api_key",
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -2767,13 +2796,10 @@ export class CodexSecurity {
       };
       // Saved launches reload the native file; preflight uses resolved values.
       const profileName = effectiveConfig["profile"];
-      const inlineProfiles = effectiveConfig["profiles"];
-      const fileProfile =
-        typeof profileName === "string" &&
-        !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]));
+      const fileProfileName = codexFileProfileName(effectiveConfig);
       const overrides = this.config.codexOverrides ?? {};
       const recipeConfig: JsonObject = {
-        ...(fileProfile
+        ...(fileProfileName !== undefined
           ? scanPreflightCodexConfig(overrides)
           : preflightConfig),
         approval_policy: approvalPolicy,
@@ -2783,7 +2809,7 @@ export class CodexSecurity {
         const value = workerRuntimeConfig[key];
         if (
           typeof value !== "string" ||
-          (fileProfile && !(key in recipeConfig))
+          (fileProfileName !== undefined && !(key in recipeConfig))
         )
           continue;
         recipeConfig[key] = value;
@@ -2801,12 +2827,22 @@ export class CodexSecurity {
         }
       }
       let replayOverrides: JsonObject = {};
-      if (fileProfile) {
-        recipeConfig["profile"] = profileName;
+      if (fileProfileName !== undefined) {
+        recipeConfig["profile"] = fileProfileName;
         delete recipeConfig["skills"];
         // Reload inherited file settings, retaining explicit refinements omitted
         // from the readable recipe in the existing private replay snapshot.
         delete recipeConfig["model_providers"];
+        if (modelProvider === "azure") {
+          const tables = preflightConfig["model_providers"];
+          const azure = isRecord(tables) ? tables["azure"] : undefined;
+          if (isRecord(azure) && typeof azure["base_url"] === "string") {
+            recipeConfig["model_provider"] = modelProvider;
+            recipeConfig["model_providers"] = {
+              azure: { base_url: azure["base_url"] },
+            };
+          }
+        }
         replayOverrides = privateReplayOverrides(overrides, recipeConfig);
         resolveNestedConfigPaths(replayOverrides, scanDir);
       } else {
@@ -4120,6 +4156,13 @@ export class CodexSecurity {
                 },
               ),
             ...inferenceOptions,
+            environment: {
+              ...environment,
+              ...azureHeaderEnvironment(
+                this.#dependencies.environment,
+                effectiveConfig,
+              ),
+            },
           });
         }
         if (previousFindings !== undefined || options.skipFindingMatching) {
@@ -4598,6 +4641,7 @@ export class CodexSecurity {
     const config = await mergedCodexConfig(
       this.config,
       scanCodexHome(this.#dependencies.environment),
+      this.#dependencies.environment,
       "login",
     );
     const command = await this.#providerPreflightCommand(config);
@@ -4941,6 +4985,8 @@ export class CodexSecurity {
               auth,
               modelProvider,
               providerEnvKey,
+              session.effectiveConfig,
+              "selected",
             ),
           ),
         ),
@@ -5000,6 +5046,10 @@ export class CodexSecurity {
     let sdkEnvironment = definedEnvironment({
       ...session.nativeProviderEnvironment,
       ...withoutOpenAiApiKeys(environment),
+      ...azureHeaderEnvironment(
+        this.#dependencies.environment,
+        session.effectiveConfig,
+      ),
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
     });
     if (
@@ -5132,6 +5182,7 @@ export class CodexSecurity {
         await mergedCodexConfig(
           this.config,
           scanCodexHome(this.#dependencies.environment),
+          this.#dependencies.environment,
         ),
         scanCodexHome(this.#dependencies.environment),
       );
@@ -5147,22 +5198,29 @@ export class CodexSecurity {
         commandAuth,
         false,
         providerEnvKey,
+        requestedConfig,
       );
       const apiKey =
-        authentication.method === "api_key"
+        authentication.method === "api_key" &&
+        azureCredentialSource(requestedConfig) === undefined
           ? environmentApiKey(
               this.#dependencies.environment,
               modelProvider,
               providerEnvKey,
             )
           : null;
-      const scanEnvironment = selectedScanEnvironment(
-        commandAuth
-          ? withoutOpenAiApiKeys(this.#dependencies.environment)
-          : this.#dependencies.environment,
-        options.auth,
-        modelProvider,
-        providerEnvKey,
+      const scanEnvironment = withoutAzureHeaders(
+        selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(this.#dependencies.environment)
+            : this.#dependencies.environment,
+          options.auth,
+          modelProvider,
+          providerEnvKey,
+          requestedConfig,
+          "selected",
+        ),
+        requestedConfig,
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5182,7 +5240,7 @@ export class CodexSecurity {
           temporaryRoot,
           (path) =>
             requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
-          options.auth,
+          scanEnvironment,
           requestedConfig,
         );
         this.#requireOpen();
@@ -5281,13 +5339,11 @@ export class CodexSecurity {
       }
       if (
         !runtime.credentialsAvailable &&
-        apiKey === null &&
-        !commandAuth &&
-        authentication.method !== "aws_credentials"
+        authentication.method === "stored_credentials"
       ) {
         throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
-      if (!commandAuth)
+      if (authentication.method === "stored_credentials")
         authentication = await runtimeScanAuthentication(
           this.#dependencies.environment,
           runtime.codexHome,
@@ -5389,6 +5445,7 @@ export class CodexSecurity {
         (await mergedCodexConfig(
           this.config,
           scanCodexHome(this.#dependencies.environment),
+          this.#dependencies.environment,
         )),
     );
   }
@@ -5446,6 +5503,7 @@ export class CodexSecurity {
       await mergedCodexConfig(
         this.config,
         scanCodexHome(this.#dependencies.environment),
+        this.#dependencies.environment,
       ),
     );
     const sources = await inspectSecurityPolicySources(target, signal);
@@ -5513,11 +5571,20 @@ export class CodexSecurity {
           "The selected plugin version does not match the expected plugin version.",
         );
       }
+      const config = await mergedCodexConfig(
+        this.config,
+        scanCodexHome(this.#dependencies.environment),
+        this.#dependencies.environment,
+      );
+      const helperEnvironment = withoutAzureHeaders(
+        this.#dependencies.environment,
+        config,
+      );
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
         configuredPath: this.config.pythonPath,
-        environment: this.#dependencies.environment,
+        environment: helperEnvironment,
         protectedRoot: local.protectedRoot,
         signal,
       });
@@ -5550,10 +5617,6 @@ export class CodexSecurity {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
       const revision = await repositoryRevision(local.repository, signal);
-      const config = await mergedCodexConfig(
-        this.config,
-        scanCodexHome(this.#dependencies.environment),
-      );
       const { model } = scanModelConfiguration(config);
       const pricingContext = scanPricingContext(
         config,
@@ -5563,7 +5626,7 @@ export class CodexSecurity {
         python,
         pluginRoot,
         environment: {
-          ...this.#dependencies.environment,
+          ...helperEnvironment,
           CODEX_SECURITY_STATE_DIR: local.stateDirectory,
         },
         signal,
@@ -5854,7 +5917,7 @@ export class CodexSecurity {
     signal: AbortSignal,
     temporaryRoot: string | undefined,
     validateLocation: (path: string) => void,
-    auth: ScanAuthMode | undefined,
+    processEnvironment: ProcessEnvironment,
     requestedConfig: JsonObject,
   ): Promise<PreparedRuntime> {
     if (this.#dependencies.prepareRuntime !== undefined) {
@@ -5862,14 +5925,6 @@ export class CodexSecurity {
     }
     const modelProvider = scanModelProvider(requestedConfig);
     const providerEnvKey = scanProviderEnvKey(requestedConfig);
-    const processEnvironment = selectedScanEnvironment(
-      hasCommandAuth(requestedConfig)
-        ? withoutOpenAiApiKeys(this.#dependencies.environment)
-        : this.#dependencies.environment,
-      auth,
-      modelProvider,
-      providerEnvKey,
-    );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
     );
@@ -5925,6 +5980,7 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
+        azureCredentialSource(requestedConfig) !== undefined ||
         providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -6708,7 +6764,7 @@ function turnPricingMetadata(context?: ScanPricingContext) {
     : { pricingContext: context };
 }
 
-function validateScanCostLimit(
+export function validateScanCostLimit(
   maxCostUsd: number | undefined,
   model: string,
   pricingContext?: ScanPricingContext,
@@ -6856,6 +6912,7 @@ export function scanAuthentication(
   commandAuth = false,
   preflight = false,
   providerEnvKey?: string,
+  config?: JsonObject,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -6863,6 +6920,13 @@ export function scanAuthentication(
     );
   }
   if (commandAuth) return { method: "command", verified: false };
+  const azureCredential = config && azureCredentialSource(config);
+  if (azureCredential !== undefined)
+    return {
+      method: "api_key",
+      source: azureCredential,
+      verified: false,
+    };
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -6988,11 +7052,27 @@ export function selectedScanEnvironment(
   modelProvider?: unknown,
   providerEnvKey?: string,
   config?: JsonObject,
+  providerKeys: "selected" | "declared" = "declared",
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
   const selectedProviderKey = providerEnvKey ?? standardProviderKey;
+  if (config !== undefined) {
+    environment = azureProviderEnvironment(
+      environment,
+      auth === "chatgpt" &&
+        !isExternalModelProvider(modelProvider) &&
+        !hasCommandAuth(config)
+        ? {}
+        : config,
+    );
+  } else if (
+    modelProvider !== "azure" &&
+    selectedProviderKey?.toUpperCase() !== AZURE_CODEX_PROVIDER.env_key
+  ) {
+    environment = azureProviderEnvironment(environment, {});
+  }
   const bedrockProvider = modelProvider === "amazon-bedrock";
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
@@ -7006,11 +7086,8 @@ export function selectedScanEnvironment(
           key === selectedProviderKey.toUpperCase()
         );
       }
-      if (
-        key === "OPENROUTER_API_KEY" ||
-        key === "FIREWORKS_API_KEY" ||
-        key === "CHEAPER_INFERENCE_API_KEY"
-      ) {
+      if (key === AZURE_CODEX_PROVIDER.env_key) return true;
+      if (EXTERNAL_PROVIDER_KEYS.has(key)) {
         return (
           !bedrockProvider &&
           (selectedProviderKey === null ||
@@ -7022,6 +7099,7 @@ export function selectedScanEnvironment(
     }),
   );
   if (
+    providerKeys === "declared" &&
     config !== undefined &&
     providerEnvKey !== undefined &&
     standardProviderKey === null &&
@@ -7035,6 +7113,8 @@ export function selectedScanEnvironment(
       ),
     );
   }
+  if (config !== undefined && modelProvider === "azure")
+    Object.assign(selected, azureHeaderEnvironment(environment, config));
   return selected;
 }
 
@@ -7582,8 +7662,19 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   }
   const modelProvider = scanModelProvider(result);
   if (isExternalModelProvider(modelProvider)) {
+    const providers = resolved["model_providers"];
+    const configured = isRecord(providers)
+      ? providers[modelProvider]
+      : undefined;
     result["model_providers"] = {
-      [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
+      [modelProvider]: {
+        ...EXTERNAL_CODEX_PROVIDERS[modelProvider],
+        ...(modelProvider === "azure" &&
+        isRecord(configured) &&
+        configured["base_url"] !== undefined
+          ? { base_url: azureBaseUrl({}, configured["base_url"]) }
+          : {}),
+      },
     };
   } else if (modelProvider === "amazon-bedrock") {
     const providers = resolved["model_providers"];
@@ -7671,13 +7762,7 @@ function declaredProviderEnvironment(
     : [];
   return Object.fromEntries(
     names.flatMap((name) => {
-      const key =
-        process.platform === "win32"
-          ? Object.keys(environment)
-              .sort()
-              .find((key) => key.toUpperCase() === name.toUpperCase())
-          : name;
-      const value = key === undefined ? undefined : environment[key];
+      const value = childEnvironmentEntry(environment, name);
       return value === undefined ? [] : [[name, value]];
     }),
   );
@@ -7688,16 +7773,30 @@ function selectedWorkerRuntimeConfig(
   selectedProvider: unknown,
   workingDirectory: string,
   environment: ProcessEnvironment,
-  nativeProviderEnvironment?: Record<string, string>,
+  selectedCredentials: Record<string, string>,
+  ambientWorkerEnvironment?: ProcessEnvironment,
+  allowAlternateAccountKeys = false,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  const providerEnvironment =
-    nativeProviderEnvironment ??
-    declaredProviderEnvironment(providers, environment);
+  // Alternate provider tables may name account keys as provider credentials.
+  // The selected provider and non-API-key sign-ins retain their own auth policy.
+  const alternateProviders =
+    allowAlternateAccountKeys && isRecord(providers)
+      ? Object.fromEntries(
+          Object.entries(providers).filter(([name]) => name !== provider),
+        )
+      : undefined;
+  const ambient = ambientWorkerEnvironment ?? {};
+  const providerEnvironment = {
+    ...declaredProviderEnvironment(providers, withoutOpenAiApiKeys(ambient)),
+    ...declaredProviderEnvironment(alternateProviders, ambient),
+    ...declaredProviderEnvironment(providers, environment),
+    ...declaredProviderEnvironment(providers, selectedCredentials),
+  };
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
