@@ -312,7 +312,7 @@ test.each([
     "requires --scan or --workflow-id",
   ],
 ])(
-  "dedupe does not emit an ok: true envelope when a scan is missing: %s",
+  "dedupe emits a failed envelope when a scan is missing: %s",
   async (_label, flags, expected) => {
     const { stdout, stderr } = createCliTest(main);
     expect(
@@ -323,12 +323,15 @@ test.each([
         dependencies(),
       ),
     ).toBe(2);
-    expect(stdout.text()).toBe("");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining(expected) },
+    });
     expect(stderr.text()).toContain(expected);
   },
 );
 
-test("dedupe does not emit an ok: true envelope for a failed structured dedupe run", async () => {
+test("dedupe returns a failed envelope for an execution error", async () => {
   const deps = dependencies();
   deps.deduplicateScan = async () => {
     throw new Error("Finding has not been indexed");
@@ -337,7 +340,10 @@ test("dedupe does not emit an ok: true envelope for a failed structured dedupe r
   expect(
     await main([...args, "--full-output"], stdout.stream, stderr.stream, deps),
   ).toBe(2);
-  expect(stdout.text()).toBe("");
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    ok: false,
+    error: { message: "Finding has not been indexed" },
+  });
   expect(stderr.text()).toContain("Finding has not been indexed");
 });
 

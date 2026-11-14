@@ -10,6 +10,7 @@ import {
 import { loadContractWithScanDirectory } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import type { Finding } from "./models.js";
+import type { DocumentRoots } from "./prompt-files.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { savedScanWorkbench } from "./saved-scan-bootstrap.js";
 import {
@@ -17,6 +18,7 @@ import {
   type SavedScanDependencies,
 } from "./saved-scan.js";
 import { SeverityStore } from "./severity-store.js";
+import { documentSourceRoot, nullIfMissingPath } from "./targets.js";
 
 const CLASSIFICATION_FILE = "severity-classification.json";
 export interface ScanSeverityClassification extends SeverityClassification {
@@ -69,11 +71,22 @@ export async function classifyScanSeverityInternal(
   ) {
     throw new CodexSecurityError("Saved scan does not match expectedScanId.");
   }
+  const target = scan["targetPath"];
+  // The workbench enables remediation only for the recorded checkout and revision.
+  const sourceRoot =
+    scan["remediationAvailable"] === true &&
+    typeof target === "string" &&
+    (options.rubricPath !== undefined || options.knowledgeBasePaths?.length)
+      ? await documentSourceRoot(target, options.signal).catch(
+          nullIfMissingPath,
+        )
+      : null;
   return classifyScanDirectorySeverityInternal(
     scan.scanDir,
     { ...options, expectedScanId: scan.scanId },
     surface,
     bootstrap?.protectedRoots,
+    sourceRoot === null ? null : [sourceRoot],
   );
 }
 
@@ -91,6 +104,7 @@ export async function classifyScanDirectorySeverityInternal(
   options: ClassifyScanSeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   protectedRoots: readonly string[] = [],
+  sourceRoots: DocumentRoots = [],
 ): Promise<ScanSeverityClassification> {
   const { contract, scanDirectory } = await loadContractWithScanDirectory(
     requestedDirectory,
@@ -120,6 +134,7 @@ export async function classifyScanDirectorySeverityInternal(
         findings.map(({ findingId }) => findingId),
         options.reprocess ?? false,
       ),
+      sourceRoots && [scanDirectory, ...sourceRoots],
     )),
     scanId: contract.manifest.scan.id,
   };

@@ -101,7 +101,7 @@ async function createCredentialHome() {
 
 describe("CLI authentication", () => {
   test("login status JSON uses an isolated home and returns the effective authentication source", async () => {
-    const { stdout, runCli } = createCliTest(main, { stderr: true });
+    const { stdout, stderr, runCli } = createCliTest(main, { stderr: true });
     const environment = {
       HOME: stateDirectory,
       USERPROFILE: stateDirectory,
@@ -113,6 +113,9 @@ describe("CLI authentication", () => {
         dependencies({ environment }),
       ),
     ).toBe(0);
+    expect(stderr.text()).toStartWith(
+      "API key configured via CODEX_API_KEY (offline check).\nStored sign-in status:\n",
+    );
     expect(JSON.parse(stdout.text())).toEqual({
       authenticated: true,
       method: "api_key",
@@ -449,7 +452,7 @@ describe("CLI authentication", () => {
         await runCli(["login", "status"], dependencies({ environment })),
       ).toBe(0);
       expect(stderr.text()).toContain(
-        `Effective scan authentication: API key from ${expectedSource}.`,
+        `API key configured via ${expectedSource} (offline check).`,
       );
       expect(stderr.text()).toContain(
         "To use a ChatGPT sign-in, remove OPENAI_API_KEY and CODEX_API_KEY from the environment.",
@@ -966,6 +969,7 @@ describe("CLI authentication", () => {
   });
 
   test("never prompts during automation, explicit selection, or unavailable credentials", async () => {
+    const repository = "/original/repository";
     for (const scenario of [
       { argv: ["scan", "--json"], terminal: true, stored: true, key: true },
       {
@@ -1039,16 +1043,26 @@ describe("CLI authentication", () => {
       let prompts = 0;
       const hasStoredChatGPTSignIn = mock(resolving(scenario.stored));
       const deps = dependencies({
+        currentDirectory: repository,
         environment: scenario.key
           ? { OPENAI_API_KEY: "synthetic-private-key" }
           : {},
         onTurn,
         onWorkbench: (args): JsonObject =>
           args[0] === "list-scans"
-            ? { scans: [{ scanId: "scan-original" }] }
+            ? {
+                scans: [
+                  {
+                    scanId: "scan-original",
+                    targetPath: repository,
+                    inCurrentWorktree: true,
+                  },
+                ],
+              }
             : {
+                scanId: "scan-original",
                 recipe: {
-                  repository: "/original/repository",
+                  repository,
                   target: { kind: "repository", paths: [] },
                   mode: "standard",
                   ...(scenario.recipeAuth === undefined
@@ -1121,7 +1135,7 @@ describe("CLI authentication", () => {
         dependencies({ environment, onCodex: () => 1 }),
       ),
     ).toBe(0);
-    expect(stderr.text()).toContain("API key from OPENAI_API_KEY");
+    expect(stderr.text()).toContain("API key configured via OPENAI_API_KEY");
     expect(stderr.text()).not.toContain("synthetic");
 
     delete environment["OPENAI_API_KEY"];
@@ -1132,7 +1146,7 @@ describe("CLI authentication", () => {
         dependencies({ environment, onCodex: () => 1 }),
       ),
     ).toBe(0);
-    expect(rotated.text()).toContain("API key from CODEX_API_KEY");
+    expect(rotated.text()).toContain("API key configured via CODEX_API_KEY");
 
     expect(
       await runCapturedCli(
@@ -1298,12 +1312,12 @@ describe("CLI authentication", () => {
         expect(stderr.text()).toContain("--auth chatgpt");
         expect(stderr.text()).not.toContain("ChatGPT sign-in was not used");
         expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-        expect(stderr.text()).not.toContain("org-private");
+        expect(stderr.text()).toContain(detail);
       }
     }
   });
 
-  test("replaces permanent stored sign-in refresh details with recovery steps", async () => {
+  test("preserves permanent stored sign-in refresh details with recovery steps", async () => {
     for (const auth of ["chatgpt", "api-key"] as const) {
       for (const detail of [
         "Your access token could not be refreshed.",
@@ -1319,7 +1333,7 @@ describe("CLI authentication", () => {
           environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_SECRET_123" },
           onRun: () => {
             throw new CodexSecurityError(
-              `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. PRIVATE_UPSTREAM_DETAIL`,
+              `Codex Exec exited with code 1: Error: ${detail} Please log out and sign in again. SYNTHETIC_UPSTREAM_DETAIL`,
             );
           },
         });
@@ -1347,7 +1361,11 @@ describe("CLI authentication", () => {
           "npx @openai/codex-security logout', then 'npx @openai/codex-security login",
         );
         expect(stderr.text()).not.toContain("provide a valid API key");
-        expect(stderr.text()).not.toContain("PRIVATE_UPSTREAM_DETAIL");
+        expect(stderr.text()).toContain(detail);
+        expect(stderr.text()).toContain("SYNTHETIC_UPSTREAM_DETAIL");
+        expect(JSON.parse(stdout.text()).message).toContain(
+          "SYNTHETIC_UPSTREAM_DETAIL",
+        );
       }
     }
   });
@@ -1420,7 +1438,7 @@ describe("CLI authentication", () => {
       expect(stderr.text()).toContain(source);
       expect(stderr.text()).toContain("--auth chatgpt");
       expect(stderr.text()).not.toContain("SYNTHETIC_SECRET");
-      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).toContain(message);
     }
   });
 

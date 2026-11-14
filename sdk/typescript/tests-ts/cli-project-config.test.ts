@@ -335,6 +335,26 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
   },
 );
 
+test("validation rejects knowledge selected through a checkout link", async () => {
+  const input = await fixture({});
+  git(input.repository, "init", "--quiet");
+  const link = join(input.repository, "documents");
+  await symlink(input.configDirectory, link, "junction");
+  for (const command of [
+    ["scan", "--validate"],
+    ["validate", "candidate"],
+  ]) {
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        [...command, "--knowledge-base", join(link, "scan.json")],
+        dependencies({ currentDirectory: input.repository }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("repository directory links");
+  }
+});
+
 test("a missing operator-selected environment file fails without falling back", async () => {
   const input = await fixture({});
   const onConfig = mock();
@@ -406,6 +426,29 @@ test("rerun rejects a blank replacement when scan instructions are required", as
   expect(onConfig).not.toHaveBeenCalled();
 });
 
+test.each(["project", "flag"])(
+  "rejects patching before starting a scan with a %s budget",
+  async (source) => {
+    const input = await fixture({ limits: { max_cost_usd_per_scan: 1 } });
+    const onRun = mock(throwing("unexpected scan"));
+    const onCodex = mock(throwing("unexpected patch"));
+    const stderr = captureCli(main, "stderr");
+    const budget =
+      source === "project" ? ["-c", input.config] : ["--max-cost", "1"];
+    expect(
+      await stderr.run(
+        ["scan", input.repository, "--patch", ...budget, "--json"],
+        dependencies({ onRun, onCodex }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--patch cannot be combined with a scan cost limit",
+    );
+    expect(onRun).not.toHaveBeenCalled();
+    expect(onCodex).not.toHaveBeenCalled();
+  },
+);
+
 test.each(["instructions_file", "validation_file"] as const)(
   "bulk %s retains directory-link protection for local CSV repositories",
   async (file) => {
@@ -413,6 +456,7 @@ test.each(["instructions_file", "validation_file"] as const)(
       scan: { [file]: "../repository/linked/prompt.md" },
       output: { directory: "../batch-results" },
     });
+    git(input.repository, "init", "--quiet");
     const external = join(input.root, "external");
     await mkdir(external);
     await writeFile(join(external, "prompt.md"), "Synthetic external data.");

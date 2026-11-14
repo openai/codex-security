@@ -44,13 +44,21 @@ select logical findings using their current stored bodies; dedupe does not
 replace newer bodies with old scan artifacts. A local database does not include
 findings stored only in a separate Docker volume or remote service.
 
-A scan or workflow selector is required. `--scan` also accepts a unique ID
-prefix. The scan must have sealed artifacts and a local checkout available.
-Local `latest` lookup matches the exact checkout path without Git. Matching
-across worktrees or clones additionally requires a Git executable outside all
-saved scan targets. If an unrelated historical target includes the available
-Git installation, use `codex-security dedupe --scan SCAN_ID` with an explicit
-saved scan ID instead.
+A scan or workflow selector is required. Use a full scan ID, a unique prefix, or
+`latest` for the current repository. The scan must be complete and its artifacts
+sealed. Reviews that read source also require the local checkout.
+
+Local `latest` verifies the checkout generation and component scope. Non-Git
+targets match by exact path. Git history, including matches across worktrees or
+clones, requires a Git executable outside all saved checkout directories. For a
+legacy Git target without a recorded checkout directory, set `CODEX_SECURITY_GIT`
+to an absolute, trusted Git executable. If a saved checkout contains the
+available Git installation, select the scan by its explicit ID.
+
+For older history, use an absolute `PYTHON` path when selecting system Python.
+If Bun cannot locate a trusted Node.js helper, run local deduplication with
+Node.js.
+
 By default, candidates come from its manifest's `scan.target.targetId`. Use
 `--all-repositories` to search the whole selected database or service.
 

@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import { loadContract } from "../src/contract.js";
@@ -55,6 +55,85 @@ afterEach(cleanup);
 const testPosix = test.skipIf(process.platform === "win32");
 
 describe("multiscan", () => {
+  test("divides an invocation budget across pending repositories and retries", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    await writeFile(
+      paths.input,
+      `id,repository,revision
+first,${source.path},${source.revision}
+second,${source.path},${source.revision}
+`,
+    );
+    const limits: number[] = [];
+    const bothStarted = Promise.withResolvers<void>();
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_checkout, scan = {}) => {
+          limits.push(scan.maxCostUsd!);
+          expect(scan.skipFindingMatching).toBe(true);
+          expect(scan.ownerSuggestions).toBe(false);
+          if (scan.outputDir!.endsWith("attempt-1")) {
+            if (limits.length === 2) bothStarted.resolve();
+            await bothStarted.promise;
+            throw new Error("Retry this repository");
+          }
+          return completedScan(scan.outputDir!);
+        }),
+        {
+          maxCostUsd: 12,
+          maxTotalCostUsd: 8,
+          workers: 2,
+          maxAttempts: 2,
+          scanOptionsByMode: { standard: { ownerSuggestions: true } },
+        },
+      ),
+    );
+    expect(summary).toMatchObject({ completed: 2, failed: 0 });
+    expect(limits).toEqual([2, 2, 2, 2]);
+  });
+
+  test("charges observed overruns before dispatching queued repository attempts", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "source");
+    const rows = ["first", "second", "third"].map(
+      (id) => `${id},${source.path},${source.revision}`,
+    );
+    await writeFile(
+      paths.input,
+      ["id,repository,revision", ...rows].join("\n"),
+    );
+    const limits: number[] = [];
+    const summary = await runMultiscan(
+      options(
+        paths,
+        client(async (_repo, scan = {}) => {
+          limits.push(scan.maxCostUsd!);
+          const estimatedUsd = limits.length === 1 ? 5 : 2;
+          throw new ScanCostLimitExceededError(
+            scan.maxCostUsd!,
+            {
+              model: "gpt-5.6-sol",
+              inputTokens: 10,
+              cachedInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              outputTokens: 10,
+              estimatedUsd,
+            },
+            scan.outputDir!,
+          );
+        }),
+        { workers: 1, maxAttempts: 1, maxTotalCostUsd: 6 },
+      ),
+    );
+    expect(limits).toEqual([2, 1]);
+    expect(summary).toMatchObject({ failed: 3 });
+    expect((await results(summary.resultsPath)).at(-1)?.["error"]).toContain(
+      "invocation cost limit is exhausted",
+    );
+  });
+
   test("prepares shared prompt files once while missing sources remain row failures", async () => {
     const paths = await fixture();
     const source = await repository(paths.root, "prompt-source");
@@ -84,6 +163,106 @@ describe("multiscan", () => {
       { id: "first", status: "completed" },
       { id: "second", status: "completed" },
     ]);
+  });
+
+  const linkedPromptGit =
+    "excludes every selected repository from Git lookup for linked bulk prompts";
+  test(linkedPromptGit, async () => {
+    if (runTestInSubprocess(import.meta.path, linkedPromptGit)) return;
+    const { paths, source } = await repositoryFixture("first");
+    const second = await repository(paths.root, "second");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nfirst,${source.path},${source.revision}\nsecond,${second.path},${second.revision}\n`,
+    );
+    await writeFile(join(paths.root, "prompt.md"), "External prompt.");
+    const docs = join(source.path, "docs");
+    await symlink(paths.root, docs, "junction");
+    const marker = join(paths.root, "untrusted-git-ran");
+    const hostGit = Bun.which("git")!;
+    const shim = join(
+      second.path,
+      process.platform === "win32" ? "git.exe" : "git",
+    );
+    await writeFile(
+      shim,
+      '#!/bin/sh\necho called > "$SHIM_MARKER"\nexec "$HOST_GIT" "$@"\n',
+      { mode: 0o700 },
+    );
+    process.env["SHIM_MARKER"] = marker;
+    process.env["HOST_GIT"] = hostGit;
+    process.env["PATH"] = [second.path, process.env["PATH"]].join(delimiter);
+    await expect(
+      runMultiscan(
+        options(paths, client(completeRun), {
+          scanPromptFile: join(docs, "prompt.md"),
+        }),
+      ),
+    ).rejects.toThrow("repository directory links");
+    expect(await Bun.file(marker).exists()).toBe(false);
+    const internal = join(source.path, "internal");
+    await mkdir(internal);
+    await writeFile(join(internal, "prompt.md"), "Internal prompt.");
+    const alias = join(source.path, "alias");
+    await symlink(internal, alias, "junction");
+    const security = client(async (_checkout, scan = {}) => {
+      expect(scan.scanPrompt).toBe("Internal prompt.");
+      return await completedScan(scan.outputDir!);
+    });
+    const result = await runMultiscan(
+      options(paths, security, { scanPromptFile: join(alias, "prompt.md") }),
+    );
+    expect(result).toMatchObject({ completed: 2, failed: 0 });
+  });
+
+  test("checks linked bulk documents against the selected Git layout", async () => {
+    const { paths, source } = await repositoryFixture("source");
+    const settings = options(paths, client(completeRun), { maxAttempts: 1 });
+    const direct = join(await filesystem.realpath(paths.root), "policy.md");
+    await writeFile(direct, "External document.");
+    const docs = join(source.path, "docs");
+    await filesystem.symlink(paths.root, docs, "junction");
+    const linked = join(docs, "policy.md");
+
+    const { resultsPath } = await runMultiscan({
+      ...settings,
+      knowledgeBasePaths: [linked],
+    });
+    expect(await results(resultsPath)).toMatchObject([
+      {
+        status: "failed",
+        error: expect.stringContaining("repository directory links"),
+      },
+    ]);
+
+    const requireCanonical = async (repository: string) => {
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nrow,${repository},${source.revision}\n`,
+      );
+      await expect(
+        runMultiscan({ ...settings, scanPromptFile: linked }),
+      ).rejects.toThrow("canonical path");
+    };
+
+    const gitfile = join(source.path, "target.ref");
+    await writeFile(
+      gitfile,
+      `gitdir: ${git(source.path, "rev-parse", "--absolute-git-dir")}\n`,
+    );
+    await requireCanonical(gitfile);
+    const directRun = await runMultiscan({
+      ...settings,
+      outputDir: join(paths.root, "direct-run"),
+      knowledgeBasePaths: [direct],
+    });
+    expect(directRun.completed).toBe(1);
+
+    const archive = join(paths.root, "archive");
+    git(paths.root, "clone", "--bare", source.path, archive + ".git");
+    await requireCanonical(archive);
+    git(source.path, "config", "core.worktree", paths.root);
+    await requireCanonical(source.path);
   });
 
   test.each([DiffTarget.refs({ base: "HEAD~1" }), DiffTarget.workingTree()])(

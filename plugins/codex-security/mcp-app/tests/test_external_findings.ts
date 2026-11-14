@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { hash } from "node:crypto";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
@@ -8,14 +8,18 @@ import { fileURLToPath } from "node:url";
 import { importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type * as External from "../src/workbench/external-findings.ts";
+import type * as Publications from "../src/workbench/external-finding-publications.ts";
 import type * as Migrations from "../src/workbench/migrations.ts";
 
-const { storeExternalFindings, listExternalFindings } = (await importSource(
-  "src/workbench/external-findings.ts",
-)) as typeof External;
+const { storeExternalFindings, listExternalFindings, listExternalImports } =
+  (await importSource("src/workbench/external-findings.ts")) as typeof External;
 const { applyMigrations, migrations } = (await importSource(
   "src/workbench/migrations.ts",
 )) as typeof Migrations;
+const { recordExternalFindingPublications, listExternalFindingPublications } =
+  (await importSource(
+    "src/workbench/external-finding-publications.ts",
+  )) as typeof Publications;
 const temporary = createTemporaryDirectories(true);
 after(() => temporary.cleanup());
 const repository = join(process.cwd(), "synthetic-repository");
@@ -101,7 +105,7 @@ test("external imports preserve incomplete evidence without creating assessed fi
       input.findings[index].source_finding_id,
     ];
     assert.deepEqual(finding, {
-      id: `ext_${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`,
+      id: `ext_${hash("sha256", JSON.stringify(identity))}`,
       repository,
       provider: input.provider,
       sourceKey: input.sourceKey,
@@ -144,7 +148,17 @@ test("repeat imports keep identities and unchanged timestamps; changed evidence 
     ],
   };
   const replay = storeExternalFindings(database, reordered, updated);
+  assert.notEqual(replay.importId, first.importId);
+  assert.deepEqual(
+    listExternalFindings(database, { repository, importId: replay.importId }),
+    {
+      read: 1,
+      excluded: [],
+      findings: [first.findings[0]],
+    },
+  );
   assert.deepEqual(replay, {
+    importId: replay.importId,
     findings: [first.findings[0]],
     counts: { created: 0, updated: 0, unchanged: 1 },
   });
@@ -221,11 +235,87 @@ test("a large mixed import and its replay return every stored row in input order
   });
   const changes = database.prepare("SELECT total_changes() AS writes");
   const beforeReplay = changes.get()!.writes;
-  assert.deepEqual(storeExternalFindings(database, mixed, created), {
+  const replay = storeExternalFindings(database, mixed, created);
+  assert.deepEqual(replay, {
+    importId: replay.importId,
     findings: result.findings,
     counts: { created: 0, updated: 0, unchanged: 513 },
   });
-  assert.equal(changes.get()!.writes, beforeReplay);
+  for (const selection of [
+    { importId: replay.importId },
+    { findings: replay.findings },
+  ])
+    assert.deepEqual(
+      listExternalFindings(database, { repository, ...selection }).findings,
+      result.findings,
+    );
+  // Only the import and its membership were written; finding evidence stays untouched.
+  assert.equal(
+    Number(changes.get()!.writes) - Number(beforeReplay),
+    result.findings.length + 1,
+  );
+});
+
+test("stored selections retain run context, isolate repositories and reject stale evidence or provenance", (t) => {
+  const database = open(t);
+  const input = batch();
+  input.provenance = {
+    sourceRepositories: [{ url: "https://example.com/team/repo" }],
+  };
+  input.read = 3;
+  input.excluded = [
+    { position: 3, source_finding_id: null, reason: "missing ID" },
+  ];
+  input.report = { run: "scanner/run/1" };
+  const first = storeExternalFindings(database, input, created);
+  const expected = first.findings.map((f) => ({
+    ...f,
+    provenance: input.provenance,
+  }));
+  const select = (
+    choice: Omit<External.ExternalFindingSelection, "repository">,
+    checkout = repository,
+  ) => listExternalFindings(database, { repository: checkout, ...choice });
+  const asImport = { importId: first.importId };
+  const refs = first.findings
+    .toReversed()
+    .map(({ id, version }) => ({ id, version }));
+  const asVersions = { findings: refs };
+  assert.deepEqual(select(asImport), {
+    read: 3,
+    excluded: input.excluded,
+    report: input.report,
+    findings: expected,
+  });
+  assert.deepEqual(select(asVersions).findings, expected.toReversed());
+  assert.throws(() => select({ findings: [refs[0], refs[0]] }), /once/u);
+  const foreign = join(repository, "other");
+  assert.throws(() => select(asImport, foreign), /selected repository/u);
+  assert.throws(() => select(asVersions, foreign), /missing/u);
+  assert.deepEqual(
+    listExternalImports(database, { repository: foreign }).imports,
+    [],
+  );
+  const latest = storeExternalFindings(
+    database,
+    { ...input, provenance: undefined },
+    updated,
+  );
+  assert.equal(latest.counts.updated, 2);
+  assert.throws(() => select(asImport), /has changed/u);
+  assert.throws(() => select(asVersions), /has changed/u);
+  assert.deepEqual(
+    listExternalImports(database, { repository }).imports.map((row) => ({
+      ...row,
+    })),
+    [latest, first].map((x) => ({
+      importId: x.importId,
+      createdAt: x.findings[0].updatedAt,
+      provider: input.provider,
+      sourceKey: input.sourceKey,
+      count: 2,
+    })),
+  );
 });
 
 test("repository, provider and source namespaces keep distinct finding identities", (t) => {
@@ -256,11 +346,39 @@ test("repository, provider and source namespaces keep distinct finding identitie
   );
 });
 
+test("reordering a scope's repository bindings keeps the same revision", (t) => {
+  const database = open(t);
+  const input = batch();
+  const refs = [
+    { url: "https://example.com/A" },
+    { url: "https://example.com/B" },
+  ];
+  const mappings: [string, string][] = [
+    ["arn:A", refs[0].url],
+    ["arn:B", refs[1].url],
+  ];
+  input.provenance = {
+    sourceRepositories: refs,
+    inspectorProjectMap: mappings,
+  };
+  storeExternalFindings(database, input, created);
+  input.provenance = {
+    sourceRepositories: refs.toReversed(),
+    inspectorProjectMap: mappings.toReversed(),
+  };
+  assert.deepEqual(storeExternalFindings(database, input, updated).counts, {
+    created: 0,
+    updated: 0,
+    unchanged: 2,
+  });
+});
+
 test("invalid batches and failed writes preserve all previously stored evidence", (t) => {
   const database = open(t);
   const input = batch();
   storeExternalFindings(database, input, created);
   const before = listExternalFindings(database, { repository });
+  const beforeImports = listExternalImports(database, { repository });
   const duplicate = {
     ...input,
     findings: [
@@ -297,7 +415,55 @@ test("invalid batches and failed writes preserve all previously stored evidence"
       /synthetic write failure/u,
     );
     assert.deepEqual(listExternalFindings(database, { repository }), before);
+    assert.deepEqual(
+      listExternalImports(database, { repository }),
+      beforeImports,
+    );
   }
+});
+
+test("receipt links retain the actually published revision and replay idempotently", (t) => {
+  const database = open(t);
+  const imported = storeExternalFindings(database, batch(), created);
+  const { id, version } = imported.findings[0];
+  const destination = {
+    cloudApiUrl: "https://service.example",
+    accountId: "account",
+    destinationId: "repo-id",
+  };
+  const receipt: Publications.ExternalPublicationLinks["entries"][number] = {
+    id,
+    version,
+    receiptId: "receipt-1",
+    outcome: "created",
+    cloudFindingId: "remote-id",
+  };
+  const record = (
+    ...entries: Publications.ExternalPublicationLinks["entries"]
+  ) =>
+    recordExternalFindingPublications(
+      database,
+      { repository, ...destination, entries },
+      updated,
+    ).recorded;
+  const read = (checkout = repository) =>
+    listExternalFindingPublications(database, { repository: checkout })
+      .publications;
+
+  const replacement = batch();
+  replacement.findings[0].evidence = { title: "New revision while uploading" };
+  storeExternalFindings(database, replacement, updated);
+  assert.throws(
+    () => record(receipt, { ...receipt, version: 99 }),
+    /No finding/u,
+  );
+  assert.deepEqual(read(), []);
+  assert.equal(record(receipt), 1);
+  assert.equal(record(receipt), 0);
+  assert.deepEqual(read(), [
+    { ...receipt, ...destination, createdAt: updated },
+  ]);
+  assert.deepEqual(read(join(repository, "other")), []);
 });
 
 test("a Python database at the preceding schema upgrades in Node and remains readable in Python", async () => {
