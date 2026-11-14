@@ -169,7 +169,6 @@ export async function prepareEval(
     `Repository and authorized scope: ${repo}, all current files.`,
     `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
     `For this generated read-only fixture, the caller handles policy discovery. It checked the root and every nested directory. Apply inherited policy using this complete list of repository-relative SECURITY.md files: ${JSON.stringify(policyFiles)}. The fixture has no plugin helper.`,
-    ...(externalTokenScanner ? [fixture.files["SECURITY.md"].trim()] : []),
     "User security context: none. Supplied threat model: none. Knowledge base: none.",
     "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
     "This caller has no scan tools. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",

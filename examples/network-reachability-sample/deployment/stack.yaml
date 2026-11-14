@@ -1,0 +1,440 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Synthetic network reachability benchmark with identical private RCE workers
+
+Parameters:
+  ArtifactBucket:
+    Type: String
+  GatewayKey:
+    Type: String
+  WorkerKey:
+    Type: String
+  ContinuumExternalId:
+    Type: String
+    NoEcho: true
+  ContinuumEnvironmentArn:
+    Type: String
+    Default: ""
+  ContinuumCollectorArn:
+    Type: String
+    Default: ""
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  InstanceType:
+    Type: String
+    Default: t3.micro
+
+Conditions:
+  HasCollectorAssociation: !And
+    - !Not [!Equals [!Ref ContinuumEnvironmentArn, ""]]
+    - !Not [!Equals [!Ref ContinuumCollectorArn, ""]]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.80.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.80.0.0/24
+      MapPublicIpOnLaunch: true
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.80.1.0/24
+      MapPublicIpOnLaunch: false
+
+  AclPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.80.2.0/24
+      MapPublicIpOnLaunch: false
+
+  PublicRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRoutes
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRoutes
+
+  PrivateRoutes:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PrivateRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRoutes
+
+  AclPrivateRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AclPrivateSubnet
+      RouteTableId: !Ref PrivateRoutes
+
+  AclPrivateNetworkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref Vpc
+
+  AclPrivateNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref AclPrivateSubnet
+      NetworkAclId: !Ref AclPrivateNetworkAcl
+
+  AclDenyGatewayHttp:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref AclPrivateNetworkAcl
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: deny
+      Egress: false
+      CidrBlock: 10.80.0.0/24
+      PortRange:
+        From: 8080
+        To: 8080
+
+  AclAllowOtherIngress:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref AclPrivateNetworkAcl
+      RuleNumber: 200
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+
+  AclAllowEgress:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref AclPrivateNetworkAcl
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRoutes
+
+  GatewaySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public benchmark gateway
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  OpenWorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Worker accepts HTTP from gateway security group
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref GatewaySecurityGroup
+
+  BlockedWorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Worker with no inbound access
+      VpcId: !Ref Vpc
+      SecurityGroupIngress: []
+
+  AclBlockedWorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Worker whose security group allows the gateway but network ACL denies it
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref GatewaySecurityGroup
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadBenchmarkSources
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/${GatewayKey}
+                  - !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/${WorkerKey}
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  ContinuumIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /continuum/integrations/
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: continuum.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ContinuumExternalId
+      Policies:
+        - PolicyName: SourceBucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ArtifactBucket}/nr/*
+
+  ContinuumCollectorDataAccessRole:
+    Type: AWS::IAM::Role
+    Condition: HasCollectorAssociation
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: continuum.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Ref ContinuumEnvironmentArn
+      Policies:
+        - PolicyName: CollectorDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: continuum:GetCollectorDataAccessAuthorization
+                Resource: !Ref ContinuumCollectorArn
+
+  OpenWorker:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - S3Endpoint
+      - PrivateRouteAssociation
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref OpenWorkerSecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          mkdir -p /opt/reachability
+          aws s3 cp s3://${ArtifactBucket}/${WorkerKey} /tmp/worker.zip
+          python3 -m zipfile -e /tmp/worker.zip /opt/reachability
+          cat > /etc/systemd/system/reachability.service <<'UNIT'
+          [Unit]
+          Description=Synthetic reachability worker
+          After=network-online.target
+          [Service]
+          Environment=ENABLE_DIAGNOSTIC=0
+          ExecStart=/usr/bin/python3 /opt/reachability/worker.py
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now reachability.service
+
+  BlockedWorker:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - S3Endpoint
+      - PrivateRouteAssociation
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref BlockedWorkerSecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          mkdir -p /opt/reachability
+          aws s3 cp s3://${ArtifactBucket}/${WorkerKey} /tmp/worker.zip
+          python3 -m zipfile -e /tmp/worker.zip /opt/reachability
+          cat > /etc/systemd/system/reachability.service <<'UNIT'
+          [Unit]
+          Description=Synthetic reachability worker
+          After=network-online.target
+          [Service]
+          Environment=ENABLE_DIAGNOSTIC=0
+          ExecStart=/usr/bin/python3 /opt/reachability/worker.py
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now reachability.service
+
+  AclBlockedWorker:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - S3Endpoint
+      - AclPrivateRouteAssociation
+      - AclPrivateNetworkAclAssociation
+      - AclDenyGatewayHttp
+      - AclAllowOtherIngress
+      - AclAllowEgress
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref AclPrivateSubnet
+      SecurityGroupIds:
+        - !Ref AclBlockedWorkerSecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          mkdir -p /opt/reachability
+          aws s3 cp s3://${ArtifactBucket}/${WorkerKey} /tmp/worker.zip
+          python3 -m zipfile -e /tmp/worker.zip /opt/reachability
+          cat > /etc/systemd/system/reachability.service <<'UNIT'
+          [Unit]
+          Description=Synthetic reachability worker
+          After=network-online.target
+          [Service]
+          Environment=ENABLE_DIAGNOSTIC=0
+          ExecStart=/usr/bin/python3 /opt/reachability/worker.py
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now reachability.service
+
+  Gateway:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - PublicDefaultRoute
+      - PublicRouteAssociation
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref GatewaySecurityGroup
+      MetadataOptions:
+        HttpTokens: required
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          mkdir -p /opt/reachability
+          aws s3 cp s3://${ArtifactBucket}/${GatewayKey} /tmp/gateway.zip
+          python3 -m zipfile -e /tmp/gateway.zip /opt/reachability
+          cat > /etc/systemd/system/reachability.service <<'UNIT'
+          [Unit]
+          Description=Synthetic public reachability gateway
+          After=network-online.target
+          [Service]
+          Environment=OPEN_WORKER_HOST=${OpenWorker.PrivateIp}
+          Environment=BLOCKED_WORKER_HOST=${BlockedWorker.PrivateIp}
+          Environment=ACL_BLOCKED_WORKER_HOST=${AclBlockedWorker.PrivateIp}
+          ExecStart=/usr/bin/python3 /opt/reachability/gateway.py
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+          systemctl daemon-reload
+          systemctl enable --now reachability.service
+
+Outputs:
+  GatewayUrl:
+    Value: !Sub http://${Gateway.PublicIp}:8080
+  GatewayInstanceId:
+    Value: !Ref Gateway
+  OpenWorkerInstanceId:
+    Value: !Ref OpenWorker
+  BlockedWorkerInstanceId:
+    Value: !Ref BlockedWorker
+  AclBlockedWorkerInstanceId:
+    Value: !Ref AclBlockedWorker
+  ContinuumIntegrationRoleArn:
+    Value: !GetAtt ContinuumIntegrationRole.Arn
+  ContinuumCollectorDataAccessRoleArn:
+    Condition: HasCollectorAssociation
+    Value: !GetAtt ContinuumCollectorDataAccessRole.Arn
