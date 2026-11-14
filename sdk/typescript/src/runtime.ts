@@ -759,11 +759,14 @@ function windowsAceAllowsAncestorReplacement(
 ): boolean {
   if (inheritanceFlags.has("IO")) return false;
   if (/^0x[\da-f]+$/iu.test(rights)) {
-    return (BigInt(rights) & 0x100d0040n) !== 0n;
+    const mask = BigInt(rights);
+    // FILE_GENERIC_WRITE is a composite. FILE_ADD_FILE alone only creates siblings.
+    return (mask & 0x500d0040n) !== 0n || (mask & 0x120116n) === 0x120116n;
   }
   // Rights tokens stay aligned to pairs of UTF-16 code units.
   for (const [right] of rights.matchAll(/[\s\S]{2}/g)) {
-    if (["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DC", "DT"].includes(right))
+    // SDDL DT is FILE_DELETE_CHILD (0x40). DC is FILE_ADD_FILE (0x2).
+    if (["FA", "GA", "FW", "GW", "SD", "WD", "WO", "DT"].includes(right))
       return true;
   }
   return false;
