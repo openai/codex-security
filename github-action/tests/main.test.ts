@@ -12,7 +12,7 @@ import { BlobClient } from '@azure/storage-blob';
 import { runAction } from '../src/main.ts';
 import { parse } from 'yaml';
 import { gitEnvironment } from '../src/targets.ts';
-import { runtimeEnvironment, type Runtime } from '../src/runtime.ts';
+import { runtimeEnvironment, type Runtime, type RuntimeOptions } from '../src/runtime.ts';
 import type { ProcessResult } from '../src/process.ts';
 import { copyCompletedScan } from './fixtures.ts';
 
@@ -108,6 +108,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
   t.after(() => { core.summary.emptyBuffer(); });
   let capturedArgs: readonly string[] = [];
   let capturedEnvironment: NodeJS.ProcessEnv = {};
+  let capturedSetupOptions: RuntimeOptions | undefined;
   async function reports(): Promise<void> {
     await copyCompletedScan(runtime.resultsDirectory);
     const manifestPath = join(runtime.resultsDirectory, 'scan-manifest.json');
@@ -153,7 +154,7 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
       try {
         process.exitCode = 0;
         await runAction(root, {
-          setupRuntime: async (options) => { setups++; options.log?.('Synthetic provisioning output.'); await configuration.prepare?.(); await reports(); return runtime; },
+          setupRuntime: async (options) => { setups++; capturedSetupOptions = options; options.log?.('Synthetic provisioning output.'); await configuration.prepare?.(); await reports(); return runtime; },
           cleanupRuntime: async () => { cleanups++; if (configuration.cleanupFails) throw new Error('Synthetic cleanup failure'); },
           runProcess: async (_executable, args, options): Promise<ProcessResult> => {
             processes++; capturedArgs = args; capturedEnvironment = options.env;
@@ -167,10 +168,26 @@ async function harness(t: TestContext, scenario: Scenario = 'schedule', serverUr
         exitCode = process.exitCode;
       } finally { process.stdout.write = originalWrite; process.exitCode = previousExitCode; }
       return { exitCode, setups, processes, cleanups, summary, args: capturedArgs, environment: capturedEnvironment,
+        setupOptions: capturedSetupOptions,
         outputs: outputValues(await readFile(outputPath, 'utf8')), logs: logs.join('') };
     },
   };
 }
+
+test('runner npm configuration is captured only with explicit opt-in', async t => {
+  const app = await harness(t);
+  process.env.NPM_CONFIG_USERCONFIG = '/runner/trusted/npmrc';
+  process.env.NODE_EXTRA_CA_CERTS = '/runner/trusted/ca.pem';
+  let result = await app.run();
+  assert.equal(result.setupOptions?.runnerNpmConfig, undefined);
+
+  app.setInput('use-runner-npm-config', 'true');
+  result = await app.run();
+  assert.deepEqual(result.setupOptions?.runnerNpmConfig, {
+    userConfig: '/runner/trusted/npmrc',
+    extraCaCerts: '/runner/trusted/ca.pem',
+  });
+});
 
 test('PR severity failure retains SARIF outputs despite unrelated scope notes', async (t) => {
   const app = await harness(t, 'pr'); app.setInput('fail-on-severity', 'high'); app.configure({ exitCode: 1, scanResult: value => {
