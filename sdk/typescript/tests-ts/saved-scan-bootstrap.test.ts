@@ -959,7 +959,7 @@ test.skipIf(process.platform === "win32")(
         ...options,
         environment: { ...options.environment, PYTHON: "python3" },
       });
-      return workbench(["get-scan", "--scan-id", scanId]);
+      return workbench(["get-scan", "--scan-id", scanId, "--metadata-only"]);
     }
     expect((await getById())["scan"]).toMatchObject({ scanId });
     expect(existsSync(pythonProbe)).toBe(false);
@@ -1833,7 +1833,12 @@ for (const kind of ["missing", "symlinked"] as const) {
           pluginRoot: PLUGIN_ROOT,
           currentDirectory: f.root,
         });
-        const result = workbench(["get-scan", "--scan-id", scanId]);
+        const result = workbench([
+          "get-scan",
+          "--scan-id",
+          scanId,
+          "--metadata-only",
+        ]);
         if (source === "PYTHON")
           await expect(result).rejects.toThrow(
             "PYTHON interpreter is unavailable or unusable",
