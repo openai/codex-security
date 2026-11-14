@@ -22,6 +22,8 @@ describe("GitLab patch destinations", () => {
       [
         "fork HTTPS",
         "fork SSH",
+        "self-managed SSH alias fork",
+        "self-managed IPv6 SSH alias fork",
         "same project",
         "local fetch",
         "different port mirror",
@@ -33,6 +35,7 @@ describe("GitLab patch destinations", () => {
         "implicit SSH default port fork",
         "distinct SSH transport ports fork",
         "git+ssh transport port fork",
+        "ssh+git transport port fork",
       ].map((mode) => ({
         mode,
         resume,
@@ -57,10 +60,19 @@ describe("GitLab patch destinations", () => {
     async ({ mode, resume }) => {
       const { directory, git, remote } = await publicationRepository(fixtures);
       const portCase = mode.includes("port");
-      const host =
-        mode === "self-managed fork" || portCase
+      const alias = mode.endsWith("SSH alias fork");
+      const ipv6 = mode === "self-managed IPv6 SSH alias fork";
+      const host = ipv6
+        ? "[2001:db8::1]"
+        : mode === "self-managed fork" || alias || portCase
           ? "gitlab.example.test"
           : "gitlab.com";
+      const sshScheme =
+        mode === "git+ssh transport port fork"
+          ? "git+ssh"
+          : mode === "ssh+git transport port fork"
+            ? "ssh+git"
+            : undefined;
       const explicitDefault = mode.startsWith("explicit");
       const protocol = mode === "explicit HTTP port fork" ? "http" : "https";
       const fetchPort = explicitDefault
@@ -83,12 +95,11 @@ describe("GitLab patch destinations", () => {
             ? `ssh://git@${host}/example/repository.git`
             : mode === "distinct SSH transport ports fork"
               ? `ssh://git@${host}:2222/example/repository.git`
-              : mode === "git+ssh transport port fork"
-                ? `git+ssh://git@${host}:2222/example/repository.git`
+              : sshScheme
+                ? `${sshScheme}://git@${host}:2222/example/repository.git`
                 : `${protocol}://${host}${fetchPort}/example/repository.git`;
       const fork =
-        mode === "explicit SSH default port fork" ||
-        mode === "git+ssh transport port fork"
+        mode === "explicit SSH default port fork" || sshScheme
           ? `git@${host}:synthetic-user/repository.git`
           : mode === "implicit SSH default port fork"
             ? `ssh://git@${host}:22/synthetic-user/repository.git`
@@ -97,8 +108,9 @@ describe("GitLab patch destinations", () => {
               : `${protocol}://${host}${pushPort}/synthetic-user/repository.git`;
       const sameProject = mode.startsWith("same project");
       const localFetch = mode === "local fetch" || mode === "file fetch";
-      const push =
-        mode === "fork credentials"
+      const push = alias
+        ? "git@gitlab-work:synthetic-user/repository.git"
+        : mode === "fork credentials"
           ? "https://synthetic-user:synthetic-token@gitlab.com/synthetic-user/repository.git"
           : mode === "fork SSH"
             ? "git@gitlab.com:synthetic-user/repository.git"
@@ -108,8 +120,7 @@ describe("GitLab patch destinations", () => {
                 ? upstream
                 : fork;
       const source =
-        mode === "explicit SSH default port fork" ||
-        mode === "git+ssh transport port fork"
+        mode === "explicit SSH default port fork" || sshScheme || alias
           ? `ssh://git@${host}/synthetic-user/repository.git`
           : mode === "fork credentials"
             ? fork
@@ -118,6 +129,14 @@ describe("GitLab patch destinations", () => {
               : push;
       const mirror = mode.endsWith("mirror");
       const target = localFetch || mirror ? source : upstream;
+      const sshConfig = alias
+        ? join(await fixtures.create("gitlab-ssh-config-"), "config")
+        : undefined;
+      if (sshConfig)
+        await writeFile(
+          sshConfig,
+          `Host gitlab-work\n  Hostname ${ipv6 ? "2001:0db8:0:0:0:0:0:1" : host}\n`,
+        );
       const sourceId = sameProject ? 11 : 22;
       const targetId = localFetch || mirror ? sourceId : 11;
       git(
@@ -161,8 +180,15 @@ describe("GitLab patch destinations", () => {
           : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
-          environment:
-            mode === "self-managed fork" || portCase
+          environment: sshConfig
+            ? {
+                GITLAB_HOST: host,
+                GIT_SSH_COMMAND:
+                  "ssh -F '" +
+                  sshConfig.replaceAll("\\", "/").replaceAll("'", "'\\''") +
+                  "'",
+              }
+            : mode === "self-managed fork" || portCase
               ? { GITLAB_HOST: host }
               : {},
           onWorkbench: () =>

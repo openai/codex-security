@@ -1041,6 +1041,22 @@ test.each(["common-disabled", "enabled-correct", "enabled-rebound"])(
     else expect(await result).toBe(await realpath(linked));
   },
 );
+
+test.skipIf(process.platform === "win32")(
+  "protects the enclosing checkout when a saved component becomes a symlink loop",
+  async () => {
+    const repo = await repository();
+    const component = join(repo, "component");
+    await symlink("component", component);
+    expect(await gitProtectionRoots(component)).toContain(repo);
+    await expect(
+      gitMarkerRoot(component, undefined, "nearest"),
+    ).rejects.toMatchObject({
+      code: "ELOOP",
+    });
+  },
+);
+
 test("ordinary storage folders with malformed config are not Git metadata", async () => {
   const root = await temporaryDirectory();
   await mkdir(join(root, "objects"));
@@ -1085,4 +1101,21 @@ test("executable protection retains lexical and canonical checkout roots", async
   expect(await gitProtectionRoots(join(alias, "missing", "child"))).toEqual(
     expect.arrayContaining([lexical, canonical]),
   );
+});
+
+test("executable protection follows native parent traversal before finding Git roots", async () => {
+  const stored = await repository("stored");
+  const physical = await repository("physical");
+  const link = join(stored, "child");
+  await symlink(
+    join(physical, "src"),
+    link,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const expected = process.platform === "win32" ? [stored] : [physical, stored];
+  for (const suffix of [".git", "missing/child"]) {
+    expect((await gitProtectionRoots(`${link}/../${suffix}`)).sort()).toEqual(
+      expected.toSorted(),
+    );
+  }
 });

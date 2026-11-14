@@ -27,6 +27,122 @@ const runCommand: typeof runGitRepositoryCommand = (
       ? "[]"
       : "https://github.example.test/example/repository/pull/1";
 
+test.each(["issue", "saved"] as const)(
+  "publishes a materialized tracked file outside the sparse checkout for a %s patch",
+  async (mode) => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    git("config", "core.autocrlf", "true");
+    const outside = join(directory, "outside");
+    const file = join(outside, "finding.ts");
+    await mkdir(outside);
+    await writeFile(file, "original\n");
+    git("add", "outside/finding.ts");
+    git("commit", "-m", "Add tracked source outside the cone");
+    const parent = git("rev-parse", "HEAD");
+    git("sparse-checkout", "set", "--cone", "src");
+    expect(git("ls-files", "-t", "outside/finding.ts")).toBe(
+      "S outside/finding.ts",
+    );
+    await expect(readFile(file)).rejects.toMatchObject({ code: "ENOENT" });
+    git(
+      "checkout-index",
+      "--index",
+      "--ignore-skip-worktree-bits",
+      "--",
+      "outside/finding.ts",
+    );
+    expect(git("--no-optional-locks", "status", "--porcelain")).toBe("");
+    const selection =
+      mode === "issue" ? ["Synthetic issue"] : ["--scan", "scan-1"];
+    const result = await runWorkflow(
+      ["patch", ...selection, "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onRepositoryCommand: runCommand,
+        onCodex: async (_args, output) => {
+          await writeFile(file, "fixed\n");
+          output!.stdout.write(
+            mode === "issue"
+              ? "Fixed the issue."
+              : JSON.stringify({
+                  patches: [
+                    {
+                      occurrenceId: "occ_1",
+                      status: "verified",
+                      files: ["outside/finding.ts"],
+                      verification: "Checked the edited file.",
+                    },
+                  ],
+                }),
+          );
+          return 0;
+        },
+      },
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const remoteGit = repositoryGit(remote);
+    const tip = remoteGit("for-each-ref", "--format=%(objectname)");
+    expect(remoteGit("show", `${tip}:outside/finding.ts`)).toBe("fixed");
+    expect(remoteGit("rev-parse", `${tip}^`)).toBe(parent);
+  },
+);
+
+test.skipIf(process.platform !== "linux")(
+  "publishes both supplied-issue edits when a raw path has a Unicode alias",
+  async () => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    const name = Buffer.from([0x72, 0xff]);
+    const raw = Buffer.concat([Buffer.from(directory + "/"), name]);
+    const alias = join(directory, "r\ufffd");
+    await writeFile(raw, "raw before\n");
+    await writeFile(alias, "alias before\n");
+    git("add", "--all");
+    git("commit", "-m", "Synthetic byte-path baseline");
+    const result = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onRepositoryCommand: runCommand,
+        onCodex: async (_args, output) => {
+          await writeFile(raw, "raw after\n");
+          await writeFile(alias, "alias after\n");
+          output!.stdout.write("Fixed both files.");
+          return 0;
+        },
+      },
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    const tip = repositoryGit(remote)("for-each-ref", "--format=%(objectname)");
+    const entries = Buffer.from(
+      await runGitRepositoryCommand("git", ["ls-tree", "-z", tip], remote, {
+        encoding: "base64",
+      }),
+      "base64",
+    )
+      .toString("latin1")
+      .split("\0");
+    for (const [path, expected] of [
+      [name, "raw after"],
+      [Buffer.from("r\ufffd"), "alias after"],
+    ] as const) {
+      const entry = entries.find((record) =>
+        record.endsWith("\t" + path.toString("latin1")),
+      );
+      expect(entry).toBeDefined();
+      expect(
+        repositoryGit(remote)(
+          "cat-file",
+          "blob",
+          entry!.split("\t")[0]!.split(" ")[2]!,
+        ),
+      ).toBe(expected);
+    }
+    expect(git("status", "--porcelain")).toBe("");
+  },
+);
+
 test.skipIf(process.platform !== "linux").each([false, true])(
   "checks ignored content at a raw publication path (copied: %p)",
   async (copied) => {

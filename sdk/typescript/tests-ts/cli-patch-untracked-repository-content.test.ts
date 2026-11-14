@@ -15,13 +15,82 @@ import {
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
+for (const copied of [false, true]) {
+  test(`preserves staged-only content during publication, copied: ${copied}`, async () => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    const file = join(directory, "unrelated.txt");
+    const baseline = "Committed fixture baseline\n";
+    const marker = "Synthetic staged-only content\n";
+    await writeFile(file, baseline);
+    git("add", "--", "unrelated.txt");
+    git("commit", "-m", "Add independent fixture file");
+    await writeFile(file, marker);
+    git("add", "--", "unrelated.txt");
+    await writeFile(file, baseline);
+    const head = git("rev-parse", "HEAD");
+    let pushes = 0;
+    const result = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", directory),
+        onCodex: async (_args, output) => {
+          await writeFile(
+            join(directory, "selected.txt"),
+            copied ? marker : "Independent change\n",
+          );
+          output!.stdout.write(
+            JSON.stringify({
+              patches: [
+                {
+                  occurrenceId: "occ_1",
+                  status: "verified",
+                  files: ["selected.txt"],
+                  verification: "Synthetic verification.",
+                },
+              ],
+            }),
+          );
+          return 0;
+        },
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command === "git") {
+            if (args.includes("push")) {
+              pushes++;
+              if (copied)
+                throw new Error("Unexpected publication of staged content");
+            }
+            return runGitRepositoryCommand(command, args, cwd, options);
+          }
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        },
+      },
+    );
+    expect(git("show", ":unrelated.txt")).toBe(marker.trim());
+    expect(await readFile(file, "utf8")).toBe(baseline);
+    expect(pushes).toBe(copied ? 0 : 1);
+    expect(result.exitCode, result.stderr).toBe(copied ? 2 : 0);
+    if (copied) {
+      expect(result.stderr).toContain("pre-existing staged content");
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(repositoryGit(remote)("for-each-ref")).toBe("");
+    }
+  });
+}
+
 for (const kind of [
   "untracked",
   "ignored",
   "metadata",
+  "Subversion working copy",
   "ignored metadata",
   "committed",
   "initialized submodule",
+  "untracked file in initialized submodule",
+  "tracked edit in initialized submodule",
   "raw",
   "scrubbed",
   "directory link",
@@ -45,11 +114,22 @@ for (const kind of [
         nestedGit("config", "user.name", "Synthetic User");
         nestedGit("config", "user.email", "synthetic@example.test");
         nestedGit("config", "commit.gpgsign", "false");
-        await writeFile(join(nested, ".gitignore"), "local.txt\n");
+        const trackedEdit = kind === "tracked edit in initialized submodule";
+        const ordinarySubmoduleFile =
+          kind === "untracked file in initialized submodule";
+        await writeFile(
+          join(nested, ".gitignore"),
+          ordinarySubmoduleFile ? "different.txt\n" : "local.txt\n",
+        );
         nestedGit("add", ".gitignore");
         nestedGit("commit", "-m", "Synthetic nested baseline");
         let content = "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
         let source: string | Buffer = join(nested, "local.txt");
+        if (kind === "Subversion working copy") {
+          await mkdir(join(nested, ".svn"));
+          source = join(nested, ".svn", "wc.db");
+          content = "SQLite format 3\0SYNTHETIC_PRIVATE_WORKING_COPY_DATA\n";
+        }
         if (kind.endsWith("metadata")) {
           nestedGit(
             "config",
@@ -78,11 +158,14 @@ for (const kind of [
           );
           source = join(nested, "linked", "local.txt");
         } else await writeFile(source, content);
-        if (kind === "committed") {
+        if (kind === "committed" || trackedEdit) {
+          if (trackedEdit)
+            await writeFile(source, "Committed fixture baseline\n");
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
+          if (trackedEdit) await writeFile(source, content);
         }
-        if (kind === "initialized submodule") {
+        if (kind.endsWith("initialized submodule")) {
           const childRemote = await fixtures.create(
             "publication-child-origin-",
           );
@@ -104,6 +187,11 @@ for (const kind of [
           expect(
             git("ls-files", "--others", "--ignored", "--exclude-standard"),
           ).toBe("");
+          if (ordinarySubmoduleFile) {
+            expect(
+              nestedGit("ls-files", "--others", "--exclude-standard"),
+            ).toBe("local.txt");
+          }
         }
         const copiedPrivateContent = copied && kind !== "directory link";
         const blocked = copiedPrivateContent || kind === "scrubbed";
@@ -112,7 +200,9 @@ for (const kind of [
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
           kind.startsWith("ignored") || kind === "initialized submodule"
             ? ""
-            : "?? nested/",
+            : ordinarySubmoduleFile || trackedEdit
+              ? "M nested"
+              : "?? nested/",
         );
         const head = git("rev-parse", "HEAD");
         const nestedHead = nestedGit("rev-parse", "HEAD");
@@ -139,7 +229,11 @@ for (const kind of [
               savedScan(resultWithFindings(["high"]), "scan-1", directory),
             onRepositoryCommand: (command, args, cwd, options) => {
               if (command === "git") {
-                if (args.includes("push")) pushes++;
+                if (args.includes("push")) {
+                  pushes++;
+                  if ((ordinarySubmoduleFile || trackedEdit) && copied)
+                    throw new Error("Unexpected push of pre-existing content");
+                }
                 return runGitRepositoryCommand(command, args, cwd, options);
               }
               if (args[1] === "create") creations++;

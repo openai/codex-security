@@ -7,6 +7,7 @@ import {
   rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";
@@ -31,6 +32,47 @@ describe("CodexSecurity finding validation", () => {
     persistedValidationClient,
     temporaryDirectory,
   } = createValidationFixtures();
+
+  for (const sourceOwned of [false, true]) {
+    test(`validates knowledge directory links against the traversed repository (source-owned=${sourceOwned})`, async () => {
+      const fixture = await validationClient();
+      await using client = fixture.client;
+      const spelling = join(fixture.root, "spelling");
+      const child = join(fixture.root, "child");
+      const documents = join(fixture.root, "documents");
+      await Promise.all([mkdir(spelling), mkdir(child), mkdir(documents)]);
+      await symlink(child, join(spelling, "jump"), "junction");
+      const lexical = join(spelling, "repository");
+      if (sourceOwned || process.platform === "win32") {
+        await mkdir(lexical);
+        execFileSync("git", ["init", "--quiet", lexical]);
+      }
+      const repository =
+        process.platform === "win32" ? lexical : fixture.options.repositoryPath;
+      const alias = join(sourceOwned ? repository : spelling, "knowledge");
+      await symlink(documents, alias, "junction");
+      await writeFile(
+        join(documents, "policy.md"),
+        "Synthetic operator guidance.",
+      );
+      const result = client.validate({
+        ...fixture.options,
+        repositoryPath: `${spelling}/jump/../repository`,
+        knowledgeBasePaths: [join(alias, "policy.md")],
+      });
+      if (sourceOwned) {
+        await expect(result).rejects.toThrow(
+          "repository directory links outside the selected repository",
+        );
+        expect(fixture.captured.thread).toBeUndefined();
+      } else {
+        await expect(result).resolves.toMatchObject(assessment);
+        expect(fixture.captured.codex?.env?.["CODEX_SECURITY_REPOSITORY"]).toBe(
+          await fsPromises.realpath(repository),
+        );
+      }
+    });
+  }
 
   test("invalidates cached validation when inline instructions change", async () => {
     let modelCalls = 0;

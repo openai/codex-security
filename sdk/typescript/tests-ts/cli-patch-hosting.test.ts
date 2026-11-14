@@ -10,7 +10,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join, relative } from "node:path";
+import { delimiter, dirname, join, parse, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -821,12 +821,16 @@ exit 1
   test.each(
     [false, true].flatMap((resume) =>
       ["github.com", "gitlab.com"].flatMap((host) =>
-        [false, true].map((fileUrl) => ({ resume, host, fileUrl })),
+        [
+          "path",
+          "file-url",
+          ...(process.platform === "win32" ? ["drive-relative"] : []),
+        ].map((spelling) => ({ resume, host, spelling })),
       ),
     ),
   )(
-    "rejects all-local pushes with a hosted fetch URL: $host, resume=$resume, file=$fileUrl",
-    async ({ resume, host, fileUrl }) => {
+    "rejects all-local pushes with a hosted fetch URL: $host, resume=$resume, $spelling",
+    async ({ resume, host, spelling }) => {
       const { directory, git, remote } = await publicationRepository();
       git(
         "remote",
@@ -834,13 +838,14 @@ exit 1
         "origin",
         `https://${host}/example/repository.git`,
       );
-      git(
-        "remote",
-        "set-url",
-        "--push",
-        "origin",
-        fileUrl ? pathToFileURL(remote).href : remote,
-      );
+      let pushUrl = remote;
+      if (spelling === "file-url") pushUrl = pathToFileURL(remote).href;
+      if (spelling === "drive-relative") {
+        pushUrl = parse(remote).root.slice(0, 2) + relative(directory, remote);
+        expect(pushUrl).toMatch(/^[a-z]:[^\\/]/iu);
+        expect(git("ls-remote", pushUrl)).toBe("");
+      }
+      git("remote", "set-url", "--push", "origin", pushUrl);
       const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
       if (resume) {

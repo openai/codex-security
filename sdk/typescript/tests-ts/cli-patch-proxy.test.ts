@@ -90,7 +90,13 @@ test("one native push uses the configured proxy for each destination", async () 
     GITLAB_HOST: "127.0.0.1:1",
     PATH: external + delimiter + process.env["PATH"],
   };
-  git("config", "--file", system, "include.path", "operator.gitconfig");
+  git(
+    "config",
+    "--file",
+    system,
+    "includeIf.onbranch:main.path",
+    "operator.gitconfig",
+  );
   git("config", "--file", include, "patchFixture.original", "enabled");
   const branch = "codex-security/patch-scan-1";
   git("branch", branch);
@@ -137,6 +143,11 @@ exec git receive-pack ${literal}
           return args[1] === "create"
             ? "https://gitlab.example.test/team/repository/-/merge_requests/17"
             : "";
+        // Git versions before 2.42 do not expose this variable.
+        if (args[0] === "var" && args[1] === "GIT_CONFIG_SYSTEM")
+          throw Object.assign(new Error("usage: git var (-l | <variable>)"), {
+            status: 129,
+          });
         const bound = {
           ...options,
           environment: { ...environment, ...options?.environment },

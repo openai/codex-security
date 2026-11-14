@@ -179,6 +179,47 @@ describe("patch Git administration", () => {
     });
   }
 
+  test("checks an active origin against the include edge that supplied it", async () => {
+    const directory = await fixtures.create("patch-include-origin-");
+    const external = join(
+      await fixtures.create("operator-configuration-"),
+      "outside.gitconfig",
+    );
+    const inside = join(directory, "inside.gitconfig");
+    const git = repositoryGit(directory);
+    git("init", "--initial-branch=main");
+    await writeFile(external, "[fixture]\nvalue=outside\n");
+    await writeFile(inside, "[fixture]\nvalue=inside\n");
+    git("config", "include.path", external);
+    let switched = false;
+    const capture = () =>
+      capturePatchGitControls(
+        directory,
+        async (_root, checkout, args, options) => {
+          const result = await runGitRepositoryCommand(
+            "git",
+            args,
+            checkout,
+            options,
+          );
+          if (
+            !switched &&
+            args.includes("--list") &&
+            args.includes("--includes") &&
+            args.includes("--show-origin")
+          ) {
+            git("config", "include.path", inside);
+            switched = true;
+          }
+          return result;
+        },
+        false,
+      );
+    await expect(capture()).rejects.toThrow("include outside");
+    expect(switched).toBe(true);
+    expect(git("config", "--get", "fixture.value")).toBe("inside");
+  });
+
   for (const replacement of [false, true]) {
     test(`binds prepared cache directories before the patch turn (replacement: ${replacement})`, async () => {
       const repository = await fixtures.create("patch-prepared-cache-");
