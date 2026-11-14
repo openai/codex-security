@@ -138,7 +138,11 @@ for (const platform of ["win32", "linux"] as const) {
 test("snapshot Git keeps credentials out of checkout-filtered blobs and preserves ordinary settings", async () => {
   const cwd = await fixtures.create("patch-snapshot-credentials-");
   const env = {
-    ...process.env,
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => !/^(?:https?|all)_proxy$/iu.test(key),
+      ),
+    ),
     DOCKER_AUTH_CONFIG: JSON.stringify({
       auths: {
         "registry.example.test": { auth: "synthetic-registry-credential" },
@@ -146,6 +150,9 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
     }),
     DATABASE_URL: "postgresql://fixture:synthetic@db.example.test/fixture",
     SNAPSHOT_USER_SETTING: "preserved",
+    HTTP_PROXY: "http://fixture:synthetic@proxy.example.test:8080",
+    https_proxy: "https://fixture:synthetic@proxy.example.test",
+    ALL_PROXY: "socks5://proxy.example.test:1080#note@proxy.example.test",
   };
   const git = (...args: string[]) =>
     execFileSync("git", args, { cwd, env, encoding: "utf8" });
@@ -159,8 +166,8 @@ test("snapshot Git keeps credentials out of checkout-filtered blobs and preserve
     join(cwd, "filter.cjs"),
     `const input = require("node:fs").readFileSync(0, "utf8");
 process.stdout.write(JSON.stringify({
-  input, setting: process.env.SNAPSHOT_USER_SETTING,
-  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL"].filter(key => key in process.env),
+  input, setting: process.env.SNAPSHOT_USER_SETTING, proxy: process.env.ALL_PROXY,
+  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
 }));`,
   );
   const add = [
@@ -170,11 +177,20 @@ process.stdout.write(JSON.stringify({
     "--",
     "candidate.txt",
   ];
-  const expected = { input: "safe patch\n", setting: "preserved" };
+  const expected = {
+    input: "safe patch\n",
+    setting: "preserved",
+    proxy: env.ALL_PROXY,
+  };
   git(...add);
   expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
     ...expected,
-    credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL"],
+    credentialKeys: [
+      "DOCKER_AUTH_CONFIG",
+      "DATABASE_URL",
+      "HTTP_PROXY",
+      "https_proxy",
+    ],
   });
 
   git("read-tree", "--empty");

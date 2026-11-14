@@ -995,14 +995,14 @@ test("snapshot binding frames retain raw stdin and unset semantics while native 
   await writeFile(
     join(home, "config.toml"),
     windows +
-      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nGH_TOKEN="synthetic-policy-github"\nPGPASSWORD="synthetic-policy-password"\nDATABASE_URL="postgresql://fixture:synthetic@db.example.test/policy"\ngitlab_token="synthetic-policy-gitlab"\nAWS_SESSION_TOKEN="synthetic-policy-session"\nAWS_CONTAINER_AUTHORIZATION_TOKEN="synthetic-container-token"\nSNAPSHOT_USER_SET="preserved"\n',
+      '[shell_environment_policy]\ninherit="all"\nexclude=["GIT_*","SNAPSHOT_USER_FILTERED"]\n[shell_environment_policy.set]\nGIT_DIR="incorrect-repository"\nOPENAI_API_KEY="synthetic-policy-key"\nGH_TOKEN="synthetic-policy-github"\nPGPASSWORD="synthetic-policy-password"\nDATABASE_URL="postgresql://fixture:synthetic@db.example.test/policy"\nALL_PROXY="fixture@proxy.example.test:1080"\nHTTPS_PROXY="http:///fixture:synthetic@proxy.example.test:8888"\nSSH_ASKPASS="synthetic-policy-askpass"\nHTTP_PROXY="http://proxy.example.test:8888?contact=f@proxy.example.test"\nFiXtUrE_PrOvIdEr="synthetic-policy-model-key"\ngitlab_token="synthetic-policy-gitlab"\nAWS_SESSION_TOKEN="synthetic-policy-session"\nAWS_CONTAINER_AUTHORIZATION_TOKEN="synthetic-container-token"\nSNAPSHOT_USER_SET="preserved"\n',
   );
   const script = join(root, "inspect.cjs");
   await writeFile(
     script,
     `const fs=require("node:fs");
 if(process.argv.includes("bedrock")){fs.writeSync(1, JSON.stringify(Object.keys(process.env).filter(key=>/^AWS_/i.test(key))));process.exit(0);}
-fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,credentialKeys:["OPENAI_API_KEY","CODEX_API_KEY","SYNTHETIC_PROVIDER_TOKEN","GH_TOKEN","gitlab_token","GITHUB_TOKEN","GLAB_TOKEN","SSH_AUTH_SOCK","OPENAI_IDENTITY_TOKEN_FILE","OPENAI_FEDERATION_RULE_ID","PGPASSWORD","DATABASE_URL"].filter(key=>key in process.env)})+"\\n");
+fs.writeSync(1, JSON.stringify({index:process.env.GIT_INDEX_FILE,dir:process.env.GIT_DIR??null,filtered:process.env.SNAPSHOT_USER_FILTERED??null,set:process.env.SNAPSHOT_USER_SET,proxyPreserved:process.env.HTTP_PROXY==="http://proxy.example.test:8888?contact=f@proxy.example.test",credentialKeys:["OPENAI_API_KEY","CODEX_API_KEY","FiXtUrE_PrOvIdEr","fixture_provider","GH_TOKEN","gitlab_token","GITHUB_TOKEN","GLAB_TOKEN","SSH_AUTH_SOCK","OPENAI_IDENTITY_TOKEN_FILE","OPENAI_FEDERATION_RULE_ID","PGPASSWORD","DATABASE_URL","ALL_PROXY","HTTPS_PROXY","GIT_ASKPASS","SSH_ASKPASS"].filter(key=>key in process.env)})+"\\n");
 fs.writeSync(1, fs.readFileSync(0));
 if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.\\n");process.exitCode=17;}
 `,
@@ -1042,10 +1042,11 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
         CODEX_API_KEY: "synthetic-model-key",
         OPENAI_FEDERATION_RULE_ID: "synthetic-rule",
         OPENAI_IDENTITY_TOKEN_FILE: join(root, "synthetic-identity-token"),
-        SYNTHETIC_PROVIDER_TOKEN: "synthetic-provider-key",
+        fixture_provider: "synthetic-provider-key",
+        GIT_ASKPASS: "synthetic-inherited-askpass",
       },
     ),
-    providerKeyVariable: "SYNTHETIC_PROVIDER_TOKEN",
+    providerKeyVariable: "Fixture_Provider",
     gitEnvironment,
     profile: {
       extends: ":workspace",
@@ -1082,6 +1083,7 @@ if(process.argv.includes("fail")){fs.writeSync(2, "Synthetic Git failure detail.
     dir: null,
     filtered: null,
     set: "preserved",
+    proxyPreserved: true,
     credentialKeys: [],
   });
   expect(bytes.subarray(end + 1)).toEqual(input);
