@@ -1,24 +1,12 @@
 import { formatScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
-/** Returns the original error message without altering its contents. */
-export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
-}
-
-/** Base error for Codex Security SDK failures. */
-export class CodexSecurityError extends Error {
-  public constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = new.target.name;
-  }
-}
+import { CodexSecurityError } from "./shared/checkout/errors.js";
+export {
+  CodexSecurityError,
+  InvalidTargetError,
+  abortReason,
+  errorMessage,
+} from "./shared/checkout/errors.js";
 
 export type DeduplicationReviewStage = "screening" | "pair-review";
 export type DeduplicationReviewFailureCategory =
@@ -50,7 +38,6 @@ export class PluginBootstrapError extends CodexSecurityError {}
 export class LocalPluginBootstrapError extends PluginBootstrapError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
 export class SandboxUnavailableError extends CodexSecurityError {}
-export class InvalidTargetError extends CodexSecurityError {}
 export class OutputDirectoryError extends CodexSecurityError {}
 export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
   public constructor(

@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -54,6 +55,95 @@ test("builds and loads the host runtime from standalone plugin source", async (t
         path.startsWith(`mcp/native/${nativeTarget}/`)),
   );
   assert.deepEqual(actual.sort(), expected.sort());
+
+  // Exercise the shipped verifier without an SDK checkout or model.
+  const repo = join(output, "fixture");
+  await mkdir(repo);
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+  git("init", "-q");
+  await mkdir(join(repo, "nested"));
+  await writeFile(
+    join(repo, "nested", "owned.ts"),
+    "export const nested = true;\n",
+  );
+  await writeFile(join(repo, "CODEOWNERS"), "owned.ts @reviewer\n");
+  await writeFile(join(repo, "owned.ts"), "export const owned = true;\n");
+  await writeFile(join(repo, "other.ts"), "export const other = true;\n");
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Example",
+    "-c",
+    "user.email=reviewer@example.test",
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "-qm",
+    "Fixture",
+  );
+  const inputs = Array.from({ length: 1000 }, (_, index) => ({
+    findingId: String(index),
+    occurrenceId: String(index),
+    title: "Fixture",
+    summary: "",
+    locations: [{ path: index === 0 ? "./owned.ts" : "other.ts" }],
+  }));
+  // Exercise invocation through a directory alias, as with macOS temporary paths.
+  let verifierDirectory = mcp;
+  if (process.platform !== "win32") {
+    verifierDirectory = join(output, "aliased-mcp");
+    await symlink(mcp, verifierDirectory, "dir");
+  }
+  const verified = execFileSync(
+    process.execPath,
+    [
+      join(verifierDirectory, "scan-owners.mjs"),
+      repo,
+      git("rev-parse", "HEAD"),
+    ],
+    { input: JSON.stringify(inputs), encoding: "utf8" },
+  )
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(verified.length, inputs.length);
+  assert.equal(verified[0].suggestions[0].owner.handle, "reviewer");
+  assert.ok(
+    verified
+      .slice(1)
+      .every(
+        (entry, index) =>
+          entry.occurrenceId === String(index + 1) &&
+          entry.status === "identified" &&
+          entry.suggestions[0].owner.email === "reviewer@example.test" &&
+          entry.suggestions[0].evidence[0].kind === "history",
+      ),
+  );
+
+  const nested = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        join(verifierDirectory, "scan-owners.mjs"),
+        join(repo, "nested"),
+        git("rev-parse", "HEAD"),
+      ],
+      {
+        input: JSON.stringify([
+          { ...inputs[0], locations: [{ path: "./owned.ts", startLine: 1 }] },
+        ]),
+        encoding: "utf8",
+      },
+    ),
+  );
+  assert.equal(nested.suggestions[0].owner.handle, "reviewer");
+  assert.equal(
+    nested.suggestions[0].evidence[0].matchedPath,
+    "nested/./owned.ts",
+  );
+  assert.equal(nested.suggestions[1].owner.email, "reviewer@example.test");
+  assert.equal(nested.suggestions[1].evidence[0].kind, "blame");
 
   const emptyPathEnvironment = {
     ...Object.fromEntries(

@@ -1,12 +1,8 @@
-import { join, relative, sep } from "node:path";
+import { join } from "node:path";
 import type { ScanResult } from "./result.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
 import type { ReadOnlyCodexOptions } from "./scan-comparison.js";
-import {
-  enclosingGitWorktreeRoot,
-  normalizeRepository,
-  repositoryRevision,
-} from "./targets.js";
+import { ownerPlugin, withOwnerErrors } from "./owner-plugin.js";
 import {
   suggestOwnersFromScan,
   type SuggestOwnersOptions,
@@ -32,26 +28,17 @@ export async function writeScanOwnerSuggestions(
     throw new Error(
       "Owner suggestions require a completed scan of committed Git content.",
     );
-  if ((await repositoryRevision(repository, options.signal)) !== revision)
-    throw new Error(
-      "Owner checkout does not match the completed scan revision.",
-    );
-  const scanRoot = await normalizeRepository(repository, options.signal);
-  const gitRoot =
-    (await enclosingGitWorktreeRoot(scanRoot, options.signal, {
-      requireIfPresent: true,
-    })) ?? scanRoot;
-  const prefix = relative(gitRoot, scanRoot).split(sep).join("/");
+  const { findingsAtScanRevision } = await ownerPlugin();
   const report = await suggestOwnersFromScan(
     repository,
-    result.findings.findings.map((finding) => ({
-      ...finding,
-      sourceRevision: revision,
-      locations: finding.locations.map((location) => ({
-        ...location,
-        path: prefix ? `${prefix}/${location.path}` : location.path,
-      })),
-    })),
+    await withOwnerErrors(() =>
+      findingsAtScanRevision(
+        repository,
+        revision,
+        result.findings.findings,
+        options.signal,
+      ),
+    ),
     options,
   );
   if (report.revision !== revision)

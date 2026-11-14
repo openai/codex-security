@@ -2894,6 +2894,9 @@ export class CodexSecurity {
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
           ...environmentWithGit(git.environment, git),
+          CODEX_MCP_NODE_PATH:
+            environmentValue(git.environment, "CODEX_MCP_NODE_PATH") ??
+            process.execPath,
           CODEX_HOME: runtime.codexHome,
           ...sqliteEnvironment,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
@@ -2901,6 +2904,15 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
+      // Custom plugins from older releases only support the post-scan owner report.
+      const inlineOwners =
+        options.ownerSuggestions &&
+        normalized.kind === "paths" &&
+        (
+          await lstat(
+            join(workbenchOptions.pluginRoot, "mcp", "scan-owners.mjs"),
+          ).catch(() => null)
+        )?.isFile();
       checkOpen();
       const registration =
         options.resumeScanId !== undefined
@@ -3416,7 +3428,6 @@ export class CodexSecurity {
         options.maxCostUsd !== undefined,
         discoveryPrompt,
         modelProvider,
-        options.ownerSuggestions,
         severityRubric,
         standard,
       );
@@ -3856,7 +3867,10 @@ export class CodexSecurity {
           try {
             preparation = await workbench(
               workbenchOptions,
-              workbenchArgs("prepare-scan-completion", { scanId }),
+              workbenchArgs("prepare-scan-completion", {
+                scanId,
+                ownerSuggestions: inlineOwners,
+              }),
             );
           } catch (error) {
             const saved = await workbench(
@@ -3905,6 +3919,7 @@ export class CodexSecurity {
         "complete-scan",
         "--scan-id",
         scanId,
+        ...(inlineOwners ? ["--owner-suggestions"] : []),
         ...(completionCost === null
           ? []
           : ["--cost-json", JSON.stringify(completionCost)]),
@@ -6442,17 +6457,11 @@ function scanPrompt(
   enforceCostLimit = false,
   discoveryPrompt?: string,
   modelProvider?: unknown,
-  ownerSuggestions = false,
   severityRubric?: SeverityRubricSnapshot,
   standard = false,
 ): string {
   const python = pluginPythonCommand();
   const customValidation = discoveryPrompt !== undefined;
-  const ownership = ownerSuggestions
-    ? [
-        "Record optional ownership evidence while finalizing each finding, within this scan's existing session and budget. Prefer CODEOWNERS declarations. Otherwise use Git blame/history for the affected committed source and record extensions.ownerSuggestion as {email, commit, reason}, using an observed contributor email, a full supporting commit hash, and a short explanation. Omit the hint when ownership is unclear. Never invent an identity, infer current employment, invoke a separate owner model/command, or start an ownership turn after the scan. Preserve hints in delegated finding results. Owner hints are optional and must not prevent recording security findings. The SDK validates hints against the checkout and writes owner-suggestions.json without inference.",
-      ]
-    : [];
   const knowledge = hasKnowledgeBase
     ? [
         `The ${shellEnvironmentReference("CODEX_SECURITY_KNOWLEDGE_BASE")} environment variable contains primary documents about the project and its organization, including their architecture, threat model, and policies. These documents are a source of truth and override conflicting SECURITY.md guidance, generated threat models, and other sources, except explicit user instructions.`,
@@ -6480,7 +6489,6 @@ function scanPrompt(
       "Find exploitable vulnerabilities in the authorized source. Trace attacker access to the broken control and show the evidence.",
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
       targetDescription,
-      ...ownership,
       ...rubric,
       ...additional,
       ...knowledge,
@@ -6499,7 +6507,6 @@ function scanPrompt(
       `Read ${skillPath} and follow that ${skillName} workflow. Resolve all of its plugin-relative references and helpers from ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT")}. This is the readable copy of the selected plugin; its installed cache under CODEX_HOME is intentionally denied.`,
     `For a Codex Security skill invoked by the assigned workflow, remove any codex-security: prefix from its name, read ${shellEnvironmentReference("CODEX_SECURITY_PLUGIN_ROOT", "/skills/<skill-name>/SKILL.md")}, and follow that file. Resolve its relative references from its directory. Give delegated workers the same readable skill paths. Load only skills required by the assigned workflow.`,
     "Run this Codex Security scan non-interactively.",
-    ...ownership,
     ...(modelProvider === "amazon-bedrock"
       ? [
           "This scan uses Amazon Bedrock with AWS authentication. Skip the ChatGPT account Daybreak access advisory, including get_codex_security_daybreak_access and get_tac_status; it does not check Bedrock model access or access to local scan results. OpenAI login is not required for this scan. Report any actual provider error unchanged.",

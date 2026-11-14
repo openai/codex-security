@@ -116,8 +116,11 @@ from workbench_setup import (
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
+    expected_coverage_mode,
     expected_target_kinds,
     public_scan_recipe,
+    requested_finding_scope,
+    requested_scan_file_paths,
     requested_scan_paths,
     safe_source_path,
 )
@@ -342,21 +345,6 @@ def apply_migrations(
     )
 
 
-def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
-    # Older scans did not record path kinds. Retain their lexical scope semantics
-    # rather than infer the original target from a possibly changed checkout.
-    if scan["recipe_json"] is None:
-        return []
-    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-    return recipe.get("scopeFilePaths", [])
-
-
-def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
-    """Return requested paths paired with whether the stored recipe identified each one as a file."""
-    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
-    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
-
-
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
     """Return the target identity, scope requirements, and diff target recorded for this scan."""
     target = Path(scan["target_path"])
@@ -388,9 +376,6 @@ def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
         },
         "target": target_contract,
     }
-
-
-expected_coverage_mode = scan_history.expected_coverage_mode
 
 
 def workbench_completion_binding(
@@ -1083,6 +1068,7 @@ def complete_scan(
             args.claim_token,
             cost_json,
             prepare_only=prepare_only,
+            owner_suggestions=getattr(args, "owner_suggestions", False),
             thread_id=getattr(args, "thread_id", None),
             turn_id=getattr(args, "turn_id", None),
             model_thread_id=getattr(args, "model_thread_id", None),
@@ -1294,6 +1280,7 @@ def complete_scan_locked(
     thread_id: str | None = None,
     turn_id: str | None = None,
     model_thread_id: str | None = None,
+    owner_suggestions: bool = False,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
     handoff.require_tokenless_scan_owner(connection, scan, model_thread_id)
@@ -1390,6 +1377,11 @@ def complete_scan_locked(
                 allow_missing_writeups=True,
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
+                owner_repository=(
+                    Path(scan["target_path"])
+                    if owner_suggestions and scan["target_revision"] != "unversioned"
+                    else None
+                ),
             )
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
@@ -3520,7 +3512,9 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             )
         elif args.command in {"prepare-scan-completion", "complete-scan"}:
             result = complete_scan(
-                connection, args, prepare_only=args.command == "prepare-scan-completion"
+                connection,
+                args,
+                prepare_only=args.command == "prepare-scan-completion",
             )
         elif args.command == "cancel-finding-remediation-request":
             result = scan_context(

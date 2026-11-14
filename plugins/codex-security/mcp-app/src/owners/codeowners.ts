@@ -1,7 +1,4 @@
-export type CodeownerIdentity =
-  | { kind: "person" | "group"; provider: "github"; handle: string }
-  | { kind: "person"; email: string };
-
+import type { CodeownerIdentity } from "./types.js";
 export interface CodeownersRule {
   pattern: string;
   line: number;

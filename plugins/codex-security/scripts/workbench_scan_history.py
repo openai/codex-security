@@ -79,26 +79,6 @@ def scan_recipe(scan: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def expected_coverage_mode(scan: sqlite3.Row) -> str:
-    """Return the coverage mode implied by the recorded scope, scan mode, and diff target kind."""
-    if scan["mode"] == "diff":
-        mode = {
-            "commit": "commit",
-            "range": "branch_diff",
-            "working_tree": "working_tree",
-        }.get(scan["diff_target_kind"])
-        if mode is None:
-            raise SystemExit("This migrated diff scan does not have a validated change set.")
-        return mode
-    if scan["scope"] != "." or (
-        "recipe_json" in scan.keys()
-        and scan["recipe_json"] is not None
-        and json.loads(scan["recipe_json"])["target"]["kind"] == "paths"
-    ):
-        return "scoped_path"
-    return "deep_repository" if scan["mode"] == "deep" else "repository"
-
-
 def preserve_sealed_completion(
     binding: dict[str, Any], manifest: dict[str, Any] | None
 ) -> dict[str, Any]:

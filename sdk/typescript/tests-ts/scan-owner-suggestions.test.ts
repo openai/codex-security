@@ -220,13 +220,12 @@ test.each([
       { codex: { startThread: inference } },
     );
     const report = JSON.parse(await readFile(path!, "utf8"));
-    expect(report.results[0].status).toBe(
-      outcome === "identified"
-        ? "identified"
-        : outcome === "missing"
-          ? "abstained"
-          : "error",
-    );
+    expect(report.results[0]).toMatchObject({
+      status: "identified",
+      owner: {
+        email: git(repository, "show", "-s", "--format=%ae", authorCommit),
+      },
+    });
     expect(JSON.stringify(result.findings)).toBe(before);
     expect(inference).not.toHaveBeenCalled();
   },

@@ -9,6 +9,7 @@ import {
   parse,
   sep,
 } from "node:path";
+import { sameCheckedFileDevice } from "./contract.js";
 import { CodexSecurityError } from "./errors.js";
 import { resolveInputPath, resolveParentTraversal } from "./runtime.js";
 import { isWithin } from "./trusted-executable.js";
@@ -143,8 +144,11 @@ export async function readRegularInputFile(
     const opened = await file.stat({ bigint: true });
     if (
       !opened.isFile() ||
-      opened.dev !== selected.dev ||
-      opened.ino !== selected.ino
+      !(await sameCheckedFileDevice(
+        file,
+        { path: canonical, metadata: selected },
+        opened,
+      ))
     ) {
       throw new CodexSecurityError("Input files must remain regular files.");
     }

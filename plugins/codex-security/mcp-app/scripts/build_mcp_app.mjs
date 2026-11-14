@@ -124,6 +124,15 @@ export async function buildMcpApp({ output, native = "universal" }) {
     target: "node20",
   });
 
+  await build({
+    bundle: true,
+    entryPoints: [join(root, "src/owners/scan-owners.ts")],
+    format: "esm",
+    outfile: join(mcpDir, "scan-owners.mjs"),
+    platform: "node",
+    target: "node20",
+  });
+
   async function writeRuntime(name, entryPoint) {
     const bundle = join(mcpDir, name + ".bundle.cjs");
     const result = await build({

@@ -42,6 +42,7 @@ import {
   runComponentScans,
   resolveProjectConfig,
   suggestOwners,
+  type OwnerCandidate,
   type OwnerFinding,
   type OwnerSuggestion,
   type ComponentScanOptions,
@@ -378,8 +379,12 @@ export async function suggestFindingOwners(
 ) {
   const report = await suggestOwners(repository, findings);
   const schemaVersion: 2 = report.schemaVersion;
+  const suggestions: OwnerCandidate[][] = report.results.map(
+    (item) => item.suggestions,
+  );
   return {
     schemaVersion,
+    suggestions,
     identifiers: report.results.map(({ owner }) => ownerIdentifier(owner)),
   };
 }
