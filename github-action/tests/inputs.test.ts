@@ -7,7 +7,7 @@ test('defaults are stable across events', () => {
   const input = parse();
   assert.deepEqual(input, {
     repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
-    provider: 'openai', model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
+    provider: 'openai', model: 'gpt-6.1-sol', effort: 'high', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
     verbose: true, dryRun: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
   });
@@ -33,15 +33,15 @@ test('provider and model inputs map directly to scan CLI arguments in both modes
     const args = scanArguments(parse({provider, model}), {repository:'/checkout'}, '/results');
     assert.ok(!args.some(arg => arg.startsWith('--model')), 'Leave missing model validation to the CLI');
   }
-  assert.equal(parse({provider:'openai'}).model, 'gpt-5.6-sol');
+  assert.equal(parse({provider:'openai'}).model, 'gpt-6.1-sol');
 });
 test('reasoning efforts pass through to both scan modes', () => {
-  for (const mode of ['standard', 'deep']) for (const effort of ['ultra', 'synthetic-future-effort', '--help']) {
+  for (const mode of ['standard', 'deep']) for (const effort of ['xhigh', 'ultra', 'synthetic-future-effort', '--help']) {
     const args = scanArguments(parse({mode, effort}), {repository:'/checkout'}, '/results');
     assert.ok(args.includes(`--effort=${effort}`));
     assert.ok(!args.includes(effort));
   }
-  assert.equal(parse({effort:'  '}).effort, 'xhigh');
+  assert.equal(parse({effort:'  '}).effort, 'high');
 });
 test('Cyber access selections reach both standard and Deep scan CLI invocations', () => {
   for (const mode of ['standard', 'deep']) for (const program of ['standard', 'daybreak_blue', 'daybreak_red']) {

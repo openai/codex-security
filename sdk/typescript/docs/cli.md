@@ -1006,12 +1006,14 @@ resume and rerun do not depend on later changes to legacy defaults.
 ### Runtime configuration and worker limits
 
 Scans use an isolated Codex configuration. The default model and effort are
-`gpt-5.6-sol` and `xhigh`. Multi-agent v2 allows nine concurrent threads: the
+`gpt-6.1-sol` and `high`. Multi-agent v2 allows nine concurrent threads: the
 parent and up to eight delegated workers. That limit is separate from Deep Scan
 and bulk worker counts.
 
+To select a different model and effort for one scan and limit it to four threads, run
+
 ```bash
-codex-security scan . --model gpt-6.1-sol --effort high \
+codex-security scan . --model gpt-5.6-sol --effort xhigh \
   --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
 ```
 

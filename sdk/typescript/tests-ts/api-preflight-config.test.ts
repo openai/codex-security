@@ -179,8 +179,8 @@ describe("CodexSecurity preflight configuration", () => {
           client.preflight(repository, { mode }),
         ).resolves.toMatchObject({
           mode,
-          model: explicitRoot ? "gpt-5.6-terra" : "gpt-5.6-sol",
-          reasoningEffort: explicitRoot ? "low" : "xhigh",
+          model: explicitRoot ? "gpt-5.6-terra" : "gpt-6.1-sol",
+          reasoningEffort: explicitRoot ? "low" : "high",
         });
       }
     },
