@@ -366,7 +366,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       const key = colon < 0 ? "xmlns" : "xmlns:" + name.slice(0, colon);
       return declarations.get(key)?.at(-1) ?? "";
     };
-    const elements: { wordName?: string; layout: boolean }[] = [];
+    const elements: { wordName?: string; layout: boolean; hidden?: boolean }[] =
+      [];
     let documentElement = false;
     let ignoredDepth = 0;
     let instructionText = false;
@@ -374,16 +375,17 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     let tabStops = false;
     // Content controls mark unfilled prompt text with w:showingPlcHdr.
     const placeholders: boolean[] = [];
-    // Word does not display runs whose properties contain w:vanish.
-    const hiddenRuns: boolean[] = [];
     const wordAttribute = (
       attributes: Record<string, string>,
       localName: string,
+      wordOnly = false,
     ) =>
       decodeXml(
         Object.entries(attributes).find(
           ([key]) =>
-            key.endsWith(":" + localName) && wordNamespaces.has(namespace(key)),
+            key.split(":").at(-1) === localName &&
+            (!wordOnly ||
+              (key.includes(":") && wordNamespaces.has(namespace(key)))),
         )?.[1] ?? "",
       );
     const append = (value: string) => {
@@ -410,8 +412,10 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       const localName = name.split(":").at(-1)!;
       const uri = namespace(name);
       const wordName = wordNamespaces.has(uri) ? localName : undefined;
+      const parent = elements.at(-1);
       elements.push({
         wordName,
+        hidden: parent?.hidden,
         layout: drawingLayout.get(uri)?.has(localName) ?? false,
       });
       if (
@@ -422,7 +426,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         localName === "moveFrom" ||
         (localName === "sdtContent" && placeholders.at(-1)) ||
         // Field markers still delimit visible instructions and results across runs.
-        (hiddenRuns.at(-1) && wordName !== "fldChar")
+        (parent?.hidden && wordName !== "fldChar")
       ) {
         ignoredDepth++;
         return;
@@ -432,14 +436,14 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         placeholders[placeholders.length - 1] = !["0", "false", "off"].includes(
           wordAttribute(attributes, "val"),
         );
-      else if (wordName === "r") hiddenRuns.push(false);
-      else if (
+      const run = elements.at(-3);
+      if (
         wordName === "vanish" &&
-        elements.at(-2)?.wordName === "rPr" &&
-        elements.at(-3)?.wordName === "r"
+        parent?.wordName === "rPr" &&
+        run?.wordName === "r"
       )
-        hiddenRuns[hiddenRuns.length - 1] = !["0", "false", "off"].includes(
-          wordAttribute(attributes, "val"),
+        run.hidden = !["0", "false", "off"].includes(
+          wordAttribute(attributes, "val", true),
         );
       if (localName === "txbxContent") {
         // Text boxes have their own field boundaries.
@@ -461,7 +465,7 @@ function extractDocx(path: string, bytes: Uint8Array): string {
       else if (localName === "noBreakHyphen") append("-");
     });
     parser.on("closetag", ({ name, attributes, isSelfClosing }) => {
-      const element = elements.pop();
+      elements.pop();
       for (const key of Object.keys(attributes)) {
         const bindings = declarations.get(key);
         if (!bindings) continue;
@@ -474,7 +478,6 @@ function extractDocx(path: string, bytes: Uint8Array): string {
         return;
       }
       if (localName === "sdt") placeholders.pop();
-      else if (element?.wordName === "r") hiddenRuns.pop();
       if (localName === "txbxContent") {
         while (fields.length > 0) finishField(false);
         const content = text.join("");
@@ -487,7 +490,8 @@ function extractDocx(path: string, bytes: Uint8Array): string {
     });
     // Word stores drawing positions and relative sizes as character data.
     const appendCharacters = (value: string) => {
-      if (!elements.at(-1)?.layout) append(value);
+      const element = elements.at(-1);
+      if (!element?.layout && !element?.hidden) append(value);
     };
     parser.on("text", (value) => appendCharacters(decodeXml(value)));
     parser.on("cdata", (value) =>

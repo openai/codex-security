@@ -545,35 +545,6 @@ describe("scan knowledge bases", () => {
       ),
     );
     await writeFile(
-      join(root, "hidden-text.docx"),
-      docxBody(
-        "<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>" +
-          "<w:r><w:t>Rotate keys.</w:t></w:r>" +
-          '<w:r><w:rPr><w:vanish/></w:rPr><w:t xml:space="preserve"> Replace this guidance.</w:t></w:r>' +
-          '<w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t xml:space="preserve"> Audit weekly.</w:t></w:r></w:p>',
-      ),
-    );
-    await writeFile(
-      join(root, "hidden-control-delimiter.docx"),
-      docxBody(
-        "<w:p><w:r><w:drawing><w:txbxContent><w:p><w:sdt>" +
-          "<w:sdtEndPr><w:rPr><w:vanish/></w:rPr></w:sdtEndPr>" +
-          "<w:sdtContent><w:r><w:t>Require MFA.</w:t></w:r></w:sdtContent>" +
-          "</w:sdt></w:p></w:txbxContent></w:drawing></w:r></w:p>",
-      ),
-    );
-    await writeFile(
-      join(root, "hidden-field-markers.docx"),
-      docxBody(
-        '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>' +
-          "<w:r><w:instrText>AUTHOR</w:instrText></w:r>" +
-          '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>' +
-          "<w:r><w:t>Policy owner</w:t></w:r>" +
-          '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>' +
-          "<w:r><w:t>.</w:t></w:r></w:p>",
-      ),
-    );
-    await writeFile(
       join(root, "field-code.docx"),
       docxBody(
         '<w:p><w:r><w:t xml:space="preserve">See </w:t><w:fldChar w:fldCharType="begin"/></w:r>' +
@@ -596,9 +567,6 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
-    expect(documents).toContain("Rotate keys. Audit weekly.\n");
-    expect(documents).toContain("Policy owner.\n");
-    expect(documents).toContain("Require MFA.\n\n");
     expect(documents).toContain("Owner: \nData: Confidential\n");
   });
 
@@ -626,12 +594,46 @@ describe("scan knowledge bases", () => {
       "Main-before First text-box guidance.\nSecond text-box guidance.\nMain-after\n",
     ],
     [
+      "direct hidden run properties and a disabled toggle",
+      "<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>" +
+        "<w:r><w:t>Rotate keys.</w:t></w:r>" +
+        '<w:r><w:rPr><w:vanish/></w:rPr>\n<w:t xml:space="preserve"> Replace this guidance.</w:t></w:r>' +
+        '<w:r><w:rPr><w:vanish w:val="0"/></w:rPr><w:t xml:space="preserve"> Audit weekly.</w:t></w:r></w:p>',
+      "Rotate keys. Audit weekly.\n",
+    ],
+    [
+      "hidden formatting on a content control delimiter",
+      "<w:p><w:r><w:drawing><w:txbxContent><w:p><w:sdt>" +
+        "<w:sdtEndPr><w:rPr><w:vanish/></w:rPr></w:sdtEndPr>" +
+        "<w:sdtContent><w:r><w:t>Require MFA.</w:t></w:r></w:sdtContent>" +
+        "</w:sdt></w:p></w:txbxContent></w:drawing></w:r></w:p>",
+      "Require MFA.\n\n",
+    ],
+    [
+      "field markers in hidden runs",
+      '<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="begin"><w:fldData>QUJD</w:fldData></w:fldChar></w:r>' +
+        "<w:r><w:instrText>AUTHOR</w:instrText></w:r>" +
+        '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="separate"/></w:r>' +
+        "<w:r><w:t>Policy owner</w:t></w:r>" +
+        '<w:r><w:rPr><w:vanish/></w:rPr><w:fldChar w:fldCharType="end"/></w:r>' +
+        "<w:r><w:t>.</w:t></w:r></w:p>",
+      "Policy owner.\n",
+    ],
+    [
       "hidden run properties in Word and extension namespaces",
       '<w:p xmlns:s="http://purl.oclc.org/ooxml/wordprocessingml/main" xmlns:x="urn:vendor:extension">' +
         "<w:r><w:rPr><x:vanish/></w:rPr><w:t>Enforce MFA.</w:t></w:r>" +
         '<s:r><s:rPr><s:vanish x:val="0" s:val="1"/></s:rPr><s:t>Hidden.</s:t></s:r>' +
         "<w:r><x:rPr><w:vanish/></x:rPr><w:t> Audit weekly.</w:t></w:r></w:p>",
       "Enforce MFA. Audit weekly.\n",
+    ],
+    [
+      "unqualified field and content-control attributes",
+      '<w:p><w:r><w:fldChar fldCharType="begin"/><w:instrText>AUTHOR</w:instrText>' +
+        '<w:fldChar fldCharType="separate"/><w:t>Owner.</w:t><w:fldChar fldCharType="end"/></w:r>' +
+        '<w:sdt><w:sdtPr><w:showingPlcHdr val="0"/></w:sdtPr>' +
+        "<w:sdtContent><w:r><w:t> Review policy.</w:t></w:r></w:sdtContent></w:sdt></w:p>",
+      "Owner. Review policy.\n",
     ],
     [
       "ordinary runs after an unclosed field",
