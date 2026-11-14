@@ -132,7 +132,7 @@ def test_frozen_parent_replay_ignores_nonreference_ancestry(
         previous.append(checkpoint.relative_to(tmp_path).as_posix())
         os.utime(checkpoint, ns=(100, 100))
     pending["previousParentCheckpoints"] = [*previous, *ancestry]
-    checkpoint = write_checkpoint(tmp_path / "checkpoints", pending, mtime_ns=200)
+    write_checkpoint(tmp_path / "checkpoints", pending, mtime_ns=200)
     originals = {path: path.read_bytes() for path in (tmp_path / "checkpoints").iterdir()}
     warnings = []
     first = saved.merge_saved_results(
