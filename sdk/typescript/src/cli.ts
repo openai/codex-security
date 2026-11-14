@@ -11651,6 +11651,36 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
+async function inspectPatchGitExecutable(
+  command: string,
+  repository: string,
+  dependencies: CliDependencies,
+  protectedRoots: string[],
+  transportDirectory: string,
+) {
+  let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
+  const hostPath =
+    environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
+  if (
+    !execPath &&
+    !command.includes("/") &&
+    !command.includes("\\") &&
+    !parse(command).root
+  )
+    execPath = (
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["--exec-path"],
+        repository,
+        { trim: false },
+      )
+    ).replace(/\n$/u, "");
+  const path = [execPath, hostPath].filter(Boolean).join(delimiter);
+  return inspectTrustedExecutable(command, { PATH: path }, protectedRoots, {
+    gitTransportDirectory: transportDirectory,
+  });
+}
+
 async function runPatchTransport(
   args: string[],
   remotes: readonly string[],
@@ -11696,31 +11726,14 @@ async function runPatchTransport(
     repository,
     dependencies,
   );
-  let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
-  const hostPath =
-    environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
   const pin = async (command: string): Promise<string | null> => {
     if (!proxyBindings.has(command)) {
-      if (
-        !execPath &&
-        !command.includes("/") &&
-        !command.includes("\\") &&
-        !parse(command).root
-      )
-        execPath = (
-          await dependencies.runRepositoryCommand(
-            "git",
-            ["--exec-path"],
-            repository,
-            { trim: false },
-          )
-        ).replace(/\n$/u, "");
-      const path = [execPath, hostPath].filter(Boolean).join(delimiter);
-      const result = await inspectTrustedExecutable(
+      const result = await inspectPatchGitExecutable(
         command,
-        { PATH: path },
+        repository,
+        dependencies,
         [root, caller],
-        { gitTransportDirectory: directory },
+        directory,
       );
       proxyBindings.set(command, result.executable);
     }
@@ -11821,7 +11834,11 @@ async function runPatchTransport(
         );
         const trusted = await inspectTrustedExecutable(
           "git",
-          { PATH: hostPath },
+          {
+            PATH:
+              environmentEntry(dependencies.environment, "PATH") ??
+              process.env["PATH"],
+          },
           [root, caller],
           { gitTransportDirectory: directory },
         );
@@ -11953,7 +11970,8 @@ async function pinPublicationSshCommand(
   root: string,
   caller: string,
   directory: string,
-  environment: CliDependencies["environment"],
+  repository: string,
+  dependencies: CliDependencies,
 ): Promise<string> {
   const unsupported = () =>
     new CodexSecurityError(
@@ -11978,19 +11996,12 @@ async function pinPublicationSshCommand(
   }
   const [program, ...args] = words;
   if (!program) throw unsupported();
-  const path = [
-    environmentEntry(environment, "GIT_EXEC_PATH"),
-    environmentEntry(environment, "PATH") ?? process.env["PATH"],
-  ]
-    .filter(Boolean)
-    .join(delimiter);
-  const { executable } = await inspectTrustedExecutable(
+  const { executable } = await inspectPatchGitExecutable(
     program,
-    { PATH: path },
+    repository,
+    dependencies,
     [root, caller],
-    {
-      gitTransportDirectory: directory,
-    },
+    directory,
   );
   if (!executable) throw unsupported();
   const bindFile = async (file: string | undefined) => {
@@ -12032,7 +12043,7 @@ async function pinPublicationSshCommand(
           if (/[\s"'\\]/u.test(literal)) throw unsupported();
           bound = pathSetting[1] + "=" + literal;
         } else if (
-          !/^(?:BatchMode|IdentitiesOnly|StrictHostKeyChecking|HostKeyAlias|ConnectTimeout|LogLevel|AddressFamily)=[a-zA-Z0-9._-]+$/iu.test(
+          !/^(?:BatchMode|IdentitiesOnly|StrictHostKeyChecking|HostKeyAlias|ConnectTimeout|ServerAliveInterval|LogLevel|AddressFamily)=[a-zA-Z0-9._-]+$/iu.test(
             value,
           )
         ) {
@@ -12070,7 +12081,8 @@ async function publicationSshCommand(
       root,
       caller,
       directory,
-      dependencies.environment,
+      repository,
+      dependencies,
     );
   const environmentCommand = environmentEntry(
     dependencies.environment,
@@ -12319,11 +12331,12 @@ async function patchCommandContext(
   for (const name of ["GIT_ASKPASS", "SSH_ASKPASS"] as const) {
     const askpass = environmentEntry(dependencies.environment, name);
     if (!askpass) continue;
-    const helper = await inspectTrustedExecutable(
+    const helper = await inspectPatchGitExecutable(
       askpass,
-      dependencies.environment,
+      repository,
+      dependencies,
       [physicalRoot, physicalDirectory],
-      { gitTransportDirectory: transportDirectory },
+      transportDirectory,
     );
     // An empty value disables a missing or checkout-controlled helper.
     environment[name] = helper.executable ?? "";

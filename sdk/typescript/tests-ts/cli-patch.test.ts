@@ -232,7 +232,8 @@ describe("scan and patch workflow", () => {
       const askpassEnvironment =
         kind === "removed component with external askpass"
           ? {
-              GIT_ASKPASS: relative(repository, askpass),
+              GIT_EXEC_PATH: directory,
+              GIT_ASKPASS: basename(askpass),
               SSH_ASKPASS: relative(repository, sshAskpass),
             }
           : kind === "removed component with checkout askpass"

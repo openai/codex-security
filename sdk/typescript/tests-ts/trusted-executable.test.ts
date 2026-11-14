@@ -100,6 +100,37 @@ describe("trusted executable resolution", () => {
   });
 
   test.skipIf(process.platform === "win32")(
+    "preserves a virtualenv interpreter selected for a Git transport",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repo");
+      const venv = join(root, "venv");
+      await mkdir(repository);
+      expect(
+        spawnSync(PYTHON, ["-m", "venv", "--without-pip", "--symlinks", venv])
+          .status,
+      ).toBe(0);
+      const bin = join(venv, "bin");
+      const { executable } = await inspectTrustedExecutable(
+        join(bin, "python"),
+        { PATH: bin },
+        repository,
+        { gitTransportDirectory: repository },
+      );
+      expect(executable).not.toBeNull();
+      const result = spawnSync(
+        executable!,
+        ["-c", "import sys; print(sys.prefix)"],
+        {
+          encoding: "utf8",
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe(await realpath(venv));
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
     "pins askpass aliases that traverse a worktree link",
     async () => {
       const root = await temporaryDirectory();

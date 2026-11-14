@@ -296,16 +296,20 @@ export async function inspectTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      if (options) {
-        // Authentication can happen after a patch replaces an intermediate link.
-        executable ??= canonical;
-        continue;
+      // Keep the launcher's name for virtualenvs and other argv[0]-sensitive tools.
+      let invocationPath =
+        pathLike || options
+          ? join(await realpath(dirname(current.path)), basename(current.path))
+          : current.path;
+      if (options && invocationPath !== canonical) {
+        // Authentication can run after the patch replaces a link in the checkout.
+        const resolveHostPath = await trustedHostPathResolver(
+          options.gitTransportDirectory,
+          roots,
+        ).catch(() => undefined);
+        if (resolveHostPath?.(invocationPath) !== canonical)
+          invocationPath = canonical;
       }
-      // Keep explicit virtualenv launchers, but resolve repository-local aliases
-      // to the trusted target instead of invoking them from the repository.
-      const invocationPath = pathLike
-        ? join(await realpath(dirname(current.path)), basename(current.path))
-        : current.path;
       executable ??=
         pathLike &&
         (crossesSource ||

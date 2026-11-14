@@ -1540,7 +1540,7 @@ process.exit(result.status ?? 1);
       const config = join(tools, "synthetic config");
       await writeFile(config, "");
       const configOption = transport === "scp-command" ? "none" : config;
-      const configuredCommand = `ssh -F "${configOption}"`;
+      const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")
@@ -1556,7 +1556,7 @@ process.exit(result.status ?? 1);
       environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] || coreCommand
-          ? `'${ssh}' '-F' '${configOption}'`
+          ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60'`
           : `'${ssh}'`;
       const alias =
         transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"
