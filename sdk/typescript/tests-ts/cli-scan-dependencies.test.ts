@@ -226,6 +226,7 @@ describe("scan dependencies CLI", () => {
     const result = dependencyResult("partial");
     addMatch(result);
     result.diagnostics = [
+      "Synthetic unsupported lockfile",
       "Synthetic scanner token=SYNTHETIC_VALUE\u001b[2J\ncontinued",
     ];
     result.coverage.limitations = ["Synthetic unsupported lockfile"];
@@ -243,7 +244,9 @@ describe("scan dependencies CLI", () => {
     expect(stderr.text()).toContain(result.outputDir);
     expect(stderr.text()).toContain("token=SYNTHETIC_VALUE");
     expect(stderr.text()).not.toContain("\u001b");
-    expect(stderr.text()).toContain("Synthetic unsupported lockfile");
+    expect(stderr.text().match(/Synthetic unsupported lockfile/g)).toHaveLength(
+      1,
+    );
   });
 
   test.each([

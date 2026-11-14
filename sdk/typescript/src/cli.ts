@@ -9020,10 +9020,10 @@ async function runDependencyScan(
       `Coverage: ${result.coverage.status}\n` +
       `Artifacts: ${result.outputDir}`,
   );
-  for (const diagnostic of [
+  for (const diagnostic of new Set([
     ...result.coverage.limitations,
     ...result.diagnostics,
-  ]) {
+  ])) {
     writeDiagnostic(`codex-security: ${diagnostic}`);
   }
   if (verbose) {
