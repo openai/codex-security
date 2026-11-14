@@ -264,8 +264,9 @@ Generated PRs leave the disclosure attestations unchecked for maintainer review.
 ## Prepare a release
 
 1. Choose the next stable version and update `sdk/typescript/package.json`,
-   `github-action/package.json`, and both root version fields in
-   `github-action/package-lock.json`. The rolling release PR normally prepares
+   `github-action/package.json`, both root version fields in
+   `github-action/package-lock.json`, and the top-level `version` in
+   `CITATION.cff`. The rolling release PR normally prepares
    these changes. Keep the Action runtime pin on its published CLI baseline;
    release packaging updates it after npm publication.
 2. Update `.github/release-notes.md`. Its first line must be

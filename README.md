@@ -238,6 +238,6 @@ To report a vulnerability privately, follow the [security policy](SECURITY.md).
 ## Citation
 
 Use **Cite this repository** on GitHub to copy an APA or BibTeX citation, or
-download the metadata from [CITATION.cff](CITATION.cff). To cite the version
-you used, run `codex-security --version` and include the publication date
-from the matching `npm-vX.Y.Z` entry in [GitHub Releases](https://github.com/openai/codex-security/releases).
+download [CITATION.cff](CITATION.cff). Match the citation’s version to
+`codex-security --version` and use the publication date from that version’s
+`npm-vX.Y.Z` entry in [GitHub Releases](https://github.com/openai/codex-security/releases).
