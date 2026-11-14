@@ -14,12 +14,26 @@ function severity(match: ScaMatch): number {
   return labels[value] ?? (Number.isFinite(Number(value)) ? Number(value) : -1);
 }
 
+/** Preserve the first occurrence when reading a saved result, as Array.find does. */
+function firstBy<T>(
+  items: readonly T[],
+  key: (item: T) => string,
+): Map<string, T> {
+  const index = new Map<string, T>();
+  for (const item of items) {
+    const id = key(item);
+    if (!index.has(id)) index.set(id, item);
+  }
+  return index;
+}
+
 /** Source severity is a scheduling hint, not an exploitability verdict. */
-export function prioritizedDependencyMatches(result: ScaResult): ScaMatch[] {
+export function prioritizedDependencyMatches(
+  result: ScaResult,
+  components = firstBy(result.components, (component) => component.id),
+): ScaMatch[] {
   const devOnly = (match: ScaMatch) => {
-    const groups =
-      result.components.find((component) => component.id === match.componentId)
-        ?.dependencyGroups ?? [];
+    const groups = components.get(match.componentId)?.dependencyGroups ?? [];
     return groups.length > 0 && groups.every((group) => group === "dev")
       ? 1
       : 0;
@@ -40,10 +54,9 @@ export function dependencyAssessmentCounts(result: ScaResult) {
     failed: 0,
     unfinished: 0,
   };
+  const assessments = firstBy(result.assessments, (item) => item.matchId);
   for (const match of result.matches) {
-    const assessment = result.assessments.find(
-      (item) => item.matchId === match.id,
-    );
+    const assessment = assessments.get(match.id);
     if (assessment?.status === "completed") {
       if (assessment.verdict === "confirmed") counts.confirmed++;
       else if (assessment.verdict === "not_actionable") counts.notActionable++;
@@ -63,17 +76,19 @@ export function dependencyInventorySummary(
   result: ScaResult,
   format: (value: string) => string = (value) => value,
 ): string[] {
-  const matches = prioritizedDependencyMatches(result);
-  const componentIds = [...new Set(matches.map((match) => match.componentId))];
+  const components = firstBy(result.components, (component) => component.id);
+  const matches = prioritizedDependencyMatches(result, components);
+  const byComponent = Map.groupBy(matches, (match) => match.componentId);
+  const contexts = firstBy(
+    result.packageContexts ?? [],
+    (context) => context.componentId,
+  );
   const lines = [
-    `Matching: ${result.coverage.inputs.filter((input) => input.status === "scanned").length} dependency files checked; ${matches.length} advisory matches across ${componentIds.length} package occurrences.`,
+    `Matching: ${result.coverage.inputs.filter((input) => input.status === "scanned").length} dependency files checked; ${matches.length} advisory matches across ${byComponent.size} package occurrences.`,
   ];
-  for (const id of componentIds) {
-    const component = result.components.find((item) => item.id === id)!;
-    const context = result.packageContexts?.find(
-      (item) => item.componentId === id,
-    );
-    const selected = matches.filter((match) => match.componentId === id);
+  for (const [id, selected] of byComponent) {
+    const component = components.get(id)!;
+    const context = contexts.get(id);
     lines.push(
       `${format(component.name)}@${format(component.version ?? "unknown")} — ${format(component.sourcePath)}${context?.projectName ? ` (project: ${format(context.projectName)}${context.private ? ", private" : ""})` : ""}`,
     );

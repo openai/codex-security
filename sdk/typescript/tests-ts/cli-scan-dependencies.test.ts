@@ -529,6 +529,7 @@ describe("scan dependencies CLI", () => {
       const { stdout, stderr, runCli } = createCliTest(main);
       const deps = dependencies({
         onScanDependencies: async (options) => {
+          expect(typeof options.onInventory === "function").toBe(verbose);
           options.onProgress?.({ phase: "discovering" });
           options.onProgress?.({
             phase: "matching",

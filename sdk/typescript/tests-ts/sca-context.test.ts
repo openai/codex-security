@@ -394,6 +394,8 @@ test("findings and next actions precede inventory and inconclusive results remai
       error: null,
     },
   ];
+  // Saved records use the first assessment for each match.
+  result.assessments.push({ ...result.assessments[0]!, verdict: "confirmed" });
   expect(dependencyAssessmentSummary(result)).toBe(
     "0 confirmed, 0 not actionable, 1 inconclusive, 0 failed, 2 unfinished",
   );

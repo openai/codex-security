@@ -9097,12 +9097,15 @@ async function runDependencyScan(
     result = await security.scanDependencies({
       ...options,
       signal: controller.signal,
-      onInventory: (inventory) =>
-        notify(() => {
-          if (stopped || (!verbose && !progress.interactive)) return;
-          for (const line of dependencyInventorySummary(inventory))
-            milestone(line);
-        }),
+      onInventory:
+        verbose || progress.interactive
+          ? (inventory) =>
+              notify(() => {
+                if (stopped) return;
+                for (const line of dependencyInventorySummary(inventory))
+                  milestone(line);
+              })
+          : undefined,
       onProgress: (event) =>
         notify(() => {
           if (stopped) return;
