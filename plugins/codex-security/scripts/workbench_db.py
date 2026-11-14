@@ -112,6 +112,8 @@ from workbench_source_scopes import (
     capture_source_scopes,
     expected_target_kinds,
     public_scan_recipe,
+    requested_finding_scope,
+    requested_scan_file_paths,
     requested_scan_paths,
 )
 from workbench_target import (
@@ -328,21 +330,6 @@ def apply_migrations(
         immediate=immediate,
         discovery_roots=discovery_roots,
     )
-
-
-def requested_scan_file_paths(scan: sqlite3.Row) -> list[str]:
-    # Older scans did not record path kinds. Retain their lexical scope semantics
-    # rather than infer the original target from a possibly changed checkout.
-    if scan["recipe_json"] is None:
-        return []
-    recipe = json.loads(scan["recipe_json"], parse_constant=reject_non_finite_json)
-    return recipe.get("scopeFilePaths", [])
-
-
-def requested_finding_scope(scan: sqlite3.Row) -> list[tuple[str, bool]]:
-    """Return requested paths paired with whether the stored recipe identified each one as a file."""
-    files = {PurePosixPath(path) for path in requested_scan_file_paths(scan)}
-    return [(path, PurePosixPath(path) in files) for path in requested_scan_paths(scan)]
 
 
 def scan_contract(scan: sqlite3.Row) -> dict[str, Any]:
