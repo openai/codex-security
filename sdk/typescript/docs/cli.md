@@ -526,6 +526,11 @@ as bare flags or use lowercase `=true` or `=false`.
 When a cost limit is configured, `scan --dry-run` shows the resolved
 `maxCostUsd` and a `costLimitNote` explaining how the scan measures usage
 against the limit and why in-flight requests can exceed it.
+The dry-run field `configuredParentSessionThreadLimit` reports the native
+`features.multi_agent_v2.max_concurrent_threads_per_session` setting. The
+limit includes the parent session's root thread. Deep Scan runs discovery
+workers in separate sessions, each with up to `subagents` children. Direct
+Deep Scan can start workers without launching a parent Codex session.
 
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.
