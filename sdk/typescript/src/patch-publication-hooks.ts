@@ -130,9 +130,12 @@ export function filterCommandConfig(
   );
   if (parsed.error) throw parsed.error;
   if (parsed.status !== 0)
-    throw new Error(
-      parsed.stderr.trimEnd() ||
-        "Could not read Git command-scope configuration.",
+    throw Object.assign(
+      new Error(
+        parsed.stderr.trimEnd() ||
+          "Could not read Git command-scope configuration.",
+      ),
+      { code: parsed.status, stderr: parsed.stderr },
     );
   const records = parsed.stdout.split("\0");
   const parameters = [];

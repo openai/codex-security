@@ -8,7 +8,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   completePatches,
@@ -315,7 +315,12 @@ test.each(
   },
 );
 
-test.each(["absolute", "relative", "relative configuration"])(
+test.each([
+  "absolute",
+  "relative",
+  "relative configuration",
+  "NUL configuration",
+])(
   "prepares saved component publication with %s Git settings",
   async (mode) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
@@ -334,7 +339,13 @@ test.each(["absolute", "relative", "relative configuration"])(
       GIT_WORK_TREE: mode === "absolute" ? directory : "..",
       ...(mode === "relative configuration"
         ? { GIT_CONFIG_GLOBAL: "settings" }
-        : {}),
+        : mode === "NUL configuration"
+          ? {
+              GIT_CONFIG_GLOBAL: "NUL",
+              GIT_CONFIG_SYSTEM: "nul",
+              GIT_CONFIG_NOSYSTEM: "0",
+            }
+          : {}),
     };
     const configured =
       mode === "relative configuration"
@@ -376,6 +387,20 @@ test.each(["absolute", "relative", "relative configuration"])(
               : "https://github.example.test/example/repository/pull/1";
           }
           if (args[0] === "push") {
+            if (mode === "NUL configuration") {
+              for (const key of [
+                "GIT_CONFIG_GLOBAL",
+                "GIT_CONFIG_SYSTEM",
+              ] as const) {
+                const entry = context.environment[key]!;
+                if (process.platform === "win32")
+                  expect(entry).toBe(environment[key]);
+                else {
+                  expect(isAbsolute(entry)).toBe(true);
+                  expect(basename(entry)).toBe(environment[key]!);
+                }
+              }
+            }
             pushes++;
             return "";
           }
