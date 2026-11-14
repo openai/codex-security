@@ -2092,7 +2092,10 @@ test.each(["removed", "recreated directory", "replacement Git checkout"])(
           input,
         ),
     });
-    expect(canonical.scanId).toBe(newest.scanId);
+    expect(canonical).toMatchObject({
+      scanId: newest.scanId,
+      remediationAvailable: false,
+    });
   },
 );
 

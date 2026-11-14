@@ -200,6 +200,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     detail = get_scan.add_mutually_exclusive_group()
     detail.add_argument("--occurrence-id")
     detail.add_argument("--progress-only", action="store_true")
+    detail.add_argument("--metadata-only", action="store_true")
     get_scan.add_argument("--check-target", action="store_true")
 
     get_finding = subparsers.add_parser("get-finding")

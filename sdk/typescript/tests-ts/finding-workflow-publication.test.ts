@@ -368,7 +368,12 @@ test.each(["before-post", "before-write", "lost-ack", "lost-completion"])(
     ]);
     const history = async (args: readonly string[], input?: string) => {
       if (args[0] === "get-scan") {
-        expect(args).toEqual(["get-scan", "--scan-id", document.scanId]);
+        expect(args).toEqual([
+          "get-scan",
+          "--scan-id",
+          document.scanId,
+          "--metadata-only",
+        ]);
         return {
           scan: {
             scanId: document.scanId,

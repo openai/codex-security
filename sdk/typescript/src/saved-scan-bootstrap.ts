@@ -207,7 +207,7 @@ export async function savedScanWorkbench(
       return { scans: [] };
     }
     const result = await execute(
-      target ? ["get-scan", "--scan-id", target.id] : args,
+      target ? ["get-scan", "--scan-id", target.id, "--metadata-only"] : args,
     );
     if (typeof requestedId !== "string" && args[0] === "finding-workflow") {
       const workflow = result["workflow"];
