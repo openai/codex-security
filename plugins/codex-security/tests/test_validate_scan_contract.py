@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 
+import pytest
 from workbench_test_support import ScanFixtureTestCase, load_script
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +17,21 @@ EXAMPLE_SCAN = PLUGIN_ROOT / "examples" / "legacy-completed-scan"
 
 
 VALIDATOR = load_script("validate_scan_contract")
+
+
+@pytest.mark.parametrize("missing", ["mode", "review"])
+def test_inline_manifest_requires_mode_and_review(tmp_path: Path, missing: str) -> None:
+    scan_dir = tmp_path / "scan"
+    shutil.copytree(PLUGIN_ROOT / "examples" / "completed-scan", scan_dir)
+    path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    del manifest["scan"][missing]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(
+        VALIDATOR.FINALIZER.ContractError, match=rf"\.{missing}: missing required schema property"
+    ):
+        VALIDATOR.validate_contract(scan_dir)
 
 
 class ValidateScanContractTest(ScanFixtureTestCase):
