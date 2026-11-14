@@ -418,16 +418,17 @@ credentials, and bugs such as a server token sent to a browser. Remove the rule
 to restore the default, or put “Report standalone findings for known-format API
 keys and tokens” in a component’s `SECURITY.md` to opt that component back in.
 
-For one scan, override repository policy with an instruction file. Project
-configs use `scan.instructions_file`, and the SDK accepts `scanPrompt` or
-`scanPromptFile`.
+For one scan, override repository policy with an instruction file you control.
+Project configs use [`scan.instructions_file`](../../../docs/project-configuration.md#settings),
+and the SDK accepts `scanPrompt` or `scanPromptFile`.
 
 ```bash
 codex-security scan . --scan-prompt-file credential-policy.md
 ```
 
 When a scan finds a credential, share its type and location with the owner.
-Source snippets and diffs can contain the value.
+Source snippets and diffs can contain the value, and previous commits or copies
+can retain it after cleanup.
 
 - **If you own the code**, replace a committed literal with a lookup in the
   project’s secret store, or stop the runtime leak. For example, remove the
@@ -2635,10 +2636,12 @@ execution. Both `validate` and `patch` accept files or literal text in the
 current directory. Patching by saved finding or occurrence ID selects the
 original repository.
 
-For a checked-in credential, `patch` can leave a verified source change in
-your working tree and report `blocked` pending confirmation of revocation.
-Review the diff and follow the [credential owner steps](#checked-in-credentials).
-Saved-finding `--create-pr` stops when a finding is blocked.
+For a checked-in credential, patch results distinguish the code change from
+retirement of the old value. A saved finding can return `verified` after a code
+change or `no_change` if the source was already clean. If
+`credentialRevocationPending` is `true`, follow the [credential owner steps](#checked-in-credentials).
+You can review the diff or use `--create-pr` with a verified source change while
+the owner retires the old credential.
 
 Basic patching also works in ordinary directories and Git worktrees before their
 first commit. Directory change tracking excludes `.git` and `.svn` metadata.
@@ -2825,8 +2828,10 @@ scan saves the findings and skips the interactive patch offer. Use
 `high` selects high and critical findings. Interactive users can select findings
 and add instructions. The interactive finding browser lists critical, high,
 medium, then low findings, preserving scan order within each severity.
-Patch results are `verified`, `no_change`, `blocked`, or
-`failed`. Verified/already-fixed findings no longer fail the severity threshold.
+Patch results are `verified`, `no_change`, `blocked`, or `failed`. A verified
+patch or an already-fixed finding clears the severity threshold unless an
+exposed credential still needs retirement. In that case the code change is
+available for review and the finding still counts toward the threshold.
 
 ### Create or resume a draft pull request
 
@@ -2890,7 +2895,8 @@ for `patch`. Omit it or use `--verification-mode standard` for the default check
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
 For a checked-in credential, verified source cleanup with unknown retirement
 returns `inconclusive`. To verify again, put the original finding, source location,
-and issuer or owner confirmation in one file, omitting the credential value.
+and issuer or owner confirmation that the specific old credential was disabled
+in one file, omitting the credential value.
 Run `codex-security verify-fix finding.md` from the affected checkout.
 
 Without output options, each finding prints a verdict and its evidence.

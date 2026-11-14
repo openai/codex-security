@@ -35,7 +35,11 @@ describe("CodexSecurity headless patching", () => {
     verificationReport:
       "The injection payload is rejected and ordinary queries still pass.",
   } as const;
-  const verifiedResponse = { ...verified, reason: null } as const;
+  const verifiedResponse = {
+    ...verified,
+    reason: null,
+    credentialRevocationPending: false,
+  } as const;
 
   async function* patchEvents(
     response: unknown = verifiedResponse,
@@ -304,8 +308,15 @@ describe("CodexSecurity headless patching", () => {
           reason: {
             anyOf: [{ type: "string", minLength: 1 }, { type: "null" }],
           },
+          credentialRevocationPending: { type: "boolean" },
         },
-        required: ["status", "changedFiles", "verificationReport", "reason"],
+        required: [
+          "status",
+          "changedFiles",
+          "verificationReport",
+          "reason",
+          "credentialRevocationPending",
+        ],
         additionalProperties: false,
       });
       expect(captured.turn?.outputSchema).not.toHaveProperty("oneOf");
@@ -500,6 +511,20 @@ describe("CodexSecurity headless patching", () => {
   );
 
   test.each([
+    {
+      status: "verified",
+      changedFiles: ["config.ts"],
+      verificationReport:
+        "The service reads the token from its secret store. The owner still needs to disable the old token.",
+      credentialRevocationPending: true,
+    },
+    {
+      status: "no_change",
+      changedFiles: [],
+      verificationReport:
+        "Source cleanup was already complete. Confirm retirement with the issuer.",
+      credentialRevocationPending: true,
+    },
     {
       status: "no_change",
       changedFiles: [],

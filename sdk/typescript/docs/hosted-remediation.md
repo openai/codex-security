@@ -95,6 +95,14 @@ result validation finished; it does not imply that a patch fixed the finding:
   still works. If the selected mode cannot establish that, use `inconclusive`
   unless the evidence shows the finding is still vulnerable.
 
+For a credential exposed in source, `patch.status` describes code cleanup.
+When `patch.credentialRevocationPending` is `true`, show the owner action in
+`patch.verification` and keep the credential finding open. The owner can revoke
+the old credential or deploy a replacement and disable the old value. A
+separate `verify` request needs source cleanup and issuer or owner confirmation
+that the old credential is unusable to return `fixed`. Source cleanup alone
+yields `inconclusive`. Both operations assess supplied evidence offline.
+
 Hosted and local verification use the same verdict parser and do not require
 `checks`. At the hosted boundary, a `fixed` verdict is rejected if a nonempty
 `checks` array matches the SDK 0.6.0 check format and reports a `failed` or

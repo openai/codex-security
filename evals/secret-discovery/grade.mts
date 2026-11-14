@@ -14,6 +14,12 @@ export interface CodeEvidence {
   [key: string]: unknown;
 }
 export interface Finding {
+  title?: string;
+  summary?: string;
+  validation?: { summary?: string; limitations?: string[] };
+  severity?: { rationale?: string };
+  confidence?: { rationale?: string };
+  remediation?: string;
   taxonomy?: { category?: string; cwe?: string[] };
   locations?: SourceLocation[];
   codeEvidence?: CodeEvidence[];
@@ -92,36 +98,53 @@ function matchesLocation(location: SourceLocation, expected: Expected) {
 function matches(
   finding: Finding,
   expected: Expected,
-  cwes = finding.taxonomy?.cwe ?? [],
+  codes = finding.taxonomy?.cwe ?? [],
 ) {
   const category = (finding.taxonomy?.category ?? "")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/[-_\s]+/g, " ")
     .trim()
     .toLowerCase();
-  const runtimeLeak = expected.category === "sensitive-data-exposure";
-  const relevantCategory = runtimeLeak
-    ? /disclos|expos|leak|access control|authenticat|authoriz/.test(category)
-    : secretCategory.test(category);
+  if (
+    negatedCategory.test(category) ||
+    !finding.locations?.some((location) => matchesLocation(location, expected))
+  )
+    return false;
+  const cwes = codes.map((value) =>
+    value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1"),
+  );
+  if (
+    expected.id === "private-key" &&
+    cwes.includes("CWE-321") &&
+    /^(?:embedded[- ]+)?(?:cryptographic(?:[- ]+signing)?|signing)[- ]+keys?(?:[- ]+(?:exposure|disclosure))?$/i.test(
+      category,
+    )
+  )
+    return true;
+  if (expected.category === "sensitive-data-exposure") {
+    const exact = runtimeCategoryCwes.get(category);
+    if (exact) return cwes.includes(exact);
+    // The endpoint returns a value loaded at runtime. Source storage is a different defect.
+    return (
+      (/disclos|expos|leak|authenticat|authoriz|access[- ]control/i.test(
+        category,
+      ) ||
+        (explicitSecretCategory.test(category) &&
+          /\bresponses?\b/i.test(category))) &&
+      !/hard ?cod|^(?:credential|secret|password|token)s? in source|cleartext storage/i.test(
+        category,
+      ) &&
+      cwes.some((cwe) => expected.cwes.includes(cwe))
+    );
+  }
   return (
-    !negatedCategory.test(category) &&
-    cwes.some((value) => {
-      const cwe = value.trim().replace(/^cwe-0*(\d+)$/i, "CWE-$1");
-      if (expected.cwes.includes(cwe)) {
-        return (
-          relevantCategory ||
-          (runtimeLeak && runtimeCategoryCwes.get(category) === cwe) ||
-          (cwe === "CWE-321" &&
-            /^(?:embedded )?cryptographic keys?$/.test(category))
-        );
-      }
-      return (
-        !runtimeLeak &&
-        ["CWE-200", "CWE-540"].includes(cwe) &&
-        explicitSecretCategory.test(category)
-      );
-    }) &&
-    finding.locations?.some((location) => matchesLocation(location, expected))
+    secretCategory.test(category) &&
+    cwes.some(
+      (cwe) =>
+        expected.cwes.includes(cwe) ||
+        (["CWE-200", "CWE-540"].includes(cwe) &&
+          explicitSecretCategory.test(category)),
+    )
   );
 }
 
@@ -136,7 +159,7 @@ function matchesConsumer(location: SourceLocation, expected: Expected) {
   );
 }
 
-function validEvidence(finding: Finding, fixture: Fixture) {
+function evidenceIssues(finding: Finding, fixture: Fixture, index: number) {
   const evidence = (finding.codeEvidence ?? []).map((entry) => {
     const code = entry.code?.replaceAll("\r\n", "\n").replace(/\n$/u, "");
     return {
@@ -145,29 +168,35 @@ function validEvidence(finding: Finding, fixture: Fixture) {
       endLine: entry.startLine + (code?.split("\n").length ?? 0) - 1,
     };
   });
-  return (
-    evidence.length > 0 &&
-    evidence.every(
+  const incorrectSnippets = evidence
+    .filter(
       (entry) =>
-        Boolean(entry.code?.trim()) &&
-        validSourceRange(entry, fixture) &&
-        entry.code ===
+        !entry.code?.trim() ||
+        !validSourceRange(entry, fixture) ||
+        entry.code !==
           sourceText(entry.path, fixture)!
             .replaceAll("\r\n", "\n")
             .split("\n")
             .slice(entry.startLine - 1, entry.endLine)
             .join("\n"),
-    ) &&
-    fixture.positives
-      .filter((expected) => matches(finding, expected))
-      .every((expected) =>
-        evidence.some(
+    )
+    .map(({ path, startLine }) => ({ path, startLine }));
+  const missingCaseEvidence = fixture.positives
+    .filter(
+      (expected) =>
+        matches(finding, expected) &&
+        !evidence.some(
           (entry) =>
             matchesLocation(entry, expected) ||
             matchesConsumer(entry, expected),
         ),
-      )
-  );
+    )
+    .map(({ id }) => id);
+  return !evidence.length ||
+    incorrectSnippets.length ||
+    missingCaseEvidence.length
+    ? [{ index, incorrectSnippets, missingCaseEvidence }]
+    : [];
 }
 
 /** Grade retained final findings, never keyword mentions or deferred candidates. */
@@ -195,6 +224,13 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
             !matchedCases.some(
               (expected) =>
                 matchesLocation(location, expected) ||
+                // This sentence establishes the audience of the independently matched status route.
+                (expected.category === "sensitive-data-exposure" &&
+                  normalizeSourcePath(location.path) ===
+                    normalizeSourcePath("README.md") &&
+                  location.startLine === fixture.statusAccessLine &&
+                  (location.endLine ?? location.startLine) ===
+                    fixture.statusAccessLine) ||
                 matchesConsumer(location, expected),
             )),
       )
@@ -216,14 +252,45 @@ export function gradeResult(result: Result | undefined, fixture: Fixture) {
   if (found !== cases.length) errors.push("missing retained secret findings");
   if (falsePositives.length)
     errors.push("false positives or incorrect taxonomy/locations");
-  if (findings.some((finding) => !validEvidence(finding, fixture)))
-    errors.push("missing or invalid code evidence");
+  const evidenceFailures = findings.flatMap((finding, index) =>
+    evidenceIssues(finding, fixture, index),
+  );
+  if (evidenceFailures.length) errors.push("missing or invalid code evidence");
+  const discoveryPassed = errors.length === 0;
+  const retained = findings.filter((finding) =>
+    fixture.positives.some(
+      (expected) =>
+        expected.category !== "sensitive-data-exposure" &&
+        matches(finding, expected),
+    ),
+  );
+  const withStatus = retained.filter((finding) =>
+    [
+      finding.title,
+      finding.summary,
+      finding.validation?.summary,
+      ...(finding.validation?.limitations ?? []),
+      finding.confidence?.rationale,
+      finding.severity?.rationale,
+      finding.remediation,
+    ].some(
+      (field) =>
+        typeof field === "string" && /\bValidity unchecked\b/i.test(field),
+    ),
+  ).length;
+  if (withStatus !== retained.length)
+    errors.push(
+      "missing validity status on retained checked-in credential findings",
+    );
   return {
     passed: errors.length === 0,
+    discoveryPassed,
+    validityCopy: { withStatus, retainedCredentialFindings: retained.length },
     cases,
     recall: found / cases.length,
     falsePositiveCount: falsePositives.length,
     falsePositives,
+    evidenceFailures,
     errors,
   };
 }

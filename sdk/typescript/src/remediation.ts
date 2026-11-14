@@ -10,6 +10,10 @@ export const FindingPatchSchema = z.object({
   status: z.enum(["verified", "no_change", "blocked", "failed"]),
   files: z.array(z.string()),
   verification: z.string().optional(),
+  credentialRevocationPending: z
+    .boolean()
+    .transform((pending) => pending || undefined)
+    .optional(),
   reason: z.string().optional(),
 });
 
@@ -100,7 +104,8 @@ export async function remediationPrompt(
     );
     if (input.structuredPatch) {
       prompt.push(
-        'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the original issue is fixed or that the current code is already safe, and that legitimate behavior still works","reason":"required for blocked or failed outcomes"}. ' +
+        'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the source change or current code closes the reported code path and preserves legitimate behavior","reason":"required for blocked or failed outcomes"}. ' +
+          "Include the boolean credentialRevocationPending. Set it to true for verified or no_change repairs of committed credentials or confirmed runtime disclosures unless dated, caller-supplied issuer or owner evidence identifies the affected credential and confirms its retirement. For a possible leak with no confirmed disclosure, verify the repaired path and ask the owner to check deployment history. A replacement in use or a comment in the scanned code alone cannot establish retirement. Set the field to false otherwise. State any outstanding owner action in verification. Never try the credential or contact the issuer for status. " +
           (staticVerification
             ? 'Use "verified" only when static evidence establishes that the original attack path is closed and legitimate behavior is preserved. '
             : 'Use "verified" only after the original issue no longer reproduces and relevant checks pass. ') +

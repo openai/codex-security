@@ -114,6 +114,29 @@ test("delegating API token literals preserves the contextual password and indepe
   );
 });
 
+test("runtime disclosure needs its own finding even when token alerts are delegated", () => {
+  for (const data of [fixture, createFixture(true)]) {
+    const result = retainedResult(data);
+    const index = data.positives.findIndex(
+      ({ id }) => id === "runtime-disclosure",
+    );
+    const finding = result.findings[index];
+    finding.taxonomy = { category: "missing-authorization", cwe: ["CWE-862"] };
+    assert.equal(gradeResult(result, data).passed, true);
+    finding.taxonomy = {
+      category: "Sensitive credentials in public responses",
+      cwe: ["CWE-200"],
+    };
+    assert.equal(gradeResult(result, data).passed, true);
+    finding.taxonomy = { category: "hardcoded-credentials", cwe: ["CWE-200"] };
+    assert.equal(gradeResult(result, data).cases[index].found, false);
+    finding.taxonomy = { category: "credential-exposure", cwe: ["CWE-798"] };
+    assert.equal(gradeResult(result, data).cases[index].found, false);
+    result.findings.splice(index, 1);
+    assert.equal(gradeResult(result, data).passed, false);
+  }
+});
+
 test("resolved, deferred, and intermediate findings do not satisfy final recall", () => {
   const result = retainedResult();
   result.coverage.deferred = result.findings;
@@ -122,6 +145,30 @@ test("resolved, deferred, and intermediate findings do not satisfy final recall"
   const report = gradeResult(result, fixture);
   assert.equal(report.passed, false);
   assert.equal(report.recall, 0);
+});
+
+test("grades the unchecked status on each source credential separately from discovery", () => {
+  const result = retainedResult();
+  const source = result.findings[0];
+  delete source.validation;
+  source.codeEvidence[0].explanation = "Validity unchecked";
+  result.coverage.openQuestions.push("Validity unchecked");
+  const leak = result.findings.at(-1)!;
+  delete leak.validation;
+  const missing = gradeResult(result, fixture);
+  assert.equal(missing.discoveryPassed, true);
+  assert.equal(missing.passed, false);
+  assert.deepEqual(missing.validityCopy, {
+    withStatus: 6,
+    retainedCredentialFindings: 7,
+  });
+  source.summary = "Validity unchecked. The bearer is embedded in the client.";
+  const complete = gradeResult(result, fixture);
+  assert.equal(complete.passed, true);
+  assert.equal(complete.validityCopy.withStatus, 7);
+  delete source.summary;
+  source.validation = { limitations: ["Validity unchecked."] };
+  assert.equal(gradeResult(result, fixture).passed, true);
 });
 
 for (const [name, mutate] of [
@@ -230,6 +277,76 @@ test("accepts credential exposure with non-secret context in the category", () =
   ]) {
     result.findings[0].taxonomy.category = category;
     assert.equal(gradeResult(result, fixture).passed, true, category);
+  }
+});
+
+test("public status access corroborates only the independently identified runtime disclosure", () => {
+  const result = retainedResult();
+  const runtime = result.findings.at(-1)!;
+  const context = {
+    path: "README.md",
+    startLine: fixture.statusAccessLine,
+    role: "Documented public access",
+  };
+  runtime.locations.push(context);
+  assert.equal(gradeResult(result, fixture).passed, true);
+  const originalEvidence = runtime.codeEvidence;
+  runtime.codeEvidence = [
+    sourceEvidence(fixture, context.path, context.startLine),
+  ];
+  assert.deepEqual(
+    gradeResult(result, fixture).evidenceFailures[0].missingCaseEvidence,
+    ["runtime-disclosure"],
+  );
+  runtime.codeEvidence = originalEvidence;
+  runtime.locations.pop();
+  result.findings[0].locations.push(context);
+  assert.equal(gradeResult(result, fixture).falsePositiveCount, 1);
+  result.findings[0].locations.pop();
+  for (const location of [
+    { ...context, startLine: 1 },
+    { ...context, startLine: 1, endLine: context.startLine },
+  ]) {
+    runtime.locations.push(location);
+    assert.equal(gradeResult(result, fixture).falsePositiveCount, 1);
+    runtime.locations.pop();
+  }
+  runtime.locations = [context];
+  assert.equal(gradeResult(result, fixture).cases.at(-1)!.found, false);
+  assert.equal(gradeResult(result, fixture).falsePositiveCount, 1);
+});
+
+test("recognizes the embedded signing key at its declaration with CWE-321", () => {
+  const result = retainedResult();
+  const index = fixture.positives.findIndex(({ id }) => id === "private-key");
+  const key = fixture.positives[index];
+  const finding = result.findings[index];
+  for (const category of [
+    "Embedded cryptographic signing key",
+    "Cryptographic key disclosure",
+    "Signing-key exposure",
+  ]) {
+    finding.taxonomy = { category, cwe: ["CWE-321"] };
+    assert.equal(gradeResult(result, fixture).passed, true);
+  }
+  for (const category of [
+    "public signing key",
+    "not a signing key",
+    "SQL injection",
+  ]) {
+    finding.taxonomy.category = category;
+    assert.equal(gradeResult(result, fixture).cases[index].found, false);
+  }
+  finding.taxonomy.category = "Signing key exposure";
+  finding.taxonomy.cwe = ["CWE-200"];
+  assert.equal(gradeResult(result, fixture).cases[index].found, false);
+  finding.taxonomy.cwe = ["CWE-321"];
+  for (const [path, line] of [
+    ["config/public.pem", 1],
+    [key.path, key.consumerLine!],
+  ] as const) {
+    finding.locations = [{ path, startLine: line, role: "root_control" }];
+    assert.equal(gradeResult(result, fixture).cases[index].found, false);
   }
 });
 
@@ -483,6 +600,28 @@ for (const negativeIndex of fixture.negatives.keys()) {
   });
 }
 
+test("a provider-format placeholder and an access key ID alone cannot satisfy credential recall", () => {
+  for (const data of [fixture, createFixture(true)]) {
+    for (const [path, marker] of [
+      ["examples/settings.env.example", "GITLAB_TOKEN=glpat-"],
+      ["src/constants.py", "AWS_ACCESS_KEY_ID"],
+    ]) {
+      const line =
+        data.files[path]
+          .split("\n")
+          .findIndex((text) => text.includes(marker)) + 1;
+      assert.ok(line > 0);
+      const result = retainedResult(data);
+      result.findings.push({
+        taxonomy: { category: "token-exposure", cwe: ["CWE-798"] },
+        locations: [{ path, startLine: line, role: "root_control" }],
+        codeEvidence: [sourceEvidence(data, path, line)],
+      });
+      assert.equal(gradeResult(result, data).falsePositiveCount, 1);
+    }
+  }
+});
+
 for (const role of [
   "supporting",
   "support",
@@ -601,6 +740,13 @@ test("rejects fabricated source text at otherwise valid evidence locations", () 
     const report = gradeResult(result, fixture);
     assert.equal(report.recall, 1);
     assert.equal(report.falsePositiveCount, 0);
+    assert.deepEqual(report.evidenceFailures, [
+      {
+        index: 0,
+        incorrectSnippets: [{ path: "src/client.py", startLine: 3 }],
+        missingCaseEvidence: [],
+      },
+    ]);
     assert.deepEqual(report.errors, ["missing or invalid code evidence"]);
   }
 
@@ -710,8 +856,10 @@ test("multiple expected exposures can share a finding", () => {
   const result = retainedResult();
   const unused = result.findings.splice(1, 1)[0];
   result.findings[0].locations.push(...unused.locations);
-  assert.deepEqual(gradeResult(result, fixture).errors, [
-    "missing or invalid code evidence",
+  const incomplete = gradeResult(result, fixture);
+  assert.deepEqual(incomplete.errors, ["missing or invalid code evidence"]);
+  assert.deepEqual(incomplete.evidenceFailures, [
+    { index: 0, incorrectSnippets: [], missingCaseEvidence: ["unused-source"] },
   ]);
   result.findings[0].codeEvidence.push(...unused.codeEvidence);
   assert.equal(gradeResult(result, fixture).passed, true);

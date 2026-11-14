@@ -1302,6 +1302,7 @@ describe("custom validation", () => {
       "Independently validate each unique finding",
     );
     expect(diff).toContain("Run `$finding-discovery`");
+    expect(diff).toContain("Validity unchecked");
     expect(diff).toContain(
       "Immediately save a `complete: false` semantic draft",
     );
