@@ -1,7 +1,6 @@
 import {
   CodexSdkWorkerExecutor,
   fakeCodexFixture,
-  bundledCodexSdkEnvironment,
   assertReadOnlyWorkerPolicy,
 } from "./deep_scan_executor_fixture.ts";
 import assert from "node:assert/strict";
@@ -71,16 +70,13 @@ export async function testConcurrentWorkerExecutableAliases() {
       for (const resumeThreadId of [undefined, "resumed-thread"]) {
         await Promise.all(
           scans.map((scan) => {
-            Object.assign(
-              process.env,
-              bundledCodexSdkEnvironment(scan.alias, {
-                PATH: "",
-                CODEX_CLI_PATH: scan.alias,
-                CODEX_HOME: scan.fixture.root,
-                CODEX_SECURITY_CONFIG_PATH: scan.configPath,
-                FAKE_CODEX_MARKER: scan.fixture.markerPath,
-              }),
-            );
+            Object.assign(process.env, {
+              PATH: scan.tools,
+              CODEX_CLI_PATH: scan.alias,
+              CODEX_HOME: scan.fixture.root,
+              CODEX_SECURITY_CONFIG_PATH: scan.configPath,
+              FAKE_CODEX_MARKER: scan.fixture.markerPath,
+            });
             return scan.executor.run({
               promptPath: scan.promptPath,
               workingDirectory: scan.fixture.root,
