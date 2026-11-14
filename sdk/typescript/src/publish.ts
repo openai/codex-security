@@ -1561,9 +1561,9 @@ async function runPublicationCodex(
     const onAbort = (): void => {
       if (cancellationRequested) return;
       cancellationRequested = true;
-      termination = terminatePublicationProcess(child, signal);
+      termination = terminateChildProcess(child, signal);
       forcedTermination = setTimeout(() => {
-        terminatePublicationProcessGroup(child, "SIGKILL");
+        signalChildProcessGroup(child, "SIGKILL");
       }, 1_000);
       forcedTermination.unref();
     };
@@ -1610,7 +1610,7 @@ async function runPublicationCodex(
     child.once("close", (code, terminationSignal) => {
       void (termination ?? Promise.resolve()).finally(() => {
         if (cancellationRequested && process.platform !== "win32") {
-          terminatePublicationProcessGroup(child, "SIGKILL");
+          signalChildProcessGroup(child, "SIGKILL");
         }
         cleanup();
         resolve({
@@ -1625,19 +1625,19 @@ async function runPublicationCodex(
   });
 }
 
-function terminatePublicationProcess(
-  child: ChildProcessWithoutNullStreams,
+export function terminateChildProcess(
+  child: Pick<ChildProcessWithoutNullStreams, "pid" | "kill">,
   signal?: AbortSignal,
 ): Promise<void> {
   if (process.platform !== "win32") {
-    terminatePublicationProcessGroup(
+    signalChildProcessGroup(
       child,
       signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
     );
     return Promise.resolve();
   }
   if (child.pid === undefined) {
-    terminatePublicationProcessGroup(child, "SIGKILL");
+    signalChildProcessGroup(child, "SIGKILL");
     return Promise.resolve();
   }
 
@@ -1652,11 +1652,11 @@ function terminatePublicationProcess(
       windowsHide: true,
     });
     taskkill.once("error", () => {
-      terminatePublicationProcessGroup(child, "SIGKILL");
+      signalChildProcessGroup(child, "SIGKILL");
       resolve();
     });
     taskkill.once("close", (code) => {
-      if (code !== 0) terminatePublicationProcessGroup(child, "SIGKILL");
+      if (code !== 0) signalChildProcessGroup(child, "SIGKILL");
       resolve();
     });
   });
@@ -1679,11 +1679,11 @@ function forceTerminatePublicationProcess(
       spawnSync(command, args, { stdio: "ignore", windowsHide: true });
     if (taskkill.error === undefined && taskkill.status === 0) return;
   }
-  terminatePublicationProcessGroup(child, "SIGKILL");
+  signalChildProcessGroup(child, "SIGKILL");
 }
 
-export function terminatePublicationProcessGroup(
-  child: ChildProcessWithoutNullStreams,
+export function signalChildProcessGroup(
+  child: Pick<ChildProcessWithoutNullStreams, "pid" | "kill">,
   signal: NodeJS.Signals,
 ): void {
   if (child.pid === undefined) return;

@@ -151,6 +151,27 @@ describe("trusted executable resolution", () => {
     },
   );
 
+  test("Git transport resolves a relative PATH alias from its own directory inside a campaign", async () => {
+    const directory = await temporaryDirectory();
+    const checkout = join(directory, "checkout");
+    const launcher = join(directory, "operator");
+    const tools = join(directory, `tools${delimiter}literal`);
+    await Promise.all([mkdir(checkout), mkdir(launcher), mkdir(tools)]);
+    await symlink(
+      tools,
+      join(launcher, "bin"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const executable = join(tools, "proxy-tool");
+    await writeFile(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const selected = await withProtectedExecutableRoots([checkout], () =>
+      inspectTrustedExecutable("proxy-tool", { PATH: "bin" }, checkout, {
+        gitTransportDirectory: launcher,
+      }),
+    );
+    expect(selected.executable).toBe(await realpath(executable));
+  });
+
   test("accepts safe relative PATH entries without trusting repository links", async () => {
     const root = await temporaryDirectory();
     const repository = join(root, "repository");

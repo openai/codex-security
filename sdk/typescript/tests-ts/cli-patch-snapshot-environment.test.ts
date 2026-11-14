@@ -1,0 +1,277 @@
+import { afterEach, expect, test } from "bun:test";
+import { execFileSync, spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { PATCH_GIT_ENVIRONMENT_RUNNER as runner } from "../src/cli.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const fixtures = createTemporaryDirectories(true);
+afterEach(fixtures.cleanup);
+
+function bindingFrame(environment: Record<string, string> = {}): Buffer {
+  return Buffer.from(JSON.stringify({ bindings: Object.entries(environment) }));
+}
+
+const nativeGrants = ["C:/synthetic/repository", "C:/synthetic/repository/*"];
+const cases = [
+  { name: "wildcard reset", caller: ["*", ""], active: [] },
+  {
+    name: "named reset with a later grant",
+    caller: ["C:/cleared", "", "C:/retained"],
+    active: ["C:/retained"],
+  },
+  {
+    name: "repeated resets",
+    caller: ["*", "", "C:/cleared", "", "C:/retained"],
+    active: ["C:/retained"],
+  },
+  {
+    name: "case-insensitive reset key",
+    caller: ["*", ""],
+    active: [],
+    resetKey: "SAFE.Directory",
+  },
+  {
+    name: "caller grant without a reset",
+    caller: ["C:/retained"],
+    active: ["C:/retained"],
+  },
+];
+
+for (const platform of ["win32", "linux"] as const) {
+  for (const { name, caller, active, resetKey } of cases) {
+    test(`constructs snapshot Git arguments with ${name} on ${platform}`, () => {
+      const entries = caller.map((value) => [
+        value === "" ? (resetKey ?? "safe.directory") : "safe.directory",
+        value,
+      ]);
+      entries.push(["filter.synthetic.clean", "synthetic-clean-filter"]);
+      const environment = (values: string[][]) => ({
+        GIT_CONFIG_COUNT: String(values.length),
+        ...Object.fromEntries(
+          values.flatMap(([key, value], index) => [
+            [`GIT_CONFIG_KEY_${index}`, key],
+            [`GIT_CONFIG_VALUE_${index}`, value],
+          ]),
+        ),
+      });
+      const original = environment(entries);
+      const filtered = environment([
+        ...entries,
+        ...nativeGrants.map((value) => ["safe.directory", value]),
+      ]);
+      const header = bindingFrame(original);
+      const input = Buffer.from([0, 255, 10, 13]);
+      const frame = Buffer.concat([header, input]);
+      let consumed = 0;
+      const invocations: {
+        command: string;
+        args: string[];
+        environment: object;
+      }[] = [];
+      const child = { on() {} };
+      const process = {
+        platform,
+        argv: [
+          "node",
+          String(header.length),
+          "git",
+          "-C",
+          "C:/synthetic/repository",
+          "status",
+        ],
+        env: filtered,
+      };
+      // Exercise the exact argument construction without starting a child.
+      new Function("require", "process", "Buffer", runner)(
+        (module: string) => {
+          if (module === "node:fs")
+            return {
+              readSync(
+                fd: number,
+                buffer: Buffer,
+                offset: number,
+                length: number,
+              ) {
+                expect(fd).toBe(0);
+                const bytes = Math.min(length, 7, frame.length - consumed);
+                frame.copy(buffer, offset, consumed, consumed + bytes);
+                consumed += bytes;
+                return bytes;
+              },
+            };
+          expect(module).toBe("node:child_process");
+          return {
+            spawn(command: string, args: string[], options: object) {
+              expect(options).toEqual({ stdio: "inherit" });
+              invocations.push({
+                command,
+                args,
+                environment: { ...process.env },
+              });
+              return child;
+            },
+          };
+        },
+        process,
+        Buffer,
+      );
+      expect(invocations).toHaveLength(1);
+      expect(invocations[0]!.command).toBe("git");
+      expect(invocations[0]!.args).toEqual([
+        ...(platform === "win32"
+          ? [...active, ...nativeGrants].flatMap((value) => [
+              "-c",
+              `safe.directory=${value}`,
+            ])
+          : []),
+        "-C",
+        "C:/synthetic/repository",
+        "status",
+      ]);
+      expect(invocations[0]!.environment).toMatchObject(original);
+      expect(frame.subarray(consumed)).toEqual(input);
+    });
+  }
+}
+
+test("snapshot Git keeps credentials out of checkout-filtered blobs and preserves ordinary settings", async () => {
+  const cwd = await fixtures.create("patch-snapshot-credentials-");
+  const env = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => !/^(?:https?|all)_proxy$/iu.test(key),
+      ),
+    ),
+    DOCKER_AUTH_CONFIG: JSON.stringify({
+      auths: {
+        "registry.example.test": { auth: "synthetic-registry-credential" },
+      },
+    }),
+    DATABASE_URL: "postgresql://fixture:synthetic@db.example.test/fixture",
+    SNAPSHOT_USER_SETTING: "preserved",
+    HTTP_PROXY: "http://fixture:synthetic@proxy.example.test:8080",
+    https_proxy: "https://fixture:synthetic@proxy.example.test",
+    ALL_PROXY: "socks5://proxy.example.test:1080#note@proxy.example.test",
+  };
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd, env, encoding: "utf8" });
+  git("init", "--quiet");
+  await writeFile(
+    join(cwd, ".gitattributes"),
+    "candidate.txt filter=inspect\n",
+  );
+  await writeFile(join(cwd, "candidate.txt"), "safe patch\n");
+  await writeFile(
+    join(cwd, "filter.cjs"),
+    `const input = require("node:fs").readFileSync(0, "utf8");
+process.stdout.write(JSON.stringify({
+  input, setting: process.env.SNAPSHOT_USER_SETTING, proxy: process.env.ALL_PROXY,
+  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL", "HTTP_PROXY", "https_proxy"].filter(key => key in process.env),
+}));`,
+  );
+  const add = [
+    "-c",
+    "filter.inspect.clean=node filter.cjs",
+    "add",
+    "--",
+    "candidate.txt",
+  ];
+  const expected = {
+    input: "safe patch\n",
+    setting: "preserved",
+    proxy: env.ALL_PROXY,
+  };
+  git(...add);
+  expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
+    ...expected,
+    credentialKeys: [
+      "DOCKER_AUTH_CONFIG",
+      "DATABASE_URL",
+      "HTTP_PROXY",
+      "https_proxy",
+    ],
+  });
+
+  git("read-tree", "--empty");
+  const header = bindingFrame();
+  execFileSync(
+    Bun.which("node")!,
+    ["-e", runner, "--", String(header.length), "git", ...add],
+    { cwd, env, input: header },
+  );
+  expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
+    ...expected,
+    credentialKeys: [],
+  });
+});
+
+test("snapshot Git reports an incomplete binding frame before starting the command", async () => {
+  const child = spawn(
+    process.execPath,
+    ["-e", runner, "--", "64", "synthetic-unreachable-command"],
+    { stdio: "pipe" },
+  );
+  let stderr = "";
+  let stdout = "";
+  child.stderr.setEncoding("utf8").on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.stdout.setEncoding("utf8").on("data", (chunk) => {
+    stdout += chunk;
+  });
+  const closed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  child.stdin.end("[");
+  expect(await closed).toEqual({ code: 1, signal: null });
+  expect(stdout).toBe("");
+  expect(stderr).toContain(
+    "Snapshot Git bindings ended before the complete frame.",
+  );
+  expect(stderr).not.toContain("ENOENT");
+});
+
+test("snapshot Git launch failures retain diagnostics with a non-emitting stderr stream", async () => {
+  const missingGit = join(await fixtures.create("patch-missing-git-"), "git");
+  const results: {
+    code: number | null;
+    signal: string | null;
+    stderr: string;
+  }[] = [];
+  const header = bindingFrame();
+  for (const dummyStderr of [false, true]) {
+    const prefix = dummyStderr
+      ? 'Object.defineProperty(process,"stderr",{value:new (require("node:stream").Writable)({write(chunk,encoding,callback){callback();}})});'
+      : "";
+    const child = spawn(
+      Bun.which("node")!,
+      [
+        "-e",
+        prefix + runner,
+        "--",
+        String(header.length),
+        missingGit,
+        "status",
+      ],
+      { stdio: "pipe" },
+    );
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const closed = new Promise<{ code: number | null; signal: string | null }>(
+      (resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => resolve({ code, signal }));
+      },
+    );
+    child.stdin.end(header);
+    results.push({ ...(await closed), stderr });
+  }
+  expect(results[0]).toMatchObject({ code: 1, signal: null });
+  expect(results[0]!.stderr).toContain(`spawn ${missingGit} ENOENT`);
+  expect(results[0]!.stderr).toContain("spawnargs: [ 'status' ]");
+  expect(results[1]).toEqual(results[0]);
+});

@@ -9,6 +9,7 @@ import {
   extname,
   isAbsolute,
   join,
+  parse,
   relative,
   resolve,
   sep,
@@ -150,6 +151,7 @@ export async function inspectTrustedExecutable(
   candidate: string,
   environment: Readonly<Record<string, string | undefined>>,
   protectedRoot: string | readonly string[],
+  options?: { gitTransportDirectory: string },
 ): Promise<InspectedExecutable> {
   const selectedRoots = await Promise.all(
     (typeof protectedRoot === "string" ? [protectedRoot] : protectedRoot).map(
@@ -165,6 +167,13 @@ export async function inspectTrustedExecutable(
   const roots = campaign ? [...campaign.roots, ...extra] : selectedRoots;
   const isProtected = (path: string) =>
     roots.some((root) => isWithin(root, path));
+  const fromLauncherDirectory = (value: string) => {
+    if (!options || isAbsolute(value)) return value;
+    // Keep parent traversal through symlinks until realpath inspects it.
+    return parse(value).root
+      ? resolve(options.gitTransportDirectory, value)
+      : `${options.gitTransportDirectory}${sep}${value}`;
+  };
   const path =
     searchPath(environment) ??
     (campaign
@@ -182,14 +191,15 @@ export async function inspectTrustedExecutable(
       entry = entry.slice(1, -1);
     }
     if (entry.length === 0) continue;
-    const canonical = await realpath(entry).catch(() => null);
+    const launcherEntry = fromLauncherDirectory(entry);
+    const canonical = await realpath(launcherEntry).catch(() => null);
     if (canonical === null || isProtected(canonical)) continue;
     // A directory containing the separator can be on PATH through a safe alias.
     // Keep that absolute spelling so joining the entries cannot split its name.
     const directory = canonical.includes(delimiter)
-      ? isAbsolute(entry)
-        ? entry
-        : `${process.cwd()}${sep}${entry}`
+      ? isAbsolute(launcherEntry)
+        ? launcherEntry
+        : `${process.cwd()}${sep}${launcherEntry}`
       : canonical;
     if (
       !directory.includes(delimiter) &&
@@ -213,16 +223,26 @@ export async function inspectTrustedExecutable(
     }
   }
 
-  const pathLike = candidate.includes("/") || candidate.includes("\\");
+  const pathLike =
+    candidate.includes("/") ||
+    candidate.includes("\\") ||
+    Boolean(options && parse(candidate).root);
+  if (pathLike) candidate = fromLauncherDirectory(candidate);
   // execFile cannot launch batch files, but their symlink targets still affect PATH trust.
   // CreateProcess appends .exe to an extensionless explicit path, so inspect the file that
   // will actually run instead of rejecting an otherwise valid Windows configuration.
+  // Git for Windows can use an interpreter for explicit transport and askpass scripts.
+  const allowScript = options !== undefined;
   const windows = process.platform === "win32";
   const suffixes =
     !windows || /\.(?:exe|com)$/iu.test(candidate)
       ? [""]
       : pathLike
-        ? [extname(candidate) === "" ? ".exe" : ""]
+        ? extname(candidate) === ""
+          ? allowScript
+            ? [".exe", ""]
+            : [".exe"]
+          : [""]
         : [".exe", ".com", ".bat", ".cmd", ""];
   const primary = suffixes.map((suffix) => candidate + suffix);
   // The Windows MCP launcher and inventory look up Node and ripgrep on this PATH.
@@ -239,7 +259,10 @@ export async function inspectTrustedExecutable(
       entry,
       path: entry === null && windows ? resolve(name) : prefix + name,
       runnable:
-        primary.includes(name) && (!windows || /\.(?:exe|com)$/iu.test(name)),
+        primary.includes(name) &&
+        (!windows ||
+          /\.(?:exe|com)$/iu.test(name) ||
+          (allowScript && name === candidate)),
     }));
   });
   const unsafeEntries = new Set<string>();
@@ -259,7 +282,11 @@ export async function inspectTrustedExecutable(
       if (current.entry !== null) unsafeEntries.add(current.entry);
       continue;
     }
-    if (process.platform === "win32" && /\.(?:bat|cmd)$/iu.test(canonical)) {
+    if (
+      !allowScript &&
+      process.platform === "win32" &&
+      /\.(?:bat|cmd)$/iu.test(canonical)
+    ) {
       continue;
     }
     if (!current.runnable) continue;
@@ -269,6 +296,11 @@ export async function inspectTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
+      if (options) {
+        // Authentication can happen after a patch replaces an intermediate link.
+        executable ??= canonical;
+        continue;
+      }
       // Keep explicit virtualenv launchers, but resolve repository-local aliases
       // to the trusted target instead of invoking them from the repository.
       const invocationPath = pathLike

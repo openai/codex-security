@@ -2759,10 +2759,32 @@ output prints its report; saved-finding JSON includes `patchRisk.report`.
 With `--create-pr`, the draft description includes the concise Markdown summary.
 The assessment does not change the patch or merge state.
 
+Git snapshots, including snapshots of initialized submodules, run configured Git
+filters with the workspace permissions from your Codex configuration. Configure
+additional writable roots and network access in your user configuration.
+An external Git administration directory must belong to a registered worktree or
+be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git
+directory points to a separate external common directory, select that common
+directory too unless the worktree is registered.
+For Git LFS storage outside the checkout, select the cache in your user or
+system Git configuration, pass it through Git's command environment, or grant
+the snapshot workspace write access to the cache.
+
+In a sparse checkout, Git can remove a materialized out-of-cone file when it
+reapplies the sparse rules. If the patch sees the file disappear after an index
+rewrite and cannot determine whether you intended to delete it, it stops before
+publishing. For an intended deletion, stage it with
+`git rm --cached --sparse -- <path>` and retry. To keep the file, restore it
+before retrying.
+
 Patching first checks that its sandbox can start. Failure reports
 `SANDBOX_UNAVAILABLE`; no file changes from the task reports `NO_PATCH_APPLIED`.
 Results list `applied`, `filesChanged`, and `files`, excluding preexisting edits.
 File changes alone do not prove a fix; saved findings require a verified result.
+Errors from interrupted patches or unfinished preparation retain completed
+finding results and known file lists. When the final inspection is incomplete,
+they omit `applied` and `filesChanged` and
+explain that limitation in the error message; local edits remain in place.
 
 For a controlled container providing its own isolation:
 
@@ -2786,29 +2808,73 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 ### Create or resume a draft pull request
 
+For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
+Publication checks the source of `core.sshCommand` before it runs SSH.
+
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.
-GitLab merge requests stay within the origin project; a fork merge request with
-the same branch name is not reused. GitLab descriptions display the report in a
-blockquote so report text cannot execute quick actions. The report contents,
-including code, HTML, and math, retain their original text.
+For GitLab, the first network `origin` push URL selects the source project. A
+network `origin` fetch URL on the same host selects the target project.
+SSH and `git+ssh` transport ports are ignored in that comparison, matching `glab`
+project selectors; ports on other URL schemes remain significant. Git still uses
+the original URLs and SSH configuration. If the fetch URL is a local path, a
+`file://` URL, or uses another host or retained port, the target is the push
+project too. On resume, an existing merge request for the patch branch is reused
+only when its source project is the selected push project and its head matches
+the saved patch commit. A request from another project with the same branch name
+is not reused.
+
+GitLab descriptions display the report in a blockquote so report text cannot
+execute quick actions. The report contents, including code, HTML, and math,
+retain their original text.
 
 ```bash
 GITLAB_HOST=gitlab.example.com codex-security patch --scan SCAN_ID --create-pr
 ```
 
-Both providers return `pullRequest: { branch, url }`. Saved-finding publication
-includes files changed and verified in the same patch turn. If a selected file
-already had local edits, the CLI keeps the patch in the working tree for review.
-The risk assessment and commit use the same verified tree. If staging changed
-during the run and Git cannot update the index, the CLI reports it and keeps
-the existing staging.
-Supplied-issue patching requires a clean tree. If publication fails, run the printed
+Both providers return `pullRequest: { branch, url }`. Supplied-issue patching
+requires a clean tree. Saved-finding publication uses the changes verified for each patch turn. An
+exact move includes the source deletion when its file mode and Git object
+uniquely match the reported destination in that turn. For an edited move,
+report both the source and destination to publish the deletion. If Git cannot
+update staging after the commit, the CLI reports the error and preserves the
+existing staging. Saved-scan publication also refuses patched files that had
+staged, unstaged, or untracked changes before patching; local edits and generated
+patches remain available for review. Existing patch branches and pull requests
+are checked before patching, including closed or merged requests. Review and
+publish further patches from the same scan separately.
+
+Automatic publication also compares changed files with in-memory digests of
+nonempty, ignored regular files enumerated by Git before patching. An exact
+content match is refused, including a move or copy into a new publishable path;
+the edits remain available for manual review and publication. This can also
+refuse independently generated content identical to an ignored template or build
+output. Empty files and external link targets are not fingerprinted. Files that
+disappear during preflight (`ENOENT`) are skipped. Other read errors for eligible
+ignored files stop the command before patching and report the original error.
+File permissions are left unchanged. This adds reads proportional to the ignored
+data and does not detect arbitrary transformed or partial copies. Existing tracked
+edits are protected by path overlap and Git's rename/copy recognition.
+
+All configured push destinations are checked for existing branch namespace
+collisions before patching. Separate remote servers cannot be updated atomically:
+a remote can change or fail after that check, leaving an earlier push complete.
+
+Automatic publication pushes the parent repository only. By default it checks
+that changed submodule commits are available and also checks remote-tracking
+refs in the retained metadata of deinitialized submodules. An explicit setting
+that disables recursion skips these checks. On-demand recursion and
+`submodule.recurse=true` use check-only mode. Child-only push mode stops
+publication. Publish missing child commits separately, then resume the saved
+parent from a configuration that allows a parent push.
+
+If publication fails after saving its commit, run the printed
 `patch --resume-pr BRANCH` command in the same repository. It reuses the saved
-commit and refuses changed branches. Retain the GitLab host setting on resume.
+commit without rerunning Codex, but refuses changed branches or an existing
+request pointing to a different commit. Retain the GitLab host setting on resume.
 
 ### Patch Linear issues
 
