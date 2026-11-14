@@ -294,13 +294,12 @@ describe("integration command dispatch", () => {
       args: ["--yes", "@openai/codex-security", "--mcp"],
     });
     expect(await readdir(home)).toEqual([]);
-    const url = "HTTP://mcp.example.invalid/MCP?mode=ReadOnly";
     const global = await run(
       "mcp",
       "add",
       "--agent=cursor",
       "--command",
-      url,
+      "my-tool --mcp",
       "--json",
     );
     expect(global.status).toBe(0);
@@ -308,7 +307,10 @@ describe("integration command dispatch", () => {
     const userConfig = JSON.parse(
       await readFile(join(home, ".cursor", "mcp.json"), "utf8"),
     );
-    expect(userConfig.mcpServers["codex-security"]).toEqual({ url });
+    expect(userConfig.mcpServers["codex-security"]).toMatchObject({
+      command: "my-tool",
+      args: ["--mcp"],
+    });
   }, 30_000);
 
   test("empty scopes require explicit targets and --all registers compatible project clients", async () => {
@@ -358,6 +360,8 @@ describe("integration command dispatch", () => {
     const existingExecutable = join(temp.path, "server with spaces");
     await writeFile(existingExecutable, "", { mode: 0o700 });
     const args = ["--mcp", "", "two words", "--json", "one=two"];
+    const httpUrl = "HTTP://mcp.example.invalid/MCP?mode=ReadOnly";
+    const httpsUrl = "hTtPs://mcp.example.invalid/MCP?mode=ReadOnly";
     const nonAsciiScheme = "httpſ://mcp.example.invalid";
     for (const [launcher, expected] of [
       [
@@ -377,6 +381,9 @@ describe("integration command dispatch", () => {
           args: [String.raw`C:\tools\server.js`, "--label=two words", "--mcp"],
         },
       ],
+      [["--command=local-server"], { command: "local-server", args: [] }],
+      [[`--command=${httpUrl}`], { url: httpUrl }],
+      [[`--command=${httpsUrl}`], { url: httpsUrl }],
       [[`--command=${nonAsciiScheme}`], { command: nonAsciiScheme, args: [] }],
       [
         [`--command=${existingExecutable}`],
@@ -435,7 +442,6 @@ describe("integration command dispatch", () => {
   test("explicit JSON returns a parseable MCP installer result", async () => {
     await using temp = await scopedTemporaryDirectory("cli-integrations-");
     const { home, run } = await isolatedCli(temp.path);
-    const url = "hTtPs://mcp.example.invalid/MCP?mode=ReadOnly";
     const mcp = await run(
       "mcp",
       "add",
@@ -443,18 +449,21 @@ describe("integration command dispatch", () => {
       "--agent",
       "amp",
       "--command",
-      url,
+      "my-tool --mcp",
       "--json",
     );
     expect(mcp.status).toBe(0);
     expect(JSON.parse(mcp.stdout)).toMatchObject({
       agents: ["Amp"],
-      command: url,
+      command: "my-tool --mcp",
     });
     const configuration = JSON.parse(
       await readFile(join(home, ".config", "amp", "settings.json"), "utf8"),
     );
-    expect(configuration["amp.mcpServers"]["codex-security"]).toEqual({ url });
+    expect(configuration["amp.mcpServers"]["codex-security"]).toEqual({
+      command: "my-tool",
+      args: ["--mcp"],
+    });
   }, 30_000);
 
   test("lists installed guidance at the selected grouping depth", async () => {
