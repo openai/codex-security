@@ -55,12 +55,10 @@ import {
   promptContext,
   standardScanDraft,
   eventually,
-  assertNoPublishedCandidates,
   immediateClock,
   createCoordinator,
   runCoordinator,
   recordingClock,
-  recordCodexSecurityWorkerScanDraft,
   type TestWorker,
   type StoreInput,
 } from "./deep_scan_coordinator_fixture.ts";
