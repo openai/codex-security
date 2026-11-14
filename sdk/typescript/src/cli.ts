@@ -6873,6 +6873,10 @@ export async function main(
                       currentDirectory,
                       dependencies.environment,
                     );
+                    const budget = batchScanBudget(
+                      prompts.reserveResumeBudget(),
+                      recipe,
+                    );
                     const security = dependencies.createSecurity({
                       pluginPath: options.pluginPath,
                       pythonPath: options.python,
@@ -6881,10 +6885,7 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
-                        ...batchScanBudget(
-                          prompts.maxTotalCostShareUsd,
-                          recipe,
-                        ),
+                        ...budget,
                         knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         telemetryContext: prompts.telemetryContext,
                         onTelemetry: prompts.onTelemetry,

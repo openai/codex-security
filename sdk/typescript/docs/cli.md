@@ -1402,8 +1402,10 @@ codex-security bulk-scan repositories.csv \
 estimated limit among the pending repositories and their possible attempts for
 this invocation, including recovery. For example, a $12 limit with three pending
 repositories and `--max-attempts 2` reserves up to $2 per attempt. An earlier
-overrun reduces the remaining budget for queued attempts. In-flight work can
-exceed a limit. The total limit skips model-based matching and owner suggestions,
+overrun reduces the remaining budget for queued attempts. Recovery can still
+register a completed result after the budget runs out. Resuming an active scan
+or starting a fresh attempt requires remaining budget. In-flight work can exceed
+a limit. The total limit skips model-based matching and owner suggestions,
 including during recovery. Run post-scan prompts separately. A resumed scan also respects its saved
 limit and includes prior recorded usage in its cost estimate.
 
