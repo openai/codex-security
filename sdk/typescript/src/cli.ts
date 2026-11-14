@@ -12,6 +12,7 @@ import {
 } from "./provider-profile.js";
 import { isNonEmptyString, notify, parseJson } from "./value.js";
 import { compareTimestamps } from "./timestamps.js";
+import type { DependencyScanProgress } from "./sca-progress.js";
 
 import {
   execFile as execFileCallback,
@@ -5847,6 +5848,7 @@ export async function main(
           "Requires osv-scanner on PATH; it is not installed automatically.\n" +
           "Scans the whole repository. Source scopes, modes, prompts, severity policy, and workflow options are not supported.\n" +
           "Results are separate SCA artifacts: sca-result.json and report.md.\n" +
+          "Interactive terminals show live progress; --verbose logs milestones and Codex activity to stderr.\n" +
           "Incomplete JSON/JSONL --full-output returns ok: false and keeps SCA results under data.\n" +
           "Use codex-security scan ./dependencies to scan a repository named dependencies.",
         destructive: true,
@@ -8912,6 +8914,45 @@ function scanVerbose(
   return explicit === true || configuredLogLevel?.toLowerCase() === "debug";
 }
 
+function dependencyProgressDescription(update: DependencyScanProgress): {
+  summary: string;
+  detail?: string;
+} {
+  switch (update.phase) {
+    case "preparing":
+      return { summary: "Preparing repository" };
+    case "discovering":
+      return { summary: "Discovering dependency files" };
+    case "preparing_assessment":
+      return { summary: "Preparing advisory assessment" };
+    case "saving":
+      return { summary: "Saving dependency results" };
+    case "matching":
+      return {
+        summary: `Matching ${update.inputsProcessed}/${update.inputsTotal} inputs, ${update.inputsFailed} failed`,
+        detail:
+          update.currentInput ??
+          `${update.components} components, ${update.matches} advisory matches`,
+      };
+    case "assessing": {
+      const queued =
+        update.assessmentsTotal -
+        update.assessmentsCompleted -
+        update.assessmentsFailed -
+        (update.current === null ? 0 : 1);
+      const current = update.current;
+      return {
+        summary: `Assessing ${update.assessmentsCompleted}/${update.assessmentsTotal}, ${update.assessmentsFailed} failed, ${queued} queued`,
+        ...(current === null
+          ? {}
+          : {
+              detail: `${current.packageName ?? current.componentId}${current.packageVersion === null ? "" : `@${current.packageVersion}`} (${current.advisoryIds.join(", ")})`,
+            }),
+      };
+    }
+  }
+}
+
 async function runDependencyScan(
   options: DependencyScanOptions,
   config: CodexSecurityConfig,
@@ -8922,21 +8963,69 @@ async function runDependencyScan(
 ): Promise<ScanOutcome> {
   const verbose = scanVerbose(presentation.verbose, dependencies.environment);
   const controller = new AbortController();
-  const removeSignals = listenForAbort(dependencies, controller);
   let security: Pick<CodexSecurity, "scanDependencies" | "close"> | undefined;
   let result: DependencyScanResult | undefined;
   let failure: unknown;
-  const writeDiagnostic = (message: string): void => {
-    try {
-      errorOutput.write(`${diagnosticLines(message)}\n`);
-    } catch {}
+  const progress = new Progress(
+    errorOutput,
+    dependencies,
+    dependencies.environment["CI"] === undefined &&
+      dependencies.environment["TERM"] !== "dumb",
+  );
+  let update: DependencyScanProgress = { phase: "preparing" };
+  let cost: Readonly<ScanCost> | null = null;
+  let lastObservedAt = dependencies.now();
+  let activity: string | undefined;
+  let lastMilestone: string | undefined;
+  let stopped = false;
+  const removeSignals = listenForAbort(dependencies, controller, (signal) => {
+    stopped = true;
+    notify(() => progress.stopTimer());
+    if (progress.interactive)
+      notify(() => dependencies.writeSynchronously(errorOutput, SHOW_CURSOR));
+    dependencies.forceExit(signal);
+  });
+  const showCost = presentation.showCost || options.maxCostUsd !== undefined;
+  const timerMessage = (): string => {
+    const { summary, detail } = dependencyProgressDescription(update);
+    const seconds = Math.max(
+      0,
+      Math.floor((dependencies.now() - lastObservedAt) / 1_000),
+    );
+    return diagnosticValue(
+      [
+        summary,
+        `last event ${seconds}s`,
+        showCost
+          ? `est. ${cost === null ? "n/a" : formatUsd(cost.estimatedUsd)}${options.maxCostUsd === undefined ? "" : `/${formatUsd(options.maxCostUsd)}`}`
+          : undefined,
+        activity ?? detail,
+      ]
+        .filter((part) => part !== undefined)
+        .join(" · "),
+    );
   };
+  const milestone = (message: string): void => {
+    if (stopped || message === lastMilestone) return;
+    lastMilestone = message;
+    progress.writeAboveTimer(() => progress.stage(diagnosticValue(message)));
+  };
+  const writeDiagnostic = (message: string): void =>
+    notify(() =>
+      progress.writeAboveTimer(() =>
+        errorOutput.write(`${diagnosticLines(message)}\n`),
+      ),
+    );
   try {
     if (verbose) {
       writeDiagnostic(
         `codex-security: Dependency scan repository: ${options.repositoryPath}`,
       );
     }
+    notify(() => {
+      if (verbose) milestone(dependencyProgressDescription(update).summary);
+      if (progress.interactive) progress.startTimer(timerMessage);
+    });
     security = (
       dependencies.createDependencySecurity ??
       ((configuration, chooseDependencyAuthentication) =>
@@ -8948,8 +9037,9 @@ async function runDependencyScan(
     )(
       config,
       interactive
-        ? async (auth, signal) =>
-            chooseInteractiveAuthentication(
+        ? async (auth, signal) => {
+            let paused = false;
+            const selectedAuth = await chooseInteractiveAuthentication(
               {
                 auth,
                 config: await mergedCodexConfig(
@@ -8958,15 +9048,59 @@ async function runDependencyScan(
                 ),
                 command: "scan",
                 signal,
+                beforePrompt: () =>
+                  notify(() => {
+                    progress.stopTimer();
+                    paused = true;
+                  }),
               },
               errorOutput,
               dependencies,
-            )
+            );
+            if (paused && progress.interactive && !stopped && !signal.aborted)
+              notify(() => progress.startTimer(timerMessage));
+            return selectedAuth;
+          }
         : undefined,
     );
     result = await security.scanDependencies({
       ...options,
       signal: controller.signal,
+      onProgress: (event) =>
+        notify(() => {
+          if (stopped) return;
+          update = event;
+          lastObservedAt = dependencies.now();
+          activity = undefined;
+          if (verbose) {
+            const { summary, detail } = dependencyProgressDescription(event);
+            milestone(
+              detail === undefined ? summary : `${summary} · ${detail}`,
+            );
+          }
+        }),
+      onActivity: (event) =>
+        notify(() => {
+          if (stopped) return;
+          lastObservedAt = dependencies.now();
+          const label =
+            event.kind === "command" || event.kind === "tool"
+              ? "Tool"
+              : "Codex";
+          activity = `${label} ${event.status}: ${event.description}`;
+          if (verbose) milestone(activity);
+        }),
+      onCost: (estimate) => {
+        if (stopped) return;
+        cost = estimate;
+        lastObservedAt = dependencies.now();
+      },
+      onOutputDirReady: (directory) =>
+        notify(() => {
+          lastObservedAt = dependencies.now();
+          if (verbose || progress.interactive)
+            milestone(`Artifacts: ${directory}`);
+        }),
     });
   } catch (error) {
     failure = error;
@@ -8983,6 +9117,8 @@ async function runDependencyScan(
       }
     }
   } finally {
+    stopped = true;
+    notify(() => progress.stopTimer());
     try {
       await security?.close();
     } catch (error) {
@@ -9032,7 +9168,7 @@ async function runDependencyScan(
         `Model: ${result.model.model ?? "not used"}`,
     );
   }
-  if (presentation.showCost || options.maxCostUsd !== undefined) {
+  if (showCost) {
     writeDiagnostic(
       `Estimated cost: ${result.model.costUsd === null ? "unavailable" : formatUsd(result.model.costUsd)}`,
     );
@@ -11671,6 +11807,7 @@ async function chooseInteractiveAuthentication(
     config: JsonObject;
     command: "scan" | "policy";
     signal: AbortSignal;
+    beforePrompt?: () => void;
   },
   errorOutput: Writable,
   dependencies: CliDependencies,
@@ -11698,6 +11835,7 @@ async function chooseInteractiveAuthentication(
     !(await abortable(() => hasStoredSignIn(signal), signal))
   )
     return auth;
+  options.beforePrompt?.();
   const source = authentication.source;
   try {
     errorOutput.write(
@@ -13820,7 +13958,7 @@ export class Progress {
   readonly #startedAt: number;
   readonly #interactive: boolean;
   #timer: NodeJS.Timeout | null = null;
-  #timerMessage: string | null = null;
+  #timerMessage: string | (() => string) | null = null;
   #timerLineActive = false;
   #cursorHidden = false;
   readonly #terminalErrors: TerminalErrorListener;
@@ -13856,10 +13994,10 @@ export class Progress {
     this.#stream.write(`${this.#line(message)}\n`);
   }
 
-  public startTimer(message: string): void {
+  public startTimer(message: string | (() => string)): void {
     this.#terminalErrors.start();
     if (!this.interactive) {
-      this.stage(message);
+      this.stage(typeof message === "function" ? message() : message);
       return;
     }
     this.#stream.write(HIDE_CURSOR);
@@ -13912,9 +14050,12 @@ export class Progress {
     return `[${String(Math.floor(elapsedSeconds / 60)).padStart(2, "0")}:${String(elapsedSeconds % 60).padStart(2, "0")}] ${message}`;
   }
 
-  #renderTimer(message: string): void {
+  #renderTimer(message: string | (() => string)): void {
     const width = Math.max(0, (this.#stream.columns ?? 80) - 1);
-    const line = fitProgressLine(this.#line(message), width);
+    const line = fitProgressLine(
+      this.#line(typeof message === "function" ? message() : message),
+      width,
+    );
     this.#stream.write(`${this.#timerLineActive ? "\r\u001B[K" : ""}${line}`);
     this.#timerLineActive = true;
   }
