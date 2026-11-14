@@ -176,7 +176,6 @@ import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
 import {
-  FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
   verificationBatches,
@@ -512,8 +511,7 @@ const MATCHING_OPTIONS = modelOptions(
     .default(false)
     .describe("Recompute saved finding matches."),
 });
-const SKILL_CODEX_OVERRIDE_DESCRIPTION =
-  'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
+const SKILL_CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; quote strings, e.g. --codex 'model="gpt-5.6-terra"' or --codex 'model_reasoning_effort="high"'. Also supports model_provider, model_providers.<name>.<key>, daybreak=true, and analytics.enabled=false.`;
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
   codex: z
     .array(optionValue("--codex"))
@@ -521,6 +519,7 @@ const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
     .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
 });
 type SkillConfiguration = z.infer<typeof SKILL_CONFIG_OPTIONS>;
+const CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; e.g. --codex 'model_reasoning_effort="high"'. Prefer --effort for reasoning effort.`;
 const RUNTIME_OPTION_SCHEMAS = runtimeOptions(optionValue);
 
 function runtimeOptions(value: typeof optionValue) {
@@ -536,9 +535,7 @@ function runtimeOptions(value: typeof optionValue) {
     codex: z
       .array(value("--codex"))
       .default([])
-      .describe(
-        'Repeat TOML KEY=VALUE; e.g. model_reasoning_effort="high" or features.multi_agent_v2.max_concurrent_threads_per_session=4.',
-      ),
+      .describe(CODEX_OVERRIDE_DESCRIPTION),
   };
 }
 const SKILL_AUTH_OPTION = z
@@ -564,7 +561,7 @@ const PROVIDER_OPTION = z
     "cheaperinference",
     "amazon-bedrock",
   ])
-  .default("openai")
+  .optional()
   .describe("Inference provider for scans.");
 const positiveInteger = z.number().int().positive();
 
@@ -1288,6 +1285,19 @@ interface ScanOutcome {
   error?: string;
 }
 
+const failedScanEnvelopeSchema = z
+  .looseObject({
+    ok: z.literal(false),
+    error: z.object({
+      code: z.literal("SCAN_FAILED"),
+      message: z.string(),
+      fieldErrors: z.array(z.unknown()).optional(),
+    }),
+    data: z.unknown().optional(),
+    meta: z.record(z.string(), z.unknown()),
+  })
+  .describe("Failed full-output JSON or JSONL with available scan results.");
+
 const jsonDocument = z.record(z.string(), z.unknown());
 const scanArtifactFields = {
   manifest: jsonDocument,
@@ -1312,7 +1322,24 @@ const completedScanOutput = z.looseObject({
   repositoryFindings: z.array(jsonDocument).optional(),
   ownerSuggestionsPath: z.string().optional(),
   ownerSuggestionsError: z.string().optional(),
-  validation: jsonDocument.optional(),
+  validation: z
+    .discriminatedUnion("status", [
+      z.looseObject({
+        status: z.literal("complete"),
+        findings: z.int().nonnegative(),
+        reportPath: z.string().optional(),
+      }),
+      z.looseObject({ status: z.literal("skipped"), reason: z.string() }),
+      z.looseObject({
+        status: z.literal("failed"),
+        findings: z.int().nonnegative().optional(),
+        reportPath: z.string().optional(),
+        message: z.string().optional(),
+        reason: z.string().optional(),
+        exitCode: z.int().optional(),
+      }),
+    ])
+    .optional(),
   warnings: z.array(z.string()).optional(),
   patchSeverity: FailureSeveritySchema.optional(),
   patches: z.array(FindingPatchSchema).optional(),
@@ -1361,7 +1388,38 @@ function cliFailureSchema(...codes: [string, ...string[]]) {
   });
 }
 
-function scanOutputSchema(
+const scanOutputSchema: z.ZodType<
+  Record<string, unknown> | number | string | undefined
+> = z
+  .union([
+    z
+      .number()
+      .int()
+      .nonnegative()
+      .describe("Token count for the rendered scan output."),
+    completedScanOutput,
+    scanPreflightOutput,
+    z.looseObject({
+      status: z.literal("failed"),
+      code: z.literal("SCAN_FAILED"),
+      message: z.string(),
+    }),
+    failedScanEnvelopeSchema,
+    z.looseObject({
+      ok: z.literal(true),
+      data: z.union([
+        completedScanOutput,
+        scanPreflightOutput,
+        z.string().describe("Text from a token-truncated result."),
+      ]),
+      meta: z.record(z.string(), z.unknown()),
+    }),
+    retainedScanOutput,
+    z.string().describe("Token-window excerpt from raw JSON output."),
+  ])
+  .optional();
+
+function scanReplayOutputSchema(
   ...codes: [string, ...string[]]
 ): z.ZodType<Record<string, unknown> | undefined> {
   return z
@@ -3133,7 +3191,7 @@ export async function main(
           .default(false)
           .describe("Print additional scan diagnostics to stderr."),
       }),
-      output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
+      output: scanReplayOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
       async run({ args, error: incurError, format, options }) {
         if (format === "md") {
           errorOutput.write(
@@ -3221,7 +3279,7 @@ export async function main(
           .default(false)
           .describe("Print additional scan diagnostics to stderr."),
       }),
-      output: scanOutputSchema(
+      output: scanReplayOutputSchema(
         "SCAN_FAILED",
         "SCAN_REPLAY_UNAVAILABLE",
         "SCAN_IMPORT_FAILED",
@@ -5470,7 +5528,17 @@ export async function main(
         { args: { repository: "." }, options: { diff: "origin/main" } },
         { args: { repository: "." }, options: { mode: "deep" } },
       ],
-      hint: "Import existing findings without security analysis with scan import --help. Use ./import to scan a repository named import. Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
+      hint:
+        "Configuration notes:\n" +
+        "CLI input/output paths are relative to the current directory (scope paths are repository-relative). Flags override project configuration, except model and effort selected by a native Codex profile; displayed defaults are built-in defaults. Use init to create a config and info -c FILE --json to inspect it.\n\n" +
+        "Automation and results:\n" +
+        "  codex-security scan . --auth api-key --json --fail-on-severity high > ../findings.json\n" +
+        "The API-key example requires OPENAI_API_KEY or CODEX_API_KEY. Progress and summaries go to stderr. Completed scans leave stdout empty unless an output option is selected. --json writes results to stdout. Exit codes: 0 success (findings are report-only by default), 1 severity policy failed, 2 execution failure, 130/143 interrupted/terminated. Browse saved results with scans and findings; use export to save reports.\n\n" +
+        "Import existing findings without security analysis:\n" +
+        "  codex-security scan import findings.csv\n" +
+        "  codex-security scan import findings.json --json\n" +
+        "See scan import --help for options. Use ./import to scan a repository named import.\n" +
+        "Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
       alias: { config: "c" },
       args: z.object({
@@ -5511,14 +5579,14 @@ export async function main(
             .optional()
             .meta({ default: [] })
             .describe(
-              "Scan only PATH; repeat for multiple repository-relative paths.",
+              "Scan only repository-relative paths; repeat for multiple paths.",
             ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
             .optional()
             .meta({ default: [] })
             .describe(
-              "Add security-context files or directories; repeat for multiple paths.",
+              "Security-context files or directories; repeatable. Replaces the configured list.",
             ),
           rubric: optionValue("--rubric")
             .optional()
@@ -5527,50 +5595,64 @@ export async function main(
             ),
           scanPromptFile: optionValue("--scan-prompt-file")
             .optional()
-            .describe("Append scan instructions from FILE."),
+            .describe(
+              "Append model instructions from FILE to the scan prompt.",
+            ),
           validationPromptFile: optionValue("--validation-prompt-file")
             .optional()
             .describe(
-              "Replace final validation with the workflow in FILE (not Deep).",
+              "Replace final validation with model instructions from FILE; standard mode only.",
             ),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
-            .describe("Run FILE after each scan, including failures."),
+            .describe(
+              "Send FILE as model instructions after scanning (best effort); skips setup failures, cancellation, and cost exhaustion.",
+            ),
           diff: optionValue("--diff")
             .optional()
-            .describe("Scan committed Git changes from BASE to --head."),
+            .describe(
+              "Scan committed changes from this ref to --head; requires a clean, nonsparse checkout, including no untracked files.",
+            ),
           workingTree: z
             .boolean()
             .optional()
             .meta({ default: false })
-            .describe("Scan staged and unstaged changes against --base."),
+            .describe(
+              "Scan staged, unstaged, and untracked changes against --base.",
+            ),
           head: optionValue("--head")
             .optional()
-            .describe("Git head ref for --diff (default: HEAD)."),
+            .describe(
+              "End ref for --diff; must match the checked-out commit (default: HEAD).",
+            ),
           base: optionValue("--base")
             .optional()
             .describe("Git base ref for --working-tree (default: HEAD)."),
           mode: ScanSettingsSchema.shape.mode.describe(
-            "Scan mode (default: standard); deep supports repository and path targets.",
+            "standard runs one scan; deep repeats discovery across workers for repository/path targets (default: standard).",
           ),
           maxTime: ScanSettingsSchema.shape.maxTimeMinutes,
           ...DEEP_SCAN_OPTION_SCHEMAS,
           ...modelOptions(
-            `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
+            `Model ID for the selected provider (OpenAI default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}); external providers require a configured or explicit model.`,
           ).shape,
-          provider: PROVIDER_OPTION,
+          provider: PROVIDER_OPTION.describe(
+            "Override the configured provider; if omitted, use configured provider or openai.",
+          ),
           outputDir: optionValue("--output-dir")
             .optional()
             .describe(
-              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+              "New/empty artifact directory outside the enclosing Git worktree (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
             ),
           archiveExisting: z
             .boolean()
             .default(false)
-            .describe("Archive existing results; requires --output-dir."),
+            .describe(
+              "Archive existing results in the output directory set by --output-dir or configuration.",
+            ),
           ...RUNTIME_OPTION_SCHEMAS,
           failOnSeverity: FailureSeveritySchema.optional().describe(
-            "Exit 1 for findings at or above LEVEL.",
+            "Exit 1 for unresolved findings at or above LEVEL after patching.",
           ),
           patch: z
             .boolean()
@@ -5585,21 +5667,21 @@ export async function main(
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
-            .describe("Patch findings at or above LEVEL; requires --patch."),
+            .describe(
+              "Patch threshold (default: low); requires --patch. Interactive runs can select findings.",
+            ),
           createPr: CREATE_PR_OPTION.describe(
             "Create a draft pull request or merge request after verified patches; requires --patch.",
           ),
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
-            "Stop above AMOUNT in estimated USD; the dashboard offers increases near the limit.",
+            "Estimated scan budget in USD; may overshoot. Run patching or validation separately.",
           ),
           ownerSuggestions: ScanSettingsSchema.shape.ownerSuggestions,
           showCost: SHOW_COST_OPTION,
           headless: z
             .boolean()
             .default(false)
-            .describe(
-              "Use plain text progress instead of the interactive dashboard.",
-            ),
+            .describe("Use plain text progress and skip interactive prompts."),
           dryRun: z
             .boolean()
             .default(false)
@@ -5635,7 +5717,7 @@ export async function main(
               "--mock cannot be combined with --dry-run, --patch, or --validate.",
           },
         ),
-      output: scanOutputSchema("SCAN_FAILED"),
+      output: scanOutputSchema,
       async run({ args, error: incurError, format, options }) {
         if (options.host)
           throw new CodexSecurityError("Use scan --host alone.");
@@ -8127,10 +8209,14 @@ export async function main(
         );
         const resolved = resolveScanSettings(project, {}, directory);
         deepScanOptions(resolved.options);
-        const codex = await mergedCodexConfig(
-          resolved.config,
-          scanCodexHome(dependencies.environment),
+        const home = scanCodexHome(dependencies.environment);
+        const overrides = resolved.config.codexOverrides;
+        const effective = mergeCodexOverrides(
+          await readCodexFileProfile(overrides, home),
+          overrides,
         );
+        requireExternalProviderModel(effective, scanModelProvider(overrides));
+        const codex = await mergedCodexConfig(resolved.config, home);
         const deep =
           resolved.options.mode === "deep"
             ? await resolveDeepScanConfig(
@@ -8451,7 +8537,19 @@ export async function main(
     }
     return frameworkFlags.tokenError;
   }
-  const frameworkFlags = parseFrameworkArguments(argv);
+  const scanCommand = command === "scan" && !scanImport;
+  let outputArgv = argv;
+  if (scanCommand) {
+    for (const name of ["json", "full-output", "token-count"]) {
+      const disabled = outputArgv.lastIndexOf(`--no-${name}`);
+      if (disabled < 0) continue;
+      outputArgv = outputArgv.filter(
+        (arg, index) =>
+          arg !== `--no-${name}` && (arg !== `--${name}` || index > disabled),
+      );
+    }
+  }
+  const frameworkFlags = parseFrameworkArguments(outputArgv);
   const frameworkArgv = frameworkFlags.args;
   const { jsonFormat } = frameworkFlags;
   const policyFullOutput =
@@ -8463,25 +8561,52 @@ export async function main(
   const commandPath = subcommand
     ? `${command} ${subcommand}`
     : (command ?? "codex-security");
-  const argumentFailure = (
+  const argumentEnvelope = (
     message: string,
     code = commandPath === "scan"
       ? "SCAN_FAILED"
       : command === "policy"
         ? "POLICY_FAILED"
         : "INVALID_ARGUMENTS",
-  ) =>
-    Formatter.format(
-      { ok: false, error: { code, message }, meta: { command: commandPath } },
-      envelopeFormat,
-    ) + "\n";
-  const reportError = async (message: string, code?: string) => {
+    fieldErrors?: unknown[],
+  ) => ({
+    ok: false,
+    error: { code, message, ...(fieldErrors && { fieldErrors }) },
+    meta: { command: commandPath },
+  });
+  const reportError = async (
+    message: string,
+    code?: string,
+    fieldErrors?: unknown[],
+  ) => {
     errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
-    if (envelopeFormat)
-      await writeCliOutput(output, argumentFailure(message, code));
+    if (jsonFormat && (envelopeFormat || (scanCommand && !inspection))) {
+      const envelope = argumentEnvelope(message, code, fieldErrors);
+      const failure = envelopeFormat
+        ? envelope
+        : { status: "failed", ...envelope.error };
+      const rendered = Formatter.format(failure, jsonFormat) + "\n";
+      try {
+        await writeCliOutput(
+          output,
+          scanCommand && frameworkFlags.tokenView
+            ? formatJsonTokenView(
+                rendered,
+                jsonFormat,
+                frameworkFlags.fullOutput,
+                frameworkFlags.tokenView,
+              )
+            : rendered,
+        );
+      } catch (error) {
+        errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+      }
+    }
     return 2;
   };
+  // Keep command and verb offsets valid while checking the original positionals.
   const argumentError = validateCliArguments();
+  argv = outputArgv;
   if (argumentError !== undefined && (!policyFullOutput || envelopeFormat))
     return reportError(argumentError);
   if (protocol) {
@@ -8626,10 +8751,11 @@ export async function main(
         record?.["ok"] === false ? asRecord(record["error"]) : record;
       const validationError = error?.["code"] === "VALIDATION_ERROR";
       const structuredFailure = Boolean(envelopeFormat || validationError);
+      const scanArgumentError = scanCommand && exitCode === 0 && !inspection;
       let message =
         structuredFailure && typeof error?.["message"] === "string"
           ? error["message"]
-          : await incurErrorMessage(frameworkOutput);
+          : await incurErrorMessage(frameworkOutput, scanArgumentError);
       if (validationError && Array.isArray(error["fieldErrors"])) {
         const entry = command ? commands.get(command) : undefined;
         const leaf =
@@ -8658,6 +8784,15 @@ export async function main(
         error["message"] = message;
         frameworkOutput = Formatter.format(envelope, jsonFormat) + "\n";
       }
+      if (scanArgumentError) {
+        return reportError(
+          message,
+          undefined,
+          Array.isArray(error?.["fieldErrors"])
+            ? error["fieldErrors"]
+            : undefined,
+        );
+      }
       // Handlers that set an exit code have already reported the execution error.
       if (exitCode === 0)
         errorOutput.write(`codex-security: ${diagnosticLines(message)}\n`);
@@ -8665,7 +8800,8 @@ export async function main(
       if (exitCode === 0) exitCode = 2;
       // Incur parses its built-in flags before selecting a format.
       if (envelopeFormat && record?.["ok"] !== false)
-        frameworkOutput = argumentFailure(message);
+        frameworkOutput =
+          Formatter.format(argumentEnvelope(message), envelopeFormat) + "\n";
     }
   }
   if (rawExportOutput) return exitCode;
@@ -10440,7 +10576,7 @@ async function runFindingPatches(
             "occurrenceId" in entry &&
             entry["occurrenceId"] === finding.occurrenceId,
         );
-        const parsed = findingPatchSchema.safeParse(matches[0]);
+        const parsed = FindingPatchSchema.safeParse(matches[0]);
         if (matches.length !== 1 || !parsed.success) {
           patch = failed(
             "No complete patch result was returned for this finding.",
@@ -11347,25 +11483,64 @@ export function skillCommandFailure(
   return `${command} failed with exit code ${status}.${advice ? ` ${advice}` : ""}${detail ? `\n${detail}` : ""}`;
 }
 
-async function incurErrorMessage(output: string): Promise<string> {
-  // YAML folds long strings across lines; JSON output keeps its serialized form.
-  if (!output.startsWith("{")) {
-    const { parse } = await import("yaml");
+async function incurErrorMessage(
+  output: string,
+  scanArguments = false,
+): Promise<string> {
+  if (!scanArguments && output.startsWith("{")) return output.trim();
+  type IncurFailure = {
+    error?: { code?: string; message?: string };
+    code?: string;
+    message?: string;
+  };
+  let parsed = parseJson(() => output) as IncurFailure | null;
+  // YAML folds long strings across lines; parse it before extracting diagnostics.
+  if (parsed === null && !output.startsWith("{")) {
     try {
-      const parsed: unknown = parse(output);
-      if (isJsonObject(parsed) && typeof parsed["message"] === "string")
-        return parsed["message"];
+      const { parse } = await import("yaml");
+      const yaml: unknown = parse(output);
+      if (isJsonObject(yaml)) parsed = yaml as IncurFailure;
     } catch {
-      // Output that is not YAML (for example a Markdown table) uses the line scan.
+      // Other rendered formats retain the line-based fallback below.
     }
   }
-  const message = output
-    .split("\n")
-    .find((line) => line.startsWith("message: "))
-    ?.slice("message: ".length);
-  if (message === undefined) return output.trim();
-  const parsed = parseJson(() => message);
-  return typeof parsed === "string" ? parsed : message;
+  const error = parsed?.error ?? parsed;
+  let message = error?.message;
+  let validation = error?.code === "VALIDATION_ERROR";
+  if (message === undefined) {
+    message = output
+      .split("\n")
+      .find((line) => line.startsWith("message: "))
+      ?.slice("message: ".length);
+    if (message === undefined) return output.trim();
+    const parsed = parseJson(() => message!);
+    if (typeof parsed === "string") message = parsed;
+    validation = /^code: VALIDATION_ERROR$/mu.test(output);
+  }
+  if (scanArguments && validation) {
+    const details = message.indexOf("\n\nDetails: ");
+    if (details >= 0) {
+      // Incur includes the Zod issues in its validation message in every format.
+      const issues = JSON.parse(
+        message.slice(details + "\n\nDetails: ".length),
+      ) as {
+        path: (string | number)[];
+        message: string;
+      }[];
+      return issues
+        .map(({ path, message }) => {
+          const name = path[0];
+          if (typeof name !== "string") return message;
+          const label =
+            name === "repository"
+              ? name
+              : `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
+          return `${label}: ${message}`;
+        })
+        .join("\n");
+    }
+  }
+  return message;
 }
 
 type VerboseDiagnosticValue = string | number | boolean | null | undefined;
@@ -11667,7 +11842,10 @@ async function executeScan(
     const otel = resolvedConfiguration["otel"];
     if (isJsonObject(otel)) patchOtel = otel;
     auth =
-      !arguments_.dryRun && !arguments_.mock && interactive
+      !arguments_.headless &&
+      !arguments_.dryRun &&
+      !arguments_.mock &&
+      interactive
         ? await chooseInteractiveAuthentication(
             {
               auth: arguments_.auth,
@@ -13397,18 +13575,24 @@ function resolveCliScope(
 async function parseScanCodexOverrides(
   options: ModelCliOptions & {
     codex: readonly string[];
-    provider: z.infer<typeof PROVIDER_OPTION>;
+    provider?: z.infer<typeof PROVIDER_OPTION>;
   },
   environment: NodeJS.ProcessEnv,
   defaults?: JsonObject,
 ): Promise<JsonObject> {
   const { codex: values, model, effort, provider } = options;
   const profileHome = scanCodexHome(environment);
-  if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
+  const explicit = parseCodexOverrideValues(values, model, effort);
+  const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
+  const selectedProvider = provider ?? scanModelProvider(overrides);
+  // A native profile can select its own provider and its default model. Require
+  // a model when the CLI or project explicitly selects the external provider.
+  if (
+    !isExternalModelProvider(selectedProvider) &&
+    selectedProvider !== "amazon-bedrock"
+  ) {
     return parseCodexOverrides(values, model, effort, provider, defaults);
   }
-  const explicit = parseCodexOverrides(values, model, effort);
-  const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
   const profile = await readCodexFileProfile(overrides, profileHome);
   const result = parseCodexOverrides(
     values,
@@ -13449,6 +13633,25 @@ export function parseCodexOverrides(
   provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
   defaults?: JsonObject,
 ): JsonObject {
+  const result = parseCodexOverrideValues(
+    values,
+    model,
+    effort,
+    provider,
+    defaults,
+  );
+  const effective = mergeCodexOverrides(defaults ?? {}, result);
+  requireExternalProviderModel(effective, scanModelProvider(effective));
+  return result;
+}
+
+function parseCodexOverrideValues(
+  values: readonly string[],
+  model?: string,
+  effort?: ModelCliOptions["effort"],
+  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  defaults?: JsonObject,
+): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
@@ -13457,7 +13660,7 @@ export function parseCodexOverrides(
     result["model_providers"] = {
       [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
     };
-  } else if (provider === "amazon-bedrock") {
+  } else if (provider !== undefined) {
     result["model_provider"] = provider;
   }
   for (const value of values) {
@@ -13483,7 +13686,9 @@ export function parseCodexOverrides(
     try {
       parsed = parseToml(`value = ${literal}`)["value"] as JsonValue;
     } catch {
-      throw new CodexSecurityError("Invalid --codex TOML value");
+      throw new CodexSecurityError(
+        "Invalid --codex TOML value. Preserve string quotes in the shell, for example: --codex 'model_reasoning_effort=\"high\"'.",
+      );
     }
     let cursor = result;
     for (const part of parts.slice(0, -1)) {
@@ -13508,10 +13713,7 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
-      if (
-        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
-        key === "model_provider"
-      ) {
+      if (provider !== undefined && key === "model_provider") {
         throw new CodexSecurityError(
           "--provider conflicts with --codex model_provider",
         );
@@ -13520,10 +13722,42 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
+  if (provider !== undefined) {
+    const effective = mergeCodexOverrides(defaults ?? {}, result);
+    const profile = effective["profile"];
+    const profiles = effective["profiles"] ?? {};
+    if (
+      typeof profile === "string" &&
+      isJsonObject(profiles) &&
+      isJsonObject(profiles[profile] ?? null)
+    ) {
+      const overrides = result["profiles"] ?? {};
+      const selectedOverrides = isJsonObject(overrides)
+        ? overrides[profile]
+        : undefined;
+      if (
+        isJsonObject(selectedOverrides) &&
+        Object.hasOwn(selectedOverrides, "model_provider")
+      ) {
+        throw new CodexSecurityError(
+          `--provider conflicts with --codex profiles.${profile}.model_provider`,
+        );
+      }
+      result["profiles"] = mergeCodexOverrides(
+        isJsonObject(overrides) ? overrides : {},
+        { [profile]: { model_provider: provider } },
+      );
+    }
+  }
+  return result;
+}
+
+function requireExternalProviderModel(
+  config: JsonObject,
+  provider: unknown,
+): void {
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
-    const selectedModel = scanModel(
-      mergeCodexOverrides(defaults ?? {}, result),
-    );
+    const selectedModel = scanModel(config);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
         selectedModel === undefined
@@ -13532,7 +13766,6 @@ export function parseCodexOverrides(
       );
     }
   }
-  return result;
 }
 
 function workerStatusMessage(status: ScanWorkerStatus): string {

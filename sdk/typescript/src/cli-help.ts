@@ -18,11 +18,14 @@ const COMMAND_GROUPS: readonly Group[] = [
 ];
 
 const SCAN_GROUPS: readonly Group[] = [
-  ["Scope", ["path", "diff", "head", "working-tree", "base"]],
+  [
+    "Scope (at most one: --path, --diff, --working-tree)",
+    ["path", "diff", "head", "working-tree", "base"],
+  ],
   ["Configuration", ["config", "mode", "knowledge-base", "dry-run"]],
   ["Model and authentication", ["auth", "model", "effort", "provider"]],
   [
-    "Deep Scan",
+    "Deep Scan (deep mode only)",
     DEEP_SCAN_SETTINGS.flatMap(([, , , flag]) =>
       flag === null ? [] : [flag.slice(2)],
     ),
@@ -371,8 +374,11 @@ export function formatCliHelp(text: string, columns = 80): string | undefined {
           ...groupedRows(rows, OUTPUT_GROUPS, "Agent options", width),
         );
       } else {
-        const outputRows = rows.filter((row) =>
-          OUTPUT_FLAGS.includes(rowName(row)),
+        const outputRows = rows.filter(
+          (row) =>
+            OUTPUT_FLAGS.includes(rowName(row)) ||
+            ((command === "scan" || command === "scan import") &&
+              rowName(row).startsWith("token-")),
         );
         if (outputRows.length)
           sections.push(renderRows("Output", outputRows, width));
