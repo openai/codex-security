@@ -99,6 +99,7 @@ export function createMultiscanFixtures() {
   const { temporaryDirectory, cleanup: cleanupDirectories } =
     createApiTestFixtures("codex-security-multiscan-");
   const fixtureRoots = new Set<string>();
+  const fixtureInputs = new Map<string, string>();
   const fixtureRequests = new Map<
     string,
     {
@@ -114,6 +115,7 @@ export function createMultiscanFixtures() {
   async function cleanup() {
     await cleanupDirectories();
     fixtureRoots.clear();
+    fixtureInputs.clear();
     fixtureRequests.clear();
     fixtureScanIds.clear();
     fixtureState = undefined;
@@ -129,7 +131,7 @@ export function createMultiscanFixtures() {
       process.env["CODEX_SECURITY_STATE_DIR"] = fixtureState;
       await runWorkbench(
         { python: PYTHON, pluginRoot: PLUGIN_ROOT, environment: process.env },
-        ["list-scans"],
+        ["database-info"],
       );
     }
     return {
@@ -155,7 +157,7 @@ export function createMultiscanFixtures() {
     );
     if (root === undefined) return undefined;
     const inventory = await readFile(
-      join(root, "repositories.csv"),
+      fixtureInputs.get(outputDir) ?? join(root, "repositories.csv"),
       "utf8",
     ).catch(() => undefined);
     if (inventory === undefined) return undefined;
@@ -358,6 +360,7 @@ export function createMultiscanFixtures() {
       return {
         close: () => instance.close(),
         run: async (repository, settings = {}) => {
+          fixtureInputs.set(settings.outputDir!, selected.inputPath);
           await recordFixtureRequest(repository, settings, config);
           try {
             return await instance.run(repository, settings);

@@ -1,8 +1,6 @@
-import { markPreviousCloudProjection } from "./reader-selection.js";
 import {
   normalizeSemgrepPlatformFindings,
   isSemgrepPlatformFormat,
-  semgrepPlatformLegacyFormat,
   semgrepPlatformFormat,
 } from "./semgrep-platform-findings.js";
 import { isRecord } from "./record.js";
@@ -36,7 +34,6 @@ import {
   optionalArray,
   readScannerJson,
   record,
-  relativePath,
   requiredText,
   sarifRunRepositories,
   sarifRunResults,
@@ -183,6 +180,10 @@ export function normalizeSemgrepFindings(
       options.sourceRepositories,
     );
   }
+  if (document["format"] === "semgrep-platform-findings/v1")
+    throw new Error(
+      "This Semgrep Platform export uses the retired v1 format. Recollect the findings with cs import semgrep.",
+    );
   if (isSemgrepPlatformFormat(document["format"])) {
     return normalizeSemgrepPlatformFindings(
       document,
@@ -200,47 +201,25 @@ export function normalizeSemgrepFindings(
   return normalizeSemgrepJson(document, options, target);
 }
 
-function nativeProjection(target: ExternalImportTarget, previous: boolean) {
-  let changed = false;
-  return {
-    location(raw: string) {
-      const oldPath = relativePath(raw);
-      if (previous) return oldPath;
-      // Semgrep retains its raw spelling; OpenGrep groups by the normalized path.
-      const path = nativeResultPath(raw, oldPath) === null ? null : raw;
-      if (path !== oldPath) changed = true;
-      return path;
-    },
-    finish(findings: ExternalFindings, omittedExplanations = false) {
-      if (target === "cloud" && (changed || omittedExplanations))
-        markPreviousCloudProjection(findings);
-      return findings;
-    },
-  };
-}
-
-/** @internal Rebuild the native JSON or SARIF that an earlier reader approved. */
-export function normalizePreviousSemgrepFindings(
-  input: unknown,
-  options: Partial<SemgrepImportOptions>,
-): ExternalFindings {
-  const document = record(input, "Semgrep report");
-  return document["version"] === "2.1.0" && document["runs"] !== undefined
-    ? normalizeSarif(document, options, "cloud", true)
-    : normalizeSemgrepJson(document, options, "cloud", true);
+function semgrepLocation(raw: string) {
+  // Semgrep retains the scanner's path spelling after validation.
+  return nativeResultPath(raw) === null ? null : raw;
 }
 
 function normalizeSemgrepJson(
   document: Record<string, unknown>,
   options: Partial<SemgrepImportOptions>,
   target: ExternalImportTarget,
-  previous = false,
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
-  const { results, paths: _paths, time: _time, ...context } = document;
-  const omitExplanations = !previous && Object.hasOwn(context, "explanations");
-  if (omitExplanations) delete context["explanations"];
+  const {
+    results,
+    paths: _paths,
+    time: _time,
+    explanations: _explanations,
+    ...context
+  } = document;
   const rows = array(results, "Semgrep results");
   if (!rows.length && document["errors"] === undefined)
     throw new Error("An empty Semgrep report must include its errors array.");
@@ -248,12 +227,11 @@ function normalizeSemgrepJson(
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
-  const projection = nativeProjection(target, previous);
-  const findings = normalizeRecords(
+  return normalizeRecords(
     rows,
     (value) =>
       projectNativeJsonResult(
-        parseNativeJsonResult(value, "Semgrep", projection.location),
+        parseNativeJsonResult(value, "Semgrep", semgrepLocation),
         {
           origin: "Semgrep",
           repositoryUrl,
@@ -265,7 +243,6 @@ function normalizeSemgrepJson(
     jsonIdentity,
     target,
   );
-  return projection.finish(findings, omitExplanations);
 }
 
 export function isSemgrepSarifDriver(name: string): boolean {
@@ -276,15 +253,6 @@ export function normalizeSemgrepSarif(
   input: unknown,
   options: SemgrepImportOptions,
   target: ExternalImportTarget = "cloud",
-): ExternalFindings {
-  return normalizeSarif(input, options, target);
-}
-
-function normalizeSarif(
-  input: unknown,
-  options: Partial<SemgrepImportOptions>,
-  target: ExternalImportTarget,
-  previous = false,
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
   const repositoryKey = cloudRepositoryUrlKey(repositoryUrl);
@@ -309,8 +277,7 @@ function normalizeSarif(
       throw new Error("Expected a Semgrep SARIF producer.");
     return sarifRunResults(context, "Semgrep");
   });
-  const projection = nativeProjection(target, previous);
-  const findings = normalizeRecords(
+  return normalizeRecords(
     entries,
     ({ result: value, context }) => {
       const result = record(value, "Semgrep result");
@@ -363,7 +330,7 @@ function normalizeSarif(
         typeof artifact["uri"] === "string" &&
         /^[a-z][a-z\d+.-]*:/iu.test(artifact["uri"]);
       const path =
-        rawPath === null || absoluteUri ? null : projection.location(rawPath);
+        rawPath === null || absoluteUri ? null : semgrepLocation(rawPath);
       return validateExternalEvidence(
         {
           title: ruleId,
@@ -403,7 +370,6 @@ function normalizeSarif(
     ({ result, context }) => sarifIdentity(result, context.runContext),
     target,
   );
-  return projection.finish(findings);
 }
 
 /** @internal Read the original file before resolving repository provenance. */
@@ -411,16 +377,12 @@ export async function readSemgrepReport(path: string): Promise<unknown> {
   return readScannerJson(path, (json) => {
     // Pick a parser before allocating the findings array. Verify the root:
     // the member can be nested in a native report or escaped in a Platform one.
-    const parser = /"format"\s*:\s*"semgrep-platform-findings\/v[12]"/u.test(
-      json,
-    )
+    const parser = /"format"\s*:\s*"semgrep-platform-findings\/v2"/u.test(json)
       ? parseHostedScannerJson
       : JSON.parse;
     const parsed: unknown = parser(json);
     const requiredParser =
-      isRecord(parsed) &&
-      (parsed["format"] === semgrepPlatformLegacyFormat ||
-        parsed["format"] === semgrepPlatformFormat)
+      isRecord(parsed) && parsed["format"] === semgrepPlatformFormat
         ? parseHostedScannerJson
         : JSON.parse;
     return parser === requiredParser ? parsed : requiredParser(json);

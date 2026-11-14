@@ -1,6 +1,5 @@
-import { gitText } from "./support/shell.js";
+import { gitText, nodeCommand } from "./support/shell.js";
 import { parseJsonLines } from "./support/json.js";
-import { execFileSync } from "node:child_process";
 import {
   access,
   appendFile,
@@ -18,12 +17,14 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { delimiter, dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
-import { normalizeTarget } from "../src/targets.js";
+import { gitOutput, normalizeTarget } from "../src/targets.js";
+import { probeCodexSandbox, runCodexCommand } from "../src/runtime.js";
+import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting } from "./support/errors.js";
 
@@ -181,6 +182,30 @@ describe("multiscan", () => {
 
     expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
   });
+
+  testPosix(
+    "continues the campaign when local Git sources cannot be resolved",
+    async () => {
+      const { paths, source } = await repositoryFixture("valid");
+      const cycle = join(paths.root, "cycle");
+      await symlink(cycle, cycle);
+      const invalid = [
+        cycle,
+        join(paths.root, "missing"),
+        join(source.path, "src", "app.ts", "child"),
+      ];
+      await appendFile(
+        paths.input,
+        invalid
+          .map((path, i) => `invalid-${i},${path},${source.revision}\n`)
+          .join(""),
+      );
+      const summary = await runMultiscan(
+        options(paths, client(completeRun), { maxAttempts: 1 }),
+      );
+      expect(summary).toMatchObject({ completed: 1, failed: invalid.length });
+    },
+  );
 
   test("materializes the pinned commit, applies row options, and removes its checkout", async () => {
     const paths = await fixture();
@@ -1173,6 +1198,72 @@ describe("multiscan", () => {
     },
   );
 
+  testPosix(
+    "bootstrap launchers and inventory helpers use the campaign's selected tool path",
+    async () => {
+      const { paths, source } = await repositoryFixture("source");
+      const install = join(paths.root, "tool:installation");
+      const tools = join(paths.root, "tools");
+      await mkdir(install);
+      await symlink(install, tools, "dir");
+      await symlink(nodeCommand().command, join(tools, "node"));
+      const launcher = join(tools, "codex");
+      await writeFile(launcher, "#!/usr/bin/env node\nprocess.exit(0);\n", {
+        mode: 0o700,
+      });
+      const aliases = [];
+      for (const name of ["node", "rg"]) {
+        const alias = join(paths.root, `${name}-aliases`);
+        await mkdir(alias);
+        await writeFile(join(source.path, name), "#!/bin/sh\nexit 73\n", {
+          mode: 0o700,
+        });
+        await symlink(join(source.path, name), join(alias, name));
+        aliases.push(alias);
+      }
+      await writeFile(
+        join(tools, "rg"),
+        "#!/bin/sh\nprintf './src/app.ts\\0'\n",
+        {
+          mode: 0o700,
+        },
+      );
+      const environment = {
+        PATH: [source.path, ...aliases, tools].join(delimiter),
+      };
+      const inventory = join(paths.root, "inventory.txt");
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async (checkout, settings) => {
+            await probeCodexSandbox({ command: launcher }, environment);
+            const result = await runCodexCommand(
+              { command: join(tools, "node") },
+              [
+                join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+                "generate-in-scope-files",
+                "--repo",
+                checkout,
+                "--scope",
+                ".",
+                "--out",
+                inventory,
+              ],
+              environment,
+            );
+            expect(result.success, result.stderr).toBe(true);
+            return completeRun(checkout, settings);
+          }),
+          { maxAttempts: 1 },
+        ),
+      );
+      expect((await results(summary.resultsPath))[0]).toMatchObject({
+        status: "completed",
+      });
+      expect(await readFile(inventory, "utf8")).toBe("./src/app.ts\n");
+    },
+  );
+
   test("ignores repository-local Git shims while preserving credential configuration", async () => {
     if (
       runTestInSubprocess(
@@ -1181,15 +1272,55 @@ describe("multiscan", () => {
       )
     )
       return;
-    const { paths } = await repositoryFixture("private");
-    const shimDirectory = join(paths.root, "node_modules", ".bin");
-    const leakedCredential = join(paths.root, "leaked-credential");
-    await mkdir(shimDirectory, { recursive: true });
+    const paths = await fixture();
+    const first = await repository(paths.root, "first");
+    const second = await repository(paths.root, "second");
     await writeFile(
-      join(shimDirectory, "git"),
-      `#!/bin/sh\nprintf '%s' "$GIT_CONFIG_VALUE_0" > "${leakedCredential}"\nexit 1\n`,
-      { mode: 0o700 },
+      paths.input,
+      `id,repository,revision\nfirst,${first.path},${first.revision}\nsecond,${join(second.path, ".git")},${second.revision}\n`,
     );
+    const shimDirectories = [first.path, second.path].map((root) =>
+      join(root, "node_modules", ".bin"),
+    );
+    const shimMarker = join(paths.root, "shim-ran");
+    const interpreterMarker = join(paths.root, "source-interpreter-ran");
+    const gitMarker = join(paths.root, "operator-git-ran");
+    for (const directory of shimDirectories) {
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, process.platform === "win32" ? "git.exe" : "git"),
+        `#!/bin/sh\nprintf called > "${shimMarker}"\nexit 1\n`,
+        { mode: 0o700 },
+      );
+    }
+    if (process.platform !== "win32") {
+      const operatorBin = join(paths.root, "operator-bin");
+      await mkdir(operatorBin);
+      await writeFile(
+        join(second.path, "sh"),
+        `#!/bin/sh\nprintf called > "${shimMarker}"\nexec /bin/sh "$@"\n`,
+        { mode: 0o700 },
+      );
+      await symlink(join(second.path, "sh"), join(operatorBin, "sh"));
+      const wrapperBin = join(paths.root, "wrapper-bin");
+      await mkdir(wrapperBin);
+      const sourceInterpreter = join(second.path, "interpreter");
+      await symlink("/bin/sh", sourceInterpreter);
+      const interpreterAlias = join(operatorBin, "interpreter");
+      await symlink(sourceInterpreter, interpreterAlias);
+      const hostGit = Bun.which("git")!.replaceAll("'", "'\\''");
+      await writeFile(
+        join(wrapperBin, "git"),
+        `#!${interpreterAlias}\nprintf called > "${interpreterMarker}"\nexec '${hostGit}' "$@"\n`,
+        { mode: 0o700 },
+      );
+      await writeFile(
+        join(operatorBin, "git"),
+        `#!/usr/bin/env sh\nprintf called > "${gitMarker}"\nexec '${hostGit}' "$@"\n`,
+        { mode: 0o700 },
+      );
+      shimDirectories.push(wrapperBin, operatorBin);
+    }
     const previousDirectory = process.cwd();
     const environment = new Map(
       [
@@ -1201,9 +1332,10 @@ describe("multiscan", () => {
     );
 
     try {
-      process.chdir(paths.root);
-      process.env["PATH"] =
-        `${shimDirectory}${process.platform === "win32" ? ";" : ":"}${environment.get("PATH") ?? ""}`;
+      process.chdir(first.path);
+      process.env["PATH"] = [...shimDirectories, environment.get("PATH")].join(
+        delimiter,
+      );
       process.env["GIT_CONFIG_COUNT"] = "1";
       process.env["GIT_CONFIG_KEY_0"] = "multiscan.credential";
       process.env["GIT_CONFIG_VALUE_0"] = "SYNTHETIC_GIT_CREDENTIAL";
@@ -1212,31 +1344,23 @@ describe("multiscan", () => {
         options(
           paths,
           client(async (checkout, scanOptions = {}) => {
-            const trustedGit = await resolveTrustedExecutable(
-              "git",
-              { ...process.env, PATH: environment.get("PATH") ?? "" },
-              paths.root,
-            );
-            if (trustedGit === null) {
-              throw new Error("Git is not available on a trusted PATH.");
-            }
-            const credential = execFileSync(
-              trustedGit.executable,
-              ["-C", checkout, "config", "--get", "multiscan.credential"],
-              {
-                encoding: "utf8",
-                env: trustedGit.environment,
-                stdio: ["ignore", "pipe", "pipe"],
-              },
-            ).trim();
+            const credential = await gitOutput(checkout, [
+              "config",
+              "--get",
+              "multiscan.credential",
+            ]);
             expect(credential).toBe("SYNTHETIC_GIT_CREDENTIAL");
             return await completedScan(scanOptions.outputDir!);
           }),
         ),
       );
 
-      expect(summary).toMatchObject({ completed: 1, failed: 0 });
-      await expect(access(leakedCredential)).rejects.toThrow();
+      await expect(access(shimMarker)).rejects.toThrow();
+      if (process.platform !== "win32") {
+        await expect(access(interpreterMarker)).rejects.toThrow();
+        await access(gitMarker);
+      }
+      expect(summary).toMatchObject({ completed: 2, failed: 0 });
     } finally {
       process.chdir(previousDirectory);
       for (const [name, value] of environment) {

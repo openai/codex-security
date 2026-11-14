@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { CodexSecurityConfig, JsonObject } from "./config.js";
+import { resolveTargetPath } from "./targets.js";
 import type { ScanOptions } from "./api.js";
 import { DEFAULT_SCAN_MODE } from "./scan-settings.js";
 import type { LoadedContract } from "./contract.js";
@@ -102,12 +103,11 @@ function requestDigest(
       ...options,
       target:
         repository !== undefined && Array.isArray(options.target)
-          ? options.target.map(
-              (path) =>
-                relative(repository, resolve(repository, path))
-                  .split(sep)
-                  .join("/") || ".",
-            )
+          ? {
+              paths: options.target.map((path) =>
+                resolveTargetPath(expandHome(path), repository),
+              ),
+            }
           : (options.target ?? "repository"),
       mode: options.mode ?? DEFAULT_SCAN_MODE,
       ...(stagedDocuments === undefined

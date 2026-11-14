@@ -9,6 +9,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -110,6 +111,8 @@ async function fixture(registerOnly = false) {
           mode: scan.mode ?? "standard",
           target,
           config: {},
+          maxCostUsd: scan.maxCostUsd,
+          ownerSuggestions: scan.ownerSuggestions,
           scanRequestDigest: scanRequestDigest(config, scan, checkout),
         },
         userContext: scan.scanPrompt,
@@ -128,7 +131,7 @@ async function fixture(registerOnly = false) {
       kind: "git_revision",
       targetId: registered["targetId"],
       displayName: basename(checkout),
-      revision,
+      revision: git(checkout, "rev-parse", "HEAD"),
     };
     manifest.scan.scope = { includePaths, excludePaths: [] };
     delete manifest.scan.sealedAt;
@@ -453,6 +456,71 @@ for (const kind of ["prompt", "configuration", "legacy", "seal"] as const) {
     });
   }
 }
+
+test.skipIf(process.platform === "win32")(
+  "a cleaned checkout preserves physical scope identity",
+  async () => {
+    const value = await fixture();
+    await mkdir(join(value.source, "nested/child"), { recursive: true });
+    await mkdir(join(value.source, "nested/src"));
+    await writeFile(join(value.source, "nested/src/file.ts"), "export {};\n");
+    await writeFile(join(value.source, "nested/child/file.ts"), "export {};\n");
+    await symlink("nested/child", join(value.source, "alias"));
+    git(value.source, "add", ".");
+    git(
+      value.source,
+      "commit",
+      "--no-gpg-sign",
+      "-qm",
+      "Distinct scoped paths",
+    );
+    const revision = git(value.source, "rev-parse", "HEAD");
+    await writeFile(
+      value.options.inputPath,
+      `id,repository,revision\nrepo,${value.source},${revision}\n`,
+    );
+    delete value.options.scanPrompt;
+    value.options.scanOptionsByMode = {
+      standard: { target: ["alias/../src"] },
+    };
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 1,
+    });
+    value.options.scanOptionsByMode.standard = { target: ["src"] };
+    const file = join(value.options.outputDir, "manifest.json");
+    const manifest = JSON.parse(await readFile(file, "utf8"));
+    manifest.configurationDigest = workflowDigest({
+      scanOptions: value.options.scanOptionsByMode,
+      pluginPath: pluginRoot,
+    });
+    await writeFile(file, JSON.stringify(manifest, null, 2) + "\n");
+    expect(await runMultiscan(value.options)).toMatchObject({
+      completed: 1,
+      skipped: 0,
+    });
+    expect(value.runs()).toBe(2);
+  },
+);
+
+test("a saved batch reservation can be reused with a new invocation budget", async () => {
+  const value = await fixture();
+  value.options.maxTotalCostUsd = 6;
+  expect(await runMultiscan(value.options)).toMatchObject({
+    completed: 1,
+    skipped: 0,
+  });
+  value.options.maxTotalCostUsd = 3;
+  expect(await runMultiscan(value.options)).toMatchObject({
+    completed: 1,
+    skipped: 1,
+  });
+  expect(value.runs()).toBe(1);
+});
 
 test("SDK registration records the same complete request identity used by campaign reuse", async () => {
   const root = await temporaryDirectory();
