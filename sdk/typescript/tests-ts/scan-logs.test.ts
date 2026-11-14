@@ -541,11 +541,14 @@ describe("saved scan logs", () => {
       const sessions = await scanRolloutSessions({
         codexHome: home,
         rootThreadId: "root",
-        executionThreadIds: ["worker"],
+        // Failed registration can leave the host receipts as the only thread binding.
         workerReceipts: { directory, scanId: "scan" },
         startedAt: at("001"),
         completedAt: at("011"),
       });
+      expect(
+        sessions.map(({ threadId, attribution }) => [threadId, attribution]),
+      ).toEqual([["worker", "recorded"]]);
       const retained = await Array.fromAsync(sessions[0]!.events());
       const ids = retained.flatMap(({ payload }) =>
         typeof payload === "object" && payload && "call_id" in payload

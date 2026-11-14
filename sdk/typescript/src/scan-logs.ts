@@ -569,10 +569,10 @@ export async function scanRolloutSessions(
     workerReceipts?: { directory: string; scanId: string };
   },
 ): Promise<ScanRolloutSession[]> {
-  const execution = [
+  const registered = new Set([
     options.rootThreadId,
     ...(options.executionThreadIds ?? []),
-  ];
+  ]);
   const workerTurns = new Map<string, WorkerTurns>();
   if (options.workerReceipts) {
     await readWorkerReceipts(options.workerReceipts, new Map(), (receipt) => {
@@ -584,7 +584,8 @@ export async function scanRolloutSessions(
         return;
       // Comparisons start standalone SDK threads, while discovery retries can
       // resume one registered thread for several scan-owned turns.
-      if (receipt["kind"] === "compare") execution.push(threadId);
+      if (receipt["kind"] === "compare" || receipt["kind"] === "discovery")
+        registered.add(threadId);
       if (receipt["kind"] === "discovery") {
         const previous = workerTurns.get(threadId);
         const worker = previous ?? {
@@ -628,14 +629,13 @@ export async function scanRolloutSessions(
   const sessions = await selectSessionCopies(
     {
       scanId: options.rootThreadId,
-      executionThreadIds: execution,
+      executionThreadIds: [...registered],
       codexHome: options.codexHome,
       allowMissingRoot: true,
     },
     options,
   );
   const byId = new Map(sessions.map((copies) => [copies[0].threadId, copies]));
-  const registered = new Set(execution);
   type Capture = {
     session: SessionLog;
     prompt?: string;
@@ -715,10 +715,7 @@ export async function scanRolloutSessions(
     return result;
   }
   return sessions.map(([session]) => ({
-    attribution:
-      registered.has(session.threadId) || workerTurns.has(session.threadId)
-        ? "recorded"
-        : "inferred",
+    attribution: registered.has(session.threadId) ? "recorded" : "inferred",
     threadId: session.threadId,
     parentThreadId:
       session.parentThreadId &&
