@@ -1,0 +1,7 @@
+#!/bin/sh
+# The trailing slash preserves directory names ending in newlines through substitution.
+set -- "$(CDPATH= cd -P "${0%/*}/../origin" && printf '%s/' "${PWD%/}")${0##*/}" "$@"
+case "$1" in
+  /*) exec "$@" ;;
+  *) exit 126 ;;
+esac

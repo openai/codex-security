@@ -57,16 +57,6 @@ async function reseal(scanDir: string): Promise<void> {
   await writeJson(manifestPath, manifest);
 }
 
-function savedCandidateCount(scanDir: string) {
-  return runPythonJsonProbe(
-    `import json,sys
-sys.path.insert(0,sys.argv[1])
-from workbench_scan_history import saved_unresolved_candidate_count
-print(json.dumps(saved_unresolved_candidate_count({"scan_dir":json.loads(sys.argv[2])})))`,
-    scanDir,
-  );
-}
-
 function pythonExport(scanDir: string) {
   return runPython(pythonExecutable() ?? "python", [
     join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
@@ -1993,9 +1983,6 @@ for (const receiptRefs of [
         turnResult: {},
       });
       expect(result.unresolvedCandidates).toEqual(coverage["deferred"]);
-      expect(savedCandidateCount(scanDir)).toBe(
-        result.unresolvedCandidateCount,
-      );
       const replay = runPython(
         process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
         [
@@ -2078,7 +2065,6 @@ for (const change of ["inventory", "bytes"]) {
         join(scanDir, "artifacts/proof.bin"),
         Buffer.from([0, 255, 128]),
       );
-      expect(savedCandidateCount(scanDir)).toBe(0);
       const sealed = runPython(
         process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
         [
@@ -2099,7 +2085,6 @@ for (const change of ["inventory", "bytes"]) {
         turnResult: {},
       });
       expect(result.unresolvedCandidates).toEqual([]);
-      expect(savedCandidateCount(scanDir)).toBe(0);
       if (change === "inventory") {
         const changed = await readJson(join(scanDir, "scan-manifest.json"));
         changed["scan"]["artifacts"] = changed["scan"]["artifacts"].filter(

@@ -61,6 +61,21 @@ def test_unresolved_count_preserves_progress_with_incomplete_canonical_drafts(
     assert json.loads(findings_path.read_text()) == findings
 
 
+def test_candidate_count_follows_saved_scan_identity(tmp_path: Path) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    saved = create_saved_workspace(state_dir, target)
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
+    scan_dir = Path(started["scanDir"])
+    deferred = [{"candidateId": "pending", "reason": "Review remains."}]
+    for owner, expected in ((scan_id, 1), ("other-scan", 0)):
+        manifest = {"scan": {"id": owner, "reviewState": {"deferred": deferred}, "scope": None}}
+        (scan_dir / "scan-manifest.json").write_text(json.dumps(manifest))
+        (scan_dir / "findings.json").write_text(json.dumps({"scanId": owner, "findings": []}))
+        detail = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert detail["progress"]["candidates"]["unresolved"] == expected
+
+
 def test_progress_preserves_phase_receipts_until_validation(tmp_path: Path) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)

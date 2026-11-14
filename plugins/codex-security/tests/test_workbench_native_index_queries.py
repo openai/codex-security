@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ntpath
 import sqlite3
+import sys
 from argparse import Namespace
 from contextlib import closing
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -122,7 +124,8 @@ def test_global_finding_filters_apply_before_pagination(workbench_api, indexed_c
     assert [finding["scanId"] for finding in targeted["findings"]] == [SCAN_IDS[0]]
     assert query(connection, query_args(query="needle", severity="low"))["findings"] == []
     unfiltered = query(connection, query_args())
-    assert set(unfiltered) == {"findings", "limit", "nextOffset", "offset"}
+    assert set(unfiltered) == {"findings", "limit", "nextOffset", "offset", "projectionAvailable"}
+    assert unfiltered["projectionAvailable"] is True
     assert len(unfiltered["findings"]) == 3
 
 
@@ -363,24 +366,111 @@ def test_scan_root_filter_matches_windows_path_aliases(
 def test_scan_list_probes_requested_repository_once(
     workbench_api, indexed_collections, monkeypatch
 ):
+    import workbench_target as target_module
+
     connection, targets = indexed_collections
     history = workbench_api["scan_history"]
     probes = []
+    git_command = target_module.git_command
 
-    def record_git_output(target, *arguments):
+    def record_git_command(target, *arguments, **kwargs):
         probes.append((target, arguments))
-        if arguments[0] == "rev-parse":
-            return str(target / ".git")
-        return f"https://example.test/{target.name}.git"
+        return git_command(target, *arguments, **kwargs)
 
-    monkeypatch.setattr(history, "git_output", record_git_output)
+    monkeypatch.setattr(target_module, "git_command", record_git_command)
     result = history.list_scans(connection, query_args(repository=str(targets[0]), limit=1))
 
     assert [scan["scanId"] for scan in result["scans"]] == [SCAN_IDS[0]]
     assert [arguments for target, arguments in probes if target == targets[0]] == [
         ("rev-parse", "--path-format=absolute", "--git-common-dir"),
-        ("remote", "get-url", "origin"),
+        ("rev-parse", "--show-toplevel"),
     ]
+    assert all(target == targets[0] for target, _ in probes)
+
+
+@pytest.mark.parametrize("exact_saved", [False, True])
+@pytest.mark.parametrize("stale_exact", [False, True])
+@pytest.mark.parametrize("device_changed", [False, True])
+def test_repository_findings_match_directory_aliases_after_exact_paths(
+    workbench_api,
+    indexed_collections,
+    tmp_path,
+    monkeypatch,
+    exact_saved,
+    stale_exact,
+    device_changed,
+):
+    connection, targets = indexed_collections
+    alias = tmp_path / "alias"
+    alias.symlink_to(targets[0], target_is_directory=True)
+    resolve = Path.resolve
+
+    def preserve_alias(self, *args, **kwargs):
+        return self if self == alias else resolve(self, *args, **kwargs)
+
+    # Exercise preserved case-alias spelling with an actual directory link.
+    monkeypatch.setattr(Path, "resolve", preserve_alias)
+    if exact_saved:
+        connection.execute(
+            "UPDATE security_targets SET current_path = ? WHERE id = ?",
+            (str(alias), stable_target_id(targets[1])),
+        )
+    selected = 1 if exact_saved else 0
+    if stale_exact or device_changed:
+        metadata = targets[0].stat()
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (
+                str(metadata.st_dev + 1 if device_changed else metadata.st_dev),
+                str(metadata.st_ino + 1 if stale_exact else metadata.st_ino),
+                SCAN_IDS[selected],
+            ),
+        )
+    result = workbench_api["native_indexes"].list_global_findings(
+        connection, query_args(repository=str(alias))
+    )
+    available = not stale_exact and (not device_changed or sys.platform == "linux")
+    assert result["projectionAvailable"] is available
+    assert [item["scanId"] for item in result["findings"]] == (
+        [SCAN_IDS[selected]] if available else []
+    )
+
+
+@pytest.mark.parametrize("operation", ["list", "matching"])
+@pytest.mark.parametrize("requested_kind", ["saved_alias", "canonical", "unsaved_alias"])
+def test_requested_alias_keeps_its_own_legacy_scan_history(
+    workbench_api, indexed_collections, tmp_path, operation, requested_kind
+):
+    connection, targets = indexed_collections
+    alias = tmp_path / "saved-alias"
+    alias.symlink_to(targets[0], target_is_directory=True)
+    unsaved_alias = tmp_path / "unsaved-alias"
+    unsaved_alias.symlink_to(targets[0], target_is_directory=True)
+    connection.execute(
+        "UPDATE security_targets SET current_path = ? WHERE id = ?",
+        (str(alias), stable_target_id(targets[1])),
+    )
+    connection.execute("UPDATE scans SET target_path = ? WHERE id = ?", (str(alias), SCAN_IDS[1]))
+    selected, requested = {
+        "saved_alias": (SCAN_IDS[1], alias),
+        "canonical": (SCAN_IDS[0], targets[0]),
+        "unsaved_alias": (SCAN_IDS[0], unsaved_alias),
+    }[requested_kind]
+    history = workbench_api["scan_history"]
+    args = query_args(repository=str(requested), limit=None, force=False, after_scan_id=selected)
+    if operation == "list":
+        assert [scan["scanId"] for scan in history.list_scans(connection, args)["scans"]] == [
+            selected
+        ]
+    else:
+        result = history.list_unmatched_scan_pairs(
+            connection,
+            args,
+            backfill_finding_details=lambda *args: None,
+            read_coverage=lambda *args: {},
+        )
+        assert result["scanCount"] == 1
+        assert result["repository"] == str(targets[0])
 
 
 @pytest.mark.parametrize("collection", ["scans", "repositories", "findings"])
@@ -446,12 +536,16 @@ def test_scan_detail_skips_findings_artifacts_without_unresolved_candidates(
 
     def read_artifact(scan_dir, name, label):
         reads.append((scan_dir.name, name))
-        return coverage if name == "coverage.json" else {"findings": []}
+        return (coverage if name == "coverage.json" else {"findings": []}), b""
 
-    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    monkeypatch.setattr(history, "_read_scan_local_json_bytes", read_artifact)
+    connection.execute("UPDATE scans SET status = 'running' WHERE id = ?", (SCAN_IDS[0],))
     scan = connection.execute("SELECT * FROM scans WHERE id = ?", (SCAN_IDS[0],)).fetchone()
 
-    assert history.saved_unresolved_candidate_count(scan) == 0
+    assert (
+        history.saved_unresolved_candidate_count(scan, workbench_api["verify_manifest_binding"])
+        == 0
+    )
     assert reads == [(SCAN_IDS[0], "scan-manifest.json"), (SCAN_IDS[0], "coverage.json")]
 
 
@@ -471,12 +565,16 @@ def test_scan_detail_reads_findings_to_resolve_saved_candidates(
 
     def read_artifact(scan_dir, name, label):
         reads.append((scan_dir.name, name))
-        return coverage if name == "coverage.json" else findings
+        return (coverage if name == "coverage.json" else findings), b""
 
-    monkeypatch.setattr(history, "_read_scan_local_json", read_artifact)
+    monkeypatch.setattr(history, "_read_scan_local_json_bytes", read_artifact)
+    connection.execute("UPDATE scans SET status = 'running' WHERE id = ?", (SCAN_IDS[0],))
     scan = connection.execute("SELECT * FROM scans WHERE id = ?", (SCAN_IDS[0],)).fetchone()
 
-    assert history.saved_unresolved_candidate_count(scan) == 1
+    assert (
+        history.saved_unresolved_candidate_count(scan, workbench_api["verify_manifest_binding"])
+        == 1
+    )
     assert reads == [
         (SCAN_IDS[0], "scan-manifest.json"),
         (SCAN_IDS[0], "coverage.json"),
@@ -503,7 +601,7 @@ def test_scan_list_does_not_read_candidate_artifacts(
     def reject_artifact_read(*arguments):
         raise AssertionError("Listing scans must not load candidate artifacts.")
 
-    monkeypatch.setattr(history, "_read_scan_local_json", reject_artifact_read)
+    monkeypatch.setattr(history, "_read_scan_local_json_bytes", reject_artifact_read)
     result = history.list_scans(connection, query_args(**arguments) if arguments else None)
 
     assert [scan["scanId"] for scan in result["scans"]] == expected_ids
@@ -546,7 +644,7 @@ def test_repository_list_does_not_read_candidate_artifacts(
     def reject_artifact_read(*arguments):
         raise AssertionError("Listing repositories must not load candidate artifacts.")
 
-    monkeypatch.setattr(history, "_read_scan_local_json", reject_artifact_read)
+    monkeypatch.setattr(history, "_read_scan_local_json_bytes", reject_artifact_read)
     result = workbench_api["native_indexes"].list_repositories(
         connection, query_args(**arguments) if arguments is not None else None
     )
@@ -666,6 +764,30 @@ def test_scan_start_chronology_keeps_latest_and_first_seen_queries_consistent(
     ]
     assert [scan["scanId"] for scan in history] == (SCAN_IDS[:2] if equal else SCAN_IDS[1::-1])
     assert list(connection.iterdump()) == before
+
+
+@pytest.mark.parametrize("newer_status", ["complete", "running", "failed"])
+def test_repository_latest_scan_uses_completion_order_without_hiding_active_scans(
+    workbench_api, indexed_collections, newer_status
+):
+    connection, targets = indexed_collections
+    target_id = stable_target_id(targets[0])
+    connection.execute("UPDATE scans SET completion_sequence = completion_sequence + 100")
+    for index, sequence in [(0, 2), (1, 1)]:
+        connection.execute(
+            "UPDATE scans SET target_id = ?, started_at = ?, completion_sequence = ?, status = ? WHERE id = ?",
+            (
+                target_id,
+                f"2026-08-01T00:{index * 10:02d}:00Z",
+                sequence if index == 0 or newer_status == "complete" else None,
+                "complete" if index == 0 else newer_status,
+                SCAN_IDS[index],
+            ),
+        )
+    repository = workbench_api["native_indexes"].list_repositories(
+        connection, query_args(target_id=target_id)
+    )["repositories"][0]
+    assert repository["latestScan"]["scanId"] == SCAN_IDS[0 if newer_status == "complete" else 1]
 
 
 @pytest.mark.parametrize("in_transaction", [False, True])
