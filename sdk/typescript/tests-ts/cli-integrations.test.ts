@@ -360,6 +360,9 @@ describe("integration command dispatch", () => {
     const existingExecutable = join(temp.path, "server with spaces");
     await writeFile(existingExecutable, "", { mode: 0o700 });
     const args = ["--mcp", "", "two words", "--json", "one=two"];
+    const httpUrl = "HTTP://mcp.example.invalid/MCP?mode=ReadOnly";
+    const httpsUrl = "hTtPs://mcp.example.invalid/MCP?mode=ReadOnly";
+    const nonAsciiScheme = "httpſ://mcp.example.invalid";
     for (const [launcher, expected] of [
       [
         ["--exec", executable, ...args.map((value) => `--arg=${value}`)],
@@ -379,6 +382,9 @@ describe("integration command dispatch", () => {
         },
       ],
       [["--command=local-server"], { command: "local-server", args: [] }],
+      [[`--command=${httpUrl}`], { url: httpUrl }],
+      [[`--command=${httpsUrl}`], { url: httpsUrl }],
+      [[`--command=${nonAsciiScheme}`], { command: nonAsciiScheme, args: [] }],
       [
         [`--command=${existingExecutable}`],
         { command: existingExecutable, args: [] },
