@@ -13,12 +13,16 @@ root, install the SDK dependencies, compile the fixture, and run its test:
 pnpm --dir sdk/typescript install --frozen-lockfile
 pnpm --dir sdk/typescript run build:examples
 node examples/custom-validation/validate.mjs --output reports/http-proof.json
+node examples/custom-validation/validate.mjs --mode repaired --output reports/repaired-proof.json
 ```
 
-The script starts a loopback server and writes the observed responses to
-`reports/http-proof.json`. Look for an anonymous request returning 401, Alice's
-own invoice returning 200, Alice reading Bob's invoice with 200, and
-`server_stopped: true`. This test runs without model access or sign-in.
+Both proofs record the mode, a 401 for an anonymous request, a 200 for each owner
+reading their own invoice, and `server_stopped: true`. Compare Alice's request for
+Bob's invoice with Bob's successful request for the same record.
+The vulnerable server returns 200 and records `cross_account_read: true`, which
+supports reporting the finding. The repaired server returns 403 and records
+`cross_account_read: false`, which supports suppression. Both runs use a loopback
+server and work without model access or sign-in.
 
 ## Run the scan with custom validation
 
@@ -38,11 +42,12 @@ node examples/custom-validation/run.mjs
 ```
 
 The runner copies the API into a temporary directory, compiles it, then starts a
-model-backed scan. Open `report.md` in the scan output directory it prints. In
-`artifacts/custom-validation/`, `candidates.json` lists the findings passed to
-validation, `http-proof.json` contains the HTTP observations, and `results.json`
-records each decision. A confirmed cross-account read is reportable. If custom
-validation cannot complete, the scan fails.
+model-backed scan of the default vulnerable mode. Open `report.md` in the scan
+output directory it prints. In `artifacts/custom-validation/`,
+`candidates.json` lists the findings passed to validation, `http-proof.json`
+contains the HTTP observations, and `results.json` records each decision. A
+confirmed cross-account read is reportable. If custom validation cannot
+complete, the scan fails.
 
 ## Adapt it to another app
 
