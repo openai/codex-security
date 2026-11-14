@@ -1894,14 +1894,22 @@ async function loadResumableScan(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       await ensureOutputDirectory(root);
-      await checkoutRevision(
-        receipt,
-        root,
-        signal,
-        options.githubHost,
-        true,
-        paths,
+      // Use private Git configuration and refs while repairing a retained checkout.
+      const retained = await lstat(join(root, ".git")).catch(
+        undefinedIfMissingFile,
       );
+      const repairDirectory = retained
+        ? await mkdtemp(join(dirname(root), ".repair-git-"))
+        : undefined;
+      try {
+        await checkoutRevision(receipt, root, signal, options.githubHost, {
+          paths,
+          repairDirectory,
+        });
+      } finally {
+        if (repairDirectory)
+          await rm(repairDirectory, { recursive: true, force: true });
+      }
       return;
     }
     createdCheckout = root;
@@ -2267,8 +2275,7 @@ async function checkoutRevision(
   path: string,
   signal?: AbortSignal,
   githubHost?: string,
-  restoreIncomplete = false,
-  restorePaths: readonly string[] = ["."],
+  restore?: { paths: readonly string[]; repairDirectory: string | undefined },
 ): Promise<void> {
   const environment = { ...process.env };
   for (const name of Object.keys(environment)) {
@@ -2282,25 +2289,13 @@ async function checkoutRevision(
   const command = await resolveTrustedExecutable(
     "git",
     environment,
-    restoreIncomplete ? [process.cwd(), path] : process.cwd(),
+    restore ? [process.cwd(), path] : process.cwd(),
   );
   if (command === null) {
     throw new Error("Git is not available on a trusted PATH.");
   }
   const gitDirectory = join(path, ".git");
-  const retained =
-    restoreIncomplete &&
-    (await lstat(gitDirectory).catch(undefinedIfMissingFile));
-  // The retained repository's configuration must remain usable throughout repair.
-  // Use a private Git directory for configuration and refs, sharing only its objects and index.
-  await using repair = retained
-    ? {
-        directory: await mkdtemp(join(dirname(path), ".repair-git-")),
-        async [Symbol.asyncDispose]() {
-          await rm(this.directory, { recursive: true, force: true });
-        },
-      }
-    : undefined;
+  const repairDirectory = restore?.repairDirectory;
   const gitOptions: string[] = [];
   const gitEnvironment = { ...command.environment };
   const gitOutput = async (
@@ -2342,7 +2337,7 @@ async function checkoutRevision(
   const git = async (...args: string[]): Promise<string> =>
     (await gitOutput(args)).toString("utf8").trim();
   let retainedHead: string | undefined;
-  if (repair) {
+  if (repairDirectory) {
     const canonicalGit = await ensureOutputDirectory(gitDirectory, {
       privateGitMetadata: true,
     });
@@ -2417,7 +2412,7 @@ async function checkoutRevision(
         throw error;
       });
     }
-    gitOptions.push("--git-dir", repair.directory, "--work-tree", path);
+    gitOptions.push("--git-dir", repairDirectory, "--work-tree", path);
     gitEnvironment["GIT_OBJECT_DIRECTORY"] = canonicalObjects;
     gitEnvironment["GIT_INDEX_FILE"] = join(canonicalGit, "index");
     const configured = async (
@@ -2468,17 +2463,17 @@ async function checkoutRevision(
     }
     await git("init", "--quiet", "--template=");
     if (retainedHead)
-      await writeFile(join(repair.directory, "HEAD"), retainedHead + "\n");
+      await writeFile(join(repairDirectory, "HEAD"), retainedHead + "\n");
     const shallow = await readFile(join(canonicalGit, "shallow")).catch(
       undefinedIfMissingFile,
     );
-    if (shallow) await writeFile(join(repair.directory, "shallow"), shallow);
+    if (shallow) await writeFile(join(repairDirectory, "shallow"), shallow);
   } else {
     await git("init", "--quiet");
   }
   let locallyPinned = false;
   let incompleteObjects = false;
-  if (restoreIncomplete) {
+  if (restore) {
     try {
       await git(
         "rev-parse",
@@ -2515,18 +2510,18 @@ async function checkoutRevision(
       task.revision,
     );
     if (
-      repair &&
-      (await lstat(join(repair.directory, "shallow")).catch(
+      repairDirectory &&
+      (await lstat(join(repairDirectory, "shallow")).catch(
         undefinedIfMissingFile,
       ))
     )
       await rename(
-        join(repair.directory, "shallow"),
+        join(repairDirectory, "shallow"),
         join(gitDirectory, "shallow"),
       );
   }
   if (
-    restoreIncomplete &&
+    restore &&
     !(await lstat(join(path, ".git", "index")).catch(undefinedIfMissingFile))
   ) {
     // Rebuild the lost index without restoring unrelated deleted worktree files.
@@ -2537,10 +2532,10 @@ async function checkoutRevision(
       "checkout",
       "--quiet",
       "--detach",
-      ...(restoreIncomplete ? ["--no-overwrite-ignore"] : []),
+      ...(restore ? ["--no-overwrite-ignore"] : []),
       task.revision,
     );
-  if (restoreIncomplete) {
+  if (restore) {
     const ignoreCase =
       (
         await git("config", "--bool", "core.ignorecase").catch(
@@ -2608,7 +2603,7 @@ async function checkoutRevision(
       }
     };
     const selectedPaths = new Set<string>();
-    for (const requested of restorePaths) {
+    for (const requested of restore.paths) {
       let selected =
         relative(
           path,
@@ -2705,9 +2700,9 @@ async function checkoutRevision(
   ) {
     throw new Error("Git checkout revision did not match the pinned SHA.");
   }
-  if (repair && !retainedHead) {
+  if (repairDirectory && !retainedHead) {
     // Publish the recovered detached HEAD only after the worktree is ready.
-    await rename(join(repair.directory, "HEAD"), join(gitDirectory, "HEAD"));
+    await rename(join(repairDirectory, "HEAD"), join(gitDirectory, "HEAD"));
   }
 }
 
