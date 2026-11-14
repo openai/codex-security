@@ -247,7 +247,8 @@ export async function readAcceptedDiscovery(
             "Saved discovery receipt",
           );
           const digest = createHash("sha256");
-          for await (const chunk of createReadStream(path)) digest.update(chunk);
+          for await (const chunk of createReadStream(path))
+            digest.update(chunk);
           receiptDigests.set(key, digest.digest("hex"));
         } catch {
           // Missing evidence cannot establish an earlier receipt origin.
