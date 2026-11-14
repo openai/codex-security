@@ -68,6 +68,15 @@ const turnFailures = {
     message: "Rate limit reached",
     codexErrorInfo: "rateLimitExceeded",
   },
+  "flex-unavailable-turn": {
+    message: "Flex capacity unavailable.",
+    codexErrorInfo: "flexUnavailable",
+  },
+  "restricted-capacity-turn": {
+    message:
+      "Policy-restricted capacity is unavailable. Please try again later.",
+    codexErrorInfo: "policyCapacityUnavailable",
+  },
   "server-error": {
     message: "Provider temporarily unavailable",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
