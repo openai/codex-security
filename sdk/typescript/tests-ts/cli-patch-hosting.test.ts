@@ -824,6 +824,7 @@ exit 1
         [
           "path",
           "file-url",
+          ...(process.platform === "win32" ? [] : ["newline-relative"]),
           ...(process.platform === "win32" ? ["drive-relative"] : []),
         ].map((spelling) => ({ resume, host, spelling })),
       ),
@@ -840,6 +841,7 @@ exit 1
       );
       let pushUrl = remote;
       if (spelling === "file-url") pushUrl = pathToFileURL(remote).href;
+      if (spelling === "newline-relative") pushUrl = "\nproject";
       if (spelling === "drive-relative") {
         pushUrl = parse(remote).root.slice(0, 2) + relative(directory, remote);
         expect(pushUrl).toMatch(/^[a-z]:[^\\/]/iu);
@@ -1539,7 +1541,8 @@ process.exit(result.status ?? 1);
       // double-quoted Windows path passed through Git for Windows.
       const config = join(tools, "synthetic config");
       await writeFile(config, "");
-      const configOption = transport === "scp-command" ? "none" : config;
+      const configOption =
+        transport === "scp-command" ? (resume ? "NoNe" : "none") : config;
       const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60`;
       const coreCommand = transport.includes("core")
         ? configuredCommand

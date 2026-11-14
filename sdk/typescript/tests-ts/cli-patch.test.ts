@@ -5297,12 +5297,10 @@ describe("patch publication integrity", () => {
                   if (selected.environment[key] === `url.${hosted}.insteadOf`)
                     selected.environment[key] = `url.${local}.insteadOf`;
               }
-              const output = await runGitRepositoryCommand(
-                command,
-                args,
-                cwd,
-                selected,
-              );
+              const run = options?.patchTransport
+                ? runLocalHostingTransport
+                : runGitRepositoryCommand;
+              const output = await run(command, args, cwd, selected);
               if (args[args.indexOf("remote") + 1] === "get-url")
                 return output
                   .split("\n")
@@ -6601,7 +6599,13 @@ test.each(["untracked", "tracked"])(
               directory,
               options,
             );
-            if (patched && !injected && args.includes("--name-only")) {
+            if (
+              patched &&
+              !injected &&
+              args.includes("diff") &&
+              args.includes("--name-only") &&
+              !args.includes("--cached")
+            ) {
               injected = true;
               await writeFile(
                 join(repository, "user-notes.txt"),
@@ -8740,7 +8744,6 @@ describe("patch change tracking", () => {
     "equals",
     "newline",
     "newline-multiple",
-    "newline-relative",
     "mixed-fetch-push-instead",
   ]) {
     test.skipIf(
@@ -8756,26 +8759,22 @@ describe("patch change tracking", () => {
           rewriting === "equals" ? "repository=v2" : "project",
         );
         const remote =
-          rewriting === "newline-relative"
-            ? join(directory, "\nproject")
-            : rewriting === "trailing-space"
-              ? `${raw} `
-              : rewriting.startsWith("newline")
-                ? `${raw}\npart`
-                : `${raw}-v2`;
+          rewriting === "trailing-space"
+            ? `${raw} `
+            : rewriting.startsWith("newline")
+              ? `${raw}\npart`
+              : `${raw}-v2`;
         git("init", "--bare", remote);
         git(
           "remote",
           "set-url",
           "origin",
-          rewriting === "newline-relative"
-            ? "\nproject"
-            : rewriting === "ordinary" ||
-                rewriting === "trailing-space" ||
-                rewriting === "equals" ||
-                rewriting.startsWith("newline")
-              ? remote
-              : raw,
+          rewriting === "ordinary" ||
+            rewriting === "trailing-space" ||
+            rewriting === "equals" ||
+            rewriting.startsWith("newline")
+            ? remote
+            : raw,
         );
         if (rewriting === "equal-length")
           git("config", `url.${remote}-incorrect.insteadOf`, remote);
@@ -8794,17 +8793,9 @@ describe("patch change tracking", () => {
             join(container, "unused-fetch"),
           );
         const secondary = join(container, "secondary");
-        if (
-          rewriting === "newline-multiple" ||
-          rewriting === "newline-relative"
-        ) {
+        if (rewriting === "newline-multiple") {
           git("init", "--bare", secondary);
-          git(
-            "config",
-            "--add",
-            "remote.origin.pushurl",
-            rewriting === "newline-relative" ? "\nproject" : remote,
-          );
+          git("config", "--add", "remote.origin.pushurl", remote);
           git("config", "--add", "remote.origin.pushurl", secondary);
         }
         git("push", "origin", "HEAD:refs/heads/native-control");
@@ -8837,10 +8828,7 @@ describe("patch change tracking", () => {
             "refs/heads/codex-security/patch-scan-1",
           ),
         ).toBe(git("rev-parse", "HEAD"));
-        if (
-          rewriting === "newline-multiple" ||
-          rewriting === "newline-relative"
-        )
+        if (rewriting === "newline-multiple")
           expect(
             git(
               "--git-dir",
