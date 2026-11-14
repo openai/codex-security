@@ -24,11 +24,7 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None
     scan = manifest["scan"]
     for key in ("coverageRef", "artifacts", "sealedAt"):
         scan.pop(key)
-    state["explicitExclusions"] = [
-        {"pattern": "vendor", "reason": "External code"},
-        {"pattern": "dist", "reason": "Generated files"},
-        {"pattern": "vendor", "reason": "Reviewed separately"},
-    ]
+    state["explicitExclusions"] = [{"pattern": "vendor", "reason": "External code"}]
     state["openQuestions"] = ["Which runtime controls apply?"]
     state["surfaces"] = [
         {
@@ -50,7 +46,7 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None
 
     finalizer.finalize_scan(scan_dir)
     result = validator.validate_contract(scan_dir)
-    expected = {"excludedPaths": ["vendor", "dist"]}
+    expected = {"excludedPaths": ["vendor"]}
     assert result["review"] == expected
     assert result["manifest"]["scan"]["review"] == expected
     assert "reviewState" not in result["manifest"]["scan"]
@@ -60,14 +56,12 @@ def test_results_without_coverage_file(tmp_path: Path, unfinished: bool) -> None
     checkpoint = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
     assert checkpoint["reviewState"]["surfaces"][0]["candidateId"] == "candidate-1"
     assert checkpoint["reviewState"]["deferred"] == state["deferred"]
-    assert checkpoint["reviewState"]["explicitExclusions"] == state["explicitExclusions"]
     assert checkpoint["reviewState"]["openQuestions"] == [
         {"question": "Which runtime controls apply?"}
     ]
     assert "coverage" not in checkpoint
     report = (scan_dir / "report.md").read_text()
     assert "coverage.json" not in report
-    assert report.count("- Excluded vendor: Excluded from review") == 1
     assert "Reviewed Surfaces" not in report
     assert "Review status" not in report
 

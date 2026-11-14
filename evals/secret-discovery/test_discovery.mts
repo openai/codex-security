@@ -90,7 +90,8 @@ test("delegating API token literals preserves the contextual password and indepe
   const policy = (
     await readFile(join(prepared.repo, "SECURITY.md"), "utf8")
   ).trim();
-  assert.ok(prepared.prompt.includes(policy));
+  assert.ok(policy.length > 0);
+  assert.equal(prepared.prompt.includes(policy), false);
   for (const value of delegated.secretValues)
     assert.equal(prepared.prompt.includes(value), false);
 

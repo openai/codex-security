@@ -161,16 +161,13 @@ export async function loadSealedContract(
     const findings = payloads["findings.json"] as FindingsDocument;
     const coverage = payloads["coverage.json"] as CoverageDocument | undefined;
     const mode = coverage?.mode ?? manifest.scan.mode!;
-    const summary = coverage ? undefined : manifest.scan.review;
-    const review = {
-      ...summary,
-      excludedPaths: [
-        ...new Set(
-          summary?.excludedPaths ??
-            (coverage?.explicitExclusions ?? []).map((entry) => entry.pattern),
-        ),
-      ],
-    };
+    const review = coverage
+      ? {
+          excludedPaths: (coverage.explicitExclusions ?? []).map(
+            (entry) => entry.pattern,
+          ),
+        }
+      : manifest.scan.review!;
     if (
       options.expectedScanId !== undefined &&
       manifest.scan.id !== options.expectedScanId

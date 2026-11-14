@@ -105,11 +105,14 @@ export async function remediationPrompt(
     if (input.structuredPatch) {
       prompt.push(
         'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the source change or current code closes the reported code path and preserves legitimate behavior","reason":"required for blocked or failed outcomes"}. ' +
-          "Include the boolean credentialRevocationPending. Set it to true for verified or no_change source-credential patches unless caller-supplied issuer or owner evidence confirms the specific old credential is retired. A replacement in use or a comment in the scanned code alone cannot establish retirement. Set the field to false otherwise. State any outstanding owner action in verification. Never try the credential or contact the issuer for status. " +
+          "Include the boolean credentialRevocationPending. Set it to true for verified or no_change repairs of committed credentials or confirmed runtime disclosures unless dated, caller-supplied issuer or owner evidence identifies the affected credential and confirms its retirement. For a possible leak with no confirmed disclosure, verify the repaired path and ask the owner to check deployment history. A replacement in use or a comment in the scanned code alone cannot establish retirement. Set the field to false otherwise. State any outstanding owner action in verification. Never try the credential or contact the issuer for status. " +
           (staticVerification
             ? 'Use "verified" only when static evidence establishes that the original attack path is closed and legitimate behavior is preserved. '
             : 'Use "verified" only after the original issue no longer reproduces and relevant checks pass. ') +
           "Preserve unrelated local changes.",
+        'For a blocked result, use "reason" to say whether this attempt changed any files, what stopped the fix, and what needs to happen next. ' +
+          "If a required change is outside the writable repository or path, explain what that component does and why it matters to the fix. Assume the reader knows only the current repository. " +
+          "Identify the required change and where it belongs when known. If additional access or an owner action is needed, state it before suggesting another attempt.",
       );
     }
   }

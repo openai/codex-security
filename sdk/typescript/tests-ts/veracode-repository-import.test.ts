@@ -70,7 +70,11 @@ test("replaying a Veracode policy flaw tracks evidence without assessing another
     typed.evidence.details!.repository!.url =
       "git@github.com:example/mirror.git";
     const prepareMixed = () =>
-      prepareNormalizedLocalImport(mixed, options, dependencies);
+      prepareNormalizedLocalImport(
+        mixed,
+        { ...options, sourceRepositoryUrl: undefined },
+        dependencies,
+      );
     await expect(prepareMixed()).rejects.toThrow(/configured remote/);
     fixture.git("remote", "add", "mirror", "https://github.com/example/mirror");
     expect((await prepareMixed()).preview.findings).toHaveLength(2);
