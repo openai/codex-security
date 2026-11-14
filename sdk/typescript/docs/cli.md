@@ -277,6 +277,67 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
+### xAI Responses API through a local gateway
+
+Codex 0.167.0 sends collaboration and Codex Security MCP tools as `namespace`
+declarations. A direct scan against xAI can pass `--dry-run` and then fail with
+HTTP 422 on the first model request. CLIProxyAPI's xAI adapter exposes each
+namespace member to xAI as a plain function and restores the namespace when
+Codex receives a tool call. Both connections use the Responses API.
+[Direct xAI provider support](https://github.com/openai/codex-security/issues/2412)
+
+Install CLIProxyAPI v8.0.59 and save this gateway config outside the scanned
+repository in a file readable only by the gateway user. Replace the placeholders
+with a private client key of your choice and your xAI API key.
+[CLIProxyAPI release](https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.59)
+
+```yaml
+config-version: 8
+server:
+  host: "127.0.0.1"
+  port: 8317
+access:
+  api-keys: ["<gateway-client-key>"]
+api-keys:
+  xai:
+    - name: scan
+      base-url: "https://api.x.ai/v1"
+      models:
+        - name: "grok-4.7"
+      keys:
+        - api-key: "<xai-api-key>"
+oauth:
+  auth-dir: "~/.cli-proxy-api-xai"
+```
+
+Start the gateway in one shell.
+
+```bash
+cli-proxy-api -config /path/to/private/config.yaml -local-model
+```
+
+In a second shell on the same machine or in the same container, set
+`CODEX_API_KEY` to the client key from `access.api-keys` and run the scan.
+
+```bash
+codex-security scan . --auth api-key --model grok-4.7 --effort low \
+  --codex "model_provider='xai'" \
+  --codex "model_providers.xai.name='xAI'" \
+  --codex "model_providers.xai.base_url='http://127.0.0.1:8317/v1'" \
+  --codex "model_providers.xai.wire_api='responses'" \
+  --codex "model_providers.xai.env_key='CODEX_API_KEY'" \
+  --codex 'features.multi_agent_v2.max_concurrent_threads_per_session=1'
+```
+
+The one-thread setting keeps Standard scans from spawning subagents. Without it,
+the gateway can forward a subagent's `agent_message` on a later request, which
+xAI rejects with HTTP 422. A contributor completed a live Standard scan with
+this setting. Deep Scan workers have separate concurrency settings and remain
+unverified with this gateway.
+
+The SDK has no built-in price for `grok-4.7`, so it rejects `--max-cost` for this
+model before starting a scan.
+
 ### Hugging Face compatibility
 
 In compatibility testing, Codex 0.166.0 sent its scan-completion tool inside a
