@@ -221,6 +221,13 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           this.runtimeSettings = undefined;
           throw error;
         }));
+      // Each managed scan owns the provider credentials its workers may inherit.
+      if (runtimeSettings.environment !== undefined) {
+        for (const name of Object.keys(childEnv)) {
+          if (name.toUpperCase() === "STANDARDCOMPUTE_API_KEY")
+            delete childEnv[name];
+        }
+      }
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
@@ -1010,8 +1017,10 @@ export async function workerRuntimeSettings(
     model_providers: legacyProviders,
     ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
-  if (isRecord(workerEnvironment)) {
-    settings.environment = workerEnvironment as Record<string, string>;
+  if (isRecord(snapshot)) {
+    settings.environment = isRecord(workerEnvironment)
+      ? (workerEnvironment as Record<string, string>)
+      : {};
   }
   if (typeof nativeProfile === "string") {
     // Match Codex's plain profile-v2 names before constructing a private file path.

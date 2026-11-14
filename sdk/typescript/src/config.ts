@@ -44,11 +44,106 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const STANDARDCOMPUTE_CODEX_PROVIDER = {
+  name: "Standard Compute",
+  base_url: "https://api.stdcmpt.com/v1",
+  env_key: "STANDARDCOMPUTE_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
+  standardcompute: STANDARDCOMPUTE_CODEX_PROVIDER,
 } as const;
+
+export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
+  Object.values(EXTERNAL_CODEX_PROVIDERS).map(({ env_key }) => env_key),
+);
+
+/** Native bearer and header profiles supply credentials directly to the transport. */
+function standardComputeTableCredential(table: unknown): string | undefined {
+  if (!isObject(table) || table["auth"] != null || table["env_key"] != null)
+    return undefined;
+  if (typeof table["experimental_bearer_token"] === "string")
+    return "experimental_bearer_token";
+  return ["http_headers", "env_http_headers"].find((field) => {
+    const headers = table[field];
+    if (!isObject(headers)) return false;
+    // A native gateway may use a custom authentication header. On a partial
+    // preset override, ancillary headers should still allow its normal API key.
+    return Object.keys(headers).some(
+      (name) =>
+        (typeof table["base_url"] === "string" &&
+          URL.parse(table["base_url"])?.href.replace(/\/+$/u, "") !==
+            STANDARDCOMPUTE_CODEX_PROVIDER.base_url) ||
+        /^(?:authorization|proxy-authorization|(?:x-)?api-key)$/iu.test(name),
+    );
+  });
+}
+
+export function selectedProviderTable(
+  config: Readonly<JsonObject>,
+  selected = scanModelProvider(config),
+): JsonObject | undefined {
+  if (typeof selected !== "string") return undefined;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const table = isObject(providers) ? providers[selected] : undefined;
+  return isObject(table) ? table : undefined;
+}
+
+/** Supply only missing preset fields so a native profile retains its own credentials. */
+export function standardComputeDefaults(
+  config: Readonly<JsonObject>,
+): JsonObject {
+  const native = selectedProviderTable(config, "standardcompute") ?? {};
+  const preset: JsonObject = { ...STANDARDCOMPUTE_CODEX_PROVIDER };
+  for (const field of Object.keys(native)) delete preset[field];
+  if (
+    native["auth"] != null ||
+    standardComputeTableCredential(native) !== undefined
+  )
+    delete preset["env_key"];
+  return preset;
+}
+
+export function standardComputeCredentialSource(
+  config: Readonly<JsonObject>,
+): string | undefined {
+  return scanModelProvider(config) === "standardcompute"
+    ? standardComputeTableCredential(selectedProviderTable(config))
+    : undefined;
+}
+
+/** Keep the Standard Compute credential only when the selected provider uses it. */
+export function standardComputeEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+  provider: unknown,
+  providerEnvKey?: string,
+  config?: JsonObject,
+): Record<string, string | undefined> {
+  const key = STANDARDCOMPUTE_CODEX_PROVIDER.env_key;
+  if (!Object.keys(environment).some((name) => name.toUpperCase() === key))
+    return environment;
+  const settings = (config && selectedProviderTable(config, provider)) ?? {};
+  const referencesKey = (name: unknown) =>
+    typeof name === "string" && name.toUpperCase() === key;
+  if (
+    referencesKey(providerEnvKey ?? settings["env_key"]) ||
+    (provider === "standardcompute" &&
+      providerEnvKey === undefined &&
+      settings["env_key"] == null &&
+      settings["auth"] == null &&
+      standardComputeTableCredential(settings) === undefined) ||
+    (isObject(settings["env_http_headers"]) &&
+      Object.values(settings["env_http_headers"]).some(referencesKey))
+  )
+    return environment;
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !referencesKey(name)),
+  );
+}
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
 
@@ -240,9 +335,14 @@ export function scanProviderEnvKey(
     ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
   )
     return undefined;
-  const providers = resolveCodexProfile(config)["model_providers"];
-  const provider = isObject(providers) ? providers[selected] : undefined;
-  return isObject(provider) && typeof provider["env_key"] === "string"
+  const provider = selectedProviderTable(config, selected);
+  if (
+    selected === "standardcompute" &&
+    (provider?.["auth"] != null ||
+      standardComputeTableCredential(provider) !== undefined)
+  )
+    return undefined;
+  return typeof provider?.["env_key"] === "string"
     ? provider["env_key"]
     : isExternalModelProvider(selected)
       ? EXTERNAL_CODEX_PROVIDERS[selected].env_key
@@ -251,13 +351,7 @@ export function scanProviderEnvKey(
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
 export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
-  const selected = scanModelProvider(config);
-  const providers = resolveCodexProfile(config)["model_providers"];
-  const provider =
-    typeof selected === "string" && isObject(providers)
-      ? providers[selected]
-      : undefined;
-  return isObject(provider) && provider["auth"] != null;
+  return selectedProviderTable(config)?.["auth"] != null;
 }
 
 /** @internal Keep host-side helpers independent of the source checkout. */
@@ -500,6 +594,11 @@ export async function mergedCodexConfig(
       await readCodexAuthConfig(profileHome, purpose === "login"),
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  if (scanModelProvider(effectiveOverrides) === "standardcompute") {
+    defaults["model_providers"] = {
+      standardcompute: standardComputeDefaults(effectiveOverrides),
+    };
+  }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.

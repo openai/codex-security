@@ -229,6 +229,8 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
+  standardComputeCredentialSource,
+  standardComputeDefaults,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -562,6 +564,7 @@ const PROVIDER_OPTION = z
     "openrouter",
     "fireworks",
     "cheaperinference",
+    "standardcompute",
     "amazon-bedrock",
   ])
   .default("openai")
@@ -11409,6 +11412,7 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     hasCommandAuth(config) ||
+    standardComputeCredentialSource(config) !== undefined ||
     scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
@@ -11686,9 +11690,13 @@ async function executeScan(
       )?.[provider];
       providerOptions = {
         provider,
-        providerConfiguration: isExternalModelProvider(provider)
-          ? { ...EXTERNAL_CODEX_PROVIDERS[provider], ...providerConfiguration }
-          : providerConfiguration,
+        providerConfiguration:
+          isExternalModelProvider(provider) && provider !== "standardcompute"
+            ? {
+                ...EXTERNAL_CODEX_PROVIDERS[provider],
+                ...providerConfiguration,
+              }
+            : providerConfiguration,
       };
     }
     selectedAuthentication = arguments_.mock
@@ -11700,6 +11708,7 @@ async function executeScan(
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
           scanProviderEnvKey(effectiveConfiguration),
+          effectiveConfiguration,
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
@@ -13420,6 +13429,7 @@ async function parseScanCodexOverrides(
   const providers = profile["model_providers"];
   if (
     isExternalModelProvider(provider) &&
+    provider !== "standardcompute" &&
     isJsonObject(providers) &&
     isJsonObject(providers[provider])
   ) {
@@ -13454,9 +13464,11 @@ export function parseCodexOverrides(
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
   if (isExternalModelProvider(provider)) {
     result["model_provider"] = provider;
-    result["model_providers"] = {
-      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-    };
+    if (provider !== "standardcompute") {
+      result["model_providers"] = {
+        [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+      };
+    }
   } else if (provider === "amazon-bedrock") {
     result["model_provider"] = provider;
   }
@@ -13521,15 +13533,22 @@ export function parseCodexOverrides(
     cursor[final] = parsed;
   }
   if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
-    const selectedModel = scanModel(
-      mergeCodexOverrides(defaults ?? {}, result),
-    );
+    const configured = mergeCodexOverrides(defaults ?? {}, result);
+    const selectedModel = scanModel(configured);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
         selectedModel === undefined
           ? `--model is required when using --provider ${provider}`
           : `--model must be a nonempty string when using --provider ${provider}`,
       );
+    }
+    if (provider === "standardcompute") {
+      const preset = standardComputeDefaults(configured);
+      if (Object.keys(preset).length > 0)
+        return mergeCodexOverrides(
+          { model_providers: { [provider]: preset } },
+          result,
+        );
     }
   }
   return result;

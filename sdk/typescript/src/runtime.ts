@@ -95,6 +95,7 @@ import {
   abortReason,
 } from "./errors.js";
 import {
+  EXTERNAL_PROVIDER_KEYS,
   writeCodexConfig,
   writePrivateConfig,
   type JsonObject,
@@ -157,9 +158,7 @@ const SANDBOX_PROBE_TIMEOUT_MILLISECONDS = 10_000;
 const PLUGIN_HELPER_SECRET_ENVIRONMENT_VARIABLES = new Set([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
-  "OPENROUTER_API_KEY",
-  "FIREWORKS_API_KEY",
-  "CHEAPER_INFERENCE_API_KEY",
+  ...EXTERNAL_PROVIDER_KEYS,
   "HF_TOKEN",
 ]);
 const PREPARE_SCAN_ARTIFACT_RESTORER_PROGRAM = `

@@ -417,6 +417,7 @@ describe("semantic scan comparison", () => {
     "fireworks",
     "amazon-bedrock",
     "command",
+    "standardcompute",
     "file-command-shadow",
     "file-command-shadow-lowercase",
   ])(
@@ -424,8 +425,13 @@ describe("semantic scan comparison", () => {
     async (selection) => {
       const home = await temporaryDirectory();
       const commandProfile =
-        selection === "command" || selection.startsWith("file-command-shadow");
-      const providerName = commandProfile ? "synthetic.command" : selection;
+        selection === "command" ||
+        selection === "standardcompute" ||
+        selection.startsWith("file-command-shadow");
+      const providerName =
+        commandProfile && selection !== "standardcompute"
+          ? "synthetic.command"
+          : selection;
       const provider = {
         ...(selection === "amazon-bedrock"
           ? { aws: { region: "us-east-1" } }
@@ -435,6 +441,9 @@ describe("semantic scan comparison", () => {
               requires_openai_auth: false,
             }),
         base_url: "https://provider.example.test/v1",
+        ...(selection === "standardcompute"
+          ? { env_http_headers: { "X-Billing": "CODEX_API_KEY" } }
+          : {}),
         http_headers: { "X-Synthetic-Secret": "synthetic-header-marker" },
         ...(commandProfile
           ? {
@@ -484,13 +493,16 @@ describe("semantic scan comparison", () => {
           : undefined;
       const profileClient = captureProfileClient();
       const startupCommands: Parameters<typeof runCodexCommand>[0][] = [];
+      const startupEnvironments: Parameters<typeof runCodexCommand>[2][] = [];
       const runNativeCommand = runtimeCommands.runCodexCommand;
       const nativeCommand = spyOn(
         runtimeCommands,
         "runCodexCommand",
       ).mockImplementation((...args) => {
-        if (Array.isArray(args[1]) && args[1].includes("mcp"))
+        if (Array.isArray(args[1]) && args[1].includes("mcp")) {
           startupCommands.push(args[0]);
+          startupEnvironments.push(args[2]);
+        }
         return runNativeCommand(...args);
       });
       const before = finding("before");
@@ -518,6 +530,7 @@ describe("semantic scan comparison", () => {
               home,
             CODEX_SECURITY_SCAN_ID: "current",
             OPENAI_API_KEY: "synthetic-ambient-key",
+            CODEX_API_KEY: "synthetic-billing-key",
             SYNTHETIC_PROVIDER_KEY: "synthetic-provider-key",
           },
           config: {
@@ -590,9 +603,11 @@ describe("semantic scan comparison", () => {
             codex_security_surface: "sdk",
             codex_security_command: "compare",
             codex_security_package_version: VERSION,
-            codex_security_provider: ["fireworks", "amazon-bedrock"].includes(
-              selection,
-            )
+            codex_security_provider: [
+              "fireworks",
+              "amazon-bedrock",
+              "standardcompute",
+            ].includes(selection)
               ? selection
               : "custom",
           },
@@ -640,6 +655,12 @@ describe("semantic scan comparison", () => {
         if (commandProfile) {
           expect(captured?.apiKey).toBeUndefined();
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
+          expect(startupEnvironments[0]).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.env?.["CODEX_API_KEY"]).toBe(
+            selection === "standardcompute"
+              ? "synthetic-billing-key"
+              : undefined,
+          );
         }
         expect(calls.threadOptions).toMatchObject({
           approvalPolicy: "never",
@@ -1851,6 +1872,84 @@ describe("semantic scan comparison", () => {
       FIREWORKS_API_KEY: "provider-key",
     };
     expect(await comparisonEnvironment(provider, account)).toEqual(provider);
+    expect(account).not.toHaveBeenCalled();
+  });
+
+  test("read-only helpers use only the selected Standard Compute key", async () => {
+    const home = await temporaryDirectory();
+    const state = join(home, "state");
+    await mkdir(join(state, "codex-home"), { recursive: true });
+    const account = mock(async () => ({
+      authenticated: true,
+      details: "managed",
+    }));
+    const source = {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: state,
+      STANDARDCOMPUTE_API_KEY: "synthetic-standardcompute-key",
+      OPENAI_API_KEY: "synthetic-openai-key",
+    };
+    const openai = await comparisonEnvironment(
+      source,
+      account,
+      undefined,
+      undefined,
+      { model_provider: "openai" },
+    );
+    expect(openai).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
+    expect(openai["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
+    await writeFile(
+      join(home, "config.toml"),
+      'model_provider = "standardcompute"\n',
+    );
+    const selected = await comparisonEnvironment(source, account);
+    expect(selected["STANDARDCOMPUTE_API_KEY"]).toBe(
+      source.STANDARDCOMPUTE_API_KEY,
+    );
+    expect(selected).not.toHaveProperty("OPENAI_API_KEY");
+    const onlyProvider = await comparisonEnvironment(
+      { ...source, OPENAI_API_KEY: undefined },
+      account,
+    );
+    expect(onlyProvider["CODEX_HOME"]).toBe(home);
+    const nativeHeader = await comparisonEnvironment(
+      source,
+      account,
+      undefined,
+      undefined,
+      {
+        model_provider: "standardcompute",
+        model_providers: {
+          standardcompute: {
+            name: "Local router",
+            base_url: "http://localhost/v1",
+            env_http_headers: { Authorization: "OPENAI_API_KEY" },
+          },
+        },
+      },
+    );
+    expect(nativeHeader["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
+    expect(nativeHeader).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
+    const gateway = {
+      model_provider: "gateway",
+      model_providers: {
+        gateway: {
+          auth: { command: "synthetic-command" },
+          env_http_headers: { "X-Provider-Key": "STANDARDCOMPUTE_API_KEY" },
+        },
+      },
+    };
+    expect(
+      (
+        await comparisonEnvironment(
+          source,
+          account,
+          undefined,
+          undefined,
+          gateway,
+        )
+      )["STANDARDCOMPUTE_API_KEY"],
+    ).toBe(source.STANDARDCOMPUTE_API_KEY);
     expect(account).not.toHaveBeenCalled();
   });
 

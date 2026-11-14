@@ -63,6 +63,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  STANDARDCOMPUTE_CODEX_PROVIDER,
   scanModelConfiguration,
   mergedCodexConfig,
 } from "../src/config.js";
@@ -873,6 +874,7 @@ describe("CLI", () => {
               "openrouter",
               "fireworks",
               "cheaperinference",
+              "standardcompute",
               "amazon-bedrock",
             ],
           },
@@ -3427,6 +3429,13 @@ describe("CLI", () => {
       "claude-sonnet-5",
       CHEAPERINFERENCE_CODEX_PROVIDER,
     ],
+    [
+      "Standard Compute",
+      "standardcompute",
+      "StandardCompute",
+      "anthropic/claude-sonnet-5",
+      STANDARDCOMPUTE_CODEX_PROVIDER,
+    ],
   ] as const)(
     "routes scans through %s",
     async (_name, provider, selectedModel, codexModel, providerConfig) => {
@@ -3458,6 +3467,55 @@ describe("CLI", () => {
       }
     },
   );
+
+  test("preserves native Standard Compute credentials from a profile or CLI table", async () => {
+    await using fixture = await scopedTemporaryDirectory(
+      "codex-security-standardcompute-profile-",
+    );
+    const home = fixture.path;
+    await writeFile(
+      join(home, "review.config.toml"),
+      '[model_providers.standardcompute]\nbase_url="https://gateway.example.test/v1"\n[model_providers.standardcompute.env_http_headers]\nX-Gateway="SYNTHETIC_GATEWAY_KEY"\n',
+    );
+    const { runCli, stderr } = createCliTest(main);
+    for (const [override, environment, expectedKey] of [
+      ['profile="review"', { SYNTHETIC_GATEWAY_KEY: "synthetic" }, undefined],
+      [
+        'model_providers.standardcompute.http_headers.Authorization="Bearer synthetic"',
+        {},
+        undefined,
+      ],
+      [
+        'model_providers.standardcompute.http_headers.X-Trace="synthetic"',
+        { STANDARDCOMPUTE_API_KEY: "synthetic" },
+        "STANDARDCOMPUTE_API_KEY",
+      ],
+    ] as const) {
+      let selected: CodexSecurityConfig | undefined;
+      const status = await runCli(
+        [
+          "scan",
+          ".",
+          "--provider=standardcompute",
+          "--model=synthetic",
+          "--auth=api-key",
+          "--codex",
+          override,
+        ],
+        dependencies({
+          environment: { CODEX_HOME: home, ...environment },
+          onConfig: (config) => (selected = config),
+        }),
+      );
+      expect(status, stderr.text()).toBe(0);
+      const effective = await mergedCodexConfig(selected!, home);
+      expect(
+        (effective["model_providers"] as Record<string, JsonObject>)[
+          "standardcompute"
+        ]?.["env_key"],
+      ).toBe(expectedKey);
+    }
+  });
 
   test("routes scans through the built-in Amazon Bedrock provider", async () => {
     for (const options of [

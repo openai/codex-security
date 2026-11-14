@@ -82,6 +82,10 @@ import {
 import {
   CODEX_AUTH_CONFIG_KEYS,
   EXTERNAL_CODEX_PROVIDERS,
+  EXTERNAL_PROVIDER_KEYS,
+  standardComputeEnvironment,
+  standardComputeCredentialSource,
+  selectedProviderTable,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -1084,12 +1088,14 @@ export class CodexSecurity {
       );
       const git = await inspectTrustedExecutable(
         "git",
-        withoutProviderKey(
+        withoutProviderKeys(
           selectedScanEnvironment(
             runtime.environment,
             options.auth,
             session.modelProvider,
             session.providerEnvKey,
+            session.effectiveConfig,
+            "selected",
           ),
           session.providerEnvKey,
         ),
@@ -1807,6 +1813,7 @@ export class CodexSecurity {
         hasCommandAuth(configuration),
         true,
         scanProviderEnvKey(configuration),
+        configuration,
       ),
       ...model,
       ...(typeof modelProvider === "string" ? { modelProvider } : {}),
@@ -2413,12 +2420,14 @@ export class CodexSecurity {
       } = session;
       let git: InspectedExecutable = {
         executable: null,
-        environment: withoutProviderKey(
+        environment: withoutProviderKeys(
           selectedScanEnvironment(
             runtime.environment,
             options.auth,
             modelProvider,
             session.providerEnvKey,
+            session.effectiveConfig,
+            "selected",
           ),
           session.providerEnvKey,
         ),
@@ -2488,28 +2497,43 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const workerProviderEnvironment = {
-        ...withoutOpenAiApiKeys(
-          selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-            session.providerEnvKey,
-          ),
+      const workerProviderEnvironment = withoutOpenAiApiKeys(
+        selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          modelProvider,
+          session.providerEnvKey,
+          effectiveConfig,
+          "selected",
         ),
+      );
+      const selectedWorkerCredentials = {
+        ...session.nativeProviderEnvironment,
         ...(session.apiKey === null
           ? {}
           : {
               [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
+      let alternateProviderEnvironment: ProcessEnvironment | undefined;
+      if (
+        mode === "deep" &&
+        (options.auth !== "chatgpt" ||
+          authentication.method !== "stored_credentials")
+      ) {
+        alternateProviderEnvironment =
+          options.auth !== "chatgpt" && authentication.method === "api_key"
+            ? this.#dependencies.environment
+            : withoutOpenAiApiKeys(this.#dependencies.environment);
+      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
           modelProvider,
           scanDir,
           workerProviderEnvironment,
-          session.nativeProviderEnvironment,
+          selectedWorkerCredentials,
+          alternateProviderEnvironment,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -4941,6 +4965,8 @@ export class CodexSecurity {
               auth,
               modelProvider,
               providerEnvKey,
+              session.effectiveConfig,
+              "selected",
             ),
           ),
         ),
@@ -5147,9 +5173,11 @@ export class CodexSecurity {
         commandAuth,
         false,
         providerEnvKey,
+        requestedConfig,
       );
+      const tableCredential = standardComputeCredentialSource(requestedConfig);
       const apiKey =
-        authentication.method === "api_key"
+        authentication.method === "api_key" && tableCredential === undefined
           ? environmentApiKey(
               this.#dependencies.environment,
               modelProvider,
@@ -5163,6 +5191,8 @@ export class CodexSecurity {
         options.auth,
         modelProvider,
         providerEnvKey,
+        requestedConfig,
+        "selected",
       );
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
@@ -5281,13 +5311,11 @@ export class CodexSecurity {
       }
       if (
         !runtime.credentialsAvailable &&
-        apiKey === null &&
-        !commandAuth &&
-        authentication.method !== "aws_credentials"
+        authentication.method === "stored_credentials"
       ) {
         throw new AuthenticationRequiredError(NO_CREDENTIALS_MESSAGE);
       }
-      if (!commandAuth)
+      if (authentication.method === "stored_credentials")
         authentication = await runtimeScanAuthentication(
           this.#dependencies.environment,
           runtime.codexHome,
@@ -5308,10 +5336,31 @@ export class CodexSecurity {
         );
       }
       notifyObserver(options, "onAuthentication")(authentication);
-      const helperEnvironment = withoutProviderKey(
+      const helperEnvironment = withoutProviderKeys(
         scanEnvironment,
         providerEnvKey,
       );
+      let nativeProviderEnvironment: Record<string, string> | undefined;
+      if (modelProvider === "standardcompute") {
+        nativeProviderEnvironment = declaredProviderEnvironment(
+          { standardcompute: selectedProviderTable(requestedConfig) },
+          this.#dependencies.environment,
+        );
+      } else if (
+        providerEnvKey !== undefined &&
+        apiKey !== null &&
+        !isExternalModelProvider(modelProvider)
+      ) {
+        nativeProviderEnvironment = {
+          ...declaredProviderEnvironment(providers, {
+            ...(options.auth === "chatgpt"
+              ? withoutOpenAiApiKeys(this.#dependencies.environment)
+              : this.#dependencies.environment),
+            ...withoutOpenAiApiKeys(runtime.environment),
+          }),
+          [providerEnvKey]: apiKey,
+        };
+      }
       const python = await (
         this.#dependencies.resolvePluginPython ?? resolvePluginPython
       )({
@@ -5335,20 +5384,7 @@ export class CodexSecurity {
           runtime.environment,
         ),
         providerEnvKey,
-        nativeProviderEnvironment:
-          providerEnvKey !== undefined &&
-          apiKey !== null &&
-          !isExternalModelProvider(modelProvider)
-            ? {
-                ...declaredProviderEnvironment(providers, {
-                  ...(options.auth === "chatgpt"
-                    ? withoutOpenAiApiKeys(this.#dependencies.environment)
-                    : this.#dependencies.environment),
-                  ...withoutOpenAiApiKeys(runtime.environment),
-                }),
-                [providerEnvKey]: apiKey,
-              }
-            : undefined,
+        nativeProviderEnvironment,
         apiKey,
         scanEnvironment: helperEnvironment,
         authentication,
@@ -5869,6 +5905,8 @@ export class CodexSecurity {
       auth,
       modelProvider,
       providerEnvKey,
+      requestedConfig,
+      "selected",
     );
     const codexHome = await realpath(
       codexSecurityCredentialHome(processEnvironment),
@@ -5925,6 +5963,7 @@ export class CodexSecurity {
           : join(deepScanConfigDirectory, "deep-scan-config.toml");
       const credentialsAvailable =
         hasCommandAuth(requestedConfig) ||
+        standardComputeCredentialSource(requestedConfig) !== undefined ||
         providerEnvKey !== undefined ||
         modelProvider === "amazon-bedrock"
           ? false
@@ -6856,6 +6895,7 @@ export function scanAuthentication(
   commandAuth = false,
   preflight = false,
   providerEnvKey?: string,
+  config?: JsonObject,
 ): ScanAuthentication {
   if (!SCAN_AUTH_MODES.includes(auth)) {
     throw new TypeError(
@@ -6863,6 +6903,9 @@ export function scanAuthentication(
     );
   }
   if (commandAuth) return { method: "command", verified: false };
+  const tableCredential = config && standardComputeCredentialSource(config);
+  if (tableCredential !== undefined)
+    return { method: "api_key", source: tableCredential, verified: false };
   if (modelProvider === "amazon-bedrock") {
     const sources = [
       "AWS_BEARER_TOKEN_BEDROCK",
@@ -6969,16 +7012,19 @@ export async function runtimeScanAuthentication(
 }
 
 /** Local helpers do not authenticate model requests. */
-function withoutProviderKey(
+function withoutProviderKeys(
   environment: ProcessEnvironment,
-  key: string | undefined,
+  ...keys: (string | undefined)[]
 ): ProcessEnvironment {
-  if (key === undefined) return environment;
-  const child = { ...environment };
-  for (const name of Object.keys(child)) {
-    if (name.toUpperCase() === key.toUpperCase()) delete child[name];
-  }
-  return child;
+  const privateNames = new Set(
+    keys.filter((key) => key !== undefined).map((key) => key.toUpperCase()),
+  );
+  if (privateNames.size === 0) return environment;
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) => !privateNames.has(name.toUpperCase()),
+    ),
+  );
 }
 
 /** @internal */
@@ -6988,12 +7034,23 @@ export function selectedScanEnvironment(
   modelProvider?: unknown,
   providerEnvKey?: string,
   config?: JsonObject,
+  providerKeys: "selected" | "declared" = "declared",
 ): ProcessEnvironment {
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
   const selectedProviderKey = providerEnvKey ?? standardProviderKey;
   const bedrockProvider = modelProvider === "amazon-bedrock";
+  environment = standardComputeEnvironment(
+    environment,
+    modelProvider,
+    providerEnvKey,
+    auth === "chatgpt" &&
+      !isExternalModelProvider(modelProvider) &&
+      !hasCommandAuth(config ?? {})
+      ? undefined
+      : config,
+  );
   if (auth !== "chatgpt" && selectedProviderKey === null && !bedrockProvider) {
     return environment;
   }
@@ -7006,11 +7063,8 @@ export function selectedScanEnvironment(
           key === selectedProviderKey.toUpperCase()
         );
       }
-      if (
-        key === "OPENROUTER_API_KEY" ||
-        key === "FIREWORKS_API_KEY" ||
-        key === "CHEAPER_INFERENCE_API_KEY"
-      ) {
+      if (key === EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key) return true;
+      if (EXTERNAL_PROVIDER_KEYS.has(key)) {
         return (
           !bedrockProvider &&
           (selectedProviderKey === null ||
@@ -7022,6 +7076,7 @@ export function selectedScanEnvironment(
     }),
   );
   if (
+    providerKeys === "declared" &&
     config !== undefined &&
     providerEnvKey !== undefined &&
     standardProviderKey === null &&
@@ -7034,6 +7089,20 @@ export function selectedScanEnvironment(
         auth === "chatgpt" ? withoutOpenAiApiKeys(environment) : environment,
       ),
     );
+  }
+  if (config !== undefined && modelProvider === "standardcompute") {
+    const credentials = declaredProviderEnvironment(
+      { standardcompute: selectedProviderTable(config) },
+      environment,
+    );
+    // Native credentials are restored at the model launch, after helper setup.
+    if (providerKeys === "selected")
+      return withoutProviderKeys(
+        selected,
+        EXTERNAL_CODEX_PROVIDERS.standardcompute.env_key,
+        ...Object.keys(credentials),
+      );
+    Object.assign(selected, credentials);
   }
   return selected;
 }
@@ -7688,16 +7757,30 @@ function selectedWorkerRuntimeConfig(
   selectedProvider: unknown,
   workingDirectory: string,
   environment: ProcessEnvironment,
-  nativeProviderEnvironment?: Record<string, string>,
+  selectedCredentials: Record<string, string>,
+  alternateProviderEnvironment?: ProcessEnvironment,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  const providerEnvironment =
-    nativeProviderEnvironment ??
-    declaredProviderEnvironment(providers, environment);
+  const alternateProviders =
+    isRecord(providers) && alternateProviderEnvironment !== undefined
+      ? Object.fromEntries(
+          Object.entries(providers).filter(([id]) => id !== provider),
+        )
+      : undefined;
+  const providerEnvironment = {
+    // Only declared credentials enter the snapshot. The parent provider's
+    // prepared values take precedence over credentials for alternate workers.
+    ...declaredProviderEnvironment(
+      alternateProviders,
+      alternateProviderEnvironment ?? {},
+    ),
+    ...declaredProviderEnvironment(providers, environment),
+    ...declaredProviderEnvironment(providers, selectedCredentials),
+  };
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
