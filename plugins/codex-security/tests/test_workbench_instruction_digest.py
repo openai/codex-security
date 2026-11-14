@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import os
+from contextlib import closing
 from pathlib import Path, PurePosixPath
 
 import pytest
+from test_workbench_setup_and_migrations import (
+    EXPECTED_MIGRATIONS,
+    create_historical_database,
+    insert_legacy_scan,
+    migration_name_row,
+    record_migration,
+    rename_migration,
+)
 
 
 def test_measures_selected_markdown_and_compiled_deep_roles(tmp_path: Path, workbench_api) -> None:
@@ -205,3 +214,42 @@ def test_changing_instructions_inside_the_installation_yields_no_digest(
     assert before and after
     assert (before == after) == (update == "restore-after-open")
     assert measured is None, f"measured {measured}, stable digests were {before} and {after}"
+
+
+@pytest.mark.parametrize("preview", [59, 61, 63, 64, 67, 70])
+def test_instruction_digest_preview_upgrades_without_losing_saved_measurements(
+    workbench_api,
+    preview: int,
+) -> None:
+    digest_migration = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 76)
+    connection, migrate = create_historical_database(preview)
+    connection.executescript(digest_migration[2])
+    record_migration(connection, preview, digest_migration[1], "preview timestamp")
+    digest = "sha256:" + "a" * 64
+    try:
+        if preview == 61:
+            connection.execute("ALTER TABLE scans ADD COLUMN launch_surface TEXT")
+        insert_legacy_scan(connection, "timestamp", instruction_digest=digest)
+        migrate(connection)
+        migrate(connection)
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            )
+        ] == EXPECTED_MIGRATIONS
+        assert connection.execute("SELECT instruction_digest FROM scans").fetchone()[0] == digest
+    finally:
+        connection.close()
+
+
+def test_instruction_digest_migration_rolls_back_on_unknown_receipt(workbench_api) -> None:
+    digest = next(item for item in workbench_api["MIGRATIONS"] if item[0] == 76)
+    connection, migrate = create_historical_database(64, ((64, *digest[1:]),))
+    with closing(connection):
+        rename_migration(connection, 63, "unrecognized preview")
+        with pytest.raises(SystemExit, match="Unsupported workbench migration receipt"):
+            migrate(connection)
+        assert migration_name_row(connection, 63)["name"] == "unrecognized preview"
+        assert migration_name_row(connection, 64)["name"] == digest[1]
+        assert migration_name_row(connection, 76) is None
