@@ -11,7 +11,7 @@ on:
       passed:
         description: Validation, dependency audits and eligible hosted smoke tests passed.
         value: >-
-          ${{ jobs.validate.outputs.result == 'success' &&
+          ${{ jobs.validate.outputs.result == 'success' && jobs.windows.outputs.result == 'success' &&
               jobs.dependencies.outputs.result == 'success' &&
               (jobs.smoke.outputs.result || 'skipped') == (github.event_name == 'pull_request' &&
                 github.event.pull_request.head.repo.full_name != github.repository && 'skipped' || 'success') }}
@@ -21,7 +21,9 @@ on:
     tags: ["**"]
     paths:
       - action.yml
+      - .gitattributes
       - github-action/**
+      - sdk/typescript/scripts/package-smoke-npm.mjs
       - sdk/typescript/src/git-remote.ts
       - plugins/codex-security/examples/completed-scan/**
       - .github/workflows/action-ci.yml
@@ -84,6 +86,28 @@ jobs:
           path: github-action/build/*.json
           retention-days: 7
           if-no-files-found: error
+
+  windows:
+    name: Windows Action build and release checks
+    if: *run-action-ci
+    runs-on: windows-latest
+    timeout-minutes: 15
+    outputs: *action-result
+    steps:
+      - *actions-checkout
+      - *actions-setup-node
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check-dist
+      - name: Verify bundle paths and hashes in the manifest
+        shell: pwsh
+        run: |
+          $files = (Get-Content -Raw build/release-manifest.json | ConvertFrom-Json -AsHashtable).files
+          foreach ($path in 'dist/index.cjs', 'dist/post.cjs') {
+            if ($files[$path].sha256 -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash) {
+              throw "Release manifest is missing the correct hash for $path"
+            }
+          }
+      - run: node --test tests/release.test.mjs tests/dependency-patches.test.mjs
 
   smoke:
     name: Hosted Action smoke tests

@@ -67,6 +67,31 @@ test('release preparation aligns manifests without changing locked Action depend
   assert.equal((await readJson(join(actionRoot, 'package.json'))).version, version);
 });
 
+test('release preparation accepts an already locked runtime with npm offline', async t => {
+  const { actionRoot, sourceCommit } = await fixture(t);
+  const runtimeLock = join(actionRoot, 'runtime/package-lock.json');
+  const lock = await readJson(runtimeLock);
+  lock.packages[''].dependencies[packageName] = '0.2.0';
+  lock.packages[`node_modules/${packageName}`].resolved =
+    `https://registry.npmjs.org/${packageName}/-/codex-security-${version}.tgz`;
+  await writeJson(runtimeLock, lock);
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('../scripts/release.mjs', import.meta.url)),
+    'prepare', version, sourceCommit, cliIntegrity, actionRoot,
+  ], {
+    env: {
+      PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+      // Package managers such as pnpm set this to their own entry point.
+      npm_execpath: join(actionRoot, 'pnpm.cjs'),
+      HOME: actionRoot, USERPROFILE: actionRoot,
+      npm_config_offline: 'true', npm_config_update_notifier: 'false',
+      npm_config_cache: join(actionRoot, '../npm cache'),
+    },
+    stdio: 'pipe',
+  });
+  await validateRelease(actionRoot, version, cliIntegrity);
+});
+
 test('publisher stages the tested runtime lock byte-for-byte without npm on PATH', async t => {
   const { actionRoot, sourceCommit } = await fixture(t);
   const runtimeLock = join(actionRoot, '../tested-runtime-lock.json');

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { statSync } from 'node:fs';
 import { copyFile, readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const packageName = '@openai/codex-security';
@@ -70,12 +71,43 @@ export async function validateReleaseSource(actionRoot, sourceCommit) {
   }
 }
 
+// A standalone node.exe can use npm from a different installation on PATH.
+function windowsPathNpmCli() {
+  for (const entry of (process.env.PATH ?? '').split(delimiter)) {
+    const directory = entry.replace(/^"(.*)"$/, '$1');
+    if (!isAbsolute(directory)) continue;
+    const launcher = resolve(directory, 'npm.cmd');
+    if (!statSync(launcher, { throwIfNoEntry: false })?.isFile()) continue;
+    const cli = resolve(directory, 'node_modules/npm/bin/npm-cli.js');
+    if (statSync(cli, { throwIfNoEntry: false })?.isFile()) return cli;
+    throw new Error(`Cannot locate the npm CLI for ${launcher}. Run release preparation through npm or set npm_execpath to its npm-cli.js.`);
+  }
+}
+
 export async function prepareRelease(actionRoot, version, sourceCommit, cliIntegrity) {
   releaseIdentity(version, sourceCommit, cliIntegrity);
   await updateReleaseManifests(actionRoot, version);
-  execFileSync('npm', ['install', '--package-lock-only', '--ignore-scripts', '--include=optional', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org/'], {
-    cwd: resolve(actionRoot, 'runtime'), stdio: 'inherit',
-  });
+  const args = ['install', '--package-lock-only', '--ignore-scripts', '--include=optional', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org/'];
+  const options = { cwd: resolve(actionRoot, 'runtime'), stdio: 'inherit' };
+  try {
+    execFileSync('npm', args, options);
+  } catch (error) {
+    // Keep native shims on PATH. Run the JS entry point directly on .cmd-only installs.
+    if (process.platform !== 'win32' || error.code !== 'ENOENT') throw error;
+    const { resolveNpm } = await import('../../sdk/typescript/scripts/package-smoke-npm.mjs');
+    // npm_execpath is relative to the invoking process when a launcher supplies a relative path.
+    const configured = process.env.npm_execpath ? resolve(process.env.npm_execpath) : undefined;
+    let cli = configured && basename(configured).toLowerCase() === 'npm-cli.js' &&
+      statSync(configured, { throwIfNoEntry: false })?.isFile() ? configured : windowsPathNpmCli();
+    cli ??= resolve((await resolveNpm()).args[0]);
+    if (cli !== configured) {
+      // Like npm.cmd, prefer npm installed in the user's global prefix. Read its configuration outside the checkout.
+      const prefix = execFileSync(process.execPath, [cli, 'prefix', '--global'], { cwd: dirname(process.execPath), encoding: 'utf8' }).trimEnd();
+      const globalCli = resolve(prefix, 'node_modules/npm/bin/npm-cli.js');
+      if (statSync(globalCli, { throwIfNoEntry: false })?.isFile()) cli = globalCli;
+    }
+    execFileSync(process.execPath, [cli, ...args], options);
+  }
   await validateRelease(actionRoot, version, cliIntegrity);
 }
 
