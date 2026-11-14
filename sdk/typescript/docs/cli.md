@@ -2334,6 +2334,7 @@ Use `scans compare BEFORE AFTER` to compare a pair. A cache miss can use the mod
 and save its matching decisions. Pass `--force` to recompute saved matches.
 The older `scans match BEFORE AFTER` spelling is also supported.
 Use `scans match --all` to match completed scans in this repository generation, including linked worktrees.
+The SDK accepts matching plans with inline findings and asks compatible workbenches to send each scan’s findings once.
 Comparisons classify findings as new, persisting, reopened, not observed, resolved,
 or unknown. An absent finding in the later scope is not observed; absence alone
 does not verify remediation. A finding is resolved only after it was explicitly
