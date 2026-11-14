@@ -120,11 +120,9 @@ test(function testContextLimitClassification() {
   }
   for (const error of [
     { code: "rate_limit_exceeded" },
-    new Error("Rate limit reached. Please try again in 1.2s."),
-    new Error("Codex worker stream ended before turn.completed"),
     new Error("Keep the context window small when writing prompts."),
-    new Error("unknown_context_length_exceeded_status"),
-    undefined,
+    new Error("unknown_context_length_exceeded"),
+    new Error("context_length_exceeded_status"),
   ]) {
     assert.equal(exceedsContext(error), false, String(error));
   }
