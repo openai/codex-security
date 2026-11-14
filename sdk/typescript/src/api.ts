@@ -331,6 +331,7 @@ import {
   gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
+  resolveTargetPath,
   type NormalizedTarget,
   type ScanMode,
   validatedGitEnvironment,
@@ -398,6 +399,22 @@ interface PreparedSession {
 
 const DEEP_SCAN_CONFIG_PATH_ENVIRONMENT =
   "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH";
+
+const savedPricingSchema = z.object({
+  model: z.string(),
+  context: z
+    .discriminatedUnion("provider", [
+      z.object({
+        provider: z.literal("amazon-bedrock"),
+        region: z.string().nullable(),
+      }),
+      z.object({
+        provider: z.literal("gcp"),
+        managedEndpoint: z.boolean().optional(),
+      }),
+    ])
+    .optional(),
+});
 
 const scanLifecycleSchema = z.object({
   scanId: z.string(),
@@ -2322,11 +2339,33 @@ export class CodexSecurity {
     }
     const target = recipe["target"];
     if (options.target !== undefined) {
-      const requested =
-        options.target === "repository"
-          ? { kind: "repository", paths: [] }
-          : await normalizeTarget(repo, options.target, signal);
-      if (!isDeepStrictEqual(target, requested))
+      // The workbench has already verified the manifest against the registered scope.
+      // Match the original input or its canonical saved spelling without reopening it.
+      const requested = options.target;
+      const paths = target["paths"];
+      const samePathScope =
+        Array.isArray(requested) &&
+        target["kind"] === "paths" &&
+        Array.isArray(paths) &&
+        paths.every((path) => typeof path === "string") &&
+        requested.every(
+          (path) => typeof path === "string" && path.length > 0,
+        ) &&
+        (isDeepStrictEqual(requested, recipe["requestedPaths"]) ||
+          isDeepStrictEqual(
+            new Set(
+              requested.map((path) =>
+                resolveTargetPath(expandHome(path), requestedRepository),
+              ),
+            ),
+            new Set(
+              paths.map((path) => resolveTargetPath(path, requestedRepository)),
+            ),
+          ));
+      if (
+        !(requested === "repository" && target["kind"] === "repository") &&
+        !samePathScope
+      )
         throw new CodexSecurityError(
           "The requested target differs from the sealed scan.",
         );
@@ -2362,12 +2401,14 @@ export class CodexSecurity {
     const config = isRecord(recipe["config"])
       ? (recipe["config"] as JsonObject)
       : {};
-    const savedModel = resolveCodexProfile(config)["model"];
+    const pricing = savedPricingSchema
+      .optional()
+      .parse(recipe["sealedPricing"]);
+    const savedModel = pricing?.model ?? resolveCodexProfile(config)["model"];
     const model = typeof savedModel === "string" ? savedModel : undefined;
-    const pricingContext = scanPricingContext(
-      config,
-      this.#dependencies.environment,
-    );
+    const pricingContext = pricing
+      ? pricing.context
+      : scanPricingContext(config, this.#dependencies.environment);
     if (limit !== undefined) {
       if (!model)
         throw new IncompleteScanError(
@@ -3164,12 +3205,23 @@ export class CodexSecurity {
         ...(this.config.executableSourcePaths ?? []),
         ...(inputs.deepScanConfiguration?.sourcePaths ?? []),
         ...modelFilePaths,
-        ...(await Promise.all(
-          modelFilePaths.map((path) => canonicalConfigPath(path)),
-        )),
+        ...(await Promise.all(modelFilePaths.map((path) => realpath(path)))),
       ];
-      if (mode === "deep" && executableSources.length)
-        recipe["executableSourcePaths"] = [...new Set(executableSources)];
+      if (mode === "deep") {
+        recipe["sealedPricing"] = {
+          model,
+          ...(pricingContext && { context: pricingContext }),
+        };
+        if (knowledgeBase?.protectedRoots.length)
+          recipe["knowledgeBaseProtectedRoots"] = knowledgeBase.protectedRoots;
+        if (executableSources.length)
+          recipe["executableSourcePaths"] = [...new Set(executableSources)];
+        if (
+          Array.isArray(options.target) &&
+          !isDeepStrictEqual(options.target, normalized.paths)
+        )
+          recipe["requestedPaths"] = [...options.target];
+      }
 
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
@@ -8076,7 +8128,11 @@ function selectedWorkerRuntimeConfig(
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
     if (typeof file === "string") {
-      resolved[key] = resolve(workingDirectory, expandHome(file, environment));
+      const path = expandHome(file, environment);
+      resolved[key] =
+        process.platform !== "win32" && isAbsolute(path)
+          ? path
+          : resolve(workingDirectory, path);
     }
   }
   return {

@@ -451,7 +451,7 @@ test.each(
       await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
         "synthetic stop after registration",
       );
-      expect(recipe).toBeDefined();
+      expect(recipe!["sealedPricing"]).toEqual({ model: "initial-model" });
       await writeFile(profilePath, stringify(fileProfile("reloaded")));
       let replay: JsonObject | undefined;
       const out = capture(),

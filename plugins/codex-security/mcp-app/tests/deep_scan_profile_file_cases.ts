@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
-import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -217,6 +223,15 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
       const relative = configuration.includes("relative-instructions.md");
       const modelFiles = configuration.includes("model_catalog_json");
       const codeMode = configuration.includes("[features.code_mode]");
+      const compactPath = (index: number) =>
+        process.platform === "win32"
+          ? path.join(fixture.root, `compact-${index}.md`)
+          : `${fixture.root}/alias/../compact-${index}.md`;
+      if (modelFiles && process.platform !== "win32") {
+        const child = path.join(fixture.root, "selected", "child");
+        await mkdir(child, { recursive: true });
+        await symlink(child, path.join(fixture.root, "alias"));
+      }
       const scanRoot = path.join(fixture.root, "parent-scan");
       const workerDirectory = path.join(scanRoot, "artifacts");
       await mkdir(workerDirectory, { recursive: true });
@@ -254,7 +269,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
               )
               .replace(
                 '"profile-compact.md"',
-                JSON.stringify(path.join(fixture.root, `compact-${index}.md`)),
+                JSON.stringify(compactPath(index)),
               )
               .replace(
                 '["synthetic_tools"]',
@@ -415,9 +430,7 @@ client-private-key = ${JSON.stringify(path.join(codexHome, "tls", "client.key"))
                 ? path.join(fixture.root, `catalog-${index}.json`)
                 : undefined,
             experimental_compact_prompt_file:
-              modelFiles && !clearedFiles
-                ? path.join(fixture.root, `compact-${index}.md`)
-                : undefined,
+              modelFiles && !clearedFiles ? compactPath(index) : undefined,
             model_instructions_file:
               instructions && !clearedFiles
                 ? path.join(fixture.root, `instructions-${index}.md`)

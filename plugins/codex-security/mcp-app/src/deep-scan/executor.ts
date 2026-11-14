@@ -413,15 +413,9 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
         ...Object.values(this.modelSettings.modelFileInputs ?? {}).flatMap(
           (input) => (input?.path ? [input.path] : []),
         ),
-        ...[
-          "model_instructions_file",
-          "experimental_compact_prompt_file",
-          "model_catalog_json",
-        ].flatMap((key) => {
+        ...modelFileSettings.flatMap((key) => {
           const path = runtimeSettings.config[key];
-          return typeof path === "string" && path.length
-            ? [modelFilePath(path, originalCwd)]
-            : [];
+          return typeof path === "string" && path.length ? [path] : [];
         }),
       ];
       const roots = await (this.executableRoots ??= workerExecutableRoots(

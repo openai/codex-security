@@ -15288,12 +15288,12 @@ if __name__ == "__main__":
   );
 
   test.each([
-    "model_instructions_file",
-    "experimental_compact_prompt_file",
-    "model_catalog_json",
+    ["model_instructions_file", "modelInstructionsFileSha256"],
+    ["experimental_compact_prompt_file", "compactPromptFileSha256"],
+    ["model_catalog_json", "modelCatalogFileSha256"],
   ] as const)(
     "checks the recorded %s before resuming a Deep model turn",
-    async (setting) => {
+    async (setting, legacyKey) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const path = join(codexHome, "scan-model-input.json");
       await writeFile(path, '{"models":[]}');
@@ -15347,6 +15347,13 @@ if __name__ == "__main__":
       await expect(resume()).rejects.toThrow(`${setting} changed`);
       expect(commands).not.toContain("fail-scan");
       expect(routed).not.toHaveBeenCalled();
+      const inputs = recipe["scanInputs"] as JsonObject;
+      const receipt = (inputs["modelFileInputs"] as JsonObject)[
+        setting
+      ] as JsonObject;
+      inputs[legacyKey] = receipt["sha256"]!;
+      delete inputs["modelFileInputs"];
+      await expect(resume()).rejects.toThrow(`${setting} changed`);
       await writeFile(path, '{"models":[]}');
       await expect(resume()).rejects.toThrow(
         "restored model input reached routing",

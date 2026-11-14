@@ -80,6 +80,9 @@ async function interruptedScan(
     providerProfile?: JsonObject;
     recipeRepositoryAlias?: boolean;
     executableSourcePaths?: string[];
+    target?: { kind: "paths"; paths: string[] };
+    sealedPricing?: JsonObject;
+    knowledgeBaseProtectedRoots?: string[];
   } = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -1237,7 +1240,8 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
       doc.scanId = f.scanId;
       if (name === "findings.json") doc.findings = [];
       else {
-        doc.mode = "deep_repository";
+        doc.mode =
+          f.recipe.target.kind === "paths" ? "scoped_path" : "deep_repository";
         doc.completeness = "partial";
         doc.surfaces = [];
         doc.deferred = [{ id: "time_cap", reason: "Synthetic time cap" }];
@@ -1652,7 +1656,13 @@ test.each(["complete", "partial", "unpriced"] as const)(
   async (scenario) => {
     const model =
       scenario === "unpriced" ? "synthetic-unpriced-model" : "gpt-5.6-sol";
-    const f = await interruptedScan("deep", false, { config: { model } });
+    const f = await interruptedScan(
+      "deep",
+      false,
+      scenario === "complete"
+        ? { config: { profile: "review" }, sealedPricing: { model } }
+        : { config: { model } },
+    );
     const worker = randomUUID();
     const timestamp = new Date().toISOString();
     const counters = {
@@ -1765,12 +1775,14 @@ test.each(["complete", "partial", "unpriced"] as const)(
   },
 );
 
-test.skipIf(process.platform === "win32").each([false, true])(
-  "sealed SDK recovery rejects PATH Python in a saved configuration checkout before probing it (paths resupplied: %s)",
-  async (resupplied) => {
+test
+  .skipIf(process.platform === "win32")
+  .each(["config", "resupplied", "knowledge", "legacy-knowledge"] as const)(
+  "sealed SDK recovery excludes the %s checkout before Python discovery",
+  async (sourceKind) => {
     const checkout = await temporaryDirectory();
     gitText(["-C", checkout, "init", "-q"]);
-    const source = join(checkout, "settings", "model.toml");
+    const source = join(checkout, "settings", "instructions.md");
     const bin = join(checkout, "tools");
     await mkdir(dirname(source));
     await mkdir(bin);
@@ -1780,9 +1792,18 @@ test.skipIf(process.platform === "win32").each([false, true])(
       mode: 0o700,
     });
 
-    const f = await interruptedScan("deep", false, {
-      executableSourcePaths: [source],
-    });
+    const f = await interruptedScan(
+      "deep",
+      false,
+      sourceKind === "knowledge" || sourceKind === "legacy-knowledge"
+        ? {
+            knowledgeBasePaths: [source],
+            ...(sourceKind === "knowledge" && {
+              knowledgeBaseProtectedRoots: [checkout],
+            }),
+          }
+        : { executableSourcePaths: [source] },
+    );
     await sealWithOriginalPlugin(f);
     await rm(f.repository, { recursive: true });
     f.environment.PATH = bin;
@@ -1790,7 +1811,9 @@ test.skipIf(process.platform === "win32").each([false, true])(
       fail("Unexpected model launch"),
     ).createSecurity({
       pythonPath: "python3",
-      ...(resupplied ? { executableSourcePaths: [source] } : {}),
+      ...(sourceKind === "resupplied"
+        ? { executableSourcePaths: [source] }
+        : {}),
     });
     try {
       await expect(
@@ -1809,6 +1832,30 @@ test.skipIf(process.platform === "win32").each([false, true])(
     }
   },
 );
+
+test("sealed SDK resumes the registered path scope after the checkout is removed", async () => {
+  const f = await interruptedScan("deep", false, {
+    target: { kind: "paths", paths: ["source.py"] },
+  });
+  await sealWithOriginalPlugin(f);
+  await rm(f.repository, { recursive: true });
+  await using client = resumeDependencies(f, () =>
+    fail("Unexpected model launch"),
+  ).createSecurity({});
+  const options = {
+    mode: "deep" as const,
+    outputDir: f.scanDir,
+    resumeScanId: f.scanId,
+  };
+  await expect(
+    client.run(f.repository, { ...options, target: ["other"] }),
+  ).rejects.toThrow("requested target differs");
+  const result = await client.run(f.repository, {
+    ...options,
+    target: ["./source.py"],
+  });
+  expect(result.manifest.scan.id).toBe(f.scanId);
+});
 
 test("sealed SDK resume accepts the canonical target of a saved repository alias", async () => {
   const f = await interruptedScan("deep", false, {

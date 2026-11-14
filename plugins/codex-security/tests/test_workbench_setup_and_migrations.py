@@ -235,20 +235,12 @@ def test_composition_preview_keeps_receipts_across_released_migrations(
                 (-(version + first_version - 63), name, timestamp)
                 for version, name, timestamp in preview
             ]
-            assert (
-                connection.execute(
-                    "SELECT name FROM schema_migrations WHERE version = 63"
-                ).fetchone()[0]
-                == "retain unverified Deep Scan worker attempts"
-            )
-            assert {
-                "log_completed_at",
-                "windows_resume_output_identity",
-                "windows_resume_target_identity",
-            } <= {row["name"] for row in connection.execute("PRAGMA table_info(scans)")}
-            assert "worker_usage_gap" in {
-                row["name"] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
-            }
+            assert [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT version, name FROM schema_migrations WHERE version > 0 ORDER BY version"
+                )
+            ] == EXPECTED_MIGRATIONS
 
 
 @pytest.mark.parametrize("reopened", [False, True])
