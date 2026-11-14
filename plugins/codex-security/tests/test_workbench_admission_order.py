@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from test_workbench_scan_history import compare_scan_pair
 from test_workbench_setup_and_migrations import (
     apply_historical_migrations,
     create_migration_history,
@@ -119,6 +120,30 @@ def test_triage_observes_first_result_admission(tmp_path: Path, ordering: str, r
         next_scan = create_cli_scan(state, scans, repository, complete=False)
         feedback = run_workbench(state, "get-scan-feedback", "--scan-id", next_scan["scanId"])
         assert bool(feedback["falsePositives"]) is (expected == "closed")
+
+
+def test_comparison_reopens_finding_admitted_after_dismissal(tmp_path: Path):
+    state, scans, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    repository.mkdir()
+    pending = create_cli_scan(state, scans, repository, complete=False)
+    completed = create_cli_scan(state, scans, repository)
+    occurrence = run_workbench(state, "get-scan", "--scan-id", completed["scanId"])["scan"][
+        "findings"
+    ][0]["occurrenceId"]
+    run_workbench(
+        state,
+        "set-finding-triage",
+        "--occurrence-id",
+        occurrence,
+        "--status",
+        "closed",
+        "--close-reason",
+        "false_positive",
+        "--note",
+        "Synthetic dismissal.",
+    )
+    complete_pending(state, repository, pending)
+    assert compare_scan_pair(state, completed, pending)["summary"]["reopened"] == 1
 
 
 @pytest.mark.parametrize("failed", [False, True])

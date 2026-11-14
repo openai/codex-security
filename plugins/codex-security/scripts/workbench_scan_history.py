@@ -582,7 +582,7 @@ def _legacy_owner(identities: RepositoryIdentityCache, target_id: str):
             try:
                 metadata = path.stat()
             except OSError:
-                pass
+                return False, ownership
         if metadata is not None and (ownership[1] is not None or current.resolved_path is None):
             valid = _checkout_matches(ownership[0], path, metadata)
     return valid, ownership

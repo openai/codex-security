@@ -141,6 +141,7 @@ from workbench_target import (
     worktree_content_digest_for_context,
 )
 from workbench_target_state import (
+    RepositoryIdentityCache,
     RepositoryScanScope,
     backfill_security_targets,
     ensure_security_target,
@@ -2789,6 +2790,19 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
     scan = require_scan(connection, args.scan_id)
     if getattr(args, "check_target", False):
         require_scan_target_unchanged(scan)
+    if getattr(args, "metadata_only", False):
+        owner = scan_history.scan_has_current_owner(
+            connection, scan, RepositoryIdentityCache(connection)
+        )
+        return {
+            "scan": {
+                "scanId": scan["id"],
+                "scanDir": scan["scan_dir"],
+                "targetPath": scan["target_path"],
+                "progress": {"status": "canceled" if scan["canceled_at"] else scan["status"]},
+                "remediationAvailable": owner and remediation_availability(scan)[0],
+            }
+        }
     context_claim = getattr(args, "context_claim_token", None)
     if args.occurrence_id is not None or not scan_history.is_unbound_standard_handoff(
         connection, scan, context_claim

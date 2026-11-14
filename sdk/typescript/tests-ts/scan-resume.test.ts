@@ -1922,8 +1922,12 @@ test.each([
     expect(prompts, stderr.text()).toHaveLength(2);
     expect(prompts[1]).toBe(settings.postScanPrompt);
     expect(f.environment.OPENAI_API_KEY).toBe("synthetic-resume-key");
+    const readState = workbenchCommand(
+      f.python,
+      f.environment.CODEX_SECURITY_STATE_DIR,
+    );
     expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+      (await readState(["get-scan", "--scan-id", f.scanId]))["scan"],
     ).toMatchObject({
       progress: { status: "complete" },
       continuationThreadId: f.threadId,
