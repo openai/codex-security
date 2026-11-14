@@ -421,3 +421,24 @@ def test_native_directory_change_after_probe_remains_a_path_error(
     assert mutated
     assert (retained_scan / "keep.txt").read_bytes() == b"Accepted content"
     assert not (retained_scan / "drafts/receipt.json").exists()
+
+
+@pytest.mark.parametrize("name", ["a" * 255, ".0123456789abcdef.tmp"])
+def test_stage_and_replace_valid_artifact_names(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(WINDOWS_FILES.secrets, "token_hex", lambda _: "0123456789abcdef")
+    destination = tmp_path / name
+    if os.name == "nt":
+        destination = Path(WINDOWS_FILES._extended_path(destination))
+    with ExitStack() as files:
+        backend = WINDOWS_FILES
+        if os.name != "nt":
+            backend = emulate_windows_atomic_write(
+                monkeypatch, load_script("finalize_scan_contract"), files
+            )
+        with backend.stage_write(tmp_path, name, b"first") as publish:
+            assert not destination.exists()
+            publish()
+        assert destination.read_bytes() == b"first"
+        backend.atomic_write(tmp_path, name, b"updated")
+    assert destination.read_bytes() == b"updated"
+    assert list(destination.parent.iterdir()) == [destination]

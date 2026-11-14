@@ -1320,7 +1320,10 @@ def _existing_output_matches(path: Path, payload: bytes) -> bool:
 @contextlib.contextmanager
 def _written_temp(destination: Path, payload: bytes) -> Iterator[tuple[Path, _OwnedHandle]]:
     for _ in range(16):
-        path = destination.with_name(f".{destination.name}.{secrets.token_hex(8)}.tmp")
+        name = f".{secrets.token_hex(8)}.tmp"
+        if name == destination.name.casefold():
+            name = "." + name
+        path = destination.with_name(name)
         try:
             handle = _create_file(
                 path,
