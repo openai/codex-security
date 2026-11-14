@@ -336,11 +336,10 @@ export const runGitRepositoryCommand: (
 function localHostingOptions(
   options: Parameters<typeof runGitRepositoryCommand>[3],
 ) {
-  const environment = { ...options?.environment };
-  for (const [key, value] of Object.entries(environment))
-    if (key.startsWith("GIT_CONFIG_KEY_") && value === "protocol.file.allow")
-      environment[key.replace("_KEY_", "_VALUE_")] = "always";
-  return { ...options, environment };
+  return {
+    ...options,
+    environment: { ...options?.environment, GIT_ALLOW_PROTOCOL: "file" },
+  };
 }
 
 export const runLocalHostingTransport: typeof runGitRepositoryCommand = (

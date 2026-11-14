@@ -6,6 +6,7 @@ import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   publicationRepository,
   runGitRepositoryCommand,
+  runLocalHostingTransport,
   runWorkflow,
 } from "./cli-patch-fixtures.js";
 
@@ -229,9 +230,12 @@ test.each([
               )
                 effective[key] = `url.${remote}.insteadOf`;
             }
-            return runGitRepositoryCommand(
+            const run = options?.patchTransport
+              ? runLocalHostingTransport
+              : runGitRepositoryCommand;
+            return run(
               command,
-              args[0] === "push"
+              options?.patchTransport && args.includes("push")
                 ? args.map((argument) =>
                     argument === "origin" ? remote : argument,
                   )

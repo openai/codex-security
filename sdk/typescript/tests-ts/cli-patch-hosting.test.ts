@@ -1534,7 +1534,8 @@ process.exit(result.status ?? 1);
       // double-quoted Windows path passed through Git for Windows.
       const config = join(tools, "synthetic config");
       await writeFile(config, "");
-      const configuredCommand = `ssh -F "${config}"`;
+      const configOption = transport === "scp-command" ? "none" : config;
+      const configuredCommand = `ssh -F "${configOption}"`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")
@@ -1550,7 +1551,7 @@ process.exit(result.status ?? 1);
       environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] || coreCommand
-          ? `'${ssh}' '-F' '${config}'`
+          ? `'${ssh}' '-F' '${configOption}'`
           : `'${ssh}'`;
       const alias =
         transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"

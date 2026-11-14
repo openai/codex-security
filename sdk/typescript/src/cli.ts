@@ -10746,6 +10746,7 @@ async function pinPublicationSshCommand(
       const value = arg.length > 2 ? arg.slice(2) : args[++i];
       if (!value) throw unsupported();
       let bound = value;
+      if (option === "-F" && value.toLowerCase() === "none") continue;
       if (option === "-F" || option === "-i") {
         bound = await bindFile(value);
       } else if (option === "-o") {
