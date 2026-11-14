@@ -326,6 +326,15 @@ export async function prepareCodexSecurityCredentialHome(
     });
     return canonical;
   } catch (error) {
+    if (
+      error instanceof OutputDirectoryError &&
+      error.cause instanceof UntrustedWindowsCredentialAncestorError
+    ) {
+      throw new OutputDirectoryError(
+        `${error.message}\nSet CODEX_SECURITY_STATE_DIR to a private, writable directory outside the rejected ancestor and the repository. The new directory has separate sign-in and scan history.`,
+        { cause: error.cause },
+      );
+    }
     if (error instanceof OutputDirectoryError) throw error;
     const code = nodeErrorCode(error);
     const recovery =
@@ -459,13 +468,8 @@ export async function requirePrivateDirectory(
     await (options.secureWindowsHome ?? secureWindowsCredentialHome)(path);
   } catch (error) {
     const detail = windowsCredentialAclFailure(error);
-    const recovery =
-      description === "credential home" &&
-      error instanceof UntrustedWindowsCredentialAncestorError
-        ? "\nSet CODEX_SECURITY_STATE_DIR to a private, writable directory outside the rejected ancestor and the repository. Keep existing state; the new directory has separate sign-in and scan history."
-        : "";
     throw new OutputDirectoryError(
-      `Unable to create a private Windows ${description}: ${path}${detail}${recovery}`,
+      `Unable to create a private Windows ${description}: ${path}${detail}`,
       { cause: error },
     );
   }
