@@ -1085,14 +1085,18 @@ test.each([
       ],
       deps,
     );
-    // The fixture returns an unregistered result. A fresh attempt may follow,
-    // but the saved scan itself must receive the effective recovery budget.
-    expect(
-      seen.filter((scan) => scan.resumeScanId !== undefined),
-    ).toMatchObject([
+    // The synthetic result is unregistered. The fresh attempt receives
+    // its own reservation after recovery verifies the saved result.
+    expect(seen).toMatchObject([
       {
         resumeScanId: f.scanId,
         maxCostUsd: expected,
+        skipFindingMatching: true,
+        ownerSuggestions: false,
+      },
+      {
+        outputDir: join(f.root, "artifacts", "repo", "attempt-2"),
+        maxCostUsd: 2,
         skipFindingMatching: true,
         ownerSuggestions: false,
       },

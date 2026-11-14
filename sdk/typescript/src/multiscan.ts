@@ -838,18 +838,29 @@ async function runCampaign(
             const normalCheckout = join(checkoutRoot, task.id);
             if (options.recoverScan === undefined) {
               try {
-                await mkdir(normalCheckout, { mode: 0o700 });
-                checkout = normalCheckout;
+                if (attempt === 1) {
+                  await mkdir(normalCheckout, { mode: 0o700 });
+                  checkout = normalCheckout;
+                } else if (
+                  await lstat(normalCheckout).catch(undefinedIfMissingFile)
+                ) {
+                  checkoutOccupied = true;
+                }
               } catch (error) {
                 if ((error as NodeJS.ErrnoException).code !== "EEXIST")
                   throw error;
                 checkoutOccupied = true;
+              }
+              if (checkoutOccupied) {
                 requiresRecovery = true;
                 throw new Error(
                   `Bulk checkout is already occupied: ${normalCheckout}. Retry with --recover to use a fresh checkout, or inspect and move the retained checkout before an ordinary retry.`,
                 );
               }
-            } else {
+            }
+            // Each new Git checkout has a distinct history identity. Recreating
+            // it at a previously registered path would invalidate that binding.
+            if (checkout === undefined) {
               const isolatedRoot = await ensureOutputDirectory(
                 join(output, "recovery-checkouts"),
               );
@@ -857,7 +868,8 @@ async function runCampaign(
                 join(isolatedRoot, task.id),
               );
               const isolatedCheckout = join(taskRoot, `attempt-${attempt}`);
-              await mkdir(scanDir, { mode: 0o700 });
+              if (options.recoverScan !== undefined)
+                await mkdir(scanDir, { mode: 0o700 });
               await mkdir(isolatedCheckout, { mode: 0o700 });
               checkout = isolatedCheckout;
             }
@@ -892,12 +904,10 @@ async function runCampaign(
                 options,
                 task,
                 scanDir,
+                checkout,
                 knowledge?.snapshot,
               ),
               telemetryContext: { operationId },
-              ...(task.scope === undefined
-                ? {}
-                : { target: [resolve(checkout, task.scope)] }),
               ...budget,
               maxCostUsd,
               ...observers,
@@ -1002,7 +1012,12 @@ async function runCampaign(
           ...(recoveryCheckout !== undefined
             ? { cleanupPending: "recovery-checkout" }
             : failure === undefined && cleanupFailure !== undefined
-              ? { cleanupPending: "checkout" }
+              ? {
+                  cleanupPending:
+                    checkout === join(checkoutRoot, task.id)
+                      ? "checkout"
+                      : "recovery-checkout",
+                }
               : {}),
           ...(knowledgeBaseFailure ? { knowledgeBaseFailure: true } : {}),
           ...(checkoutOccupied ? { checkoutOccupied: true } : {}),
@@ -1634,6 +1649,7 @@ function campaignScanOptions(
   options: MultiscanOptions,
   task: MultiscanTask,
   scanDir: string,
+  checkout: string,
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot,
 ): ScanOptions {
   const scanPrompt = [options.scanPrompt?.trim(), task.prompt]
@@ -1642,7 +1658,9 @@ function campaignScanOptions(
   return {
     ...options.scanOptionsByMode?.[task.mode],
     knowledgeBaseSnapshot,
-    ...(task.scope === undefined ? {} : { target: [task.scope] }),
+    ...(task.scope === undefined
+      ? {}
+      : { target: [resolve(checkout, task.scope)] }),
     ...(options.knowledgeBasePaths?.length
       ? { knowledgeBasePaths: options.knowledgeBasePaths }
       : {}),
@@ -1675,6 +1693,7 @@ function matchesRegisteredRequest(
     options,
     task,
     scanDir,
+    checkout,
     knowledgeBaseSnapshot,
   );
   const matches = (settings: ScanOptions): boolean => {
