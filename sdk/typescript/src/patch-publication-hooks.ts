@@ -1,7 +1,169 @@
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import type { PatchPublicationHooks } from "./patch-git-controls.js";
+
+export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
+
+// Also embedded in the standalone Git and hook runners.
+export function removePatchCredentials(
+  environment: NodeJS.ProcessEnv,
+  credentialNames: readonly string[],
+  stripAwsCredentials?: boolean,
+  proxyCredentials = proxyUserinfo,
+): void {
+  for (const [name, value] of Object.entries(environment)) {
+    if (
+      /^(?:DATABASE_URL|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
+        name,
+      ) ||
+      credentialNames.includes(name.toUpperCase()) ||
+      (stripAwsCredentials && /^AWS_/i.test(name)) ||
+      (/^(?:https?|all)_proxy$/i.test(name) &&
+        value !== undefined &&
+        proxyCredentials.test(value))
+    )
+      delete environment[name];
+  }
+}
+
+// HTTP credentials can be a username alone. SSH usernames select the remote
+// account and remain available to validators unless a password is present.
+function withoutUrlCredentials(value: string): string {
+  return value.replace(
+    /((?:https?|ftps?|ssh(?:\+git)?|git(?:\+ssh)?|socks(?:4a?|5h?)?):\/\/)([^/?#\s]+@)/gi,
+    (authority, scheme, userinfo) =>
+      /^(?:https?|ftps?):/i.test(scheme) || userinfo.includes(":")
+        ? scheme
+        : authority,
+  );
+}
+
+// Executed by the coordinator and embedded in the standalone hook dispatcher.
+export function filterCommandConfig(
+  environment: NodeJS.ProcessEnv,
+  git: string,
+  marker?: string,
+  parseGit = spawnSync,
+  stripUrlCredentials = withoutUrlCredentials,
+  proxyCredentials = proxyUserinfo,
+): void {
+  function credentialSetting(key: string, value: string): boolean {
+    if (/^(?:http|remote)(?:\..*)?\.proxy$/i.test(key))
+      return proxyCredentials.test(value) || stripUrlCredentials(key) !== key;
+    return (
+      stripUrlCredentials(key) !== key ||
+      stripUrlCredentials(value) !== value ||
+      /^credential\.|^http(?:\..*)?\.(?:extraheader|cookiefile|sslkey|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
+        key,
+      )
+    );
+  }
+  // Keep indexed entries separate: together they can exceed the OS limit
+  // for a single environment string. Let Git report malformed input itself.
+  for (const name of Object.keys(environment)) {
+    if (
+      name !== name.toUpperCase() &&
+      /^GIT_CONFIG_(?:COUNT|PARAMETERS|(?:KEY|VALUE)_\d+)$/i.test(name)
+    ) {
+      const value = environment[name];
+      delete environment[name];
+      if (process.platform === "win32") environment[name.toUpperCase()] = value;
+    }
+  }
+  const rawCount = environment["GIT_CONFIG_COUNT"] ?? "";
+  const count = Number(rawCount);
+  let invalid =
+    count < 0 ||
+    (rawCount !== "" && !/^[ \t\r\n\f\v]*[+-]?\d+$/.test(rawCount));
+  const tuples: [string, string][] = [];
+  for (let index = 0; !invalid && index < count; index++) {
+    const key = environment["GIT_CONFIG_KEY_" + index];
+    const value = environment["GIT_CONFIG_VALUE_" + index];
+    if (key === undefined || value === undefined || !key) invalid = true;
+    else if (!credentialSetting(key, value)) tuples.push([key, value]);
+  }
+  if (!invalid) {
+    if (tuples.length < count) {
+      environment["GIT_CONFIG_COUNT"] = String(tuples.length);
+      for (const [index, [key, value]] of tuples.entries()) {
+        environment["GIT_CONFIG_KEY_" + index] = key;
+        environment["GIT_CONFIG_VALUE_" + index] = value;
+      }
+    }
+    for (const name of Object.keys(environment)) {
+      const tuple = /^GIT_CONFIG_(?:KEY|VALUE)_(\d+)$/.exec(name);
+      if (
+        tuple &&
+        (Number(tuple[1]) >= tuples.length ||
+          String(Number(tuple[1])) !== tuple[1])
+      )
+        delete environment[name];
+    }
+    if (!marker && !environment["GIT_CONFIG_PARAMETERS"]) return;
+  }
+  const empty = process.platform === "win32" ? "NUL" : "/dev/null";
+  const parserEnvironment = { ...environment };
+  for (const name of Object.keys(parserEnvironment))
+    if (
+      /^GIT_(CONFIG(?:_GLOBAL|_NOSYSTEM)?|DIR|COMMON_DIR|WORK_TREE)$/i.test(
+        name,
+      )
+    )
+      delete parserEnvironment[name];
+  // Read Git's command scope without opening the checkout, following includes,
+  // or passing any config values on the command line.
+  parserEnvironment["GIT_DIR"] = empty;
+  parserEnvironment["GIT_CONFIG_NOSYSTEM"] = "1";
+  parserEnvironment["GIT_CONFIG_GLOBAL"] = empty;
+  if (!invalid) parserEnvironment["GIT_CONFIG_COUNT"] = "0";
+  const parsed = parseGit(
+    git,
+    ["config", "--no-includes", "--null", "--list", "--show-scope"],
+    {
+      env: parserEnvironment,
+      encoding: "utf8",
+      windowsHide: true,
+      maxBuffer: Infinity,
+    },
+  );
+  if (parsed.error) throw parsed.error;
+  if (parsed.status !== 0)
+    throw new Error(
+      parsed.stderr.trimEnd() ||
+        "Could not read Git command-scope configuration.",
+    );
+  const records = parsed.stdout.split("\0");
+  const parameters = [];
+  let changed = false;
+  let bridge = false,
+    removed = false;
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  for (let i = 0; i + 1 < records.length; i += 2) {
+    if (records[i] !== "command") continue;
+    const entry = records[i + 1]!;
+    const split = entry.indexOf("\n");
+    const key = split === -1 ? entry : entry.slice(0, split);
+    const value = split === -1 ? "" : entry.slice(split + 1);
+    if (key === marker) {
+      changed = true;
+      bridge = value === "begin";
+      removed ||= value === "end";
+      continue;
+    }
+    if (bridge || credentialSetting(key, value)) changed = true;
+    else
+      parameters.push(
+        key.includes("=")
+          ? quote(key) + "=" + (split === -1 ? "" : quote(value))
+          : quote(split === -1 ? key : key + "=" + value),
+      );
+  }
+  if (marker && (!removed || bridge))
+    throw new Error("Could not restore the publication hook configuration.");
+  if (changed) environment["GIT_CONFIG_PARAMETERS"] = parameters.join(" ");
+}
 
 // Git starts this trusted dispatcher with the native hook's cwd, argv, index
 // and stdin. Only Git's original hook runs with the patch permissions.
@@ -10,15 +172,8 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const [event, ...args] = process.argv.slice(2);
-// HTTP credentials can be a username alone. SSH usernames select the remote
-// account and remain available to validators unless a password is present.
-function withoutUrlCredentials(value) {
-  return value.replace(
-    /((?:https?|ftps?|ssh(?:\+git)?|git(?:\+ssh)?|socks(?:4a?|5h?)?):\/\/)([^/?#\s]+@)/gi,
-    (authority, scheme, userinfo) =>
-      /^(?:https?|ftps?):/i.test(scheme) || userinfo.includes(":") ? scheme : authority,
-  );
-}
+const withoutUrlCredentials = ${withoutUrlCredentials};
+const filterCommandConfig = ${filterCommandConfig};
 if (event === "pre-push") {
   for (let i = 0; i < args.length; i++) args[i] = withoutUrlCredentials(args[i]);
 }
@@ -26,91 +181,21 @@ const plan = JSON.parse(
   fs.readFileSync(path.join(__dirname, "plan.json"), "utf8"),
 );
 const environment = { ...process.env };
-const credentials = new RegExp(plan.credentialPattern, "i");
-for (const name of Object.keys(environment)) {
-  if (
-    credentials.test(name) ||
-    (/^(?:https?|all)_proxy$/i.test(name) &&
-      /^(?:[a-z][\w+.-]*:\/\/)?[^/@\s]+@/i.test(environment[name])) ||
-    plan.credentialNames.includes(name.toUpperCase()) ||
-    (plan.stripAwsCredentials && /^AWS_/i.test(name))
-  )
-    delete environment[name];
-}
+const removeCredentials = ${removePatchCredentials};
+removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo});
 environment.CODEX_HOME = plan.home;
 
-// Let Git parse its own command scope, including inherited git -c quoting.
-// Read only that scope without loading a checkout or an operator config file.
-const parserEnvironment = { ...environment };
-for (const name of ["GIT_CONFIG", "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"])
-  delete parserEnvironment[name];
-parserEnvironment.GIT_CONFIG_NOSYSTEM = "1";
-parserEnvironment.GIT_CONFIG_GLOBAL =
-  process.platform === "win32" ? "NUL" : "/dev/null";
-parserEnvironment.GIT_CEILING_DIRECTORIES = path.dirname(__dirname);
-const parsed = spawnSync(
-  plan.git,
-  ["config", "--no-includes", "--null", "--list", "--show-scope"],
-  {
-    cwd: __dirname,
-    env: parserEnvironment,
-    encoding: "utf8",
-    windowsHide: true,
-    maxBuffer: Infinity,
-  },
-);
-if (parsed.error) throw parsed.error;
-if (parsed.status !== 0)
-  throw new Error("Could not read the publication hook's Git configuration.");
-const records = parsed.stdout.split("\0");
-for (const name of Object.keys(environment))
-  if (/^GIT_CONFIG_(?:PARAMETERS|COUNT|(?:KEY|VALUE)_\d+)$/i.test(name))
-    delete environment[name];
-let bridge = false,
-  removed = false;
-const parameters = [];
-const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
-for (let i = 0; i + 1 < records.length; i += 2) {
-  if (records[i] !== "command") continue;
-  const entry = records[i + 1];
-  const split = entry.indexOf("\n");
-  const key = split === -1 ? entry : entry.slice(0, split);
-  const value = split === -1 ? "" : entry.slice(split + 1);
-  if (key === plan.marker) {
-    bridge = value === "begin";
-    removed ||= value === "end";
-    continue;
-  }
-  // Host transports retain their authentication. Do not rebind credentials
-  // passed through Git command scope in a checkout-supplied child program.
-  if (
-    bridge ||
-    withoutUrlCredentials(key) !== key ||
-    withoutUrlCredentials(value) !== value ||
-    /^credential\.|^http(?:\..*)?\.(?:extraheader|proxy|cookiefile|sslkey|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
-      key,
-    )
-  )
-    continue;
-  parameters.push(split === -1 ? quote(key) : quote(key) + "=" + quote(value));
-}
-if (!removed || bridge)
-  throw new Error("Could not restore the publication hook configuration.");
-environment.GIT_CONFIG_PARAMETERS = parameters.join(" ");
+filterCommandConfig(environment, plan.git, plan.marker, spawnSync, withoutUrlCredentials, ${proxyUserinfo});
 const bindings = Object.entries(environment).filter(([name]) =>
-  /^(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|PREFIX|EDITOR|ATTR_SOURCE|ATTR_NOSYSTEM|CONFIG(?:_GLOBAL|_SYSTEM|_NOSYSTEM|_PARAMETERS)?)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME)$/i.test(
+  /^(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|PREFIX|EDITOR|ATTR_SOURCE|ATTR_NOSYSTEM|CONFIG(?:_GLOBAL|_SYSTEM|_NOSYSTEM|_PARAMETERS|_COUNT|_(?:KEY|VALUE)_\d+)?)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME)$/i.test(
     name,
   ),
-);
-bindings.push(
-  ["GIT_CONFIG_COUNT", null],
-  ...plan.credentialNames.map((name) => [name, null]),
 );
 const header = Buffer.from(
   JSON.stringify({
     bindings,
+    credentialNames: plan.credentialNames,
     stripAwsCredentials: plan.stripAwsCredentials,
-    stripHookProxyCredentials: true,
   }),
 );
 const inputEvent = [
@@ -233,7 +318,7 @@ try {
   // has one classic executable per event. Invoke it inside the same sandbox.
   const version = spawnSync(plan.git, ["--version"], {
     cwd: __dirname,
-    env: parserEnvironment,
+    env: environment,
     windowsHide: true,
     encoding: "utf8",
   });
@@ -362,7 +447,6 @@ export async function writePublicationHooks(
     message?: string;
     messageDirectory?: string;
     runner: string;
-    credentialPattern: string;
     credentialNames: string[];
     stripAwsCredentials: boolean;
   },
