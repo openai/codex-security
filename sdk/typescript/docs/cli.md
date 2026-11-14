@@ -1034,11 +1034,12 @@ Cloud. See [deduplication](findings-service.md#deduplicate-a-scan) for scope,
 credentials, and workflow resume behavior.
 
 For `dedupe --scan latest`, matching across worktrees or clones requires a Git
-executable outside all saved scan targets. If a historical target includes the
-available Git installation, use `codex-security dedupe --scan SCAN_ID` with an
-explicit saved scan ID. Exact-path `latest` lookup works without Git for non-Git
-scan targets; recorded Git generations require a trusted Git executable to verify
-that the checkout still owns its saved history.
+executable outside all saved scan targets. Exact-path `latest` lookup works
+without Git for non-Git targets. If the saved targets include the available Git
+installation, use `codex-security dedupe --scan SCAN_ID` for an ordinary Git
+checkout. The explicit ID lets the workbench verify the original checkout
+directory and the recorded Git and object directories without launching Git.
+Linked worktrees and redirected Git directories require a trusted Git executable.
 
 Repeat `--codex KEY=VALUE` for supported native settings. For example,
 `--codex "model_reasoning_effort='high'"` passes the TOML string `high` in Bash,
@@ -2164,7 +2165,7 @@ attach only their owner's session. Unrecorded earlier retry sessions may be abse
 ## Scan history and reruns
 
 Commands default to the current repository. IDs accept unique prefixes of at
-least eight characters. Reading empty history leaves the workbench database uninitialized.
+least eight characters. Repository findings track an issue across scans. A scan view shows the occurrences from that run. Reading empty history leaves the workbench database uninitialized.
 
 Linked Git worktrees share scans, findings, and reviewer decisions when their
 scans record the same repository generation in the selected state database.
@@ -2187,6 +2188,7 @@ in the workbench, without changing sealed report timestamps.
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                                 |
 | `findings list [REPOSITORY]`                          | List open findings.                                                              |
 | `findings imported [REPOSITORY]`                      | Read locally imported, unassessed vendor evidence.                               |
+| `findings show OCCURRENCE_ID`                         | Show finding details, remediation advice, and saved occurrence history.          |
 | `findings false-positive OCCURRENCE_ID --reason TEXT` | Dismiss a finding while the reason applies.                                      |
 
 In the terminal, `findings list` shows the occurrence ID for each open finding.
@@ -2276,6 +2278,36 @@ Codex may compress saved session logs to `.jsonl.zst`. Plain and compressed logs
 work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder
 reads concatenated frames and reports truncated streams as collection errors.
+
+Use `findings list --scan SCAN_ID` for one saved scan, or `--all-repositories`
+for every repository. These options cannot be combined with a repository
+argument. Filter with `--query TEXT`, `--severity LEVEL`, or `--status open|closed`.
+Repository and all-repository lists default to open findings; scan-specific
+lists include both statuses unless filtered. `--status closed` also includes
+closed findings that no longer appear in the latest completed scan. A finding
+missing from a later scan remains open unless explicitly closed; comparisons
+report it as `not_observed` until remediation is verified.
+
+An unfiltered repository list in an interactive terminal shows all open findings.
+Filtered, scan-specific, all-repository, and machine-readable lists return one
+page. Pages default to 20 findings; use `--limit N` to choose the page size.
+Start at offset 0 and follow `nextOffset` with `--offset N` until it is null,
+keeping the same scope and filters on each request. For example:
+
+```bash
+codex-security findings list --severity high --limit 50 --json
+codex-security findings list --status closed
+```
+
+Finding lists include the occurrence IDs used by `findings show` and
+`findings false-positive`. Closed finding details distinguish fixed, false
+positive, and ignored findings. An explicit triage action applies to the matched
+finding history; a later scan that reports a fixed or false-positive finding
+again reopens it.
+
+Listing and showing saved findings or scans reads local data without calling a
+model. Matching and comparisons use Codex when saved matches are unavailable,
+and save the resulting links. Rerunning a scan starts a new scan.
 
 ### Resuming an interrupted scan
 

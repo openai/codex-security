@@ -1419,12 +1419,11 @@ with ExitStack() as stack:
         require_scan = lambda database, scan_id: database.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
         coverage = lambda scan: {"completeness": "complete"}
         accepted = []
-        with patch.object(state, "_inspect_repository_target", side_effect=AssertionError("Sealed comparison inspected the live target")):
-            for before, after in (("legacy-before", "legacy-after"), ("first-scan", "second-scan")):
-                args = argparse.Namespace(before_scan_id=before, after_scan_id=after, matches_json='{"matches":[],"uncertain":[]}', matches_json_stdin=False)
-                compared = history.compare_scans(connection, args, require_scan=require_scan, read_coverage=coverage)
-                saved = history.save_scan_comparison(connection, args, now=lambda: timestamp, require_scan=require_scan, read_coverage=coverage)
-                accepted.append(compared["afterScanId"] == after and saved["beforeScanId"] == before)
+        for before, after in (("legacy-before", "legacy-after"), ("first-scan", "second-scan")):
+            args = argparse.Namespace(before_scan_id=before, after_scan_id=after, matches_json='{"matches":[],"uncertain":[]}', matches_json_stdin=False)
+            compared = history.compare_scans(connection, args, require_scan=require_scan, read_coverage=coverage, finding_triage=lambda *_: {})
+            saved = history.save_scan_comparison(connection, args, now=lambda: timestamp, require_scan=require_scan, read_coverage=coverage, finding_triage=lambda *_: {})
+            accepted.append(compared["afterScanId"] == after and saved["beforeScanId"] == before)
         conflicting = history._same_repository(
             connection,
             {"target_id": "same-target", "repository_generation": "repository-first"},
@@ -1674,10 +1673,10 @@ test("counts findings in each selected repository scope and preserves absent dec
     nextOffset: null,
   });
   expect(result["notScanned"]).toEqual({
-    counts: {},
-    ids: [],
+    counts: { refused: 0 },
+    ids: ["refused"],
     calls: [],
-    inspections: [],
+    inspections: all.inspections,
     nextOffset: null,
   });
   expect((result["openIds"] as string[]).sort()).toEqual([

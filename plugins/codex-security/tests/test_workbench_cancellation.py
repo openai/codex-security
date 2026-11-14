@@ -41,7 +41,7 @@ def test_get_scan_returns_consistent_progress_when_canceled_during_read(tmp_path
     monkeypatch.setattr(workbench, "backfill_legacy_finding_details", cancel_after_backfill)
     with closing(workbench.connect(deferred=True)) as connection:
         result = workbench.get_scan(
-            connection, argparse.Namespace(scan_id=scan_id, occurrence_id=None)
+            connection, argparse.Namespace(scan_id=scan_id, occurrence_id=None, check_target=False)
         )
     scan = result["scan"]
     assert scan["progress"]["status"] == scan["lifecycle"]["status"] == "canceled"

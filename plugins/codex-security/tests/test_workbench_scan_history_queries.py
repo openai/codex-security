@@ -17,7 +17,7 @@ pytestmark = pytest.mark.cross_platform
 NOW = "2026-01-01T00:00:00Z"
 
 
-def add_scan(db, scan_id, repository: Path, *, target_id=None, started_at=NOW):
+def add_scan(db, scan_id, repository: Path, *, target_id=None, started_at=NOW, checkout=None):
     if target_id is not None:
         db.execute(
             "INSERT INTO security_targets (id, current_path, display_name, created_at, updated_at) "
@@ -43,6 +43,20 @@ def add_scan(db, scan_id, repository: Path, *, target_id=None, started_at=NOW):
             NOW,
         ),
     )
+
+    if checkout is not None:
+        from filesystem_identity import serialize_filesystem_identity
+
+        checkout.mkdir(exist_ok=True)
+        metadata = checkout.stat()
+        db.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ? WHERE id = ?",
+            (
+                serialize_filesystem_identity(metadata.st_dev),
+                serialize_filesystem_identity(metadata.st_ino),
+                scan_id,
+            ),
+        )
 
 
 def add_occurrence(db, scan_id, occurrence_id, *, finding_id=None, severity="high", path=None):
@@ -95,6 +109,45 @@ def link(db, previous, current, reason="Confirmed link."):
     )
 
 
+@pytest.mark.parametrize("claimed", [False, True])
+def test_targetless_legacy_comparisons_require_unclaimed_paths(
+    workbench_api, workbench_db, tmp_path, claimed
+):
+    history = workbench_api["scan_history"]
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    for scan_id in ("legacy-before", "legacy-after"):
+        add_scan(workbench_db, scan_id, repository)
+    if claimed:
+        add_scan(workbench_db, "current", repository, target_id="current", checkout=repository)
+
+    # A CLI process can migrate these rows before querying. Exercise the same saved
+    # records in both readers, while the pre-target rows still have their original IDs.
+    plan = history.list_unmatched_scan_pairs(
+        workbench_db,
+        Namespace(repository=str(repository), force=False),
+        backfill_finding_details=lambda *_: None,
+        read_coverage=lambda _: {},
+    )
+    assert plan["scanCount"] == (1 if claimed else 2)
+    assert len(plan["batches"]) == (0 if claimed else 1)
+
+    def compare():
+        return history.compare_scans(
+            workbench_db,
+            Namespace(before_scan_id="legacy-before", after_scan_id="legacy-after"),
+            require_scan=workbench_api["require_scan"],
+            finding_triage=lambda *_: {},
+            read_coverage=lambda _: {},
+        )
+
+    if claimed:
+        with pytest.raises(SystemExit, match="repository"):
+            compare()
+    else:
+        assert compare()["afterScanId"] == "legacy-after"
+
+
 def test_legacy_repository_matching_excludes_confirmed_links_from_another_checkout(
     workbench_api, workbench_db, tmp_path
 ):
@@ -119,6 +172,9 @@ def test_legacy_repository_matching_excludes_confirmed_links_from_another_checko
         workbench_db,
         Namespace(before_scan_id="selected-before", after_scan_id="selected-after"),
         require_scan=workbench_api["require_scan"],
+        finding_triage=lambda connection, scan, through: workbench_api["scan_finding_triage"](
+            connection, scan, through_scan=through
+        ),
         read_coverage=lambda _: {},
         include_matching_inputs=True,
     )
@@ -219,6 +275,9 @@ def test_invalid_comparison_preserves_saved_groups_and_related_pairs(
             ),
             now=lambda: NOW,
             require_scan=workbench_api["require_scan"],
+            finding_triage=lambda connection, scan, through: workbench_api["scan_finding_triage"](
+                connection, scan, through_scan=through
+            ),
             read_coverage=lambda _: {
                 "includePaths": ["src"],
                 "excludePaths": [],
@@ -312,6 +371,12 @@ def test_cached_group_status_follows_coverage_uncertainty_and_confirmed_links(
             db,
             Namespace(before_scan_id="scan-before", after_scan_id="scan-after"),
             require_scan=workbench_api["require_scan"],
+            finding_triage=lambda connection, scan, _: {
+                row["id"]: {"status": row["triage_status"], "closeReason": row["close_reason"]}
+                for row in workbench_api["scan_history"]
+                ._scan_findings(connection, scan["id"])
+                .values()
+            },
             read_coverage=lambda _: coverage,
             require_matches=True,
         )
@@ -370,8 +435,8 @@ def test_matching_reuses_repository_membership_for_repeated_scans(
     history = workbench_api["scan_history"]
     repository = tmp_path / "current"
     previous_path = tmp_path / "previous"
-    add_scan(workbench_db, "current", repository, target_id="selected")
-    add_scan(workbench_db, "moved", previous_path, target_id="selected")
+    add_scan(workbench_db, "current", repository, target_id="selected", checkout=repository)
+    add_scan(workbench_db, "moved", previous_path, target_id="selected", checkout=repository)
     add_scan(workbench_db, "legacy-current", repository)
     add_scan(workbench_db, "legacy-previous", previous_path)
     add_scan(workbench_db, "another-legacy-previous", previous_path)
@@ -458,7 +523,14 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
     repository = tmp_path / "repository"
     for index in range(3):
         scan = f"scan-{index}"
-        add_scan(db, scan, repository, target_id="target", started_at=f"2026-01-01T00:00:0{index}Z")
+        add_scan(
+            db,
+            scan,
+            repository,
+            target_id="selected",
+            checkout=repository,
+            started_at=f"2026-01-01T00:00:0{index}Z",
+        )
         add_occurrence(db, scan, scan)
     queries = []
     backfilled = []
@@ -513,7 +585,14 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
 
     for index in (3, 4):
         scan = f"scan-{index}"
-        add_scan(db, scan, repository, target_id="target", started_at=f"2026-01-01T00:00:0{index}Z")
+        add_scan(
+            db,
+            scan,
+            repository,
+            target_id="selected",
+            checkout=repository,
+            started_at=f"2026-01-01T00:00:0{index}Z",
+        )
         add_occurrence(db, scan, scan, finding_id=f"scan-{index - 3}")
 
     def coverage(scan):
@@ -589,7 +668,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     assert set(scoped) == {"left-0"}
     (relation,) = scoped["left-0"]
     assert (relation["occurrenceId"], relation["scanId"]) == ("right-0", "two")
-    assert len(queries) <= 3
+    single_query_count = len(queries)
     queries.clear()
     assert history.finding_relations(db, "one", []) == {}
     assert queries == []
@@ -620,7 +699,7 @@ def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     assert {
         left: [relation["occurrenceId"] for relation in rows] for left, rows in page.items()
     } == {f"left-{i}": [f"right-{i}"] for i in range(1, 11)}
-    assert len(queries) <= 3
+    assert len(queries) <= single_query_count
     queries.clear()
     rows = history._rows_for_ids(
         db,
@@ -650,7 +729,14 @@ def test_confirmed_history_follows_recurring_ids_and_reverts_after_unlink(
     occurrences = {}
     for index, (scan, anchor, target) in enumerate(scans):
         started[scan] = f"2026-08-01T00:00:0{index}Z"
-        add_scan(db, scan, tmp_path / target, target_id=target, started_at=started[scan])
+        add_scan(
+            db,
+            scan,
+            tmp_path / target,
+            target_id=target,
+            checkout=tmp_path / target,
+            started_at=started[scan],
+        )
         finding = {"ruleId": "synthetic-control", "identity": {"anchor": anchor}}
         _populate_unsealed_finding_identities(
             {"scan": {"id": scan, "target": {"targetId": target}}},
@@ -662,16 +748,18 @@ def test_confirmed_history_follows_recurring_ids_and_reverts_after_unlink(
     link(db, occurrences["b"], occurrences["c"], reason="Second confirmed link.")
 
     def assert_history(group):
-        # The group is in scan-start order; matches are sorted by scan ID.
+        # Both the group and its matches follow scan start time.
         for scan in group:
+            row = db.execute("SELECT * FROM scans WHERE id = ?", (scan,)).fetchone()
+            indexed = workbench_api["_indexed_scan_findings"](db, row)[occurrences[scan]]
             matches, first, bounds = history.finding_matches(
-                db, occurrences[scan], scan, started[scan]
+                db, occurrences[scan], indexed["occurrence_ids"]
             )
             assert [(match["scanId"], match["occurrenceId"]) for match in matches] == [
-                (other, occurrences[other]) for other in sorted(set(group) - {scan})
+                (other, occurrences[other]) for other in group if other != scan
             ]
             assert first == started[group[0]]
-            assert bounds == (group if len(group) == 1 else [group[0], group[-1]])
+            assert bounds == group
             assert all(match["reason"] for match in matches)
             if scan == "a" and "b" in group:
                 assert (

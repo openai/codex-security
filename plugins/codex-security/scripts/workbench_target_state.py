@@ -29,7 +29,9 @@ from workbench_target import (
     git_bytes,
     git_output,
     git_worktree_context,
+    has_windows_checkout_binding,
     pin_scoped_git,
+    require_scan_target_identity,
 )
 
 
@@ -266,6 +268,12 @@ def _repository_identity_details(target: Path | str) -> GitRepositoryIdentity | 
     )
     if object_directory is None:
         return None
+    return _filesystem_repository_identity(common_directory, object_directory, relative)
+
+
+def _filesystem_repository_identity(
+    common_directory: Path, object_directory: Path, relative: str
+) -> GitRepositoryIdentity | None:
     canonical_directory = str(common_directory)
     try:
         metadata = common_directory.stat()
@@ -321,10 +329,50 @@ def repository_identity(target: Path | str) -> str | None:
     return identity.value if identity is not None else None
 
 
+def saved_checkout_available(
+    connection: sqlite3.Connection, scan: sqlite3.Row, owner: bool
+) -> bool:
+    try:
+        target = require_scan_target_identity(scan)
+        if owner:
+            return True
+        generation = scan_repository_generation(scan)
+        if os.environ.get("CODEX_SECURITY_GIT") != "" or generation is None:
+            return False
+        # An explicit saved ID can be used when executable discovery excluded Git.
+        # Only an ordinary checkout can prove its layout here without consulting Git.
+        row = connection.execute(
+            "SELECT git_checkout_root FROM security_targets WHERE id = ? AND current_path = ?",
+            (scan["target_id"], str(target)),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return False
+        root = Path(row[0])
+        relative = target.relative_to(root)
+        for directory in (target, *target.parents):
+            if directory == root:
+                break
+            if os.path.lexists(directory / ".git"):
+                return False
+        common = root / ".git"
+        objects = common / "objects"
+        if (
+            not stat.S_ISDIR(common.lstat().st_mode)
+            or not stat.S_ISDIR(objects.lstat().st_mode)
+            or os.path.lexists(common / "commondir")
+        ):
+            return False
+        identity = _filesystem_repository_identity(common, objects, relative.as_posix())
+        return identity is not None and generation in (identity.value, identity.previous_value)
+    except (OSError, ValueError, SystemExit):
+        return False
+
+
 def repository_origin(target: Path) -> tuple[str, str] | None:
     remote = git_output(target, "remote", "get-url", "origin")
     if remote is None:
         return None
+    account = None
     if "://" in remote:
         try:
             parsed = urlsplit(remote)
@@ -335,6 +383,8 @@ def repository_origin(target: Path) -> tuple[str, str] | None:
             return None
         if parsed.query or parsed.fragment:
             return None
+        if parsed.scheme == "ssh" and (parsed.path == "/~" or parsed.path.startswith("/~/")):
+            account = parsed.username
         host = parsed.hostname
         if port is not None and port != {"https": 443, "ssh": 22}[parsed.scheme]:
             host = f"{host}:{port}"
@@ -343,9 +393,18 @@ def repository_origin(target: Path) -> tuple[str, str] | None:
         authority, separator, path = remote.partition(":")
         if not separator or "?" in path or "#" in path:
             return None
-        host = authority.rsplit("@", 1)[-1]
+        account, at, host = authority.rpartition("@")
+        if not at:
+            account, host = None, authority
+        elif path.startswith("/") or (
+            path.startswith("~") and path != "~" and not path.startswith("~/")
+        ):
+            account = None
     path = path.strip("/").removesuffix(".git")
-    return (host.lower(), path) if host and path else None
+    host = host.lower()
+    if account and not (account == "git" and host in {"github.com", "gitlab.com", "bitbucket.org"}):
+        host = f"{account}@{host}"
+    return (host, path) if host and path else None
 
 
 def supports_repository_identity(connection: sqlite3.Connection) -> bool:
@@ -472,9 +531,15 @@ def _inspect_repository_target(
                 ", started_at, created_at" if {"started_at", "created_at"} <= scan_columns else ""
             )
             revisions = ", target_revision" if "target_revision" in scan_columns else ""
+            windows_binding = ""
+            if "windows_resume_target_identity" in scan_columns:
+                windows_binding = (
+                    ", id, mode, launch_kind, CASE WHEN recipe_json IS NOT NULL THEN 1 END AS recipe_json,"
+                    " windows_resume_target_identity"
+                )
             scans = connection.execute(
                 f"""
-                SELECT target_device, target_inode{timestamps}{revisions} FROM scans
+                SELECT target_device, target_inode{timestamps}{revisions}{windows_binding} FROM scans
                 WHERE target_id = ? OR target_path = ?
                 """,
                 (target_id, target_path),
@@ -498,6 +563,14 @@ def _inspect_repository_target(
                     strict_owner_matches = False
                     continue
                 recorded_owner = True
+                if has_windows_checkout_binding(scan):
+                    # Windows Deep scans may store a wider file ID than Python stat returns.
+                    try:
+                        require_scan_target_identity(scan, target_path=target_path)
+                    except (OSError, SystemExit):
+                        malformed_owner = True
+                        strict_owner_matches = False
+                    continue
                 if not stored_filesystem_identity_matches(device, metadata.st_dev):
                     strict_owner_matches = False
                     mismatch = mismatch or sys.platform != "linux"
@@ -648,6 +721,28 @@ class RepositoryIdentityCache:
         self.targets_by_path = {row["target_path"]: row for row in self.targets.values()}
         self._states: dict[tuple[str, str, str | None], RepositoryTargetState] = {}
         self._origins: dict[str, tuple[str, str] | None] = {}
+        self._owners: dict[str, tuple[sqlite3.Row, int | None] | None] = {}
+
+    def recorded_owner(self, target_id: str) -> tuple[sqlite3.Row, int | None] | None:
+        """Read the latest stored checkout owner and the row preceding its ownership epoch."""
+        if not {"target_device", "target_inode"} <= self.scan_columns:
+            return None
+        if target_id not in self._owners:
+            latest = self.connection.execute(
+                "SELECT * FROM scans WHERE target_id = ? AND target_device IS NOT NULL "
+                "AND target_inode IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+                (target_id,),
+            ).fetchone()
+            ownership = None
+            if latest is not None:
+                epoch = self.connection.execute(
+                    "SELECT MAX(rowid) FROM scans WHERE target_id = ? AND target_device IS NOT NULL "
+                    "AND target_inode IS NOT NULL AND (target_device != ? OR target_inode != ?)",
+                    (target_id, latest["target_device"], latest["target_inode"]),
+                ).fetchone()[0]
+                ownership = latest, epoch
+            self._owners[target_id] = ownership
+        return self._owners[target_id]
 
     def for_row(self, row: sqlite3.Row | dict) -> RepositoryTargetState:
         target = self.targets.get(row["target_id"])

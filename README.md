@@ -127,6 +127,8 @@ try {
 The [SDK guide](sdk/typescript/docs/sdk.md) includes deep-scan configuration,
 validation, severity classification, owner suggestions, and result handling.
 
+Use `findings list` to browse saved findings across scans, `findings list --scan SCAN_ID`
+to inspect a previous scan, or `findings show OCCURRENCE_ID` for its details and history.
 Linked Git worktrees share scan history and saved findings when they use the same
 Codex Security state directory. Keep `CODEX_SECURITY_STATE_DIR` stable to retain
 that shared history and sign-in scope. See the [scan history guide](sdk/typescript/docs/cli.md#scan-history-and-reruns).

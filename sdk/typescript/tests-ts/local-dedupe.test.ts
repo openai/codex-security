@@ -233,6 +233,7 @@ test("local dedupe indexes a sealed directory, reuses vectors and never calls th
             scanId: f.document.scanId,
             scanDir: f.scanDir,
             targetPath: f.repository,
+            checkoutAvailable: true,
             progress: { status: "complete" },
           },
         }

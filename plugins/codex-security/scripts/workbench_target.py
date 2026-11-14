@@ -1741,12 +1741,8 @@ def verified_windows_checkout(
         yield
 
 
-@contextmanager
-def checked_scan_target(scan: sqlite3.Row) -> Iterator[Path]:
-    """Keep any recorded Windows checkout binding intact while a caller reads the target."""
-    target = require_remediation_target(scan["target_path"])
-    replaced = "Remediation is unavailable because the selected checkout path was replaced. Start a new scan."
-    if (
+def has_windows_checkout_binding(scan: sqlite3.Row) -> bool:
+    return (
         os.name == "nt"
         and "windows_resume_target_identity" in scan.keys()
         and (
@@ -1757,7 +1753,15 @@ def checked_scan_target(scan: sqlite3.Row) -> Iterator[Path]:
                 and scan["recipe_json"] is not None
             )
         )
-    ):
+    )
+
+
+@contextmanager
+def checked_scan_target(scan: sqlite3.Row, *, target_path: str | None = None) -> Iterator[Path]:
+    """Keep any recorded Windows checkout binding intact while a caller reads the target."""
+    target = require_remediation_target(scan["target_path"] if target_path is None else target_path)
+    replaced = "Remediation is unavailable because the selected checkout path was replaced. Start a new scan."
+    if has_windows_checkout_binding(scan):
         with ExitStack() as pins:
             try:
                 pins.enter_context(
@@ -1779,14 +1783,17 @@ def checked_scan_target(scan: sqlite3.Row) -> Iterator[Path]:
         raise SystemExit(
             "Remediation is unavailable because the selected checkout is no longer accessible."
         ) from exc
-    if not stored_filesystem_identity_matches(expected_inode, metadata.st_ino):
+    if not stored_filesystem_identity_matches(expected_inode, metadata.st_ino) or (
+        target_path is not None
+        and not stored_filesystem_identity_matches(scan["target_device"], metadata.st_dev)
+    ):
         raise SystemExit(replaced)
     yield target
 
 
-def require_scan_target_identity(scan: sqlite3.Row) -> Path:
+def require_scan_target_identity(scan: sqlite3.Row, *, target_path: str | None = None) -> Path:
     """Return the recorded checkout path after checking its filesystem identity."""
-    with checked_scan_target(scan) as target:
+    with checked_scan_target(scan, target_path=target_path) as target:
         return target
 
 

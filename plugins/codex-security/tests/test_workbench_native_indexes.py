@@ -185,7 +185,7 @@ def test_global_findings_keep_latest_occurrence_and_stable_target_identity(tmp_p
     assert first["scanId"] == latest_first["scanId"]
     assert first["occurrenceId"] == latest_first_occurrence
     assert first["occurrenceCount"] == 2
-    assert first["status"] == "closed"
+    assert first["status"] == "open"
     assert first["targetPath"] == str(first_target.resolve())
     assert first["locationPath"] == "src/control.py"
     assert distinct["scanId"] == distinct_first["scanId"]
@@ -295,7 +295,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
     second = repositories_by_target[second_target_id]
     assert first["checkoutAvailable"] is True
     assert first["latestScan"]["scanId"] == distinct_first["scanId"]
-    assert first["openFindingsCount"] == 1
+    assert first["openFindingsCount"] == 2
     assert first["scanCount"] == 4
     assert second["checkoutAvailable"] is False
     assert second["latestScan"]["scanId"] == latest_second["scanId"]
@@ -305,7 +305,7 @@ def test_repository_index_reports_latest_scan_open_findings_and_missing_checkout
 
 @pytest.mark.parametrize("legacy", (False, True))
 @pytest.mark.parametrize("same_target", (False, True))
-def test_native_completion_keeps_same_target_legacy_triage_without_matching(
+def test_native_completion_reopens_same_target_recurrence_without_matching(
     tmp_path: Path, legacy: bool, same_target: bool
 ) -> None:
     state = tmp_path / "state"
@@ -357,7 +357,7 @@ def test_native_completion_keeps_same_target_legacy_triage_without_matching(
     findings = run_workbench(state, "list-global-findings")["findings"]
     assert len(findings) == (1 if same_target else 2)
     current = next(row for row in findings if row["targetId"] == stable_target_id(next_target))
-    assert current["status"] == ("closed" if same_target else "open")
+    assert current["status"] == "open"
     assert current["occurrenceCount"] == (2 if same_target else 1)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scan_comparison_matches").fetchone() == (0,)
@@ -410,7 +410,7 @@ def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
             later,
             producer.confirmed_match(first_finding["occurrenceId"], later_finding["occurrenceId"]),
         )
-        assert match["summary"]["persisting"] == 1
+        assert match["summary"]["reopened"] == 1
     producer.create_cli_scan(
         state, tmp_path / "results", repository, target_revision=revision, finding=False
     )
@@ -478,6 +478,13 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
         "--note",
         "Synthetic checked guard.",
     )
+    # This decision predates scan admission watermarks. Its propagation depends on
+    # the saved repository generation and occurrence matches.
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE finding_decisions SET admission_sequence=NULL, scan_sequence=NULL"
+        )
+
     current = producer.create_cli_scan(
         state, tmp_path / "results", repository, target_revision=revision
     )
@@ -490,7 +497,8 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
     ][0]
     assert first_finding["findingId"] == current_finding["findingId"]
     assert first_finding["findingId"] != later_finding["findingId"]
-    assert current_finding["triage"]["status"] == later_finding["triage"]["status"] == "open"
+    assert current_finding["triage"]["status"] == "closed"
+    assert later_finding["triage"]["status"] == "open"
     if saved_current_match:
         result = producer.save_scan_matches(
             state,
@@ -500,7 +508,7 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
                 current_finding["occurrenceId"], later_finding["occurrenceId"]
             ),
         )
-        assert result["summary"]["persisting"] == 1
+        assert result["summary"]["reopened" if legacy_first else "persisting"] == 1
     global_rows = run_workbench(state, "list-global-findings")["findings"]
     scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(linked))[
         "findings"
@@ -580,6 +588,13 @@ def test_saved_legacy_alias_survives_current_linked_match(
         "--note",
         "Synthetic checked guard.",
     )
+    # This decision predates scan admission watermarks. Its propagation depends on
+    # the saved repository generation and occurrence matches.
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE finding_decisions SET admission_sequence=NULL, scan_sequence=NULL"
+        )
+
     second = producer.create_cli_scan(
         state,
         tmp_path / "results",
@@ -634,7 +649,7 @@ def test_saved_legacy_alias_survives_current_linked_match(
                 current_finding["occurrenceId"], later_finding["occurrenceId"]
             ),
         )
-        assert result["summary"]["persisting"] == 1
+        assert result["summary"]["reopened" if saved_legacy_alias else "persisting"] == 1
     global_rows = run_workbench(state, "list-global-findings")["findings"]
     scoped_rows = run_workbench(state, "list-global-findings", "--repository", str(repository))[
         "findings"
@@ -651,6 +666,118 @@ def test_saved_legacy_alias_survives_current_linked_match(
     for rows in [global_rows, linked_rows]:
         linked_row = next(row for row in rows if later["scanId"] in row["knownScanIds"])
         assert linked_row["status"] == "open"
+
+
+def test_global_findings_apply_pagination_to_historical_findings(
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    historical_target = tmp_path / "historical-repo"
+    first_active_target = tmp_path / "first-active-repo"
+    second_active_target = tmp_path / "second-active-repo"
+    for target in (historical_target, first_active_target, second_active_target):
+        target.mkdir()
+
+    historical = complete_scan(state_dir, historical_target, identity_anchor="historical-finding")
+    complete_scan(
+        state_dir,
+        historical_target,
+        identity_anchor="incomplete-follow-up",
+        finding=False,
+        follow_up=True,
+    )
+    first_active = complete_scan(
+        state_dir, first_active_target, identity_anchor="first-active-finding"
+    )
+    second_active = complete_scan(
+        state_dir, second_active_target, identity_anchor="second-active-finding"
+    )
+
+    first_page = run_workbench(state_dir, "list-global-findings", "--limit", "1")
+    second_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "1")
+    third_page = run_workbench(state_dir, "list-global-findings", "--limit", "1", "--offset", "2")
+
+    assert first_page["nextOffset"] == 1
+    assert second_page["nextOffset"] == 2
+    assert third_page["nextOffset"] is None
+    assert {
+        first_page["findings"][0]["scanId"],
+        second_page["findings"][0]["scanId"],
+        third_page["findings"][0]["scanId"],
+    } == {
+        historical["scanId"],
+        first_active["scanId"],
+        second_active["scanId"],
+    }
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_repository_index_excludes_previous_checkout_owner(tmp_path: Path, legacy: bool) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    original = complete_scan(state_dir, target, identity_anchor="original-finding")
+    if legacy:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            connection.execute(
+                "UPDATE scans SET target_device = NULL, target_inode = NULL WHERE id = ?",
+                (original["scanId"],),
+            )
+    previous = complete_scan(state_dir, target, identity_anchor="previous-finding")
+    other_target = tmp_path / "other-repo"
+    other_target.mkdir()
+    other = complete_scan(state_dir, other_target, identity_anchor="other-finding")
+    before = run_workbench(state_dir, "list-repositories")["repositories"]
+    before_by_target = {repository["targetId"]: repository for repository in before}
+    assert before_by_target[stable_target_id(target)]["latestScan"]["scanId"] == previous["scanId"]
+    assert before_by_target[stable_target_id(target)]["scanCount"] == 2
+
+    target.rename(tmp_path / "previous-checkout")
+    target.mkdir()
+    remaining = run_workbench(state_dir, "list-repositories")["repositories"]
+    assert len(remaining) == 2
+    replacement = next(r for r in remaining if r["targetId"] == stable_target_id(target))
+    assert (
+        replacement["latestScan"],
+        replacement["scanCount"],
+        replacement["openFindingsCount"],
+    ) == (None, 0, 0)
+    assert remaining[0]["latestScan"]["scanId"] == other["scanId"]
+    assert remaining[0]["scanCount"] == 1
+    assert remaining[0]["openFindingsCount"] == 1
+    assert run_workbench(state_dir, "list-repositories", "--status", "not_scanned")[
+        "repositories"
+    ] == [replacement]
+    assert run_workbench(state_dir, "list-repositories", "--status", "scanned")["repositories"] == [
+        remaining[0]
+    ]
+
+    # Modern registration rejects a different owner at a saved path.
+    # Restore the saved checkout to verify that the persisted history remains available.
+    target.rmdir()
+    (tmp_path / "previous-checkout").rename(target)
+    restored = run_workbench(state_dir, "list-repositories")["repositories"]
+    original_target = next(row for row in restored if row["targetId"] == stable_target_id(target))
+    assert original_target["latestScan"]["scanId"] == previous["scanId"]
+    assert original_target["scanCount"] == 2
+
+
+def test_repository_index_preserves_unclaimed_legacy_scan(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "repo"
+    target.mkdir()
+    legacy = complete_scan(state_dir, target, identity_anchor="legacy-finding")
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET target_device = NULL, target_inode = NULL")
+    for checkout_available in (True, False):
+        if not checkout_available:
+            target.rename(tmp_path / "unavailable-checkout")
+        repositories = run_workbench(state_dir, "list-repositories")["repositories"]
+        assert len(repositories) == 1
+        assert repositories[0]["checkoutAvailable"] is checkout_available
+        assert repositories[0]["latestScan"]["scanId"] == legacy["scanId"]
+        assert repositories[0]["scanCount"] == 1
+        assert repositories[0]["openFindingsCount"] == 1
 
 
 def test_overlapping_scans_mark_findings_present_in_latest_started_scan(tmp_path: Path) -> None:

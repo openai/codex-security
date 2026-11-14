@@ -1,4 +1,5 @@
 import { isRecord } from "./record.js";
+import { workbenchArgs } from "./workbench-arguments.js";
 import type { JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
@@ -207,7 +208,12 @@ export async function savedScanWorkbench(
       return { scans: [] };
     }
     const result = await execute(
-      target ? ["get-scan", "--scan-id", target.id] : args,
+      target
+        ? workbenchArgs("get-scan", {
+            scanId: target.id,
+            metadataOnly: args.includes("--metadata-only"),
+          })
+        : args,
     );
     if (typeof requestedId !== "string" && args[0] === "finding-workflow") {
       const workflow = result["workflow"];

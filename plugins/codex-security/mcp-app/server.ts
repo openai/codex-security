@@ -1145,9 +1145,13 @@ export function createCodexSecurityServer(): McpServer {
     const scanId = requestedScanId.toLowerCase();
     const cancelParent = () => workbench("cancel-scan", { scanId, threadId });
     let workspace: Awaited<ReturnType<typeof runWorkbench>> | undefined;
-    if (threadId && deepScanCoordinators.get(scanId)) {
+    const coordinator = deepScanCoordinators.get(scanId);
+    if (threadId && coordinator) {
       await deepScanStore.get(scanId, threadId);
     }
+    const ownerThreadId = coordinator?.owningThreadId;
+    const readOwnedParent = (threadId: string) =>
+      workbench("get-deep-scan", { scanId, threadId });
     const canceledLocally = await deepScanCoordinators.cancelAndWait(
       scanId,
       "user_canceled_scan",
@@ -1155,6 +1159,19 @@ export function createCodexSecurityServer(): McpServer {
         workspace = await cancelParent();
       },
       async () => {
+        if (ownerThreadId) {
+          // The live coordinator owns this scan even if its checkout was replaced.
+          const parent = (await readOwnedParent(ownerThreadId))[
+            "parentScan"
+          ] as JsonObject;
+          return {
+            status: parent["status"] as string,
+            failureMessage:
+              typeof parent["failureMessage"] === "string"
+                ? parent["failureMessage"]
+                : undefined,
+          };
+        }
         const current = (await workbench("get-scan", { scanId }))[
           "workspace"
         ] as JsonObject;
@@ -1174,11 +1191,13 @@ export function createCodexSecurityServer(): McpServer {
     );
     if (workspace === undefined && canceledLocally) {
       // A joined caller did not perform the write. Read the requested parent.
-      const saved = (await workbench("get-scan", { scanId }))
-        .workspace as WorkspaceState;
-      const scan = saved.results;
+      const parent = ownerThreadId
+        ? await readOwnedParent(ownerThreadId)
+        : await workbench("get-scan", { scanId });
+      const saved = parent.workspace as WorkspaceState | undefined;
+      const scan = saved?.results;
       const progress = isJsonObject(scan?.progress) ? scan.progress : undefined;
-      if (progress?.status !== "running") {
+      if (saved && progress?.status !== "running") {
         return workspaceResult(
           saved,
           progress?.status === "canceled" && scan?.scanId === scanId
@@ -1311,6 +1330,7 @@ export function createCodexSecurityServer(): McpServer {
     async ({ limit, offset, query, severity, status, targetId }) =>
       scanActionResult(
         await workbench("list-global-findings", {
+          includeResolved: status === "closed",
           query,
           severity,
           status,

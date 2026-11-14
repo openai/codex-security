@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from filesystem_identity import serialize_filesystem_identity
 from finalize_scan_contract import (
     ContractError,
     _prepare_scan_finalization,
@@ -25,16 +26,18 @@ from finalize_scan_contract import (
 )
 from report_projection import SEVERITY_ORDER
 from review_state import review_state
-from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LOCATION_SQL
+from workbench_constants import ARTIFACTS, DEFAULT_PAGE_SIZE, PRIMARY_FINDING_LOCATION_SQL
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
 from workbench_target import (
+    has_windows_checkout_binding,
     require_remediation_target,
     require_scan_target_identity,
     verified_windows_checkout,
 )
 from workbench_target_state import (
     RepositoryIdentityCache,
+    RepositoryTargetState,
     _timestamp_ns,
     repository_relative_path,
     same_repository_worktree,
@@ -309,6 +312,26 @@ def _windows_path_key(value: str) -> str:
     return os.path.normcase(os.path.realpath(value))
 
 
+CheckoutIdentity = tuple[int | str, int | str]
+
+
+def _stat_identity(metadata: os.stat_result) -> CheckoutIdentity:
+    return serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(
+        metadata.st_ino
+    )
+
+
+def _checkout_matches(scan: sqlite3.Row, path: Path, metadata: os.stat_result) -> bool:
+    if has_windows_checkout_binding(scan):
+        # A Windows Deep Scan may record a wider file ID than this Python exposes through stat.
+        try:
+            require_scan_target_identity(scan, target_path=str(path))
+        except (OSError, SystemExit):
+            return False
+        return True
+    return (scan["target_device"], scan["target_inode"]) == _stat_identity(metadata)
+
+
 def _same_repository(
     connection: sqlite3.Connection,
     before: sqlite3.Row,
@@ -367,6 +390,7 @@ def _same_repository(
 
 SCAN_SUMMARY_COLUMNS = """
     scans.*,
+    targets.current_path AS current_target_path,
     lifecycle.snapshot AS lifecycle_json,
     progress.reportable_findings_count,
     progress.scope_file_count,
@@ -383,8 +407,34 @@ SCAN_SUMMARY_QUERY = f"""
 SELECT {SCAN_SUMMARY_COLUMNS}
 FROM scans
 JOIN scan_progress AS progress ON progress.scan_id = scans.id
+LEFT JOIN security_targets AS targets ON targets.id = scans.target_id
 JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
 """
+
+
+def is_unbound_standard_handoff(
+    connection: sqlite3.Connection, scan: sqlite3.Row, context_claim: str | None
+) -> bool:
+    """A Standard handoff can be inspected before its checkout and findings are bound."""
+    return (
+        scan["mode"] == "standard"
+        and scan["status"] == "running"
+        and scan["canceled_at"] is None
+        and (
+            scan["phase"] == "preflight"
+            or (
+                scan["phase"] == "threat_model"
+                and context_claim is not None
+                and context_claim == scan["handoff_claim_token"]
+            )
+        )
+        and scan["handoff_status"] == "delivered"
+        and None in (scan["target_device"], scan["target_inode"])
+        and connection.execute(
+            "SELECT 1 FROM finding_occurrences WHERE scan_id = ? LIMIT 1", (scan["id"],)
+        ).fetchone()
+        is None
+    )
 
 
 def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
@@ -452,35 +502,183 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _unclaimed_path(identities: RepositoryIdentityCache, path: str) -> bool:
+    target = Path(path)
+    try:
+        resolved = target.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return (
+        not any(
+            str(parent) in identities.targets_by_path
+            for parent in (target, *target.parents, resolved, *resolved.parents)
+        )
+        and not identities.for_path(path).target_id
+    )
+
+
+def _legacy_owner(identities: RepositoryIdentityCache, target_id: str):
+    current = identities.for_row(identities.targets[target_id])
+    ownership = identities.recorded_owner(target_id)
+    valid = current.ownership_matches
+    if ownership and not valid and current.stored_identity is None:
+        path = Path(current.target_path)
+        metadata = current.metadata
+        if current.resolved_path is None:
+            # A saved comparison can still check its recorded file ID when realpath fails.
+            try:
+                metadata = path.stat()
+            except OSError:
+                return False, ownership
+        if metadata is not None and (ownership[1] is not None or current.resolved_path is None):
+            valid = _checkout_matches(ownership[0], path, metadata)
+    return valid, ownership
+
+
+def _legacy_owner_clause(identities: RepositoryIdentityCache, target_id: str) -> tuple[str, tuple]:
+    valid, ownership = _legacy_owner(identities, target_id)
+    if not valid:
+        return "0", ()
+    if ownership is None:
+        return "scans.target_id = ?", (target_id,)
+    latest, epoch = ownership
+    owner = "scans.target_device = ? AND scans.target_inode = ?"
+    values = (target_id, latest["target_device"], latest["target_inode"])
+    if epoch is None:
+        return (
+            f"scans.target_id = ? AND (({owner}) OR (scans.target_device IS NULL AND scans.target_inode IS NULL))",
+            values,
+        )
+    return f"scans.target_id = ? AND {owner} AND scans.rowid > ?", (*values, epoch)
+
+
+def _legacy_parent(
+    identities: RepositoryIdentityCache, requested: RepositoryTargetState
+) -> RepositoryTargetState | None:
+    if requested.repository is not None or requested.resolved_path is None:
+        return None
+    if requested.target_id and (
+        requested.stored_identity is not None or identities.recorded_owner(requested.target_id)
+    ):
+        return None
+    path = Path(requested.resolved_path)
+    for directory in (path, *path.parents):
+        if directory != path and (owner := identities.targets_by_path.get(str(directory))):
+            parent = identities.for_row(owner)
+            if not requested.target_id:
+                return parent
+            # Target backfill can bind a legacy descendant using only its path.
+            # A transition at the parent makes that unverified child ambiguous.
+            previous = identities.recorded_owner(parent.target_id)
+            if previous and (previous[1] is not None or not parent.ownership_matches):
+                return parent
+            break
+        if os.path.lexists(directory / ".git"):
+            break
+    return None
+
+
+def repository_scan_scope(
+    connection: sqlite3.Connection,
+    repository: str | Path,
+    *,
+    identities: RepositoryIdentityCache | None = None,
+) -> tuple[list[str], list[Any]]:
+    identities = identities or RepositoryIdentityCache(connection)
+    path = identities.history_path(str(Path(repository).expanduser().absolute()))
+    requested = identities.for_path(path)
+    parent = _legacy_parent(identities, requested)
+    if parent is not None:
+        requested = parent
+        path = requested.target_path
+    if requested.target_id:
+        scope = identities.scope_for_path(path)
+        if requested.stored_identity is not None or scope.generation is not None:
+            clause, values = scope.sql(supports_generation=identities.supports_generation)
+        else:
+            clause, values = _legacy_owner_clause(identities, requested.target_id)
+    else:
+        clause, values = identities.scope_for_path(path).sql(
+            supports_generation=identities.supports_generation
+        )
+        if _unclaimed_path(identities, path):
+            clause = (
+                f"({clause} OR (scans.target_id IS NULL AND scans.target_path = CAST(? AS TEXT)))"
+            )
+            # SQLite TEXT paths are UTF-8. Comparing encoded bytes also permits
+            # querying a valid alias that resolves to a non-UTF-8 POSIX path.
+            values = (*values, os.fsencode(Path(path).resolve()))
+    return [clause], list(values)
+
+
+def scan_has_current_owner(
+    connection: sqlite3.Connection, scan: sqlite3.Row, identities: RepositoryIdentityCache
+) -> bool:
+    target_id = scan["target_id"]
+    if target_id is None:
+        return _unclaimed_path(identities, scan["target_path"])
+    target = identities.targets.get(target_id)
+    if target is None:
+        return False
+    current = identities.for_row(target)
+    if _legacy_parent(identities, current) is not None:
+        return False
+    generation = scan_repository_generation(scan)
+    if generation is not None and not current.missing:
+        return current.ownership_matches and current.live_identity == generation
+    valid, ownership = _legacy_owner(identities, target_id)
+    if not valid or ownership is None:
+        return valid
+    latest, epoch = ownership
+    saved = scan["target_device"], scan["target_inode"]
+    if saved == (None, None):
+        return epoch is None
+    if saved != (latest["target_device"], latest["target_inode"]):
+        return False
+    if epoch is None:
+        return True
+    sequence = (
+        scan["scan_sequence"]
+        if "scan_sequence" in scan.keys()
+        else connection.execute("SELECT rowid FROM scans WHERE id = ?", (scan["id"],)).fetchone()[0]
+    )
+    return sequence > epoch
+
+
+def require_finding_checkout_owner(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> sqlite3.Row | None:
+    identities = RepositoryIdentityCache(connection)
+    if not scan_has_current_owner(connection, scan, identities):
+        raise SystemExit("Codex Security finding is unavailable for the current checkout owner.")
+    return identities.targets.get(scan["target_id"])
+
+
 def list_scans(
     connection: sqlite3.Connection, args: argparse.Namespace | None = None
 ) -> dict[str, Any]:
-    connection.create_function("casefold", 1, str.casefold, deterministic=True)
     if os.name == "nt":
         connection.create_function("codex_security_path_key", 1, _windows_path_key)
-    clauses: list[str] = []
-    values: list[Any] = []
-    worktree_order = ""
+    clauses, values = [], []
+    identities = None
     if args is not None and args.repository:
-        repository = Path(args.repository).expanduser().absolute()
         identities = RepositoryIdentityCache(connection)
-        repository = Path(identities.history_path(str(repository)))
-        clause, scope_values = identities.scope_for_path(str(repository)).sql(
-            supports_generation=identities.supports_generation
+        clauses, values = repository_scan_scope(connection, args.repository, identities=identities)
+    worktree_order = ""
+    if identities is not None and getattr(args, "prefer_worktree", False):
+        selected_path = Path(
+            identities.history_path(str(Path(args.repository).expanduser().absolute()))
         )
-        clauses.append(clause)
-        values.extend(scope_values)
-        if getattr(args, "prefer_worktree", False):
 
-            @cache
-            def in_worktree(target_path: str) -> bool:
-                try:
-                    return repository.samefile(target_path)
-                except OSError:
-                    return False
+        @cache
+        def in_worktree(target_path: str) -> bool:
+            try:
+                return selected_path.samefile(target_path)
+            except OSError:
+                return False
 
-            connection.create_function("in_worktree", 1, in_worktree)
-            worktree_order = "in_worktree(scans.target_path) DESC,"
+        connection.create_function("in_worktree", 1, in_worktree)
+        worktree_order = "in_worktree(scans.target_path) DESC,"
     if args is not None and args.scan_root:
         scan_root = str(Path(args.scan_root).expanduser().resolve())
         prefix = scan_root.rstrip(os.sep) + os.sep
@@ -507,19 +705,20 @@ def list_scans(
             clauses.append("scans.status = ? AND scans.canceled_at IS NULL")
             values.append(args.status)
     if args is not None and args.query:
+        connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
         query = args.query.strip().casefold()
         if query:
             clauses.append(
-                "(instr(casefold(scans.target_path), ?) > 0 "
-                "OR instr(casefold(COALESCE(scans.name, '')), ?) > 0 "
-                "OR instr(casefold(COALESCE(scans.target_summary, '')), ?) > 0 "
-                "OR instr(casefold(scans.scope), ?) > 0 "
-                "OR instr(casefold(scans.mode), ?) > 0)"
+                "(instr(codex_security_casefold(scans.target_path), ?) > 0 "
+                "OR instr(codex_security_casefold(COALESCE(scans.name, '')), ?) > 0 "
+                "OR instr(codex_security_casefold(COALESCE(scans.target_summary, '')), ?) > 0 "
+                "OR instr(codex_security_casefold(scans.scope), ?) > 0 "
+                "OR instr(codex_security_casefold(scans.mode), ?) > 0)"
             )
             values.extend((query, query, query, query, query))
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     paginated = args is not None and (args.limit is not None or args.offset != 0)
-    limit = (args.limit or FINDINGS_PAGE_MAX) if paginated else None
+    limit = (args.limit or DEFAULT_PAGE_SIZE) if paginated else None
     pagination = "LIMIT ? OFFSET ?" if paginated else ""
     if limit is not None:
         values.extend((limit + 1, args.offset))
@@ -530,17 +729,28 @@ def list_scans(
         ORDER BY {worktree_order}
             CASE WHEN scans.status = 'running' AND scans.canceled_at IS NULL THEN 0 ELSE 1 END,
             MAX(julianday(upper(scans.updated_at)), julianday(upper(progress.updated_at))) DESC,
-            julianday(upper(scans.started_at)) DESC,
-            scans.id
+            julianday(upper(scans.started_at)) DESC, scans.id
         {pagination}
         """,
         values,
     ).fetchall()
-    scans = [scan_summary(row) for row in rows[:limit]]
-    if worktree_order:
-        for scan in scans:
-            scan["inCurrentWorktree"] = in_worktree(scan["targetPath"])
-    result = {"scans": scans}
+    result = {
+        "scans": [
+            {
+                **scan_summary(row),
+                **(
+                    {"inCurrentWorktree": in_worktree(row["target_path"])} if worktree_order else {}
+                ),
+                **(
+                    {"currentTargetPath": row["current_target_path"]}
+                    if row["current_target_path"] is not None
+                    and row["current_target_path"] != row["target_path"]
+                    else {}
+                ),
+            }
+            for row in rows[:limit]
+        ]
+    }
     if limit is not None:
         result.update(
             {
@@ -629,16 +839,21 @@ def list_unmatched_scan_pairs(
     repository = requested_repository.resolve()
     identities = RepositoryIdentityCache(connection)
     requested = identities.for_path(str(requested_repository))
-    if identities.supports_identity:
+    if (
+        identities.supports_identity
+        and not requested.ownership_matches
+        and (
+            requested.resolved_path is None
+            or not requested.target_id
+            or not _legacy_owner(identities, requested.target_id)[0]
+        )
+    ):
         requested.require_owner()
-    clause, values = identities.scope_for_path(str(requested_repository)).sql(
-        supports_generation=identities.supports_generation
-    )
+    clauses, values = repository_scan_scope(connection, requested_repository, identities=identities)
     selected = connection.execute(
-        f"SELECT * FROM scans WHERE status = 'complete' AND {clause}",
+        f"SELECT * FROM scans WHERE status = 'complete' AND {' AND '.join(clauses)}",
         values,
     ).fetchall()
-
     selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
 
     available = []
@@ -669,7 +884,7 @@ def list_unmatched_scan_pairs(
         candidates = [
             before
             for before in available[:index]
-            if _same_repository(connection, before, after, identities=identities)
+            if _same_registered_repository(connection, before, after, identities=identities)
         ]
         previous = [
             before
@@ -728,6 +943,83 @@ def list_unmatched_scan_pairs(
     }
 
 
+def _same_registered_repository(
+    connection: sqlite3.Connection,
+    before: sqlite3.Row,
+    after: sqlite3.Row,
+    *,
+    identities: RepositoryIdentityCache | None = None,
+) -> bool:
+    identities = identities or RepositoryIdentityCache(connection)
+    if before["target_id"] is None or after["target_id"] is None:
+        return (
+            before["target_id"] is None
+            and after["target_id"] is None
+            and _unclaimed_path(identities, before["target_path"])
+            and _unclaimed_path(identities, after["target_path"])
+            and (
+                Path(before["target_path"]).resolve() == Path(after["target_path"]).resolve()
+                or same_repository_worktree(Path(before["target_path"]), Path(after["target_path"]))
+            )
+        )
+    if (
+        scan_repository_generation(before) is not None
+        or scan_repository_generation(after) is not None
+    ):
+        return _same_repository(connection, before, after, identities=identities)
+    if not all(scan_has_current_owner(connection, row, identities) for row in (before, after)):
+        return False
+    if before["target_id"] == after["target_id"]:
+        return True
+    targets = [identities.targets[scan["target_id"]] for scan in (before, after)]
+    if any(identities.for_row(target).missing for target in targets):
+        return (
+            connection.execute(
+                "SELECT 1 FROM scan_comparisons WHERE (before_scan_id = ? AND after_scan_id = ?) OR "
+                "(before_scan_id = ? AND after_scan_id = ?)",
+                (before["id"], after["id"], after["id"], before["id"]),
+            ).fetchone()
+            is not None
+        )
+    return _same_repository(connection, *targets, identities=identities)
+
+
+def saved_repository_target_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> set[str]:
+    target_ids = {scan["target_id"]}
+    pending = list(target_ids)
+    checked_pairs = set()
+    identities = RepositoryIdentityCache(connection)
+    while pending:
+        target_id = pending.pop()
+        for pair in connection.execute(
+            """
+            SELECT comparisons.before_scan_id, comparisons.after_scan_id
+            FROM scan_comparisons AS comparisons
+            JOIN scans AS before ON before.id = comparisons.before_scan_id
+            JOIN scans AS after ON after.id = comparisons.after_scan_id
+            WHERE (before.target_id = ? OR after.target_id = ?)
+                AND before.status = 'complete' AND after.status = 'complete'
+                AND before.target_id != after.target_id
+            """,
+            (target_id, target_id),
+        ):
+            scan_ids = (pair["before_scan_id"], pair["after_scan_id"])
+            if scan_ids in checked_pairs:
+                continue
+            checked_pairs.add(scan_ids)
+            scans = [
+                connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
+                for scan_id in scan_ids
+            ]
+            if not _same_registered_repository(connection, *scans, identities=identities):
+                continue
+            for related in scans:
+                if related["target_id"] not in target_ids:
+                    target_ids.add(related["target_id"])
+                    pending.append(related["target_id"])
+    return target_ids
+
+
 def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> list[sqlite3.Row]:
     return [
         row
@@ -781,6 +1073,9 @@ def compare_scans(
     *,
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    finding_triage: Callable[
+        [sqlite3.Connection, sqlite3.Row, sqlite3.Row], dict[str, dict[str, Any]]
+    ],
     backfill_finding_details: Callable[[sqlite3.Connection, sqlite3.Row], None] | None = None,
     include_matching_inputs: bool = False,
     require_matches: bool = False,
@@ -792,7 +1087,7 @@ def compare_scans(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(connection, before, after):
+    if not _same_registered_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     cached = connection.execute(
         "SELECT result_json FROM scan_comparisons WHERE before_scan_id = ? AND after_scan_id = ?",
@@ -817,6 +1112,9 @@ def compare_scans(
     after_coverage = read_coverage(after)
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
+    previous_triage = finding_triage(connection, before, before) if before_findings else {}
+    current_triage = finding_triage(connection, after, after) if after_findings else {}
+    absent_triage = None
     matches = json.loads(cached["result_json"]) if cached is not None else None
     saved_matches = matches["matches"] if matches is not None else []
     occurrences = before_findings | after_findings
@@ -859,10 +1157,12 @@ def compare_scans(
             status = (
                 "reopened"
                 if any(
-                    row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
+                    previous_triage[row["id"]]["status"] == "closed"
+                    and previous_triage[row["id"]].get("closeReason")
+                    in {"already_fixed", "false_positive"}
                     for row in previous_rows
                 )
-                and any(row["triage_status"] == "open" for row in current_rows)
+                and any(current_triage[row["id"]]["status"] == "open" for row in current_rows)
                 else "persisting"
             )
             if match_reason is not None:
@@ -883,14 +1183,20 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        elif all(
-            row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
-            for row in previous_rows
-        ):
-            status = "resolved"
         else:
-            status = "not_observed"
-            item["reason"] = "Not observed in the later scan; remediation has not been verified."
+            if absent_triage is None:
+                absent_triage = finding_triage(connection, before, after)
+            if all(
+                absent_triage[row["id"]]["status"] == "closed"
+                and absent_triage[row["id"]].get("closeReason") == "already_fixed"
+                for row in previous_rows
+            ):
+                status = "resolved"
+            else:
+                status = "not_observed"
+                item["reason"] = (
+                    "Not observed in the later scan; remediation has not been verified."
+                )
         if len(previous_rows) == 1:
             item["beforeOccurrenceId"] = previous_rows[0]["id"]
         elif previous_rows:
@@ -901,8 +1207,8 @@ def compare_scans(
             item["afterOccurrenceIds"] = [row["id"] for row in current_rows]
         if current_rows:
             item["triage"] = {
-                "closeReason": selected["close_reason"],
-                "status": selected["triage_status"],
+                "closeReason": current_triage[selected["id"]].get("closeReason"),
+                "status": current_triage[selected["id"]]["status"],
             }
         item["status"] = status
         findings.append(item)
@@ -927,13 +1233,13 @@ def compare_scans(
                 for pair in related
             ]
     if include_matching_inputs:
-        identities = RepositoryIdentityCache(connection)
         after_key = (timestamp_key(after["started_at"]), after["id"])
+        identities = RepositoryIdentityCache(connection)
         known_scan_ids = {
             scan["id"]
             for scan in connection.execute("SELECT * FROM scans WHERE status = 'complete'")
             if (timestamp_key(scan["started_at"]), scan["id"]) <= after_key
-            and _same_repository(connection, scan, after, identities=identities)
+            and _same_registered_repository(connection, scan, after, identities=identities)
         }
         excluded_pairs = {(before["id"], after["id"]), (after["id"], before["id"])}
         known_groups = _known_finding_groups(
@@ -965,6 +1271,9 @@ def save_scan_comparison(
     now: Callable[[], str],
     require_scan: Callable[[sqlite3.Connection, str], sqlite3.Row],
     read_coverage: Callable[[sqlite3.Row], dict[str, Any]],
+    finding_triage: Callable[
+        [sqlite3.Connection, sqlite3.Row, sqlite3.Row], dict[str, dict[str, Any]]
+    ],
 ) -> dict[str, Any]:
     before = require_scan(connection, args.before_scan_id)
     after = require_scan(connection, args.after_scan_id)
@@ -972,7 +1281,7 @@ def save_scan_comparison(
         raise SystemExit("Select two different scans to compare.")
     if before["status"] != "complete" or after["status"] != "complete":
         raise SystemExit("Only completed scans can be compared.")
-    if not _same_repository(connection, before, after):
+    if not _same_registered_repository(connection, before, after):
         raise SystemExit("Semantic scan comparisons require the same repository target.")
     read_coverage(after)
     allowed = {
@@ -1085,7 +1394,13 @@ def save_scan_comparison(
                 for current in match["afterOccurrenceIds"]
             ),
         )
-    return compare_scans(connection, args, require_scan=require_scan, read_coverage=read_coverage)
+    return compare_scans(
+        connection,
+        args,
+        require_scan=require_scan,
+        read_coverage=read_coverage,
+        finding_triage=finding_triage,
+    )
 
 
 def _valid_finding_pair(value: Any) -> bool:
@@ -1167,12 +1482,19 @@ def finding_relations(
     if not selected:
         return {}
     pairs = []
+    identities = RepositoryIdentityCache(connection)
     for comparison in connection.execute(
         "SELECT before_scan_id, after_scan_id, result_json FROM scan_comparisons "
         "WHERE before_scan_id = ? OR after_scan_id = ? "
         "ORDER BY before_scan_id, after_scan_id",
         (scan_id, scan_id),
     ):
+        compared_scans = [
+            connection.execute("SELECT * FROM scans WHERE id = ?", (comparison[key],)).fetchone()
+            for key in ("before_scan_id", "after_scan_id")
+        ]
+        if not _same_registered_repository(connection, *compared_scans, identities=identities):
+            continue
         side = "before" if comparison["before_scan_id"] == scan_id else "after"
         other = "after" if side == "before" else "before"
         for pair in json.loads(comparison["result_json"]).get("related", []):
@@ -1254,57 +1576,34 @@ def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) ->
 
 
 def finding_matches(
-    connection: sqlite3.Connection, occurrence_id: str, scan_id: str, started_at: str
+    connection: sqlite3.Connection, occurrence_id: str, occurrence_ids: set[str]
 ) -> tuple[list[dict[str, Any]], str, list[str]]:
     rows = connection.execute(
         """
-        SELECT matches.after_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
-            occurrences.title, matches.reason
-        FROM scan_comparison_matches AS matches
-        JOIN finding_occurrences AS occurrences ON occurrences.id = matches.after_occurrence_id
-        WHERE matches.before_occurrence_id = ?
-        UNION
-        SELECT matches.before_scan_id AS scan_id, occurrences.id AS occurrence_id, occurrences.finding_id,
-            occurrences.title, matches.reason
-        FROM scan_comparison_matches AS matches
-        JOIN finding_occurrences AS occurrences ON occurrences.id = matches.before_occurrence_id
-        WHERE matches.after_occurrence_id = ?
-        ORDER BY scan_id, occurrence_id
+        WITH selected_occurrences AS (SELECT value AS id FROM json_each(?))
+        SELECT occurrences.id AS occurrence_id, occurrences.finding_id,
+            occurrences.title, scans.id AS scan_id, scans.started_at,
+            COALESCE((
+                SELECT matches.reason
+                FROM scan_comparison_matches AS matches
+                WHERE (matches.before_occurrence_id = occurrences.id
+                    OR matches.after_occurrence_id = occurrences.id)
+                    AND matches.before_occurrence_id IN (SELECT id FROM selected_occurrences)
+                    AND matches.after_occurrence_id IN (SELECT id FROM selected_occurrences)
+                ORDER BY CASE WHEN matches.before_occurrence_id = ?
+                    OR matches.after_occurrence_id = ? THEN 0 ELSE 1 END,
+                    matches.rowid
+                LIMIT 1
+            ), 'Same stable finding identifier.') AS reason
+        FROM finding_occurrences AS occurrences
+        JOIN scans ON scans.id = occurrences.scan_id
+        WHERE occurrences.id IN (SELECT id FROM selected_occurrences)
         """,
-        (occurrence_id, occurrence_id),
+        (json.dumps(sorted(occurrence_ids)), occurrence_id, occurrence_id),
     ).fetchall()
-    linked_rows = list(
-        _rows_for_ids(
-            connection,
-            f"""
-            {_LINKED_FINDINGS_SQL}
-            SELECT occurrences.id AS occurrence_id, occurrences.finding_id, occurrences.title,
-                scans.started_at, scans.id AS scan_id
-            FROM linked
-            CROSS JOIN finding_occurrences AS occurrences
-                ON occurrences.finding_id = linked.finding_id
-            CROSS JOIN scans ON scans.id = occurrences.scan_id
-            """,
-            (occurrence_id,),
-        )
+    rows.sort(
+        key=lambda row: (timestamp_key(row["started_at"]), row["scan_id"], row["occurrence_id"])
     )
-    known_scans = sorted(
-        {(started_at, scan_id)} | {(row["started_at"], row["scan_id"]) for row in linked_rows},
-        key=lambda scan: (timestamp_key(scan[0]), scan[1]),
-    )
-    included = {occurrence_id, *(row["occurrence_id"] for row in rows)}
-    rows.extend(
-        {
-            **row,
-            "reason": "The findings share a stable identity or a previously confirmed link.",
-        }
-        for row in linked_rows
-        if row["occurrence_id"] not in included
-    )
-    rows.sort(key=lambda row: (row["scan_id"], row["occurrence_id"]))
-    known_scan_ids = [known_scans[0][1]]
-    if len(known_scans) > 1:
-        known_scan_ids.append(known_scans[-1][1])
     return (
         [
             {
@@ -1315,9 +1614,10 @@ def finding_matches(
                 "title": row["title"],
             }
             for row in rows
+            if row["occurrence_id"] != occurrence_id
         ],
-        known_scans[0][0],
-        known_scan_ids,
+        rows[0]["started_at"],
+        list(dict.fromkeys(row["scan_id"] for row in rows)),
     )
 
 
@@ -1391,10 +1691,16 @@ def finding_occurrence_rows(
     query: str | None = None,
     severity: str | None = None,
     status: str | None = None,
+    aggregate_status: bool = False,
 ) -> list[sqlite3.Row]:
-    connection.create_function("casefold", 1, str.casefold, deterministic=True)
+    if query is not None and query.strip():
+        connection.create_function("codex_security_casefold", 1, str.casefold, deterministic=True)
     conditions, values = finding_occurrence_conditions(
-        scan_id, query=query, severity=severity, status=status
+        scan_id,
+        query=query,
+        severity=severity,
+        status=status,
+        aggregate_status=aggregate_status,
     )
     severity_order = " ".join(
         f"WHEN '{level}' THEN {rank}" for level, rank in SEVERITY_ORDER.items()
@@ -1430,6 +1736,7 @@ def finding_occurrence_conditions(
     query: str | None,
     severity: str | None,
     status: str | None,
+    aggregate_status: bool = False,
 ) -> tuple[str, list[str]]:
     conditions = ["occurrences.scan_id = ?"]
     values = [scan_id]
@@ -1437,18 +1744,21 @@ def finding_occurrence_conditions(
         conditions.append("occurrences.severity = ?")
         values.append(severity)
     if status is not None:
-        conditions.append("COALESCE(triage.status, 'open') = ?")
+        value = "COALESCE(triage.status, 'open')"
+        if aggregate_status:
+            value = f"codex_security_aggregate_status(occurrences.id, {value})"
+        conditions.append(f"{value} = ?")
         values.append(status)
     if query:
         search = query.strip().casefold()
         if search:
             conditions.append(
-                "(instr(casefold(occurrences.title), ?) > 0 "
-                "OR instr(casefold(occurrences.summary), ?) > 0 "
+                "(instr(codex_security_casefold(occurrences.title), ?) > 0 "
+                "OR instr(codex_security_casefold(occurrences.summary), ?) > 0 "
                 "OR EXISTS ("
                 "SELECT 1 FROM finding_locations AS locations "
                 "WHERE locations.occurrence_id = occurrences.id "
-                "AND instr(casefold(locations.relative_path), ?) > 0))"
+                "AND instr(codex_security_casefold(locations.relative_path), ?) > 0))"
             )
             values.extend((search, search, search))
     return " AND ".join(conditions), values

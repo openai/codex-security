@@ -837,7 +837,7 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
     assert row["remediation"] == "' \t＋1+1"
 
 
-def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> None:
+def test_completed_findings_support_requested_page_sizes(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     findings_path = scan_dir / "findings.json"
@@ -863,6 +863,7 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
     assert second_page["offset"] == 20
     assert second_page["nextOffset"] == 70
     assert second_page["total"] == 75
+    assert second_page["limit"] == 50
     assert len(second_page["findings"]) == 50
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]

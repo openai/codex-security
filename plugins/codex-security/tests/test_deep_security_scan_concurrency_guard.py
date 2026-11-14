@@ -50,7 +50,7 @@ def test_scan_context_reports_only_other_running_deep_scans(
             "UPDATE scans SET handoff_status = 'delivered' WHERE id IN (?, ?)",
             (scans["other"]["scanId"], scans["failed"]["scanId"]),
         )
-    current = Namespace(scan_id=scans["current"]["scanId"], occurrence_id=None)
+    current = Namespace(scan_id=scans["current"]["scanId"], occurrence_id=None, check_target=False)
     other = scans["other"]
     assert workbench_api["get_scan"](workbench_db, current)["otherRunningDeepScans"] == [
         {

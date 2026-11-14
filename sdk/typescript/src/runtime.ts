@@ -3667,6 +3667,11 @@ export async function bootstrapPlugin(
 
   if (!stagedMatches) {
     if (existing !== null) {
+      if (isWithin(await realpath(marketplace), root)) {
+        throw new PluginBootstrapError(
+          `Cannot refresh the SDK plugin marketplace because it contains the selected plugin source: ${marketplace}. Copy the selected plugin outside this directory and retry.`,
+        );
+      }
       await rm(marketplace, { recursive: true, force: true });
     }
     await createMarketplace(codexHome, root, options.signal);

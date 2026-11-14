@@ -99,6 +99,41 @@ function insertScan(database: DatabaseSync, target = "/synthetic/repository") {
     .run(target);
 }
 
+test("migration records first admission through both terminal publication routes", (t) => {
+  const database = memory(t, 65);
+  insertScan(database);
+  database.exec("UPDATE scans SET status = 'complete'");
+  applyMigrations(database);
+  const admitted = database
+    .prepare("SELECT sequence FROM scan_admissions WHERE scan_id = 'scan'")
+    .get()!.sequence;
+  database.exec("UPDATE scans SET seal_manifest_digest = 'synthetic-seal'");
+  assert.equal(
+    database
+      .prepare("SELECT sequence FROM scan_admissions WHERE scan_id = 'scan'")
+      .get()!.sequence,
+    admitted,
+  );
+  database.exec("DELETE FROM scans WHERE id = 'scan'; DELETE FROM workspaces;");
+  insertScan(database);
+  database.exec("UPDATE scans SET status = 'failed'");
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS total FROM scan_admissions").get()!
+      .total,
+    0,
+  );
+  database.exec(
+    "UPDATE scans SET seal_manifest_digest = 'synthetic-retained-seal'",
+  );
+  assert.ok(
+    Number(
+      database
+        .prepare("SELECT sequence FROM scan_admissions WHERE scan_id = 'scan'")
+        .get()!.sequence,
+    ) > Number(admitted),
+  );
+});
+
 test("retains SQLite open errors and recovery guidance", async () => {
   const directory = await temporary.create("workbench-database-error-");
   const databasePath = join(directory, "workbench.sqlite3");
@@ -1691,6 +1726,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
           name !== "external_finding_imports" &&
           name !== "external_finding_import_members" &&
           name !== "external_finding_publications" &&
+          name !== "scan_admissions" &&
           name !== "sqlite_sequence",
       )
       .map(([name, rows]) => {
@@ -1726,6 +1762,10 @@ with sqlite3.connect(sys.argv[2]) as connection:
     ),
   );
   assert.deepEqual(
+    initialized.prepare("SELECT * FROM scan_admissions").all(),
+    [],
+  );
+  assert.deepEqual(
     initialized.prepare("SELECT * FROM deep_scan_worker_threads").all(),
     [],
   );
@@ -1743,10 +1783,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   );
   assert.deepEqual(
     initialized
-      .prepare("SELECT name, seq FROM sqlite_sequence")
+      .prepare("SELECT name, seq FROM sqlite_sequence ORDER BY name")
       .all()
       .map((row) => ({ ...row })),
-    [{ name: "finding_issue_receipts", seq: 0 }],
+    [
+      { name: "finding_issue_receipts", seq: 0 },
+      { name: "scan_admissions", seq: 0 },
+    ],
   );
   assert.equal(
     initialized
