@@ -11,7 +11,7 @@ import type {
   ThreatModel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
-import { uniqueCandidateRows, unresolvedCandidateRows } from "./candidates.js";
+import { uniqueCandidateRows, unresolvedCandidates } from "./candidates.js";
 import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
 
 export interface TurnResultMetadata {
@@ -147,14 +147,9 @@ export class ScanResult {
 
   /** Saved unresolved candidates, distinct within each logical worker. */
   public get unresolvedCandidates(): readonly DeferredCoverage[] {
-    const rows = this.#legacyCoverage
-      ? unresolvedCandidateRows(
-          this.#legacyCoverage,
-          this.findings.findings,
-          true,
-        )
-      : (this.review.unresolvedCandidates ?? []);
-    return uniqueCandidateRows(rows);
+    return this.#legacyCoverage
+      ? unresolvedCandidates(this.#legacyCoverage, this.findings.findings, true)
+      : uniqueCandidateRows(this.review.unresolvedCandidates ?? []);
   }
 
   public get unresolvedCandidateCount(): number {

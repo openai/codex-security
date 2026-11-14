@@ -109,6 +109,17 @@ export function unresolvedCandidateRows(
   });
 }
 
+/** One row per unresolved candidate, for result summaries. */
+export function unresolvedCandidates(
+  coverage: CoverageDocument,
+  findings: readonly Finding[],
+  sealed = false,
+): DeferredCoverage[] {
+  return uniqueCandidateRows(
+    unresolvedCandidateRows(coverage, findings, sealed),
+  );
+}
+
 export function uniqueCandidateRows(
   rows: readonly DeferredCoverage[],
 ): DeferredCoverage[] {
