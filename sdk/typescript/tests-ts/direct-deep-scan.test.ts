@@ -11,6 +11,7 @@ import { afterEach, test } from "node:test";
 import { setTimeout } from "node:timers/promises";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
+  DeepScanInterruptedError,
   runDeepScan,
 } from "../src/deep-scan.js";
 import { ScanCostTracker } from "../src/cost.js";
@@ -73,6 +74,11 @@ if (process.env.SYNTHETIC_FAIL === '1') {
   process.exitCode = 1;
   lines.close();
   process.stdin.destroy();
+} else if (process.env.SYNTHETIC_PAUSED === '1') {
+  process.stdout.write(JSON.stringify({ scanId: request.scanId, status: 'interrupted',
+    error: 'Quota exceeded. Check your plan and billing details.' }) + '\\n');
+  lines.close();
+  process.stdin.destroy();
 } else if (process.env.SYNTHETIC_WAIT === '1') {
   lines.once('close', () => { writeFileSync(process.env.SYNTHETIC_RECEIPT + '.stopped', 'stopped'); process.exit(0); });
   setInterval(() => {}, 1000);
@@ -86,6 +92,37 @@ if (process.env.SYNTHETIC_FAIL === '1') {
   );
   return { root, pluginRoot };
 }
+
+test("a quota-paused child reports interruption without a completed turn", async () => {
+  const { root, pluginRoot } = await fixture();
+  const events = runDeepScan({
+    preflightCommand: { command: "/synthetic/codex" },
+    pluginRoot,
+    repository: root,
+    scanDir: root,
+    scanId: "paused-scan",
+    prompt: "Synthetic audit.",
+    signal: new AbortController().signal,
+    codexOptions: {
+      env: {
+        PATH: process.versions["bun"] ? process.env["PATH"]! : "",
+        CODEX_HOME: join(root, "codex-home"),
+        CODEX_SECURITY_SCAN_DIR: root,
+        SYNTHETIC_RECEIPT: join(root, "receipt"),
+        SYNTHETIC_THREAD_ID: "owner",
+        SYNTHETIC_PAUSED: "1",
+      },
+    },
+  });
+  assert.equal((await events.next()).value?.type, "thread.started");
+  await assert.rejects(events.next(), (error: unknown) => {
+    assert.ok(error instanceof DeepScanInterruptedError);
+    assert.equal(error.scanDir, root);
+    assert.match(error.message, /Quota exceeded/);
+    assert.match(error.message, /codex-security scans resume paused-scan/);
+    return true;
+  });
+});
 
 test("isolates direct engine credentials and runtime snapshots across concurrent scans", async () => {
   const { root, pluginRoot } = await fixture();

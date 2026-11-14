@@ -1781,7 +1781,10 @@ async function testStoreConfirmationSurvivesReplayAndThreadMetadata() {
 
 async function testJoinAndOrphanRules() {
   const fixture = await fixtureRun(twoRunConfig({ workers: 2, subagents: 1 }));
-  const existingCoordinator = { marker: "existing" };
+  const existingCoordinator = {
+    marker: "existing",
+    snapshot: () => fixture.run,
+  };
   const defaults = {
     executor: {},
     pluginRoot: fixture.pluginRoot,
@@ -1904,13 +1907,14 @@ async function testJoinAndOrphanRules() {
 
   const lock = new AsyncLock();
   const firstGate = Promise.withResolvers<void>();
-  let liveCoordinator: { marker: string } | undefined;
+  let liveCoordinator:
+    { marker: string; snapshot: () => DeepScanRunState } | undefined;
   starts.mock.resetCalls();
   const registry = {
     get: () => liveCoordinator,
     start: () => {
       starts();
-      liveCoordinator = { marker: "concurrent" };
+      liveCoordinator = { marker: "concurrent", snapshot: () => fixture.run };
       return liveCoordinator;
     },
   };
@@ -2400,14 +2404,17 @@ async function testRestartRestoresDispatchOrderAfterMixedResults(
   assert.equal(executor.discoveryCalls, 0);
 }
 
-async function testComparisonStopCondition(mode: "quota" | "deadline") {
+async function testComparisonStopCondition(
+  t: TestContext,
+  mode: "quota" | "deadline",
+) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     stopAfterNoNew: 3,
     maxDiscoveryRuns: 6,
   });
   const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
-  const deadline = Promise.withResolvers<void>();
+  if (mode === "deadline") t.mock.timers.enable({ apis: ["setTimeout"] });
   let comparisons = 0;
   const terminal = await runCoordinator(
     fixture,
@@ -2432,7 +2439,8 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
           throw codexWorkerTurnError(
             "Quota exceeded. Check your plan and billing details.",
           );
-        await deadline.promise;
+        // Expire the discovery budget while comparison is in flight.
+        t.mock.timers.tick(500);
         signal.throwIfAborted();
         return JSON.stringify({
           uncertain: [],
@@ -2447,12 +2455,7 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
         });
       },
     },
-    {
-      ...(mode === "deadline" && { discoveryTimeoutMs: 500 }),
-      log: (event) => {
-        if (event.event === "discovery_deadline_reached") deadline.resolve();
-      },
-    },
+    mode === "deadline" ? { discoveryTimeoutMs: 500 } : {},
   );
   assert.equal(comparisons, 1);
   assert.equal(worker.discoveryCalls, 2);
@@ -2460,12 +2463,37 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
   assert.equal(store.iterations[0].workerIds.length, 2);
   assert.equal(
     terminal?.status,
-    mode === "quota" ? "failed" : "succeeded",
+    mode === "quota" ? "interrupted" : "succeeded",
     terminal?.error,
   );
   const checkpoint = await readJson(store.iterations[0].resultPath);
   assert.equal(checkpoint.findings.length, mode === "quota" ? 2 : 1);
-  if (mode === "quota") assert.match(terminal.error ?? "", /Quota exceeded/);
+  if (mode === "quota") {
+    assert.match(terminal.error ?? "", /Quota exceeded/);
+    assert.equal(store.finishCalls.length, 0);
+    await assertNoPublishedCandidates(fixture.run.scanDir);
+    const saved = await readFile(store.iterations[0].resultPath, "utf8");
+    // The workbench reactivates the same run and fences the old coordinator.
+    Object.assign(store.run, {
+      status: "running",
+      error: null,
+      cancelRequested: false,
+      coordinatorGeneration: 3,
+      resumeAvailable: undefined,
+    });
+    const replacement = new FakeExecutor();
+    const continued = await runCoordinator(fixture, store, replacement, {
+      run: await store.get(),
+    });
+    assert.equal(continued?.status, "succeeded", continued?.error);
+    assert.equal(continued.scanId, terminal.scanId);
+    assert.ok(replacement.discoveryCalls > 0);
+    assert.equal(replacement.discoveryAttempts.has("discovery-0001"), false);
+    assert.equal(replacement.discoveryAttempts.has("discovery-0002"), false);
+    assert.equal(await readFile(store.iterations[0].resultPath, "utf8"), saved);
+    const manifest = await readJson(continued.manifestPath);
+    assert.equal(manifest.findings.length, 2);
+  }
 }
 
 async function testDiscoveryDeadlineReducesSingleBufferedFinding(
@@ -2811,6 +2839,7 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     ? "Request blocked by cyberPolicy."
     : "Quota exceeded. Check your plan and billing details.";
   const attempts: (string | undefined)[] = [];
+  let lateQuotaReported = false;
   const terminal = runCoordinator(
     fixture,
     store,
@@ -2829,7 +2858,20 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
           await shutdown.promise;
           throw new Error("later cleanup failure");
         }
-        return normal.run(request);
+        try {
+          return await normal.run(request);
+        } catch (error) {
+          if (!resumed && request.signal.aborted) {
+            // A late sibling quota signal must not replace the first cause.
+            lateQuotaReported = true;
+            request.onNonRetryableError?.(
+              codexWorkerTurnError(
+                "You’ve hit your usage limit. Try again later.",
+              ),
+            );
+          }
+          throw error;
+        }
       },
     },
     { clock: recordingClock(sleeps), retryDelaysMs: [1], random: () => 0 },
@@ -2869,10 +2911,13 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     }
     shutdown.resolve();
     const result = await terminal;
-    assert.equal(result?.status, "failed");
+    assert.equal(result?.status, resumed ? "failed" : "interrupted");
     assert.equal(result?.error, message);
     assert.equal(signals.length, callsAtFailure);
-    assert.equal(store.workers.get(source.id)?.status, "failed");
+    assert.equal(
+      store.workers.get(source.id)?.status,
+      resumed ? "failed" : "canceled",
+    );
     assert.deepEqual(
       store.workerUpdates.filter((update) => update.terminalFailure),
       [source],
@@ -2885,10 +2930,31 @@ async function testTerminalFailureStopsDispatchBeforeWorkerShutdown(
     assert.equal(store.finishCalls.length, 0);
     assert.equal(await readFile(checkpoint, "utf8"), committed);
     assert.deepEqual(sleeps, resumed ? [1] : []);
+    assert.equal(lateQuotaReported, !resumed);
   } finally {
     shutdown.resolve();
     await terminal;
   }
+}
+
+async function testPersistedQuotaInterruptsBeforeDispatch() {
+  const { fixture, store } = await coordinatorFixture(twoRunConfig());
+  const message = "You’ve hit your usage limit. Try again later.";
+  store.run.error = message;
+  const executor = new FakeExecutor();
+  let publications = 0;
+  const terminal = await runCoordinator(fixture, store, executor, {
+    run: await store.get(),
+    onStopped: async () => {
+      publications++;
+    },
+  });
+  assert.equal(terminal?.status, "interrupted");
+  assert.equal(terminal.error, message);
+  assert.equal(executor.discoveryCalls, 0);
+  assert.equal(publications, 0);
+  assert.equal(store.finishCalls.length, 0);
+  await assertNoPublishedCandidates(fixture.run.scanDir);
 }
 
 function registerCases<T extends unknown[]>(
@@ -2901,6 +2967,7 @@ function registerCases<T extends unknown[]>(
 
 after(() => temporaryDirectories.cleanup());
 test("Deep Scan lifecycle", testDeepScanLifecycle);
+test(testPersistedQuotaInterruptsBeforeDispatch);
 registerCases(testTerminalFailureStopsDispatchBeforeWorkerShutdown, [
   [false],
   [true],
@@ -2914,7 +2981,9 @@ test(testWorkerScopedCandidateSourceAggregation);
 test(testRetryKeepsLogicalWorker);
 test(testSandboxDiagnosticSurvivesArtifactRetries);
 test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
-registerCases(testComparisonStopCondition, [["quota"], ["deadline"]]);
+for (const mode of ["quota", "deadline"] as const)
+  test(`finding comparison stops at the ${mode} limit`, (t) =>
+    testComparisonStopCondition(t, mode));
 test({ timeout: 30_000 }, testDiscoveryDeadlineReducesSingleBufferedFinding);
 test(testDiscoveryAcceptedAtDeadlineIsReduced);
 test(testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence);

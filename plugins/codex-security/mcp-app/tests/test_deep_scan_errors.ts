@@ -7,6 +7,7 @@ const {
   classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
+  DeepScanUsageLimitError,
 } = await importModule({
   entryPoints: [
     fileURLToPath(new URL("../src/deep-scan/errors.ts", import.meta.url)),
@@ -101,5 +102,27 @@ test(function testNativeTurnFailureClassification() {
     const error = codexWorkerTurnError(message);
     assert.equal(error.name, "Error");
     assert.equal(error.message, message);
+  }
+});
+
+test("only native quota failures are resumable interruptions", () => {
+  for (const message of [
+    "Quota exceeded. Check your plan and billing details.",
+    "You’ve hit your usage limit. Try again later.",
+    "Error running remote compact task: You’ve hit your usage limit. Try again later.",
+  ]) {
+    const error = codexWorkerTurnError(message);
+    assert.ok(error instanceof DeepScanUsageLimitError);
+    assert.equal(error.message, message);
+  }
+  for (const message of [
+    "Request blocked by cyberPolicy.",
+    "429 Too Many Requests",
+    "Command failed: Quota exceeded. Check your plan and billing details.",
+  ]) {
+    assert.equal(
+      codexWorkerTurnError(message) instanceof DeepScanUsageLimitError,
+      false,
+    );
   }
 });

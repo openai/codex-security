@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -704,7 +704,7 @@ def start_delivered_scan(
 ) -> dict[str, object]:
     """Prepare an unclaimed, delivered scan for tests outside handoff ownership."""
     scan = start_scan_command(state_dir, workspace_id, *args, environment=environment)["results"]
-    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+    with closing(sqlite3.connect(state_dir / "workbench.sqlite3")) as connection, connection:
         connection.execute(
             "UPDATE scans SET handoff_status = 'delivered' WHERE id = ?", (scan["scanId"],)
         )

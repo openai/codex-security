@@ -122,6 +122,7 @@ import {
   deepScanParentToolOverrides,
   readDeepScanParentConfig,
   runDeepScan,
+  DeepScanInterruptedError,
   type DeepScanDiagnostic,
 } from "./deep-scan.js";
 import {
@@ -4281,6 +4282,34 @@ export class CodexSecurity {
                 completedScan,
                 terminalTurnStatus,
               );
+          } else if (
+            isRecord(completedScan) &&
+            completedScan["mode"] === "deep" &&
+            typeof completedScan["continuationThreadId"] === "string" &&
+            !signal.aborted &&
+            !(failure instanceof ScanCostLimitExceededError)
+          ) {
+            const savedDeepScan = await workbench(
+              cleanupOptions,
+              workbenchArgs("get-deep-scan", {
+                scanId: activeScan.id,
+                threadId: completedScan["continuationThreadId"],
+              }),
+            );
+            const deepScan = savedDeepScan["deepScan"];
+            if (
+              isRecord(deepScan) &&
+              deepScan["status"] === "interrupted" &&
+              deepScan["resumeAvailable"] === true
+            ) {
+              failure = new DeepScanInterruptedError(
+                typeof deepScan["error"] === "string"
+                  ? deepScan["error"]
+                  : errorMessage(failure),
+                activeScan.id,
+                scanDir,
+              );
+            }
           }
         } catch (cleanupError) {
           notifyObserver(
@@ -4320,6 +4349,7 @@ export class CodexSecurity {
       // A resumed Deep Scan persists its own terminal status.
       if (
         activeScan !== null &&
+        !(failure instanceof DeepScanInterruptedError) &&
         (options.resumeScanId === undefined ||
           releaseStandardScan !== undefined)
       ) {
@@ -4356,7 +4386,11 @@ export class CodexSecurity {
         } catch {}
       }
       stopHeadDriftMonitor?.();
-      if (runPostScan !== null && !signal.aborted) {
+      if (
+        runPostScan !== null &&
+        !signal.aborted &&
+        !(failure instanceof DeepScanInterruptedError)
+      ) {
         scanProgressTracker?.stop();
         try {
           for await (const event of (await runPostScan()).events) {

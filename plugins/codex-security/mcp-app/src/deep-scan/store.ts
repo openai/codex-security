@@ -187,6 +187,16 @@ export class WorkbenchDeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
+    if (result.coordinatorDisposition === "claimed") {
+      this.coordinatorLeases.set(run.scanId, {
+        input: {
+          scanId: run.scanId,
+          threadId: input.threadId,
+          handoffClaimToken: input.handoffClaimToken,
+        },
+        run,
+      });
+    }
     return run;
   }
 
@@ -210,7 +220,8 @@ export class WorkbenchDeepScanStore {
   }
 
   async claimCoordinator(
-    input: DeepScanCoordinatorLeaseInput,
+    input: DeepScanCoordinatorLeaseInput &
+      Pick<DeepScanRunState, "model" | "reasoningEffort">,
   ): Promise<DeepScanCoordinatorClaim> {
     const result = await this.enqueueWrite(
       workbenchArgs("claim-deep-scan-coordinator", {
@@ -218,6 +229,8 @@ export class WorkbenchDeepScanStore {
         threadId: input.threadId,
         coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         claimToken: input.handoffClaimToken || undefined,
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
       }),
     );
     const run = parseDeepScan(result);
@@ -345,7 +358,7 @@ export class WorkbenchDeepScanStore {
   async fail(
     scanId: string,
     message: string,
-    status: "failed" | "interrupted" = "failed",
+    status: "failed" | "interrupted" | "usage_limit" = "failed",
     manifestPath?: string,
     stagedManifestPath?: string,
   ): Promise<DeepScanRunState> {
@@ -360,7 +373,7 @@ export class WorkbenchDeepScanStore {
         ...(stagedManifestPath
           ? ["--staged-manifest-path", stagedManifestPath]
           : []),
-        ...(status === "interrupted" ? ["--deep-status", "interrupted"] : []),
+        ...(status === "failed" ? [] : ["--deep-status", status]),
       ]),
     );
   }

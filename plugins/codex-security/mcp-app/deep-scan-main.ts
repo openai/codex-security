@@ -63,6 +63,10 @@ export async function runCliDeepScan(): Promise<void> {
     if (run.status === "running") {
       const started = await startDeepScanEngine({
         run,
+        adoptionSettings: {
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+        },
         store,
         registry,
         runWorkbench,
@@ -77,11 +81,19 @@ export async function runCliDeepScan(): Promise<void> {
           }),
         parentSandbox,
         threadId: input.threadId,
-        model: input.model,
-        reasoningEffort: input.reasoningEffort,
       });
       if (controller.signal.aborted) stop();
       terminal = await started.coordinator.wait(controller.signal);
+    }
+    if (terminal.status === "interrupted" && terminal.resumeAvailable) {
+      process.stdout.write(
+        JSON.stringify({
+          scanId: terminal.scanId,
+          status: "interrupted",
+          error: terminal.error,
+        }) + "\n",
+      );
+      return;
     }
     if (terminal.status !== "succeeded") {
       throw new Error(terminal.error ?? `Deep Scan ${terminal.status}.`);
