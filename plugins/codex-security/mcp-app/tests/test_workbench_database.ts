@@ -1678,6 +1678,13 @@ with sqlite3.connect(sys.argv[2]) as connection:
   before.close();
   assert.equal((await databaseInfo(directory)).databasePath, databasePath);
   const initialized = new DatabaseSync(databasePath);
+  const newDeepTables = [
+    "deep_scan_attempts",
+    "deep_scan_attempt_sessions",
+    "deep_scan_merge_claims",
+  ];
+  for (const table of newDeepTables)
+    assert.deepEqual(initialized.prepare(`SELECT * FROM ${table}`).all(), []);
   assert.deepEqual(
     storedRows(initialized)
       .filter(
@@ -1686,6 +1693,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
           name !== "scan_severity_assessments" &&
           name !== "local_finding_embeddings" &&
           name !== "finding_issue_receipts" &&
+          !newDeepTables.includes(String(name)) &&
           name !== "deep_scan_worker_threads" &&
           name !== "external_source_reports" &&
           name !== "external_finding_imports" &&

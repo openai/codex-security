@@ -27,6 +27,14 @@ export const {
 
 export const {
   resolveCodexPath,
+  WorkbenchDeepScanStore,
+  captureDeepScanExecutionSettings,
+  retainDeepScanExecutionSettings,
+  loadDeepScanExecutionSettings,
+  restoredDeepScanWorkerSettings,
+  classifyCodexWorkerError,
+  DeepScanNonRetryableError,
+  codexWorkerTurnError,
   snapshotWorkerEnvironment,
   appendItemDiagnostic,
   parseDeepScan,

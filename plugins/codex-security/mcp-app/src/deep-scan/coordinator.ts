@@ -1,4 +1,5 @@
 /// <reference lib="es2023.array" />
+import { publishSelectedDeepScan } from "./finalization.js";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
@@ -173,7 +174,7 @@ export class DeepScanCoordinator {
     if (this.started) return;
     this.started = true;
     this.log({ event: "coordinator_started", scanId: this.state.scanId });
-    this.scheduleDiscoveryDeadline();
+    if (!this.state.finalizationInput) this.scheduleDiscoveryDeadline();
     this.scheduleHeartbeat();
     void this.run().catch((error: unknown) => {
       this.log({
@@ -351,12 +352,17 @@ export class DeepScanCoordinator {
   }
 
   private async run(): Promise<void> {
+    let finalizationFailure: { error: unknown } | undefined;
     try {
       // A replacement coordinator must honor a worker failure committed before handoff.
       if (this.state.error) throw new Error(this.state.error);
       await ensureDeepScanDirectories(this.artifacts);
       if (this.canceled || this.externallyFailed) return;
 
+      if (this.state.finalizationInput) {
+        await this.completeSelectedFinalization();
+        return;
+      }
       if (this.options.checkFreshTarget && isFreshRun(this.state)) {
         await this.options.checkFreshTarget(
           this.state,
@@ -415,10 +421,26 @@ export class DeepScanCoordinator {
         reason: loopResult.reason,
       });
     } catch (error) {
+      const cancellationPendingAtFailure =
+        this.cancellationPersistence !== undefined;
       if (this.canceled || this.externallyFailed) {
         return;
       }
       if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
+        return;
+      }
+      if (this.state.finalizationInput) {
+        // Publication can be retried from the committed input without model work.
+        this.log({
+          event: "coordinator_publication_pending",
+          scanId: this.state.scanId,
+          reason: errorKind(error),
+        });
+        if (cancellationPendingAtFailure) {
+          finalizationFailure = { error };
+        } else if (this.stopLocally()) {
+          this.terminalResult.reject(error);
+        }
         return;
       }
       if (
@@ -556,11 +578,25 @@ export class DeepScanCoordinator {
       }
       if (this.canceled && !this.failurePersisted)
         this.state = { ...this.state, status: "canceled" };
-      if (this.stopLocally())
-        this.terminalResult.resolve(cloneState(this.state));
+      if (this.stopLocally()) {
+        if (finalizationFailure && !this.canceled && !this.externallyFailed)
+          this.terminalResult.reject(finalizationFailure.error);
+        else this.terminalResult.resolve(cloneState(this.state));
+      }
     }
   }
 
+  private async completeSelectedFinalization(): Promise<void> {
+    this.state = await publishSelectedDeepScan({
+      run: this.state,
+      artifacts: this.artifacts,
+      signal: this.publicationAbortController.signal,
+      publish: async (...args) => {
+        await this.options.onComplete?.(...args);
+      },
+      finish: (input) => this.options.store.finish(input),
+    });
+  }
   private stopLocally(): boolean {
     if (this.terminal) return false;
     this.terminal = true;
@@ -677,7 +713,16 @@ export class DeepScanCoordinator {
       current.coordinatorGeneration !== undefined &&
       this.state.coordinatorGeneration !== undefined &&
       current.coordinatorGeneration > this.state.coordinatorGeneration;
-    if (current.status === "running" && !replacementConfirmed) return false;
+    if (current.status === "running" && !replacementConfirmed) {
+      // A selection response can be lost after its transaction commits.
+      if (current.finalizationInput)
+        this.state = {
+          ...this.state,
+          finalizationInput: current.finalizationInput,
+          terminalReason: current.terminalReason,
+        };
+      return false;
+    }
 
     this.externallyFailed = true;
     this.state = current;
@@ -766,7 +811,9 @@ export class DeepScanCoordinator {
       // in dispatch order, including failures before a later accepted worker.
       const lastMerged = accepted.findLast((worker) => merged.has(worker.id));
       const boundary = lastMerged
-        ? discoverySequence(dirname(lastMerged.resultPath))
+        ? discoverySequence(
+            lastMerged.artifactDir ?? dirname(lastMerged.resultPath),
+          )
         : -1n;
       const pending = persisted
         .filter(
@@ -1015,15 +1062,31 @@ export class DeepScanCoordinator {
         throw new Error("Deep Scan is missing its saved iteration result.");
       return { scanId: this.state.scanId, findings: [] };
     }
-    await requireRegularFile(resultPath, this.artifacts.dedupRoot);
+    const checkpoint = this.state.persistedWorkers?.find(
+      (worker) =>
+        worker.kind === "dedup" && worker.resultManifestPath === resultPath,
+    );
+    const claim = this.state.persistedMergeClaims?.find(
+      (item) =>
+        item.previousWorkerId === checkpoint?.id && item.previousResultPath,
+    );
+    const path =
+      checkpoint?.acceptedResultPath ?? claim?.previousResultPath ?? resultPath;
+    await requireRegularFile(path, this.artifacts.dedupRoot);
     const result = parseStoredScanDraft(
-      await readJsonObject(resultPath),
+      await readJsonObject(
+        path,
+        checkpoint?.acceptedResultPath
+          ? checkpoint.acceptedResultSha256
+          : claim?.previousResultSha256,
+      ),
       "Saved Deep Scan iteration",
       this.state.scanId,
       parseScanUnion,
     );
-    for (const worker of merged)
-      addScanCoverage(result, worker, this.artifacts.scanDir);
+    if (!result.sourceCoverage)
+      for (const worker of merged)
+        addScanCoverage(result, worker, this.artifacts.scanDir);
     return result;
   }
 
@@ -1077,29 +1140,52 @@ export class DeepScanCoordinator {
     for (const worker of this.state.persistedWorkers ?? []) {
       if (worker.kind !== "discovery" || worker.status !== "succeeded")
         continue;
-      if (!worker.resultManifestPath || !worker.completionSequence) {
+      // Migrated workers can have frozen merge inputs without an attempt record.
+      const claimedInput = this.state.persistedDedupInputs?.find(
+        (input) =>
+          input.discoveryWorkerId === worker.id &&
+          (input.attempt === undefined || input.attempt === worker.attempt) &&
+          input.resultManifestPath,
+      );
+      const resultPath =
+        worker.acceptedResultPath ??
+        claimedInput?.resultManifestPath ??
+        worker.resultManifestPath;
+      if (!resultPath || !worker.completionSequence) {
         throw new Error(
           `Accepted discovery ${worker.id} has incomplete persisted evidence.`,
         );
       }
       const result = await validateDiscoveryArtifacts(
         this.artifacts,
-        worker.resultManifestPath,
+        resultPath,
         this.state.scanId,
-        this.state,
+        {
+          ...this.state,
+
+          artifactDir: worker.artifactDir,
+          resultSha256:
+            (resultPath === worker.acceptedResultPath
+              ? worker.acceptedResultSha256
+              : undefined) ??
+            (resultPath === claimedInput?.resultManifestPath
+              ? claimedInput.resultManifestSha256
+              : undefined),
+        },
         "previously-accepted",
       );
       recovered.push({
         id: worker.id,
-        resultPath: worker.resultManifestPath,
+        artifactDir: worker.artifactDir,
+        resultPath,
         result,
         attempt: worker.attempt,
       });
     }
     return recovered.sort((a, b) =>
       Number(
-        discoverySequence(dirname(a.resultPath)) -
-          discoverySequence(dirname(b.resultPath)),
+        discoverySequence(a.artifactDir ?? dirname(a.resultPath)) -
+          discoverySequence(b.artifactDir ?? dirname(b.resultPath)),
       ),
     );
   }

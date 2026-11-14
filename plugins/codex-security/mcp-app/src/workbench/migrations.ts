@@ -17,7 +17,7 @@ export interface Migration {
 // Python owns the repository-dependent migrations 67–71. Migration 72 only uses
 // the external source tables that both workbench runtimes already maintain.
 export const migrations: readonly Migration[] = history.filter(
-  (item) => item.version <= 66 || item.version === 72,
+  (item) => item.version <= 66 || item.version >= 72,
 );
 const migration = (version: number) =>
   migrations.find((item) => item.version === version)!;

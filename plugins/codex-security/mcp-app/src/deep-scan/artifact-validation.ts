@@ -11,6 +11,7 @@ import {
 import {
   parsePersistedScanDraft,
   scanDraftInputSchema,
+  workerResultMatchesCurrentCheckpoint,
   retainRecordedReceiptOwnership,
   workerCoverageReceiptLocation,
   validateFindingSemantics,
@@ -50,49 +51,53 @@ export function persistedScanUnion(
 }
 
 export function parseScanUnion(input: unknown): ScanUnion {
-  const parsed = aggregateSchema.parse(input);
+  const { sourceCoverage, ...stored } = asRecord(input) ?? {};
+  const parsed = aggregateSchema.parse(stored);
   validateFindingSemantics(parsed.findings);
   if (parsed.complete === false)
     throw new Error("Saved Deep Scan iteration is incomplete.");
-  return parsed;
+  if (sourceCoverage === undefined) return parsed;
+  return {
+    ...parsed,
+    sourceCoverage: parsePersistedScanDraft({
+      ...stored,
+      reviewState: sourceCoverage,
+    }).reviewState,
+  };
 }
+
+type DiscoveryArtifactOptions = Pick<
+  ArtifactContext,
+  "scope" | "includePaths" | "filePaths"
+> & { artifactDir?: string; resultSha256?: string };
 
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
 export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
   resultPath: string,
   expectedScanId: string,
-  boundScope: Pick<
-    ArtifactContext,
-    "scope" | "includePaths" | "filePaths"
-  > = {},
+  options: DiscoveryArtifactOptions = {},
   admission: "new" | "previously-accepted" = "new",
 ): Promise<ScanDraftInput> {
-  await requireRegularFile(resultPath, artifacts.workersRoot);
-  const root = dirname(resultPath);
-  const context = {
-    root,
-    repoRoot: root,
-    layout: "worker" as const,
-    scanId: expectedScanId,
-    scope: boundScope.scope,
-    includePaths: boundScope.includePaths,
-    filePaths: boundScope.filePaths,
-  };
-  const stored = await readJsonObject(resultPath);
-  await retainRecordedReceiptOwnership(context, stored);
-  const result = parseStoredScanDraft(
-    stored,
-    "Standard scan worker",
+  const result = await readDiscoveryAuditDraft(
+    artifacts,
+    resultPath,
     expectedScanId,
-    parsePersistedScanDraft,
+    options,
+    admission,
   );
   if (result.complete === false)
     throw new Error(
       "Standard scan worker wrote only a checkpoint; its audit is not complete.",
     );
-  // Preserve the existing publication of previously accepted historical payloads.
-  if (admission === "new") validateWorkerReport(result);
+  return result;
+}
+
+async function validateDiscoveryCoverage(
+  workersRoot: string,
+  context: ArtifactContext,
+  result: ScanDraftInput,
+): Promise<void> {
   validateRetainedCoverage(result.reviewState);
   // Check the worker's own task IDs before qualifying active and closed tasks.
   const closures = result.reviewState.resolvedDeferred ?? [];
@@ -118,7 +123,7 @@ export async function validateDiscoveryArtifacts(
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
       const location = workerCoverageReceiptLocation(context, row, ref);
       const normalized = relative(
-        artifacts.workersRoot,
+        workersRoot,
         join(location.context.root, ...location.components),
       );
       const key = normalized.toLowerCase();
@@ -136,6 +141,51 @@ export async function validateDiscoveryArtifacts(
       );
     }
   }
+}
+
+export async function readDiscoveryAuditDraft(
+  artifacts: DeepScanArtifacts,
+  resultPath: string,
+  expectedScanId: string,
+  options: DiscoveryArtifactOptions = {},
+  admission: "new" | "previously-accepted" = "new",
+): Promise<ScanDraftInput> {
+  const {
+    artifactDir = dirname(resultPath),
+    scope,
+    includePaths,
+    filePaths,
+  } = options;
+  const context: ArtifactContext = {
+    root: artifactDir,
+    repoRoot: artifactDir,
+    layout: "worker",
+    scanId: expectedScanId,
+    scope,
+    includePaths,
+    filePaths,
+  };
+  await requireRegularFile(resultPath, artifacts.workersRoot);
+  const saved = await readJsonObject(resultPath, options.resultSha256);
+  if (
+    resultPath === join(artifactDir, "result.json") &&
+    !(await workerResultMatchesCurrentCheckpoint(context, saved))
+  )
+    throw new Error(
+      "The worker result does not match its current checkpoint head.",
+    );
+  await retainRecordedReceiptOwnership(context, saved);
+  const result = parseStoredScanDraft(
+    saved,
+    "Standard scan worker",
+    expectedScanId,
+    parsePersistedScanDraft,
+  );
+  if (result.complete !== false) {
+    // Historical results retain their original display policy.
+    if (admission === "new") validateWorkerReport(result);
+    await validateDiscoveryCoverage(artifacts.workersRoot, context, result);
+  }
   return result;
 }
 
@@ -146,7 +196,10 @@ export function scanCoverage(
   additionalModel?: ScanDraftInput["threatModel"],
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
-  const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
+  const artifactPrefix = relative(
+    scanDir,
+    worker.artifactDir ?? dirname(worker.resultPath),
+  )
     .split(sep)
     .join("/");
   const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;

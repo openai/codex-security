@@ -47,6 +47,9 @@ def test_resumed_owner_reconciles_crash_and_failed_reconnect_only_with_matching_
     rollout = _rollout(tmp_path, thread_id, events)
     usage = _measure_rollout(workbench_api["scan_usage"], rollout, at, at, resume_owner=True)
     assert usage.tokens == _counts(30, 0, 5)
-    assert usage.warnings == (
+    expected_warnings = (
         set() if cumulative_input == 30 else {"token_record_missing", "turn_in_progress"}
     )
+    if cumulative_input == 31:
+        expected_warnings.add("token_receipts_incomplete")
+    assert usage.warnings == expected_warnings

@@ -590,20 +590,7 @@ export async function hasScanDraftCheckpoint(
     "current",
   )) {
     const { handoffClaimToken: _recordedClaim, ...checkpoint } = recorded;
-    if (
-      isDeepStrictEqual(
-        {
-          ...checkpoint,
-          findings: findingsWithinScope(
-            checkpoint.findings as JsonObject[],
-            includePaths,
-            context.filePaths,
-          ),
-        },
-        snapshot,
-      )
-    )
-      return true;
+    if (workerCheckpointMatches(context, checkpoint, snapshot)) return true;
   }
   return false;
 }
@@ -2008,6 +1995,49 @@ function reconcileDeferredSurfaces(
   return resolved;
 }
 
+function workerCheckpointMatches(
+  context: ArtifactContext,
+  checkpoint: JsonObject,
+  result: JsonObject,
+): boolean {
+  if (isDeepStrictEqual(checkpoint, result)) return true;
+  const includePaths = context.includePaths ?? [context.scope || "."];
+  return (
+    !includePaths.includes(".") &&
+    Array.isArray(checkpoint.findings) &&
+    isDeepStrictEqual(
+      {
+        ...checkpoint,
+        findings: findingsWithinScope(
+          checkpoint.findings,
+          includePaths,
+          context.filePaths,
+        ),
+      },
+      result,
+    )
+  );
+}
+
+/** Accept the selected immutable checkpoint, including its legacy bound-scope projection. */
+export async function workerResultMatchesCurrentCheckpoint(
+  context: ArtifactContext,
+  result: JsonObject,
+): Promise<boolean> {
+  const head = await readCheckpointHead(context, "current");
+  if (!head) return true;
+  const checkpoint = parseJsonObject(
+    await readArtifactText(
+      context,
+      ["checkpoints", head.checkpoint],
+      "current scan checkpoint",
+    ),
+    "current scan checkpoint",
+  );
+  const { handoffClaimToken: _claim, ...snapshot } = result;
+  return workerCheckpointMatches(context, checkpoint, snapshot);
+}
+
 async function readCheckpointHead(
   context: ArtifactContext,
   kind: "current" | "archived",
@@ -2880,6 +2910,56 @@ export async function getCodexSecurityCompletedScan(
     findings,
     review: review as JsonObject,
   };
+}
+
+/** Project canonical documents through the same semantic parser as worker drafts. */
+export async function readScanAuditDraft(input: {
+  root: string;
+  scanId?: string;
+  manifest: JsonObject;
+  findings: JsonObject;
+  reviewState: JsonObject;
+}): Promise<ScanDraftInput> {
+  const context: ArtifactContext = {
+    root: input.root,
+    repoRoot: input.root,
+    layout: "scan",
+    scanId: input.scanId,
+  };
+  const head = await readCheckpointHead(context, "current");
+  if (head !== undefined) {
+    const { saved } = await readPreviousScanDocuments(context);
+    const scan = requireObject(input.manifest.scan, "scan draft manifest.scan");
+    const legacy =
+      scan.coverageRef !== undefined ||
+      (scan.reviewState === undefined && scan.review === undefined);
+    // The writer commits its head before replacing the canonical documents.
+    if (
+      head.modifiedMs >=
+      Math.min(
+        ...saved
+          .slice(0, legacy ? 3 : 2)
+          .map((record) => record?.modifiedMs ?? 0),
+      )
+    ) {
+      const draft = parsePersistedCheckpoint(
+        parseJsonObject(
+          await readArtifactText(
+            context,
+            ["checkpoints", head.checkpoint],
+            "current scan checkpoint",
+          ),
+          "current scan checkpoint",
+        ),
+      );
+      if (draft.scanId !== input.scanId)
+        throw new Error(
+          "scan checkpoint: current checkpoint belongs to a different scan.",
+        );
+      return draft;
+    }
+  }
+  return parseCanonicalScanDraft(input);
 }
 
 /** Admit file-authored drafts through the current contract after removing host fields. */

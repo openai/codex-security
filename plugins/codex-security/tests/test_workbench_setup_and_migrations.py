@@ -120,6 +120,10 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
+    (73, "retain deep scan attempts and exact merge inputs"),
+    (74, "persist selected deep scan finalization input"),
+    (75, "bind original deep scan parent usage turn"),
+    (76, "bind original deep scan execution settings"),
 ]
 
 
@@ -2314,7 +2318,7 @@ def test_legacy_delivered_scan_waits_for_its_thread(
     previous_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
     fail_scan(state_dir, previous_id, "Earlier scan failed")
     scan_id = start_delivered_scan(state_dir, workspace["id"])["scanId"]
-    begin = ("--thread-id", "fixture-thread", "--workflow-version", "fixture")
+    begin = ("--thread-id", "fixture-thread")
 
     assert get_scan(state_dir, scan_id)["scan"]["scanId"] == scan_id
     for command, args in (
@@ -2376,8 +2380,6 @@ def test_legacy_delivered_scan_waits_for_its_thread(
         "other",
         "--user-context",
         begun["deepScan"]["userContext"],
-        "--workflow-version",
-        "fixture",
     )
     assert replacement["startDisposition"] == "created"
     assert replacement["deepScan"]["scanId"] != scan_id

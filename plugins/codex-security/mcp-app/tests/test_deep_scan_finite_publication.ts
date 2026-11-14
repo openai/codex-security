@@ -29,6 +29,10 @@ after(() => temporaryDirectories.cleanup());
 test("Deep engine preserves stopped results for an option-shaped thread ID", async () => {
   const fixture = await fixtureRun();
   const store = new FakeStore(fixture.run);
+  store.run.executionSettings = {
+    version: 1,
+    settings: { codexPath: process.execPath, codexHome: fixture.pluginRoot },
+  };
   store.run.coordinatorGeneration = 7;
   const handoffClaimToken = randomUUID();
   const registry = new DeepScanCoordinatorRegistry();
@@ -73,6 +77,10 @@ test("Deep engine preserves stopped results for an option-shaped thread ID", asy
 test("Deep engine publishes an accepted historical scan without another model turn", async () => {
   const fixture = await fixtureRun({ maxDiscoveryRuns: 1 });
   const store = new FakeStore(fixture.run);
+  store.run.executionSettings = {
+    version: 1,
+    settings: { codexPath: process.execPath, codexHome: fixture.pluginRoot },
+  };
   const registry = new DeepScanCoordinatorRegistry();
   const run = store.run;
   const source = finding("shared", "api/source.py");

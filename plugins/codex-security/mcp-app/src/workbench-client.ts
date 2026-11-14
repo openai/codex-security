@@ -31,19 +31,26 @@ export async function scanRoot(): Promise<string> {
 }
 
 interface WorkbenchOptions {
+  selectFinalization?: boolean;
+  withExecutionSettings?: boolean;
   isolatedPython?: boolean;
 }
 
 export async function runWorkbench(
   args: string[],
   input?: string | Buffer,
-  options: WorkbenchOptions = {},
+  options: WorkbenchOptions | boolean = {},
+  withExecutionSettings = false,
 ): Promise<JsonObject> {
+  const settings =
+    typeof options === "boolean"
+      ? { selectFinalization: options, withExecutionSettings }
+      : options;
   const pythonCommand = await resolvePythonCommand({
     workingDirectory: PLUGIN_ROOT,
   });
   try {
-    return await executeWorkbench(pythonCommand, args, input, options);
+    return await executeWorkbench(pythonCommand, args, input, settings);
   } catch (error) {
     const message =
       missingPythonHelperMessage(error, pythonCommand) ??
@@ -112,6 +119,8 @@ async function executeWorkbench(
       "-c",
       WORKBENCH_PYTHON,
       workbenchScriptPath(),
+      ...(options.selectFinalization ? ["select_finalization"] : []),
+      ...(options.withExecutionSettings ? ["with_execution_settings"] : []),
     ],
     {
       cwd: PLUGIN_ROOT,

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { estimateScanCost } from "../src/cost-model.js";
+import {
+  estimateScanCost,
+  estimateScanCostLowerBound,
+} from "../src/cost-model.js";
 
 const usage = {
   input_tokens: 16_000,
@@ -53,4 +56,31 @@ test("requires a managed Vertex billing context for MaaS prices", () => {
   expect(
     estimateScanCost("openai/gpt-oss-20b-maas", usage, "us-east-1"),
   ).toBeNull();
+});
+
+test("uses Vertex prices for attributed models and a partially priced budget", () => {
+  const model = "gpt-oss-20b-maas";
+  const context = { provider: "gcp" } as const;
+  const first = { model, ...usage };
+  const second = { ...first, model: "openai/gpt-oss-120b-maas" };
+  const total = {
+    input_tokens: 32_000,
+    cached_input_tokens: 16_000,
+    cache_write_input_tokens: 4_000,
+    output_tokens: 2_000,
+    modelUsage: [first, second],
+  };
+  expect(estimateScanCost(model, total, context)?.estimatedUsd).toBeCloseTo(
+    0.000866 + 0.0018,
+    12,
+  );
+  const mixed = {
+    ...total,
+    modelUsage: [first, { ...second, model: "unpriced" }],
+  };
+  expect(estimateScanCost(model, mixed, context)).toBeNull();
+  expect(estimateScanCostLowerBound(model, mixed, context)).toMatchObject({
+    coverage: "partial",
+    estimatedUsd: 0.000866,
+  });
 });

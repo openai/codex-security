@@ -3274,6 +3274,39 @@ def _prepare_scan_finalization(
     )
 
 
+def _seal_warnings(
+    prepared: PreparedScanFinalization, projection_warnings: list[str] | None
+) -> list[str]:
+    # Filesystem diagnostics can contain surrogate-escaped bytes.
+    return list(
+        dict.fromkeys(
+            warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
+            for warning in [
+                *prepared.manifest["scan"].get("warnings", []),
+                *(projection_warnings or []),
+                *prepared.warnings,
+            ]
+        )
+    )
+
+
+def _write_prepared_review_checkpoint(prepared: PreparedScanFinalization) -> None:
+    scan_dir = prepared.scan_dir
+    scan = prepared.manifest["scan"]
+    checkpoint = {
+        "scanId": scan["id"],
+        "complete": scan["status"] == "completed",
+        "scope": scan["scope"],
+        "findings": prepared.findings["findings"],
+        "reviewState": checkpoint_review_state(prepared.coverage),
+        **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
+    }
+    contents = _json_bytes(checkpoint)
+    name = hashlib.sha256(contents).hexdigest() + ".json"
+    write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
+    _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+
+
 def _write_prepared_scan_finalization(
     prepared: PreparedScanFinalization,
     source_root: Path | None = None,
@@ -3285,19 +3318,7 @@ def _write_prepared_scan_finalization(
     scan_dir = prepared.scan_dir
     scan = _require_dict(prepared.manifest, "scan", "manifest")
     if not prepared.was_sealed:
-        # Capture warnings before the first seal; later operation diagnostics must
-        # not change an existing scan's portable results.
-        # Escape surrogate-escaped filesystem bytes for the Unicode JSON contract.
-        warnings = list(
-            dict.fromkeys(
-                warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
-                for warning in [
-                    *scan.get("warnings", []),
-                    *(projection_warnings or []),
-                    *prepared.warnings,
-                ]
-            )
-        )
+        warnings = _seal_warnings(prepared, projection_warnings)
         if warnings:
             scan["warnings"] = warnings
             validate_against_schema(
@@ -3307,18 +3328,7 @@ def _write_prepared_scan_finalization(
         if "coverageRef" in scan:
             _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
         elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
-            checkpoint = {
-                "scanId": scan["id"],
-                "complete": scan["status"] == "completed",
-                "scope": scan["scope"],
-                "findings": prepared.findings["findings"],
-                "reviewState": checkpoint_review_state(prepared.coverage),
-                **({"threatModel": scan["threatModel"]} if "threatModel" in scan else {}),
-            }
-            contents = _json_bytes(checkpoint)
-            name = hashlib.sha256(contents).hexdigest() + ".json"
-            write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
-            _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
+            _write_prepared_review_checkpoint(prepared)
     if not prepared.was_sealed and "coverageRef" not in scan:
         _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
     sealed_paths = (
