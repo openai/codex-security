@@ -639,7 +639,12 @@ def list_unmatched_scan_pairs(
         values,
     ).fetchall()
 
-    selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
+    focus_scan_id = getattr(args, "after_scan_id", None)
+    if focus_scan_id is None:
+        selected.sort(key=lambda scan: (timestamp_key(scan["started_at"]), scan["id"]))
+    else:
+        selected.sort(key=_scan_completion_order)
+    scan_ids = [scan["id"] for scan in selected]
 
     available = []
     for scan in selected:
@@ -653,11 +658,8 @@ def list_unmatched_scan_pairs(
         frozenset((row["before_scan_id"], row["after_scan_id"]))
         for row in connection.execute("SELECT before_scan_id, after_scan_id FROM scan_comparisons")
     }
-    focus_scan_id = getattr(args, "after_scan_id", None)
-    if focus_scan_id is not None and not any(scan["id"] == focus_scan_id for scan in selected):
+    if focus_scan_id is not None and focus_scan_id not in scan_ids:
         raise SystemExit("The scan to match is not a completed scan in this repository.")
-    if focus_scan_id is not None:
-        available.sort(key=_scan_completion_order)
     batches = []
     skipped = 0
     matching_findings: dict[str, list[dict[str, Any]]] = {}
@@ -681,30 +683,18 @@ def list_unmatched_scan_pairs(
         if not previous:
             continue
         if known_links is None:
-            known_links = (
-                []
-                if args.force
-                else _saved_finding_links(connection, {scan["id"] for scan in selected})
-            )
+            known_links = [] if args.force else _saved_finding_links(connection, set(scan_ids))
         for scan in (*previous, after):
             if scan["id"] not in matching_findings:
                 backfill_finding_details(connection, scan)
                 matching_findings[scan["id"]] = [
                     _matching_input(row) for row in _scan_findings(connection, scan["id"]).values()
                 ]
-        known_groups = _known_finding_groups(
-            known_links,
-            {
-                scan["id"]
-                for scan in selected
-                if (
-                    _scan_completion_order(scan) <= _scan_completion_order(after)
-                    if focus_scan_id is not None
-                    else (timestamp_key(scan["started_at"]), scan["id"])
-                    <= (timestamp_key(after["started_at"]), after["id"])
-                )
-            },
-        )
+        known_groups = []
+        if known_links:
+            # Unavailable scans can still contribute a saved finding identity.
+            through_after = set(scan_ids[: scan_ids.index(after["id"]) + 1])
+            known_groups = _known_finding_groups(known_links, through_after)
         batches.append(
             {
                 "afterScanId": after["id"],
