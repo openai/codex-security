@@ -47,6 +47,10 @@ export function createCodexProfileClient(options) {
   };
 }
 
+class PermissionProfileFallbackError extends Error {
+  name = "PermissionProfileFallbackError";
+}
+
 class ProfileThread {
   constructor(options, threadOptions, id = null) {
     this.options = options;
@@ -121,7 +125,7 @@ class ProfileThread {
             this.options.requestedPermissionProfile,
           )
         ) {
-          throw new Error(
+          throw new PermissionProfileFallbackError(
             "Read-only Codex helper stopped because organization policy changed its permission profile. Its results were discarded.\n" +
               item.message,
           );

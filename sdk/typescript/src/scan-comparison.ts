@@ -378,6 +378,11 @@ export async function matchScanFindingsInternal(
       const turn = await thread
         .run(prompt, turnOptions)
         .catch((error: unknown) => {
+          if (
+            error instanceof Error &&
+            error.name === "PermissionProfileFallbackError"
+          )
+            throw new ConfigurationError(error.message, { cause: error });
           // Native thread clients expose failed turns as Error(message), without an HTTP status field.
           if (
             error instanceof Error &&
