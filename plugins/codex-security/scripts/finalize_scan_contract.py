@@ -2628,13 +2628,14 @@ def build_sarif(
                 ],
             }
         },
-        "automationDetails": {"id": scan["id"]},
         "results": [
             _sarif_result(finding, rule_index[finding["ruleId"]], line_hash_cache)
             for finding in ordered_findings
         ],
         "properties": {
             "codexSecuritySchemaVersion": manifest["schemaVersion"],
+            # keep the scan id here, not in automationDetails, so upload-sarif's category wins
+            "codexSecurityScanId": scan["id"],
             "codexSecurityTargetKind": target["kind"],
         },
     }

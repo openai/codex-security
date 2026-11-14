@@ -58,6 +58,26 @@ class SarifProjectionTest(unittest.TestCase):
             self.assertEqual(changed["results"][0][field], result[field])
 
     @pytest.mark.cross_platform
+    def test_sarif_leaves_run_automation_details_to_the_uploader_category(self) -> None:
+        # emulate github/codeql-action upload-sarif: it sets the category only when the run
+        # has no automationDetails, and reads the id as "category/run-id"
+        def uploaded_category(sarif: dict, category: str) -> str:
+            automation_id = category if category.endswith("/") else f"{category}/"
+            for run in sarif["runs"]:
+                run.setdefault("automationDetails", {"id": automation_id})
+            run_id = sarif["runs"][0]["automationDetails"]["id"]
+            return run_id.rsplit("/", 1)[0] if "/" in run_id else ""
+
+        sarif = FINALIZER.build_sarif(self.manifest, self.findings)
+        self.assertNotIn("automationDetails", sarif["runs"][0])
+        for category in ("codex-security/full", "codex-security/diff"):
+            self.assertEqual(uploaded_category(copy.deepcopy(sarif), category), category)
+        self.assertEqual(
+            sarif["runs"][0]["properties"]["codexSecurityScanId"],
+            self.manifest["scan"]["id"],
+        )
+
+    @pytest.mark.cross_platform
     def test_sarif_merges_shared_rule_metadata_without_mixing_results(self) -> None:
         first = copy.deepcopy(self.finding)
         first["severity"] = {"level": "low"}
