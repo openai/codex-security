@@ -66,6 +66,7 @@ export interface PatchGitCommandOptions {
   readonly callerContext?: boolean;
   readonly nestedProbe?: boolean;
   readonly indexFile?: string;
+  readonly hookMessagePath?: string;
   readonly input?: string | Uint8Array;
   readonly environment?: NodeJS.ProcessEnv;
 }
@@ -93,7 +94,7 @@ type RunIndexGit = (
 export async function withPatchGitIndex<T>(
   run: RunIndexGit,
   inspect: (run: RunIndexGit) => Promise<T>,
-  files?: readonly string[],
+  files?: readonly string[] | { readonly treeKeys: readonly string[] },
   sourcePathspecs?: readonly string[],
 ): Promise<T> {
   const directory = await mkdtemp(
@@ -103,17 +104,43 @@ export async function withPatchGitIndex<T>(
   const indexed: RunIndexGit = (args, options) =>
     run(args, { ...options, indexFile });
   try {
-    let hasHead = true;
+    let head: string | undefined;
     try {
-      await indexed(["rev-parse", "--verify", "--quiet", "HEAD"]);
+      head = (
+        await indexed(["rev-parse", "--verify", "--quiet", "HEAD"])
+      ).trim();
     } catch (error) {
       const failure = error as { code?: unknown; status?: unknown };
       if ((failure.code ?? failure.status) !== 1) throw error;
       // An unborn symbolic HEAD has no commit; malformed refs still fail.
       await indexed(["symbolic-ref", "--quiet", "HEAD"]);
-      hasHead = false;
     }
-    await indexed(["read-tree", ...(hasHead ? ["HEAD"] : ["--empty"])]);
+    await indexed(["read-tree", head ?? "--empty"]);
+    let removals = "";
+    if (head !== undefined && sourcePathspecs !== undefined) {
+      // A staged rename can replace a HEAD spelling that still resolves on disk.
+      // Index-info paths are root-relative, including when called from a subdirectory.
+      const removed = await run(
+        [
+          "diff",
+          "--cached",
+          "--no-renames",
+          "--no-relative",
+          "--ignore-submodules=none",
+          "--diff-filter=D",
+          "--name-only",
+          "-z",
+          head,
+          ...sourcePathspecs,
+        ],
+        { encoding: "base64" },
+      );
+      const zero = "0".repeat(head.length);
+      for (const path of Buffer.from(removed, "base64")
+        .toString("latin1")
+        .split("\0"))
+        if (path) removals += `0 ${zero}\t${path}\0`;
+    }
     const entries = Buffer.from(
       await run(
         [
@@ -122,7 +149,10 @@ export async function withPatchGitIndex<T>(
           "--stage",
           "--full-name",
           "-z",
-          ...(sourcePathspecs ?? (files === undefined ? [] : ["--", ...files])),
+          ...(sourcePathspecs ??
+            (files === undefined || "treeKeys" in files
+              ? []
+              : ["--", ...files])),
         ],
         {
           encoding: "base64",
@@ -130,11 +160,30 @@ export async function withPatchGitIndex<T>(
       ),
       "base64",
     ).toString("latin1");
+    // ls-files accepts only text argv pathspecs. Filter whole-index records
+    // by their original bytes when a requested path cannot round-trip as text.
+    const selectedEntries =
+      files && "treeKeys" in files
+        ? entries
+            .split("\0")
+            .filter((entry) => {
+              const path = entry.slice(entry.indexOf("\t") + 1);
+              return files.treeKeys.some(
+                (key) => path === key || path.startsWith(key + "/"),
+              );
+            })
+            .map((entry) => entry + "\0")
+            .join("")
+        : entries;
     await indexed(
       ["-c", "core.ignorestat=false", "update-index", "-z", "--index-info"],
       {
         input: Buffer.from(
-          entries.replaceAll(/(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu, "$1$2 0\t"),
+          removals +
+            selectedEntries.replaceAll(
+              /(^|\0)([0-7]+ [a-f\d]+) [123]\t/gu,
+              "$1$2 0\t",
+            ),
           "latin1",
         ),
       },
@@ -146,6 +195,8 @@ export async function withPatchGitIndex<T>(
 }
 
 export interface PatchGitControls {
+  readonly publicationHooks: PatchPublicationHooks;
+  readonly nestedCheckouts: readonly string[];
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
@@ -154,6 +205,93 @@ export interface PatchGitControls {
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
   validateCapturedSelection(): Promise<void>;
+}
+
+export interface PatchPublicationHooks {
+  readonly gitDirectory: string;
+  readonly events: Set<string>;
+  readonly configured: Set<string>;
+}
+
+function recordConfiguredHook(
+  hooks: Pick<PatchPublicationHooks, "events" | "configured">,
+  key: string,
+  event: string,
+) {
+  const name = /^hook\.(.+)\.event$/u.exec(key)?.[1];
+  if (name !== undefined && GIT_HOOKS.includes(event)) {
+    hooks.events.add(event);
+    hooks.configured.add(name);
+  }
+}
+
+async function hookIsAvailable(path: string): Promise<boolean> {
+  const executable = await access(path, constants.X_OK).then(
+    () => true,
+    () => false,
+  );
+  if (!executable) return false;
+  const metadata = await stat(path).catch(missing);
+  return metadata !== undefined && !metadata.isDirectory();
+}
+
+async function readConfiguredHooks(
+  hooks: Pick<PatchPublicationHooks, "events" | "configured">,
+  run: (args: string[]) => Promise<string>,
+) {
+  let entries: string;
+  try {
+    entries = await run([
+      "config",
+      "--includes",
+      "--null",
+      "--get-regexp",
+      "^hook\\..+\\.event$",
+    ]);
+  } catch (error) {
+    const failure = error as { code?: unknown; status?: unknown };
+    if ((failure.code ?? failure.status) === 1) return;
+    throw error;
+  }
+  for (const entry of entries.split("\0")) {
+    const separator = entry.indexOf("\n");
+    if (separator !== -1)
+      recordConfiguredHook(
+        hooks,
+        entry.slice(0, separator),
+        entry.slice(separator + 1),
+      );
+  }
+}
+
+// Resume has no model turn or private-index discovery. These queries only read configuration and paths.
+export async function activePatchPublicationHooks(
+  run: (args: string[]) => Promise<string>,
+): Promise<PatchPublicationHooks> {
+  const hooks = { events: new Set<string>(), configured: new Set<string>() };
+  await readConfiguredHooks(hooks, run);
+  const directory = dirname(
+    (
+      await run([
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "hooks/pre-push",
+      ])
+    ).replace(/\n$/u, ""),
+  );
+  for (const hook of GIT_HOOKS) {
+    const path = join(directory, hook);
+    if (await hookIsAvailable(path))
+      hooks.events.add(hook.replace(/\.exe$/u, ""));
+  }
+  return {
+    ...hooks,
+    gitDirectory: (await run(["rev-parse", "--absolute-git-dir"])).replace(
+      /\n$/u,
+      "",
+    ),
+  };
 }
 
 // Windows provisions read ACLs in the background. Ask Git to read the same
@@ -728,15 +866,6 @@ export async function capturePatchGitControls(
     Buffer | { size: bigint; mtimeNs: bigint; ctimeNs: bigint }
   >();
   const hookDirectories = new Set<string>();
-  const hookIsAvailable = async (path: string): Promise<boolean> => {
-    const executable = await access(path, constants.X_OK).then(
-      () => true,
-      () => false,
-    );
-    if (!executable) return false;
-    const metadata = await stat(path).catch(missing);
-    return metadata !== undefined && !metadata.isDirectory();
-  };
   const rememberControl = async (
     path: string,
     protectDirectory = true,
@@ -924,6 +1053,7 @@ export async function capturePatchGitControls(
   };
   const rememberHook = async (path: string): Promise<void> => {
     if (await hookIsAvailable(path)) {
+      publicationHooks.events.add(basename(path).replace(/\.exe$/u, ""));
       await rememberControl(path, false);
       const canonical = controlPaths.get(path)!.canonical;
       const metadata = await stat(canonical, { bigint: true });
@@ -962,6 +1092,11 @@ export async function capturePatchGitControls(
         { environment: { GIT_OBJECT_DIRECTORY: "." } },
       )
     ).replace(/\n$/u, "");
+
+  const publicationHooks = {
+    events: new Set<string>(),
+    configured: new Set<string>(),
+  };
   const activeHostFilters = new Set<string>();
   const branchFilterSettings = new Set<string>();
   let hasConditionalFilters = false;
@@ -1006,18 +1141,39 @@ export async function capturePatchGitControls(
   const captureReferences = async (checkout: string): Promise<void> => {
     const configurationDirectory = await setupDirectory(checkout);
     filterDirectories.set(checkout, configurationDirectory);
-    const origins = await runConfigFields(checkout, [
+    const records = await runConfigFields(checkout, [
       "config",
       "--null",
+      "--show-scope",
       "--show-origin",
       "--includes",
       "--list",
-      "--name-only",
     ]);
-    let includes = false;
+    // Bind an active origin to the include edges from the same native Git read.
+    const settings: {
+      scope: string;
+      origin: string;
+      key: string;
+      value: string;
+    }[] = [];
+    for (let index = 0; index + 2 < records.length; index += 3) {
+      const entry = records[index + 2]!;
+      const split = entry.indexOf("\n");
+      settings.push({
+        scope: records[index]!,
+        origin: records[index + 1]!,
+        key: split < 0 ? entry : entry.slice(0, split),
+        value: split < 0 ? "" : entry.slice(split + 1),
+      });
+    }
     const activeConfigurations = new Set<string>();
-    for (let index = 0; index + 1 < origins.length; index += 2) {
-      const origin = origins[index]!;
+    if (settings.some(({ key }) => /^hook\..+\.event$/u.test(key)))
+      await readConfiguredHooks(publicationHooks, (args) =>
+        runControl(root, checkout, args, {
+          environment: configurationEnvironment,
+        }),
+      );
+    for (const { origin } of settings) {
       if (origin.startsWith("file:")) {
         const path = relativeFile(
           configurationDirectory,
@@ -1025,8 +1181,6 @@ export async function capturePatchGitControls(
         );
         activeConfigurations.add(path);
       }
-      if (/^(include|includeif\..*)\.path$/u.test(origins[index + 1]!))
-        includes = true;
     }
     const captureHooks = async (configured?: string): Promise<void> => {
       let entry: string;
@@ -1145,6 +1299,11 @@ export async function capturePatchGitControls(
         const separator = entry.indexOf("\n");
         const key = entry.slice(0, separator);
         const value = entry.slice(separator + 1);
+        recordConfiguredHook(
+          publicationHooks,
+          configPath(key),
+          configPath(value),
+        );
         if (
           automaticPublication &&
           value &&
@@ -1164,41 +1323,25 @@ export async function capturePatchGitControls(
           );
       }
     };
-    if (includes) {
-      const paths = await runConfigFields(checkout, [
-        "config",
-        "--null",
-        "--show-scope",
-        "--show-origin",
-        "--includes",
-        "--get-regexp",
-        "^(include|includeif\\..*)\\.path$",
-      ]);
-      for (let index = 0; index + 2 < paths.length; index += 3) {
-        const scope = paths[index]!;
-        const origin = paths[index + 1]!;
-        const value = paths[index + 2]!;
-        const separator = value.indexOf("\n");
-        const key = value.slice(0, separator);
-        const relativeTo = origin.startsWith("file:")
-          ? dirname(
-              relativeFile(configurationDirectory, configPath(origin.slice(5))),
-            )
-          : configurationDirectory;
-        await captureInclude(
-          relativeTo,
-          value.slice(separator + 1),
-          key.startsWith("includeif."),
-          await userSelectedConfig(scope, origin, configurationDirectory),
-        );
-      }
+    for (const { scope, origin, key, value } of settings) {
+      if (!/^(include|includeif\..*)\.path$/u.test(key)) continue;
+      const relativeTo = origin.startsWith("file:")
+        ? dirname(
+            relativeFile(configurationDirectory, configPath(origin.slice(5))),
+          )
+        : configurationDirectory;
+      await captureInclude(
+        relativeTo,
+        value,
+        key.startsWith("includeif."),
+        await userSelectedConfig(scope, origin, configurationDirectory),
+      );
     }
     for (const path of activeConfigurations) await rememberConfiguration(path);
     if (
       automaticPublication &&
-      origins.some(
-        (key, index) =>
-          index % 2 === 1 && /^filter\..+\.(clean|smudge|process)$/u.test(key),
+      settings.some(({ key }) =>
+        /^filter\..+\.(clean|smudge|process)$/u.test(key),
       )
     ) {
       for (const key of await activeCheckoutFilters(
@@ -1624,16 +1767,23 @@ export async function capturePatchGitControls(
             "--null",
             "--show-scope",
             "--show-origin",
-            "--default=lfs",
+            "--default=",
             "--get",
             "lfs.storage",
           ]).catch((error: unknown) => {
             const failure = error as Error & {
               code?: unknown;
               status?: unknown;
+              stderr?: unknown;
               signal?: unknown;
               killed?: boolean;
             };
+            const status = failure.code ?? failure.status;
+            const missingValue =
+              status === 1 &&
+              (failure.stderr === "" ||
+                (Buffer.isBuffer(failure.stderr) &&
+                  failure.stderr.length === 0));
             // Git LFS discards failed config reads, including partial output,
             // and uses the default cache after reporting its warning.
             if (
@@ -1641,7 +1791,7 @@ export async function capturePatchGitControls(
               failure.name !== "AbortError" &&
               !failure.signal &&
               !failure.killed &&
-              (failure.code === 128 || failure.status === 128)
+              (missingValue || status === 128)
             )
               return "";
             throw error;
@@ -1655,7 +1805,10 @@ export async function capturePatchGitControls(
         const lfs = absolute
           ? configured
           : join(common.replace(/\n$/u, ""), configured);
-        const userSelected = await userSelectedConfig(scope, origin, checkout);
+        // Git reports a supplied default as command-line configuration. Only an
+        // actual nonempty setting can authorize a cache outside this checkout.
+        const userSelected =
+          !!value && (await userSelectedConfig(scope, origin, checkout));
         pendingStoragePaths.push({ path: lfs, userSelected });
       }
       let tracked: Buffer;
@@ -1670,6 +1823,8 @@ export async function capturePatchGitControls(
               [
                 "-c",
                 "core.hooksPath=/dev/null",
+                "-c",
+                "hook.post-index-change.enabled=false",
                 "-c",
                 "core.fsmonitor=false",
                 ...args,
@@ -2014,6 +2169,7 @@ export async function capturePatchGitControls(
       alternateObjectDirectories.push(path);
   }
   return {
+    publicationHooks: { ...publicationHooks, gitDirectory },
     readOnlyPaths: [
       ...new Set([
         ...alternateObjectDirectories,
@@ -2031,6 +2187,7 @@ export async function capturePatchGitControls(
           .map(({ canonical }) => canonical),
       ]),
     ],
+    nestedCheckouts: [...nestedDirectories.keys()],
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],

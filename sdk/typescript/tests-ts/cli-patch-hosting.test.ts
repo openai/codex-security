@@ -10,7 +10,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { delimiter, dirname, join, relative } from "node:path";
+import { delimiter, dirname, join, parse, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -24,6 +24,7 @@ import {
   completePatches,
   runWorkflow,
   runGitRepositoryCommand,
+  runLocalHostingTransport,
   publicationRepository as createPublicationRepository,
 } from "./cli-patch-fixtures.js";
 
@@ -820,12 +821,16 @@ exit 1
   test.each(
     [false, true].flatMap((resume) =>
       ["github.com", "gitlab.com"].flatMap((host) =>
-        [false, true].map((fileUrl) => ({ resume, host, fileUrl })),
+        [
+          "path",
+          "file-url",
+          ...(process.platform === "win32" ? ["drive-relative"] : []),
+        ].map((spelling) => ({ resume, host, spelling })),
       ),
     ),
   )(
-    "rejects all-local pushes with a hosted fetch URL: $host, resume=$resume, file=$fileUrl",
-    async ({ resume, host, fileUrl }) => {
+    "rejects all-local pushes with a hosted fetch URL: $host, resume=$resume, $spelling",
+    async ({ resume, host, spelling }) => {
       const { directory, git, remote } = await publicationRepository();
       git(
         "remote",
@@ -833,13 +838,14 @@ exit 1
         "origin",
         `https://${host}/example/repository.git`,
       );
-      git(
-        "remote",
-        "set-url",
-        "--push",
-        "origin",
-        fileUrl ? pathToFileURL(remote).href : remote,
-      );
+      let pushUrl = remote;
+      if (spelling === "file-url") pushUrl = pathToFileURL(remote).href;
+      if (spelling === "drive-relative") {
+        pushUrl = parse(remote).root.slice(0, 2) + relative(directory, remote);
+        expect(pushUrl).toMatch(/^[a-z]:[^\\/]/iu);
+        expect(git("ls-remote", pushUrl)).toBe("");
+      }
+      git("remote", "set-url", "--push", "origin", pushUrl);
       const branch = "codex-security/patch-scan-1";
       const commit = git("rev-parse", "HEAD");
       if (resume) {
@@ -927,14 +933,14 @@ exit 1
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
               if (args.includes("ls-remote"))
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   ["ls-remote", "--heads", "--", remote],
                   cwd,
                   options,
                 );
               if (args[0] === "push")
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   args.map((arg) => (arg === "origin" ? remote : arg)),
                   cwd,
@@ -1533,7 +1539,8 @@ process.exit(result.status ?? 1);
       // double-quoted Windows path passed through Git for Windows.
       const config = join(tools, "synthetic config");
       await writeFile(config, "");
-      const configuredCommand = `ssh -F "${config}"`;
+      const configOption = transport === "scp-command" ? "none" : config;
+      const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")
@@ -1549,7 +1556,7 @@ process.exit(result.status ?? 1);
       environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] || coreCommand
-          ? `'${ssh}' '-F' '${config}'`
+          ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60'`
           : `'${ssh}'`;
       const alias =
         transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"
@@ -1784,7 +1791,7 @@ process.exit(result.status ?? 1);
                   `refs/heads/${branch}`,
                   `refs/heads/${branch}/*`,
                 ]);
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   [...args.slice(0, 3), remote, ...args.slice(4)],
                   cwd,
@@ -1809,7 +1816,7 @@ process.exit(result.status ?? 1);
                   "origin",
                   `${git("rev-parse", branch)}:refs/heads/${branch}`,
                 ]);
-                return runGitRepositoryCommand(
+                return runLocalHostingTransport(
                   command,
                   [
                     "push",
@@ -1942,7 +1949,7 @@ process.exit(result.status ?? 1);
         },
         { localHosting: false },
       );
-      if (transport === "local" || localOnly) {
+      if (transport === "local" || localOnly || localFirst) {
         expect(outcome.exitCode, outcome.stderr).toBe(2);
         expect(outcome.stderr).toContain("network push URL");
         expect(modelCalls).toBe(0);

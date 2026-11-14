@@ -19,7 +19,6 @@ import {
 } from "./support/patch-snapshot-environment.js";
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
-// Batch publication captures clean-filter inputs around each finding's immutable tree.
 const preparedSnapshotTimeout = process.platform === "win32" ? 180_000 : 90_000;
 for (const policy of ["set", "exclude", "control"] as const) {
   for (const action of [
@@ -35,12 +34,12 @@ for (const policy of ["set", "exclude", "control"] as const) {
     "inline-publish",
     ...(policy === "control" ? (["batch-edited-publish"] as const) : []),
   ] as const) {
+    const batch = action.startsWith("batch");
+    const publish = action.endsWith("publish");
     test(
       `prepared snapshot context preserves ${policy} filter policy for ${action}`,
       async () => {
-        const batch = action.startsWith("batch");
         const risk = action.includes("risk");
-        const publish = action.endsWith("publish");
         const inline = action === "inline-publish";
         const dataPath = inline ? "src/data" : "data";
         const { directory, remote } = await publicationRepository(fixtures);
@@ -341,13 +340,17 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
             index,
           );
       },
-      preparedSnapshotTimeout,
+      // Batch publication repeatedly starts native Windows sandboxes to capture
+      // each finding's immutable tree and verify filtered content before pushing.
+      process.platform === "win32" && batch && publish
+        ? 1_200_000
+        : preparedSnapshotTimeout,
     );
   }
 }
 
 test("publication keeps mixed valid and missing selected-path errors before branching", async () => {
-  const { directory, git } = await publicationRepository(fixtures);
+  const { directory, remote, git } = await publicationRepository(fixtures);
   const original = git("rev-parse", "HEAD");
   const index = await readFile(join(directory, ".git", "index"));
   const outcome = await runWorkflow(
@@ -389,6 +392,7 @@ test("publication keeps mixed valid and missing selected-path errors before bran
   expect(
     git("for-each-ref", "--format=%(refname)", "refs/heads/codex-security/"),
   ).toBe("");
+  expect(repositoryGit(remote)("for-each-ref", "refs/heads/")).toBe("");
   expect(await readFile(join(directory, ".git", "index"))).toEqual(index);
 });
 

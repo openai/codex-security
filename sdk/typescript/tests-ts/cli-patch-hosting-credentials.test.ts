@@ -6,6 +6,7 @@ import {
   publicationRepository,
   resultWithFindings,
   runGitRepositoryCommand,
+  runLocalHostingTransport,
   runWorkflow,
   savedScan,
 } from "./cli-patch-fixtures.js";
@@ -73,11 +74,12 @@ test.each(
           const readGit = (arguments_: readonly string[]) =>
             runGitRepositoryCommand("git", arguments_, cwd, effective);
           if (command === "git") {
-            if (args[0] === "ls-remote") {
+            const probe = args.indexOf("ls-remote");
+            if (options?.patchTransport && probe >= 0) {
               preflights++;
-              expect(await readGit(["ls-remote", "--get-url", args[3]!])).toBe(
-                resolved,
-              );
+              expect(
+                await readGit(["ls-remote", "--get-url", args[probe + 3]!]),
+              ).toBe(resolved);
               expect(
                 await readGit(["config", "--get", "synthetic.inherited"]),
               ).toBe("count value");
@@ -86,15 +88,18 @@ test.each(
               ).toBe("parameter value");
               return "";
             }
-            if (args[0] === "push") {
+            if (options?.patchTransport && args.includes("push")) {
               pushes++;
               expect(
                 await readGit(["remote", "get-url", "--push", "origin"]),
               ).toBe(resolved);
-              return readGit(
+              return runLocalHostingTransport(
+                command,
                 args.map((argument) =>
                   argument === "origin" ? remote : argument,
                 ),
+                cwd,
+                effective,
               );
             }
             return readGit(args);

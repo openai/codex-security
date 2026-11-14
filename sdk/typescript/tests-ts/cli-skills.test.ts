@@ -268,8 +268,8 @@ describe("CLI skill commands", () => {
     await using temp = await scopedTemporaryDirectory("codex-security-skills-");
     const directory = temp.path;
     for (const [command, skill, argument, status] of [
-      ["validate", "validation", "findings...", 0],
-      ["patch", "fix-finding", "issues...", 7],
+      ["validate", "validation", "<findings...>", 0],
+      ["patch", "fix-finding", "ISSUE...", 7],
     ] as const) {
       const file = join(directory, `${command}.txt`);
       await writeFile(file, `${command} file contents\n`);
@@ -283,7 +283,7 @@ describe("CLI skill commands", () => {
             command,
             `${command}.txt`,
             `${command} literal`,
-            "C:\\tmp\\finding one.txt",
+            "text:C:\\tmp\\finding one.txt",
             "\\\\server\\share\\issue.txt",
           ],
           dependencies({
@@ -382,7 +382,7 @@ describe("CLI skill commands", () => {
       const help = captureCli(main, "stdout");
       expect(await help.run([command, "--help"], dependencies())).toBe(0);
       expect(help.text()).toContain(
-        `Usage: codex-security ${command} ${command === "patch" ? `[${argument}]` : `<${argument}>`}`,
+        `Usage: codex-security ${command} ${argument}`,
       );
       expect(help.text()).toContain("--effort <effort>");
       expect(help.text()).toContain("--model <model>");
@@ -989,6 +989,17 @@ describe("CLI skill commands", () => {
       const stderr = captureCli(main, "stderr");
       expect(await stderr.run([command, url], deps)).toBe(2);
       expect(stderr.text()).toContain("finding #1.md");
+      for (const path of [
+        file,
+        "./missing.md",
+        "../missing.md",
+        "~/missing.md",
+      ]) {
+        expect(await stderr.run([command, path], deps)).toBe(2);
+        expect(stderr.text()).toContain(
+          path === file ? "finding #1.md" : "missing.md",
+        );
+      }
     }
     const stderr = captureCli(main, "stderr");
     expect(
@@ -999,6 +1010,10 @@ describe("CLI skill commands", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("must refer to local files");
     expect(onCodex).not.toHaveBeenCalled();
+    expect(
+      await runCapturedCli(main, ["validate", "text:./missing.md"], deps),
+    ).toBe(0);
+    expect(onCodex.mock.lastCall?.[3]).toContain("./missing.md");
     await writeFile(file, "Finding supplied through a file URL.");
     expect(await runCapturedCli(main, ["validate", url], deps)).toBe(0);
     expect(onCodex.mock.lastCall?.[3]).toContain(
@@ -1616,13 +1631,39 @@ process.stdout.write(JSON.stringify({
     ),
     ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
       [
-        "model cache not found",
         "model metadata file not found",
-        "permission denied opening model cache",
         "model 'synthetic'\nconfiguration entry not found",
         "Safety policy: request refused.",
+        "Error loading configuration: config.toml:4:2: model 'gpt-5' not found",
+        "Error loading configuration: config.toml:4:2: responseStatus=401",
+        "/synthetic/model 'gpt-5' not found",
+        "model 'gpt-5' not found.log",
         "permission denied opening /synthetic/response_status=403/cache",
       ].map((detail) => [command, detail, null] as const),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      ["model cache not found", "permission denied opening model cache"].map(
+        (detail) =>
+          [
+            command,
+            detail,
+            "Codex could not load its model metadata.",
+          ] as const,
+      ),
+    ),
+    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+      (
+        [
+          [
+            "error sending request for url (https://example.test/v1?source=config.toml:1:2:) HTTP 401 Unauthorized",
+            "Authentication failed.",
+          ],
+          [
+            "error sending request for url (https://example.test/v1#config.toml:1:2:) HTTP 403 Forbidden",
+            "The selected model is unavailable for the current credentials.",
+          ],
+        ] as const
+      ).map(([detail, advice]) => [command, detail, advice] as const),
     ),
     ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
       (
@@ -1653,6 +1694,16 @@ process.stdout.write(JSON.stringify({
         ] as const
       ).map(([detail, advice]) => [command, detail, advice] as const),
     ),
+    [
+      "validate",
+      "Provider configured in config.toml returned 401 Unauthorized",
+      "Authentication failed.",
+    ],
+    [
+      "validate",
+      "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
+      null,
+    ],
   ] as const)(
     "retains failure advice and diagnostics from the %s child: %s",
     async (command, detail, advice) => {
@@ -1667,9 +1718,13 @@ process.stdout.write(JSON.stringify({
         ),
       ).toBe(7);
       expect(stdout.text()).toBe("");
-      if (advice === null)
-        expect(stderr.text()).not.toContain("selected model is unavailable");
-      else expect(stderr.text()).toContain(advice);
+      if (advice === null) {
+        expect(stderr.text()).toBe(
+          `codex-security: ${command} failed with exit code 7.\n${detail}\n`,
+        );
+      } else {
+        expect(stderr.text()).toContain(advice);
+      }
       expect(stderr.text()).toContain(detail);
     },
   );
@@ -1716,6 +1771,9 @@ process.stdout.write(JSON.stringify({
           ["sqlite3.OperationalError: timeout waiting for lock", false],
           ["workbench request timed-out waiting for lock", false],
           ["database network_error reading local state", false],
+          ['{"code":"request-timed-out"}', true],
+          ['{"code":"request.timed.out"}', true],
+          ["ENOENT: open /synthetic/request-timed-out/result.json", false],
           ["request timed_out", true],
           ["network.error", true],
           ["ECONNABORTED", true],
@@ -1745,6 +1803,10 @@ process.stdout.write(JSON.stringify({
 
   test("preserves skill failure details alongside helpful advice", () => {
     const cases = [
+      ["invalid.api.key", "Authentication failed"],
+      ["token.expired", "Authentication failed"],
+      ["model.not.found", "selected model is unavailable"],
+      ["model.access", "selected model is unavailable"],
       ["HTTP 401 sk-proj-SYNTHETIC_SECRET", "Authentication failed"],
       [
         "403 model access denied /private/repository",
@@ -1765,12 +1827,14 @@ process.stdout.write(JSON.stringify({
       ],
       ["tokens-per-minute limit exceeded", "rate limited"],
       ["tokens_per_minute limit exceeded", "rate limited"],
+      ["tokens.per.minute", "rate limited"],
       [
         "models cache supports_reasoning_summaries /private/home",
         "model metadata",
       ],
       ["ENOTFOUND /private/repository", "could not connect"],
       ["ECONNABORTED sk-proj-SYNTHETIC_SECRET", "could not connect"],
+      ["timed_out", "could not connect"],
       ["unknown sk-proj-SYNTHETIC_SECRET /private/repository", "exit code 7"],
     ];
     for (const [detail, expected] of cases) {
@@ -1838,7 +1902,13 @@ process.stdout.write(JSON.stringify({
 
   test.each([
     "Failed after 1401 bytes",
+    "Error loading configuration: config.toml:401:8: unclosed array, expected `]`",
     "permission denied opening cache",
+    "config.toml:401:8: invalid token",
+    "config.toml:403:429: invalid api key",
+    "config.toml:429:8: model access denied",
+    "config.toml:401:8: rate limit exceeded",
+    "config.toml:4:2: response_status=403",
     "permission denied opening model cache",
     "line 1429 could not be parsed",
     "count_tokens_per_minute_limit is undefined",
@@ -1935,6 +2005,11 @@ process.stdout.write(JSON.stringify({
       ].map((detail) => [detail, null] as const),
     ]),
     ["database responseStatus=401", null],
+    [
+      JSON.stringify({ error: { message: "Invalid API key." } }),
+      "Authentication failed",
+    ],
+    ["ENOENT: could not open /synthetic/timed.out/result.json", null],
     ["sqlite3 response_status=403", null],
     ["workbench responseStatus=429", null],
     ["permission denied opening /synthetic/response_status=403/cache", null],
@@ -1953,6 +2028,14 @@ process.stdout.write(JSON.stringify({
     ["ExpiredTokenException", "Authentication failed"],
     ["HTTP 403 ExpiredTokenException", "Authentication failed"],
     ["HTTP 401; parsed 429 bytes", "Authentication failed"],
+    [
+      "error sending request for url (https://example.test/v1?source=config.toml:1:2:)",
+      "could not connect",
+    ],
+    [
+      "error sending request for url (https://example.test/v1) config.toml:401:8: invalid token",
+      null,
+    ],
     ["HTTP request failed while parsing line 429", null],
     ["permission denied opening /synthetic/403/cache", null],
     ["401 sk-proj-SYNTHETIC_SECRET", null],
@@ -1976,6 +2059,7 @@ process.stdout.write(JSON.stringify({
       expect(message).not.toContain("Authentication failed");
       expect(message).not.toContain("selected model is unavailable");
       expect(message).not.toContain("rate limited");
+      expect(message).not.toContain("could not connect");
     } else {
       expect(message).toContain(advice);
     }
@@ -1983,15 +2067,26 @@ process.stdout.write(JSON.stringify({
   });
 
   test.each([
+    "model.access",
+    "model.access.denied",
+    "model.not.found",
+    "invalid.api.key",
+    "token.expired",
     "response_code=401",
     "response-code=403",
     "responseCode=429",
     "responseStatus=401",
     "response_status=403",
-  ])("keeps response-code URL components separate from advice: %s", (code) => {
+  ])("keeps endpoint components separate from diagnostic code %s", (code) => {
     for (const url of [
+      `https://${code}.example/v1`,
+      `https://example.test/${code}/v1`,
+      `https://example.test/${code}`,
       `https://example.test/v1?${code}`,
+      `https://example.test/v1?error=${code}`,
+      `https://example.test/v1?${code}=synthetic`,
       `https://example.test/v1#${code}`,
+      `https://example.test/v1#error=${code}`,
     ]) {
       const detail = `error sending request for url (${url})`;
       const message = skillCommandFailure("validate", 7, detail);

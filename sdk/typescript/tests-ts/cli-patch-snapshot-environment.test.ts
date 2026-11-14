@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PATCH_GIT_ENVIRONMENT_RUNNER as runner } from "../src/cli.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -133,6 +134,50 @@ for (const platform of ["win32", "linux"] as const) {
     });
   }
 }
+
+test("snapshot Git keeps Docker registry auth out of checkout-filtered blobs", async () => {
+  const cwd = await fixtures.create("patch-snapshot-registry-");
+  const registryAuth = JSON.stringify({
+    auths: {
+      "registry.example.test": { auth: "synthetic-registry-credential" },
+    },
+  });
+  const env = { ...process.env, DOCKER_AUTH_CONFIG: registryAuth };
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd, env, encoding: "utf8" });
+  git("init", "--quiet");
+  await writeFile(
+    join(cwd, ".gitattributes"),
+    "candidate.txt filter=registry\n",
+  );
+  await writeFile(join(cwd, "candidate.txt"), "safe patch\n");
+  await writeFile(
+    join(cwd, "filter.cjs"),
+    'const input = require("node:fs").readFileSync(0); process.stdout.write(process.env.DOCKER_AUTH_CONFIG ?? input);',
+  );
+  const add = [
+    "-c",
+    "filter.registry.clean=node filter.cjs",
+    "add",
+    "--",
+    "candidate.txt",
+  ];
+  git(...add);
+  expect(git("show", ":candidate.txt")).toBe(registryAuth);
+
+  git("read-tree", "--empty");
+  const header = bindingFrame();
+  execFileSync(
+    Bun.which("node")!,
+    ["-e", runner, "--", String(header.length), "git", ...add],
+    {
+      cwd,
+      env,
+      input: header,
+    },
+  );
+  expect(git("show", ":candidate.txt")).toBe("safe patch\n");
+});
 
 test("snapshot Git reports an incomplete binding frame before starting the command", async () => {
   const child = spawn(

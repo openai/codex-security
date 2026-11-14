@@ -14,6 +14,7 @@ import {
   repositoryGit,
   runGitRepositoryCommand,
   readAppliedText,
+  runLocalHostingTransport,
   publicationRepository as createPublicationRepository,
 } from "./cli-patch-fixtures.js";
 import { gitText } from "./support/shell.js";
@@ -231,7 +232,8 @@ describe("scan and patch workflow", () => {
       const askpassEnvironment =
         kind === "removed component with external askpass"
           ? {
-              GIT_ASKPASS: relative(repository, askpass),
+              GIT_EXEC_PATH: directory,
+              GIT_ASKPASS: basename(askpass),
               SSH_ASKPASS: relative(repository, sshAskpass),
             }
           : kind === "removed component with checkout askpass"
@@ -1531,7 +1533,7 @@ describe("scan and patch workflow", () => {
   ] as const)(
     "completes required patch output (status %i, failure %p)",
     async (codexStatus, failOutput, expectedStatus) => {
-      const { directory } = await createPublicationRepository(repositories);
+      const { directory } = await createPublicationRepository(fixtures);
       const report = "Synthetic patch report: café → fixed.\n";
       const started = Promise.withResolvers<(error?: Error) => void>();
       const stdout = new Writable({
@@ -2287,69 +2289,88 @@ describe("scan and patch workflow", () => {
   test.each([false, true])(
     "patches selected scan findings with analytics.enabled=%p in the scanned repository and returns JSON",
     async (analyticsEnabled) => {
-      const result = resultWithFindings(["critical", "high", "medium", "low"]);
-      const invocations: Array<{
-        args: readonly string[];
-        directory: string | undefined;
-        prompt: string | undefined;
-      }> = [];
-      const patched: Finding[] = [];
-      const outcome = await runWorkflow(
-        [
-          "scan",
-          "../other/repository",
-          "--patch",
-          "--codex",
-          `analytics.enabled=${analyticsEnabled}`,
-          "--codex",
-          "features.goals=false",
-          "--patch-severity",
+      const directory = await temporaryDirectory("scan-patch-target-");
+      try {
+        const currentDirectory = join(directory, "current");
+        const repository = join(directory, "other", "repository");
+        await mkdir(currentDirectory);
+        await mkdir(join(repository, "src"), { recursive: true });
+        const result = resultWithFindings([
+          "critical",
           "high",
-          "--fail-on-severity",
-          "high",
-          "--json",
-        ],
-        {
-          result,
-          onCodex: (args, output) => {
-            invocations.push({
-              args,
-              directory: output?.appServer?.directory,
-              prompt: output?.appServer?.prompt,
-            });
-            patched.push(...completePatches(args, output));
-            return 0;
+          "medium",
+          "low",
+        ]);
+        const invocations: Array<{
+          args: readonly string[];
+          directory: string | undefined;
+          prompt: string | undefined;
+        }> = [];
+        const patched: Finding[] = [];
+        const outcome = await runWorkflow(
+          [
+            "scan",
+            "../other/repository",
+            "--patch",
+            "--codex",
+            `analytics.enabled=${analyticsEnabled}`,
+            "--codex",
+            "features.goals=false",
+            "--patch-severity",
+            "high",
+            "--fail-on-severity",
+            "high",
+            "--json",
+          ],
+          {
+            currentDirectory,
+            result,
+            onCodex: async (args, output) => {
+              invocations.push({
+                args,
+                directory: output?.appServer?.directory,
+                prompt: output?.appServer?.prompt,
+              });
+              const findings = completePatches(args, output);
+              for (const finding of findings)
+                await writeFile(
+                  join(repository, finding.locations[0]!.path),
+                  "fixed\n",
+                );
+              patched.push(...findings);
+              return 0;
+            },
           },
-        },
-      );
+        );
 
-      expect(outcome.exitCode).toBe(0);
-      expect(patched.map(({ occurrenceId }) => occurrenceId)).toEqual([
-        "occ_1",
-        "occ_2",
-      ]);
-      expect(invocations).toHaveLength(2);
-      for (const invocation of invocations) {
-        expect(invocation.args[0]).toBe("app-server");
-        expect(invocation.args).toContain(
-          `analytics.enabled=${analyticsEnabled}`,
-        );
-        expect(invocation.args).not.toContain("features.goals=false");
-        expect(invocation.directory).toBe(
-          resolve(CURRENT_REPOSITORY, "../other/repository"),
-        );
-        expect(invocation.prompt).toContain("Return exactly one JSON object");
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(patched.map(({ occurrenceId }) => occurrenceId)).toEqual([
+          "occ_1",
+          "occ_2",
+        ]);
+        expect(invocations).toHaveLength(2);
+        for (const invocation of invocations) {
+          expect(invocation.args[0]).toBe("app-server");
+          expect(invocation.args).toContain(
+            `analytics.enabled=${analyticsEnabled}`,
+          );
+          expect(invocation.args).not.toContain("features.goals=false");
+          expect(invocation.directory).toBe(repository);
+          expect(invocation.prompt).toContain("Return exactly one JSON object");
+        }
+        expect(JSON.parse(outcome.stdout)).toMatchObject({
+          manifest: result.manifest,
+          findings: result.findings,
+          patchSeverity: "high",
+          patches: [
+            { occurrenceId: "occ_1", status: "verified" },
+            { occurrenceId: "occ_2", status: "verified" },
+          ],
+        });
+        expect(outcome.stderr).toContain("Patching 2 confirmed findings...");
+      } finally {
+        await rm(directory, { recursive: true, force: true });
       }
-      expect(JSON.parse(outcome.stdout)).toMatchObject({
-        manifest: result.manifest,
-        findings: result.findings,
-        patchSeverity: "high",
-        patches: [
-          { occurrenceId: "occ_1", status: "verified" },
-          { occurrenceId: "occ_2", status: "verified" },
-        ],
-      });
-      expect(outcome.stderr).toContain("Patching 2 confirmed findings...");
     },
   );
 
@@ -2838,7 +2859,7 @@ describe("scan and patch workflow", () => {
           },
           onRepositoryCommand: async (command, args, cwd, options) => {
             if (command === "git") {
-              if (args[0] === "push") {
+              if (args.includes("push")) {
                 pushCalls += 1;
                 if (failure === "push" && failOnce) {
                   failOnce = false;
@@ -2846,14 +2867,17 @@ describe("scan and patch workflow", () => {
                 }
               }
               const environment = { ...options?.environment };
-              if (args[0] === "ls-remote")
+              if (args.includes("ls-remote"))
                 for (const key of Object.keys(environment))
                   if (
                     key.startsWith("GIT_CONFIG_KEY_") &&
                     environment[key] === `url.${origin}.insteadOf`
                   )
                     environment[key] = `url.${remote}.insteadOf`;
-              const output = await runGitRepositoryCommand(command, args, cwd, {
+              const run = options?.patchTransport
+                ? runLocalHostingTransport
+                : runGitRepositoryCommand;
+              const output = await run(command, args, cwd, {
                 ...options,
                 environment,
               });
@@ -2917,7 +2941,7 @@ describe("scan and patch workflow", () => {
           fixtures,
           { localHosting: false },
         );
-        expect(retry.exitCode).toBe(0);
+        expect(retry.exitCode, retry.stderr).toBe(0);
         expect(JSON.parse(retry.stdout)).toEqual({
           pullRequest: { branch, url },
         });
@@ -3326,6 +3350,24 @@ describe("scan and patch workflow", () => {
         expect(outcome.stderr).toContain("Open findings for review?");
       }
     }
+  });
+
+  test("shows findings without offering interactive patches on a budgeted scan", async () => {
+    const confirmPatchReview = mock(resolving(true));
+    const patchEditor = mock(resolving(null));
+    const outcome = await runWorkflow(
+      ["scan", "--max-cost", "1"],
+      { result: resultWithFindings(["high"]) },
+      {
+        interactive: true,
+        configure: (value) =>
+          Object.assign(value, { confirmPatchReview, patchEditor }),
+      },
+    );
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.stderr).toContain("FINDINGS");
+    expect(confirmPatchReview).not.toHaveBeenCalled();
+    expect(patchEditor).not.toHaveBeenCalled();
   });
 
   test("shows normal scan findings before optionally opening patch review", async () => {
@@ -8459,6 +8501,18 @@ describe("patch change tracking", () => {
       },
     );
     if (change === "vanished") expect(removed).toBe(true);
+    if (change === "symlink") {
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain(
+        "symbolic link outside the scanned repository",
+      );
+      expect(git("rev-parse", "HEAD")).toBe(before);
+      expect(git("ls-remote", "origin")).toBe("");
+      await expect(readFile(join(directory, "new.ts"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      return;
+    }
     const blocked = [
       "move",
       "copy",

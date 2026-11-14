@@ -125,13 +125,13 @@ test.each([
     const inventory = calls.filter(
       ({ args }) => args.includes("config") && !args.includes("--git-path"),
     );
-    expect(inventory.some(({ args }) => args.includes("--list"))).toBe(true);
-    expect(inventory.some(({ args }) => args.includes("--get-regexp"))).toBe(
-      true,
-    );
-    expect(inventory.some(({ args }) => args.includes("--type=path"))).toBe(
-      true,
-    );
+    const origins = inventory.filter(({ args }) => args.includes("--list"));
+    expect(origins.length).toBeGreaterThan(0);
+    for (const { args } of origins) {
+      expect(args).toContain("--includes");
+      expect(args).toContain("--show-origin");
+      expect(args).toContain("--show-scope");
+    }
     const lfsLookups = inventory.filter(
       ({ args }) => args.at(-1) === "lfs.storage",
     );

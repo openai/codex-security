@@ -248,10 +248,15 @@ export async function runWorkflow(
           if (environment[key] === `url.${hosted}.insteadOf`)
             environment[key] = `url.${local}.insteadOf`;
       }
-      const output = await run(command, args, cwd, {
-        ...commandOptions,
-        environment,
-      });
+      const bound = { ...commandOptions, environment };
+      const output = await run(
+        command,
+        args,
+        cwd,
+        localRemotes.size && commandOptions?.patchTransport
+          ? localHostingOptions(bound)
+          : bound,
+      );
       if (command !== "git" || args[args.indexOf("remote") + 1] !== "get-url")
         return output;
       if (!output.trim()) return hostedRemote;
@@ -326,6 +331,23 @@ export const runGitRepositoryCommand: (
     : result;
   return options?.trim === false ? output : output.trim();
 };
+
+// These fixtures explicitly route a simulated network destination to a local bare receiver.
+function localHostingOptions(
+  options: Parameters<typeof runGitRepositoryCommand>[3],
+) {
+  return {
+    ...options,
+    environment: { ...options?.environment, GIT_ALLOW_PROTOCOL: "file" },
+  };
+}
+
+export const runLocalHostingTransport: typeof runGitRepositoryCommand = (
+  command,
+  args,
+  cwd,
+  options,
+) => runGitRepositoryCommand(command, args, cwd, localHostingOptions(options));
 
 export async function publicationRepository(
   fixtures: ReturnType<typeof createTemporaryDirectories>,

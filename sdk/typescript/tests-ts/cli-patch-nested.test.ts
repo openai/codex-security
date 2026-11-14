@@ -1179,6 +1179,188 @@ describe("patch change tracking", () => {
     },
   );
 
+  test("captures materialized out-of-cone edits without deleting absent sparse files", async () => {
+    const root = await fixtures.create("patch-sparse-changes-");
+    const nested = join(root, "nested");
+    await mkdir(join(nested, "included"), { recursive: true });
+    await mkdir(join(nested, "outside"));
+    const git = repositoryGit(root),
+      inner = repositoryGit(nested);
+    for (const command of [git, inner]) {
+      command("init", "--initial-branch=main");
+      command("config", "user.name", "Synthetic User");
+      command("config", "user.email", "test@example.test");
+    }
+    for (const path of [
+      "included/app",
+      "outside/edited",
+      "outside/removed",
+      "outside/absent",
+    ])
+      await writeFile(join(nested, path), "original\n");
+    inner("add", ".");
+    inner("commit", "-m", "Nested baseline");
+    git("add", "nested");
+    git("commit", "-m", "Registered child");
+    inner("sparse-checkout", "set", "--cone", "included");
+    await mkdir(join(nested, "outside"), { recursive: true });
+    await writeFile(join(nested, "outside/removed"), "original\n");
+    const operatorIndex = await readFile(join(nested, ".git/index"));
+    const nestedTrees: string[] = [];
+    const run = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: root,
+      onRepositoryCommand: async (tool, args, cwd, options) => {
+        const result = await runGitRepositoryCommand(tool, args, cwd, options);
+        if (args.includes("write-tree") && args.includes(nested))
+          nestedTrees.push(result.trim());
+        return result;
+      },
+      onCodex: async (_args, output) => {
+        await mkdir(join(nested, "outside"), { recursive: true });
+        await rm(join(nested, "included/app"));
+        await rm(join(nested, "outside/removed"));
+        await writeFile(join(nested, "included/new"), "included\n");
+        await writeFile(join(nested, "outside/edited"), "modified\n");
+        await writeFile(join(nested, "outside/new"), "added\n");
+        output!.stdout.write("Fixed child file.");
+        return 0;
+      },
+    });
+    expect(run.exitCode, run.stderr).toBe(0);
+    expect(JSON.parse(run.stdout).files).toEqual([
+      "nested/included/app",
+      "nested/included/new",
+      "nested/outside/edited",
+      "nested/outside/new",
+      "nested/outside/removed",
+    ]);
+    expect(nestedTrees.length).toBeGreaterThanOrEqual(2);
+    for (const tree of nestedTrees)
+      expect(inner("ls-tree", tree, "outside/absent")).toContain(
+        "outside/absent",
+      );
+    const finalTree = nestedTrees.at(-1)!;
+    expect(inner("ls-tree", nestedTrees[0]!, "outside/removed")).toContain(
+      "outside/removed",
+    );
+    expect(inner("ls-tree", finalTree, "outside/removed")).toBe("");
+    expect(inner("ls-tree", finalTree, "included/app")).toBe("");
+    expect(inner("show", finalTree + ":included/new")).toBe("included");
+    expect(inner("show", finalTree + ":outside/edited")).toBe("modified");
+    expect(inner("show", finalTree + ":outside/new")).toBe("added");
+    expect(await readFile(join(nested, ".git/index"))).toEqual(operatorIndex);
+  });
+
+  test.each([
+    "reapply",
+    "reapply and stage another file",
+    "switch",
+    "stage another file",
+    "commit another file",
+    "rewrite the same index and delete",
+    "stage the deletion",
+  ] as const)(
+    "respects native sparse index changes when the turn chooses to %s",
+    async (operation) => {
+      const root = await fixtures.create("patch-sparse-index-");
+      const git = repositoryGit(root);
+      const path = "outside/file";
+      git("init", "--initial-branch=main");
+      git("config", "user.name", "Synthetic User");
+      git("config", "user.email", "test@example.test");
+      for (const dir of ["inside", "outside"]) await mkdir(join(root, dir));
+      await writeFile(join(root, "inside/other"), "baseline\n");
+      await writeFile(join(root, path), "original\n");
+      git("add", ".");
+      git("commit", "-m", "Baseline");
+      git("switch", "-c", "replacement");
+      await writeFile(join(root, path), "next\n");
+      git("commit", "-am", "Replacement");
+      git("switch", "main");
+      git("sparse-checkout", "set", "--cone", "inside");
+      git("checkout-index", "--ignore-skip-worktree-bits", "--", path);
+      // Keep the materialized file's stat data in its skipped index entry.
+      // A clean reapply can then remove the file without changing that entry.
+      git(
+        "-c",
+        "core.sparseCheckout=false",
+        "update-index",
+        "--no-skip-worktree",
+        "--",
+        path,
+      );
+      git("-c", "core.sparseCheckout=false", "update-index", "--refresh");
+      git(
+        "-c",
+        "core.sparseCheckout=false",
+        "update-index",
+        "--skip-worktree",
+        "--",
+        path,
+      );
+      let tree = "";
+      const result = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+        currentDirectory: root,
+        onRepositoryCommand: async (tool, args, cwd, options) => {
+          const output = await runGitRepositoryCommand(
+            tool,
+            args,
+            cwd,
+            options,
+          );
+          if (args.includes("write-tree")) tree = output.trim();
+          return output;
+        },
+        onCodex: async (_args, output) => {
+          if (
+            operation === "reapply" ||
+            operation === "reapply and stage another file"
+          ) {
+            git("update-index", "--refresh");
+            git("sparse-checkout", "reapply");
+          } else if (operation === "switch") git("switch", "replacement");
+          else {
+            await rm(join(root, path));
+            if (operation === "rewrite the same index and delete")
+              git("update-index", "--force-write-index");
+            if (operation === "stage the deletion")
+              git("rm", "--cached", "--sparse", "--", path);
+          }
+          await writeFile(join(root, "inside/other"), "edited\n");
+          if (
+            operation === "stage another file" ||
+            operation === "reapply and stage another file"
+          )
+            git("add", "inside/other");
+          if (operation === "commit another file")
+            git("commit", "-m", "Other edit", "--", "inside/other");
+          output!.stdout.write("Completed synthetic change.");
+          return 0;
+        },
+      });
+      if (
+        operation === "rewrite the same index and delete" ||
+        operation === "stage another file" ||
+        operation === "commit another file" ||
+        (operation === "reapply" && result.exitCode !== 0) ||
+        (operation === "reapply and stage another file" &&
+          result.exitCode !== 0)
+      ) {
+        expect(result.exitCode).toBe(2);
+        expect(result.stdout + result.stderr).toContain(
+          "Use git rm --cached --sparse -- <path> to stage an intended deletion",
+        );
+        return;
+      }
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(tree).not.toBe("");
+      expect(git("ls-tree", tree, path)).toBe(
+        operation === "stage the deletion" ? "" : git("ls-tree", "HEAD", path),
+      );
+      expect(git("show", `${tree}:inside/other`)).toBe("edited");
+    },
+  );
+
   test.each(["root", "package"])(
     "reports sparse nested changes from %s when the recorded commit is unavailable",
     async (scope) => {
