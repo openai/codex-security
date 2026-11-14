@@ -98,6 +98,35 @@ export class ScanInterruptedError extends CodexSecurityError {
   }
 }
 
+/**
+ * A Standard scan stopped by a model policy refusal. The refusal is terminal
+ * for the turn, but the scan's retained work is preserved as a stopped
+ * (incomplete) bundle instead of being discarded: `bundlePreserved` reports
+ * whether the sealed bundle was produced, and `phase` is the last phase the
+ * SDK observed before the turn failed.
+ */
+export class ScanPolicyRefusalError extends CodexSecurityError {
+  public readonly scanDir: string;
+  public readonly scanId: string;
+  public readonly phase: string;
+  public readonly bundlePreserved: boolean;
+
+  public constructor(
+    message: string,
+    scanDir: string,
+    scanId: string,
+    phase: string,
+    bundlePreserved: boolean,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.scanDir = scanDir;
+    this.scanId = scanId;
+    this.phase = phase;
+    this.bundlePreserved = bundlePreserved;
+  }
+}
+
 export class ScanCostLimitExceededError extends ScanInterruptedError {
   public readonly maxCostUsd: number;
   public readonly cost: Readonly<ScanCost>;

@@ -13,7 +13,7 @@ import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { main } from "../src/cli.js";
-import { ScanInterruptedError } from "../src/errors.js";
+import { ScanInterruptedError, ScanPolicyRefusalError } from "../src/errors.js";
 import { dependencies, fakeSecurity } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 
@@ -358,6 +358,74 @@ describe("scan publication and artifact recovery", () => {
       expect(cli.stderr.text()).toContain(message);
     },
   );
+
+  test("preserves a refused Standard scan as a sealed incomplete bundle", async () => {
+    const fixture = await startDraftScan();
+    const message =
+      "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
+    const deps = dependencies({
+      currentDirectory: fixture.repository,
+      onWorkbench: () => ({
+        scanId: fixture.scanId,
+        scanDir: fixture.scanDir,
+        recipe: {
+          repository: fixture.repository,
+          target: { kind: "repository", paths: [] },
+          mode: "standard",
+          config: {},
+        },
+      }),
+    });
+    deps.createSecurity = () =>
+      fakeSecurity(async (_repository, options) => {
+        options?.onScanRegistered?.(fixture);
+        await workbench(fixture, [
+          "update-progress",
+          "--scan-id",
+          fixture.scanId,
+          "--phase",
+          "validation",
+        ]);
+        await workbench(fixture, [
+          "fail-scan",
+          "--scan-id",
+          fixture.scanId,
+          "--message",
+          message,
+        ]);
+        throw new ScanPolicyRefusalError(
+          `Codex Security scan stopped during validation after a policy refusal: ${message}\nCompleted work was preserved as an incomplete bundle (status: failed) at ${fixture.scanDir}. Review scan-manifest.json and report.md there; absence of findings is inconclusive.`,
+          fixture.scanDir,
+          fixture.scanId,
+          "validation",
+          true,
+        );
+      });
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(["scan", "--format", "json", "--full-output"], deps),
+    ).toBe(2);
+    const envelope = JSON.parse(cli.stdout.text());
+    expect(envelope).toMatchObject({
+      ok: false,
+      error: { code: "SCAN_FAILED" },
+    });
+    expect(envelope.error.message).toContain("policy refusal");
+    expect(envelope.error.message).toContain("incomplete bundle");
+    expect(envelope.data).toMatchObject({
+      manifest: { scan: { id: fixture.scanId, status: "failed" } },
+      scanDir: fixture.scanDir,
+      reportPath: join(fixture.scanDir, "report.md"),
+    });
+    expect(envelope.data.findings.findings).toHaveLength(1);
+    expect(cli.stderr.text()).toContain("Trusted Access for Cyber");
+    using database = new Database(join(fixture.stateDir, "workbench.sqlite3"));
+    expect(
+      database
+        .query("SELECT phase FROM scans WHERE id = ?")
+        .get(fixture.scanId),
+    ).toEqual({ phase: "validation" });
+  });
 
   test("registers a Unicode stdin recipe with the authoritative directory contract", async () => {
     const fixture = await startDraftScan("directory", true);

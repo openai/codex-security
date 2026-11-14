@@ -184,6 +184,7 @@ import {
   errorMessage,
   ScanCostLimitExceededError,
   ScanInterruptedError,
+  ScanPolicyRefusalError,
 } from "./errors.js";
 import {
   knowledgeBaseProtectedRoots,
@@ -199,6 +200,7 @@ import {
   workflowDigest,
 } from "./finding-workflow.js";
 import { reviewSqliteHome } from "./deduplication/codex-review.js";
+import { isReviewRefusal } from "./deduplication/refusal.js";
 import {
   ScanResult,
   type RepositoryFinding,
@@ -2261,6 +2263,9 @@ export class CodexSecurity {
     let validationThreadId: string | undefined;
     let nativeTurnFailure: string | undefined;
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
+    // Declared here (not in the scan try block) so the failure path can
+    // persist the phase the scan actually reached. See #56.
+    let latestPhase: ScanProgress["phase"] = "preflight";
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
@@ -2665,7 +2670,7 @@ export class CodexSecurity {
         standardCapabilities?.["scopedInventoryReceipt"] === 1;
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
-      let latestPhase: ScanProgress["phase"] = "preflight";
+      latestPhase = "preflight";
       let reviewItems: ScanProgress["reviewItems"];
       let lastProgress: string | null = null;
       const progressKey = (progress: ScanProgress): string =>
@@ -4317,6 +4322,36 @@ export class CodexSecurity {
           runPostScan = null;
         }
       }
+      // A policy refusal ends the turn, not the scan's retained work. Classify
+      // it with the existing refusal detector so the failure path below seals
+      // the retained checkpoints as a stopped bundle (status: failed) instead
+      // of discarding the scan, and record the phase the scan actually
+      // reached. See #56.
+      const refusalMessage = nativeTurnFailure ?? errorMessage(failure);
+      let refusedScan: typeof activeScan = null;
+      if (
+        activeScan !== null &&
+        releaseStandardScan !== undefined &&
+        !signal.aborted &&
+        options.validationPrompt === undefined &&
+        scanTurnStatus !== null &&
+        terminalTurnStatus !== "completed" &&
+        !(failure instanceof ScanInterruptedError) &&
+        isReviewRefusal(refusalMessage)
+      ) {
+        refusedScan = activeScan;
+        if (latestPhase !== "preflight") {
+          // Best-effort: the failure path still records the refusal even when
+          // the observed phase cannot be persisted.
+          await workbench(
+            { ...activeScan.options, signal: undefined },
+            workbenchArgs("update-progress", {
+              scanId: activeScan.id,
+              phase: latestPhase,
+            }),
+          ).catch(() => null);
+        }
+      }
       // A resumed Deep Scan persists its own terminal status.
       if (
         activeScan !== null &&
@@ -4352,6 +4387,27 @@ export class CodexSecurity {
                 ? failure.cost
                 : snapshot?.cost),
           );
+          if (refusedScan !== null) {
+            const saved = await workbench(
+              { ...refusedScan.options, signal: undefined },
+              workbenchArgs("get-scan", { scanId: refusedScan.id }),
+            ).catch(() => null);
+            const savedScan = isRecord(saved) ? saved["scan"] : undefined;
+            const bundlePreserved =
+              isRecord(savedScan) && savedScan["reportAvailable"] === true;
+            failure = new ScanPolicyRefusalError(
+              `Codex Security scan stopped during ${latestPhase} after a policy refusal: ${refusalMessage}\n${
+                bundlePreserved
+                  ? `Completed work was preserved as an incomplete bundle (status: failed) at ${scanDir}. Review scan-manifest.json and report.md there; absence of findings is inconclusive.`
+                  : `No completed scan work could be preserved. The scan record still shows the observed phase and measured usage. Output directory: ${scanDir}.`
+              }`,
+              scanDir,
+              refusedScan.id,
+              latestPhase,
+              bundlePreserved,
+              { cause: failure },
+            );
+          }
           activeScan = null;
         } catch {}
       }
