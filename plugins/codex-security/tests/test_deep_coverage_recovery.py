@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -1280,12 +1281,54 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("probe", ["directory", "regular", "inaccessible"])
+def test_windows_receipt_access_denied_requires_proof_of_a_nonregular_file(
+    tmp_path, monkeypatch, probe
+):
+    backend = finalizer._windows_scan_local_files()
+    denied = backend.WindowsScanLocalFileError(5, "Access is denied.")
+
+    def deny_read(*args, **kwargs):
+        raise denied
+
+    def inspect_leaf(path):
+        if probe == "directory":
+            raise backend.WindowsScanLocalNonRegularFileError(22, "expected a regular file")
+        if probe == "inaccessible":
+            raise backend.WindowsScanLocalFileError(32, "sharing violation")
+        return True
+
+    monkeypatch.setattr(finalizer.os, "supports_dir_fd", set())
+    monkeypatch.setattr(finalizer, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        backend, "_locked_parent", lambda *args, **kwargs: nullcontext((tmp_path, "receipt"))
+    )
+    monkeypatch.setattr(backend, "_create_file", deny_read)
+    monkeypatch.setattr(backend, "_validate_existing_output", inspect_leaf)
+    with pytest.raises(finalizer.ContractError) as failure:
+        finalizer._require_scan_local_file(tmp_path, "receipt", "Saved coverage receipt")
+    assert not isinstance(failure.value, finalizer.MissingScanLocalFileError)
+    assert isinstance(failure.value, finalizer.NonRegularScanLocalFileError) == (
+        probe == "directory"
+    )
+    if probe != "directory":
+        assert failure.value.__cause__.errno == 5
+
+
 @pytest.mark.parametrize(
-    ("historical", "reverse"),
-    [("missing", False), ("directory", False), ("case-variant", False), ("case-variant", True)],
+    ("historical", "case_variant", "reverse"),
+    [("missing", False, False), ("directory", False, False)]
+    + [
+        (kind, True, reverse)
+        for kind in ("missing", "directory", "symlink", "unreadable")
+        for reverse in (False, True)
+    ],
 )
-def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical, reverse):
-    old_ref = "artifacts/review.md" if historical == "case-variant" else "artifacts/old.md"
+def test_historical_receipt_repair_preserves_valid_evidence(
+    tmp_path, historical, case_variant, reverse
+):
+    old_ref = "artifacts/review.md" if case_variant else "artifacts/old.md"
     refs = [old_ref, "artifacts/Review.md"]
     if reverse:
         refs.reverse()
@@ -1295,10 +1338,17 @@ def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical
     output = Path(source["artifact_dir"])
     (output / "artifacts/review.md").unlink()
     (output / "artifacts/Review.md").write_text("Retained historical evidence.\n")
+    if case_variant and (output / old_ref).exists():
+        pytest.skip("This regression requires case-sensitive receipt paths.")
     if historical == "directory":
         (output / old_ref).mkdir()
-    elif (output / old_ref).exists():
-        pytest.skip("This regression requires case-sensitive receipt paths.")
+    elif historical == "symlink":
+        (output / old_ref).symlink_to("Review.md")
+    elif historical == "unreadable":
+        if os.name == "nt" or os.geteuid() == 0:
+            pytest.skip("This regression requires POSIX file permissions.")
+        (output / old_ref).write_text("Temporarily inaccessible historical evidence.\n")
+        (output / old_ref).chmod(0)
     (output / "artifacts/replacement.md").write_text("Current review evidence.\n")
     prefix = output.relative_to(tmp_path).as_posix() + "/"
     parent = copy.deepcopy(old)
@@ -1321,7 +1371,7 @@ def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical
     documents = recover(tmp_path, [source], warnings=warnings)
     (row,) = documents[2]["surfaces"]
     retained = row["receiptRefs"]
-    if historical == "directory":
+    if (historical == "directory" and not case_variant) or historical == "unreadable":
         assert row["disposition"] == "needs_follow_up"
         assert prefix + "artifacts/Review.md" in retained
         assert prefix + old_ref not in retained
