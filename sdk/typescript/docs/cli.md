@@ -1556,13 +1556,13 @@ Supply the validation prompt again when rerunning.
 
 Choose the command by what you want to keep. [Scanner guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) list the accepted vendor formats.
 
-| Input and goal                                               | Command                                                                        | Service contacted                 | Where to find the result                                                                                       |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------ | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Save vendor evidence for a checkout                          | `publish findings FILE --to local`                                             | None                              | `findings imported PATH` lists unassessed local findings.                                                      |
-| Publish a supported vendor report                            | [`publish findings FILE --to cloud`](#publish-findings-to-cloud)               | Codex Security Cloud              | The receipt identifies the private inbox job or repository records.                                            |
-| Collect upstream records to a file                           | `import github`, `import github-advisories`, `import semgrep` or `import snyk` | Selected vendor                   | Redirect the complete `--format json` output to a private file, then preview it with `publish findings`.       |
-| Collect live Sonar issues                                    | [`import sonar --dry-run`](#import-sonarqube-cloud-issues)                     | SonarQube Cloud during collection | The `capture` field gives a private file path. Replay it to save locally or save locally and publish to Cloud. |
-| Save Codex Security findings CSV or JSON as a completed scan | [`scan import`](#import-findings-as-a-saved-scan)                              | None                              | `scans list --scan-root DIR --json` shows imports under the artifact root.                                     |
+| Input and goal                                               | Command                                                                                            | Service contacted                 | Where to find the result                                                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Save vendor evidence for a checkout                          | `publish findings FILE --to local`                                                                 | None                              | `findings imported PATH` lists unassessed local findings.                                                      |
+| Publish a supported vendor report                            | [`publish findings FILE --to cloud`](#publish-findings-to-cloud)                                   | Codex Security Cloud              | The receipt identifies the private inbox job or repository records.                                            |
+| Collect upstream records to a file                           | `import continuum`, `import github`, `import github-advisories`, `import semgrep` or `import snyk` | Selected vendor                   | Redirect the complete `--format json` output to a private file, then preview it with `publish findings`.       |
+| Collect live Sonar issues                                    | [`import sonar --dry-run`](#import-sonarqube-cloud-issues)                                         | SonarQube Cloud during collection | The `capture` field gives a private file path. Replay it to save locally or save locally and publish to Cloud. |
+| Save Codex Security findings CSV or JSON as a completed scan | [`scan import`](#import-findings-as-a-saved-scan)                                                  | None                              | `scans list --scan-root DIR --json` shows imports under the artifact root.                                     |
 
 For `publish findings`, `--to` is required. With `--to local`, `--repository`
 takes a checkout path. Select the reader with `--provider` and give the source a stable `--source-key`.
@@ -1579,7 +1579,12 @@ codex-security publish findings /private/path/endor-findings.json --provider end
 After reviewing the findings and exclusions, rerun the command without
 `--dry-run` and confirm. [Save or publish and verify](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#save-or-publish-and-verify).
 
+When you pass `--source-repository-url` to `publish findings`, the command warns
+on stderr to verify that every finding belongs to the repository you specify.
+
 For Tenable One Code Repository findings, use `--provider tenable --to local` and set `--source-repository-url` to the checkout’s verified HTTPS remote. [Tenable export and import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md)
+
+For CrowdStrike FCS CLI 4.x IaC reports, use `--provider crowdstrike --to local` and select the directory where FCS ran with `--repository`. It does not need to be a Git checkout, but each scanned file must be unchanged since the scan. Add `--source-repository-url` to record the repository; it must match a fetch remote when the directory is a Git checkout. A `git::https://` report names its repository, and a different `--source-repository-url` stops the import. [CrowdStrike import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/crowdstrike.md)
 
 Local readback uses `findings imported [PATH]`. The path defaults to the current
 directory. Each imported record starts as `not_assessed`. Unknown revisions and
@@ -1610,6 +1615,31 @@ to set the scan root and check manifest paths.
 Use `--provider endor` for one Endor project and context. The
 [Endor Labs guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/endor.md) covers native Finding JSON,
 SARIF compatibility, and the local preview.
+
+## Collect AWS Continuum issues
+
+`import continuum ENVIRONMENT_ID --format json` writes one report to standard
+output after collecting every issue page and fetching each issue's linked
+findings, prevalidation signals (`EVIDENCE`), and validation results
+(`VALIDATION_EVIDENCE`). Install AWS CLI v2.38.5 or later outside the checkout.
+The command requires exactly one configured Git repository and records it in the
+report. It collects patches when Git is the only source.
+S3 sources are allowed alongside that repository.
+Collection covers the whole environment. Pass the short
+Continuum environment ID. Optional
+`--aws-profile PROFILE` and `--aws-region REGION` override the AWS CLI's
+credential and Region selection. Preview and import the report separately
+with `publish findings FILE --provider continuum`. Pass
+`--source-repository-url URL` when the report has no saved repository URL.
+
+For one finding and its generated patches, add `--finding-id FINDING_ID` and
+`--source-root CHECKOUT` with the absolute checkout path. The CLI uses
+`GetEnvironment` to verify that the environment has exactly one Git repository
+and no S3 sources before including unnamed patches. Pass
+`--repository-name AWS_SOURCE_NAME` for other environments to keep patches
+with that exact AWS source name. This mode accepts the same AWS profile and
+Region overrides and writes the finding-based JSON format for `publish findings`.
+[Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
 ## Import SonarQube Cloud issues
 

@@ -137,6 +137,13 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import {
+  collectContinuumFinding,
+  collectContinuumIssues,
+  continuumEnvironmentId,
+  continuumFindingId,
+  continuumImportOutput,
+} from "./continuum-collector.js";
 import { validateInspectorProjectMapping } from "./inspector-findings.js";
 import {
   readLocalExternalFindings,
@@ -1488,6 +1495,8 @@ interface CliDependencies {
   publishPrompt?: Pick<BulkScanPrompt, "isInteractive" | "select"> &
     Partial<Pick<BulkScanPrompt, "checkbox">>;
   externalPublicationPrompt?: Pick<BulkScanPrompt, "isInteractive" | "confirm">;
+  collectContinuumIssues?: typeof collectContinuumIssues;
+  collectContinuumFinding?: typeof collectContinuumFinding;
   collectSonarIssues?: typeof collectSonarIssues;
   prepareLocalExternalImport?: typeof prepareLocalExternalImport;
   readLocalExternalFindings?: typeof readLocalExternalFindings;
@@ -4150,7 +4159,7 @@ export async function main(
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
           .describe(
-            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable requires --to local and --source-repository-url.",
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable requires --to local and --source-repository-url. CrowdStrike requires --to local.",
           ),
         sourceRepositoryUrl: optionValue("--source-repository-url")
           .optional()
@@ -4200,6 +4209,10 @@ export async function main(
               exitCode,
             });
           }
+          if (options.sourceRepositoryUrl !== undefined)
+            writeDiagnostic(
+              "codex-security: warning: Use --source-repository-url only after verifying that every finding belongs to the repository you specify.\n",
+            );
           const controller = new AbortController();
           const removeSignals = listenForAbort(dependencies, controller);
           const structured = formatExplicit && format !== "toon";
@@ -4525,7 +4538,8 @@ export async function main(
       },
     });
   const imports = Cli.create("import", {
-    description: "Collect findings from GitHub, Semgrep, Snyk or Sonar.",
+    description:
+      "Collect findings from Continuum, GitHub, Semgrep, Snyk or Sonar.",
   }).command("github", {
     examples: [{ args: { repository: "owner/repo" } }],
     description: "Read GitHub code scanning alerts without changing GitHub.",
@@ -4611,7 +4625,7 @@ export async function main(
     },
   });
   async function collectHostedFindings<T>(
-    provider: "GitHub advisory" | "Semgrep" | "Snyk",
+    provider: "Continuum" | "GitHub advisory" | "Semgrep" | "Snyk",
     fail: (error: { code: string; message: string; exitCode: number }) => never,
     run: (signal: AbortSignal) => Promise<T>,
   ) {
@@ -4627,9 +4641,9 @@ export async function main(
         ? `${provider} import ${interrupted === 130 ? "canceled" : "terminated"}.`
         : message;
       const terminalDiagnostic =
-        provider === "Semgrep" || provider === "Snyk"
-          ? escapeTerminalText(diagnostic)
-          : diagnostic;
+        provider === "GitHub advisory"
+          ? diagnostic
+          : escapeTerminalText(diagnostic);
       errorOutput.write(`codex-security: ${terminalDiagnostic}\n`);
       if (argv.includes("--full-output")) {
         structuredError = true;
@@ -4657,6 +4671,100 @@ export async function main(
       format === "md" || (format === "toon" && output.isTTY === true);
   }
   imports
+    .command("continuum", {
+      examples: [
+        { args: { environmentId: "abc123" } },
+        {
+          args: { environmentId: "abc123" },
+          options: {
+            findingId: "def456",
+            sourceRoot: "/absolute/path/to/checkout",
+            repositoryName: "example/project",
+          },
+        },
+      ],
+      description:
+        "Read all AWS Continuum issues or collect one finding with its repository's patches.",
+      hint: "Requires AWS CLI v2.38.5 or later installed outside the checkout. Bulk collection requires exactly one Git repository and allows S3 sources. For one finding, pass --finding-id and --source-root. The CLI checks for one Git repository and no S3 sources when --repository-name is omitted. Save --format json output for publish findings --provider continuum.",
+      destructive: false,
+      args: z.object({ environmentId: continuumEnvironmentId }),
+      options: z
+        .object({
+          awsProfile: optionValue("--aws-profile")
+            .optional()
+            .describe(
+              "AWS CLI profile (default: use the AWS CLI's configured credentials).",
+            ),
+          awsRegion: optionValue("--aws-region")
+            .optional()
+            .describe(
+              "AWS Region (default: use the AWS CLI's configured Region).",
+            ),
+          findingId: continuumFindingId.optional(),
+          sourceRoot: optionValue("--source-root")
+            .refine(isAbsolute, {
+              message: "--source-root must be an absolute path.",
+            })
+            .optional()
+            .describe(
+              "Absolute path of the selected checkout for --finding-id.",
+            ),
+          repositoryName: optionValue("--repository-name")
+            .optional()
+            .describe(
+              "Exact AWS source name for the selected finding's repository. Required unless the environment has one Git repository and no S3 sources.",
+            ),
+        })
+        .refine(
+          (options) =>
+            options.findingId !== undefined ||
+            (options.sourceRoot === undefined &&
+              options.repositoryName === undefined),
+          {
+            message:
+              "--source-root and --repository-name require --finding-id.",
+          },
+        )
+        .refine(
+          (options) =>
+            options.findingId === undefined || options.sourceRoot !== undefined,
+          { message: "--finding-id requires --source-root." },
+        ),
+      output: continuumImportOutput.optional(),
+      run: ({ args, options, error, format }) => {
+        setTerminalOutputFormat(format);
+        return collectHostedFindings<Record<string, unknown>>(
+          "Continuum",
+          error,
+          (signal) => {
+            const selection = {
+              environmentId: args.environmentId,
+              profile: options.awsProfile,
+              region: options.awsRegion,
+              cwd: dependencies.currentDirectory(),
+              environment: dependencies.environment,
+              signal,
+            };
+            if (options.findingId === undefined)
+              return (
+                dependencies.collectContinuumIssues ?? collectContinuumIssues
+              )(selection);
+            return (
+              dependencies.collectContinuumFinding ?? collectContinuumFinding
+            )({
+              ...selection,
+              findingId: options.findingId,
+              sourceRoot: options.sourceRoot!,
+              repositoryName: options.repositoryName,
+              warn: (message) =>
+                errorOutput.write(
+                  `codex-security: ${escapeTerminalText(message)}\n`,
+                ),
+            });
+          },
+        );
+      },
+    })
     .command("github-advisories", {
       examples: [{ args: { repository: "owner/repo" } }],
       description: "Read GitHub security advisories without changing GitHub.",

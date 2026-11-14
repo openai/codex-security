@@ -308,6 +308,10 @@ console.log(plan);
 `preflight()` checks local inputs without starting Codex or using the network. The returned `stateDirectory` identifies the checked storage root, including when the final scan directory will be allocated automatically.
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
+Neither preflight starts a Deep Scan worker or executes a command under its
+generated permissions, so neither qualifies the worker sandbox. See [Deep Scan
+sandbox qualification](../../../docs/project-configuration.md#deep-scan-sandbox-qualification)
+for the boundary and the limits of what these checks establish.
 
 ### Set investigation time
 
@@ -781,15 +785,17 @@ Omit `issueKeys` to collect the project's open security issues. An empty list is
 If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
 to check the Sonar binding before fetching issues.
 
-For AWS Continuum, pass a collector capture, native detail, array of selected
-details or captures, or complete list response to `readContinuumFindings` (file
-path) or `normalizeContinuumFindings` (parsed JSON). The second argument is
-the verified Git repository URL. Pass `"local"` as the third argument to retain
-full patch contents locally. The default Cloud projection records
-`contentOmitted: "cloud_evidence_limit"` on patches whose contents exceed the
-finding evidence budget. Read the native finding at `evidence.source_data.finding`
-and its available patches at `evidence.source_data.patches`.
+For AWS Continuum, use `readContinuumFindings(path, sourceRepositoryUrl)` with a
+saved issue export or finding response. Use
+`normalizeContinuumFindings(input, sourceRepositoryUrl)` with parsed JSON.
+Issue exports with a saved repository URL can omit the second argument.
+For other reports, pass the verified source repository URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
+
+Pass `"local"` as the third argument to retain full patch contents in collector
+captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
+when the patch contents exceed the evidence budget. Available patches are in
+`evidence.source_data.patches`.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.
