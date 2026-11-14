@@ -135,48 +135,59 @@ for (const platform of ["win32", "linux"] as const) {
   }
 }
 
-test("snapshot Git keeps Docker registry auth out of checkout-filtered blobs", async () => {
-  const cwd = await fixtures.create("patch-snapshot-registry-");
-  const registryAuth = JSON.stringify({
-    auths: {
-      "registry.example.test": { auth: "synthetic-registry-credential" },
-    },
-  });
-  const env = { ...process.env, DOCKER_AUTH_CONFIG: registryAuth };
+test("snapshot Git keeps credentials out of checkout-filtered blobs and preserves ordinary settings", async () => {
+  const cwd = await fixtures.create("patch-snapshot-credentials-");
+  const env = {
+    ...process.env,
+    DOCKER_AUTH_CONFIG: JSON.stringify({
+      auths: {
+        "registry.example.test": { auth: "synthetic-registry-credential" },
+      },
+    }),
+    DATABASE_URL: "postgresql://fixture:synthetic@db.example.test/fixture",
+    SNAPSHOT_USER_SETTING: "preserved",
+  };
   const git = (...args: string[]) =>
     execFileSync("git", args, { cwd, env, encoding: "utf8" });
   git("init", "--quiet");
   await writeFile(
     join(cwd, ".gitattributes"),
-    "candidate.txt filter=registry\n",
+    "candidate.txt filter=inspect\n",
   );
   await writeFile(join(cwd, "candidate.txt"), "safe patch\n");
   await writeFile(
     join(cwd, "filter.cjs"),
-    'const input = require("node:fs").readFileSync(0); process.stdout.write(process.env.DOCKER_AUTH_CONFIG ?? input);',
+    `const input = require("node:fs").readFileSync(0, "utf8");
+process.stdout.write(JSON.stringify({
+  input, setting: process.env.SNAPSHOT_USER_SETTING,
+  credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL"].filter(key => key in process.env),
+}));`,
   );
   const add = [
     "-c",
-    "filter.registry.clean=node filter.cjs",
+    "filter.inspect.clean=node filter.cjs",
     "add",
     "--",
     "candidate.txt",
   ];
+  const expected = { input: "safe patch\n", setting: "preserved" };
   git(...add);
-  expect(git("show", ":candidate.txt")).toBe(registryAuth);
+  expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
+    ...expected,
+    credentialKeys: ["DOCKER_AUTH_CONFIG", "DATABASE_URL"],
+  });
 
   git("read-tree", "--empty");
   const header = bindingFrame();
   execFileSync(
     Bun.which("node")!,
     ["-e", runner, "--", String(header.length), "git", ...add],
-    {
-      cwd,
-      env,
-      input: header,
-    },
+    { cwd, env, input: header },
   );
-  expect(git("show", ":candidate.txt")).toBe("safe patch\n");
+  expect(JSON.parse(git("show", ":candidate.txt"))).toEqual({
+    ...expected,
+    credentialKeys: [],
+  });
 });
 
 test("snapshot Git reports an incomplete binding frame before starting the command", async () => {
