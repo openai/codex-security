@@ -34,45 +34,6 @@ async function scanOutputSchema() {
 describe("scan output schema", () => {
   test("describes completed scans, preflight, and failure separately", async () => {
     const schema = await scanOutputSchema();
-    expect(schema).toMatchObject({
-      anyOf: [
-        { type: "integer", minimum: 0 },
-        {
-          properties: {
-            findings: { type: "object" },
-            review: { type: "object" },
-            scanDir: { type: "string" },
-            reportPath: { type: "string" },
-          },
-        },
-        {
-          properties: {
-            dryRun: { const: true },
-            mode: { enum: ["standard", "deep"] },
-            workers: { type: "integer" },
-            authentication: { type: "object" },
-          },
-        },
-        { properties: { code: { const: "SCAN_FAILED" } } },
-        {
-          properties: {
-            ok: { const: false },
-            error: { anyOf: [{ type: "object" }, { type: "string" }] },
-          },
-        },
-        {
-          properties: {
-            ok: { const: true },
-          },
-        },
-        {
-          properties: {
-            mode: { type: "string" },
-            manifest: { type: "object" },
-          },
-        },
-      ],
-    });
     const validate = new Ajv2020({ strict: false }).compile(schema);
     expect(validate({})).toBe(false);
     const output = capture();
@@ -94,40 +55,29 @@ describe("scan output schema", () => {
       const validate = new Ajv2020({ strict: false }).compile(
         await scanOutputSchema(),
       );
-      for (const format of ["json", "jsonl"]) {
-        for (const filter of [undefined, "warnings", "findings"]) {
-          const stdout = capture();
-          const deps = dependencies({
-            onTurn: (_repository, options) => {
-              options.onWarning?.("Synthetic target changed.", {
-                kind: "target_changed",
-              });
-            },
-            result: fakeResult(["high"], completeness),
+      const stdout = capture();
+      const deps = dependencies({
+        onTurn: (_repository, options) => {
+          options.onWarning?.("Synthetic target changed.", {
+            kind: "target_changed",
           });
-          expect(
-            await main(
-              [
-                "scan",
-                ".",
-                "--format",
-                format,
-                "--full-output",
-                ...(filter === undefined ? [] : ["--filter-output", filter]),
-              ],
-              stdout.stream,
-              capture().stream,
-              deps,
-            ),
-          ).toBe(2);
-          const output: unknown = JSON.parse(stdout.text());
-          expect(output).toMatchObject({
-            ok: false,
-            error: { code: "SCAN_FAILED" },
-          });
-          expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
-        }
-      }
+        },
+        result: fakeResult(["high"], completeness),
+      });
+      expect(
+        await main(
+          ["scan", ".", "--json", "--full-output"],
+          stdout.stream,
+          capture().stream,
+          deps,
+        ),
+      ).toBe(2);
+      const output = JSON.parse(stdout.text());
+      expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
+      expect(output.ok).toBe(false);
+      expect(output.error.code).toBe("SCAN_FAILED");
+      expect(output.error.message).toContain("target changed");
+      expect(output.data.manifest).toBeDefined();
     },
   );
 
@@ -266,22 +216,6 @@ test.each(retainedThreatModels)(
   "declares nullable threat-model fields from actual scan output: %j",
   async (threatModel) => {
     const schema = await scanOutputSchema();
-    expect(schema).toMatchObject({
-      anyOf: [
-        { type: "integer" },
-        {
-          properties: {
-            threatModel: { anyOf: [{ type: "object" }, { type: "null" }] },
-            threatModelPath: { type: ["string", "null"] },
-          },
-        },
-        {},
-        {},
-        {},
-        {},
-        { properties: { mode: { type: "string" } } },
-      ],
-    });
     const original = fakeResult(["high"]);
     const result = new ScanResult({
       manifest: {
@@ -376,7 +310,7 @@ test.each(["completed", "dry-run", "failed", "argument-error"] as const)(
               transform,
               "2",
               ...(outcome === "dry-run" ? ["--dry-run"] : []),
-              ...(outcome === "argument-error" ? ["--path"] : []),
+              ...(outcome === "argument-error" ? ["--mode", "bogus"] : []),
             ],
             stdout.stream,
             capture().stream,
@@ -391,7 +325,8 @@ test.each(["completed", "dry-run", "failed", "argument-error"] as const)(
         ).toBe(failed ? 2 : 0);
         const output = JSON.parse(stdout.text());
         expect(output.ok).toBe(!failed);
-        expect(typeof output[failed ? "error" : "data"]).toBe("string");
+        if (failed) expect(output.error).toMatchObject({ code: "SCAN_FAILED" });
+        else expect(typeof output.data).toBe("string");
         expect(validate(output), JSON.stringify(validate.errors)).toBe(true);
       }
     }

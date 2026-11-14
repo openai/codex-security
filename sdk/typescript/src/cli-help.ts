@@ -13,7 +13,7 @@ const COMMAND_GROUPS: readonly Group[] = [
   ["Automate", ["bulk-scan", "scan-components", "install-hook"]],
   [
     "Configure and troubleshoot",
-    ["login", "logout", "init", "info", "feedback"],
+    ["login", "logout", "init", "info", "feedback", "update"],
   ],
 ];
 
@@ -35,9 +35,6 @@ const SCAN_GROUPS: readonly Group[] = [
     [
       "output-dir",
       "archive-existing",
-      "format",
-      "json",
-      "full-output",
       "owner-suggestions",
       "max-cost",
       "max-time",
@@ -88,6 +85,7 @@ const VALUE_LABELS: Record<string, string> = {
   python: "path",
   codex: "key=value",
   "max-cost": "usd",
+  "max-total-cost": "usd",
   "max-time": "minutes",
   "max-time-hours": "hours",
   "fail-on-severity": "level",
@@ -111,9 +109,7 @@ const OUTPUT_FLAGS = ["format", "json", "filter-output", "full-output"];
 
 const OUTPUT_GROUPS: readonly Group[] = [
   ["Help and version", ["help", "version"]],
-  ["Maintenance", ["update"]],
   ["Output", OUTPUT_FLAGS],
-  ["Output transforms", ["token-count", "token-limit", "token-offset"]],
 ];
 
 function rowName(row: Row): string {
@@ -199,6 +195,10 @@ function optionRow(row: Row, command: string): Row {
     }
     return `<${VALUE_LABELS[name] ?? (type === "number" ? "count" : name)}>`;
   });
+  if (name === "token-limit")
+    description = "Maximum tokens in the text view (nonnegative integer).";
+  if (name === "token-offset")
+    description = "Start the text view at this token (nonnegative integer).";
   label = label.replace(/^--([\w-]+), (-\w)/u, "$2, --$1");
   if (command === "scan" && !/default:/iu.test(description)) {
     const setting = DEEP_SCAN_SETTINGS.find(
@@ -219,6 +219,7 @@ function globalRows(rows: Row[], command: string): Row[] {
     command,
   );
   const visible = rows.filter(({ label }) => {
+    if (label === "--update") return false;
     if (scan && label.startsWith("--filter-output")) return false;
     return !(
       plainOutput &&
@@ -232,27 +233,11 @@ function globalRows(rows: Row[], command: string): Row[] {
   ) {
     formats.label = formats.label.replace("|md", "");
   }
-  if (formats && command !== "scan import") {
+  if (formats) {
     visible.push({
       label: "--json",
-      description: scan
-        ? "Write structured results to stdout (--format json)."
-        : "Shorthand for --format json.",
+      description: "Shorthand for --format json.",
     });
-  }
-  if (scan) {
-    const descriptions: Record<string, string> = {
-      "full-output":
-        "Include ok, data (or error), and metadata around the result.",
-      "token-count":
-        "Print the rendered output's token count instead of the result; not model usage.",
-      "token-limit":
-        "Truncate rendered output; can split JSON. Not a model token budget.",
-      "token-offset": "Skip rendered output tokens; can split JSON.",
-    };
-    for (const row of visible) {
-      row.description = descriptions[rowName(row)] ?? row.description;
-    }
   }
   return visible.map((row) =>
     optionRow(
@@ -263,29 +248,16 @@ function globalRows(rows: Row[], command: string): Row[] {
 }
 
 /** Present Incur's generated help without changing its routing or command output. */
-export function formatCliHelp(text: string, columns = 80): string {
+export function formatCliHelp(text: string, columns = 80): string | undefined {
   const header = text.match(
     /^(codex-security(?:@[^\s]+)?((?: [a-z][a-z-]*)*))(?: — ([^\n]*))?\n\nUsage: /u,
   );
-  if (!header) return text;
+  if (!header) return undefined;
   const command = header[2]!.trim();
   const sections: string[] = [];
-  const trailingSections: string[] = [];
   // Presentation width only; long paths and copyable commands remain intact.
   const width = columns > 0 ? columns : 80;
   const blocks = text.trimEnd().split(/\n\n/u);
-  const globalOptions = globalRows(
-    parseRows(
-      blocks
-        .find((block) => block.startsWith("Global Options:\n"))
-        ?.split("\n")
-        .slice(1) ?? [],
-    ),
-    command,
-  );
-  const scanOutputOption = (row: Row) =>
-    command === "scan" &&
-    ["format", "json", "full-output"].includes(rowName(row));
   const examples = blocks.find((block) => block.startsWith("Examples:\n"));
   for (const [index, block] of blocks.entries()) {
     const [title = "", ...lines] = block.split("\n");
@@ -337,6 +309,16 @@ export function formatCliHelp(text: string, columns = 80): string {
                 description: "Choose a collector below.",
               },
               {
+                label: "CLI, API, or MCP source",
+                description:
+                  "Ask Codex to import it using the publish-findings skill.",
+              },
+              {
+                label: "Workbench findings",
+                description:
+                  "Ask Codex to publish a stored import or selected finding versions.",
+              },
+              {
                 label: "Saved vendor report",
                 description:
                   "See codex-security publish findings --help for local storage and publication.",
@@ -364,19 +346,18 @@ export function formatCliHelp(text: string, columns = 80): string {
       );
     } else if (title === "Options:") {
       const options = parseRows(lines)
-        .filter((row) => command !== "publish scan" || rowName(row) !== "csv")
+        .filter(
+          (row) =>
+            !(command === "publish scan" && rowName(row) === "csv") &&
+            !(command === "publish check" && rowName(row) === "to"),
+        )
         .map((row) => optionRow(row, command));
       const rows = options.filter(
         (row) => !row.description.startsWith("[deprecated]"),
       );
       sections.push(
         ...(command === "scan"
-          ? groupedRows(
-              [...rows, ...globalOptions.filter(scanOutputOption)],
-              SCAN_GROUPS,
-              "Advanced",
-              width,
-            )
+          ? groupedRows(rows, SCAN_GROUPS, "Advanced", width)
           : command === "publish scan"
             ? groupedRows(rows, PUBLISH_GROUPS, "Options", width)
             : [renderRows("Options", rows, width)]),
@@ -387,21 +368,21 @@ export function formatCliHelp(text: string, columns = 80): string {
       if (deprecated.length)
         sections.push(renderRows("Deprecated options", deprecated, width));
     } else if (title === "Global Options:") {
+      const rows = globalRows(parseRows(lines), command);
       if (command === "") {
         sections.push(
-          ...groupedRows(globalOptions, OUTPUT_GROUPS, "Agent options", width),
+          ...groupedRows(rows, OUTPUT_GROUPS, "Agent options", width),
         );
       } else {
-        const scan = command === "scan" || command === "scan import";
-        const outputRows = globalOptions.filter((row) => {
-          const name = rowName(row);
-          return (
-            (OUTPUT_FLAGS.includes(name) && !scanOutputOption(row)) ||
-            (scan && name.startsWith("token-"))
-          );
-        });
-        (command === "scan" ? trailingSections : sections).push(
-          ...groupedRows(outputRows, OUTPUT_GROUPS, "Output", width),
+        const outputRows = rows.filter(
+          (row) =>
+            OUTPUT_FLAGS.includes(rowName(row)) ||
+            ((command === "scan" || command === "scan import") &&
+              rowName(row).startsWith("token-")),
+        );
+        if (outputRows.length)
+          sections.push(renderRows("Output", outputRows, width));
+        sections.push(
           wrap(
             "See codex-security --help for shared help and agent options.",
             width,
@@ -445,5 +426,5 @@ export function formatCliHelp(text: string, columns = 80): string {
     );
     sections.push("Docs: https://learn.chatgpt.com/docs/security/cli");
   }
-  return `${[...sections, ...trailingSections].join("\n\n")}\n`;
+  return `${sections.join("\n\n")}\n`;
 }
