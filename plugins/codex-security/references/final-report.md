@@ -27,7 +27,7 @@ Use `schemas/tools/scan-draft.schema.json` for new drafts and `finding-detail-fi
 
 Use `scope` for reviewed context, artifacts, runtime/test status, validation mode, and limitations. Preserve the completed canonical `threatModel`, including source citations and uncertainty; do not reconstruct it from the final findings. A supplied or completed Markdown model is retained as `{ "format": "markdown", "content": "<exact model text>" }`. A historical context file can supply missing content but must not replace a newer canonical model.
 
-The generated `report.md` counts informational findings and omits their details. Read those findings in `findings.json` or export them as SARIF or CSV.
+The generated `report.md` counts informational findings and omits their details. Read those findings in `findings.json` or export them as SARIF, CSV, or HTML.
 
 ## Review State And Pending Work
 

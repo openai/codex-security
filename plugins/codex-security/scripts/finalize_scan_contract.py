@@ -88,6 +88,7 @@ SOURCE_READ_CHUNK_SIZE = 64 * 1024
 MAX_JSON_INTEGER = (1 << 53) - 1
 EXPORT_PATHS = {
     "csv": "exports/findings.csv",
+    "html": "exports/findings.html",
     "servicenow-avit": "exports/servicenow-avit.csv",
     "json": "exports/findings.json",
     "sarif": "exports/results.sarif",
@@ -2428,13 +2429,6 @@ def _github_line_hashes_for_source(
         return None
 
 
-def _sarif_primary_location(finding: dict[str, Any]) -> dict[str, Any]:
-    return next(
-        (location for location in finding["locations"] if location.get("role") == "root_control"),
-        finding["locations"][0],
-    )
-
-
 def _merged_code_evidence(finding: dict[str, Any]) -> list[dict[str, Any]]:
     catalog: dict[str, dict[str, Any]] = {}
     for evidence_key in ("codeEvidence", "code_evidence"):
@@ -2484,7 +2478,7 @@ def _finding_evidence_strength(finding: dict[str, Any]) -> int:
 
 
 def _sarif_locations(finding: dict[str, Any]) -> list[dict[str, Any]]:
-    primary = _sarif_primary_location(finding)
+    primary = report_projection.primary_finding_location(finding)
     locations = [
         primary,
         *(location for location in finding["locations"] if location is not primary),
@@ -2539,7 +2533,7 @@ def _github_line_hash_cache(
         return {}
     requested_lines_by_path: dict[str, set[int]] = {}
     for finding in findings:
-        primary_location = _sarif_primary_location(finding)
+        primary_location = report_projection.primary_finding_location(finding)
         relative_path = _require_safe_relative_path(
             primary_location["path"], "SARIF source location"
         )
@@ -2591,7 +2585,7 @@ def _sarif_result(
     partial_fingerprints = {
         "codexSecurity/v1": finding["fingerprints"]["primary"],
     }
-    primary = _sarif_primary_location(finding)
+    primary = report_projection.primary_finding_location(finding)
     line_hash = (line_hash_cache or {}).get((Path(primary["path"]), primary["startLine"]))
     if line_hash is not None:
         partial_fingerprints["primaryLocationLineHash"] = line_hash
@@ -2889,7 +2883,7 @@ def build_csv_projection(findings: dict[str, Any], coverage: dict[str, Any]) -> 
     deep_scan = report_projection.uses_deep_presentation(coverage, findings["findings"])
     writer.writerow(finding_csv_columns(deep_scan))
     for finding in findings["findings"]:
-        location = _sarif_primary_location(finding)
+        location = report_projection.primary_finding_location(finding)
         writer.writerow(
             (
                 csv_cell(finding["occurrenceId"]),
@@ -2916,7 +2910,7 @@ def _avit_fields(finding: dict[str, Any]) -> dict[str, str]:
     _normalize_legacy_string_list_fields(attack_path, ("steps",))
     steps = "\n".join(attack_path.get("steps", []))
     return servicenow_avit.finding_fields(
-        finding, _sarif_primary_location(finding), csv_cell(steps)
+        finding, report_projection.primary_finding_location(finding), csv_cell(steps)
     )
 
 
@@ -2930,7 +2924,8 @@ def build_findings_export(
     """Return bytes for the requested export of a sealed scan.
 
     JSON preserves the sealed findings bytes. SARIF can use source_root to resolve
-    locations. ServiceNow AVIT requires an application template.
+    locations. HTML is a self-contained report. ServiceNow AVIT requires an
+    application template.
     """
     if export_format not in EXPORT_PATHS:
         raise ContractError(f"unsupported export format: {export_format}")
@@ -2938,11 +2933,13 @@ def build_findings_export(
         return _json_bytes(build_sarif_projection(scan_dir, source_root, schema_dir))
     if source_root is not None:
         raise ContractError("source-root is only supported for SARIF exports")
-    _, findings, coverage, findings_bytes = _read_sealed_scan(
+    manifest, findings, coverage, findings_bytes = _read_sealed_scan(
         scan_dir, schema_dir, f"{export_format.upper()} export"
     )
     if export_format == "json":
         return findings_bytes
+    if export_format == "html":
+        return report_projection.build_html_projection(manifest, findings)
     if export_format == "servicenow-avit":
         if avit_template is None:
             raise ContractError("--export-format servicenow-avit requires --avit-template")

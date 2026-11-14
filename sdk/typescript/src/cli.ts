@@ -6946,8 +6946,9 @@ export async function main(
         "  codex-security export\n" +
         "  codex-security export --export-format json --output -\n" +
         "  codex-security export ../scan-results --export-format csv\n" +
+        "  codex-security export --export-format html --output findings.html\n" +
         "  codex-security export --artifact threat-model --output -\n\n" +
-        "Implicit filenames: results.sarif, findings.json, findings.csv, servicenow-avit.csv, or threatmodel.md.\n" +
+        "Implicit filenames: results.sarif, findings.json, findings.csv, findings.html, servicenow-avit.csv, or threatmodel.md.\n" +
         "Use --export-format for artifact format. The global --format option controls\n" +
         "framework output such as --schema; it does not change exported files.",
       destructive: true,
@@ -6969,10 +6970,10 @@ export async function main(
               "Saved scan ID, unique prefix, or latest completed scan ('latest').",
             ),
           exportFormat: z
-            .enum(["csv", "json", "sarif", "md", "servicenow-avit"])
+            .enum(["csv", "html", "json", "sarif", "md", "servicenow-avit"])
             .optional()
             .describe(
-              "Findings: csv, json, servicenow-avit, or sarif (default). Threat models use md.",
+              "Findings: csv, html, json, servicenow-avit, or sarif (default). Threat models use md.",
             ),
           avitTemplate: optionValue("--avit-template")
             .optional()
@@ -7018,18 +7019,21 @@ export async function main(
                 `${responseFlag} cannot be used with raw artifact stdout. Omit it to pipe the complete artifact.`,
               );
             }
-            const markdown =
-              options.artifact === "threat-model" ||
-              options.exportFormat === "md";
-            const csv =
-              options.exportFormat === "csv" ||
-              options.exportFormat === "servicenow-avit";
-            const expectedFormat = markdown ? "md" : csv ? undefined : "json";
+            const artifactFormat =
+              options.exportFormat ??
+              (options.artifact === "threat-model" ? "md" : "sarif");
+            const [label, expectedFormat] = {
+              csv: ["CSV", undefined],
+              "servicenow-avit": ["CSV", undefined],
+              html: ["HTML", undefined],
+              json: ["JSON", "json"],
+              sarif: ["JSON", "json"],
+              md: ["Markdown", "md"],
+            }[artifactFormat];
             const incompatible = frameworkFlags.formats.find(
               (value) => value !== expectedFormat,
             );
             if (incompatible !== undefined) {
-              const label = markdown ? "Markdown" : csv ? "CSV" : "JSON";
               throw new CodexSecurityError(
                 `${label} stdout cannot be combined with --format ${incompatible}. Omit the response format to pipe the complete artifact.`,
               );
