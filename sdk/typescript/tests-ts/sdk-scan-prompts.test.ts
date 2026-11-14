@@ -1,4 +1,5 @@
-import { runWorkbench } from "../src/runtime.js";
+import { resolvePluginSource, runWorkbench } from "../src/runtime.js";
+import { strToU8, zipSync } from "fflate";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { captureCli } from "./support/cli-run.js";
 import {
@@ -27,7 +28,7 @@ import {
   saveScanKnowledge,
   scanInputIdentity,
 } from "../src/scan-inputs.js";
-import { execNodePython } from "./support/python-probe.js";
+import { Database } from "bun:sqlite";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { useTestPython } from "./support/python.js";
 
@@ -85,25 +86,14 @@ test("SDK registration measures the shell-visible instructions separately from u
         if (args[0] !== "register-cli-scan") return mockWorkbench(args, input);
         await beforeRegistration?.();
         const { scanId } = await runWorkbench(workbench, args, input);
-        digest = JSON.parse(
-          execNodePython(
-            python,
-            [
-              "-c",
-              [
-                "import json, sqlite3, sys",
-                "sys.path.insert(0, sys.argv[1])",
-                "from workbench_db import database_path",
-                "with sqlite3.connect(database_path().as_uri() + '?mode=ro', uri=True) as db:",
-                "    row = db.execute('SELECT instruction_digest FROM scans WHERE id = ?', (sys.argv[2],)).fetchone()",
-                "    print(json.dumps(row[0]))",
-              ].join("\n"),
-              join(workbench.pluginRoot, "scripts"),
-              String(scanId),
-            ],
-            workbench.environment,
-          ),
-        );
+        using database = new Database(join(state, "workbench.sqlite3"), {
+          readonly: true,
+        });
+        digest = database
+          .query<{ digest: string | null }, [string]>(
+            "SELECT instruction_digest AS digest FROM scans WHERE id = ?",
+          )
+          .get(String(scanId))!.digest;
         throw new Error("registration recorded");
       },
     });
@@ -142,7 +132,25 @@ test("SDK registration measures the shell-visible instructions separately from u
       );
     }),
   ).toBeNull();
-  expect(await register(custom)).toMatch(/^sha256:[0-9a-f]{64}$/);
+  const current = await register(custom);
+  expect(current).toMatch(/^sha256:[0-9a-f]{64}$/);
+
+  // A Windows ZIP scan reads a fresh extraction, even if the prepared directory changes.
+  const zipPath = join(root, "selected.zip");
+  const zip = zipSync({
+    ".codex-plugin/plugin.json": await readFile(
+      join(plugin, ".codex-plugin", "plugin.json"),
+    ),
+    "skills/security-scan/SKILL.md": strToU8("# Staged workflow"),
+    "references/core-scan.md": strToU8("Staged reference"),
+  });
+  await writeFile(zipPath, zip);
+  runtime.pluginZipSource = (
+    await resolvePluginSource(zipPath, root, undefined, true)
+  ).zip;
+  const staged = await register({});
+  expect(staged).toMatch(/^sha256:[0-9a-f]{64}$/);
+  expect(staged).not.toBe(current);
 });
 
 test("rerun recognizes unchanged context after the workbench serializes its recipe", async () => {

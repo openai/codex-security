@@ -2868,7 +2868,7 @@ export class CodexSecurity {
               options.resumeScanId,
             ])
           : await workbench(
-              workbenchOptions,
+              { ...workbenchOptions, instructionRoot: shellPluginRoot },
               workbenchArgs("register-cli-scan", {
                 repository: repo,
                 scanDir,

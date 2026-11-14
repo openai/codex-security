@@ -222,6 +222,7 @@ export interface PluginPythonOptions {
 export interface WorkbenchCommandOptions {
   python: string;
   pluginRoot: string;
+  instructionRoot?: string;
   environment: ProcessEnvironment;
   stateDirectory?: string;
   protectedRoot?: string | readonly string[];
@@ -2084,7 +2085,7 @@ export async function runWorkbench(
           : {}),
         _CODEX_SECURITY_INSTRUCTION_ROOT:
           arguments_[0] === "register-cli-scan"
-            ? options.pluginRoot
+            ? (options.instructionRoot ?? options.pluginRoot)
             : undefined,
       }),
       // The SDK owns configuration normalization; the helper receives its resolved location.
