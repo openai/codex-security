@@ -308,6 +308,56 @@ export async function savedDiscoveryRoots(
   return [...new Set([...targets, ...currentRoots.flat()])];
 }
 
+export interface RegisteredScanAuthority {
+  id: string;
+  target_path: string;
+  target_revision: string;
+  scan_dir: string;
+  status: string;
+  seal_manifest_digest: string | null;
+  recipe: Record<string, unknown>;
+}
+
+/** Read registered authority without requiring the report's Python interpreter. */
+export async function readRegisteredScanAuthority(
+  scanDirectory: string,
+  environment: ProcessEnvironment,
+  signal?: AbortSignal,
+): Promise<RegisteredScanAuthority | undefined> {
+  signal?.throwIfAborted();
+  const path = workbenchDatabasePath(environment);
+  try {
+    await access(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  return readSnapshot(path, (database) => {
+    const fields = [
+      "id",
+      "target_path",
+      "target_revision",
+      "scan_dir",
+      "status",
+      "seal_manifest_digest",
+      "recipe_json",
+    ];
+    const columns = tableColumns(database, "scans");
+    if (fields.some((field) => !columns.has(field))) return undefined;
+    const row = readRows<
+      Omit<RegisteredScanAuthority, "recipe"> & { recipe_json: string | null }
+    >(
+      database,
+      `SELECT ${fields.join(", ")} FROM scans WHERE scan_dir = ?`,
+      scanDirectory,
+    )[0];
+    if (!row?.recipe_json) return undefined;
+    const { recipe_json, ...scan } = row;
+    const recipe: unknown = JSON.parse(recipe_json);
+    return isRecord(recipe) ? { ...scan, recipe } : undefined;
+  });
+}
+
 export function readSavedScanLifecycle(
   environment: ProcessEnvironment,
   scanId: string,

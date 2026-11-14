@@ -1443,7 +1443,8 @@ fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
 existing checkout before an ordinary retry.
 If checkout cleanup previously failed, the next invocation removes it only when
 its marker still identifies the same directory and scan attempt. Older or
-replacement checkouts without a matching marker are preserved.
+replacement checkouts without a matching marker are preserved. Fresh retries use
+`recovery-checkouts/<id>/attempt-<n>` to keep each checkout distinct in scan history.
 Completed results are skipped only when their saved contract and seal are valid
 and the manifest records a completed scan. Damaged or unsuccessful results get a
 new attempt, including with `--recover`, while the old artifacts remain available.
@@ -1453,6 +1454,11 @@ filenames, direct Codex overrides, or explicit `--plugin-path`/`--python` select
 require a new output directory. Version 1 manifests also require a new directory
 because their original knowledge inputs and direct overrides cannot be verified.
 Worker and retry counts can change when resuming.
+
+Reusing a sealed result also requires its original private scan registration,
+complete request identity, and recorded manifest seal. Older artifacts remain
+readable, but campaigns without that authority start a fresh attempt. An editable
+campaign receipt alone cannot establish that a result used the requested settings.
 
 On POSIX, local repository paths retain `..` components in the campaign manifest
 so distinct symlink traversals remain distinct sources. Older campaigns may have

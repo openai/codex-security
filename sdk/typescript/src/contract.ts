@@ -90,13 +90,14 @@ export async function loadContract(
 
 export async function loadContractWithScanDirectory(
   scanDirectory: string,
-  options: LoadContractOptions,
+  options: LoadContractOptions & { validateRecoveryCoverage?: boolean },
 ): Promise<{ contract: LoadedContract; scanDirectory: string }> {
   return translateContractError(async () => {
     const helper = await contractHelper();
     const result = (await helper.loadSealedContract(scanDirectory, {
       pluginRoot: options.pluginRoot,
       expectedScanId: options.expectedScanId,
+      validateRecoveryCoverage: options.validateRecoveryCoverage,
       signal: options.signal,
     })) as {
       contract: LoadedContract;

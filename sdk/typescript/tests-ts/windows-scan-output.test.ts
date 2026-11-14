@@ -4,6 +4,7 @@ import {
   cp,
   lstat,
   mkdir,
+  mkdtemp,
   readFile,
   realpath,
   symlink,
@@ -17,14 +18,9 @@ import { loadContract } from "../src/contract.js";
 import { runMultiscan } from "../src/multiscan.js";
 import * as runtime from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import {
-  client,
-  completeRun,
-  createMultiscanFixtures,
-  options,
-} from "./support/multiscan.js";
+import { client, createMultiscanFixtures } from "./support/multiscan.js";
 
-const { temporaryDirectory, repositoryFixture, cleanup } =
+const { temporaryDirectory, repositoryFixture, cleanup, completeRun, options } =
   createMultiscanFixtures();
 afterEach(cleanup);
 const exec = promisify(execFile);
@@ -69,8 +65,10 @@ async function icacls(path: string, ...args: string[]): Promise<void> {
   await exec(join(system, "icacls.exe"), [path, ...args]);
 }
 
-async function sharedRoot(): Promise<string> {
-  const root = await temporaryDirectory();
+async function sharedRoot(parent?: string): Promise<string> {
+  const root = parent
+    ? await mkdtemp(join(parent, "shared-"))
+    : await temporaryDirectory();
   await icacls(root, "/grant", "*S-1-1-0:(OI)(CI)R");
   return root;
 }
@@ -133,8 +131,10 @@ async function accessRules(path: string): Promise<string> {
   );
 }
 
-async function createMultiscanCampaign(output: string): Promise<void> {
-  const { paths } = await repositoryFixture("campaign-source");
+async function createMultiscanCampaign(
+  paths: Parameters<typeof options>[0],
+  output: string,
+): Promise<void> {
   const result = await runMultiscan(
     options({ ...paths, output }, client(completeRun), { maxAttempts: 1 }),
   );
@@ -237,7 +237,8 @@ async function archiveWorkbenchOutput(
 windowsTest(
   "new Windows scan roots start private beneath a shared parent",
   async () => {
-    const root = await sharedRoot();
+    const { paths } = await repositoryFixture("campaign-source");
+    const root = await sharedRoot(paths.root);
     const before = await descriptor(root);
     expect(before).toContain(";;;WD)");
     const explicit = join(root, "new parent", "scan");
@@ -250,7 +251,7 @@ windowsTest(
       root,
     );
     const campaign = join(root, "campaign");
-    await createMultiscanCampaign(campaign);
+    await createMultiscanCampaign(paths, campaign);
     const direct = await createDirectPluginOutput(root);
     const home = await runtime.prepareCodexSecurityCredentialHome({
       CODEX_SECURITY_STATE_DIR: direct.stateDir,
@@ -422,7 +423,8 @@ windowsTest("existing Windows scan ACLs are preserved", async () => {
 windowsTest(
   "existing Windows multiscan campaign ACLs are preserved",
   async () => {
-    const root = await temporaryDirectory();
+    const { paths } = await repositoryFixture("campaign-source");
+    const root = paths.root;
     const output = join(root, "campaign");
     await mkdir(output);
     await icacls(
@@ -432,7 +434,7 @@ windowsTest(
       "*S-1-5-32-545:(OI)(CI)(IO)M",
     );
     const permissions = await accessRules(output);
-    await createMultiscanCampaign(output);
+    await createMultiscanCampaign(paths, output);
     expect(await accessRules(output)).toBe(permissions);
   },
 );
@@ -590,7 +592,8 @@ test.skipIf(
 )(
   "private scan output excludes a second user and rejects replaceable directories",
   async () => {
-    const root = await sharedRoot();
+    const { paths } = await repositoryFixture("campaign-source");
+    const root = await sharedRoot(paths.root);
     const writableParent = join(root, "writable parent");
     await mkdir(writableParent);
     await icacls(writableParent, "/grant", "*S-1-1-0:(AD)");
@@ -609,7 +612,7 @@ test.skipIf(
       root,
     );
     const campaign = join(writableParent, "campaign");
-    await createMultiscanCampaign(campaign);
+    await createMultiscanCampaign(paths, campaign);
     for (const output of [explicit, generated, campaign, direct.scanDir]) {
       await writeFile(join(output, "probe.txt"), "synthetic private data");
     }

@@ -196,6 +196,7 @@ import { scanInputIdentity, saveScanKnowledge } from "./scan-inputs.js";
 import {
   FindingWorkflow,
   scanArtifactDigest,
+  scanRequestDigest,
   workflowDigest,
 } from "./finding-workflow.js";
 import { reviewSqliteHome } from "./deduplication/codex-review.js";
@@ -907,23 +908,9 @@ export class CodexSecurity {
       await workflow.protectArtifacts(options.outputDir);
       artifactRoots.push(canonicalOutput);
     }
-    const state = await workflow.bind({
-      repositoryPath: local.repository,
-      scanRequestDigest: workflowDigest({
-        config: this.config,
-        options: {
-          ...options,
-          ...local.prompts,
-          target: options.target ?? "repository",
-          mode: options.mode ?? DEFAULT_SCAN_MODE,
-          workflowId: undefined,
-          severityRubric: undefined,
-          rubricPath: undefined,
-          signal: undefined,
-          auth: undefined,
-          archiveExisting: undefined,
-        },
-      }),
+    const state = await workflow.bindScan(local.repository, this.config, {
+      ...options,
+      ...local.prompts,
     });
     if (state.scanId && state.scanDir) {
       await workflow.protectArtifacts(state.scanDir);
@@ -2870,6 +2857,11 @@ export class CodexSecurity {
         knowledgeBasePaths: knowledgeBase?.sources,
         deepScan: deepScanConfiguration?.settings,
       });
+      recipe["scanRequestDigest"] = scanRequestDigest(
+        this.config,
+        options,
+        repo,
+      );
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,
