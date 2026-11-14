@@ -3,6 +3,8 @@ setlocal DisableDelayedExpansion
 
 set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\server.mjs"
 if "%~1"=="--helper" (
+  rem An inherited ERRORLEVEL would shadow the helper exit code.
+  set "ERRORLEVEL="
   set "CODEX_SECURITY_MCP_SCRIPT=%~dp0..\mcp\helpers.mjs"
   goto launch
 )
