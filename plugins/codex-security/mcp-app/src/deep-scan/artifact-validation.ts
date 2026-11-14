@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -10,6 +11,10 @@ import {
 } from "../coverage-publication.js";
 import {
   parsePersistedScanDraft,
+  readAcceptedWorkerCheckpoints,
+  recordedScanReceiptRefs,
+  reconcileAcceptedWorkerHistory,
+  readArchivedWorkerCheckpoints,
   scanDraftInputSchema,
   retainRecordedReceiptOwnership,
   workerCoverageReceiptLocation,
@@ -57,6 +62,8 @@ export function parseScanUnion(input: unknown): ScanUnion {
   return parsed;
 }
 
+type WorkerAdmission = "new" | "previously-accepted";
+
 /** Admit exactly the complete semantic result written by an ordinary Standard scan. */
 export async function validateDiscoveryArtifacts(
   artifacts: DeepScanArtifacts,
@@ -66,8 +73,26 @@ export async function validateDiscoveryArtifacts(
     ArtifactContext,
     "scope" | "includePaths" | "filePaths"
   > = {},
-  admission: "new" | "previously-accepted" = "new",
+  admission: WorkerAdmission = "new",
 ): Promise<ScanDraftInput> {
+  const { context, result } = await readWorkerDraft(
+    artifacts,
+    resultPath,
+    expectedScanId,
+    boundScope,
+    admission,
+  );
+  await validateWorkerReceipts(artifacts.workersRoot, context, result);
+  return result;
+}
+
+async function readWorkerDraft(
+  artifacts: DeepScanArtifacts,
+  resultPath: string,
+  expectedScanId: string,
+  boundScope: Pick<ArtifactContext, "scope" | "includePaths" | "filePaths">,
+  admission: WorkerAdmission,
+) {
   await requireRegularFile(resultPath, artifacts.workersRoot);
   const root = dirname(resultPath);
   const context = {
@@ -113,12 +138,20 @@ export async function validateDiscoveryArtifacts(
       closed.add(id);
     }
   }
+  return { context, result };
+}
+
+async function validateWorkerReceipts(
+  workersRoot: string,
+  context: ArtifactContext,
+  result: ScanDraftInput,
+) {
   const receiptPaths = new Map<string, string>();
   for (const row of result.reviewState.surfaces as JsonObject[]) {
     for (const ref of (row.receiptRefs as string[] | undefined) ?? []) {
       const location = workerCoverageReceiptLocation(context, row, ref);
       const normalized = relative(
-        artifacts.workersRoot,
+        workersRoot,
         join(location.context.root, ...location.components),
       );
       const key = normalized.toLowerCase();
@@ -136,14 +169,127 @@ export async function validateDiscoveryArtifacts(
       );
     }
   }
-  return result;
+}
+
+// Discard worker claims about host-assigned origins before reconciling occurrences.
+function clearWorkerOriginClaims(coverage: ScanDraftInput["reviewState"]) {
+  for (const field of [
+    "surfaces",
+    "deferred",
+    "explicitExclusions",
+    "openQuestions",
+    "resolvedDeferred",
+  ] as const) {
+    for (const value of coverage[field] ?? []) {
+      const row = asRecord(value);
+      const provenance = asRecord(row?.provenance);
+      if (!row || !provenance) continue;
+      for (const key of ["workerId", "attempt", "sourceId", "candidateId"])
+        delete provenance[key];
+      if (!Object.keys(provenance).length) delete row.provenance;
+    }
+  }
+}
+
+export async function readAcceptedDiscovery(
+  artifacts: DeepScanArtifacts,
+  worker: Omit<AcceptedDiscovery, "result" | "coverage">,
+  scanId: string,
+  boundScope: Pick<
+    ArtifactContext,
+    "scope" | "includePaths" | "filePaths"
+  > = {},
+  admission: WorkerAdmission = "new",
+): Promise<AcceptedDiscovery> {
+  const draft = await readWorkerDraft(
+    artifacts,
+    worker.resultPath,
+    scanId,
+    boundScope,
+    admission,
+  );
+  const { context } = draft;
+  let result = draft.result;
+  clearWorkerOriginClaims(result.reviewState);
+  function usableCheckpoint({ input }: { input: ScanDraftInput }) {
+    try {
+      if (admission === "new") validateWorkerReport(input);
+      validateRetainedCoverage(input.reviewState);
+    } catch {
+      return false;
+    }
+    clearWorkerOriginClaims(input.reviewState);
+    return true;
+  }
+  const archived = (
+    await readArchivedWorkerCheckpoints(context, true).catch(() => [])
+  ).filter(usableCheckpoint);
+  const current = (await readAcceptedWorkerCheckpoints(context, result)).filter(
+    usableCheckpoint,
+  );
+  const history = [...current, ...archived];
+  const receiptDigests = new Map<string, string>();
+  const receiptSources = archived.length
+    ? [result, ...history.map(({ input }) => input)]
+    : [];
+  for (const source of receiptSources) {
+    for (const surface of source.reviewState.surfaces) {
+      for (const value of (surface.receiptRefs as string[] | undefined) ?? []) {
+        const ref = posix.normalize(value);
+        const shared = recordedScanReceiptRefs(surface).includes(ref);
+        const key = JSON.stringify([shared, ref]);
+        if (receiptDigests.has(key)) continue;
+        try {
+          const location = workerCoverageReceiptLocation(context, surface, ref);
+          const path = await artifactSourcePath(
+            location.context,
+            location.components,
+            "Saved discovery receipt",
+          );
+          const digest = createHash("sha256");
+          for await (const chunk of createReadStream(path))
+            digest.update(chunk);
+          receiptDigests.set(key, digest.digest("hex"));
+        } catch {
+          // Missing evidence cannot establish an earlier receipt origin.
+        }
+      }
+    }
+  }
+  if (history.length) {
+    result = await reconcileAcceptedWorkerHistory(
+      context,
+      result,
+      history,
+      receiptDigests,
+    );
+    if (admission === "new") validateWorkerReport(result);
+    validateRetainedCoverage(result.reviewState);
+  }
+  await validateWorkerReceipts(artifacts.workersRoot, context, result);
+  const accepted = { ...worker, result };
+  return {
+    ...accepted,
+    coverage: scanCoverage(
+      accepted,
+      artifacts.scanDir,
+      archived.flatMap(({ input, attempt }) => {
+        const number = /^attempt-(\d+)$/.exec(attempt ?? "")?.[1];
+        return number === undefined
+          ? []
+          : [{ attempt: Number(number), coverage: input.reviewState }];
+      }),
+      receiptDigests,
+    ),
+  };
 }
 
 /** Qualify worker-local IDs and receipt paths before combining accepted coverage. */
 export function scanCoverage(
   worker: AcceptedDiscovery,
   scanDir: string,
-  additionalModel?: ScanDraftInput["threatModel"],
+  archived: { attempt: number; coverage: ScanDraftInput["reviewState"] }[] = [],
+  receiptDigests: ReadonlyMap<string, string> = new Map(),
 ): ScanDraftInput["reviewState"] {
   const coverage = worker.result.reviewState;
   const artifactPrefix = relative(scanDir, dirname(worker.resultPath))
@@ -155,7 +301,44 @@ export function scanCoverage(
     ...(worker.attempt === undefined ? {} : { attempt: worker.attempt }),
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
-  const project = <T extends Record<string, unknown>>(item: T): T => {
+  const reviews = [provenance];
+  const history = [...archived].sort(
+    (left, right) => left.attempt - right.attempt,
+  );
+  // Each occurrence in one snapshot can account for only one current record.
+  const matchedRows = new Map<
+    string,
+    Map<(typeof history)[number], Set<number>>
+  >();
+  const project = <T extends Record<string, unknown>>(
+    field: string,
+    item: T,
+  ): T => {
+    const matchedHistory = matchedRows.get(field) ?? new Map();
+    matchedRows.set(field, matchedHistory);
+    let origin = provenance;
+    for (const saved of history) {
+      const matched = matchedHistory.get(saved) ?? new Set<number>();
+      const rows = (saved.coverage[field] as unknown[] | undefined) ?? [];
+      const index = rows.findIndex(
+        (row, index) =>
+          !matched.has(index) &&
+          matchesSavedCoverageSource(
+            field,
+            item,
+            row,
+            artifactPrefix,
+            receiptDigests,
+          ),
+      );
+      if (index < 0) continue;
+      matched.add(index);
+      matchedHistory.set(saved, matched);
+      if (origin === provenance)
+        origin = { workerId: worker.id, attempt: saved.attempt };
+    }
+    if (!reviews.some((review) => review.attempt === origin.attempt))
+      reviews.push(origin);
     const result = structuredClone(item);
     const projected = asRecord(result.provenance) ?? {};
     for (const key of [
@@ -170,7 +353,7 @@ export function scanCoverage(
       ...result,
       provenance: {
         ...projected,
-        ...provenance,
+        ...origin,
         ...(item.id === undefined ? {} : { sourceId: item.id }),
         ...(item.candidateId === undefined
           ? {}
@@ -189,7 +372,7 @@ export function scanCoverage(
       string[] | undefined;
     const scanRefs = new Set(shared);
     return {
-      ...project(surface),
+      ...project("surfaces", surface),
       id,
       receiptRefs: ((surface.receiptRefs as string[] | undefined) ?? []).map(
         (receipt) => {
@@ -204,15 +387,13 @@ export function scanCoverage(
     };
   });
   return {
-    reviews: [
-      additionalModel
-        ? { ...provenance, threatModel: additionalModel }
-        : provenance,
-    ],
+    reviews,
     surfaces,
-    explicitExclusions: coverage.explicitExclusions.map(project),
+    explicitExclusions: coverage.explicitExclusions.map((item) =>
+      project("explicitExclusions", item),
+    ),
     deferred: coverage.deferred.map((item, index) => ({
-      ...project(item),
+      ...project("deferred", item),
       id: `${prefix}-deferred-${index + 1}`,
       ...(item.surfaceIds === undefined
         ? {}
@@ -225,19 +406,89 @@ export function scanCoverage(
     ...(coverage.resolvedDeferred === undefined
       ? {}
       : {
-          resolvedDeferred: coverage.resolvedDeferred.map(({ id, reason }) => ({
-            id: `${prefix}-resolved-${id}`,
-            reason,
-          })),
+          resolvedDeferred: coverage.resolvedDeferred.map((item) => {
+            const projected = project("resolvedDeferred", item);
+            const origin = (projected as Record<string, unknown>)
+              .provenance as Record<string, unknown>;
+            return {
+              id: `${worker.id}-attempt-${origin.attempt ?? "unknown"}-resolved-${item.id}`,
+              reason: item.reason,
+            };
+          }),
         }),
     ...(coverage.openQuestions === undefined
       ? {}
       : {
           openQuestions: coverage.openQuestions.map((question) =>
-            project(typeof question === "string" ? { question } : question),
+            project(
+              "openQuestions",
+              typeof question === "string" ? { question } : question,
+            ),
           ),
         }),
   };
+}
+
+/** Compare accepted content and readable receipt bytes, never authored origin claims. */
+function matchesSavedCoverageSource(
+  field: string,
+  item: Record<string, unknown>,
+  saved: unknown,
+  artifactPrefix: string,
+  receiptDigests: ReadonlyMap<string, string>,
+): boolean {
+  const original =
+    typeof saved === "string" ? { question: saved } : structuredClone(saved);
+  const current = structuredClone(item);
+  if (
+    typeof original !== "object" ||
+    original === null ||
+    Array.isArray(original)
+  )
+    return false;
+  const previous = original as Record<string, unknown>;
+  if (previous.id === undefined) delete current.id;
+  if (field === "surfaces") {
+    const archivePrefix = `${posix.dirname(artifactPrefix)}/attempts/`;
+    for (const row of [previous, current]) {
+      const provenance = row.provenance as Record<string, unknown> | undefined;
+      const sharedRefs = provenance?.scanReceiptRefs as string[] | undefined;
+      row.receiptRefs = [
+        ...new Set(
+          ((row.receiptRefs as string[] | undefined) ?? []).map((ref) => {
+            ref = posix.normalize(ref);
+            const shared = sharedRefs?.includes(ref) ?? false;
+            const digest = receiptDigests.get(JSON.stringify([shared, ref]));
+            let path = ref;
+            // Without readable bytes, only the exact accepted reference can match.
+            if (digest !== undefined && !shared) {
+              if (path.startsWith(`${artifactPrefix}/`))
+                path = path.slice(artifactPrefix.length + 1);
+              else if (path.startsWith(archivePrefix)) {
+                const archived = path.slice(archivePrefix.length);
+                if (/^attempt-[0-9]+\//u.test(archived))
+                  path = archived.slice(archived.indexOf("/") + 1);
+              }
+              while (
+                /^artifacts\/archived-receipts\/attempt-[0-9]+\//u.test(path)
+              ) {
+                path = path.replace(
+                  /^artifacts\/archived-receipts\/attempt-[0-9]+\//u,
+                  "",
+                );
+              }
+            }
+            return JSON.stringify([shared, path, digest]);
+          }),
+        ),
+      ];
+      if (provenance) {
+        delete provenance.scanReceiptRefs;
+        if (Object.keys(provenance).length === 0) delete row.provenance;
+      }
+    }
+  }
+  return isDeepStrictEqual(previous, current);
 }
 
 export function addScanCoverage(
@@ -251,10 +502,23 @@ export function addScanCoverage(
     model && !isDeepStrictEqual(model, aggregate.threatModel)
       ? model
       : undefined;
-  const coverage = scanCoverage(worker, scanDir, additionalModel);
+  const projected = worker.coverage ?? scanCoverage(worker, scanDir);
+  const coverage =
+    additionalModel && Array.isArray(projected.reviews)
+      ? {
+          ...projected,
+          reviews: projected.reviews.map((review, index) =>
+            index === 0
+              ? { ...asRecord(review), threatModel: additionalModel }
+              : review,
+          ),
+        }
+      : projected;
   const previous = aggregate.sourceCoverage;
   if (!previous) {
-    aggregate.sourceCoverage = coverage;
+    aggregate.sourceCoverage = worker.coverage
+      ? structuredClone(coverage)
+      : coverage;
     return;
   }
   for (const field of [

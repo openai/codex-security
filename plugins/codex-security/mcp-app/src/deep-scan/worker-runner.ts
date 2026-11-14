@@ -1,8 +1,8 @@
-import { promises as fs } from "node:fs";
+import { constants, promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";
 import { dirname, join } from "node:path";
-import { validateDiscoveryArtifacts } from "./artifact-validation.js";
+import { readAcceptedDiscovery } from "./artifact-validation.js";
 import { archiveDirectory, writePrivateFile } from "./artifacts.js";
 import type { DeepScanArtifacts } from "./artifacts.js";
 import {
@@ -33,6 +33,7 @@ export interface AcceptedDiscovery {
   id: string;
   resultPath: string;
   result: ScanDraftInput;
+  coverage?: ScanDraftInput["reviewState"];
   attempt?: number;
 }
 
@@ -123,23 +124,23 @@ export class DeepScanWorkerRunner {
       artifactDir,
       attempt: 1,
     });
-    let discoveryResult: ScanDraftInput | undefined;
+    let discovery: AcceptedDiscovery | undefined;
     const outcome = await this.runWorkerWithRetries({
       workerId,
       workerLabel,
       promptPath,
       promptRoot,
       artifactDir,
-      validate: async () => {
-        discoveryResult = await validateDiscoveryArtifacts(
+      validate: async (attempt) => {
+        discovery = await readAcceptedDiscovery(
           artifacts,
-          resultPath,
+          { id: workerId, resultPath, attempt },
           run.scanId,
           run,
         );
       },
     });
-    if (!discoveryResult) {
+    if (!discovery) {
       await fs.rm(resultPath, { force: true });
     }
     if (outcome.status === "failed") {
@@ -203,12 +204,7 @@ export class DeepScanWorkerRunner {
     });
     return {
       status: "succeeded",
-      worker: {
-        id: workerId,
-        resultPath,
-        result: discoveryResult!,
-        attempt: persisted.attempt,
-      },
+      worker: discovery!,
     };
   }
 
@@ -218,7 +214,7 @@ export class DeepScanWorkerRunner {
     promptPath: string;
     promptRoot: string;
     artifactDir: string;
-    validate: () => Promise<void>;
+    validate: (attempt: number) => Promise<void>;
   }): Promise<WorkerAttemptOutcome> {
     const { run, signal } = this.options;
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
@@ -410,7 +406,7 @@ export class DeepScanWorkerRunner {
         await persistUsage();
         validationStarted = true;
         try {
-          await input.validate();
+          await input.validate(attempt);
         } catch (validationError) {
           throw withWorkerDiagnostics(validationError, result.diagnostics);
         }
@@ -496,6 +492,8 @@ export class DeepScanWorkerRunner {
             });
           }
         }
+        if (resumableThreadId)
+          await this.archiveWorkerAttempt(input.artifactDir, attempt, true);
         await finishAttempt("failed");
         const delayMs = Math.ceil(
           this.options.retryDelaysMs[attempt - 1] *
@@ -532,15 +530,48 @@ export class DeepScanWorkerRunner {
     }
   }
 
-  private async archiveWorkerAttempt(artifactDir: string, attempt: number) {
-    await archiveDirectory(
-      artifactDir,
-      join(
-        dirname(artifactDir),
-        "attempts",
-        `attempt-${String(attempt).padStart(2, "0")}`,
-      ),
+  private async archiveWorkerAttempt(
+    artifactDir: string,
+    attempt: number,
+    resuming = false,
+  ) {
+    const attemptRoot = join(
+      dirname(artifactDir),
+      "attempts",
+      `attempt-${String(attempt).padStart(2, "0")}`,
     );
+    if (resuming) {
+      // Keep the conversation's files while preserving their host attempt.
+      await fs.cp(artifactDir, attemptRoot, {
+        recursive: true,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+        filter: async (source) => {
+          try {
+            const entry = await fs.lstat(source);
+            if (entry.isSymbolicLink()) return true;
+            if (!entry.isDirectory() && !entry.isFile()) return false;
+            await fs.access(
+              source,
+              entry.isDirectory()
+                ? constants.R_OK | constants.X_OK
+                : constants.R_OK,
+            );
+            return true;
+          } catch (error) {
+            if (
+              ["EACCES", "EPERM", "ENOENT"].includes(
+                (error as NodeJS.ErrnoException).code ?? "",
+              )
+            )
+              return false;
+            throw error;
+          }
+        },
+      });
+    } else {
+      await archiveDirectory(artifactDir, attemptRoot);
+    }
   }
 
   private async cancelAttempt(
