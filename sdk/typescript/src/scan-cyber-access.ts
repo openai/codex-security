@@ -383,7 +383,10 @@ export async function resolveScanCyberAccessProgram({
     if (!apiKey) {
       if (catalogFile)
         policyOverrides.push(`model_catalog_json=${inlineToml(catalogFile)}`);
-      else if (catalogUrl !== nativeUrl) return "standard";
+      else if (catalogUrl !== nativeUrl)
+        throw new ConfigurationError(
+          "Automatic Cyber access program selection cannot use a different per-scan catalog URL with a saved login. Set the catalog URL in the native Codex home, supply model_catalog_json, or select --cyber-access-program explicitly.",
+        );
       return await probe(policyOverrides, (request) =>
         storedCatalogProgram(workspace.model, request),
       );

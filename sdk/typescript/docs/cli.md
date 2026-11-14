@@ -237,7 +237,10 @@ Blue when advertised. If the model offers Standard without Blue or lacks
 program metadata, the scan requests Standard. A Red-only model stops the scan
 before inference. To use that model, pass `--cyber-access-program daybreak_red`.
 When workspace policy prevents a catalog lookup for a project API key, the scan
-requests Standard if the policy permits it. `init` and `scan --dry-run` stay offline.
+requests Standard if the policy permits it. For a saved login, set a custom
+catalog URL in the native Codex home. If a per-scan URL differs, supply a
+local `model_catalog_json` or select the program explicitly. `init` and
+`scan --dry-run` stay offline.
 
 With a custom Codex executable or launcher, an omitted program uses that
 launcher's native behavior, which can include Red. To request a specific

@@ -124,7 +124,17 @@ test("native catalog routing follows the scan's selected identity", async () => 
   await expect(select("gpt-test", route)).rejects.toThrow(
     "must use an allowed ChatGPT host",
   );
-  expect(await select("gpt-test", route, stored)).toBe("standard");
+  await expect(
+    select(
+      "red",
+      {
+        model_catalog_json: null,
+        "model_providers.openai.model_catalog_url":
+          "https://chatgpt.com/custom/models",
+      },
+      stored,
+    ),
+  ).rejects.toThrow("Set the catalog URL in the native Codex home");
 
   await writeFile(
     join(home, "config.toml"),
@@ -158,7 +168,8 @@ test("the remote catalog subprocess uses only the project key and its private ro
       expect(config).toMatchObject({
         model_providers: { openai: { model_catalog_url: route } },
       });
-      expect([...(command.args ?? []), ...args].join(" ")).not.toContain(route);
+      expect((command.args ?? []).join(" ")).not.toContain(route);
+      expect(args).toEqual(["debug", "models"]);
       return {
         success: true,
         exitCode: 0,
