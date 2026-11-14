@@ -2508,33 +2508,56 @@ for (const binding of ["gitfile", "worktree", "common", "objects"] as const) {
   });
 }
 
-(process.platform === "win32" ? test : test.skip)(
-  "retained Git bindings reject a Windows recovery parent junction before checkout writes",
-  async () => {
-    const { paths, source } = await scopedRepository("junction-source");
-    await interruptCampaign(paths);
-    const externalParent = join(paths.root, "other-recovery-parent");
-    await mkdir(externalParent);
-    const externalCheckout = join(externalParent, "attempt-2");
-    git(paths.root, "clone", "--quiet", source.path, externalCheckout);
-    const runs = mock(async (_checkout: string, settings: ScanSettings = {}) =>
-      completedScan(settings.outputDir!, "complete", externalCheckout),
-    );
-    const campaign = options(paths, client(runs), {
-      recoverScan: async () => undefined,
-    });
-    await expectScanned(campaign);
-    await rename(externalCheckout, join(externalParent, "retained-attempt"));
-    const lexicalParent = join(paths.output, "recovery-checkouts", "repo");
-    await rm(lexicalParent, { recursive: true, force: true });
-    await symlink(externalParent, lexicalParent, "junction");
-    await expect(runMultiscan(campaign)).rejects.toThrow();
-    await expect(lstat(externalCheckout)).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-    expect(runs).toHaveBeenCalledTimes(1);
-  },
-);
+for (const complete of [true, false]) {
+  test.skipIf(complete && process.platform !== "win32")(
+    complete
+      ? "retained Git bindings reject a Windows recovery parent junction before checkout writes"
+      : "recovery rejects a linked checkout parent before retrying an incomplete attempt",
+    async () => {
+      const { paths, source } = await scopedRepository("junction-source");
+      const outside = join(paths.root, "other-recovery-parent");
+      const retained = join(outside, "retained-attempt");
+      await mkdir(outside);
+      const { campaign, runs, initial } = await completedRetry(
+        paths,
+        {},
+        async (checkout, settings = {}) => {
+          const result = await completedScan(settings.outputDir!);
+          await writeFile(join(checkout, "local.txt"), "retained data\n");
+          await rename(checkout, retained);
+          return result;
+        },
+      );
+      const ledger = await readFile(initial.resultsPath);
+      if (!complete) {
+        await rm(
+          join(
+            paths.output,
+            "artifacts",
+            "repo",
+            "attempt-2",
+            "scan-manifest.json",
+          ),
+        );
+      }
+      const parent = dirname(recoveryCheckout(paths));
+      await rm(parent, { recursive: true });
+      await symlink(
+        outside,
+        parent,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await expect(runMultiscan(campaign)).rejects.toThrow("symbolic links");
+      expect(await readFile(initial.resultsPath)).toEqual(ledger);
+      expect(await readdir(outside)).toEqual(["retained-attempt"]);
+      expect(git(retained, "rev-parse", "HEAD")).toBe(source.revision);
+      expect(await readFile(join(retained, "local.txt"), "utf8")).toBe(
+        "retained data\n",
+      );
+      expect(runs).toHaveBeenCalledTimes(1);
+    },
+  );
+}
 
 for (const entry of ["config", "FETCH_HEAD", "logs/HEAD", "logs"] as const) {
   test(`recovery refuses a linked Git ${entry} before external bytes change`, async () => {

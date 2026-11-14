@@ -112,6 +112,14 @@ const WINDOWS_DEVICE_PATH_NAME =
   /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu;
 
 class AttemptNumberExhaustedError extends Error {}
+class LinkedOutputDirectoryError extends Error {
+  constructor(
+    readonly path: string,
+    options?: ErrorOptions,
+  ) {
+    super("Multiscan output directories must not be symbolic links.", options);
+  }
+}
 
 type MultiscanTask = ReturnType<typeof parseInventory>[number];
 
@@ -651,6 +659,8 @@ async function runCampaign(
       };
       let recoveryAttempt = previous?.attempt ?? 0;
       const artifactRoot = join(output, "artifacts", task.id);
+      const recoveryRoot = join(output, "recovery-checkouts");
+      const recoveryTaskRoot = join(recoveryRoot, task.id);
       if (options.recoverScan !== undefined) {
         await ensureOutputDirectory(artifactRoot);
         for (const name of await readdir(artifactRoot)) {
@@ -718,9 +728,7 @@ async function runCampaign(
             if (existing !== undefined) {
               await ensureOutputDirectory(scanDir);
               const retainedCheckout = join(
-                output,
-                "recovery-checkouts",
-                task.id,
+                recoveryTaskRoot,
                 `attempt-${attempt}`,
               );
               const retained = await lstat(retainedCheckout).catch(
@@ -861,9 +869,7 @@ async function runCampaign(
             // Each new Git checkout has a distinct history identity. Recreating
             // it at a previously registered path would invalidate that binding.
             if (checkout === undefined) {
-              const isolatedRoot = await ensureOutputDirectory(
-                join(output, "recovery-checkouts"),
-              );
+              const isolatedRoot = await ensureOutputDirectory(recoveryRoot);
               const taskRoot = await ensureOutputDirectory(
                 join(isolatedRoot, task.id),
               );
@@ -952,7 +958,15 @@ async function runCampaign(
           if (result.manifest.scan.status !== "completed")
             throw new Error(`Multiscan scan ${result.manifest.scan.status}.`);
         } catch (error) {
-          if (error instanceof AttemptNumberExhaustedError) throw error;
+          // A redirected recovery directory invalidates the checkout binding for every retry.
+          if (
+            error instanceof AttemptNumberExhaustedError ||
+            (options.recoverScan !== undefined &&
+              error instanceof LinkedOutputDirectoryError &&
+              (relative(error.path, recoveryRoot) === "" ||
+                relative(error.path, recoveryTaskRoot) === ""))
+          )
+            throw error;
           // Recovery retains its resumable attempt and checkout; SDK telemetry records cancellation.
           if (options.signal?.aborted && options.recoverScan !== undefined)
             options.signal.throwIfAborted();
@@ -1146,8 +1160,6 @@ async function ensureOutputDirectory(
     retainedDirectory,
   }: { privateGitMetadata?: boolean; retainedDirectory?: string } = {},
 ): Promise<string> {
-  const linkedOutput =
-    "Multiscan output directories must not be symbolic links.";
   let metadata = await lstat(path, { bigint: true }).catch(
     undefinedIfMissingFile,
   );
@@ -1159,7 +1171,7 @@ async function ensureOutputDirectory(
         await createWindowsOutputDirectory(path, true);
       } catch (error) {
         if ((await lstat(path).catch(() => undefined))?.isSymbolicLink()) {
-          throw new Error(linkedOutput, { cause: error });
+          throw new LinkedOutputDirectoryError(path, { cause: error });
         }
         throw error;
       }
@@ -1169,7 +1181,7 @@ async function ensureOutputDirectory(
     metadata = await lstat(path, { bigint: true });
   }
   if (metadata.isSymbolicLink()) {
-    throw new Error(linkedOutput);
+    throw new LinkedOutputDirectoryError(path);
   }
   if (!metadata.isDirectory()) {
     throw new Error("Multiscan output paths must be directories.");
