@@ -216,6 +216,28 @@ export async function dependencyTriageContract(pluginRoot: string) {
   };
 }
 
+export function dependencyTriageEvidence(result: ScaResult, match: ScaMatch) {
+  const context = result.packageContexts?.find(
+    (item) => item.componentId === match.componentId,
+  );
+  return {
+    repository: result.repository,
+    coverage: result.coverage,
+    component: result.components.find((item) => item.id === match.componentId),
+    match,
+    packageContext: context ?? null,
+    earlierAssessments: result.assessments.filter(
+      (item) =>
+        item.status === "completed" &&
+        result.matches.some(
+          (candidate) =>
+            candidate.id === item.matchId &&
+            candidate.componentId === match.componentId,
+        ),
+    ),
+  };
+}
+
 export function dependencyTriagePrompt(
   result: ScaResult,
   skillPath: string,
@@ -224,7 +246,9 @@ export function dependencyTriagePrompt(
   return [
     `Use the bundled $codex-security:triage-finding skill at ${jsonForPrompt(skillPath)}.`,
     `Assess only match ${jsonForPrompt(match.id)} against repository ${jsonForPrompt(result.repository.path)} at revision ${jsonForPrompt(result.repository.revision)}.`,
-    `Read the complete scanner evidence from ${jsonForPrompt(join(result.outputDir, "sca-result.json"))}, including coverage, diagnostics, components, and matches. Select the match with id ${jsonForPrompt(match.id)}, use that ID as both input_id and triage_item_id, and use source_type "advisory". Resolve its componentId against components[].id and use its sourceAdvisories as the advisory evidence.`,
+    `Read the focused scanner and package evidence at ${jsonForPrompt(join(result.outputDir, "sca-assessment-input.json"))}. It contains only the selected match, its package context, and earlier assessments of that package. Use match.id as both input_id and triage_item_id, and source_type "advisory". The full inventory remains at ${jsonForPrompt(join(result.outputDir, "sca-result.json"))} for a specific evidence gap; do not reread unrelated components or advisories.`,
+    "Reuse the package context and source already inspected in this thread. Follow the supplied dependency chain and inspect the exact installed dependency source, including node_modules and pnpm symlinks inside the repository. Git-ignored or untracked source is still usable static evidence. Compare package names and versions with the scanner tuple; installed local source does not by itself prove deployment or attacker reachability.",
+    "Inspect the smallest evidence set that can change the verdict. Once the specific missing fact cannot be established from available local evidence, return needs_review with that fact and a concrete next action; do not repeat broad searches or require a confirmed exploit before explaining the advisory's maintenance implications. Keep evidence, proof gaps, and the next step concise and specific to this match.",
     "In normalized_input, include the selected component's exact name in vulnerable_component and its exact sourcePath in affected_version_or_path. Include its resolved version, when non-null, in either of those fields. Include at least one of the selected match's advisoryIds or aliases in references, as an ID or within a reference URL; a URL without a matched ID or alias does not identify the advisory.",
     "Work inline using static source and configuration inspection only. Do not execute application or dependency code, install packages, reproduce vulnerabilities, spawn subagents, start scans, patch files, or contact external services. The host saves your response.",
     "Return only triage-finding/v0 JSON with exactly one finding for the selected match. Preserve the scanner match separately from evidence about application use. Respect coverage limitations: manifest declarations do not establish installed versions or a complete dependency graph.",

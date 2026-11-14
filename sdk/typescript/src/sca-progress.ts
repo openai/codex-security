@@ -18,6 +18,8 @@ export type DependencyScanProgress =
       /** Saved assessments, including needs_review verdicts. */
       assessmentsCompleted: number;
       assessmentsFailed: number;
+      /** Completed assessments whose available evidence was inconclusive. */
+      assessmentsInconclusive?: number;
       current: {
         matchId: string;
         componentId: string;

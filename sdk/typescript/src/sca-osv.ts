@@ -410,7 +410,10 @@ function caseInsensitiveField(
 }
 
 function inputProvenance(
-  coverage: Pick<ScaCoverage, "inputs" | "configFiles" | "limitations">,
+  coverage: Pick<
+    ScaCoverage,
+    "inputs" | "configFiles" | "limitations" | "firstPartyPackages"
+  >,
 ): string {
   return JSON.stringify({
     inputs: coverage.inputs.map(({ path, sha256, format, status }) => ({
@@ -421,6 +424,7 @@ function inputProvenance(
     })),
     configFiles: coverage.configFiles,
     limitations: coverage.limitations,
+    firstPartyPackages: coverage.firstPartyPackages,
   });
 }
 
@@ -683,7 +687,7 @@ async function repositoryFiles(
 
 type ScaInputDiscovery = Pick<
   ScaCoverage,
-  "inputs" | "configFiles" | "limitations"
+  "inputs" | "configFiles" | "limitations" | "firstPartyPackages"
 > & {
   localReferences: DependencyLocalReference[];
   diagnostics: string[];
@@ -696,6 +700,91 @@ class ScaInputDiscoveryError extends Error {
   ) {
     super(errorMessage(error), { cause: error });
   }
+}
+
+/** Use inventoried manifests so workspace patterns cannot expand the selected scan scope. */
+async function cargoWorkspacePackages(
+  repository: string,
+  lockPath: string,
+  files: string[],
+  diagnostics: string[],
+): Promise<Map<string, string>> {
+  const rootDir = dirname(lockPath);
+  async function readManifest(path: string) {
+    try {
+      if (
+        !(await lstat(path)).isFile() ||
+        relativePathIsOutside(relative(repository, await realpath(path)))
+      )
+        return;
+      return parseToml(await readFile(path, "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+        diagnostics.push(
+          `Could not identify the local package from ${slash(relative(repository, path))}: ${errorMessage(error)}`,
+        );
+      return;
+    }
+  }
+  const rootPath = join(rootDir, "Cargo.toml");
+  const root = await readManifest(rootPath);
+  const workspace = root?.["workspace"];
+  const shared = record(workspace) ? workspace["package"] : undefined;
+  const packages = new Map<string, string>();
+  function remember(
+    manifest: Record<string, unknown> | undefined,
+    path: string,
+  ) {
+    const pkg = manifest?.["package"];
+    if (!record(pkg) || typeof pkg["name"] !== "string") return;
+    const declared = pkg["version"];
+    const version =
+      record(declared) && declared["workspace"] === true && record(shared)
+        ? shared["version"]
+        : declared;
+    if (typeof version === "string")
+      packages.set(
+        `${pkg["name"]}@${version}`,
+        slash(relative(repository, path)),
+      );
+  }
+  remember(root, rootPath);
+  if (!record(workspace)) return packages;
+  const normalize = (pattern: string) =>
+    posix.normalize(pattern).replace(/\/$/u, "");
+  const members = strings(workspace["members"]).map(normalize);
+  const excluded = strings(workspace["exclude"]).map(normalize);
+  if (members.length === 0) return packages;
+  // Prefix path components so Node includes dot directories as Cargo does.
+  // Preserve recursive ** and Cargo's literal braces and parentheses.
+  const patterns = members.map((member) =>
+    member
+      .split("/")
+      .map((part) =>
+        part === "**" ? part : "_" + part.replace(/[{}()]/gu, "\\$&"),
+      )
+      .join("/"),
+  );
+  for (const file of files) {
+    if (scaInputBasename(file) !== scaInputBasename("Cargo.toml")) continue;
+    const path = join(repository, file);
+    const dir = slash(relative(rootDir, dirname(path)));
+    if (!dir) continue;
+    // Cargo treats exclusions and their explicit-member overrides as literal path prefixes.
+    const contains = (prefix: string) =>
+      prefix === "." || dir === prefix || dir.startsWith(prefix + "/");
+    if (excluded.some(contains) && !members.some(contains)) continue;
+    const subject = dir
+      .split("/")
+      .map((part) => "_" + part)
+      .join("/");
+    if (
+      members.includes(dir) ||
+      patterns.some((pattern) => posix.matchesGlob(subject, pattern))
+    )
+      remember(await readManifest(path), path);
+  }
+  return packages;
 }
 
 /** Select effective lockfiles before invoking OSV, which itself gives shrinkwrap precedence. */
@@ -722,6 +811,7 @@ export async function discoverScaInputs(
   const inputs: ScaInput[] = [];
   const configFiles: ScaFile[] = [];
   const localReferences: DependencyLocalReference[] = [];
+  const firstPartyPackages: NonNullable<ScaCoverage["firstPartyPackages"]> = [];
   const diagnostics = [
     ...pathDiagnostics,
     ...submodules.map(
@@ -818,6 +908,68 @@ export async function discoverScaInputs(
           );
           input.status = inspected.status;
           input.reason = inspected.reason;
+          if (
+            additional === "cargo" &&
+            inspected.references.some(
+              (reference) => reference.resolution === "workspace-or-path",
+            )
+          ) {
+            const declared = await cargoWorkspacePackages(
+              repository,
+              path,
+              files,
+              diagnostics,
+            );
+            if (declared.size > 0) {
+              const packages = parseToml(content.toString("utf8"))["package"];
+              for (
+                let index = inspected.references.length - 1;
+                index >= 0;
+                index--
+              ) {
+                const reference = inspected.references[index]!;
+                const manifestPath = declared.get(
+                  `${reference.name}@${reference.version}`,
+                );
+                if (
+                  reference.resolution === "workspace-or-path" &&
+                  reference.version !== null &&
+                  manifestPath !== undefined
+                ) {
+                  const sources = Array.isArray(packages)
+                    ? packages.flatMap((candidate) =>
+                        record(candidate) &&
+                        candidate["name"] === reference.name &&
+                        candidate["version"] === reference.version &&
+                        typeof candidate["source"] === "string" &&
+                        candidate["source"] !== ""
+                          ? [candidate["source"]]
+                          : [],
+                      )
+                    : [];
+                  const unresolvedSource = sources.find(
+                    (source) =>
+                      source !==
+                      "registry+https://github.com/rust-lang/crates.io-index",
+                  );
+                  if (unresolvedSource === undefined)
+                    inspected.references.splice(index, 1);
+                  else reference.resolution = unresolvedSource;
+                  const sourceBearingTwin = sources.length > 0;
+                  if (!sourceBearingTwin)
+                    firstPartyPackages.push({
+                      name: reference.name,
+                      version: reference.version,
+                      sourcePath: input.path,
+                      manifestPath,
+                    });
+                  limitations.push(
+                    `${input.path}: ${reference.name}@${reference.version} is the local first-party package declared in ${manifestPath}; ${sourceBearingTwin ? "a source-bearing package shares its name and version, so scanner components and advisory matches are retained." : "registry advisory coverage does not apply to that local package."}`,
+                  );
+                }
+              }
+            }
+          }
           localReferences.push(...inspected.references);
           diagnostics.push(...inspected.diagnostics);
           limitations.push(...inspected.limitations);
@@ -922,6 +1074,7 @@ export async function discoverScaInputs(
       configFiles,
       limitations,
       localReferences,
+      firstPartyPackages,
       diagnostics,
     });
   }
@@ -931,6 +1084,7 @@ export async function discoverScaInputs(
     configFiles,
     limitations,
     localReferences,
+    firstPartyPackages,
     diagnostics,
   };
 }
@@ -1323,13 +1477,37 @@ export async function runOsvScan(
   const stderrOutputs: string[] = [];
   const emptyOutputPaths = new Set<string>();
   let unresolvedPackages = 0;
+  let normalizedMatchCount = 0;
   const consumeOutput = (raw: unknown, stderr: string, input: ScaInput) => {
     const normalized = normalizeOsvOutput(raw, {
       repositoryPath: repository,
       inputs: [input],
     });
-    result.components.push(...normalized.components);
-    result.matches.push(...normalized.matches);
+    normalizedMatchCount += normalized.matches.length;
+    const firstPartyComponents = new Set(
+      normalized.components
+        .filter(
+          (component) =>
+            component.ecosystem === "crates.io" &&
+            result.coverage.firstPartyPackages?.some(
+              (pkg) =>
+                pkg.sourcePath === component.sourcePath &&
+                pkg.name === component.name &&
+                pkg.version === component.version,
+            ),
+        )
+        .map((component) => component.id),
+    );
+    result.components.push(
+      ...normalized.components.filter(
+        (component) => !firstPartyComponents.has(component.id),
+      ),
+    );
+    result.matches.push(
+      ...normalized.matches.filter(
+        (match) => !firstPartyComponents.has(match.componentId),
+      ),
+    );
     result.diagnostics.push(...normalized.diagnostics);
     unresolvedPackages +=
       normalized.unresolvedPackages +
@@ -1492,7 +1670,7 @@ export async function runOsvScan(
       stderrOutputs.push(output.stderr);
       const diagnosticStart = result.diagnostics.length;
       result.diagnostics.push(...osvErrorDiagnostics(output.stderr));
-      const matchCount = result.matches.length;
+      const matchCount = normalizedMatchCount;
       if (output.stdout.trim() !== "") {
         let sources: Set<string> | undefined;
         try {
@@ -1531,7 +1709,7 @@ export async function runOsvScan(
         result.diagnostics.push(
           `${input.path}: OSV exited with code ${output.exitCode}. See ${invocation.stderrPath}.`,
         );
-      if (output.exitCode === 1 && result.matches.length === matchCount)
+      if (output.exitCode === 1 && normalizedMatchCount === matchCount)
         result.diagnostics.push(
           `${input.path}: OSV reported findings but no advisory matches could be normalized.`,
         );
