@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -72,7 +73,7 @@ export async function readFixtureCoverage(
   scanDir: string,
   stateDir = path.resolve(scanDir, "../../../state"),
 ): Promise<PublishedCoverage> {
-  const { stdout } = await exec(process.env.PYTHON || "python3", [
+  const { stdout } = await exec(fixturePython, [
     "-c",
     `import json,sys
 from pathlib import Path
@@ -197,7 +198,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 `,
       );
     }
-    const { stdout } = await exec(process.env.PYTHON || "python3", command, {
+    const { stdout } = await exec(fixturePython, command, {
       signal: workbenchAbort.signal,
       env: {
         ...process.env,

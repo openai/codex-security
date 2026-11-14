@@ -173,7 +173,7 @@ test.each(
     const prepare = (url: string) =>
       prepareNormalizedLocalImport(
         normalized([typedRow(url)]),
-        f.options,
+        { ...f.options, sourceRepositoryUrl: undefined },
         f.deps,
       );
     await expect(prepare(other)).rejects.toThrow(

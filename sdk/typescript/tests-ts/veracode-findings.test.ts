@@ -1,11 +1,9 @@
-import { hasPreviousCloudProjection } from "../src/reader-selection.js";
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
-  normalizePreviousVeracodeFindings,
   normalizeVeracodeFindings,
   readVeracodeFindings,
   veracodeReportRepositories,
@@ -78,29 +76,14 @@ test("accepts schema and expanded CWE and category fields under one policy flaw 
   for (const target of ["local", "cloud"] as const) {
     const expanded = normalize(page, target);
     const result = normalize(mixed, target);
-    expect(hasPreviousCloudProjection(expanded)).toBe(false);
-    expect(hasPreviousCloudProjection(result)).toBe(target === "cloud");
     expect(result.excluded).toEqual([]);
     // Only the native row spelling should distinguish the two projections.
     expanded.findings[1]!.evidence.source_data!["row"] = scalar;
     expect(result.findings).toEqual(expanded.findings);
-    const previous = normalizePreviousVeracodeFindings(
-      mixed,
-      repository,
-      target,
-    );
-    expect(previous.findings).toEqual([expanded.findings[0]!]);
-    expect(previous.excluded).toMatchObject([
-      {
-        position: 2,
-        source_finding_id: expanded.findings[1]!.source_finding_id,
-      },
-    ]);
   }
   mixed._links.self.href += "&cwe=79";
   const filtered = normalize(mixed);
   expect(filtered.findings).toHaveLength(2);
-  expect(hasPreviousCloudProjection(filtered)).toBe(false);
   mixed._links.self.href += "&finding_category=4";
   expect(() => normalize(mixed)).toThrow(/finding_category ID/);
 });

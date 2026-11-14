@@ -1,8 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -27,9 +29,9 @@ const pathNameBytes =
   process.platform === "darwin" ? Buffer.from("雪") : Buffer.from([0xff]);
 afterEach(temporary.cleanup);
 
-function fixture() {
+function fixture(name = "repository") {
   const root = temporary.create("codex-security-inventory-"),
-    repo = join(root, "repository"),
+    repo = join(root, name),
     out = join(root, "output");
   mkdirSync(repo);
   git(repo, "init", "-q");
@@ -240,7 +242,7 @@ require("node:module").syncBuiltinESMExports();
 
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   for (const rawWindowsHome of [false, true]) {
-    test.skipIf(process.platform !== "win32")(
+    test.skipIf(rawWindowsHome && process.platform !== "win32")(
       `${command} uses the selected project-local Codex ripgrep${rawWindowsHome ? " through the UTF-16 bridge" : ""}`,
       () => {
         const f = fixture();
@@ -258,17 +260,18 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
           f.repo,
           "node_modules",
           "@openai",
-          `codex-win32-${process.arch}`,
+          `codex-${process.platform}-${process.arch}`,
           "vendor",
           "synthetic-target",
         );
-        const codex = join(runtime, "bin", "codex.exe");
+        const suffix = process.platform === "win32" ? ".exe" : "";
+        const codex = join(runtime, "bin", `codex${suffix}`);
         const tools = join(runtime, "codex-path");
         mkdirSync(dirname(codex), { recursive: true });
         mkdirSync(tools);
         copyFileSync(node, codex);
-        copyFileSync(ripgrep!, join(tools, "rg.exe"));
-        copyFileSync(node, join(f.repo, "rg.exe"));
+        copyFileSync(ripgrep!, join(tools, `rg${suffix}`));
+        copyFileSync(node, join(f.repo, `rg${suffix}`));
         env[pathKey] = [f.repo, tools].join(delimiter);
         env["CODEX_CLI_PATH"] = codex;
         env["CODEX_SECURITY_GIT"] = "";
@@ -435,6 +438,28 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
   }
 }
 
+test.skipIf(process.platform === "win32")(
+  "a separately selected Codex launcher does not supply ripgrep from the scan target",
+  () => {
+    const f = fixture("codex-path");
+    const launcher = join(f.root, "bin", "codex");
+    mkdirSync(dirname(launcher));
+    writeFileSync(launcher, "fixture", { mode: 0o700 });
+    writeFileSync(
+      join(f.repo, "rg"),
+      "#!/bin/sh\nprintf called > rg-ran\nexit 73\n",
+      { mode: 0o700 },
+    );
+    const result = f.run("generate-in-scope-files", ["--scope", "."], {
+      ...f.toolEnvironment,
+      PATH: [f.repo, f.toolEnvironment["PATH"]].join(delimiter),
+      CODEX_CLI_PATH: launcher,
+    });
+    expect(readdirSync(f.repo)).not.toContain("rg-ran");
+    expect(result.status, result.stderr).toBe(0);
+  },
+);
+
 function runPathInventory(
   f: ReturnType<typeof fixture>,
   command: string,
@@ -468,7 +493,292 @@ function runPathInventory(
   );
 }
 
+test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "inventory reports access denied for an unsearchable ripgrep PATH directory",
+  () => {
+    const f = fixture();
+    const blocked = join(f.root, "blocked");
+    mkdirSync(blocked, { mode: 0o600 });
+    try {
+      f.write("scope/visible.py");
+      const result = runPathInventory(f, "generate-in-scope-files", {
+        ...f.toolEnvironment,
+        PATH: blocked,
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("EACCES");
+    } finally {
+      chmodSync(blocked, 0o700);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "inventory selects a trusted shell for an executable text wrapper in a search-only directory",
+  () => {
+    const f = fixture();
+    f.write("scope/visible.py");
+    const checkoutShell = f.write(
+      "sh",
+      "#!/bin/sh\nprintf called > shim-ran\nexit 73\n",
+    );
+    chmodSync(checkoutShell, 0o700);
+    const directory = join(f.root, "search-only");
+    mkdirSync(directory);
+    symlinkSync(checkoutShell, join(directory, "sh"));
+    writeFileSync(
+      join(directory, "rg"),
+      `exec sh -c 'printf used > wrapper-ran; exec "$@"' sh "$INVENTORY_SEARCH" "$@"\n`,
+      { mode: 0o700 },
+    );
+    chmodSync(directory, 0o111);
+    try {
+      const result = runPathInventory(f, "generate-in-scope-files", {
+        ...f.toolEnvironment,
+        PATH: [directory, f.toolEnvironment["PATH"]].join(delimiter),
+        INVENTORY_SEARCH: Bun.which("rg", { PATH: f.toolEnvironment["PATH"] })!,
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(readdirSync(f.repo)).not.toContain("shim-ran");
+      expect(readdirSync(f.repo)).toContain("wrapper-ran");
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+    } finally {
+      chmodSync(directory, 0o700);
+    }
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "inventory preserves a PATH helper's relative resource lookup in a directory with a checkout shim",
+  () => {
+    const f = fixture();
+    f.write("scope/visible.py");
+    const bin = join(f.root, "bin");
+    const lib = join(f.root, "lib");
+    mkdirSync(bin);
+    mkdirSync(lib);
+    const shim = f.write(
+      "shim",
+      "#!/bin/sh\nprintf used > shim-ran\nexit 73\n",
+    );
+    chmodSync(shim, 0o700);
+    symlinkSync(shim, join(bin, "checkout-shim"));
+    writeFileSync(
+      join(bin, "rg"),
+      '#!/bin/sh\nif command -v checkout-shim >/dev/null; then exec checkout-shim; fi\nexec inventory-helper "$@"\n',
+      { mode: 0o700 },
+    );
+    writeFileSync(
+      join(bin, "inventory-helper"),
+      '#!/bin/sh\ntest "$tool" = caller-value || exit 74\n. "${0%/*}/../lib/helper.sh"\n',
+      { mode: 0o700 },
+    );
+    writeFileSync(
+      join(lib, "helper.sh"),
+      'printf used > helper-ran\nexec "$INVENTORY_SEARCH" "$@"\n',
+    );
+    const result = runPathInventory(f, "generate-in-scope-files", {
+      ...f.toolEnvironment,
+      PATH: bin,
+      tool: "caller-value",
+      TMPDIR: process.platform === "linux" ? "/dev/shm" : f.root,
+      INVENTORY_SEARCH: Bun.which("rg", { PATH: f.toolEnvironment["PATH"] })!,
+      CODEX_SECURITY_GIT: "",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(readFileSync(f.out, "utf8")).toBe("scope/visible.py\n");
+    expect(readdirSync(f.repo)).toContain("helper-ran");
+    expect(readdirSync(f.repo)).not.toContain("shim-ran");
+  },
+);
+
 for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
+  test.skipIf(process.platform === "win32")(
+    `${command} follows a PATH directory link before checking its parent for ripgrep`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      const tools = join(f.root, "tools");
+      const unused = join(tools, "unused");
+      const external = join(tools, "repository");
+      mkdirSync(unused, { recursive: true });
+      mkdirSync(external);
+      const prefix = join(f.root, "prefix");
+      symlinkSync(unused, prefix, "dir");
+      writeFileSync(
+        join(external, "rg"),
+        '#!/bin/sh\nprintf used > wrapper-ran\nexec "$INVENTORY_SEARCH" "$@"\n',
+        { mode: 0o700 },
+      );
+      const result = runPathInventory(f, command, {
+        ...f.toolEnvironment,
+        PATH: `${prefix}/../repository`,
+        INVENTORY_SEARCH: Bun.which("rg", { PATH: f.toolEnvironment["PATH"] })!,
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(readdirSync(f.repo)).toContain("wrapper-ran");
+      expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    `${command} selects both ripgrep and its wrapper interpreter outside the checkout`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      for (const name of ["rg", "sh"]) {
+        const shim = f.write(
+          name,
+          "#!/bin/sh\nprintf called > shim-ran\nexit 73\n",
+        );
+        chmodSync(shim, 0o700);
+      }
+      const tools = join(f.root, "operator:tools");
+      const alias = join(f.root, "tools");
+      mkdirSync(tools);
+      symlinkSync(tools, alias, "dir");
+      const interpreters = join(f.root, "interpreters");
+      mkdirSync(interpreters);
+      symlinkSync(join(f.repo, "sh"), join(interpreters, "sh"));
+      symlinkSync(join(f.repo, "sh"), join(interpreters, "final-sh"));
+      const checkoutRuntime = join(f.repo, "runtime");
+      copyFileSync(process.execPath, checkoutRuntime);
+      const loader = join(interpreters, "loader");
+      symlinkSync(checkoutRuntime, loader);
+      const scripts = join(f.root, "scripts");
+      mkdirSync(scripts);
+      writeFileSync(
+        join(scripts, "sh"),
+        `#!${loader}\nawait Bun.write("shim-ran", "used"); process.exit(73);\n`,
+        { mode: 0o700 },
+      );
+      const missing = join(f.root, "incomplete");
+      mkdirSync(missing);
+      symlinkSync(join(f.repo, "missing"), join(missing, "stale-helper"));
+      writeFileSync(join(missing, "sh"), "#!/missing-interpreter\n", {
+        mode: 0o700,
+      });
+      const shell = join(f.root, "operator's shell");
+      mkdirSync(shell);
+      const envAlias = join(f.root, "launch-env");
+      symlinkSync("/usr/bin/env", envAlias);
+      symlinkSync("/bin/sh", join(shell, "final-sh"));
+      writeFileSync(
+        join(shell, "sh"),
+        `#!${envAlias} final-sh\nexec /bin/sh "$@"\n`,
+        { mode: 0o700 },
+      );
+      const rg = Bun.which("rg", { PATH: f.toolEnvironment["PATH"] });
+      expect(rg).not.toBeNull();
+      // Keep this helper available even though its neighbor points into the checkout.
+      symlinkSync(rg!, join(interpreters, "inventory-search"));
+      // Neither of these aliases can supply this wrapper's interpreter.
+      symlinkSync(join(f.repo, "sh"), join(tools, "unrelated"));
+      symlinkSync(f.write("guide.md", "Ordinary document."), join(tools, "sh"));
+      const split =
+        command === "make-repo-scope-input" &&
+        spawnSync("/usr/bin/env", ["-S", "sh -c 'exit 0'"]).status === 0;
+      writeFileSync(
+        join(tools, "rg"),
+        `#!${split ? envAlias : "/usr/bin/env"} ${split ? "-S 'sh' -e" : "sh"}\nprintf used > wrapper-ran\nexec inventory-search "$@"\n`,
+        { mode: 0o700 },
+      );
+      const result = runPathInventory(f, command, {
+        ...f.toolEnvironment,
+        TMPDIR: f.root,
+        PATH: [
+          "",
+          ".",
+          missing,
+          scripts,
+          interpreters,
+          shell,
+          alias,
+          f.toolEnvironment["PATH"],
+        ].join(delimiter),
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(
+        readdirSync(f.root).filter((entry) =>
+          entry.startsWith("codex-security-tools-"),
+        ),
+      ).toEqual([]);
+      expect(readdirSync(f.repo)).not.toContain("shim-ran");
+      expect(readdirSync(f.repo)).toContain("wrapper-ran");
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+    },
+  );
+  test.skipIf(process.platform === "win32")(
+    `${command} preserves a failed tool lookup outside the checkout`,
+    () => {
+      const f = fixture();
+      f.write("scope/visible.py");
+      f.write(".ignore", "ignored.py\n");
+      const cycle = join(f.root, "cycle");
+      symlinkSync(cycle, cycle);
+      const result = runPathInventory(f, command, {
+        ...f.toolEnvironment,
+        PATH: [cycle, f.toolEnvironment["PATH"]].join(delimiter),
+        CODEX_SECURITY_GIT: "",
+      });
+      expect(result.status).not.toBe(0);
+    },
+  );
+  for (const nested of [false, true]) {
+    // Linux can execute a script as another script's shebang interpreter.
+    test.skipIf(
+      process.platform === "win32" || (nested && process.platform !== "linux"),
+    )(
+      `${command} checks ${nested ? "nested " : ""}absolute ripgrep interpreters before launch`,
+      () => {
+        const f = fixture();
+        f.write("scope/visible.py");
+        const checkoutRuntime = join(f.repo, "runtime");
+        copyFileSync(process.execPath, checkoutRuntime);
+        const directories = ["first", "fallback"].map((name) => {
+          const directory = join(f.root, name);
+          mkdirSync(directory);
+          const shell = join(directory, "sh");
+          symlinkSync(name === "first" ? checkoutRuntime : "/bin/sh", shell);
+          const recordUnsafeLaunch =
+            'await Bun.write("first-ran", "used"); process.exit(73);';
+          const interpreter = nested ? join(directory, "interpreter") : shell;
+          if (nested) {
+            const dispatch =
+              name === "first" ? recordUnsafeLaunch : 'exec /bin/sh "$@"';
+            writeFileSync(interpreter, `#!${shell}\n${dispatch}\n`, {
+              mode: 0o700,
+            });
+          }
+          const script =
+            name === "first"
+              ? recordUnsafeLaunch
+              : 'printf used > fallback-ran\nexec "$INVENTORY_SEARCH" "$@"';
+          writeFileSync(
+            join(directory, "rg"),
+            `#!${interpreter}\n${script}\n`,
+            { mode: 0o700 },
+          );
+          return directory;
+        });
+        const result = runPathInventory(f, command, {
+          ...f.toolEnvironment,
+          PATH: directories.join(delimiter),
+          INVENTORY_SEARCH: Bun.which("rg", {
+            PATH: f.toolEnvironment["PATH"],
+          })!,
+          CODEX_SECURITY_GIT: "",
+        });
+        expect(readdirSync(f.repo)).not.toContain("first-ran");
+        expect(readdirSync(f.repo)).toContain("fallback-ran");
+        expect(result.status, result.stderr).toBe(0);
+        expect(readFileSync(f.out, "utf8")).toContain("scope/visible.py");
+      },
+    );
+  }
   test.skipIf(process.platform === "win32")(
     `${command} continues PATH lookup after a missing ripgrep interpreter`,
     () => {
@@ -482,9 +792,18 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
         `#!${join(f.root, "missing-interpreter")}\n`,
         { mode: 0o700 },
       );
+      const shim = f.write("helper", "#!/bin/sh\nexit 73\n");
+      chmodSync(shim, 0o700);
+      symlinkSync(shim, join(first, "helper"));
+      env["TMPDIR"] = f.root;
       env["PATH"] = `${first}${delimiter}${env["PATH"] ?? ""}`;
       env["CODEX_SECURITY_GIT"] = "";
       const result = runPathInventory(f, command, env);
+      expect(
+        readdirSync(f.root).filter((entry) =>
+          entry.startsWith("codex-security-tools-"),
+        ),
+      ).toEqual([]);
       expect(result.status, result.stderr).toBe(0);
       const output = readFileSync(f.out, "utf8");
       expect(
@@ -514,7 +833,11 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
           const executable = Bun.which("rg", { PATH: env[pathKey] });
           expect(executable).not.toBeNull();
           const quoted = lookup !== "extension precedence";
-          const tools = join(f.root, quoted ? "tools;version" : "tools");
+          const quotedName =
+            lookup === "double-quoted semicolon"
+              ? "worker's tools;version"
+              : "tools;version";
+          const tools = join(f.root, quoted ? quotedName : "tools");
           mkdirSync(tools);
           // Ordinary Node lookup prefers COM; the existing raw bridge prefers EXE.
           const extension = !quoted && !bridge ? "com" : "exe";
@@ -525,7 +848,12 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
               join(tools, `rg.${extension === "com" ? "exe" : "com"}`),
             );
           const quote = lookup === "single-quoted semicolon" ? "'" : '"';
-          env[pathKey] = quoted ? `${quote}${tools}${quote}` : tools;
+          // A single-quoted absolute path can contain a quote from the host profile.
+          const entry =
+            lookup === "single-quoted semicolon"
+              ? relative(f.repo, tools)
+              : tools;
+          env[pathKey] = quoted ? `${quote}${entry}${quote}` : entry;
           if (bridge) {
             env["HOME"] = `${f.root}${sep}home-\ud800`;
             expect(env["HOME"].isWellFormed()).toBe(false);
@@ -670,6 +998,97 @@ for (const scope of [".", "src", "./src", "src/résumé.py"]) {
     );
   });
 }
+
+test("make-repo-scope-input reports the count for its registered inventory", () => {
+  const f = fixture();
+  f.write("source");
+  const args = f.scopeArgs("source");
+  const scanDir = join(f.root, "scan");
+  mkdirSync(scanDir);
+  const output = join(scanDir, "scoped-source-input.jsonl");
+  const receipt = join(scanDir, "scoped-source-input.receipt.json");
+  const otherScopes = join(f.root, "alternate.json");
+  copyFileSync(args[1]!, otherScopes);
+  const scanId = randomUUID();
+  const env = {
+    ...f.toolEnvironment,
+    CODEX_SECURITY_SCAN_DIR: scanDir,
+    CODEX_SECURITY_SCAN_ID: scanId,
+    CODEX_SECURITY_REPOSITORY: f.repo + sep + ".",
+    CODEX_SECURITY_TARGET_PATHS_FILE: args[1]!,
+  };
+  const run = (overrides: NodeJS.ProcessEnv = {}, out = output) => {
+    const result = f.run("make-repo-scope-input", [...args, "--out", out], {
+      ...env,
+      ...overrides,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trimEnd()).toBe(`Wrote 1 scoped paths to ${out}`);
+  };
+  for (const mismatch of [
+    { CODEX_SECURITY_SCAN_ID: "" },
+    { CODEX_SECURITY_REPOSITORY: f.root },
+    { CODEX_SECURITY_TARGET_PATHS_FILE: otherScopes },
+    { CODEX_SECURITY_SCAN_DIR: f.root },
+  ]) {
+    run(mismatch);
+    expect(existsSync(receipt)).toBe(false);
+  }
+  run({}, f.out);
+  expect(existsSync(receipt)).toBe(false);
+
+  const existing = statSync(output, { bigint: true });
+  run();
+  const inventory = readFileSync(output);
+  const written = statSync(output, { bigint: true });
+  expect(written.ino).toBe(existing.ino);
+  expect(written.mode).toBe(existing.mode);
+  if (process.platform !== "win32") {
+    expect(statSync(receipt).mode & 0o777).toBe(0o600);
+  }
+  expect(JSON.parse(readFileSync(receipt, "utf8"))).toEqual({
+    scanId,
+    repository: f.repo,
+    count: 1,
+  });
+  rmSync(receipt);
+  mkdirSync(receipt);
+  run();
+  expect(readFileSync(output)).toEqual(inventory);
+});
+
+test.skipIf(process.getuid?.() === 0)(
+  "registered scope inventory preserves read-only output and reports the write failure",
+  () => {
+    const f = fixture();
+    f.write("source");
+    const args = f.scopeArgs("source");
+    const output = join(f.root, "scoped-source-input.jsonl");
+    writeFileSync(output, "existing inventory");
+    chmodSync(output, 0o444);
+    try {
+      const result = f.run(
+        "make-repo-scope-input",
+        [...args, "--out", output],
+        {
+          ...f.toolEnvironment,
+          CODEX_SECURITY_SCAN_DIR: f.root,
+          CODEX_SECURITY_SCAN_ID: randomUUID(),
+          CODEX_SECURITY_REPOSITORY: f.repo,
+          CODEX_SECURITY_TARGET_PATHS_FILE: args[1]!,
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(readFileSync(output, "utf8")).toBe("existing inventory");
+      expect(existsSync(join(f.root, "scoped-source-input.receipt.json"))).toBe(
+        false,
+      );
+    } finally {
+      chmodSync(output, 0o600);
+    }
+  },
+);
 
 test("make-repo-scope-input retains explicit and ignored tracked files without widening directory scope", () => {
   const f = fixture();

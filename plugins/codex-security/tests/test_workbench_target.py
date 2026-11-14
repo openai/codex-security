@@ -5,11 +5,15 @@ from __future__ import annotations
 import difflib
 import errno
 import hashlib
+import io
+import json
 import os
 import runpy
 import shutil
+import sqlite3
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, cast
@@ -132,15 +136,37 @@ def junction_factory(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     return create
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory component errors")
+def test_recorded_checkout_distinguishes_a_replaced_parent_from_a_missing_path(
+    tmp_path: Path,
+) -> None:
+    from workbench_target import require_remediation_target
+
+    parent = tmp_path / "projects"
+    checkout = parent / "repository"
+    checkout.mkdir(parents=True)
+    assert require_remediation_target(str(checkout)) == checkout
+
+    checkout.rmdir()
+    with pytest.raises(SystemExit, match="no longer accessible"):
+        require_remediation_target(str(checkout))
+    parent.rmdir()
+    parent.write_text("ordinary file")
+    with pytest.raises(SystemExit, match="checkout path was replaced"):
+        require_remediation_target(str(checkout))
+
+
 def write_reviewed_patch(
     tmp_path: Path, source: Path, patch: bytes, revision: str = "unversioned"
 ) -> dict[str, object]:
+    from filesystem_identity import serialize_filesystem_identity
+
     scan_dir = tmp_path / "scan"
     scan_dir.mkdir(mode=0o700)
     (scan_dir / "reviewed.patch").write_bytes(patch)
     return {
         "target_path": str(source),
-        "target_inode": source.stat().st_ino,
+        "target_inode": serialize_filesystem_identity(source.stat().st_ino),
         "target_revision": revision,
         "scan_dir": str(scan_dir),
     }
@@ -152,6 +178,218 @@ def reviewed_remediation(patch: bytes, revision: str, digest: str) -> dict[str, 
         "base_content_digest": digest,
         "patch_digest": "sha256:" + hashlib.sha256(patch).hexdigest(),
     }
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("layout", ["separate", "linked", "unborn", "unborn-root"])
+def test_reviewed_patch_uses_long_source_metadata_in_its_private_replay(
+    tmp_path: Path, layout: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_db
+
+    # The metadata argument is long in UTF-8 even on hosts with short temporary paths.
+    padding = max(1, (230 - len((tmp_path / "metadata-").as_posix().encode("utf-8")) + 2) // 3)
+    metadata = tmp_path / ("metadata-" + "界" * padding)
+    source = tmp_path / "source"
+    if layout == "unborn-root":
+        source, metadata = metadata, metadata / ".git"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+    else:
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(metadata), str(source)], check=True
+        )
+    subprocess.run(["git", "-C", str(source), "config", "core.autocrlf", "false"], check=True)
+    (source / "file.txt").write_bytes(b"before\n")
+    revision = "unversioned"
+    if layout in {"separate", "linked"}:
+        subprocess.run(["git", "-C", str(source), "add", "file.txt"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=f@example.invalid",
+                "commit",
+                "-qm",
+                "base",
+            ],
+            check=True,
+        )
+        if layout == "linked":
+            linked = tmp_path / "linked"
+            subprocess.run(
+                ["git", "-C", str(source), "worktree", "add", "--detach", str(linked)], check=True
+            )
+            source = linked
+        revision = subprocess.check_output(
+            ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+        ).strip()
+    marker = source / ".git/HEAD" if layout == "unborn-root" else source / ".git"
+    original_marker = marker.read_bytes()
+    (metadata / "info/exclude").write_bytes(b"ignored.fixture\n")
+    (source / "ignored.fixture").write_bytes(b"outside the recorded content\n")
+    if os.name == "nt" and revision == "unversioned":
+        # The private copy keeps the original gitdir-conditional visibility when using the retry.
+        global_config, included, excludes = (
+            tmp_path / name for name in ("global", "include", "excludes")
+        )
+        excludes.write_bytes(b"conditional.fixture\n")
+        subprocess.run(
+            ["git", "config", "--file", included, "core.excludesFile", excludes.as_posix()],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--file",
+                global_config,
+                f"includeIf.gitdir:{metadata.as_posix()}.path",
+                included.as_posix(),
+            ],
+            check=True,
+        )
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        (source / "conditional.fixture").write_bytes(b"excluded by the selected Git directory\n")
+        ignored = subprocess.check_output(
+            ["git", "-C", source, "check-ignore", "conditional.fixture"]
+        )
+        assert ignored.strip()
+    patch = b"diff --git a/file.txt b/file.txt\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    scan = write_reviewed_patch(tmp_path, source, patch, revision)
+    _, digest = workbench_db.remediation_checkout_snapshot(scan)
+    remediation = reviewed_remediation(patch, revision, digest)
+    selected_file = source / "file.txt"
+    selected_file.write_bytes(b"after\n")
+    _, applied_digest = workbench_db.remediation_checkout_snapshot(scan)
+    verify = workbench_db.require_reviewed_patch_applied
+    assert verify(scan, remediation, "reviewed.patch") == applied_digest
+    assert selected_file.read_bytes() == b"after\n"
+    selected_file.write_bytes(b"other\n")
+    with pytest.raises(SystemExit, match="does not contain the reviewed remediation patch"):
+        verify(scan, remediation, "reviewed.patch")
+    assert selected_file.read_bytes() == b"other\n"
+    selected_file.write_bytes(b"after\n")
+    (source / "unrelated.txt").write_bytes(b"keep me\n")
+    with pytest.raises(SystemExit, match="changes outside the reviewed patch"):
+        verify(scan, remediation, "reviewed.patch")
+    assert (source / "unrelated.txt").read_bytes() == b"keep me\n"
+    (source / "unrelated.txt").unlink()
+    malformed = b"not a patch\n"
+    (tmp_path / "scan/reviewed.patch").write_bytes(malformed)
+    with pytest.raises(SystemExit, match="does not contain the reviewed remediation patch"):
+        verify(scan, reviewed_remediation(malformed, revision, digest), "reviewed.patch")
+    assert marker.read_bytes() == original_marker
+    assert selected_file.read_bytes() == b"after\n"
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory and file sharing")
+def test_replay_gitfile_remains_bound_until_the_private_replay_is_removed(tmp_path: Path) -> None:
+    import tempfile
+    from contextlib import ExitStack
+
+    import windows_scan_local_files as windows
+    import workbench_target
+
+    source = tmp_path / "source"
+    foreign = tmp_path / "foreign"
+    initialize_git_repository(source)
+    initialize_git_repository(foreign)
+    metadata = source / ".git"
+    stages = tmp_path / "replays"
+    stages.mkdir()
+
+    def interrupt_replay():
+        with tempfile.TemporaryDirectory(dir=stages) as temporary, ExitStack() as pins:
+            scratch = Path(temporary)
+            checkout = scratch / "checkout"
+            checkout.mkdir()
+            (checkout / ".git").write_bytes(f"gitdir: {(foreign / '.git').as_posix()}\n".encode())
+            assert windows.pin_replay_metadata(pins, metadata, scratch) == metadata
+            with pytest.raises(PermissionError):
+                scratch.rename(stages / "elsewhere")
+            short = pins.enter_context(windows.pinned_replay_gitfile(checkout, metadata))
+            assert (
+                Path(
+                    workbench_target.git_output(
+                        checkout,
+                        "rev-parse",
+                        "--absolute-git-dir",
+                        git_dir=short,
+                        work_tree=checkout,
+                    )
+                )
+                == metadata
+            )
+            with pytest.raises(PermissionError):
+                (checkout / short).write_bytes(b"other")
+            for path in (metadata, checkout, scratch, checkout / short):
+                with pytest.raises(PermissionError):
+                    path.rename(path.with_name("replaced"))
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupt_replay()
+    assert not list(stages.iterdir())
+    assert metadata.is_dir() and (foreign / ".git").is_dir()
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows regular-file and junction checks")
+@pytest.mark.parametrize(
+    "change", ["foreign-pointer", "changed-patch", "replaced-parent", "writable-scratch"]
+)
+def test_short_git_reference_refuses_changed_replay_inputs(
+    tmp_path: Path, change: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import ExitStack
+
+    import windows_scan_local_files as windows
+    import workbench_remediation
+
+    metadata, scratch = tmp_path / "metadata", tmp_path / "scratch"
+    metadata.mkdir()
+    scratch.mkdir()
+    worktree = scratch / "checkout"
+    worktree.mkdir()
+    patch = scratch / "reviewed.patch"
+    patch.write_bytes(b"expected")
+    expected = "sha256:" + hashlib.sha256(patch.read_bytes()).hexdigest()
+    marker = scratch / "reviewed.git"
+    if change == "foreign-pointer":
+        marker.write_bytes(b"gitdir: foreign\n")
+    elif change == "changed-patch":
+        patch.write_bytes(b"changed")
+    elif change == "replaced-parent":
+        alias = tmp_path / "alias"
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(scratch)], check=True)
+        worktree = alias / "checkout"
+    else:
+        subprocess.run(["icacls.exe", str(scratch), "/grant", "*S-1-1-0:(WD)"], check=True)
+    failed = subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+    monkeypatch.setattr(workbench_remediation, "git_command", lambda *args, **kwargs: failed)
+    with ExitStack() as pins:
+        selected = windows.pin_replay_metadata(pins, metadata, scratch)
+        if change == "writable-scratch":
+            assert selected is None
+            with pytest.raises(SystemExit, match="Could not bind"):
+                workbench_remediation.reverse_reviewed_patch(
+                    tmp_path, worktree, metadata, selected, expected, pins, patch, "."
+                )
+            assert not marker.exists()
+            return
+        with pytest.raises(SystemExit, match="Could not verify|Patch digest does not match"):
+            workbench_remediation.reverse_reviewed_patch(
+                tmp_path, worktree, metadata, selected, expected, pins, patch, "."
+            )
+    if change == "foreign-pointer":
+        assert marker.read_bytes() == b"gitdir: foreign\n"
+    if change == "replaced-parent":
+        assert not marker.exists()
 
 
 @pytest.mark.parametrize(
@@ -290,6 +528,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
     populated: bool,
 ) -> None:
     import workbench_db
+    import workbench_remediation
 
     repository = tmp_path / "repository"
     initialize_git_repository(repository)
@@ -307,7 +546,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
     junction = nested / "linked"
     junction_factory(junction, outside)
     relative_junction = junction.relative_to(repository)
-    original_command = workbench_db.git_command
+    original_command = workbench_remediation.git_command
     original_restore = workbench_db.restore_directory_junctions
     reversed_roots: list[Path] = []
     restored: list[Path] = []
@@ -331,7 +570,7 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
         original_restore(source, destination, junctions)
         restored.append(destination)
 
-    monkeypatch.setattr(workbench_db, "git_command", command)
+    monkeypatch.setattr(workbench_remediation, "git_command", command)
     monkeypatch.setattr(workbench_db, "restore_directory_junctions", restore)
     assert_reviewed_change(
         target,
@@ -491,10 +730,43 @@ def test_reviewed_patch_restores_junction_git_context(
         assert (source / patched).read_bytes() == after.replace("\n", newline).encode()
 
 
-@pytest.mark.cross_platform
-def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "short_reference",
+    [
+        pytest.param(False, marks=pytest.mark.cross_platform),
+        pytest.param(
+            True,
+            marks=[
+                pytest.mark.native_windows,
+                pytest.mark.skipif(os.name != "nt", reason="requires Windows replay binding"),
+            ],
+        ),
+    ],
+    ids=["ordinary", "short-reference"],
+)
+def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(
+    tmp_path: Path, short_reference: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import workbench_remediation
+
     repository = tmp_path / "repository"
     initialize_unborn_git_repository(repository)
+    references = []
+    reverse = workbench_remediation.reverse_reviewed_patch
+    git = workbench_remediation.git_command
+
+    def record_references(*args, **kwargs):
+        selected = reverse(*args, **kwargs)
+        references.append(selected)
+        return selected
+
+    def require_short_reference(target, *args, **kwargs):
+        if short_reference and kwargs.get("git_dir") == repository / ".git":
+            return subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+        return git(target, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_remediation, "reverse_reviewed_patch", record_references)
+    monkeypatch.setattr(workbench_remediation, "git_command", require_short_reference)
     attributes = tmp_path / "attributes"
     attributes.write_text("*.txt text eol=crlf\n")
     subprocess.run(
@@ -506,6 +778,8 @@ def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(tmp_path: Path) -> None
     assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n", newline="\n")
 
     assert (source / "app.txt").read_bytes() == b"after\n"
+    if short_reference:
+        assert references[0][0] is not None
 
 
 def assert_reviewed_change(
@@ -1146,13 +1420,17 @@ def test_windows_directory_query_preserves_exclusions_with_inherited_noglob(
     assert dict(os.environ) == environment
 
 
-def test_directory_content_digest_uses_git_file_set(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pathspec_mode", ["GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"])
+def test_directory_content_digest_uses_git_file_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pathspec_mode: str
+) -> None:
     target = tmp_path / "target"
     initialize_unborn_git_repository(target)
     (target / ".gitignore").write_text("ignored-cache/\n")
     source = target / "app.py"
     source.write_text("print('fixture')\n")
     original_digest = directory_content_digest(target)
+    monkeypatch.setenv(pathspec_mode, "1")
 
     source.write_text("print('changed')\n")
     assert directory_content_digest(target) != original_digest
@@ -1296,6 +1574,184 @@ def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> 
     assert directory_content_digest(target) == original_digest
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("color.ui", "always"),
+        ("color.diff", "always"),
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.context", "0"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.interHunkContext", "20"),
+        ("diff.suppressBlankEmpty", "true"),
+        ("diff.orderFile", "order"),
+        ("diff.renames", "false"),
+        ("diff.renameLimit", "1"),
+        ("core.quotePath", "false"),
+        ("GIT_DIFF_OPTS", "--unified=0"),
+    ],
+)
+def test_git_diff_display_settings_preserve_selected_working_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api: dict[str, Any],
+    option: str,
+    value: str,
+) -> None:
+    target = tmp_path / "source"
+    initialize_git_repository(target)
+    path = target / "café.txt"
+    path.write_bytes(b"heading\none\nC\nB\nB\nthree\n")
+    lines = target / "z-lines.txt"
+    original_lines = ["start", "", *(f"line {n}" for n in range(20)), "end"]
+    lines.write_text("\n".join(original_lines) + "\n", encoding="utf-8")
+    indent = target / "indent.txt"
+    indent.write_bytes(b"\ndone()\ndef sample():\n")
+    moved = [("first.txt", "new-first.txt"), ("second.txt", "new-second.txt")]
+    for name, _ in moved:
+        (target / name).write_text(
+            "".join(f"{name} line {n}\n" for n in range(20)), encoding="utf-8"
+        )
+    subprocess.run(["git", "add", "--", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Track fixture"], cwd=target, check=True)
+    indent.write_bytes(b"\ndone()\ndone()\ndef sample():\n")
+    for name, destination in moved:
+        subprocess.run(["git", "mv", name, destination], cwd=target, check=True)
+        with (target / destination).open("ab") as stream:
+            stream.write(b"added line\n")
+        subprocess.run(["git", "add", "--", destination], cwd=target, check=True)
+    path.write_bytes(b"heading\none\nB\nC\nC\nthree\n")
+    original_lines[0] = "changed start"
+    original_lines[-1] = "changed end"
+    lines.write_text("\n".join(original_lines) + "\n", encoding="utf-8")
+    if option == "diff.orderFile":
+        order_file = tmp_path / "diff order"
+        order_file.write_text(lines.name + "\n", encoding="utf-8", newline="\n")
+        value = str(order_file)
+    selected = workbench_api["require_diff_target"](target, "working_tree", None, None, None)
+    if option == "GIT_DIFF_OPTS":
+        monkeypatch.setenv(option, value)
+    else:
+        subprocess.run(["git", "config", "--local", option, value], cwd=target, check=True)
+
+    # Reproduce a stored digest generated by a previous version with this setting.
+    old_patch = subprocess.check_output(
+        ["git", "diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD"],
+        cwd=target,
+    )
+    old_hash = hashlib.sha256()
+    update_digest_field(old_hash, b"format", b"codex-security-snapshot/v1")
+    update_digest_field(old_hash, b"tracked-diff", old_patch)
+    legacy = f"codex-security-snapshot/v1:sha256:{old_hash.hexdigest()}"
+    assert legacy != selected["contentDigest"]
+
+    def validate(digest: str | None) -> str:
+        return workbench_api["require_diff_target"](target, "working_tree", None, None, digest)[
+            "contentDigest"
+        ]
+
+    assert validate(None) == selected["contentDigest"]
+    assert validate(selected["contentDigest"]) == selected["contentDigest"]
+    assert validate(legacy) == legacy
+
+    path.write_bytes(b"new source content\n")
+    for digest in (selected["contentDigest"], legacy):
+        with pytest.raises(SystemExit, match="contents changed"):
+            validate(digest)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("display", ["log", "diff"])
+def test_git_submodule_display_preserves_selected_working_content(
+    tmp_path: Path, workbench_api: dict[str, Any], display: str
+) -> None:
+    target = tmp_path / "parent"
+    initialize_git_repository(target)
+    child = target / "submodule"
+    initial = initialize_git_repository(child)
+    add_submodule_gitlink(target, initial, ".")
+    subprocess.run(["git", "commit", "-qm", "Pin child"], cwd=target, check=True)
+
+    def advance_child(content: str) -> None:
+        (child / "README.md").write_text(content + "\n", encoding="utf-8")
+        subprocess.run(["git", "commit", "-qam", content], cwd=child, check=True)
+        subprocess.run(["git", "add", "--", "submodule"], cwd=target, check=True)
+
+    advance_child("Selected child")
+    require_target = workbench_api["require_diff_target"]
+    selected = require_target(target, "working_tree", None, None, None)["contentDigest"]
+    diff = ["git", "diff", "HEAD", "--", "submodule"]
+    original = subprocess.check_output(diff, cwd=target)
+    subprocess.run(["git", "config", "--local", "diff.submodule", display], cwd=target, check=True)
+    configured = subprocess.check_output(diff, cwd=target)
+    assert configured != original
+    assert require_target(target, "working_tree", None, None, selected)["contentDigest"] == selected
+
+    advance_child("Changed child")
+    with pytest.raises(SystemExit, match="contents changed"):
+        require_target(target, "working_tree", None, None, selected)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("key", "value", "binary"),
+    [
+        ("diff.python.xfuncname", "^class.*$", False),
+        ("diff.python.binary", "true", False),
+        ("diff.Mixed=driver.binary", "true", False),
+        ("diff.python.binary", "false", True),
+        ("core.compression", "0", True),
+    ],
+)
+def test_git_driver_settings_preserve_selected_working_content(
+    tmp_path: Path, workbench_api: dict[str, Any], key: str, value: str, binary: bool
+) -> None:
+    target = tmp_path / "source"
+    initialize_git_repository(target)
+    driver = "Mixed=driver" if key == "diff.Mixed=driver.binary" else "python"
+    (target / ".gitattributes").write_bytes(f"*.py diff={driver}\n".encode())
+    source = target / "example.py"
+    initial = (
+        b"class Example:\n    def sample(self):\n"
+        + b"".join(f"        a = {n}\n".encode() for n in range(24))
+        + (b"\0" + b"abcde" * 4096 if binary else b"")
+    )
+    source.write_bytes(initial)
+    subprocess.run(["git", "add", "--", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Track example"], cwd=target, check=True)
+    source.write_bytes(initial.replace(b"a = 15", b"a = 42"))
+    require_target = workbench_api["require_diff_target"]
+    selected = require_target(target, "working_tree", None, None, None)["contentDigest"]
+    args = ["git", "diff", "--binary", "--full-index", "HEAD"]
+    original = subprocess.check_output(args, cwd=target)
+    subprocess.run(["git", "config", "--local", key, value], cwd=target, check=True)
+    configured = subprocess.check_output(args, cwd=target)
+    assert configured != original
+    assert require_target(target, "working_tree", None, None, selected)["contentDigest"] == selected
+    assert require_target(target, "working_tree", None, None, None)["contentDigest"] == selected
+    legacy_hash = hashlib.sha256()
+    update_digest_field(legacy_hash, b"format", b"codex-security-snapshot/v1")
+    update_digest_field(legacy_hash, b"tracked-diff", configured)
+    legacy = f"codex-security-snapshot/v1:sha256:{legacy_hash.hexdigest()}"
+    assert require_target(target, "working_tree", None, None, legacy)["contentDigest"] == legacy
+    source.write_bytes(initial + b"actual change\n")
+    for digest in (selected, legacy):
+        with pytest.raises(SystemExit, match="contents changed"):
+            require_target(target, "working_tree", None, None, digest)
+
+
+def test_snapshot_keeps_hunk_coordinates_and_long_source_lines() -> None:
+    header = b"@@ -12,4 +12,5 @@"
+    # The next read starts with a header-shaped string in the middle of an added line.
+    long_line = b"+" + b"x" * (1024 * 1024 - 1) + header + b" literal content\n"
+    patch = header + b" def sample():\n" + long_line + header + b"\n"
+    chunks = WORKBENCH_TARGET["_canonical_patch_chunks"](io.BytesIO(patch))
+    assert b"".join(chunks) == header + b"\n" + long_line + header + b"\n"
+
+
 def test_worktree_content_digest_streams_tracked_binary_patch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1417,6 +1873,424 @@ def test_git_discovery_continues_past_repository_tools_and_batch_shims(
         trusted_git_executable(repository)
 
 
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("windows", [False, True])
+def test_scoped_git_discovery_pins_all_target_roots_and_restores_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+) -> None:
+    first, second, host = (tmp_path / name for name in ("first", "second", "host"))
+    for root in (first, second, host):
+        root.mkdir()
+    for repository in (first, second):
+        (repository / ".git").mkdir()
+    name = "git.exe" if windows else "git"
+    for root in (second, host):
+        (root / name).write_text("synthetic executable fixture\n")
+        (root / name).chmod(0o700)
+    monkeypatch.setitem(
+        trusted_git_executable.__globals__,
+        "sys",
+        SimpleNamespace(platform="win32" if windows else "linux"),
+    )
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (second, host))))
+    with WORKBENCH_TARGET["scoped_git_discovery"](lambda: (first, second)):
+        assert trusted_git_executable(first) == str(host / name)
+        monkeypatch.setenv("PATH", str(second))
+        assert trusted_git_executable(second) == str(host / name)
+    assert trusted_git_executable(first) == str(second / name)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("windows", [False, True])
+def test_unvalidated_workspace_paths_exclude_tools_without_blocking_host_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool
+) -> None:
+    repository, candidate, host = (tmp_path / name for name in ("repository", "candidate", "host"))
+    (repository / ".git").mkdir(parents=True)
+    host.mkdir()
+    name = "git.exe" if windows else "git"
+    (host / name).write_text("synthetic executable fixture\n")
+    (host / name).chmod(0o700)
+    monkeypatch.setitem(
+        trusted_git_executable.__globals__,
+        "sys",
+        SimpleNamespace(platform="win32" if windows else "linux"),
+    )
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (candidate, host))))
+    for exists in (False, True):
+        if exists:
+            candidate.mkdir()
+            (candidate / name).write_text("synthetic repository executable fixture\n")
+            (candidate / name).chmod(0o700)
+        with WORKBENCH_TARGET["scoped_git_discovery"](
+            lambda: (repository,), recorded_git_roots=lambda: (candidate,)
+        ):
+            assert trusted_git_executable(repository) == str(host / name)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_scoped_git_discovery_excludes_unavailable_target_ancestor_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, windows: bool, recorded: bool
+) -> None:
+    repository, historical, host = (
+        tmp_path / name for name in ("repository", "historical", "host")
+    )
+    (repository / ".git").mkdir(parents=True)
+    surviving = historical / "surviving"
+    surviving.mkdir(parents=True)
+    host.mkdir()
+    name = "git.exe" if windows else "git"
+    for root in (historical, host):
+        (root / name).write_text("synthetic executable fixture\n")
+        (root / name).chmod(0o700)
+    monkeypatch.setitem(
+        trusted_git_executable.__globals__,
+        "sys",
+        SimpleNamespace(platform="win32" if windows else "linux"),
+    )
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (historical, host))))
+    saved = surviving if recorded else surviving / "missing"
+    with WORKBENCH_TARGET["scoped_git_discovery"](
+        lambda: (repository, saved),
+        recorded_git_roots=lambda: None if recorded else (),
+    ):
+        assert trusted_git_executable(repository) is None
+
+    # A recorded outer boundary keeps the historical shim excluded after target deletion.
+    with WORKBENCH_TARGET["scoped_git_discovery"](
+        lambda: (repository, saved), recorded_git_roots=lambda: (historical,)
+    ):
+        assert trusted_git_executable(repository) == str(host / name)
+
+    # The caller can still explicitly select a tool outside the current repository.
+    monkeypatch.setenv("CODEX_SECURITY_GIT", str(historical / name))
+    with WORKBENCH_TARGET["scoped_git_discovery"](
+        lambda: (repository, saved),
+        recorded_git_roots=lambda: None if recorded else (),
+    ):
+        assert trusted_git_executable(repository) == str(historical / name)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
+@pytest.mark.parametrize("operation", ["current-query", "missing-query", "missing-migration"])
+@pytest.mark.parametrize("shim_directory", [".", "bin"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_workbench_commands_exclude_saved_checkout_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api: dict[str, Any],
+    operation: str,
+    shim_directory: str,
+    configured: bool,
+) -> None:
+    host_git = shutil.which("git")
+    assert host_git is not None
+    requested, historical = (tmp_path / name for name in ("requested", "historical"))
+    for repository in (requested, historical):
+        initialize_git_repository(repository)
+    historical_target = historical
+    if operation.startswith("missing-"):
+        shutil.rmtree(historical / ".git")
+        (historical / "surviving").mkdir()
+        historical_target = historical / "surviving" / "missing"
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        apply_migrations = workbench_api["apply_migrations"]
+        with monkeypatch.context() as migration_patch:
+            if operation == "missing-migration":
+                # Reproduce a database written before repository identities were recorded.
+                migration_patch.setitem(
+                    apply_migrations.__globals__,
+                    "MIGRATIONS",
+                    tuple(
+                        migration for migration in workbench_api["MIGRATIONS"] if migration[0] < 53
+                    ),
+                )
+            apply_migrations(connection)
+        connection.executemany(
+            "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+            "VALUES (?, ?, 'Saved checkout', 'created', 'updated')",
+            [("requested", str(requested)), ("historical", str(historical_target))],
+        )
+    marker = tmp_path / "repository-git-ran"
+    tools = historical / shim_directory
+    tools.mkdir(exist_ok=True)
+    executable = tools / "git"
+    executable.write_text(
+        '#!/bin/sh\nprintf invoked > "$WORKBENCH_GIT_MARKER"\nexec "$WORKBENCH_HOST_GIT" "$@"\n'
+    )
+    executable.chmod(0o700)
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
+        WORKBENCH_GIT_MARKER=str(marker),
+        WORKBENCH_HOST_GIT=host_git,
+    )
+    if configured:
+        environment["CODEX_SECURITY_GIT"] = host_git
+    arguments = (
+        ["list-scans"]
+        if operation == "missing-migration"
+        else ["list-global-findings", "--repository", str(requested)]
+    )
+    script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), *arguments],
+        cwd=requested,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    key = "scans" if operation == "missing-migration" else "findings"
+    assert json.loads(completed.stdout)[key] == []
+    assert not marker.exists()
+    if operation == "missing-migration":
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            identities = dict(
+                connection.execute("SELECT id, repository_identity FROM security_targets")
+            )
+            assert (identities["requested"] is not None) is configured
+            assert identities["historical"] is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "identity",
+        "generation",
+        "revision",
+        "legacy-revision",
+        "legacy-unborn",
+        "legacy-workspace",
+        "legacy-directory",
+        "directory",
+    ],
+)
+@pytest.mark.parametrize("configured", [False, True])
+def test_saved_git_boundary_removal_does_not_select_its_parent_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api: dict[str, Any],
+    evidence: str,
+    configured: bool,
+) -> None:
+    from workbench_target_state import repository_identity
+
+    host_git = shutil.which("git")
+    assert host_git is not None
+    requested, historical = (tmp_path / name for name in ("requested", "historical"))
+    initialize_git_repository(requested)
+    if evidence in {"legacy-unborn", "legacy-workspace"}:
+        subprocess.run([host_git, "init", "-q", str(historical)], check=True)
+        revision = WORKBENCH_TARGET["git_revision"](historical)
+        assert revision == "unversioned"
+    elif evidence in {"directory", "legacy-directory"}:
+        historical.mkdir()
+        revision = "unversioned"
+    else:
+        revision = initialize_git_repository(historical)
+    saved = historical / "surviving" / "component"
+    saved.mkdir(parents=True)
+    identity = repository_identity(saved)
+    if identity is None and evidence in {"identity", "generation"}:
+        pytest.skip("filesystem does not expose repository generation evidence")
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.row_factory = sqlite3.Row
+        apply_migrations = workbench_api["apply_migrations"]
+        with monkeypatch.context() as migration_patch:
+            if evidence.startswith("legacy-"):
+                last_version = 52 if evidence == "legacy-revision" else 60
+                migration_patch.setitem(
+                    apply_migrations.__globals__,
+                    "MIGRATIONS",
+                    tuple(item for item in workbench_api["MIGRATIONS"] if item[0] <= last_version),
+                )
+            apply_migrations(connection)
+        register = workbench_api["register_security_target"]
+        historical_id = register(connection, str(saved)).target_id
+        if not evidence.startswith("legacy-") or evidence == "legacy-revision":
+            register(connection, str(requested))
+        if evidence in {"identity", "generation", "revision"}:
+            # These rows predate recorded roots, but retain distinct kinds of Git evidence.
+            connection.execute(
+                "UPDATE security_targets SET git_checkout_root = NULL, repository_identity = ? "
+                "WHERE id = ?",
+                (identity if evidence == "identity" else None, historical_id),
+            )
+        if evidence != "identity":
+            connection.execute(
+                "INSERT INTO workspaces(id, target_id, target_path, created_at, updated_at) "
+                "VALUES ('workspace', ?, ?, 'created', 'updated')",
+                (historical_id, str(saved)),
+            )
+        if evidence not in {"identity", "legacy-workspace"}:
+            connection.execute(
+                "INSERT INTO scans(id, workspace_id, target_id, target_path, target_revision, "
+                "scope, mode, scan_dir, status, phase, started_at, created_at, updated_at) "
+                "VALUES ('scan', 'workspace', ?, ?, ?, '.', 'standard', "
+                "?, 'complete', 'reporting', 'created', 'created', 'updated')",
+                (
+                    historical_id,
+                    str(saved),
+                    "unversioned" if evidence == "generation" else revision,
+                    str(tmp_path / "saved-scan"),
+                ),
+            )
+            if evidence == "generation":
+                connection.execute("UPDATE scans SET repository_generation = ?", (identity,))
+    if evidence not in {"directory", "legacy-directory"}:
+        shutil.rmtree(historical / ".git")
+    tools = (
+        tmp_path / "host-tools"
+        if evidence in {"directory", "legacy-directory"}
+        else historical / "bin"
+    )
+    tools.mkdir()
+    executable = tools / "git"
+    executable.write_text('#!/bin/sh\nprintf invoked > "$0.ran"\nexec "$WORKBENCH_HOST_GIT" "$@"\n')
+    executable.chmod(0o700)
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
+        WORKBENCH_HOST_GIT=host_git,
+    )
+    pinned = tmp_path / "trusted-git"
+    if configured:
+        shutil.copy(executable, pinned)
+        environment["CODEX_SECURITY_GIT"] = str(pinned)
+    script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "list-scans", "--repository", str(requested)],
+        cwd=requested,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout)["scans"] == []
+    assert executable.with_suffix(".ran").exists() is (evidence == "directory" and not configured)
+    assert pinned.with_suffix(".ran").exists() is configured
+    if evidence == "legacy-directory":
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            register(connection, str(saved))
+            assert (
+                connection.execute(
+                    "SELECT git_checkout_root FROM security_targets WHERE id = ?", (historical_id,)
+                ).fetchone()[0]
+                is None
+            )
+    if evidence == "legacy-revision":
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            identities = dict(
+                connection.execute("SELECT current_path, repository_identity FROM security_targets")
+            )
+        assert (identities[str(requested)] is not None) is configured
+        assert identities[str(saved)] is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable shim")
+@pytest.mark.parametrize(("migrate", "configured"), [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("spelling", ["absolute", "tilde"])
+def test_new_workspace_skips_git_in_its_unregistered_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    workbench_api: dict[str, Any],
+    migrate: bool,
+    configured: bool,
+    spelling: str,
+) -> None:
+    host_git = shutil.which("git")
+    assert host_git is not None
+    repository = tmp_path / "repository"
+    initialize_git_repository(repository)
+    tools = repository / "bin"
+    tools.mkdir()
+    marker = tmp_path / "repository-git-ran"
+    executable = tools / "git"
+    executable.write_text(
+        '#!/bin/sh\nprintf invoked > "$WORKBENCH_GIT_MARKER"\nexec "$WORKBENCH_HOST_GIT" "$@"\n'
+    )
+    executable.chmod(0o700)
+    state = tmp_path / "state"
+    if migrate:
+        saved = tmp_path / "saved"
+        initialize_git_repository(saved)
+        state.mkdir(mode=0o700)
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            connection.row_factory = sqlite3.Row
+            apply_migrations = workbench_api["apply_migrations"]
+            with monkeypatch.context() as migration_patch:
+                migration_patch.setitem(
+                    apply_migrations.__globals__,
+                    "MIGRATIONS",
+                    tuple(item for item in workbench_api["MIGRATIONS"] if item[0] < 54),
+                )
+                apply_migrations(connection)
+            connection.execute(
+                "INSERT INTO security_targets(id, current_path, display_name, created_at, updated_at) "
+                "VALUES ('saved', ?, 'Saved checkout', '2099-01-01T00:00:00Z', '2099-01-01T00:00:00Z')",
+                (str(saved),),
+            )
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    environment = {key: value for key, value in os.environ.items() if key != "CODEX_SECURITY_GIT"}
+    environment.update(
+        CODEX_SECURITY_STATE_DIR=str(state),
+        PATH=str(tools) + os.pathsep + os.environ.get("PATH", ""),
+        WORKBENCH_GIT_MARKER=str(marker),
+        WORKBENCH_HOST_GIT=host_git,
+    )
+    if configured:
+        environment["CODEX_SECURITY_GIT"] = host_git
+    script = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
+    requested_path = (
+        str(repository)
+        if spelling == "absolute"
+        else "~/" + os.path.relpath(repository, Path.home())
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "create-workspace",
+            "--workspace-id",
+            "00000000-0000-4000-8000-000000000001",
+            "--target-path",
+            requested_path,
+        ],
+        cwd=caller,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout)["targetPath"] == str(repository)
+    assert not marker.exists()
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        identities = dict(
+            connection.execute("SELECT current_path, repository_identity FROM security_targets")
+        )
+        assert len(identities) == (2 if migrate else 1)
+        if migrate:
+            assert (identities[str(saved)] is not None) is configured
+        # Only an explicit Git can inspect a state with an unknown legacy boundary.
+        assert (identities[str(repository)] is not None) is (configured or not migrate)
+
+
 def test_git_discovery_does_not_invoke_through_repository_directory_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1529,6 +2403,322 @@ def test_git_context_preserves_trailing_root_whitespace(
     destination = tmp_path / "copied"
     WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
     assert (destination / "synthetic.txt").read_text() == "selected target content\n"
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="Windows symlinks record the target type")
+def test_copy_git_worktree_preserves_dangling_windows_directory_symlink(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    initialize_unborn_git_repository(source)
+    link = source / "directory-link"
+    link.symlink_to("missing", target_is_directory=True)
+
+    destination = tmp_path / "copy"
+    WORKBENCH_TARGET["copy_git_worktree_files"](source, destination, ())
+
+    copied = destination / link.name
+    assert os.readlink(copied) == os.readlink(link)
+    assert copied.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_DIRECTORY
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory sharing")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "in-tree",
+        "separate",
+        "localized",
+        "scoped",
+        "failed-retry",
+        "check-ignore-unmatched",
+        "different-pointer",
+        "case-marker",
+        "relative-pointer",
+        "conditional",
+        "scoped-conditional",
+        "deep-gitfile",
+    ],
+)
+def test_windows_root_inventory_retries_the_selected_git_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    import ctypes
+
+    import workbench_target
+
+    if len(tmp_path.drive) != 2 or ctypes.windll.kernel32.GetDriveTypeW(tmp_path.anchor) != 3:
+        pytest.skip("requires an ordinary fixed local drive")
+    source = tmp_path / "source"
+    initialize_git_repository(source)
+    metadata = source / ".git"
+    worktree = source
+    if case != "in-tree":
+        worktree = tmp_path / "checkout"
+        worktree.mkdir()
+        spelling = metadata.as_posix()
+        if case == "different-pointer":
+            spelling = (tmp_path / "other-metadata").as_posix()
+        if case == "relative-pointer":
+            spelling = os.path.relpath(metadata, worktree)
+        marker_name = ".GIT" if case == "case-marker" else ".git"
+        (worktree / marker_name).write_text(f"gitdir: {spelling}\n", encoding="utf-8")
+    cwd = worktree
+    expected = b"README.md\0"
+    scoped = case in {"scoped", "scoped-conditional"}
+    if scoped:
+        scope = Path("component[ab]", "nested")
+        cwd = worktree / scope
+        cwd.mkdir(parents=True)
+        (source / scope).mkdir(parents=True)
+        (source / scope / "selected.txt").write_text("selected\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "--", (scope / "selected.txt").as_posix()], cwd=source, check=True
+        )
+        expected = b"selected.txt\0"
+    if case == "deep-gitfile":
+        while len(os.fsencode(os.path.relpath(worktree / ".git", cwd))) <= len(
+            os.fsencode(worktree / ".git")
+        ):
+            cwd /= "d"
+        cwd.mkdir(parents=True)
+    native = workbench_target.git_command
+    args = ("ls-files", "--cached", "-z", "--", ".")
+    marker = Path("..", "..", ".git") if scoped else Path(".git")
+    if case == "deep-gitfile":
+        marker = worktree / ".git"
+    expected_status = 0
+    input_data = None
+    overrides = {"GIT_TRACE_SETUP": "1"}
+    if case == "check-ignore-unmatched":
+        for name in ("visible one", "visible two"):
+            (worktree / name).mkdir()
+        (worktree / ".gitignore").write_text("!visible one/\n!visible two/\n", encoding="utf-8")
+        args = ("--no-literal-pathspecs", "check-ignore", "-z", "--stdin")
+        input_data = b"visible one\0visible two\0"
+        overrides["GIT_NOGLOB_PATHSPECS"] = "0"
+        expected_status = 1
+        expected = b""
+    if case in {"conditional", "scoped-conditional"}:
+        excludes = tmp_path / "ignore"
+        excludes.write_text("visible.fixture\n", encoding="utf-8")
+        include = tmp_path / "included"
+        include.write_text(f'[core]\n  excludesFile = "{excludes.as_posix()}"\n', encoding="utf-8")
+        config = tmp_path / "gitconfig"
+        pattern = "./source/.git" if scoped else "./checkout/**"
+        config.write_text(f'[includeIf "gitdir:{pattern}"]\n  path = included\n', encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+        monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+        (cwd / "visible.fixture").write_text("selected\n", encoding="utf-8")
+        args = ("ls-files", "--others", "--exclude-standard", "-z", "--", "visible.fixture")
+        expected = b"" if scoped else b"visible.fixture\0"
+    english = subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' too big\n")
+    first = (
+        subprocess.CompletedProcess([], 128, b"", b"fatal: '$GIT_DIR' zu gro\xc3\x9f\n")
+        if case == "localized"
+        else english
+    )
+    calls = []
+
+    def reject_long_argument(target, *args, **kwargs):
+        directory = kwargs["git_dir"]
+        calls.append(directory)
+        assert str(target) == str(cwd) and str(kwargs["work_tree"]) == str(worktree)
+        if directory == metadata:
+            return (
+                english if (kwargs["environment_overrides"] or {}).get("LC_ALL") == "C" else first
+            )
+        assert directory == marker
+        assert kwargs["environment_overrides"] == overrides
+        assert kwargs["input_data"] == input_data
+        with pytest.raises(PermissionError):
+            metadata.rename(source / "moved")
+        if scoped:
+            for pinned in (cwd, cwd.parent):
+                with pytest.raises(PermissionError):
+                    pinned.rename(pinned.with_name("moved"))
+        if worktree != source:
+            with pytest.raises(PermissionError), (worktree / ".git").open("r+b"):
+                pass
+        if case == "failed-retry":
+            return subprocess.CompletedProcess([], 1, b"", b"fixture read failed")
+        if case == "deep-gitfile":
+            return subprocess.CompletedProcess([], 0, expected, b"trace verified gitfile")
+        return native(target, *args, **kwargs)
+
+    monkeypatch.setattr(workbench_target, "git_command", reject_long_argument)
+    result = workbench_target._windows_inventory_query(
+        cwd,
+        *args,
+        git_dir=metadata,
+        work_tree=worktree,
+        input_data=input_data,
+        environment_overrides=overrides.copy(),
+    )
+    if case in {"different-pointer", "relative-pointer", "case-marker"}:
+        assert result is first and calls == [metadata]
+    else:
+        initial = [metadata, metadata] if case == "localized" else [metadata]
+        assert calls == [*initial, marker]
+        if case == "failed-retry":
+            assert result is first
+        else:
+            assert result.returncode == expected_status and result.stdout == expected
+            assert b"trace" in result.stderr
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows path semantics")
+def test_root_git_marker_declines_unsupported_paths_without_opening_directories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import windows_scan_local_files as windows_files
+
+    monkeypatch.setattr(
+        windows_files, "_GetDriveTypeW", lambda anchor: 4 if anchor == "D:\\" else 3
+    )
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("unsupported paths must be declined before opening directories")
+
+    monkeypatch.setattr(windows_files, "_open_directory", unexpected_open)
+    for target, metadata in (
+        (r"C:\repo", r"D:\metadata"),
+        (r"C:\repo", r"\\server.invalid\share\metadata"),
+        (r"\\?\C:\repo", r"\\?\C:\metadata"),
+        (r"\\server.invalid\share\repo", r"\\server.invalid\share\metadata"),
+        (r"C:checkout", r"C:\metadata"),
+        ("C:\\", r"C:\metadata"),
+    ):
+        with windows_files.pinned_root_git_marker(Path(target), Path(metadata)) as selected:
+            assert selected is None
+    root = Path(r"C:\repo")
+    for cwd in (Path(r"C:\repo-other\scope"), root / ".." / "scope", Path(r"D:\repo\scope")):
+        with windows_files.pinned_root_git_marker(cwd, root / ".git", work_tree=root) as selected:
+            assert selected is None
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows drive semantics")
+def test_root_git_marker_pins_the_checkout_and_metadata_on_independent_fixed_drives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import MagicMock
+
+    import windows_scan_local_files as windows_files
+
+    root, metadata = Path(r"C:\worktree"), Path(r"D:\metadata")
+    scope = root / "selected"
+    marker = tmp_path / "gitfile"
+    marker.write_bytes(f"gitdir: {metadata.as_posix()}\n".encode())
+    drives = []
+    opened = []
+
+    def fixed_drive(anchor):
+        drives.append(anchor)
+        return 3
+
+    def open_fixture(path):
+        opened.append(path)
+        return MagicMock(value=path)
+
+    monkeypatch.setattr(windows_files, "_GetDriveTypeW", fixed_drive)
+    monkeypatch.setattr(windows_files, "_open_directory", open_fixture)
+
+    monkeypatch.setattr(windows_files, "_final_path", windows_files._extended_path)
+
+    def open_marker(parent, name, context):
+        assert (parent, name) == (root, ".git")
+        return os.open(marker, os.O_RDONLY | os.O_BINARY), name
+
+    monkeypatch.setattr(windows_files, "open_read_fd_with_path", open_marker)
+    with windows_files.pinned_root_git_marker(scope, metadata, work_tree=root) as selected:
+        assert selected == Path("..", ".git")
+        assert opened == [
+            Path(root.anchor),
+            root,
+            scope,
+            Path(metadata.anchor),
+            metadata,
+        ]
+    assert set(drives) == {root.anchor, metadata.anchor}
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+@pytest.mark.parametrize("inside_scope", [False, True])
+def test_root_git_marker_refuses_a_reparse_ancestor_before_descending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, inside_scope: bool
+) -> None:
+    import _winapi
+    import ctypes
+
+    import windows_scan_local_files as windows_files
+
+    if len(tmp_path.drive) != 2 or ctypes.windll.kernel32.GetDriveTypeW(tmp_path.anchor) != 3:
+        pytest.skip("requires an ordinary fixed local drive")
+    cwd = tmp_path / "checkout"
+    cwd.mkdir()
+    ordinary = tmp_path / "ordinary"
+    (ordinary / "metadata").mkdir(parents=True)
+    link = (cwd if inside_scope else tmp_path) / "link"
+    _winapi.CreateJunction(str(ordinary), str(link))
+    metadata = cwd / ".git" if inside_scope else link / "metadata"
+    scope = link / "metadata" if inside_scope else cwd
+    if inside_scope:
+        metadata.mkdir()
+    visited = []
+    open_directory = windows_files._open_directory
+    resolve = Path.resolve
+
+    def observe(path, **kwargs):
+        assert link not in path.parents
+        visited.append(path)
+        return open_directory(path, **kwargs)
+
+    def no_link_resolution(path, *args, **kwargs):
+        assert path != link and link not in path.parents
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(windows_files, "_open_directory", observe)
+    monkeypatch.setattr(Path, "resolve", no_link_resolution)
+    with windows_files.pinned_root_git_marker(scope, metadata, work_tree=cwd) as selected:
+        assert selected is None
+    assert link in visited
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows Git directory inventory")
+def test_long_git_metadata_keeps_nested_directory_inventory_scoped(tmp_path: Path) -> None:
+    import _winapi
+    import ctypes
+
+    import workbench_target
+
+    if len(tmp_path.drive) != 2 or ctypes.windll.kernel32.GetDriveTypeW(tmp_path.anchor) != 3:
+        pytest.skip("requires an ordinary fixed local drive")
+    seed = tmp_path / "seed"
+    initialize_git_repository(seed)
+    subprocess.run(["git", "config", "core.longpaths", "true"], cwd=seed, check=True)
+    # More than 220 UTF-8 bytes in --git-dir without requiring a long Win32 component.
+    checkout = tmp_path / ("界" * 75)
+    shutil.copytree(seed, checkout)
+    scope = checkout / "selected[ab]" / "component"
+    scope.mkdir(parents=True)
+    (scope / "source.txt").write_text("selected\n")
+    (checkout / "selecteda").mkdir()
+    (checkout / "selecteda" / "outside.txt").write_text("sibling\n")
+    (checkout / ".gitignore").write_text("ignored/\n")
+    (scope / "ignored").mkdir()
+    (scope / "ignored" / "excluded.txt").write_text("ignored\n")
+    external = tmp_path / "external"
+    external.mkdir()
+    _winapi.CreateJunction(str(external), str(scope / "empty-junction"))
+
+    assert set(workbench_target.git_directory_snapshot_paths(scope)) == {
+        scope / "source.txt",
+        scope / "empty-junction",
+    }
 
 
 def test_copy_skips_index_paths_under_a_directory_replaced_by_a_file(tmp_path: Path) -> None:

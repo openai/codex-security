@@ -484,6 +484,69 @@ test("omits a failed component's stale model link while retaining its model", as
   );
 });
 
+test.each([
+  [9, 2],
+  [3, 1],
+])(
+  "divides a $%i budget across concurrent components",
+  async (total, expected) => {
+    const paths = await fixture();
+    const config = join(paths.root, "settings.yaml");
+    await writeFile(config, "scan:\n  owner_suggestions: true\n");
+    const matchFindings = mock(rejecting("unexpected unmetered model call"));
+    const { code, stderr, stdout } = await cli(
+      paths,
+      [
+        ...components.flatMap(({ paths }) => ["--component", paths[0]!]),
+        "--config",
+        config,
+        "--workers",
+        "3",
+        "--max-cost",
+        "2",
+        "--max-total-cost",
+        String(total),
+      ],
+      {
+        createSecurity: client(async (repository, options) => {
+          expect(options.maxCostUsd).toBe(expected);
+          expect(options.skipFindingMatching).toBe(true);
+          expect(options.ownerSuggestions).toBe(false);
+          return completed(repository, options);
+        }),
+        matchFindings,
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      completed: 3,
+      findingCount: 3,
+      deduplication: { status: "skipped" },
+    });
+    expect(stderr).toContain(`$${expected}.00 per component`);
+    expect(matchFindings).not.toHaveBeenCalled();
+  },
+);
+
+test("rejects unmetered planning and post-scan prompts under a total limit", async () => {
+  const paths = await fixture();
+  const planComponents = mock(rejecting("unexpected planner call"));
+  const result = await cli(
+    paths,
+    ["--auto", "--plan-only", "--max-total-cost", "2"],
+    { planComponents },
+  );
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("--component or --components-file");
+  expect(planComponents).not.toHaveBeenCalled();
+  await expect(
+    scan(paths, {
+      maxTotalCostUsd: 2,
+      scanOptions: { postScanPrompt: "Extra turn" },
+    }),
+  ).rejects.toThrow("post-scan prompt");
+});
+
 test("bounds standard scans, continues after failure, and preserves partial results", async () => {
   const paths = await fixture();
   let active = 0,
@@ -496,6 +559,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     scanOptions: {
       auth: "chatgpt",
       scanPrompt: "Check access controls",
+      ownerSuggestions: true,
       maxCostUsd: 3,
     },
     onProgress: throwing("optional observer"),
@@ -510,6 +574,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
           mode: "standard",
           auth: "chatgpt",
           scanPrompt: "Check access controls",
+          ownerSuggestions: true,
           maxCostUsd: 3,
         });
         if (scope(repository, options) === "apps/api")
@@ -882,8 +947,14 @@ test.each([
   },
 );
 
-test("CLI escapes component failure controls while preserving the saved error", async () => {
+test("CLI escapes component names and errors in headless output and preserves their saved values", async () => {
   const paths = await fixture();
+  const name = "API\u001b[2J\nnext\u009bline";
+  const planFile = join(paths.root, "plan.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({ components: [{ name, paths: ["apps/api"] }] }),
+  );
   const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
   const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -892,25 +963,36 @@ test("CLI escapes component failure controls while preserving the saved error", 
       [
         "scan-components",
         paths.repository,
-        "--component",
-        "apps/api",
+        "--components-file",
+        planFile,
+        "--headless",
         "--output-dir",
         paths.outputDir,
         "--json",
       ],
       {
         ...dependencies({ currentDirectory: paths.root }),
-        createSecurity: client(rejecting(failure)),
+        createSecurity: client(async (_repository, options) => {
+          options.onProgress?.({
+            phase: "validation",
+            filesCompleted: 1,
+            filesTotal: 1,
+          });
+          throw new Error(failure);
+        }),
       },
     ),
   ).toBe(2);
+  expect(stderr.text()).toContain("API [2J next line validating findings");
+  expect(stderr.text()).toContain("API [2J next line failed:");
   expect(stderr.text()).toContain(
     "Component failed: token=SYNTHETIC_VALUE [2J continued\n",
   );
   expect(stderr.text()).not.toContain("\u001b");
+  expect(stderr.text()).not.toContain("\u009b");
   const result = JSON.parse(stdout.text());
   expect(await json(result.summaryPath)).toMatchObject({
-    components: [expect.objectContaining({ error: failure })],
+    components: [expect.objectContaining({ name, error: failure })],
   });
 });
 
@@ -1889,19 +1971,58 @@ test.each(["auto", "explicit", "file"])(
         : selection === "file"
           ? ["--components-file", planFile]
           : selected.flatMap(({ paths }) => ["--component", paths[0]!]);
-    const result = await cli(paths, [...args, "--plan-only"], {
-      planComponents: async () => ({ components: selected }),
-      createSecurity: throwing("unexpected scan"),
-    });
-    expect(result.code).toBe(0);
+    const result = await cli(
+      paths,
+      [
+        ...args,
+        "--plan-only",
+        ...(selection === "auto"
+          ? []
+          : [
+              "--auth",
+              "api-key",
+              "--workers=2",
+              "--max-total-cost=3",
+              "--max-cost",
+              "1.5",
+              "--codex",
+              'model_providers.example.http_headers.Example="synthetic-header"',
+            ]),
+      ],
+      {
+        environment: {},
+        planComponents: async () => ({ components: selected }),
+        createSecurity: throwing("unexpected scan"),
+      },
+    );
+    expect(result.code, result.stderr).toBe(0);
     expect(await json(join(paths.outputDir, "components.json"))).toEqual({
       components:
         selection === "explicit"
           ? selected.map(({ paths }) => ({ name: paths[0], paths }))
           : selected,
     });
-    expect(JSON.parse(result.stdout).planPath).toBe(
-      join(paths.outputDir, "components.json"),
+    const plan = JSON.parse(result.stdout);
+    expect(plan.planPath).toBe(join(paths.outputDir, "components.json"));
+    expect(plan.nextCommand).toContain("codex-security scan-components");
+    expect(plan.nextCommand).toContain("--components-file");
+    expect(plan.nextCommand).toContain(join(paths.outputDir, "results"));
+    if (selection !== "auto") {
+      expect(plan.nextCommand).toContain("--auth api-key");
+      expect(plan.nextCommand).toContain("--workers 2");
+      expect(plan.nextCommand).toContain("--max-cost 1.5");
+      expect(plan.nextCommand).toContain("--max-total-cost 3");
+      expect(plan.nextCommandNote).toContain("--codex");
+      expect(result.stdout + result.stderr).not.toContain("synthetic-header");
+    }
+    const occupied = await cli(paths, [
+      "--components-file",
+      plan.planPath,
+      "--plan-only",
+    ]);
+    expect(occupied.code).toBe(2);
+    expect(occupied.stderr).toContain(
+      "Choose a new or empty directory with --output-dir",
     );
   },
 );
