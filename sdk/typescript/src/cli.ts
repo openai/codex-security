@@ -8753,7 +8753,7 @@ export async function main(
       const structuredFailure = Boolean(envelopeFormat || validationError);
       const scanArgumentError = scanCommand && exitCode === 0 && !inspection;
       let message =
-        validationError && typeof error?.["message"] === "string"
+        structuredFailure && typeof error?.["message"] === "string"
           ? error["message"]
           : await incurErrorMessage(frameworkOutput, scanArgumentError);
       if (validationError && Array.isArray(error["fieldErrors"])) {
