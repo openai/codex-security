@@ -33,6 +33,17 @@ export async function nativeCodexLaunch(
   };
 }
 
+export function isBundledExecutable(command: string): boolean {
+  try {
+    return (
+      realpathSync.native(command) ===
+      realpathSync.native(resolveBundledCodexExecutable())
+    );
+  } catch {
+    return false; // An installation may supply only an external launcher.
+  }
+}
+
 export function bundledCodexSdkEnvironment(
   command: string,
   environment: Record<string, string>,

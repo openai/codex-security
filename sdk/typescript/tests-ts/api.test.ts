@@ -2466,11 +2466,18 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["revision", "registration", "cancellation", "mock"] as const)(
+  test.each([
+    "revision",
+    "catalog",
+    "registration",
+    "cancellation",
+    "mock",
+  ] as const)(
     "keeps existing output when %s prevents scan registration",
     async (failurePoint) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
+      let catalogDirectory: string | undefined;
       const cancellation = new AbortController();
       const client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
@@ -2482,6 +2489,13 @@ describe("CodexSecurity orchestration", () => {
               throw new Error("fixture revision rejected");
             if (failurePoint === "cancellation") cancellation.abort();
             return null;
+          },
+          resolveScanCyberAccessProgram: async ({ cwd }) => {
+            catalogDirectory = cwd;
+            expect(dirname(cwd)).toBe(dirname(scanDir));
+            expect(await readdir(cwd)).toEqual([]);
+            if (failurePoint === "catalog") throw new Error("Red-only model");
+            return "daybreak_blue";
           },
           runWorkbench: async () => {
             throw new Error("fixture registration rejected");
@@ -2497,7 +2511,10 @@ describe("CodexSecurity orchestration", () => {
             signal: cancellation.signal,
             mock: failurePoint === "mock",
           }),
-        ).rejects.toThrow();
+        ).rejects.toThrow(
+          failurePoint === "catalog" ? "Red-only model" : undefined,
+        );
+        if (catalogDirectory) expect(existsSync(catalogDirectory)).toBe(false);
         expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
           "previous scan\n",
         );
@@ -2529,12 +2546,18 @@ describe("CodexSecurity orchestration", () => {
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
+          resolveScanCyberAccessProgram: async () => "daybreak_blue",
           runWorkbench: async (
             _options: Parameters<typeof runWorkbench>[0],
             args: readonly string[],
             input?: string,
           ): Promise<JsonObject> => {
-            if (args[0] === "register-cli-scan") registration = args;
+            if (args[0] === "register-cli-scan") {
+              registration = args;
+              const recipe = JSON.parse(input!).recipe;
+              expect(recipe.cyberAccessProgram).toBeUndefined();
+              expect(recipe.requestedCyberAccessProgram).toBe("daybreak_blue");
+            }
             const result = await runWorkbench(
               {
                 ..._options,
@@ -2550,7 +2573,12 @@ describe("CodexSecurity orchestration", () => {
             }
             return result;
           },
-          createCodex: codexFactory(scanDidNotStart),
+          createCodex: codexFactory(
+            async (_prompt: string, turn: { cyberAccessProgram?: string }) => {
+              expect(turn.cyberAccessProgram).toBe("daybreak_blue");
+              return scanDidNotStart();
+            },
+          ),
         },
       );
 
@@ -15284,6 +15312,67 @@ if __name__ == "__main__":
       } finally {
         await client.close();
       }
+    },
+  );
+
+  test.each([
+    [{ requestedCyberAccessProgram: "daybreak_blue" }, "daybreak_blue"],
+    [{ cyberAccessProgram: "daybreak_red" }, "daybreak_red"],
+    [{}, undefined],
+  ] as const)(
+    "restores the saved Cyber access program %p",
+    async (saved, expected) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      const scanId = "scan_example_001";
+      const threadId = "thread-1";
+      const configPath = join(codexHome, "worker.toml");
+      await writeUsageSession(codexHome, threadId, {}, { cwd: scanDir });
+      const recipe = {
+        repository,
+        target: { kind: "repository", paths: [] },
+        ...saved,
+      };
+      const runStreamed = mock(rejecting("resumed turn"));
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          configPath,
+        }),
+        resolveScanCyberAccessProgram: rejecting("unexpected rediscovery"),
+        readDeepScanParentConfig: async () => undefined,
+        runWorkbench: async (_options, args, input): Promise<JsonObject> =>
+          args[0] === "get-cli-scan-resume"
+            ? {
+                ...mockScanRegistration(
+                  ["--registration-json-stdin", "--scan-dir", scanDir],
+                  JSON.stringify({ recipe }),
+                ),
+                recipe,
+                threadId,
+              }
+            : mockWorkbench(args, input),
+        createCodex: () => ({
+          startThread: throwing("expected resume"),
+          resumeThread: () => ({ id: threadId, runStreamed }),
+        }),
+      });
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          resumeScanId: scanId,
+          outputDir: scanDir,
+        }),
+      ).rejects.toThrow("resumed turn");
+      expect(runStreamed).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ cyberAccessProgram: expected }),
+      );
+      expect(
+        parseToml(await readFile(configPath, "utf8"))["codex_security"],
+      ).toEqual(
+        expected === undefined ? undefined : { cyber_access_program: expected },
+      );
     },
   );
 

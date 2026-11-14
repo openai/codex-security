@@ -172,8 +172,9 @@ Some cybersecurity requests and protected findings require
 
 ### Daybreak opt-in
 
-Codex 0.163.0 and later default the Daybreak toggle to off. Enable it through
-the existing native configuration override:
+Passing `daybreak=true` opts in to native Codex selection, which can choose
+Red when the model offers Red without Blue. To use the bundled runtime's scan
+default, leave the toggle unset. See [Select a Cyber access program](#select-a-cyber-access-program).
 
 ```bash
 codex-security scan . --codex daybreak=true
@@ -210,7 +211,7 @@ can apply Daybreak Blue to compatible mainline models when the API organization
 and project have access. An omitted `access_programs.cyber` field does not by
 itself mean that Daybreak treatment is disabled.
 
-Choose a compatible model available to your project and select Daybreak Blue
+To require Daybreak Blue, select a compatible model and request Blue
 explicitly. If you use `--max-cost` or the SDK's `maxCostUsd`, choose a model
 with built-in pricing so the scan can enforce the limit.
 
@@ -230,8 +231,20 @@ instead of passing it as a `--codex` configuration key.
 
 ### Select a Cyber access program
 
-For the built-in OpenAI provider, choose `standard`, `daybreak_blue`, or
-`daybreak_red`:
+With bundled Codex and the built-in OpenAI provider, CLI and SDK scans check
+the selected model's catalog entry for the scan credentials. The scan requests
+Blue when advertised. If the model offers Standard without Blue or lacks
+program metadata, the scan requests Standard. A Red-only model stops the scan
+before inference. To use that model, pass `--cyber-access-program daybreak_red`.
+When workspace policy prevents a catalog lookup for a project API key, the scan
+requests Standard if the policy permits it. For a saved login, set a custom
+catalog URL in the native Codex home. If a per-scan URL differs, supply a
+local `model_catalog_json` or select the program explicitly. `init` and
+`scan --dry-run` stay offline.
+
+With a custom Codex executable or launcher, an omitted program uses that
+launcher's native behavior, which can include Red. To request a specific
+program, pass `standard`, `daybreak_blue`, or `daybreak_red`.
 
 ```bash
 codex-security scan . --auth api-key --cyber-access-program daybreak_blue
@@ -246,14 +259,14 @@ await security.run("/path/to/repository", {
 
 `scan-components` accepts the same flag. Project files use
 `scan.cyber_access_program`, including for bulk scans. Explicit CLI or SDK values
-override the file; omission preserves Codex defaults. `standard` explicitly
-selects the standard program.
+override the file. An explicit program takes precedence over the native
+`daybreak` toggle, which in turn takes precedence over automatic selection.
 
-The selection applies to workers, resumed scans, planning, matching, and scan
-follow-ups. Recipes retain it for resume and rerun. API-key selection enables
-Codex's experimental Cyber support unless native configuration explicitly disables
-`features.api_key_cyber_access_programs`. A selection does not grant entitlement;
-explicit disables and access denials remain errors.
+The selection applies to workers, planning, matching, and scan follow-ups.
+A resume retains the recorded program. A fresh rerun repeats automatic selection
+if the original scan used it. An explicit API-key program enables Codex's
+experimental Cyber support unless native configuration disables
+`features.api_key_cyber_access_programs`. Access denials remain errors.
 
 ### Native command authentication and other providers
 

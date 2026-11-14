@@ -104,6 +104,7 @@ const distModules = [
   "provider-profile",
   "scan-modes",
   "scan-settings",
+  "scan-cyber-access",
   "scan-owner-suggestions",
   "scan-time-budget",
   "errors",
@@ -204,6 +205,7 @@ const distModules = [
 ];
 
 export const packageDistFiles = [
+  "package/dist/scan-policy-catalog.json",
   "package/dist/server/embedding-tokenizer.cdx.json",
   ...distModules.flatMap((module) =>
     ["js", "js.map", "d.ts", "d.ts.map"].map(

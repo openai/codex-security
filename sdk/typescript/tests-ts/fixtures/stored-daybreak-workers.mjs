@@ -1,5 +1,7 @@
 import childProcess from "node:child_process";
 import { once } from "node:events";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { mock } from "bun:test";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
@@ -39,6 +41,12 @@ const server = Bun.serve({
   },
 });
 process.env.OPENAI_BASE_URL = `${server.url}v1`;
+if (process.argv[4] === "--local-provider") {
+  await writeFile(
+    join(process.env.CODEX_HOME, "config.toml"),
+    `openai_base_url = "${server.url}v1"\nchatgpt_base_url = "${server.url}"\n`,
+  );
+}
 const executor = new CodexSdkWorkerExecutor({
   model: "gpt-test",
   parentSandbox: { filesystemDenies: [] },
@@ -46,9 +54,11 @@ const executor = new CodexSdkWorkerExecutor({
 process.stdout.write(
   JSON.stringify({ baseUrl: process.env.OPENAI_BASE_URL }) + "\n",
 );
+let previousThreadId;
 try {
   for await (const line of createInterface({ input: process.stdin })) {
     const request = JSON.parse(line);
+    if (request.resumePrevious) request.resumeThreadId = previousThreadId;
     const requestCount = requests.length;
     workerArgs = undefined;
     workerProcess = undefined;
@@ -75,6 +85,7 @@ try {
         signal,
       });
       threadId = result.threadId;
+      previousThreadId = threadId;
     }
     if (!workerArgs)
       throw new Error("Native worker arguments were not captured");

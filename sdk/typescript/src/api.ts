@@ -49,6 +49,7 @@ import {
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
+import { resolveScanCyberAccessProgram } from "./scan-cyber-access.js";
 import { isRecord } from "./record.js";
 import {
   STATIC_VERIFICATION_INSTRUCTIONS,
@@ -371,7 +372,6 @@ interface PreparedSession {
   runtime: PreparedRuntime;
   runtimeHome: string;
   effectiveConfig: JsonObject;
-  preflightConfig: JsonObject;
   sessionConfig: JsonObject;
   modelProvider: unknown;
   providerEnvKey?: string;
@@ -446,6 +446,7 @@ export interface ScanOptions extends ScanSettings {
     scanId: string;
     scanDir: string;
     startedAt?: string;
+    cyberAccessProgram?: ScanSettings["cyberAccessProgram"];
   }) => void;
   onAuthentication?: (authentication: ScanAuthentication) => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -776,6 +777,7 @@ interface ClientDependencies {
   prepareScanArtifactRestorer?: typeof prepareScanArtifactRestorer;
   repositoryRevision?: typeof repositoryRevision;
   resolveCodexCommand?: () => CodexCommand;
+  resolveScanCyberAccessProgram?: typeof resolveScanCyberAccessProgram;
   probeCodexSandbox?: typeof probeCodexSandbox;
   runWorkbench?: typeof runWorkbench;
   matchFindings?: typeof matchScanFindingsInternal;
@@ -790,6 +792,7 @@ export const DEFAULT_DEPENDENCIES: ClientDependencies = {
     nativeProfile === undefined
       ? new Codex(options)
       : createProfileCodex(options, nativeProfile),
+  resolveScanCyberAccessProgram,
   environment: process.env,
 };
 
@@ -937,6 +940,7 @@ export class CodexSecurity {
       ScanResultOptions,
       | "threadId"
       | "turnResult"
+      | "requestedCyberAccessProgram"
       | "sarifPath"
       | "repositoryFindings"
       | "ownerSuggestionsPath"
@@ -955,6 +959,7 @@ export class CodexSecurity {
           metadata ??= {
             threadId: (scan["continuationThreadId"] as string) ?? "",
             turnResult: { status: "completed" },
+            requestedCyberAccessProgram: savedCyberAccessProgram(recipe),
           };
         else local.retryRecipe = isRecord(recipe) ? recipe : {};
       }
@@ -992,6 +997,7 @@ export class CodexSecurity {
       metadata = {
         threadId: result.threadId,
         turnResult: result.turnResult,
+        requestedCyberAccessProgram: result.requestedCyberAccessProgram,
         sarifPath: result.sarifPath,
         repositoryFindings: result.repositoryFindings,
         ownerSuggestionsPath: result.ownerSuggestionsPath,
@@ -2016,6 +2022,12 @@ export class CodexSecurity {
                 ),
               ),
             );
+      // The Windows sandbox creates directories for missing exact deny paths.
+      if (runtime.configPath !== undefined)
+        await writeCodexConfig(
+          runtime.configPath,
+          scanPreflightCodexConfig(effectiveConfig),
+        );
       const policyFilesystem = policyFilesystemPermissions(
         [
           session.runtimeHome,
@@ -2239,6 +2251,7 @@ export class CodexSecurity {
       signal,
       budgetAbortController.signal,
     ]);
+    let cyberAccessProgram = options.cyberAccessProgram;
     let maxCostUsd = options.maxCostUsd;
     let latestCost: Readonly<ScanCost> | null = null;
     let latestCostComplete = false;
@@ -2404,7 +2417,6 @@ export class CodexSecurity {
         runtime,
         runtimeHome,
         effectiveConfig,
-        preflightConfig,
         modelProvider,
         pricingContext,
         authentication,
@@ -2514,15 +2526,16 @@ export class CodexSecurity {
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
         typeof sqliteHome === "string" ? { CODEX_SQLITE_HOME: sqliteHome } : {};
-      const workerSnapshot: JsonObject = {
-        ...workerRuntimeConfig,
-        responses_api_metadata: codexSecurityRequestContext(effectiveConfig, {
+      workerRuntimeConfig["responses_api_metadata"] =
+        codexSecurityRequestContext(effectiveConfig, {
           ...this.#operationTelemetry?.context,
           surface: this.#surface,
           command: "scan",
           pluginVersion: runtime.plugin.version,
           mode,
-        }).metadata,
+        }).metadata;
+      const workerSnapshot: JsonObject = {
+        ...workerRuntimeConfig,
         ...(workerEnvironment === undefined
           ? {}
           : { environment: workerEnvironment }),
@@ -2772,6 +2785,7 @@ export class CodexSecurity {
         typeof profileName === "string" &&
         !(isRecord(inlineProfiles) && isRecord(inlineProfiles[profileName]));
       const overrides = this.config.codexOverrides ?? {};
+      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       const recipeConfig: JsonObject = {
         ...(fileProfile
           ? scanPreflightCodexConfig(overrides)
@@ -2902,13 +2916,64 @@ export class CodexSecurity {
         failureMessage: "Could not save the Codex Security scan",
       };
       checkOpen();
-      const registration =
+      const resumeRegistration =
         options.resumeScanId !== undefined
           ? await workbench(workbenchOptions, [
               "get-cli-scan-resume",
               "--scan-id",
               options.resumeScanId,
             ])
+          : undefined;
+      if (
+        resumeRegistration !== undefined ||
+        inputs.retryRecipe !== undefined
+      ) {
+        cyberAccessProgram ??= savedCyberAccessProgram(
+          resumeRegistration?.["recipe"] ?? inputs.retryRecipe,
+        );
+      } else if (
+        cyberAccessProgram === undefined &&
+        this.#dependencies.resolveScanCyberAccessProgram !== undefined &&
+        (modelProvider === undefined || modelProvider === "openai")
+      ) {
+        // An empty sibling inherits the replacement output's project layers.
+        const archiveWorkspace =
+          options.archiveExisting && (await readdir(scanDir)).length > 0
+            ? await prepareOutputDir(undefined, "catalog", dirname(scanDir))
+            : undefined;
+        try {
+          cyberAccessProgram =
+            await this.#dependencies.resolveScanCyberAccessProgram({
+              command: this.#codexCommand(),
+              cwd: archiveWorkspace ?? scanDir,
+              nativeProfile: runtime.providerProfile !== undefined,
+              environment: definedEnvironment({
+                ...environmentWithGit(workerProviderEnvironment, git),
+                CODEX_HOME: runtimeHome,
+              }),
+              config: workerRuntimeConfig,
+              model,
+              signal,
+            });
+        } finally {
+          if (archiveWorkspace !== undefined)
+            await cleanupSdkDirectory(archiveWorkspace);
+        }
+      }
+      if (cyberAccessProgram !== undefined) {
+        // A continuation restores the selection. A new rerun uses the caller's original choice.
+        if (options.cyberAccessProgram === undefined)
+          recipe["requestedCyberAccessProgram"] = cyberAccessProgram;
+        preflightConfig["codex_security"] = {
+          cyber_access_program: cyberAccessProgram,
+        };
+      }
+      if (runtime.configPath !== undefined)
+        await writeCodexConfig(runtime.configPath, preflightConfig);
+      checkOpen();
+      const registration =
+        resumeRegistration !== undefined
+          ? resumeRegistration
           : await workbench(
               workbenchOptions,
               workbenchArgs("register-cli-scan", {
@@ -3243,6 +3308,7 @@ export class CodexSecurity {
       )({
         scanId,
         scanDir,
+        ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
         ...(typeof registration["startedAt"] === "string"
           ? { startedAt: registration["startedAt"] }
           : {}),
@@ -3565,10 +3631,7 @@ export class CodexSecurity {
         skipGitRepoCheck: true,
         approvalPolicy,
       };
-      const turnOptions: TurnOptions = {
-        signal,
-        cyberAccessProgram: options.cyberAccessProgram,
-      };
+      const turnOptions: TurnOptions = { signal, cyberAccessProgram };
       const postScanPrompt = options.postScanPrompt;
       const openThread = (client: CodexClientLike, id: unknown) => {
         if (typeof id !== "string") return client.startThread(threadOptions);
@@ -4043,10 +4106,7 @@ export class CodexSecurity {
           )(`Could not run post-scan instructions: ${errorMessage(error)}`);
         }
       }
-      const inferenceRuntimeConfig: JsonObject = {
-        ...structuredClone(workerRuntimeConfig),
-        responses_api_metadata: workerSnapshot["responses_api_metadata"]!,
-      };
+      const inferenceRuntimeConfig = structuredClone(workerRuntimeConfig);
       const inferenceFeatures = inferenceRuntimeConfig["features"];
       if (isRecord(inferenceFeatures)) delete inferenceFeatures["plugins"];
       const inferenceOptions = {
@@ -4061,7 +4121,7 @@ export class CodexSecurity {
           },
         },
         model,
-        cyberAccessProgram: options.cyberAccessProgram,
+        cyberAccessProgram,
         signal,
       };
       if (options.ownerSuggestions) {
@@ -4092,6 +4152,7 @@ export class CodexSecurity {
           )(`Could not generate owner suggestions: ${errorMessage(error)}`);
         }
       }
+      result.requestedCyberAccessProgram = cyberAccessProgram;
       if (this.#dependencies.hostedScan !== undefined) return result;
       try {
         const runWorkbench = (args: readonly string[], input?: string) =>
@@ -4232,6 +4293,7 @@ export class CodexSecurity {
             budgetRecovery.pythonPath,
             budgetRecovery.protectedRoot,
           );
+          result.requestedCyberAccessProgram = cyberAccessProgram;
           const completedScan = completion["scan"];
           const targetWarnings = new Set(
             Array.isArray(completion["targetWarnings"])
@@ -5081,7 +5143,6 @@ export class CodexSecurity {
         approval_policy: "never",
         ...this.config.codexOverrides,
       };
-      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       const runtimeHome = await createIsolatedHome(temporaryRoot, (path) =>
         requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
       );
@@ -5101,7 +5162,6 @@ export class CodexSecurity {
         },
       };
       this.#runtime = runtime;
-      await writeCodexConfig(configPath, preflightConfig);
       const python = await resolvePluginPython({
         environment,
         protectedRoot,
@@ -5112,8 +5172,7 @@ export class CodexSecurity {
         runtime,
         runtimeHome,
         effectiveConfig,
-        preflightConfig,
-        sessionConfig: preflightConfig,
+        sessionConfig: scanPreflightCodexConfig(effectiveConfig),
         modelProvider: "host",
         apiKey: null,
         scanEnvironment: environment,
@@ -5205,21 +5264,8 @@ export class CodexSecurity {
         runtime.codexHome,
       );
       const approvalPolicy = scanApprovalPolicy(effectiveConfig);
-      const preflightConfig = scanPreflightCodexConfig(effectiveConfig);
       const resolvedConfig = resolveCodexProfile(effectiveConfig);
       const providers = resolvedConfig["model_providers"];
-      if (runtime.configPath !== undefined) {
-        await writeCodexConfig(runtime.configPath, {
-          ...preflightConfig,
-          ...(options.cyberAccessProgram === undefined
-            ? {}
-            : {
-                codex_security: {
-                  cyber_access_program: options.cyberAccessProgram,
-                },
-              }),
-        });
-      }
       const runtimeHome = await realpath(runtime.codexHome);
       requireOutputOutsideRepositories(protectedRoots, runtimeHome, "runtime");
       await runtime.providerProfile?.cleanup();
@@ -5327,7 +5373,6 @@ export class CodexSecurity {
         toolRoots: protectedRoots,
         runtimeHome,
         effectiveConfig,
-        preflightConfig,
         sessionConfig,
         modelProvider,
         pricingContext: scanPricingContext(
@@ -6634,6 +6679,13 @@ async function targetInstruction(
   return `Scan target: staged and unstaged working-tree changes against ${target.base}.`;
 }
 
+function savedCyberAccessProgram(recipe: unknown) {
+  if (isRecord(recipe))
+    return ScanSettingsSchema.shape.cyberAccessProgram.parse(
+      recipe["cyberAccessProgram"] ?? recipe["requestedCyberAccessProgram"],
+    );
+}
+
 function scanRecipe({
   repository,
   target,
@@ -6979,6 +7031,25 @@ function withoutProviderKey(
     if (name.toUpperCase() === key.toUpperCase()) delete child[name];
   }
   return child;
+}
+
+/** @internal Validate helper authentication and select its credential environment. */
+export function scanHelperEnvironment(
+  environment: ProcessEnvironment,
+  auth: ScanAuthMode | undefined,
+  config: JsonObject,
+) {
+  const provider = scanModelProvider(config);
+  const key = scanProviderEnvKey(config);
+  scanAuthentication(
+    environment,
+    auth,
+    provider,
+    hasCommandAuth(config),
+    false,
+    key,
+  );
+  return selectedScanEnvironment(environment, auth, provider, key, config);
 }
 
 /** @internal */

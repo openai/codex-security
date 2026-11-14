@@ -6,9 +6,8 @@ import { basename, join, relative, resolve, sep } from "node:path";
 import {
   CodexSecurity,
   DEFAULT_DEPENDENCIES,
-  scanAuthentication,
   scanCodexHome,
-  selectedScanEnvironment,
+  scanHelperEnvironment,
   type CodexSecuritySurface,
   type ScanAuthentication,
   type ScanLifecycle,
@@ -20,13 +19,7 @@ import {
   type ComponentPlan,
   type ComponentPlanningOptions,
 } from "./component-plan.js";
-import {
-  hasCommandAuth,
-  mergedCodexConfig,
-  scanModelProvider,
-  scanProviderEnvKey,
-  type CodexSecurityConfig,
-} from "./config.js";
+import { mergedCodexConfig, type CodexSecurityConfig } from "./config.js";
 import type {
   ScanCost,
   ScanSessionEvent,
@@ -184,23 +177,7 @@ export async function runComponentScans(
       options.config ?? {},
       scanCodexHome(source),
     );
-    const provider = scanModelProvider(configuration);
-    const providerEnvKey = scanProviderEnvKey(configuration);
-    scanAuthentication(
-      source,
-      auth,
-      provider,
-      hasCommandAuth(configuration),
-      false,
-      providerEnvKey,
-    );
-    environment = selectedScanEnvironment(
-      source,
-      auth,
-      provider,
-      providerEnvKey,
-      configuration,
-    );
+    environment = scanHelperEnvironment(source, auth, configuration);
   }
   const repository = await normalizeRepository(
     options.repository,
@@ -375,7 +352,11 @@ export async function runComponentScans(
     }
   }
   const { findings, matches, uncertain, related, error, skipped } =
-    await deduplicateFindings(receipts, results, { ...options, environment });
+    await deduplicateFindings(receipts, results, {
+      ...options,
+      repository,
+      environment,
+    });
   const deduplication: ComponentDeduplicationSummary = {
     status: skipped ? "skipped" : error === undefined ? "completed" : "failed",
     confirmedGroups: matches.length,
@@ -489,6 +470,7 @@ async function deduplicateFindings(
       )(
         { before: [...previous], after: current },
         {
+          componentRepository: options.repository,
           allowHistoricalUncertainty: true,
           auth: options.scanOptions?.auth,
           cyberAccessProgram: options.scanOptions?.cyberAccessProgram,

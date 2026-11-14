@@ -35,6 +35,26 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
+/** Match the flags the selected launcher will pass to Codex. */
+export async function preflightConfigOverrides(
+  config: JsonObject,
+  nativeProfile = false,
+): Promise<string[]> {
+  if (nativeProfile)
+    return (await nativeProfileClient()).profileConfigOverrides(config);
+  return sdkConfigFlags(config);
+}
+
+// The stock SDK emits one flag per leaf, including literal dotted keys in order.
+function sdkConfigFlags(config: JsonObject, prefix = ""): string[] {
+  return Object.entries(config).flatMap(([key, value]) => {
+    const path = prefix ? `${prefix}.${key}` : key;
+    return isRecord(value) && Object.keys(value).length
+      ? sdkConfigFlags(value, path)
+      : [`${path}=${inlineToml(value)}`];
+  });
+}
+
 /** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
 export async function providerPreflightCommand(
   command: CodexCommand,
@@ -229,7 +249,10 @@ export async function preflightReadOnlyProfileCodex(
       codexPath: executablePathForSpawn(command),
       cwd,
       configOverrides: [
-        ...client.profileConfigOverrides(options.config ?? {}),
+        // The metadata table below replaces any literal provider overrides.
+        ...client
+          .profileConfigOverrides(options.config ?? {})
+          .filter((flag: string) => !flag.startsWith("model_providers.")),
         ...configOverrides,
       ],
       providerConfigOverrides: modelProviderConfigOverride({

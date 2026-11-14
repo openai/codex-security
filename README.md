@@ -96,10 +96,9 @@ Scans use existing root and component `SECURITY.md` guidance. To write or
 revise it, see [Generate SECURITY.md](#generate-securitymd).
 
 Some cybersecurity requests and protected findings require
-[Trusted Access for Cyber](https://chatgpt.com/cyber). For accounts with Daybreak
-access, see [Daybreak opt-in](sdk/typescript/docs/cli.md#daybreak-opt-in) for the
-Codex toggle and [Cyber access programs](sdk/typescript/docs/cli.md#select-a-cyber-access-program)
-to select a program explicitly.
+[Trusted Access for Cyber](https://chatgpt.com/cyber). With bundled Codex, OpenAI
+scans request Daybreak Blue when the selected model advertises it for your
+credentials. See [Cyber access programs](sdk/typescript/docs/cli.md#select-a-cyber-access-program).
 
 ## TypeScript SDK
 

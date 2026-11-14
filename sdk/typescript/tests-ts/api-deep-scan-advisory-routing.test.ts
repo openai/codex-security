@@ -1,15 +1,20 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, mock, test } from "bun:test";
 import type { TurnOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import type { ScanAuthentication, ScanOptions } from "../src/api.js";
 import type { DirectDeepScanOptions } from "../src/deep-scan.js";
+import { resolveScanCyberAccessProgram } from "../src/scan-cyber-access.js";
 import { TestClient } from "./support/api-client.js";
 import {
+  codexFactory,
   preparedRuntime,
   scanRuntimeDependencies,
 } from "./support/api-events.js";
+import { rejecting } from "./support/errors.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
@@ -237,3 +242,85 @@ test.each(cases)(
     }
   },
 );
+
+test("automatically selected Blue reaches fresh and resumed direct workers", async () => {
+  const repository = await temporaryDirectory();
+  const home = await temporaryDirectory();
+  const scanDir = await temporaryDirectory();
+  const environment = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([name]) =>
+        /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(name),
+      ),
+    ),
+    CODEX_API_KEY: "synthetic-worker-key",
+    CODEX_SECURITY_STATE_DIR: join(home, "state"),
+  };
+  const prompt = join(repository, "prompt.md");
+  await writeFile(prompt, "Test scan.");
+  const fixture = (relative: string) =>
+    fileURLToPath(new URL(relative, import.meta.url));
+  await using client = new TestClient(
+    {
+      codexOverrides: {
+        model: "gpt-test",
+        model_catalog_json: fixture(
+          "./fixtures/native-skill-model-catalog.json",
+        ),
+      },
+    },
+    {
+      ...scanRuntimeDependencies(home, scanDir),
+      environment,
+      prepareRuntime: async () => ({
+        ...preparedRuntime(home),
+        environment,
+        configPath: join(home, "scan.toml"),
+      }),
+      canRunDirectDeepScan: () => true,
+      resolveScanCyberAccessProgram,
+      createCodex: codexFactory(rejecting("unexpected parent turn")),
+      runDeepScan: async function* ({ codexOptions, preflightCommand }) {
+        const output = execFileSync(
+          process.execPath,
+          [
+            fixture("./fixtures/stored-daybreak-workers.mjs"),
+            fixture(
+              "../../../plugins/codex-security/mcp-app/src/deep-scan/executor.ts",
+            ),
+            prompt,
+            "--local-provider",
+          ],
+          {
+            cwd: repository,
+            env: {
+              ...codexOptions.env,
+              CODEX_CLI_PATH: preflightCommand.command,
+              CODEX_API_KEY: codexOptions.apiKey,
+            },
+            input:
+              '{"kind":"discovery"}\n{"kind":"discovery","resumePrevious":true}\n',
+            encoding: "utf8",
+          },
+        );
+        const [, fresh, resumed] = output
+          .trimEnd()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(fresh).toMatchObject({
+          program: "daybreak_blue",
+          resumed: false,
+        });
+        expect(resumed).toMatchObject({
+          program: "daybreak_blue",
+          resumed: true,
+          threadId: fresh.threadId,
+        });
+        throw new Error("worker launches verified");
+      },
+    },
+  );
+  await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+    "worker launches verified",
+  );
+});

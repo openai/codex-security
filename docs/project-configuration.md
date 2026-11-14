@@ -59,11 +59,10 @@ keep their native spelling; names and values are not converted.
 YAML anchors are supported; the parser retains its guard against excessive nested
 alias expansion.
 
-For Daybreak on Codex 0.163.0 or later, set `codex.daybreak` to `true`; the toggle
-defaults off. This native setting is retained in scan recipes and passed to
-Deep Scan discovery workers, including resumes. An explicit
-`scan.cyber_access_program` takes precedence for each turn. See
-[Daybreak opt-in](../sdk/typescript/docs/cli.md#daybreak-opt-in).
+With bundled Codex, OpenAI scans request Daybreak Blue when the model advertises
+it for the scan credentials. Set `scan.cyber_access_program` to request a
+specific program. It takes precedence over the native `codex.daybreak` toggle. See
+[Cyber access programs](../sdk/typescript/docs/cli.md#select-a-cyber-access-program).
 
 ### Try the checked-in examples
 
@@ -144,7 +143,7 @@ load the same config also use that setting. The usual config file is
 | `auth`                         | Credential source: `auto`, `chatgpt`, or `api-key`; never a credential value         | `auto`                             |
 | `scan.mode`                    | `standard` or `deep`                                                                 | `standard`                         |
 | `scan.max_time_minutes`        | Advisory Standard investigation allowance; enforced Deep discovery limit, in minutes | Unset in Standard; 5760 in Deep    |
-| `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Unset; preserve Codex defaults     |
+| `scan.cyber_access_program`    | Experimental OpenAI program: `standard`, `daybreak_blue`, or `daybreak_red`          | Blue when bundled Codex offers it  |
 | `scan.scope`                   | Exactly one of `paths: [src]`, `diff: {base: HEAD}`, or `working_tree: {}`           | Whole repository                   |
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |

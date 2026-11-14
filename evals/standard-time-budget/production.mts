@@ -66,7 +66,11 @@ export function createStandardRunner({
   outputRoot,
   environment = process.env,
   createClient = (config, dependencies) =>
-    new CodexSecurity(config, dependencies, { surface: "sdk" }),
+    new CodexSecurity(
+      config,
+      { ...DEFAULT_DEPENDENCIES, ...dependencies },
+      { surface: "sdk" },
+    ),
   createCodex = DEFAULT_DEPENDENCIES.createCodex,
 }: {
   stateRoot: string;

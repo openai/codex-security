@@ -4,6 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { FIREWORKS_CODEX_PROVIDER, inlineToml } from "../src/config.js";
+import { ScanResult } from "../src/result.js";
 import { dependencies, fakePreflight, fakeResult } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
@@ -84,6 +85,8 @@ async function patchSettings(
     homeConfig?: string;
     standalone?: boolean;
     programs?: string[];
+    scanProgram?: ScanResult["requestedCyberAccessProgram"];
+    onValidate?: NonNullable<Parameters<typeof dependencies>[0]>["onValidate"];
   } = {},
 ): Promise<ChildReceipt> {
   const root = await temporaryDirectory("inline-patch-settings-");
@@ -94,7 +97,11 @@ async function patchSettings(
     await mkdir(repository);
     await writeFile(join(repository, "app.ts"), "const value = 1;\n");
     await writeFile(child, childSource);
-    const result = fakeResult(["high"]);
+    const result = new ScanResult({
+      ...fakeResult(["high"]),
+      scanDir: root,
+      requestedCyberAccessProgram: options.scanProgram,
+    });
     Object.assign(result.findings.findings[0]!, {
       occurrenceId: "occ_1",
       findingId: "csf_1",
@@ -142,6 +149,7 @@ async function patchSettings(
         "--json",
       ],
       dependencies({
+        onValidate: options.onValidate,
         currentDirectory: repository,
         environment,
         result,
@@ -417,6 +425,24 @@ describe("inline patch service tier", () => {
 });
 
 describe("patch Daybreak configuration", () => {
+  test("validation and patching reuse the scan’s selected program", async () => {
+    const validationPrograms: Array<string | undefined> = [];
+    const child = await patchSettings(["--validate"], {
+      scanProgram: "daybreak_blue",
+      onValidate: async (validation) => {
+        validationPrograms.push(validation.cyberAccessProgram);
+        return {
+          disposition: "deferred",
+          report: "Additional evidence needed.",
+          threadId: "validation-thread",
+          outputDir: "evidence",
+        };
+      },
+    });
+    expect(validationPrograms).toEqual(["daybreak_blue"]);
+    expect(child.cyberAccessProgram).toBe("daybreakBlue");
+  });
+
   test.each([true, false, undefined])(
     "preserves standalone native configuration (override: %p)",
     async (daybreak) => {

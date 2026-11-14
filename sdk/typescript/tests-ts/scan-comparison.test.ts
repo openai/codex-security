@@ -15,7 +15,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join, relative, win32 } from "node:path";
+import { delimiter, join, relative, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import {
@@ -26,6 +26,8 @@ import {
 } from "@openai/codex-sdk";
 import { afterEach, describe, expect, spyOn, test, mock } from "bun:test";
 import * as runtimeCommands from "../src/runtime.js";
+import * as auth from "../src/auth.js";
+import * as cyberAccess from "../src/scan-cyber-access.js";
 import {
   executablePathForSpawn,
   resolveCodexCommand,
@@ -175,21 +177,36 @@ describe("semantic scan comparison", () => {
   ] as const)(
     "preserves request metadata and attributes %s %s at the model boundary",
     async (surface, helper) => {
-      const root = await temporaryDirectory();
+      const root = await realpath(await temporaryDirectory());
       const home = join(root, "home");
-      const repository = join(root, "repository");
+      const checkout = join(root, "checkout");
+      const repository = join(checkout, "repository");
       await mkdir(home);
-      await mkdir(repository);
+      await mkdir(repository, { recursive: true });
+      childProcess.execFileSync("git", ["init", "-q", checkout]);
+      const repositoryBin = join(checkout, "node_modules", ".bin");
+      await mkdir(repositoryBin, { recursive: true });
       await writeFile(join(repository, "source.ts"), "export {};\n");
+      const state = join(root, "state");
+      const privateHome = join(state, "codex-home");
+      await mkdir(privateHome, { recursive: true, mode: 0o700 });
       await writeFile(
         join(home, "config.toml"),
         stringify({
+          openai_base_url: "http://127.0.0.1:1",
+          chatgpt_base_url: "http://127.0.0.1:1",
           responses_api_metadata: {
             synthetic_home: "preserved",
             codex_security_surface: "previous",
           },
         }),
       );
+      const environment = {
+        PATH: [repositoryBin, process.env["PATH"]].join(delimiter),
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: state,
+      };
       const options = {
         config: {
           codexOverrides: {
@@ -200,19 +217,27 @@ describe("semantic scan comparison", () => {
           },
         },
         environment: {
-          PATH: process.env["PATH"],
-          SystemRoot: process.env["SystemRoot"],
-          CODEX_HOME: home,
-          CODEX_SECURITY_STATE_DIR: join(root, "state"),
-          OPENAI_API_KEY: "synthetic-key",
+          ...environment,
+          ...((surface === "sdk" || helper === "planning") && {
+            OPENAI_API_KEY: "synthetic-key",
+            CODEX_API_KEY: "synthetic-secondary",
+          }),
         },
       };
       let captured: CodexOptions | undefined;
-      const { codex } = fakeCodex(
-        helper === "matching"
-          ? { matches: [], uncertain: [] }
-          : { components: [{ name: "Source", paths: ["source.ts"] }] },
+      const { codex, calls } = fakeCodex(
+        helper === "planning"
+          ? { components: [{ name: "Source", paths: ["source.ts"] }] }
+          : { matches: [], uncertain: [] },
       );
+      using _login = spyOn(auth, "accountStatus").mockResolvedValue({
+        authenticated: true,
+        details: "Logged in using ChatGPT",
+      });
+      using discovery = spyOn(
+        cyberAccess,
+        "resolveScanCyberAccessProgram",
+      ).mockResolvedValue("daybreak_blue");
       const startThread = observeCodexOptions(codex, (options) => {
         captured = options;
       });
@@ -220,8 +245,17 @@ describe("semantic scan comparison", () => {
         if (helper === "planning") {
           await planComponents(repository, {
             ...options,
-            ...(surface === "cli" ? { surface } : {}),
+            ...(surface === "cli" ? { surface, auth: "chatgpt" } : {}),
           });
+          if (surface === "cli") {
+            await expect(
+              planComponents(repository, {
+                ...options,
+                auth: "api-key",
+                environment,
+              }),
+            ).rejects.toThrow("API-key authentication requires");
+          }
         } else {
           const input = {
             before: [finding("before")],
@@ -230,18 +264,40 @@ describe("semantic scan comparison", () => {
           if (surface === "sdk") await matchScanFindings(input, options);
           else await matchScanFindingsInternal(input, options, { surface });
         }
+        const requestMetadata = parse(captured!.configOverrides!.join("\n"))[
+          "responses_api_metadata"
+        ];
+        expect(discovery).toHaveBeenCalledTimes(helper === "matching" ? 0 : 1);
+        if (helper !== "matching") {
+          const probe = discovery.mock.calls[0]![0];
+          expect(probe.environment["CODEX_API_KEY"]).toBe(
+            surface === "sdk" ? "synthetic-key" : undefined,
+          );
+          expect(probe.environment["CODEX_HOME"]).toBe(
+            surface === "sdk" ? home : privateHome,
+          );
+          expect(probe.config).not.toHaveProperty("openai_base_url");
+          expect(probe.config).not.toHaveProperty("chatgpt_base_url");
+          expect(probe.environment["PATH"]?.split(delimiter)).not.toContain(
+            repositoryBin,
+          );
+          expect(probe.environment["PATH"]).toBe(captured?.env?.["PATH"]);
+          expect(probe.config).toHaveProperty(
+            "responses_api_metadata",
+            requestMetadata,
+          );
+        }
+        expect(calls.turnOptions?.cyberAccessProgram).toBe(
+          helper === "matching" ? undefined : "daybreak_blue",
+        );
         expect(startThread).toHaveBeenCalledTimes(1);
         expect(captured?.config).not.toHaveProperty("responses_api_metadata");
-        expect(
-          parse(captured!.configOverrides!.join("\n"))[
-            "responses_api_metadata"
-          ],
-        ).toEqual({
+        expect(requestMetadata).toEqual({
           synthetic_home: "preserved",
           synthetic_caller: "preserved",
           codex_security_surface: surface,
           codex_security_command:
-            helper === "matching" ? "compare" : "scan-components",
+            helper === "planning" ? "scan-components" : "compare",
           codex_security_package_version: VERSION,
         });
       } finally {
@@ -256,14 +312,16 @@ describe("semantic scan comparison", () => {
       const home = await temporaryDirectory();
       const repository = await temporaryDirectory();
       await writeFile(join(repository, "source.ts"), "export {};\n");
-      const gateway = (env_key = "SYNTHETIC_GATEWAY_TOKEN") => ({
+      const gateway = (env_key: string | null = "SYNTHETIC_GATEWAY_TOKEN") => ({
         model_provider: "gateway",
         model_providers: {
           gateway: {
             name: "Synthetic",
             wire_api: "responses",
             base_url: "https://provider.example.test/v1",
-            env_key,
+            ...(env_key === null
+              ? { requires_openai_auth: true }
+              : { env_key }),
             env_http_headers: { "X-Gateway-Key": "CODEX_API_KEY" },
           },
         },
@@ -325,6 +383,14 @@ describe("semantic scan comparison", () => {
           },
         };
         if (withProfile) {
+          await planComponents(repository, {
+            ...options,
+            auth: "chatgpt",
+            config: { codexOverrides: gateway(null) },
+          });
+          expect(captured?.apiKey).toBeUndefined();
+          expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
+          expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           await planComponents(repository, options);
           await expect(
             planComponents(repository, { ...options, auth: "chatgpt" }),
@@ -338,7 +404,7 @@ describe("semantic scan comparison", () => {
               environment: { ...options.environment, CODEX_API_KEY: undefined },
             }),
           ).rejects.toThrow("Set CODEX_API_KEY");
-          expect(startThread).toHaveBeenCalledTimes(1);
+          expect(startThread).toHaveBeenCalledTimes(2);
         } else
           await matchScanFindings(
             { before: [finding("before")], after: [finding("after")] },
@@ -349,7 +415,7 @@ describe("semantic scan comparison", () => {
         profileClient.spy.mockRestore();
       }
       expect(captured).toBeDefined();
-      expect(profileClient.profiles).toHaveLength(withProfile ? 1 : 0);
+      expect(profileClient.profiles).toHaveLength(withProfile ? 2 : 0);
       const capture = new Codex({
         ...captured,
         codexPathOverride: nodeCommand().command,
@@ -991,6 +1057,12 @@ describe("semantic scan comparison", () => {
                   ? { model_providers: {} }
                   : {
                       model_provider: "synthetic.provider",
+                      "model_providers.openai": {
+                        model_catalog_url:
+                          "https://chatgpt.com/synthetic-private-marker-table",
+                      },
+                      "model_providers.openai.model_catalog_url":
+                        "https://chatgpt.com/synthetic-private-marker-leaf",
                       model_providers: {
                         "synthetic.provider": {
                           name: "Synthetic provider",

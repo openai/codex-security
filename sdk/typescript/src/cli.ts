@@ -11976,6 +11976,14 @@ async function executeScan(
       onScanRegistered: (scan) => {
         registeredScan = scan;
         scanDir = scan.scanDir;
+        if (
+          arguments_.cyberAccessProgram === undefined &&
+          scan.cyberAccessProgram === "daybreak_blue"
+        ) {
+          const message = "Requesting Daybreak Blue for this scan.";
+          if (dashboard !== null) dashboard.note(message);
+          else writeAboveProgress(() => progress?.stage(message));
+        }
       },
       onLifecycle: verbose
         ? (scan) =>
@@ -12322,7 +12330,9 @@ async function executeScan(
                   knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
                   finding,
                   auth,
-                  cyberAccessProgram: arguments_.cyberAccessProgram,
+                  cyberAccessProgram:
+                    arguments_.cyberAccessProgram ??
+                    result.requestedCyberAccessProgram,
                   safetyIdentifier: arguments_.safetyIdentifier,
                   signal: preparationAbortController.signal,
                 });
@@ -12688,7 +12698,8 @@ async function executeScan(
           requestMetadata: patchRequestMetadata,
           otel: patchOtel,
           daybreakFeatures: patchDaybreakFeatures,
-          cyberAccessProgram: arguments_.cyberAccessProgram,
+          cyberAccessProgram:
+            arguments_.cyberAccessProgram ?? result.requestedCyberAccessProgram,
           safetyIdentifier: arguments_.safetyIdentifier,
           auth,
           findingInstructions: patchSelection?.instructions,
