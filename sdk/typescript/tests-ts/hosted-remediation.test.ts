@@ -233,6 +233,7 @@ test.each(["patch", "verify"] as const)(
     });
     expect(result.status).toBe("failed");
     expect(result.error?.code).toBe("INVALID_RESULT");
+    expect(result.error?.reason).toBeUndefined();
     expect(result.patch).toBeUndefined();
     expect(result.verification).toBeUndefined();
     expect(result.execution).toMatchObject({
@@ -242,7 +243,7 @@ test.each(["patch", "verify"] as const)(
   },
 );
 
-test("a changed HEAD fails before execution, and cannot be accepted afterward", async () => {
+test("a mismatched HEAD fails before execution", async () => {
   const input = await fixture();
   const never = mock(rejecting("Must not execute"));
   await expect(
@@ -254,17 +255,50 @@ test("a changed HEAD fails before execution, and cannot be accepted afterward", 
     ),
   ).rejects.toMatchObject({ reason: "revision_mismatch" });
   expect(never).not.toHaveBeenCalled();
+});
+
+test.each(["patch", "verify"] as const)(
+  "a different commit invalidates a completed %s and preserves the receipt",
+  async (operation) => {
+    const input = await fixture(operation);
+    const run = mock<RemediationExecutor["run"]>(async (request) => {
+      writeSource(
+        request.repository,
+        "guard.ts",
+        "export const allowed = true;\n",
+      );
+      git(request.repository, "commit", "-qam", "changed");
+      return receipt(request);
+    });
+    const result = await runHostedRemediation(input, { executor: { run } });
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("failed");
+    expect(result.error).toMatchObject({
+      code: "INVALID_RESULT",
+      reason: "revision_changed",
+    });
+    expect(result.execution).toEqual(receipt(run.mock.calls[0]![0]));
+    expect(result.patch).toBeUndefined();
+    expect(result.verification).toBeUndefined();
+  },
+);
+
+test("an unreadable HEAD fails without reporting a different commit", async () => {
+  const input = await fixture();
   const result = await runHostedRemediation(input, {
     executor: {
       run: async (request) => {
-        git(input.repository, "commit", "--allow-empty", "-qm", "changed");
+        git(request.repository, "symbolic-ref", "HEAD", "refs/heads/unborn");
         return receipt(request);
       },
     },
   });
   expect(result.status).toBe("failed");
-  expect(result.error?.message).toContain("frozen revision");
+  expect(result.error?.code).toBe("INVALID_RESULT");
+  expect(result.error?.reason).toBeUndefined();
+  expect(result.error?.message).toContain("resolve HEAD");
   expect(result.execution?.sessionId).toBe("host-session");
+  expect(result.patch).toBeUndefined();
 });
 
 test.each(["failed", "canceled", "acceptance_unknown"] as const)(
@@ -289,12 +323,16 @@ test.each(["failed", "canceled", "acceptance_unknown"] as const)(
 test("a mismatched execution receipt is retained but never accepted", async () => {
   const result = await runHostedRemediation(await fixture(), {
     executor: {
-      run: async (request) => receipt(request, { requestId: "other" }),
+      run: async (request) => {
+        git(request.repository, "commit", "--allow-empty", "-qm", "changed");
+        return receipt(request, { requestId: "other" });
+      },
     },
   });
   expect(result.status).toBe("failed");
   expect(result.execution?.sessionId).toBe("host-session");
   expect(result.error?.message).toContain("does not match");
+  expect(result.error?.reason).toBeUndefined();
 });
 
 test("malformed protocol input returns one error without dispatch", async () => {
@@ -312,17 +350,36 @@ test("malformed protocol input returns one error without dispatch", async () => 
   input.destroy();
 });
 
-test.each([
-  ["patch", false],
-  ["verify", false],
-  ["verify", true],
-] as const)(
-  "CLI protocol pipes execute %s with cancellation=%p",
-  async (operation, cancel) => {
+test("patch --host leaves the reported changes in the supplied checkout", async () => {
+  const input = await fixture();
+  await exerciseRemediationProtocol(
+    process.execPath,
+    join(import.meta.dirname, "../src/cli.ts"),
+    input,
+    {
+      async onExecution(request) {
+        expect(request.prompt).toContain("supplied checkout");
+        expect(request.prompt).toContain("uncommitted");
+        expect(request.prompt).toContain(input.revision);
+        writeSource(
+          request.repository,
+          "guard.ts",
+          "export const allowed = true;\n",
+        );
+      },
+    },
+  );
+  expect(git(input.repository, "rev-parse", "HEAD")).toBe(input.revision);
+  expect(git(input.repository, "diff", "--name-only", "HEAD")).toBe("guard.ts");
+});
+
+test.each([false, true])(
+  "CLI protocol pipes execute verify with cancellation=%p",
+  async (cancel) => {
     await exerciseRemediationProtocol(
       process.execPath,
       join(import.meta.dirname, "../src/cli.ts"),
-      await fixture(operation),
+      await fixture("verify"),
       { cancel },
     );
   },
@@ -334,10 +391,15 @@ test.each(["patch", "verify-fix"])(
     const input = new PassThrough();
     const stdout = capture();
     const stderr = capture();
-    const completed = main([command, "--host"], stdout.stream, stderr.stream, {
-      ...dependencies(),
-      recordsInput: input,
-    });
+    const completed = main(
+      [command, "--host=true"],
+      stdout.stream,
+      stderr.stream,
+      {
+        ...dependencies(),
+        recordsInput: input,
+      },
+    );
     input.write(
       JSON.stringify({
         jsonrpc: "2.0",
@@ -357,7 +419,6 @@ test.each(["patch", "verify-fix"])(
 );
 
 test.each([
-  { args: ["patch", "--host=true"] },
   { args: ["patch", "--host", "--create-pr"] },
   { args: ["verify-fix", "finding.md", "--host"] },
 ])("hosted remediation rejects mixed arguments $args", async ({ args }) => {

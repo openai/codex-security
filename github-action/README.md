@@ -445,7 +445,7 @@ with:
   max-time-hours: "1"
 ```
 
-Deep mode does not support diff scans. `max-time-hours` limits Deep discovery;
+Deep mode does not support diff scans. `max-time-hours` limits Deep discovery (the Action converts hours to CLI minutes);
 finalization can take additional time. It is unset by default, which uses the
 CLI's default of 96 hours. Set an explicit budget for Deep scans that leaves
 room for finalization within your job timeout. The one-hour discovery budget

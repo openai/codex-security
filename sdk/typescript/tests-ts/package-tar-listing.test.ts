@@ -42,7 +42,10 @@ const execFileAsync = promisify(execFile);
 
 const pluginContract = {
   externalOwnedExact: [".codex-plugin/plugin.json"],
-  shippedExact: ["scripts/launch_codex_security_mcp"],
+  shippedExact: [
+    "scripts/dispatch_inventory_tool",
+    "scripts/launch_codex_security_mcp",
+  ],
 };
 
 function paxExtension(attributes: Record<string, string>, type = 0x78): Buffer {
@@ -76,6 +79,7 @@ function packageTar({
 } = {}): Buffer {
   const executablePaths = [
     "package/bin/codex-security.mjs",
+    "package/_bundled_plugin/scripts/dispatch_inventory_tool",
     "package/_bundled_plugin/scripts/launch_codex_security_mcp",
   ];
   const paths = [

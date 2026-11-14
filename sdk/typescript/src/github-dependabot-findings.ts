@@ -10,7 +10,7 @@ import { isGitHubCloudHost } from "./git-remote.js";
 import { isRecord } from "./record.js";
 import { REPORTABLE_SEVERITIES } from "./scan-settings.js";
 import {
-  trackReaderSelection,
+  appendFinding,
   record,
   relativePath,
   requiredText,
@@ -334,7 +334,6 @@ export function normalizeGitHubDependabotAlerts(
     findings: [],
     excluded: [],
   };
-  const selection = trackReaderSelection(result);
   const ids = new Set<string>();
   let sourceRepository: string | undefined;
   for (const [index, alert] of alerts.entries()) {
@@ -350,7 +349,7 @@ export function normalizeGitHubDependabotAlerts(
       );
     ids.add(sourceId);
     const inputEvidence = evidence(alert, url);
-    selection.append(index + 1, sourceId, () => {
+    appendFinding(result, index + 1, sourceId, () => {
       if (target === "cloud" && Buffer.byteLength(sourceId) > 512)
         throw new Error(
           "Source finding ID exceeds the Cloud limit of 512 UTF-8 bytes.",
@@ -358,5 +357,5 @@ export function normalizeGitHubDependabotAlerts(
       return validateExternalEvidence(inputEvidence, target);
     });
   }
-  return selection.finish();
+  return result;
 }

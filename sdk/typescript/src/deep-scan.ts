@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import {
-  bundledCodexSdkEnvironment,
   isBundledExecutable,
+  nativeCodexLaunch,
 } from "./codex-sdk-environment.js";
 import { CodexSecurityError } from "./errors.js";
 import {
@@ -94,6 +94,22 @@ function codeModeTable(value: JsonValue | undefined): JsonObject | undefined {
   return isRecord(value) ? value : undefined;
 }
 
+async function deepScanLaunch({
+  codexOptions,
+  preflightCommand: command,
+}: Pick<DirectDeepScanOptions, "codexOptions" | "preflightCommand">) {
+  const launch = await nativeCodexLaunch(command.command, {
+    ...codexOptions.env,
+    ...(codexOptions.apiKey === undefined
+      ? {}
+      : { CODEX_API_KEY: codexOptions.apiKey }),
+  });
+  return {
+    command: { ...command, command: launch.command },
+    environment: launch.environment!,
+  };
+}
+
 /** Read the same native layers and CLI overrides as the parent before adding its tool. */
 export async function readDeepScanParentConfig(
   options: Pick<
@@ -104,18 +120,13 @@ export async function readDeepScanParentConfig(
     pluginServers?: Record<string, unknown>;
   },
 ): Promise<JsonObject | undefined> {
-  const { codexOptions, preflightCommand: command } = options;
+  const { codexOptions } = options;
   const config = codexOptions.config ?? {};
   const overrides = await preflightConfigOverrides(
     config,
     codexOptions.nativeProfile !== undefined,
   );
-  const environment = bundledCodexSdkEnvironment(command.command, {
-    ...codexOptions.env,
-    ...(codexOptions.apiKey === undefined
-      ? {}
-      : { CODEX_API_KEY: codexOptions.apiKey }),
-  });
+  const { command, environment } = await deepScanLaunch(options);
   const configOverrides = [
     ...overrides,
     ...(codexOptions.configOverrides ?? []),
@@ -344,13 +355,7 @@ export async function* runDeepScan(
     pathToFileURL(join(options.pluginRoot, "scripts", "codex_profile.mjs")).href
   );
   const configured = options.codexOptions;
-  const command = options.preflightCommand;
-  const environment = bundledCodexSdkEnvironment(command.command, {
-    ...configured.env,
-    ...(configured.apiKey === undefined
-      ? {}
-      : { CODEX_API_KEY: configured.apiKey }),
-  });
+  const { command, environment } = await deepScanLaunch(options);
   const session = (await withCodexPreflightLock(
     environment,
     options.signal,
