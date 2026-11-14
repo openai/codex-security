@@ -1969,15 +1969,30 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
         state_dir, tmp_path / "before-results", repository, target_revision=revision
     )
     after = create_cli_scan(
-        state_dir, tmp_path / "after-results", linked_worktree, target_revision=revision
+        state_dir,
+        tmp_path / "after-results",
+        linked_worktree,
+        target_revision=revision,
+        mode="deep",
+        identity_anchor="unchecked-extraction",
     )
     for target in (repository, linked_worktree):
         pending = run_workbench(state_dir, "list-unmatched-scan-pairs", "--repository", str(target))
         assert pending["scanCount"] == 2
         assert pending["batches"][0]["afterScanId"] == after["scanId"]
-        assert pending["batches"][0]["beforeScans"][0]["scanId"] == before["scanId"]
+        prior = pending["batches"][0]["beforeScans"][0]
+        assert prior["scanId"] == before["scanId"]
+        assert prior["crossModeOccurrenceIds"] == [
+            prior["findings"][0]["occurrenceId"],
+            pending["batches"][0]["afterFindings"][0]["occurrenceId"],
+        ]
 
     compared = compare_scan_pair(state_dir, before, after, "--include-matching-inputs")
+    inputs = compared["matchingInputs"]
+    assert inputs["crossModeOccurrenceIds"] == [
+        inputs["before"][0]["occurrenceId"],
+        inputs["after"][0]["occurrenceId"],
+    ]
     assert compared["summary"]["new"] == 1
     assert compared["summary"]["not_observed"] == 1
 

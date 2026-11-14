@@ -594,11 +594,14 @@ def _cross_mode_context(
     findings: dict[str, list[dict[str, Any]]],
     sites: dict[str, _FindingSites],
 ) -> dict[str, Any]:
-    # Different repository subdirectories can share both the Git revision and clean digest.
+    # The saved generation includes the relative target path in a linked worktree.
+    same_target = before["target_id"] is not None and before["target_id"] == after["target_id"]
+    if not same_target:
+        generation = scan_repository_generation(before)
+        same_target = generation is not None and generation == scan_repository_generation(after)
     if (
         {before["mode"], after["mode"]} != {"standard", "deep"}
-        or before["target_id"] is None
-        or before["target_id"] != after["target_id"]
+        or not same_target
         or before["target_revision"] != after["target_revision"]
         or before["target_snapshot_digest"] is None
         or before["target_snapshot_digest"] != after["target_snapshot_digest"]

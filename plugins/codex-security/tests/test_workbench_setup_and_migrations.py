@@ -235,6 +235,55 @@ def test_repository_previews_52_and_53_preserve_classification_and_import_schema
         } == {"preview-time"}
 
 
+@pytest.mark.parametrize(
+    ("prefix_version", "reopened"),
+    [
+        (54, False),
+        (54, True),
+        (58, False),
+        (58, True),
+        (61, False),
+        (61, True),
+        (63, False),
+        (64, False),
+        (67, False),
+    ],
+)
+def test_scan_git_preview_upgrades_to_released_repository_identity(prefix_version, reopened):
+    connection, migrate = create_historical_database(prefix_version)
+    for offset, (name, column) in enumerate(
+        (
+            ("save scan target Git positions", "target_git_prefix"),
+            ("save scan Git repository identities", "target_git_identity_json"),
+        )
+    ):
+        version = prefix_version + offset
+        migration = (version, name, f"ALTER TABLE scans ADD COLUMN {column} TEXT;")
+        apply_historical_migrations(connection, (migration,), "preview")
+        if reopened and version in (54, 55, 58, 59, 61):
+            for statement in SCHEMA.sql_statements(SCHEMA.MIGRATIONS[version - 1][2]):
+                connection.execute(statement)
+    insert_historical_row(connection, "workspaces", "preview", id="legacy-workspace")
+    insert_legacy_scan(
+        connection, "preview", target_git_prefix="src", target_git_identity_json="{}"
+    )
+
+    migrate(connection)
+    migrate(connection)
+    assert [
+        tuple(row)
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        )
+    ] == EXPECTED_MIGRATIONS
+    assert tuple(
+        connection.execute(
+            "SELECT target_git_prefix, target_git_identity_json FROM scans WHERE id = 'legacy-scan'"
+        ).fetchone()
+    ) == ("src", "{}")
+    assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_repository_preview_history_keeps_original_application_times_after_budget_upgrade():
     connection, migrate = create_historical_database(72)
     connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
