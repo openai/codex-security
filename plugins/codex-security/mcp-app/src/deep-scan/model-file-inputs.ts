@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants, open } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 
 const modelFileSettings = ["model_instructions_file"] as const;
@@ -20,7 +20,11 @@ export const modelFileInputsSchema = z.partialRecord(
 export type ModelFileInputs = z.output<typeof modelFileInputsSchema>;
 
 export function modelFilePath(value: string, directory: string): string {
-  return resolve(directory, value.replace(/^~(?=[/\\]|$)/u, homedir()));
+  const expanded = value.replace(/^~(?=[/\\]|$)/u, () => homedir());
+  // POSIX resolves a symlink followed by .. through the symlink's destination.
+  return process.platform !== "win32" && isAbsolute(expanded)
+    ? expanded
+    : resolve(directory, expanded);
 }
 
 export async function readModelFileInputs(

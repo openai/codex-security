@@ -149,6 +149,7 @@ test.serial.each([
                 `    with socket.create_connection(('127.0.0.1', ${address.port})) as connection:`,
                 "        connection.sendall(b'ready')",
                 "        connection.recv(1)",
+                "    raise SystemExit('Synthetic registration reply lost')",
                 "def controlled(*args, **kwargs):",
                 ...(boundary === "precommit" ? ["    pause()"] : []),
                 "    result = original(*args, **kwargs)",
@@ -168,6 +169,7 @@ test.serial.each([
             async ([socket]) => {
               const [message] = await once(socket, "data", readinessOptions);
               expect(String(message)).toBe("ready");
+              return socket;
             },
           )
         : undefined;
@@ -216,13 +218,15 @@ test.serial.each([
         .run(repository, { signal: controller.signal })
         .catch((error: unknown) => error);
       if (ready !== undefined) {
-        await Promise.race([
+        const socket = await Promise.race([
           ready,
           operation.then((error) => {
             throw error;
           }),
         ]);
         controller.abort();
+        // Windows lets registration finish once it starts changing the output.
+        socket.end();
       }
       const failure = await operation;
       expect(failure).toBeInstanceOf(Error);
@@ -444,6 +448,7 @@ test.each(
         "synthetic stop after registration",
       );
       expect(recipe).toBeDefined();
+      expect(recipe!["sealedPricing"]).toEqual({ model: "initial-model" });
       await writeFile(profilePath, stringify(fileProfile("reloaded")));
       let replay: JsonObject | undefined;
       const out = capture(),

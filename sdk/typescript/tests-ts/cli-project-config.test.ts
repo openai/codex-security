@@ -111,13 +111,13 @@ async function bulkInventory(
 }
 
 test.each([
-  [undefined, "./node_modules"],
-  ["starter.json", "./node_modules"],
-  ["settings/starter.yaml", "../node_modules"],
-  ["settings/starter.json", "../node_modules"],
+  undefined,
+  "starter.json",
+  "settings/starter.yaml",
+  "settings/starter.json",
 ])(
   "init writes a valid unpinned starter and refuses overwrites: %s",
-  async (file, modules) => {
+  async (file) => {
     const input = await fixture({});
     const args = ["init", ...(file === undefined ? [] : [file]), "--json"];
     const output = captureCli(main, "stdout");
@@ -129,14 +129,27 @@ test.each([
     const path = join(input.root, file ?? "codex-security.yaml");
     expect(JSON.parse(output.text())).toEqual({ path });
     const selected = await readProjectConfig(path);
-    expect(selected.input).toEqual({
-      $schema: `${modules}/@openai/codex-security/schemas/project-config.schema.json`,
-    });
+    expect(selected.input).toEqual({});
     const contents = await readFile(path, "utf8");
     expect(await runCapturedCli(main, args, deps)).toBe(2);
     expect(await readFile(path, "utf8")).toBe(contents);
   },
 );
+
+test("init shows how to select a custom config and info reports the same preview", async () => {
+  const input = await fixture({});
+  const file = "config for review.yaml";
+  const deps = dependencies({ currentDirectory: input.root });
+  const init = captureCli(main, "stdout", true);
+  expect(await init.run(["init", file], deps)).toBe(0);
+  const preview = "codex-security scan . -c 'config for review.yaml' --dry-run";
+  expect(init.text()).toContain(preview);
+  const info = captureCli(main, "stdout", true);
+  expect(await info.run(["info", "-c", file], deps)).toBe(0);
+  expect(info.text()).toContain(preview);
+  expect(info.text()).toContain("Scope: repository");
+  expect(info.text()).not.toContain("codex.reasoning");
+});
 
 test.each(["yaml", "json"])(
   "init preserves URI-sensitive directory names in the %s schema reference",
@@ -210,7 +223,7 @@ test("info resolves a config and its sources without a target, prompt reads, or 
   expect(stdout.text()).not.toContain("synthetic-private-value");
   expect(JSON.parse(stdout.text())).toMatchObject({
     model: "gpt-5.6-terra",
-    nextStep: expect.stringContaining("scan . -c FILE --dry-run"),
+    nextStep: "codex-security scan . -c scan.json --dry-run",
     configuration: {
       path: input.config,
       settings: {
@@ -331,6 +344,26 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
   },
 );
 
+test("validation rejects knowledge selected through a checkout link", async () => {
+  const input = await fixture({});
+  git(input.repository, "init", "--quiet");
+  const link = join(input.repository, "documents");
+  await symlink(input.configDirectory, link, "junction");
+  for (const command of [
+    ["scan", "--validate"],
+    ["validate", "candidate"],
+  ]) {
+    const stderr = captureCli(main, "stderr");
+    expect(
+      await stderr.run(
+        [...command, "--knowledge-base", join(link, "scan.json")],
+        dependencies({ currentDirectory: input.repository }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("repository directory links");
+  }
+});
+
 test("a missing operator-selected environment file fails without falling back", async () => {
   const input = await fixture({});
   const onConfig = mock();
@@ -402,6 +435,29 @@ test("rerun rejects a blank replacement when scan instructions are required", as
   expect(onConfig).not.toHaveBeenCalled();
 });
 
+test.each(["project", "flag"])(
+  "rejects patching before starting a scan with a %s budget",
+  async (source) => {
+    const input = await fixture({ limits: { max_cost_usd_per_scan: 1 } });
+    const onRun = mock(throwing("unexpected scan"));
+    const onCodex = mock(throwing("unexpected patch"));
+    const stderr = captureCli(main, "stderr");
+    const budget =
+      source === "project" ? ["-c", input.config] : ["--max-cost", "1"];
+    expect(
+      await stderr.run(
+        ["scan", input.repository, "--patch", ...budget, "--json"],
+        dependencies({ onRun, onCodex }),
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain(
+      "--patch cannot be combined with a scan cost limit",
+    );
+    expect(onRun).not.toHaveBeenCalled();
+    expect(onCodex).not.toHaveBeenCalled();
+  },
+);
+
 test.each(["instructions_file", "validation_file"] as const)(
   "bulk %s retains directory-link protection for local CSV repositories",
   async (file) => {
@@ -409,6 +465,7 @@ test.each(["instructions_file", "validation_file"] as const)(
       scan: { [file]: "../repository/linked/prompt.md" },
       output: { directory: "../batch-results" },
     });
+    git(input.repository, "init", "--quiet");
     const external = join(input.root, "external");
     await mkdir(external);
     await writeFile(join(external, "prompt.md"), "Synthetic external data.");

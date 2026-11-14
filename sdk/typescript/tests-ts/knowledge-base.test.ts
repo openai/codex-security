@@ -1012,6 +1012,25 @@ describe("scan knowledge bases", () => {
     );
   });
 
+  testPosix(
+    "a directory link before a parent traversal cannot select outside documents",
+    async () => {
+      const repository = await temporaryDirectory();
+      const outside = await temporaryDirectory();
+      await mkdir(join(outside, "child"));
+      await symlink(join(outside, "child"), join(repository, "context"));
+      await writeFile(join(outside, "guide.md"), "External data");
+      const requested = `${repository}/context/../guide.md`;
+      await expect(prepareKnowledgeBase([requested])).rejects.toThrow();
+      await writeFile(join(repository, "guide.md"), "Repository guide");
+      const prepared = await prepareKnowledgeBase([requested]);
+      temporaryDirectories.track(prepared.path);
+      expect(await extractedDocuments(prepared.path)).toEqual([
+        "Repository guide",
+      ]);
+    },
+  );
+
   testPosix("does not follow symbolic links", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");
@@ -1027,6 +1046,39 @@ describe("scan knowledge bases", () => {
     await expect(prepareKnowledgeBase([linked])).rejects.toThrow(
       "cannot be symbolic links",
     );
+  });
+
+  test("checks each directory link on the way to an external document", async () => {
+    const repository = await temporaryDirectory();
+    const external = await temporaryDirectory();
+    await writeFile(join(external, "guide.md"), "External policy.");
+    const escape = join(repository, "outside");
+    const viaRepository = join(external, "via-repository");
+    const operatorAlias = join(external, "current");
+    const aliasRoot = await temporaryDirectory();
+    await mkdir(join(aliasRoot, ".git"));
+    const checkoutAlias = join(aliasRoot, "current");
+    await symlink(external, checkoutAlias, "junction");
+    await symlink(external, escape, "junction");
+    await symlink(escape, viaRepository, "junction");
+    await symlink(external, operatorAlias, "junction");
+    const read = (directory: string, checkout: string) =>
+      readKnowledgeBaseSnapshot(
+        [join(directory, "guide.md")],
+        undefined,
+        checkout,
+      );
+    expect((await read(checkoutAlias, external)).protectedRoots).toContain(
+      await filesystem.realpath(aliasRoot),
+    );
+    await expect(read(viaRepository, repository)).rejects.toThrow(
+      "repository directory links",
+    );
+    for (const checkout of [repository, external]) {
+      expect(
+        Object.values((await read(operatorAlias, checkout)).documents),
+      ).toEqual(["External policy."]);
+    }
   });
 
   testPosix("rejects unreadable source documents", async () => {
