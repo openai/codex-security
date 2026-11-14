@@ -54,15 +54,17 @@ function stageSkillRuntime() {
       (source) => sharedDirectory !== "schemas" || !source.endsWith(".tmp"),
     );
   }
-  fs.mkdirSync(path.join(stagedPluginRoot, "scripts"));
-  for (const launcher of [
-    "launch_codex_security_mcp",
-    "launch_codex_security_mcp.cmd",
+  for (const relativePath of [
+    "scripts/launch_codex_security_mcp",
+    "scripts/launch_codex_security_mcp.cmd",
+    "scripts/skill_instructions.mjs",
+    "scripts/skill_runtime.mjs",
+    "templates/skill-runtime/posix.md",
+    "templates/skill-runtime/windows.md",
   ]) {
-    fs.copyFileSync(
-      path.join(PLUGIN_ROOT, "scripts", launcher),
-      path.join(stagedPluginRoot, "scripts", launcher),
-    );
+    const target = path.join(stagedPluginRoot, relativePath);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(PLUGIN_ROOT, relativePath), target);
   }
   copyDirectory(
     path.join(EVAL_ROOT, "fixtures"),

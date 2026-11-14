@@ -44,11 +44,7 @@ Optional `scan.warnings` records run-level diagnostics available when the bundle
 
 ### Stopped Result Recovery
 
-To validate and republish retained checkpoints for a failed, non-canceled workbench scan, run:
-
-```text
-<python_command> <plugin_dir>/scripts/workbench_db.py recover-scan-results --scan-id <scan_id>
-```
+To validate and republish retained checkpoints for a failed, non-canceled workbench scan, run the [`recover-scan-results` command](skill-runtime.md) with the affected scan ID.
 
 Recovery can add only checkpoints that pass the stopped-scan source-integrity checks. It is not available for running, completed, or canceled scans. After cancellation, the owning continuation may retry publication only from the source set frozen at cancellation through `preserve-scan-results`; it cannot admit later checkpoints.
 

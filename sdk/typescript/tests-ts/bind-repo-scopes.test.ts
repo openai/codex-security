@@ -301,7 +301,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
       for (const powershell of launcher.powershells) {
         const generated = await launcher.run(
           powershell,
-          "skills/security-scan/references/scoped-paths.md",
+          "scope-inventory",
           {},
           undefined,
           workingDirectory,
@@ -320,7 +320,7 @@ for (const location of ["absolute", "relative", "unc"] as const)
         }
         const result = await launcher.run(
           powershell,
-          "skills/security-scan/references/sdk-files.md",
+          "scope-binding",
           {},
           undefined,
           workingDirectory,

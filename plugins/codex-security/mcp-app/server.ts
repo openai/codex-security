@@ -16,6 +16,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 import { resolvePythonCommand } from "./src/python_command.js";
+import {
+  readSkillRuntimeInstructions,
+  skillRuntimeTopics,
+} from "../scripts/skill_instructions.mjs";
 import { version as MCP_APP_VERSION } from "./package.json";
 import {
   handoffClaimTokenSchema,
@@ -37,7 +41,10 @@ import {
   resolveDeepWorkerParentSandbox,
   type DeepWorkerParentSandbox,
 } from "./src/deep-scan/parent-sandbox.js";
-import { WorkbenchDeepScanStore } from "./src/deep-scan/store.js";
+import {
+  ConcurrentDeepScanConfirmation,
+  WorkbenchDeepScanStore,
+} from "./src/deep-scan/store.js";
 import { readDeepScanProjectConfig } from "./src/deep-scan/project-config.js";
 import type {
   DeepScanLogEvent,
@@ -154,7 +161,14 @@ const openSchema = {
     .describe("Optional security focus supplied by the user."),
 };
 const sessionSchema = { sessionId: z.string().uuid() };
+const confirmedConcurrentScanIdsSchema = z
+  .array(z.string().uuid())
+  .optional()
+  .describe(
+    "Pass the scan IDs in a confirmationRequired result only after the user explicitly chooses Continue.",
+  );
 const startScanSchema = {
+  confirmedConcurrentScanIds: confirmedConcurrentScanIdsSchema,
   ...sessionSchema,
   model: requiredText.max(200).optional(),
   reasoningEffort: requiredText.max(32).optional(),
@@ -280,6 +294,7 @@ const setupInspectionSchema = {
 };
 const scanSchema = { scanId: z.string().uuid() };
 const startDeepScanSchema = {
+  confirmedConcurrentScanIds: confirmedConcurrentScanIdsSchema,
   projectConfigPath: projectConfigPathSchema,
   scanId: z
     .string()
@@ -315,9 +330,18 @@ const continuationMutationClaimSchema = {
 const scanContextUpdateSchema = {
   ...scanSchema,
   ...continuationMutationClaimSchema,
-  userContext: trimmedText.describe(
-    "Complete replacement context for the running scan. Pass an empty string to clear it.",
-  ),
+  maxTimeMinutes: z
+    .number()
+    .positive()
+    .optional()
+    .describe(
+      "Investigation minutes explicitly requested by the user for a native Standard or diff scan. The first allowance is retained across retries and resumes.",
+    ),
+  userContext: trimmedText
+    .optional()
+    .describe(
+      "Complete replacement context for the running scan. Pass an empty string to clear it. Omit it when setting only the investigation allowance.",
+    ),
 };
 const appScanContextUpdateSchema = {
   ...scanSchema,
@@ -532,6 +556,26 @@ export function createCodexSecurityServer(): McpServer {
     deepScanCoordinators.shutdown("mcp_transport_closed");
   const appMeta = { ui: { visibility: ["app"] as const } };
   const modelActionMeta = { ui: { visibility: ["model"] as const } };
+  server.registerTool(
+    "get_codex_security_skill_instructions",
+    {
+      title: "Read Codex Security workflow instructions",
+      description:
+        "Read the installed instructions for a workflow on this host. For scan setup, pass desktop only when the client identifies itself as the Codex desktop app.",
+      inputSchema: z.strictObject({
+        topic: z.enum(skillRuntimeTopics),
+        clientSurface: z.enum(["desktop", "headless"]).optional(),
+      }),
+      annotations: readingAnnotations,
+      _meta: modelActionMeta,
+    },
+    async ({ topic, clientSurface }) => {
+      const text = await readSkillRuntimeInstructions(PLUGIN_ROOT, topic, {
+        clientSurface,
+      });
+      return { content: [{ type: "text", text }] };
+    },
+  );
   const destructiveAnnotations = {
     ...writingAnnotations,
     destructiveHint: true,
@@ -621,6 +665,7 @@ export function createCodexSecurityServer(): McpServer {
           scanId,
           scanDir,
           handoffClaimToken,
+          investigationPolicy: started.investigationPolicy,
           scan: modelScanContext({ scan }, { omitHandoffClaim: true }).scan,
         },
         [
@@ -689,38 +734,12 @@ export function createCodexSecurityServer(): McpServer {
       _meta: modelActionMeta,
     },
     async ({ questions }, extra) => {
-      const signal = abortSignalFromExtra(extra);
-      if (!server.server.getClientCapabilities()?.elicitation?.form) {
-        return userInputToolResult("unavailable");
-      }
-      try {
-        const result = await server.server.elicitInput(
-          buildUserInputElicitation(questions),
-          {
-            timeout: USER_INPUT_WAIT_TIMEOUT_MS,
-            ...(signal ? { signal } : {}),
-          },
-        );
-        if (result.action !== "accept") {
-          return userInputToolResult(
-            result.action === "decline" ? "declined" : "cancelled",
-          );
-        }
-        if (!isJsonObject(result.content)) {
-          throw new Error(
-            "Accepted user input did not contain structured answers.",
-          );
-        }
-        // elicitInput validates accepted content against requestedSchema.
-        const answers = Object.fromEntries(
-          questions.map(({ id }) => [id, result.content![id] as string]),
-        );
-        return userInputToolResult("accepted", answers);
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        await logUserInputFailure(server, error);
-        return userInputToolResult("unavailable");
-      }
+      const answer = await elicitUserInput(
+        server,
+        questions,
+        abortSignalFromExtra(extra),
+      );
+      return userInputToolResult(answer.status, answer.answers);
     },
   );
 
@@ -877,14 +896,74 @@ export function createCodexSecurityServer(): McpServer {
       annotations: nonIdempotentWritingAnnotations,
       _meta: appMeta,
     },
-    async ({ sessionId, model, reasoningEffort }) => {
-      const workspace = (await workbench("start-scan", {
+    async (
+      { sessionId, model, reasoningEffort, confirmedConcurrentScanIds },
+      extra,
+    ) => {
+      let confirmed = confirmedConcurrentScanIds;
+      const fields = {
         workspaceId: sessionId,
         model,
         reasoningEffort,
         scanRoot: await scanRoot(),
-      })) as WorkspaceState;
-      return workspaceResult(workspace, workspace.results?.scanId);
+      };
+      for (;;) {
+        const result = await workbench("start-scan", {
+          ...fields,
+          confirmedConcurrentScanId: confirmed,
+        });
+        if (result.confirmationRequired !== true) {
+          const workspace = result as WorkspaceState;
+          return workspaceResult(workspace, workspace.results?.scanId);
+        }
+        const active = z
+          .array(
+            z.object({
+              scanId: z.string().uuid(),
+              targetPath: z.string(),
+              phase: z.string(),
+              startedAt: z.string(),
+            }),
+          )
+          .parse(result.otherRunningDeepScans);
+        const answer = await elicitUserInput(
+          server,
+          [
+            {
+              id: "concurrent_deep_scan",
+              header: "Concurrent Deep Scan",
+              question:
+                "These Deep scans are running:\n" +
+                active
+                  .map(
+                    (scan) =>
+                      `${scan.targetPath} — ${scan.phase}, started ${scan.startedAt}`,
+                  )
+                  .join("\n") +
+                "\nStarting another uses additional CPU, memory and tokens. Continue?",
+              options: [
+                {
+                  label: "Cancel (Recommended)",
+                  description: "Leave the existing scans running.",
+                },
+                {
+                  label: "Continue",
+                  description: "Start the new scan alongside the listed scans.",
+                },
+              ],
+            },
+          ],
+          abortSignalFromExtra(extra),
+        );
+        const choice = answer.answers?.concurrent_deep_scan;
+        if (choice === "Cancel (Recommended)")
+          return scanActionResult(
+            { status: "cancelled" },
+            "The new Deep Scan was cancelled.",
+          );
+        if (choice !== "Continue") return concurrentDeepScanResult(active);
+        confirmed = active.map((scan) => scan.scanId);
+      }
     },
   );
 
@@ -903,6 +982,7 @@ export function createCodexSecurityServer(): McpServer {
         scanId,
         targetPath,
         scope,
+        confirmedConcurrentScanIds,
         userContext,
         handoffClaimToken,
         projectConfigPath,
@@ -921,10 +1001,11 @@ export function createCodexSecurityServer(): McpServer {
         hasScanId &&
         (scope !== undefined ||
           normalizedUserContext !== undefined ||
+          confirmedConcurrentScanIds !== undefined ||
           projectConfigPath !== undefined)
       ) {
         return toolErrorResult(
-          "When scanId is present, omit targetPath, scope, userContext, and projectConfigPath; the persisted scan is authoritative.",
+          "When scanId is present, omit targetPath, scope, userContext, confirmedConcurrentScanIds, and projectConfigPath; the persisted scan is authoritative.",
         );
       }
       if (hasTarget && !wholeTargetScope(scope, targetPath)) {
@@ -1002,6 +1083,7 @@ export function createCodexSecurityServer(): McpServer {
           scanId,
           targetPath,
           scope: hasTarget ? (scope ?? ".") : undefined,
+          confirmedConcurrentScanIds,
           userContext: normalizedUserContext,
           handoffClaimToken,
           threadId,
@@ -1126,6 +1208,8 @@ export function createCodexSecurityServer(): McpServer {
           );
         }
       } catch (error) {
+        if (error instanceof ConcurrentDeepScanConfirmation)
+          return concurrentDeepScanResult(error.activeScans);
         // Preparation has a recovery message; waiter failures retain their MCP error text.
         const message = !preparation
           ? deepScanInvocationFailureMessage(error)
@@ -1438,14 +1522,16 @@ export function createCodexSecurityServer(): McpServer {
     claimToken?: string;
     scanId: string;
     threadId?: string;
-    userContext: string;
+    userContext?: string;
+    maxTimeMinutes?: number;
     workspaceId?: string;
   }) => {
     const updated = await workbench(
       "update-scan-context",
       {
         scanId: input.scanId,
-        userContextStdin: true,
+        userContextStdin: input.userContext !== undefined,
+        maxTimeMinutes: input.maxTimeMinutes,
         workspaceId: input.workspaceId,
         threadId: input.threadId,
         claimToken: input.claimToken,
@@ -1463,12 +1549,15 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "Update Codex Security Scan Context",
       description:
-        "Replace the context for a running scan. The next phase uses the new value; workers in the current phase keep their original context.",
+        "Update the context for a running scan or set its native investigation allowance. Context replacements apply to the next phase.",
       inputSchema: scanContextUpdateSchema,
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ scanId, userContext, handoffClaimToken }, extra) => {
+    async (
+      { scanId, userContext, handoffClaimToken, maxTimeMinutes },
+      extra,
+    ) => {
       const threadId = threadIdFromExtra(extra);
       if (!threadId) {
         return toolErrorResult(
@@ -1477,6 +1566,7 @@ export function createCodexSecurityServer(): McpServer {
       }
       return updateRunningScanContext({
         claimToken: handoffClaimToken,
+        maxTimeMinutes,
         scanId,
         threadId,
         userContext,
@@ -2092,6 +2182,13 @@ function withScanTarget<T extends CallToolResult>(result: T, scanId: unknown) {
   };
 }
 
+function concurrentDeepScanResult(activeScans: unknown[]) {
+  return scanActionResult(
+    { confirmationRequired: true, otherRunningDeepScans: activeScans },
+    `Other Deep scans are running: ${JSON.stringify(activeScans)}. Show their targets, phases and start times. Another scan uses additional CPU, memory and tokens. Ask the user to choose Cancel (Recommended) or Continue using the host's question UI or chat. Only after explicit Continue, retry the same launch with the listed scan IDs as confirmedConcurrentScanIds. A dismissal leaves the decision pending. Cancel leaves the running scans alone.`,
+  );
+}
+
 function scanActionResult<T extends JsonObject>(
   result: T,
   summary: string,
@@ -2099,7 +2196,15 @@ function scanActionResult<T extends JsonObject>(
 ) {
   return withScanTarget(
     {
-      content: [{ type: "text" as const, text: summary }],
+      content: [
+        {
+          type: "text" as const,
+          text:
+            typeof result.investigationPolicy === "string"
+              ? summary + "\n\n" + result.investigationPolicy
+              : summary,
+        },
+      ],
       structuredContent: result,
     },
     scanId,
@@ -2151,8 +2256,46 @@ function buildUserInputElicitation(
   };
 }
 
+type UserInputStatus = "accepted" | "declined" | "cancelled" | "unavailable";
+
+async function elicitUserInput(
+  server: McpServer,
+  questions: z.infer<typeof userInputQuestionsSchema>,
+  signal?: AbortSignal,
+): Promise<{ status: UserInputStatus; answers?: Record<string, string> }> {
+  if (!server.server.getClientCapabilities()?.elicitation?.form) {
+    return { status: "unavailable" };
+  }
+  try {
+    const result = await server.server.elicitInput(
+      buildUserInputElicitation(questions),
+      {
+        timeout: USER_INPUT_WAIT_TIMEOUT_MS,
+        ...(signal ? { signal } : {}),
+      },
+    );
+    if (result.action !== "accept") {
+      return { status: result.action === "decline" ? "declined" : "cancelled" };
+    }
+    if (!isJsonObject(result.content)) {
+      throw new Error(
+        "Accepted user input did not contain structured answers.",
+      );
+    }
+    // elicitInput validates accepted content against requestedSchema.
+    const answers = Object.fromEntries(
+      questions.map(({ id }) => [id, result.content![id] as string]),
+    );
+    return { status: "accepted", answers };
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    await logUserInputFailure(server, error);
+    return { status: "unavailable" };
+  }
+}
+
 function userInputToolResult(
-  status: "accepted" | "declined" | "cancelled" | "unavailable",
+  status: UserInputStatus,
   answers?: Record<string, string>,
 ) {
   const text =

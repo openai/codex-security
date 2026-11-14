@@ -131,6 +131,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     begin_deep_scan.add_argument("--available-parallelism", type=positive_int)
     begin_deep_scan.add_argument("--deep-scan-project-json")
     begin_deep_scan.add_argument("--project-config-path")
+    for launcher in (start_scan, begin_deep_scan):
+        launcher.add_argument("--confirmed-concurrent-scan-id", action="append", default=[])
     begin_deep_scan.add_argument("--join-only", action="store_true")
     begin_deep_scan.add_argument("--workflow-version", default="deep-security-scan/v1")
 
@@ -210,7 +212,8 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     add_command("get-scan-feedback", "--scan-id")
 
     update_scan_context = add_command("update-scan-context", "--scan-id")
-    add_user_context(update_scan_context, required=True)
+    add_user_context(update_scan_context)
+    update_scan_context.add_argument("--max-time-minutes", type=float)
     update_scan_context_owner = update_scan_context.add_mutually_exclusive_group(required=True)
     update_scan_context_owner.add_argument("--workspace-id")
     update_scan_context_owner.add_argument("--thread-id")

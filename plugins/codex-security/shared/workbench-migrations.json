@@ -588,5 +588,10 @@
       "CREATE INDEX external_finding_members_by_version\nON external_finding_import_members (finding_id, version);",
       "CREATE TABLE external_finding_publications (\n    finding_id TEXT NOT NULL REFERENCES external_source_reports(id),\n    version INTEGER NOT NULL,\n    cloud_api_url TEXT NOT NULL,\n    account_id TEXT NOT NULL,\n    destination_id TEXT NOT NULL,\n    receipt_id TEXT NOT NULL,\n    outcome TEXT NOT NULL,\n    cloud_finding_id TEXT,\n    created_at TEXT NOT NULL,\n    PRIMARY KEY (finding_id, version, cloud_api_url, account_id, destination_id, receipt_id)\n) WITHOUT ROWID;"
     ]
+  },
+  {
+    "version": 73,
+    "name": "retain native investigation time allowances",
+    "statements": ["ALTER TABLE scans ADD COLUMN investigation_policy TEXT;"]
   }
 ]

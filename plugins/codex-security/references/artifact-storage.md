@@ -4,7 +4,7 @@ Apply this policy to plugin-managed scans and standalone artifact-producing skil
 
 ## Scan ownership
 
-For a full scan, obtain the authoritative `scanId` before creating artifacts. Standard uses `start_codex_security_standard_scan`; a headless Diff without a scan uses `start_codex_security_prompt_only_scan` with its exact target, `mode: "diff"`, `scope: "."` and `diffTarget`. Deep uses its existing coordinator. Preserve an existing scan and handoff token. If the required MCP is unavailable or the selected baseline is unsupported, report the blocker; do not fall back to shell-authored canonical files. These rules take precedence over older terminal file-authoring fallbacks.
+For a full scan, obtain the authoritative `scanId` and directory using the selected scan runtime instructions before creating artifacts. Preserve the existing scan and handoff token. Report an unavailable required tool or unsupported baseline without creating a replacement scan or substituting another writer.
 
 Keep structured outputs on their existing tools: inventories, candidate discovery, validation, attack paths, semantic drafts, checkpoints and completion. Canonical results and recovery checkpoints are persistent even while a scan is running. Never use the supplemental file tool to replace them or generate `report.md`.
 
@@ -17,14 +17,11 @@ Identify the owner with exactly one of:
 - `scanId` and the current `handoffClaimToken` when required, for a running scan;
 - `targetPath`, for a standalone phase or a derived document requested after a scan completes. Use the authorized repository or input-document directory. This creates a target-bound artifact collection without starting a scan. Never invent a scan ID.
 
-Select `storage` explicitly:
-
-- `persistent`: retained documents/evidence under the authoritative scan directory or standalone collection. The default root is `$CODEX_SECURITY_STATE_DIR/scans`, or `$CODEX_HOME/state/plugins/codex-security/scans` when no state override is set; `CODEX_HOME` defaults to `~/.codex`. The existing `CODEX_SECURITY_SCAN_ROOT` override still takes precedence for plugin-created output. The workbench state directory must be writable; set `CODEX_SECURITY_STATE_DIR` explicitly on hosts with an unwritable default. Preserve an existing scan's saved path, including older temporary paths.
-- `temporary`: disposable staging and execution output in a context-specific OS temporary directory. Standalone temporary saves and reads do not create or require the persistent collection. It is not part of the completed result and must not be referenced from canonical findings or coverage. It can disappear independently of retained files.
+Choose `persistent` for documents and evidence that must survive the scan. Choose `temporary` for disposable staging and execution output. Keep temporary paths out of canonical findings and coverage.
 
 Relative storage overrides resolve from the plugin directory, matching the workbench, regardless of the MCP launch directory. On POSIX, `CODEX_SECURITY_SCAN_ROOT` preserves trailing whitespace. A value with leading padding is trimmed. Use an absolute path or a `./` prefix for a relative directory name that begins with whitespace.
 
-Omit `path`, `content` and `sourcePath` to prepare the selected directory. Use the returned `directory`; never construct or guess the physical path. A save with a file requires `path` plus exactly one of `content` or `sourcePath`.
+To prepare the directory, omit `path`, `content` and `sourcePath`. Use the `directory` returned by the tool. To save a file, supply `path` and exactly one of `content` or `sourcePath`.
 
 Example for a running scan:
 

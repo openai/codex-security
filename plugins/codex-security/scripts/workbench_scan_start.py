@@ -27,7 +27,7 @@ from workbench.storage import (
     short_archive_prefix,
     state_dir,
 )
-from workbench_feedback import get_scan_feedback
+from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
 from workbench_target import (
     directory_content_digest,
     git_revision,
@@ -495,7 +495,7 @@ def insert_running_scan(
         if false_positives:
             write_scan_local_bytes(
                 scan_dir,
-                "artifacts/01_context/false_positive_feedback.json",
+                FALSE_POSITIVE_FEEDBACK_PATH,
                 (json.dumps(false_positives, allow_nan=False) + "\n").encode(),
             )
     return scan_id

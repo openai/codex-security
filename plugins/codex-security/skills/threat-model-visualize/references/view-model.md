@@ -2,11 +2,7 @@
 
 The model author maps the supplied assessment to JSON, exact evidence and explicit geometry. The shell owns visual roles, selection, inspection, control previews and offline HTML/SVG export. The builder validates references, geometry, exact quotes and some control semantics; it cannot verify security claims or layout.
 
-```sh
-python3.12 <skill-directory>/scripts/build_explorer.py MODEL.json --assessment threat-model.md --output index.html
-```
-
-Use Python 3.12+. Keep the full assessment intact. Optional fields need not be filled solely for completeness.
+The builder requires Python 3.12+. Use the selected build command in phase 4 of the skill. Keep the full assessment intact. Optional fields need not be filled solely for completeness.
 
 ## Map
 

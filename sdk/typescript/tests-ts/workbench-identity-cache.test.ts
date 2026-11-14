@@ -527,7 +527,7 @@ with ExitStack() as stack:
             mocks.enter_context(patch.object(deep_workbench, "deep_scan_result", side_effect=lambda database, scan_id, **kwargs: {"scanId": scan_id}))
             deep = deep_workbench.begin_deep_scan_for_target(connection, argparse.Namespace(
                 target_path=str(target), scope=".", workflow_version="synthetic", scan_root=str(root / "artifacts"),
-                user_context=None, model=None, reasoning_effort=None,
+                user_context=None, model=None, reasoning_effort=None, confirmed_concurrent_scan_id=[],
                 join_only=False, project_config_path=None, service_tier=None,
             ), "synthetic-thread")
         print(json.dumps({
@@ -1225,6 +1225,7 @@ with ExitStack() as stack:
             "oldRegistrationRejected": old_registration_rejected,
         }))
     elif scenario == "lineage":
+        root = root.resolve()
         for name, stored, live in [
             ("requested", "repository-current", None),
             ("removed", "repository-current", None),
@@ -1237,9 +1238,9 @@ with ExitStack() as stack:
             add_target(name, stored, live, relative="service" if name == "scope" else ".")
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
         missing.add(paths["removed"])
+        Path(paths["requested"]).mkdir()
         scan_dir = root / "scan-output"
-        original_iterdir = Path.iterdir
-        stack.enter_context(patch.object(Path, "iterdir", lambda path: iter(()) if path == scan_dir else original_iterdir(path)))
+        scan_dir.mkdir()
         stack.enter_context(patch.object(workbench, "require_target", return_value=Path(paths["requested"])))
         stack.enter_context(patch.object(workbench, "require_scannable_target"))
         stack.enter_context(patch.object(workbench, "require_canonical_scan_directory", return_value=scan_dir))

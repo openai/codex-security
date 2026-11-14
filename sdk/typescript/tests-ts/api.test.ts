@@ -3395,7 +3395,12 @@ if __name__ == "__main__":
     expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("scan-results.md");
     expect(prompt).not.toContain("bind-repo-scopes");
-    expect(prompt).not.toContain("CODEX_SECURITY_TARGET_REVISION");
+    expect(codexEnvironment?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      "deadbeef",
+    );
+    expect(prompt).toContain(
+      `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} as scan.target.revision.`,
+    );
     expect(prompt).toContain("CODEX_SECURITY_SCAN_PROGRESS");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
@@ -3665,6 +3670,88 @@ if __name__ == "__main__":
       } finally {
         await client.close();
       }
+    },
+  );
+
+  test.each([
+    ["git_revision", "cafebabe", undefined],
+    ["git_worktree", "cafebabe", TEST_SNAPSHOT_DIGEST],
+    ["directory_snapshot", "unversioned", TEST_SNAPSHOT_DIGEST],
+  ] as const)(
+    "binds registered target metadata for %s",
+    async (kind, revision, digest) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      let prompt = "";
+      const createCodex = mock((_options: CodexOptions) => {
+        return {
+          startThread: () => ({
+            id: null,
+            runStreamed: async (input: string) => {
+              prompt = input;
+              return fail("target contract captured");
+            },
+          }),
+        };
+      });
+
+      const client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => ({
+          ...preparedRuntime(codexHome),
+          environment: {
+            CODEX_SECURITY_TARGET_REVISION: "stale-revision",
+            CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: "stale-digest",
+            ...(process.platform === "win32"
+              ? { Codex_Security_Target_Snapshot_Digest: "stale-digest" }
+              : {}),
+          },
+        }),
+        runWorkbench: async (
+          _options: unknown,
+          args: readonly string[],
+          input?: string,
+        ): Promise<JsonObject> => {
+          if (args[0] === "register-cli-scan") {
+            return {
+              ...mockScanRegistration(args, input),
+              targetRevision: revision,
+              contract: {
+                target: {
+                  allowedKinds: [kind],
+                  ...(digest === undefined
+                    ? {}
+                    : { requiredSnapshotDigest: digest }),
+                },
+              },
+            };
+          }
+          return mockWorkbench(args, input);
+        },
+        createCodex,
+      });
+
+      await expect(client.run(repository)).rejects.toThrow(
+        "target contract captured",
+      );
+      const env = createCodex.mock.lastCall?.[0]?.env;
+      expect(env?.["CODEX_SECURITY_TARGET_KIND"]).toBe(kind);
+      expect(env?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+        revision === "unversioned" ? undefined : revision,
+      );
+      expect(env?.["CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"]).toBe(digest);
+      expect(env).not.toHaveProperty("Codex_Security_Target_Snapshot_Digest");
+      expect(
+        prompt.includes(
+          shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION"),
+        ),
+      ).toBe(revision !== "unversioned");
+      expect(
+        prompt.includes(
+          shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"),
+        ),
+      ).toBe(digest !== undefined);
+      expect(prompt).not.toContain(TEST_SNAPSHOT_DIGEST);
+      await client.close();
     },
   );
 
@@ -18264,6 +18351,7 @@ if __name__ == "__main__":
       }),
     ).rejects.toThrow("prompt captured");
     expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toMatch(/scan\.mode[^.]*"branch_diff"/u);
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(

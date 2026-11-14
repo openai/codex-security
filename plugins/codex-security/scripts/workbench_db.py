@@ -79,7 +79,7 @@ from workbench_constants import (
     FINDINGS_RESULT_LIMIT,
     SQLITE_RETRY_ATTEMPTS,
 )
-from workbench_feedback import get_scan_feedback
+from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
@@ -117,6 +117,7 @@ from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
     capture_source_scopes,
     expected_target_kinds,
+    parse_scan_recipe,
     public_scan_recipe,
     requested_scan_paths,
     safe_source_path,
@@ -768,7 +769,6 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target_kind=diff_target["kind"] if diff_target is not None else None,
         )
         target_root = scan_target_root(args.scan_root, target)
-        create_private_directory(target_root, scan_output=True)
         require_working_tree_unchanged(target, diff_target)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
@@ -809,11 +809,20 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        if workspace["default_mode"] == "deep":
+            pending = deep_scan.concurrent_launch_confirmation(
+                connection, getattr(args, "confirmed_concurrent_scan_id", [])
+            )
+            if pending:
+                if manages_transaction:
+                    connection.commit()
+                return pending
         registration = register_security_target(connection, str(current_target))
         if registration.target_id != workspace["target_id"]:
             raise SystemExit(
                 "The saved workspace no longer matches the selected repository target."
             )
+        create_private_directory(target_root, scan_output=True)
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -945,7 +954,12 @@ def _start_prompt_driven_scan(
                 require_scan_checkout_owner(connection, existing)
                 connection.commit()
                 return {
-                    **scan_context(connection, existing["id"], model_thread_id=thread_id),
+                    **scan_context(
+                        connection,
+                        existing["id"],
+                        model_thread_id=thread_id,
+                        include_investigation_policy=True,
+                    ),
                     "startDisposition": "joined",
                 }
             create_private_directory(target_root, scan_output=True)
@@ -1020,7 +1034,10 @@ def _start_prompt_driven_scan(
         except BaseException:
             connection.rollback()
             raise
-    return {**scan_context(connection, scan_id), "startDisposition": "created"}
+    return {
+        **scan_context(connection, scan_id, include_investigation_policy=True),
+        "startDisposition": "created",
+    }
 
 
 def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
@@ -1839,55 +1856,6 @@ def set_scan_cost_limit(connection: sqlite3.Connection, args: argparse.Namespace
     return {"scanId": scan["id"], "maxCostUsd": limit}
 
 
-def parse_scan_recipe(value: str, repository: Path) -> dict[str, Any]:
-    try:
-        recipe = json.loads(value, parse_constant=reject_non_finite_json)
-    except (TypeError, UnicodeError, ValueError) as exc:
-        raise SystemExit("Scan launch recipe must be a valid JSON object.") from exc
-    if not isinstance(recipe, dict):
-        raise SystemExit("Scan launch recipe must be a JSON object.")
-    requested_repository = recipe.get("repository")
-    if (
-        not isinstance(requested_repository, str)
-        or require_target(requested_repository) != repository
-    ):
-        raise SystemExit("Scan launch recipe repository must match the scanned repository.")
-    if recipe.get("mode") not in {"standard", "deep"}:
-        raise SystemExit("Scan launch recipe mode must be standard or deep.")
-    if not isinstance(recipe.get("config"), dict):
-        raise SystemExit("Scan launch recipe config must be a JSON object.")
-    target = recipe.get("target")
-    if not isinstance(target, dict) or target.get("kind") not in {
-        "repository",
-        "paths",
-        "refs",
-        "working_tree",
-    }:
-        raise SystemExit("Scan launch recipe target must identify a supported scan target.")
-    paths = target.get("paths")
-    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-        raise SystemExit("Scan launch recipe target paths must be an array of strings.")
-    if target["kind"] == "paths" and not paths:
-        raise SystemExit("A scoped scan launch recipe must include at least one target path.")
-    if target["kind"] != "paths" and paths:
-        raise SystemExit("Only scoped scan launch recipes can include target paths.")
-    for path in paths:
-        candidate = PurePosixPath(path)
-        if (
-            not path
-            or candidate.is_absolute()
-            or ".." in candidate.parts
-            or "\\" in path
-            or not (repository / candidate).exists()
-            or not (repository / candidate).resolve().is_relative_to(repository)
-        ):
-            raise SystemExit("Scan launch recipe target paths must exist inside the repository.")
-    if target["kind"] in {"refs", "working_tree"}:
-        if not isinstance(target.get("base"), str) or not isinstance(target.get("head"), str):
-            raise SystemExit("Diff scan launch recipes require resolved base and head revisions.")
-    return recipe
-
-
 def coverage_summary_for_history(scan: sqlite3.Row) -> dict[str, Any]:
     return scan_history.coverage_summary_for_history(
         _WORKBENCH_DB_CONTEXT, scan, require_canonical_scan_directory
@@ -2683,6 +2651,7 @@ def scan_context(
     scan_id: str,
     occurrence_id: str | None = None,
     *,
+    include_investigation_policy: bool = False,
     model_thread_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
@@ -2707,6 +2676,19 @@ def scan_context(
         "scan": result,
         "workspace": workspace,
     }
+    scan_dir = Path(scan["scan_dir"])
+    if (
+        scan["status"] == "running"
+        and scan["mode"] != "deep"
+        and scan_local_regular_file(scan_dir, FALSE_POSITIVE_FEEDBACK_PATH)
+    ):
+        context["reviewerFeedbackPath"] = str(scan_dir / FALSE_POSITIVE_FEEDBACK_PATH)
+    if (
+        include_investigation_policy
+        and result["progress"]["status"] == "running"
+        and scan["investigation_policy"] is not None
+    ):
+        context["investigationPolicy"] = scan["investigation_policy"]
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
         context["recipe"] = public_scan_recipe(scan)
@@ -2783,7 +2765,11 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
         ):
             raise SystemExit("This finding was not found in the selected scan.")
     result = scan_context(
-        connection, args.scan_id, args.occurrence_id, model_thread_id=model_thread
+        connection,
+        args.scan_id,
+        args.occurrence_id,
+        model_thread_id=model_thread,
+        include_investigation_policy=True,
     )
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)

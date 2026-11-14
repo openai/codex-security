@@ -798,6 +798,10 @@ def begin_deep_scan_for_target(
             )
         if args.join_only:
             return {"newScanTarget": target_path}
+        # Serialize admission with registration, after checking for an existing run to rejoin.
+        pending = concurrent_launch_confirmation(connection, args.confirmed_concurrent_scan_id)
+        if pending:
+            return pending
         source_scopes = capture_source_scopes(
             target,
             (revision, target_snapshot_digest, target_device, target_inode),
@@ -877,7 +881,12 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
     if thread_id is None:
         raise SystemExit("thread-id is required.")
     if args.scan_id:
-        if args.user_context is not None or args.user_context_stdin or args.scope != ".":
+        if (
+            args.user_context is not None
+            or args.user_context_stdin
+            or args.scope != "."
+            or args.confirmed_concurrent_scan_id
+        ):
             raise SystemExit("scan-id cannot be combined with target setup fields.")
         return begin_deep_scan_for_scan(connection, args.scan_id, thread_id, args)
     if args.claim_token is not None:
@@ -1826,15 +1835,24 @@ def cancel_active_workers(connection: sqlite3.Connection, scan_id: str, timestam
     )
 
 
+def concurrent_launch_confirmation(
+    connection: sqlite3.Connection, confirmed_scan_ids: list[str]
+) -> dict[str, Any] | None:
+    active = other_running_deep_scans(connection)
+    if any(scan["scanId"] not in confirmed_scan_ids for scan in active):
+        return {"confirmationRequired": True, "otherRunningDeepScans": active}
+    return None
+
+
 def other_running_deep_scans(
-    connection: sqlite3.Connection, current_scan_id: str
+    connection: sqlite3.Connection, current_scan_id: str | None = None
 ) -> list[dict[str, str]]:
     """List other running Deep Scans ordered by most recent update, with target paths and phases."""
     rows = connection.execute(
         """
         SELECT id, target_path, phase, started_at, updated_at
         FROM scans
-        WHERE mode = 'deep' AND status = 'running' AND id != ?
+        WHERE mode = 'deep' AND status = 'running' AND id IS NOT ?
         ORDER BY updated_at DESC, started_at DESC, id
         """,
         (current_scan_id,),

@@ -49,6 +49,11 @@ A scan or triage request produces findings. Ask to fix a specific finding when
 you want a patch. A separate fix verification reports `fixed`,
 `still_vulnerable`, or `inconclusive` with evidence.
 
+For a Standard or diff scan in Codex, you can ask for an investigation allowance,
+such as “spend 15 minutes reviewing this change.” The workbench saves the advisory
+deadline and returns it when you resume. Before starting another Deep Scan,
+Codex lists the active Deep Scans and asks whether to run them concurrently.
+
 Existing root and component `SECURITY.md` files already guide scans. Use
 [policy generation](../README.md#generate-securitymd) to draft or update one.
 
@@ -78,6 +83,11 @@ locations and validation evidence for each finding. Check the
 `scan.review.excludedPaths` list in `scan-manifest.json` for additional
 exclusions. To find the files selected for discovery, [check the retained
 scope list](#check-a-revision-range-scan-for-missing-files).
+
+For new plugin-managed output, set `CODEX_SECURITY_SCAN_ROOT` to override the
+scan directory root. The default is `scans/` under `CODEX_SECURITY_STATE_DIR`,
+which defaults to `$CODEX_HOME/state/plugins/codex-security`. Relative overrides
+resolve from the plugin directory. Existing scans keep their saved paths.
 
 A report with zero findings can still list exclusions or unresolved questions.
 Static triage reports what the source supports. An inconclusive fix verification

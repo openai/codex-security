@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import runpy
 import sqlite3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Barrier, Event, local
 from unittest import mock
@@ -241,6 +243,59 @@ def test_prompt_only_standard_phase_uses_latest_persisted_scan_context(
     next_phase = update_progress(state_dir, scan_id, "--phase", "discovery")
     assert next_phase["scan"]["progress"]["phase"] == "discovery"
     assert next_phase["scan"]["userContext"] == updated_context
+
+
+@pytest.mark.parametrize("mode", ["standard", "diff"])
+def test_native_investigation_policy_survives_retries_and_rejoin(tmp_path: Path, mode: str) -> None:
+    state, target = tmp_path / "state", tmp_path / "target"
+    extra = ()
+    if mode == "diff":
+        initialize_git_repository(target)
+        (target / "README.md").write_text("local change\n")
+        extra = ("--diff-target-kind", "working_tree")
+    else:
+        target.mkdir()
+
+    def start():
+        return start_prompt_only_scan(
+            state, target, tmp_path / "scans", mode=mode, extra_args=extra
+        )
+
+    started = start()
+    scan_id = started["scan"]["scanId"]
+    assert "investigationPolicy" not in started
+
+    def request(minutes: str, thread="thread-prompt-only-scan", **kwargs):
+        return scan_command(
+            state,
+            "update-scan-context",
+            scan_id,
+            "--thread-id",
+            thread,
+            "--max-time-minutes",
+            minutes,
+            **kwargs,
+        )
+
+    denied = request("10", "another-thread", check=False)
+    assert denied["returncode"] != 0
+    assert "investigationPolicy" not in get_scan(state, scan_id)
+    for invalid in ("0", "-1", "nan", "inf", "1e100"):
+        assert request(invalid, check=False)["returncode"] != 0
+
+    updated = request("1.5")
+    assert updated["scan"]["userContext"] == started["scan"]["userContext"]
+    policy = updated["investigationPolicy"]
+    times = re.findall(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z", policy)
+    started_at, deadline = (datetime.fromisoformat(t.replace("Z", "+00:00")) for t in times)
+    assert deadline - started_at == timedelta(seconds=90)
+    assert "{{" not in policy
+    assert request("nan", check=False)["returncode"] != 0
+    assert request("10")["investigationPolicy"] == policy
+    assert get_scan(state, scan_id)["investigationPolicy"] == policy
+    joined = start()
+    assert joined["startDisposition"] == "joined"
+    assert joined["investigationPolicy"] == policy
 
 
 @pytest.mark.parametrize("headless_standard", [False, True])

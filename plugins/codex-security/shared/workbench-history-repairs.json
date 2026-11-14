@@ -28,14 +28,26 @@
     "            THEN 'UPDATE schema_migrations SET version = 57'",
     "        WHEN version IN (34, 40, 41, 42, 43, 44, 48) AND name = 'persist authorized source excerpt scopes'",
     "            THEN 'UPDATE schema_migrations SET version = 50'",
-    "        WHEN version = 63 AND name = 'retain native investigation time allowances'",
-    "            THEN 'DELETE FROM schema_migrations'",
+    "        WHEN version IN (63, 64, 67) AND name = 'retain native investigation time allowances'",
+    "            THEN CASE WHEN EXISTS (SELECT 1 FROM pragma_table_info('scans') WHERE name = 'investigation_policy')",
+    "                THEN 'UPDATE schema_migrations SET version = 73' ELSE 'DELETE FROM schema_migrations' END",
     "    END AS repair FROM schema_migrations AS receipt",
     ")",
     "SELECT 'sql' AS operation, repair || ' WHERE version = ' || version AS value",
     "FROM previews WHERE repair IS NOT NULL",
     "-- Vacate checkpoint preview 50 before moving a lower source-scope receipt into it.",
     "ORDER BY version DESC;"
+  ],
+  [
+    "-- Main may have replaced the allowance preview receipt while preserving the column.",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (73, ' ||",
+    "    quote(json_extract(value, '$.name')) || ', ?)' AS value",
+    "FROM json_each(:history) WHERE json_extract(value, '$.version') = 73",
+    "    AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 63",
+    "        AND name = 'retain unverified Deep Scan worker attempts')",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 73)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info('scans') WHERE name = 'investigation_policy');"
   ],
   [
     "-- mirror and early-moves: relocate numbers before checking profiles.",
