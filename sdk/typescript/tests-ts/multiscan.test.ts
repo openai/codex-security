@@ -2415,7 +2415,7 @@ for (const recovery of [false, true]) {
 }
 
 testPosix.each(["source", "campaign"] as const)(
-  "reuses an explicitly configured %s-local Python interpreter",
+  "honors the executable boundary for a %s-local Python interpreter",
   async (location) => {
     const paths = await fixture();
     const source = await repository(paths.root, "source-local-python");
@@ -2443,6 +2443,14 @@ testPosix.each(["source", "campaign"] as const)(
     const campaign = options(paths, client(runs), {
       config: { pythonPath: interpreter },
     });
+    if (location === "source") {
+      const result = await runMultiscan(campaign);
+      expect(result).toMatchObject({ completed: 0, failed: 1 });
+      expect((await results(result.resultsPath))[0]?.["error"]).toContain(
+        "configured plugin Python interpreter is unavailable",
+      );
+      return;
+    }
     await expectScanned(campaign);
     await expectReused(campaign);
     expect(runs).toHaveBeenCalledTimes(1);
@@ -4256,7 +4264,7 @@ for (const scenario of [
     expect(receipt!["policyFailed"]).toBe(true);
     const scanDir = String(receipt!["outputDir"]);
     if (scenario.startsWith("foreign-scan")) {
-      const checkout = join(paths.output, "checkouts", "repo");
+      const checkout = join(paths.root, "replacement-checkout");
       git(paths.root, "clone", "-q", source.path, checkout);
       const replacement = join(paths.root, "replacement-scan");
       await writeActualScan(
