@@ -1526,6 +1526,7 @@ async function testWorkerRuntimeSettings() {
     "PYTHONIOENCODING",
     "CODEX_SECURITY_PYTHON_COMMAND",
     "PATH",
+    "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH",
     "HOME",
     "NODE_OPTIONS",
     "NODE_DEBUG",
@@ -2133,6 +2134,15 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
 
+      const scanGitEnvironments = settings.map((_, index) => {
+        const tools = path.join(fixture.root, `operator tools ${index}`);
+        return {
+          ...gitEnvironment,
+          PATH: [tools, gitEnvironment.PATH].join(path.delimiter),
+          CODEX_SECURITY_GIT: path.join(tools, "git"),
+        };
+      });
+
       await Promise.all(
         settings.map(async (_, index) => {
           const directory = path.join(
@@ -2187,7 +2197,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         await Promise.all(
           executors.map((executor, index) => {
             // Snapshot each scan environment independently.
+            Object.assign(process.env, scanGitEnvironments[index]);
             process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
+            process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH = path.dirname(
+              nodePaths[index],
+            );
             Object.assign(process.env, temporaryEnvironments[index]);
             process.env.CODEX_SECURITY_STATE_DIR = path.join(
               fixture.root,
@@ -2269,6 +2283,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
             workerConfigurations[index].parentSandbox.pluginReadRoot ??
               path.join(fixture.root, "ambient-plugin"),
+          );
+          assert.equal(
+            workerLaunch.environment!._CODEX_SECURITY_SDK_NODE_SEARCH_PATH,
+            path.dirname(nodePaths[index]),
           );
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
@@ -2582,13 +2600,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.deepEqual(
             invocation.gitEnvironment,
             expectedGitEnvironment(
-              gitEnvironment,
+              scanGitEnvironments[index],
               nodePaths[index],
               selectedProvider.environment,
             ),
           );
           for (const [name, value] of Object.entries({
-            ...gitEnvironment,
+            ...scanGitEnvironments.at(-1),
             CODEX_MCP_NODE_PATH: nodePaths.at(-1),
           })) {
             assert.equal(process.env[name], value);
@@ -2698,7 +2716,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.deepEqual(
             preflight.gitEnvironment,
             expectedGitEnvironment(
-              gitEnvironment,
+              scanGitEnvironments[index],
               nodePaths[index],
               selectedProvider.environment,
             ),

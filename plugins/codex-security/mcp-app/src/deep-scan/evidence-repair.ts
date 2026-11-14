@@ -55,11 +55,27 @@ export async function repairAcceptedEvidence(
           z.toJSONSchema(patchSchema),
         );
         const patch = patchSchema.parse(JSON.parse(response));
+        const flow = finding.attackPath?.dataflow;
+        const dataflow =
+          typeof flow === "object" &&
+          !flow.summary &&
+          !(flow.source && flow.sink)
+            ? { ...flow, summary: patch.attackPath.dataflow }
+            : (flow ?? patch.attackPath.dataflow);
+        const validation = { ...finding.validation };
+        validation.method ??= patch.validation.method;
+        if (!validation.result && !validation.summary)
+          validation.summary = patch.validation.summary;
+        if (!validation.evidence?.length && !validation.evidenceRefs?.length)
+          validation.evidence = patch.validation.evidence;
         const repaired = scanDraftInputSchema.shape.findings.element.parse({
           ...finding,
-          ...patch,
-          attackPath: { ...finding.attackPath, ...patch.attackPath },
-          validation: { ...finding.validation, ...patch.validation },
+          codeEvidence: finding.codeEvidence?.length
+            ? finding.codeEvidence
+            : patch.codeEvidence,
+          rootCause: finding.rootCause ?? patch.rootCause,
+          attackPath: { ...finding.attackPath, dataflow },
+          validation,
         });
         validateFindingSemantics([repaired]);
         validateCompletedFindingEvidence([repaired]);

@@ -50,7 +50,17 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
     }
     const saved = await readJson(worker.resultManifestPath!);
     for (const finding of saved.findings) {
-      delete finding.validation;
+      finding.validation = {
+        result: "Observed in the saved run.",
+        evidenceRefs: ["query-sink"],
+      };
+      finding.attackPath.dataflow = {
+        source: "request",
+        ...(completedIteration ? { sink: "query" } : {}),
+        evidenceRefs: ["query-sink"],
+      };
+      finding.rootCause.evidenceRefs = [finding.codeEvidence[0].id];
+      finding.codeEvidence[0].endLine = finding.codeEvidence[0].startLine;
       if (withLaterBatch && worker.kind === "dedup") {
         // A pre-upgrade checkpoint can retain multiple source groups from one repair.
         const source = structuredClone(finding);
@@ -120,9 +130,9 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
       const { finding, targetPath } = JSON.parse(prompt.split("\n")[1]!);
       assert.equal(targetPath, fixture.run.targetPath);
       return JSON.stringify({
-        codeEvidence: finding.codeEvidence,
+        codeEvidence: [{ ...finding.codeEvidence[0], endLine: undefined }],
         rootCause: finding.rootCause.summary,
-        attackPath: finding.attackPath,
+        attackPath: { dataflow: "The request reaches the query." },
         validation: {
           method: "Static analysis",
           summary: "The query reaches SQL execution.",
@@ -159,7 +169,24 @@ async function testResumeRepairsPreviouslyAcceptedEvidence(
   assert.equal(store.run.dispatchedCount, withLaterBatch ? 2 : 1);
   assert.equal(store.failureMessages.length, 0);
   assert.equal(published.length, 1);
-  assert.ok(published[0].findings[0].validation);
+  const [repaired] = published[0].findings;
+  assert.deepEqual(repaired.validation, {
+    method: "Static analysis",
+    result: "Observed in the saved run.",
+    evidenceRefs: ["query-sink"],
+  });
+  assert.deepEqual(repaired.attackPath?.dataflow, {
+    source: "request",
+    ...(completedIteration
+      ? { sink: "query" }
+      : { summary: "The request reaches the query." }),
+    evidenceRefs: ["query-sink"],
+  });
+  assert.deepEqual(repaired.rootCause, {
+    summary: "The query uses request-controlled text without parameterization.",
+    evidenceRefs: ["query-sink"],
+  });
+  assert.equal(repaired.codeEvidence?.[0].endLine, 1);
   assert.equal(
     store.iterations.at(-1)!.workerIds.length,
     completedIteration && !withLaterBatch ? 0 : 1,
