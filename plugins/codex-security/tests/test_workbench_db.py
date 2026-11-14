@@ -1285,9 +1285,15 @@ def test_completed_scan_disables_remediation_after_checkout_revision_changes(
             "UPDATE scans SET target_device = target_device + 1 WHERE id = ?",
             (scan_id,),
         )
-    remounted = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
-    assert remounted["returncode"] != 0
-    assert "checkout owner" in remounted["stderr"]
+    if sys.platform == "linux":
+        # Linux mount device numbers may change while the Git generation and inode remain valid.
+        remounted = get_scan(state_dir, scan_id)["scan"]
+        assert remounted["remediationAvailable"] is True
+        assert remounted["findings"][0]["locations"][0]["absolutePath"] == str(target / "README.md")
+    else:
+        remounted = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
+        assert remounted["returncode"] != 0
+        assert "checkout owner" in remounted["stderr"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         scan = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()

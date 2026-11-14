@@ -132,6 +132,18 @@ def empty_history_paths(tmp_path: Path) -> tuple[Path, Path]:
     return tmp_path / "state", repository
 
 
+def comparison_readers():
+    import workbench_db
+
+    return {
+        "require_scan": workbench_db.require_scan,
+        "read_coverage": workbench_db.coverage_for_comparison,
+        "finding_triage": lambda db, scan, cutoff: workbench_db.scan_finding_triage(
+            db, scan, through_scan=cutoff
+        ),
+    }
+
+
 def compare_scan_pair(
     state_dir: Path,
     before: dict[str, Any],
@@ -2620,12 +2632,7 @@ def test_portable_identity_explicit_clone_comparison_without_birth_timestamps(
             return history.compare_scans(
                 connection,
                 args,
-                require_scan=lambda db, id: db.execute(
-                    "SELECT * FROM scans WHERE id = ?", (id,)
-                ).fetchone(),
-                read_coverage=lambda row: json.loads(
-                    (Path(row["scan_dir"]) / "coverage.json").read_text()
-                ),
+                **comparison_readers(),
             )
 
         if same_origin:
@@ -2786,12 +2793,7 @@ def test_legacy_aliases_explicit_comparison_with_mixed_birth_support(
             return history.compare_scans(
                 connection,
                 args,
-                require_scan=lambda db, id: db.execute(
-                    "SELECT * FROM scans WHERE id = ?", (id,)
-                ).fetchone(),
-                read_coverage=lambda row: json.loads(
-                    (Path(row["scan_dir"]) / "coverage.json").read_text()
-                ),
+                **comparison_readers(),
             )
 
         if same_origin:
@@ -2836,21 +2838,12 @@ def test_originless_linked_comparison_without_birth_timestamps(
         connection.commit()
         monkeypatch.setattr(target_state, "_repository_birth_time_ns", lambda *_: None)
         args = argparse.Namespace(before_scan_id=before["scanId"], after_scan_id=after["scanId"])
-        require_scan = lambda db, id: db.execute(
-            "SELECT * FROM scans WHERE id = ?", (id,)
-        ).fetchone()
-        read_coverage = lambda row: json.loads(
-            (Path(row["scan_dir"]) / "coverage.json").read_text()
-        )
+        readers = comparison_readers()
         if other_checkout != "linked":
             with pytest.raises(SystemExit, match="same repository"):
-                history.compare_scans(
-                    connection, args, require_scan=require_scan, read_coverage=read_coverage
-                )
+                history.compare_scans(connection, args, **readers)
             return
-        result = history.compare_scans(
-            connection, args, require_scan=require_scan, read_coverage=read_coverage
-        )
+        result = history.compare_scans(connection, args, **readers)
         assert result["afterScanId"] == after["scanId"]
         before_id = connection.execute(
             "SELECT id FROM finding_occurrences WHERE scan_id = ?", (before["scanId"],)
@@ -2865,8 +2858,7 @@ def test_originless_linked_comparison_without_birth_timestamps(
             connection,
             args,
             now=lambda: "2026-10-07T00:00:00Z",
-            require_scan=require_scan,
-            read_coverage=read_coverage,
+            **readers,
         )
         assert saved["afterScanId"] == after["scanId"]
 

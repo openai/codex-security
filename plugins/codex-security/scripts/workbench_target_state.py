@@ -29,7 +29,9 @@ from workbench_target import (
     git_bytes,
     git_output,
     git_worktree_context,
+    has_windows_checkout_binding,
     pin_scoped_git,
+    require_scan_target_identity,
 )
 
 
@@ -484,9 +486,15 @@ def _inspect_repository_target(
                 ", started_at, created_at" if {"started_at", "created_at"} <= scan_columns else ""
             )
             revisions = ", target_revision" if "target_revision" in scan_columns else ""
+            windows_binding = ""
+            if "windows_resume_target_identity" in scan_columns:
+                windows_binding = (
+                    ", id, mode, launch_kind, CASE WHEN recipe_json IS NOT NULL THEN 1 END AS recipe_json,"
+                    " windows_resume_target_identity"
+                )
             scans = connection.execute(
                 f"""
-                SELECT target_device, target_inode{timestamps}{revisions} FROM scans
+                SELECT target_device, target_inode{timestamps}{revisions}{windows_binding} FROM scans
                 WHERE target_id = ? OR target_path = ?
                 """,
                 (target_id, target_path),
@@ -510,6 +518,14 @@ def _inspect_repository_target(
                     strict_owner_matches = False
                     continue
                 recorded_owner = True
+                if has_windows_checkout_binding(scan):
+                    # Windows Deep scans may store a wider file ID than Python stat returns.
+                    try:
+                        require_scan_target_identity(scan, target_path=target_path)
+                    except (OSError, SystemExit):
+                        malformed_owner = True
+                        strict_owner_matches = False
+                    continue
                 if not stored_filesystem_identity_matches(device, metadata.st_dev):
                     strict_owner_matches = False
                     mismatch = mismatch or sys.platform != "linux"
