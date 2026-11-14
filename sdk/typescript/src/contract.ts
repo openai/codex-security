@@ -9,7 +9,7 @@ import type {
   ScanManifest,
 } from "./models.js";
 import type { NormalizedTarget, ScanMode } from "./targets.js";
-import { unresolvedCandidates } from "./candidates.js";
+import { unresolvedCandidateRows } from "./candidates.js";
 import { bundledPluginRoot } from "./runtime.js";
 import { safeScopePath as sharedSafeScopePath } from "./contract-values.js";
 export {
@@ -113,7 +113,7 @@ export async function loadContractWithScanDirectory(
         options.workbenchValidated === true,
       );
     if (result.legacyCoverage !== undefined) {
-      const pending = unresolvedCandidates(
+      const pending = unresolvedCandidateRows(
         result.legacyCoverage,
         result.contract.findings.findings,
         true,

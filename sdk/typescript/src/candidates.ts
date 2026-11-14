@@ -72,8 +72,8 @@ export function coverageCandidateKey(
     : undefined;
 }
 
-/** Saved candidate identities without a finding or terminal disposition. */
-export function unresolvedCandidates(
+/** Saved proof gaps without a finding or terminal disposition. */
+export function unresolvedCandidateRows(
   coverage: CoverageDocument,
   findings: readonly Finding[],
   sealed = false,
@@ -103,18 +103,19 @@ export function unresolvedCandidates(
     )
       resolved.add(key);
   }
-  return uniqueCandidateRows(coverage.deferred ?? [], resolved);
+  return (coverage.deferred ?? []).filter((row) => {
+    const key = coverageCandidateKey(row);
+    return key !== undefined && !resolved.has(key);
+  });
 }
 
 export function uniqueCandidateRows(
   rows: readonly DeferredCoverage[],
-  resolved?: ReadonlySet<string>,
 ): DeferredCoverage[] {
   const pending = new Map<string, DeferredCoverage>();
   for (const candidate of rows) {
     const key = coverageCandidateKey(candidate);
-    if (key !== undefined && !resolved?.has(key) && !pending.has(key))
-      pending.set(key, candidate);
+    if (key !== undefined && !pending.has(key)) pending.set(key, candidate);
   }
   return [...pending.values()];
 }

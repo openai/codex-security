@@ -1953,6 +1953,11 @@ for (const receiptRefs of [
       coverage["completeness"] = "partial";
       coverage["deferred"] = [
         { id: "legacy-gap", candidateId: "legacy-candidate", reason },
+        {
+          id: "second-gap",
+          candidateId: "legacy-candidate",
+          reason: "Another observation.",
+        },
       ];
       coverage["explicitExclusions"] = [
         {
@@ -1982,7 +1987,8 @@ for (const receiptRefs of [
         threadId: "saved-thread",
         turnResult: {},
       });
-      expect(result.unresolvedCandidates).toEqual(coverage["deferred"]);
+      expect(loaded.review.unresolvedCandidates).toEqual(coverage["deferred"]);
+      expect(result.unresolvedCandidates).toEqual([coverage["deferred"][0]]);
       const replay = runPython(
         process.env["PYTHON"] ?? Bun.which("python3") ?? "python",
         [
