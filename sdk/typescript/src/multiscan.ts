@@ -498,14 +498,15 @@ async function runCampaign(
         artifactOutput,
         receipt,
         checkout,
-        campaignRequestDigests(
-          options,
-          task,
-          artifactOutput,
-          checkout,
-          knowledgeByMode[task.mode]?.snapshot,
-          receipt.operationId,
-        ),
+        (registered) =>
+          matchesRegisteredRequest(
+            registered,
+            options,
+            task,
+            artifactOutput,
+            knowledgeByMode[task.mode]?.snapshot,
+            receipt.operationId,
+          ),
         (warning) => {
           warnings.push({ repository: task.id, warnings: [warning] });
           notifyProgress(options, {
@@ -689,21 +690,21 @@ async function runCampaign(
                 authority !== undefined &&
                   resolve(authority.target_path) !== resolve(normalCheckout),
               );
-              const requestDigests = campaignRequestDigests(
-                options,
-                task,
-                scanDir,
-                authority?.target_path ?? normalCheckout,
-                knowledge?.snapshot,
-                recorded?.operationId,
-              );
+              const matchesRequest = (registered: RegisteredScanAuthority) =>
+                matchesRegisteredRequest(
+                  registered,
+                  options,
+                  task,
+                  scanDir,
+                  knowledge?.snapshot,
+                  recorded?.operationId,
+                );
               if (
                 authority !== undefined &&
                 registeredTaskMatches(authority, task.revision, roots) &&
-                typeof authority.recipe["scanRequestDigest"] === "string" &&
                 (recorded?.scanId === undefined ||
                   recorded.scanId === authority.id) &&
-                requestDigests.includes(authority.recipe["scanRequestDigest"])
+                matchesRequest(authority)
               ) {
                 protectedRoot = authority.target_path;
                 const loadRegistered = async () => {
@@ -713,7 +714,7 @@ async function runCampaign(
                       await resolveResumePluginRoot(),
                       options.signal,
                     ),
-                    requestDigests,
+                    matchesRequest,
                     environment,
                     options.signal,
                   );
@@ -1553,31 +1554,71 @@ function campaignScanOptions(
   };
 }
 
-function campaignRequestDigests(
+function matchesRegisteredRequest(
+  { recipe, target_path: checkout }: RegisteredScanAuthority,
   options: MultiscanOptions,
   task: MultiscanTask,
   scanDir: string,
-  checkout: string,
   knowledgeBaseSnapshot?: KnowledgeBaseSnapshot,
   operationId?: string,
-): string[] {
-  const scanOptions = campaignScanOptions(
+): boolean {
+  const saved = recipe["scanRequestDigest"];
+  if (typeof saved !== "string") return false;
+  const scan = campaignScanOptions(
     options,
     task,
     scanDir,
     knowledgeBaseSnapshot,
   );
-  // Retain prior request identities while accepting literal absolute CSV scopes.
-  const digests = [
-    scanRequestDigest(options.config, scanOptions),
-    scanRequestDigest(options.config, scanOptions, checkout),
-  ];
-  // Older registrations included the operation ID of this specific attempt.
-  if (operationId !== undefined)
-    digests.push(
-      scanRequestDigest(options.config, scanOptions, checkout, { operationId }),
+  const matches = (settings: ScanOptions): boolean => {
+    if (scanRequestDigest(options.config, settings, checkout) === saved)
+      return true;
+    if (Array.isArray(settings.target)) {
+      // A legacy digest could collapse symlink/.. traversal. Confirm the
+      // scope against the private registration before accepting that digest.
+      const scope = recipe["target"];
+      const paths =
+        isRecord(scope) && scope["kind"] === "paths"
+          ? scope["paths"]
+          : undefined;
+      const lexical = settings.target.map(
+        (path) =>
+          relative(checkout, resolve(checkout, path)).split(sep).join("/") ||
+          ".",
+      );
+      if (
+        !Array.isArray(paths) ||
+        settings.target.some((path) => path.split(sep).includes("..")) ||
+        lexical.length !== paths.length ||
+        !lexical.every((path, index) => path === paths[index])
+      )
+        return false;
+      if (scanRequestDigest(options.config, settings) === saved) return true;
+      settings = { ...settings, target: lexical };
+    }
+    return (
+      scanRequestDigest(options.config, settings) === saved ||
+      (operationId !== undefined &&
+        scanRequestDigest(options.config, settings, undefined, {
+          operationId,
+        }) === saved)
     );
-  return digests;
+  };
+  if (matches(scan)) return true;
+  // A batch reservation sets these execution options for just this attempt.
+  const limit = recipe["maxCostUsd"];
+  return (
+    options.maxTotalCostUsd !== undefined &&
+    typeof limit === "number" &&
+    recipe["ownerSuggestions"] === false &&
+    (scan.maxCostUsd === undefined || limit <= scan.maxCostUsd) &&
+    matches({
+      ...scan,
+      maxCostUsd: limit,
+      skipFindingMatching: true,
+      ownerSuggestions: false,
+    })
+  );
 }
 
 function registeredTaskMatches(
@@ -1637,7 +1678,7 @@ type CampaignContract = Awaited<ReturnType<typeof readCampaignContract>>;
 
 async function loadRegisteredCampaignScan(
   loaded: CampaignContract,
-  expectedRequestDigests: readonly string[],
+  matchesRequest: (authority: RegisteredScanAuthority) => boolean,
   environment: NodeJS.ProcessEnv,
   signal?: AbortSignal,
 ) {
@@ -1654,8 +1695,7 @@ async function loadRegisteredCampaignScan(
     );
   if (
     authority.status !== "complete" ||
-    typeof authority.recipe["scanRequestDigest"] !== "string" ||
-    !expectedRequestDigests.includes(authority.recipe["scanRequestDigest"]) ||
+    !matchesRequest(authority) ||
     authority.seal_manifest_digest !==
       `sha256:${validatedFileDigests.get(loaded.contract.manifest)!.get("scan-manifest.json")!}`
   )
@@ -1676,14 +1716,14 @@ async function loadResumableScan(
   path: string,
   receipt: MultiscanReceipt,
   checkout: string,
-  expectedRequestDigests: readonly string[],
+  matchesRequest: (authority: RegisteredScanAuthority) => boolean,
   onWarning: (warning: string) => void,
 ) {
   const { signal, recoverScan } = options;
   const environment = options.environment ?? process.env;
   const accepted = await loadRegisteredCampaignScan(
     loaded,
-    expectedRequestDigests,
+    matchesRequest,
     environment,
     signal,
   );
@@ -1846,9 +1886,13 @@ async function verifiedCampaignCheckout(
         return undefined;
     }
   }
+  const actualPaths = new Set(scope.includePaths);
   if (
-    scope.includePaths.length !== expectedPaths.length ||
-    scope.includePaths.some((path, index) => path !== expectedPaths[index]) ||
+    actualPaths.size !== scope.includePaths.length ||
+    actualPaths.size !== expectedPaths.length ||
+    !expectedPaths.every(
+      (path) => typeof path === "string" && actualPaths.has(path),
+    ) ||
     (receipt?.resolvedScope !== undefined &&
       (expectedPaths.length !== 1 ||
         receipt.resolvedScope !== expectedPaths[0]))

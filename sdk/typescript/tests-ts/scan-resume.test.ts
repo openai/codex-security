@@ -1085,7 +1085,11 @@ test.each([
       ],
       deps,
     );
-    expect(seen).toMatchObject([
+    // The fixture returns an unregistered result. A fresh attempt may follow,
+    // but the saved scan itself must receive the effective recovery budget.
+    expect(
+      seen.filter((scan) => scan.resumeScanId !== undefined),
+    ).toMatchObject([
       {
         resumeScanId: f.scanId,
         maxCostUsd: expected,

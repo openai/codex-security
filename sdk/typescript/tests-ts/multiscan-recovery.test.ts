@@ -2577,9 +2577,6 @@ describe("multiscan", () => {
     "duplicate finding identities",
     "reversed finding line range",
     "duplicate evidence identifiers",
-    "dangling root-cause evidence",
-    "dangling validation evidence",
-    "dangling attack-path evidence",
   ] as const)("checks sealed artifacts with %s", async (corruption) => {
     if (corruption === "forged lexical symlink scope") {
       const count = Number(process.env["GIT_CONFIG_COUNT"] ?? "0");
@@ -2714,10 +2711,7 @@ describe("multiscan", () => {
     } else if (
       corruption === "duplicate finding identities" ||
       corruption === "reversed finding line range" ||
-      corruption === "duplicate evidence identifiers" ||
-      corruption === "dangling root-cause evidence" ||
-      corruption === "dangling validation evidence" ||
-      corruption === "dangling attack-path evidence"
+      corruption === "duplicate evidence identifiers"
     ) {
       const findingsPath = join(outputDir, "findings.json");
       const findings = JSON.parse(
@@ -2728,7 +2722,7 @@ describe("multiscan", () => {
         findings.findings.push(structuredClone(finding));
       } else if (corruption === "reversed finding line range") {
         finding.locations[0]!.endLine = finding.locations[0]!.startLine - 1;
-      } else if (corruption === "duplicate evidence identifiers") {
+      } else {
         const evidence = {
           id: "source-evidence",
           label: "Source evidence",
@@ -2739,15 +2733,6 @@ describe("multiscan", () => {
           explanation: "Source evidence",
         };
         finding.codeEvidence = [evidence, structuredClone(evidence)];
-      } else if (corruption === "dangling root-cause evidence") {
-        finding.rootCause = {
-          summary: "Missing source evidence.",
-          evidenceRefs: ["missing-evidence"],
-        };
-      } else if (corruption === "dangling validation evidence") {
-        finding.validation = { evidenceRefs: ["missing-evidence"] };
-      } else {
-        finding.attackPath = { evidenceRefs: ["missing-evidence"] };
       }
       await writeFile(findingsPath, `${JSON.stringify(findings, null, 2)}\n`);
     } else if (corruption === "duplicate coverage surface identities") {
@@ -2779,18 +2764,12 @@ describe("multiscan", () => {
     });
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     await reseal(outputDir);
-    const compatibleLegacyReference =
-      corruption === "dangling root-cause evidence" ||
-      corruption === "dangling validation evidence" ||
-      corruption === "dangling attack-path evidence";
-    if (compatibleLegacyReference)
-      await loadContract(outputDir, { pluginRoot: PLUGIN_ROOT });
     expect(await runMultiscan(campaign)).toMatchObject({
       completed: 1,
       failed: 0,
-      skipped: compatibleLegacyReference ? 1 : 0,
+      skipped: 0,
     });
-    expect(attempts).toBe(compatibleLegacyReference ? 1 : 2);
+    expect(attempts).toBe(2);
   });
 
   test.each([

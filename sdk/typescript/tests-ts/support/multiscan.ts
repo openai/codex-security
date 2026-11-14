@@ -131,7 +131,7 @@ export function createMultiscanFixtures() {
       process.env["CODEX_SECURITY_STATE_DIR"] = fixtureState;
       await runWorkbench(
         { python: PYTHON, pluginRoot: PLUGIN_ROOT, environment: process.env },
-        ["list-scans"],
+        ["database-info"],
       );
     }
     return {

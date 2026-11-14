@@ -2009,6 +2009,18 @@ for (const section of ["rootCause", "validation", "attackPath"] as const) {
             : ["saved-evidence", "obsolete-evidence"],
       };
       await writeFile(path, JSON.stringify(saved));
+      if (catalog === "absent") {
+        const manifestPath = join(dir, "scan-manifest.json");
+        const manifest = JSON.parse(
+          await readFile(manifestPath, "utf8"),
+        ) as ScanResult["manifest"];
+        manifest.scan.artifacts.push({
+          path: "report.md",
+          mediaType: "text/markdown",
+          sha256: "0".repeat(64),
+        });
+        await writeFile(manifestPath, JSON.stringify(manifest));
+      }
       await reseal(dir);
       const loaded = (await loadContract(dir, { pluginRoot: PLUGIN_ROOT }))
         .findings.findings[0]!;
@@ -2057,7 +2069,9 @@ async function completedConfiguredPaths(
 ) {
   const target = await normalizeTarget(checkout, settings.target!);
   const result = await completedScan(settings.outputDir!, "complete", checkout);
-  result.manifest.scan.scope.includePaths = [...target.paths];
+  // The contract permits any order for distinct scope paths.
+  const includePaths = [...target.paths].reverse();
+  result.manifest.scan.scope.includePaths = includePaths;
   await writeFile(
     join(settings.outputDir!, "scan-manifest.json"),
     JSON.stringify(result.manifest),
@@ -2066,7 +2080,7 @@ async function completedConfiguredPaths(
   const coverage = JSON.parse(await readFile(file, "utf8"));
   Object.assign(coverage, {
     mode: "scoped_path",
-    includePaths: target.paths,
+    includePaths,
     inventoryStrategy: "scoped_path",
   });
   await writeFile(file, JSON.stringify(coverage));
