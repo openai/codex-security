@@ -63,11 +63,20 @@ const GIT_HOOKS = [
 
 export interface PatchGitCommandOptions {
   readonly encoding?: "base64";
+  readonly callerContext?: boolean;
   readonly nestedProbe?: boolean;
   readonly indexFile?: string;
   readonly hookMessagePath?: string;
   readonly input?: string | Uint8Array;
   readonly environment?: NodeJS.ProcessEnv;
+}
+
+export interface PatchGitAdministrationReference {
+  readonly path: string;
+  readonly canonical: string;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly root: string;
 }
 
 type RunGit = (
@@ -195,6 +204,7 @@ export interface PatchGitControls {
   readonly snapshotConfigPaths: readonly string[];
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
+  validateCapturedSelection(): Promise<void>;
 }
 
 export interface PatchPublicationHooks {
@@ -565,6 +575,19 @@ async function directoryLinks(path: string): Promise<string[]> {
   return [...links];
 }
 
+export async function capturePatchGitAdministrationReferences(
+  path: string,
+): Promise<PatchGitAdministrationReference[]> {
+  const root = await realControlPath(path);
+  const references: PatchGitAdministrationReference[] = [];
+  for (const link of await directoryLinks(path)) {
+    const canonical = await realControlPath(link);
+    const { dev, ino } = await stat(canonical, { bigint: true });
+    references.push({ path: link, canonical, dev, ino, root });
+  }
+  return references;
+}
+
 async function readableGitParent(
   checkout: string,
   path: Buffer,
@@ -639,6 +662,7 @@ export async function capturePatchGitControls(
   usesWorktreeMarker: boolean,
   usesCommonDirectoryMarker = true,
   selectedGitDirectory?: string,
+  administrationReferences: readonly PatchGitAdministrationReference[] = [],
   configuration = {
     global: process.env["GIT_CONFIG_GLOBAL"],
     system: process.env["GIT_CONFIG_SYSTEM"],
@@ -1001,6 +1025,23 @@ export async function capturePatchGitControls(
     );
   const canPrepareStorage = async (path: string): Promise<boolean> => {
     for (const entry of await directoryLinks(path)) {
+      const reference = administrationReferences.find(
+        (reference) => reference.path === entry,
+      );
+      if (reference !== undefined) {
+        const canonical = await realControlPath(entry);
+        const identity = await stat(canonical, { bigint: true });
+        if (
+          canonical !== reference.canonical ||
+          identity.dev !== reference.dev ||
+          identity.ino !== reference.ino ||
+          !administrationRoots.has(reference.root)
+        )
+          throw new Error(
+            `Git administration reference changed during the patch: ${entry}`,
+          );
+        administrationLinks.add(entry);
+      }
       if (administrationLinks.has(entry)) {
         await rememberControl(entry, true, false);
       } else if (insideSelectedRoots(dirname(entry))) {
@@ -1040,6 +1081,18 @@ export async function capturePatchGitControls(
       inaccessibleHooks.add(path);
     }
   };
+  // Git can retain an outside caller's cwd or move an inside caller to the
+  // worktree root. Resolve its relative paths in that setup directory.
+  const setupDirectory = async (checkout: string): Promise<string> =>
+    (
+      await runControl(
+        root,
+        checkout,
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+        { environment: { GIT_OBJECT_DIRECTORY: "." } },
+      )
+    ).replace(/\n$/u, "");
+
   const publicationHooks = {
     events: new Set<string>(),
     configured: new Set<string>(),
@@ -1047,9 +1100,12 @@ export async function capturePatchGitControls(
   const activeHostFilters = new Set<string>();
   const branchFilterSettings = new Set<string>();
   let hasConditionalFilters = false;
-  const filterCheckouts = new Set<string>();
+  const filterDirectories = new Map<string, string>();
   let checkoutCleanFilter = false;
-  const activeCheckoutFilters = async (checkout: string): Promise<string[]> => {
+  const activeCheckoutFilters = async (
+    checkout: string,
+    configurationDirectory: string,
+  ): Promise<string[]> => {
     const entries = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -1074,7 +1130,7 @@ export async function capturePatchGitControls(
           !(await userSelectedConfig(
             entries[index],
             configPath(entries[index + 1]!),
-            checkout,
+            configurationDirectory,
           )),
       );
     }
@@ -1083,7 +1139,8 @@ export async function capturePatchGitControls(
       .map(([key]) => key);
   };
   const captureReferences = async (checkout: string): Promise<void> => {
-    filterCheckouts.add(checkout);
+    const configurationDirectory = await setupDirectory(checkout);
+    filterDirectories.set(checkout, configurationDirectory);
     const records = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -1118,7 +1175,10 @@ export async function capturePatchGitControls(
       );
     for (const { origin } of settings) {
       if (origin.startsWith("file:")) {
-        const path = relativeFile(checkout, configPath(origin.slice(5)));
+        const path = relativeFile(
+          configurationDirectory,
+          configPath(origin.slice(5)),
+        );
         activeConfigurations.add(path);
       }
     }
@@ -1130,6 +1190,9 @@ export async function capturePatchGitControls(
             ? []
             : ["-c", `core.hooksPath=${configured}`]),
           "rev-parse",
+          // Report an entry relative to the worktree even when called from a subdirectory.
+          "--prefix",
+          "",
           "--git-path",
           "hooks/post-index-change",
         ]);
@@ -1263,13 +1326,15 @@ export async function capturePatchGitControls(
     for (const { scope, origin, key, value } of settings) {
       if (!/^(include|includeif\..*)\.path$/u.test(key)) continue;
       const relativeTo = origin.startsWith("file:")
-        ? dirname(relativeFile(checkout, configPath(origin.slice(5))))
-        : checkout;
+        ? dirname(
+            relativeFile(configurationDirectory, configPath(origin.slice(5))),
+          )
+        : configurationDirectory;
       await captureInclude(
         relativeTo,
         value,
         key.startsWith("includeif."),
-        await userSelectedConfig(scope, origin, checkout),
+        await userSelectedConfig(scope, origin, configurationDirectory),
       );
     }
     for (const path of activeConfigurations) await rememberConfiguration(path);
@@ -1279,13 +1344,16 @@ export async function capturePatchGitControls(
         /^filter\..+\.(clean|smudge|process)$/u.test(key),
       )
     ) {
-      for (const key of await activeCheckoutFilters(checkout)) {
+      for (const key of await activeCheckoutFilters(
+        checkout,
+        configurationDirectory,
+      )) {
         activeHostFilters.add(key);
         if (!key.endsWith(".smudge")) checkoutCleanFilter = true;
       }
     }
     for (const path of globalConfigurationPaths) {
-      const selected = relativeFile(checkout, path);
+      const selected = relativeFile(configurationDirectory, path);
       await rememberSelectedConfiguration(selected, true);
       activeConfigurations.add(selected);
     }
@@ -1338,15 +1406,18 @@ export async function capturePatchGitControls(
     }
     await captureHooks();
   };
+  const directoryArguments = ["--absolute-git-dir", "--git-common-dir"];
+  const readSelectedPath = async (argument: string) =>
+    (
+      await runControl(root, root, [
+        "rev-parse",
+        "--path-format=absolute",
+        argument,
+      ])
+    ).replace(/\n$/u, "");
   const selectedPaths: string[] = [];
-  for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
-    const output = await runControl(root, root, [
-      "rev-parse",
-      "--path-format=absolute",
-      argument,
-    ]);
-    selectedPaths.push(output.replace(/\n$/u, ""));
-  }
+  for (const argument of directoryArguments)
+    selectedPaths.push(await readSelectedPath(argument));
   const selectedDirectories = await Promise.all(
     selectedPaths.map(realControlPath),
   );
@@ -1413,12 +1484,13 @@ export async function capturePatchGitControls(
   const selectedCommonDirectory = usesCommonDirectoryMarker
     ? undefined
     : selectedDirectories[1];
+  const selectorDirectory = await setupDirectory(root);
   for (const argument of [
     ...(usesWorktreeMarker ? [] : ["--git-dir"]),
     ...(usesCommonDirectoryMarker ? [] : ["--git-common-dir"]),
   ]) {
     const path = relativeFile(
-      root,
+      selectorDirectory,
       (await runControl(root, root, ["rev-parse", argument])).replace(
         /\n$/u,
         "",
@@ -2069,7 +2141,10 @@ export async function capturePatchGitControls(
         root,
         root,
         ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-        { environment: { GIT_OBJECT_DIRECTORY: selected } },
+        {
+          callerContext: true,
+          environment: { GIT_OBJECT_DIRECTORY: selected },
+        },
       );
     } catch (error) {
       const failure = error as Error & { code?: unknown; status?: unknown };
@@ -2126,11 +2201,27 @@ export async function capturePatchGitControls(
       return [
         ...new Set(
           (
-            await Promise.all([...filterCheckouts].map(activeCheckoutFilters))
+            await Promise.all(
+              [...filterDirectories].map(([checkout, directory]) =>
+                activeCheckoutFilters(checkout, directory),
+              ),
+            )
           ).flat(),
         ),
       ];
     },
     validate: () => discover(false),
+    async validateCapturedSelection() {
+      for (const [index, argument] of directoryArguments.entries()) {
+        if (
+          (await realControlPath(await readSelectedPath(argument))) !==
+          selectedDirectories[index]
+        )
+          throw new Error(
+            "Selected Git administration changed during the patch. Inspect the checkout before retrying.",
+          );
+      }
+      await discover(false);
+    },
   };
 }

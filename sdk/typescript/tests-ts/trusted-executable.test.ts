@@ -78,6 +78,84 @@ async function resolveWindowsExecutable(
 }
 
 describe("trusted executable resolution", () => {
+  test("pins named askpass scripts on the transport PATH outside the worktree", async () => {
+    const root = await temporaryDirectory("askpass-");
+    const repository = join(root, "repo");
+    const trusted = join(root, "helpers");
+    await Promise.all([mkdir(repository), mkdir(trusted)]);
+    for (const directory of [repository, trusted]) {
+      await writeFile(join(directory, "askpass.sh"), "#!/bin/sh\nexit 1\n", {
+        mode: 0o700,
+      });
+    }
+    const resolved = await inspectTrustedExecutable(
+      "askpass.sh",
+      { PATH: [".", relative(repository, trusted)].join(delimiter) },
+      repository,
+      { gitTransportDirectory: repository },
+    );
+    expect(resolved.executable).toBe(
+      await realpath(join(trusted, "askpass.sh")),
+    );
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "preserves a virtualenv interpreter selected for a Git transport",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repo");
+      const venv = join(root, "venv");
+      await mkdir(repository);
+      expect(
+        spawnSync(PYTHON, ["-m", "venv", "--without-pip", "--symlinks", venv])
+          .status,
+      ).toBe(0);
+      const bin = join(venv, "bin");
+      const { executable } = await inspectTrustedExecutable(
+        join(bin, "python"),
+        { PATH: bin },
+        repository,
+        { gitTransportDirectory: repository },
+      );
+      expect(executable).not.toBeNull();
+      const result = spawnSync(
+        executable!,
+        ["-c", "import sys; print(sys.prefix)"],
+        {
+          encoding: "utf8",
+        },
+      );
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe(await realpath(venv));
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "pins askpass aliases that traverse a worktree link",
+    async () => {
+      const root = await temporaryDirectory();
+      const repository = join(root, "repo");
+      await mkdir(repository);
+      const helper = join(root, "trusted.sh");
+      const alias = join(root, "askpass");
+      const link = join(repository, "selected-helper");
+      await writeFile(helper, "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+      await symlink(helper, link);
+      await symlink(link, alias);
+      for (const name of ["askpass", alias]) {
+        const resolved = await inspectTrustedExecutable(
+          name,
+          { PATH: root },
+          repository,
+          {
+            gitTransportDirectory: repository,
+          },
+        );
+        expect(resolved.executable).toBe(await realpath(helper));
+      }
+    },
+  );
+
   test("keeps executable search boundaries isolated between concurrent campaigns", async () => {
     const first = await temporaryDirectory();
     const second = await temporaryDirectory();
@@ -205,6 +283,40 @@ describe("trusted executable resolution", () => {
     ).toEqual({
       executable: join(trusted, executable),
       environment: { KEEP: "ok", PATH: trusted },
+    });
+  });
+
+  test("preserves independent invocation and worktree protection roots", async () => {
+    const root = await temporaryDirectory();
+    const invocation = join(root, "invocation");
+    const worktree = join(root, "worktree");
+    const trusted = join(root, "trusted");
+    const linked = join(root, "linked-invocation");
+    const executable = process.platform === "win32" ? "git.exe" : "git";
+    for (const directory of [invocation, worktree, trusted]) {
+      await mkdir(directory);
+      await writeFile(
+        join(directory, executable),
+        "synthetic local executable",
+      );
+      await chmod(join(directory, executable), 0o700);
+    }
+    await symlink(
+      invocation,
+      linked,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const resolved = await resolveTrustedExecutable(
+      "git",
+      {
+        PATH: [linked, invocation, worktree, trusted].join(delimiter),
+        KEEP: "unchanged",
+      },
+      [worktree, invocation],
+    );
+    expect(resolved).toEqual({
+      executable: join(trusted, executable),
+      environment: { PATH: trusted, KEEP: "unchanged" },
     });
   });
 

@@ -830,6 +830,21 @@ test.each([
     expect(trees).toHaveLength(2);
     expect(trees[1]).toBe(trees[0]);
     if (filtered) {
+      const alternates = (value: string | undefined) =>
+        execFileSync("git", ["count-objects", "-v"], {
+          cwd: repository,
+          env: { ...environment, GIT_ALTERNATE_OBJECT_DIRECTORIES: value },
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        })
+          .split("\n")
+          .filter((line) => line.startsWith("alternate: "));
+      const expectedAlternates =
+        selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+          ? alternates(environment[selector])
+          : undefined;
+      if (expectedAlternates !== undefined)
+        expect(expectedAlternates.length).toBeGreaterThan(0);
       for (const binding of bindings) {
         if (selector === "GIT_CONFIG_COUNT")
           expect(binding).toMatchObject({
@@ -837,7 +852,12 @@ test.each([
             GIT_CONFIG_KEY_0: "core.fsmonitor",
             GIT_CONFIG_VALUE_0: "false",
           });
-        else expect(binding).toHaveProperty(selector, environment[selector]);
+        else if (expectedAlternates === undefined)
+          expect(binding).toHaveProperty(selector, environment[selector]);
+        else {
+          expect(binding).toHaveProperty(selector);
+          expect(alternates(binding[selector])).toEqual(expectedAlternates);
+        }
       }
     }
   },

@@ -417,6 +417,9 @@ describe("CLI skill commands", () => {
           "lin_api_SYNTHETIC_EXPLICIT",
         ],
         dependencies({
+          currentDirectory: await skillState.temporaryDirectory(
+            "codex-security-skills-",
+          ),
           environment: {
             CODEX_SECURITY_LINEAR_API_KEY: "lin_api_SYNTHETIC_SECRET",
             LINEAR_API_KEY: "lin_api_SYNTHETIC_FALLBACK",
@@ -548,6 +551,9 @@ describe("CLI skill commands", () => {
           '{"labels":{"name":{"eq":"security"}}}',
         ],
         dependencies({
+          currentDirectory: await skillState.temporaryDirectory(
+            "codex-security-skills-",
+          ),
           environment: { LINEAR_ACCESS_TOKEN: "SYNTHETIC_OAUTH_TOKEN" },
           linearClient: ({ accessToken }) => {
             expect(accessToken).toBe("SYNTHETIC_OAUTH_TOKEN");
@@ -1030,6 +1036,9 @@ describe("CLI skill commands", () => {
             'model_reasoning_effort="high"',
           ],
           dependencies({
+            currentDirectory: await skillState.temporaryDirectory(
+              "codex-security-skills-",
+            ),
             onCodex,
           }),
         ),
@@ -1138,6 +1147,9 @@ describe("CLI skill commands", () => {
             ...overrides.flatMap((override) => ["--codex", override]),
           ],
           dependencies({
+            currentDirectory: await skillState.temporaryDirectory(
+              "codex-security-skills-",
+            ),
             environment: { SYNTHETIC_GATEWAY_KEY: "SYNTHETIC_VALUE" },
             onCodex,
           }),
@@ -1164,6 +1176,9 @@ describe("CLI skill commands", () => {
   test.each(["validate", "patch", "verify-fix"] as const)(
     "passes explicit native settings to %s",
     async (command) => {
+      const directory = await skillState.temporaryDirectory(
+        "codex-security-skills-",
+      );
       for (const [override, forwarded] of [
         ["analytics.enabled=false", "analytics.enabled=false"],
         ["analytics.enabled=true", "analytics.enabled=true"],
@@ -1184,6 +1199,7 @@ describe("CLI skill commands", () => {
               override,
             ],
             dependencies({
+              currentDirectory: directory,
               onCodex: (args, output) => {
                 invocation = args;
                 if (command === "verify-fix") {
@@ -1229,6 +1245,7 @@ describe("CLI skill commands", () => {
                 : []),
             ],
             dependencies({
+              currentDirectory: directory,
               onCodex,
             }),
           ),
@@ -1242,6 +1259,9 @@ describe("CLI skill commands", () => {
   test.each(["validate", "patch", "verify-fix"] as const)(
     "selects the model and reasoning effort directly for %s",
     async (command) => {
+      const directory = await skillState.temporaryDirectory(
+        "codex-security-skills-",
+      );
       for (const [model, effort] of [
         ["gpt-6-astra", "max"],
         ["gpt-6.1-sol", "max"],
@@ -1262,6 +1282,7 @@ describe("CLI skill commands", () => {
               effort,
             ],
             dependencies({
+              currentDirectory: directory,
               onCodex: (args, output) => {
                 invocation = args;
                 if (command === "verify-fix") {
@@ -1314,6 +1335,7 @@ describe("CLI skill commands", () => {
           await invalidStderr.run(
             [command, "a candidate finding", ...options],
             dependencies({
+              currentDirectory: directory,
               onCodex,
             }),
           ),

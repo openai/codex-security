@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
@@ -9,7 +9,7 @@ const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
 
 test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
-  "patch probes nested placeholders independently of selected-root %s",
+  "patch discovery preserves %s while treating ordinary nested source as data",
   async (setting) => {
     const root = await fixtures.create("patch-probe-environment-");
     const support = await fixtures.create("patch-probe-administration-");
@@ -62,6 +62,34 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
       ),
     ).toBe(marker);
 
+    const nested = join(root, "source");
+    let nestedHead: string | undefined;
+    let nestedIndex: Buffer<ArrayBuffer> | undefined;
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      git(
+        ["-C", nested, "config", "user.name", "Synthetic User"],
+        selectedEnvironment,
+      );
+      git(
+        ["-C", nested, "config", "user.email", "synthetic@example.test"],
+        selectedEnvironment,
+      );
+      git(["-C", nested, "add", "app.ts"], selectedEnvironment);
+      git(
+        ["-C", nested, "commit", "-m", "Synthetic shared object baseline"],
+        selectedEnvironment,
+      );
+      nestedHead = git(
+        ["-C", nested, "rev-parse", "HEAD"],
+        selectedEnvironment,
+      );
+      nestedIndex = await readFile(join(marker, "index"));
+      expect(() => git(["-C", nested, "rev-parse", "HEAD"])).toThrow();
+      await expect(lstat(join(marker, "objects"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+
     let launches = 0;
     let rootCommands = 0;
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
@@ -72,8 +100,19 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
           ...selectedEnvironment,
           ...options?.environment,
         };
-        if (!args.includes("--resolve-git-dir") && !args.includes("-C")) {
-          expect(effectiveEnvironment[setting]).toBe(selectedPath);
+        const objectDirectoryProbe =
+          args.join(" ") ===
+            "rev-parse --path-format=absolute --git-path objects" &&
+          options?.environment?.["GIT_OBJECT_DIRECTORY"] === ".";
+        if (
+          !args.includes("--resolve-git-dir") &&
+          !args.includes("-C") &&
+          !objectDirectoryProbe
+        ) {
+          expect(effectiveEnvironment[setting]).toBeDefined();
+          expect(
+            resolve(options?.directory ?? cwd, effectiveEnvironment[setting]!),
+          ).toBe(selectedPath);
           rootCommands++;
         }
         return runGitRepositoryCommand(command, args, cwd, {
@@ -83,6 +122,9 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
       },
       onCodex: async (_args, output) => {
         launches++;
+        const controls = output?.appServer?.permissions?.readOnlyPaths;
+        expect(controls).toBeDefined();
+        expect(controls).not.toContain(marker);
         await writeFile(source, "after\n");
         output?.stdout.write("Synthetic patch complete.\n");
         return 0;
@@ -96,5 +138,14 @@ test.each(["GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] as const)(
     expect(await readFile(join(marker, "HEAD"), "utf8")).toBe(markerHead);
     expect(git(["rev-parse", "HEAD"], selectedEnvironment)).toBe(head);
     expect(await readFile(join(root, ".git", "index"))).toEqual(index);
+    if (setting === "GIT_OBJECT_DIRECTORY") {
+      expect(
+        git(["-C", nested, "rev-parse", "HEAD"], selectedEnvironment),
+      ).toBe(nestedHead!);
+      expect(await readFile(join(marker, "index"))).toEqual(nestedIndex!);
+      await expect(lstat(join(marker, "objects"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
   },
 );

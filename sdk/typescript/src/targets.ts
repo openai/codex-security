@@ -42,7 +42,7 @@ export const UNSUPPORTED_GIT_ENVIRONMENT: ReadonlySet<string> = new Set([
   "GIT_COMMON_DIR",
   "GIT_REPLACE_REF_BASE",
 ]);
-const GIT_REPOSITORY_ENVIRONMENT = new Set([
+export const GIT_REPOSITORY_ENVIRONMENT = new Set([
   ...UNSUPPORTED_GIT_ENVIRONMENT,
   "GIT_CEILING_DIRECTORIES",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
@@ -213,37 +213,55 @@ type ReadWorktreeGit = (
   signal?: AbortSignal,
 ) => Promise<string>;
 
+interface GitWorktreeContext {
+  readGit?: ReadWorktreeGit;
+  protectedRoot?: string;
+  objectDirectory?: string;
+  runGit?: (args: readonly string[]) => Promise<string>;
+}
+
+function worktreeGit(
+  repository: string,
+  signal: AbortSignal | undefined,
+  options: GitWorktreeContext,
+) {
+  const objectEnvironment =
+    options.objectDirectory === undefined
+      ? {}
+      : { GIT_OBJECT_DIRECTORY: options.objectDirectory };
+  return (args: readonly string[]) =>
+    options.runGit?.(args) ??
+    options.readGit?.(repository, args, signal) ??
+    gitOutput(
+      options.protectedRoot ?? repository,
+      args,
+      signal,
+      objectEnvironment,
+      repository,
+    );
+}
+
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean; readGit?: ReadWorktreeGit } = {},
+  options: GitWorktreeContext & { requireIfPresent?: boolean } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
-  const readGit = options.readGit ?? gitOutput;
+  const output = worktreeGit(repository, signal, options);
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
   let canonicalRoot: string;
   try {
     if (strict) {
-      if (
-        (await readGit(
-          repository,
-          ["rev-parse", "--is-inside-git-dir"],
-          signal,
-        )) === "true"
-      ) {
+      if ((await output(["rev-parse", "--is-inside-git-dir"])) === "true") {
         throw new InvalidTargetError(
           "The selected path is inside Git metadata. Select a worktree directory instead.",
         );
       }
       if (markerRoot === null) return null;
     }
-    const root = await readGit(
-      repository,
-      ["rev-parse", "--show-toplevel"],
-      signal,
-    );
+    const root = await output(["rev-parse", "--show-toplevel"]);
     canonicalRoot = await abortable(() => realpath(root), signal);
   } catch (error) {
     throwIfAborted(signal);
@@ -268,7 +286,7 @@ export async function enclosingGitWorktreeRoot(
     );
   }
   if (markerRoot !== null)
-    await requireGitWorktreeBinding(canonicalRoot, signal, readGit);
+    await requireGitWorktreeBinding(canonicalRoot, signal, options);
   return canonicalRoot;
 }
 
@@ -374,12 +392,12 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-  options: { includeLocalObjects?: boolean; readGit?: ReadWorktreeGit } = {},
+  options: GitWorktreeContext & { includeLocalObjects?: boolean } = {},
 ): Promise<[string, string, ...string[]]> {
-  const readGit = options.readGit ?? gitOutput;
+  const output = worktreeGit(repository, signal, options);
   const [directory, commonDirectory] = await Promise.all([
-    readGit(repository, ["rev-parse", "--absolute-git-dir"], signal),
-    readGit(repository, ["rev-parse", "--git-common-dir"], signal),
+    output(["rev-parse", "--absolute-git-dir"]),
+    output(["rev-parse", "--git-common-dir"]),
   ]);
   const roots = await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
@@ -495,16 +513,57 @@ export async function gitObjectDirectories(
 
 async function requireGitWorktreeBinding(
   repository: string,
-  signal: AbortSignal | undefined,
-  readGit: ReadWorktreeGit,
+  signal?: AbortSignal,
+  options: GitWorktreeContext = {},
 ): Promise<void> {
   let cause: unknown;
   try {
     const [directory, commonDirectory] = await gitMetadataDirectories(
       repository,
       signal,
-      { readGit },
+      options,
     );
+    if (
+      options.runGit !== undefined &&
+      (relative(directory, commonDirectory) === "" ||
+        (await options.runGit([
+          "config",
+          "--default",
+          "false",
+          "--type",
+          "bool",
+          "--get",
+          "extensions.worktreeConfig",
+        ])) === "true")
+    ) {
+      // The command context pins --work-tree; verify the repository's effective binding too.
+      const configuredWorktree = await options.runGit([
+        "config",
+        "--default",
+        "",
+        "--path",
+        "--get",
+        "core.worktree",
+      ]);
+      if (
+        configuredWorktree &&
+        relative(
+          repository,
+          await abortable(
+            () =>
+              realpath(
+                isAbsolute(configuredWorktree)
+                  ? configuredWorktree
+                  : `${directory}${sep}${configuredWorktree}`,
+              ),
+            signal,
+          ),
+        ) !== ""
+      )
+        throw new InvalidTargetError(
+          "Git's worktree root does not match the selected checkout's .git marker. Select the intended checkout explicitly or fix its Git configuration.",
+        );
+    }
     if (
       [directory, commonDirectory].every(
         (path) => !relativePathIsOutside(relative(repository, path)),
@@ -513,10 +572,8 @@ async function requireGitWorktreeBinding(
       return;
     if (relative(directory, commonDirectory) === "") {
       // The toplevel check already verified the configured worktree path.
-      if (
-        await readGit(repository, ["config", "--get", "core.worktree"], signal)
-      )
-        return;
+      const output = worktreeGit(repository, signal, options);
+      if (await output(["config", "--get", "core.worktree"])) return;
     } else {
       // A copied backlink is not registration in the common Git directory.
       const worktreesDirectory = await abortable(

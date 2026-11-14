@@ -98,7 +98,7 @@ describe("GitHub patch endpoint ports", () => {
             completePatches(args, output);
             return 0;
           },
-          onRepositoryCommand: (command, args, cwd, options) => {
+          onRepositoryCommand: async (command, args, cwd, options) => {
             if (command === "git") {
               if (args.includes("ls-remote"))
                 return runLocalHostingTransport(
@@ -127,7 +127,8 @@ describe("GitHub patch endpoint ports", () => {
                       {
                         url: `${base}/pull/7`,
                         head: commit,
-                        repository: "synthetic-push-id",
+                        repositoryId: "synthetic-push-id",
+                        state: "OPEN",
                         crossRepository: true,
                       },
                     ]
@@ -135,14 +136,38 @@ describe("GitHub patch endpoint ports", () => {
               );
             if (args.at(-1) === ".url") return base;
             if (args[0] === "repo") {
-              selectors.push(args[2]!);
-              if (args.at(-1) === ".id")
-                return args[2]!.endsWith("/synthetic-user/repository")
+              const selectedRemote = await runGitRepositoryCommand(
+                "git",
+                ["ls-remote", "--get-url", "codex-security-push"],
+                cwd,
+                options,
+              );
+              const selectedUrl = new URL(selectedRemote.trim());
+              const selected = selectedUrl.pathname
+                .replace(/^\/+|\/+$/gu, "")
+                .replace(/\.git$/u, "");
+              if (args[1] === "set-default") {
+                expect(args).toEqual(["repo", "set-default", "--view"]);
+                return selected;
+              }
+              expect(args).toEqual([
+                "repo",
+                "view",
+                ...(new URL(base).port ? [`${selectorHost}/${selected}`] : []),
+                "--json",
+                "id,url",
+                "--jq",
+                "tojson",
+              ]);
+              selectors.push(`${selectorHost}/${selected}`);
+              return JSON.stringify({
+                id: selected.startsWith("synthetic-user/")
                   ? "synthetic-push-id"
-                  : "synthetic-fetch-id";
-              expect(args.at(-1)).toBe(".nameWithOwner");
-              expect(args[2]).toBe(`${selectorHost}/synthetic-user/repository`);
-              return "synthetic-user/repository";
+                  : "synthetic-fetch-id",
+                url: new URL(base).port
+                  ? `https://${args[2]}`
+                  : `${selectedUrl.protocol}//${selectedUrl.hostname}/${selected}`,
+              });
             }
             expect(args[1]).toBe("create");
             expect(args[args.indexOf("--head") + 1]).toBe(

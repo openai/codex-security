@@ -146,19 +146,20 @@ test.each([
       options,
     ) => {
       if (command === "git") {
-        if (args[0] === "switch" && args[1] === "-c") {
+        const gitArgs = args[0] === "-C" ? args.slice(2) : args;
+        if (gitArgs[0] === "switch" && gitArgs[1] === "-c") {
           await writeFile(
             join(directory, "other.ts"),
             "unrelated local edit\n",
           );
           indexBefore = await readFile(indexPath);
         }
-        if (args[0] === "push") pushes++;
+        if (gitArgs[0] === "push") pushes++;
         const output = await runGitRepositoryCommand(command, args, cwd, {
           ...options,
           environment: { GIT_CONFIG_GLOBAL: global, ...options?.environment },
         });
-        if (lostResult && args[0] === "commit")
+        if (lostResult && gitArgs[0] === "commit")
           throw new Error("Synthetic commit result lost.");
         return output;
       }

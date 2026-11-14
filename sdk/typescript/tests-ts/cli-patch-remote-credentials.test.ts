@@ -153,9 +153,19 @@ test.each(["github.example.test", "gitlab.com"])(
                 commandOptions,
               ),
             ).toBe(remote);
-            expect(args).toContain(
-              `remote.${alias}.serveroption=${serverOption}`,
-            );
+            expect(
+              runGitRepositoryCommand(
+                "git",
+                [
+                  ...args.slice(0, transport),
+                  "config",
+                  "--get",
+                  `remote.${alias}.serveroption`,
+                ],
+                cwd,
+                commandOptions,
+              ),
+            ).toBe(serverOption);
             expect(
               runGitRepositoryCommand(
                 "git",

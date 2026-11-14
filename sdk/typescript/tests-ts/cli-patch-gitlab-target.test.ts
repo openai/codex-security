@@ -249,6 +249,7 @@ describe("GitLab patch destinations", () => {
               return hasRequest && selectedTarget === target && matches
                 ? JSON.stringify({
                     url,
+                    state: "opened",
                     head: mode === "different saved commit" ? "other" : commit,
                   })
                 : "";
@@ -274,7 +275,7 @@ describe("GitLab patch destinations", () => {
       }
       if (mode === "different saved commit")
         expect(outcome.stderr).toContain(
-          "does not contain the saved patch commit",
+          "does not match the saved patch commit or is no longer open",
         );
       expect(lookups > 0).toBe(source !== target);
       expect(creations.length).toBe(existing || blocked ? 0 : 1);
