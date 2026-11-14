@@ -797,6 +797,9 @@ describe("CodexSecurity orchestration", () => {
     const { client, prepareRuntime } = localClient(
       {
         codexOverrides: {
+          features: {
+            multi_agent_v2: { max_concurrent_threads_per_session: 1 },
+          },
           model: "configured-model",
           model_reasoning_effort: "high",
         },
@@ -805,6 +808,7 @@ describe("CodexSecurity orchestration", () => {
     );
 
     await expect(client.preflight(repository)).resolves.toMatchObject({
+      configuredParentSessionThreadLimit: 1,
       model: "configured-model",
       reasoningEffort: "high",
     });
@@ -1039,6 +1043,25 @@ describe("CodexSecurity orchestration", () => {
         /model|reasoning effort/u,
       );
       await client.close();
+    }
+  });
+
+  test("rejects an invalid configured thread limit during scan preflight", async () => {
+    const { repository } = await repositoryDirectories();
+    for (const limit of [0, -1, 1.5]) {
+      await using client = new TestClient(
+        {
+          codexOverrides: {
+            features: {
+              multi_agent_v2: { max_concurrent_threads_per_session: limit },
+            },
+          },
+        },
+        {},
+      );
+      await expect(client.preflight(repository)).rejects.toThrow(
+        "max_concurrent_threads_per_session must be a positive integer",
+      );
     }
   });
 

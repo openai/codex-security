@@ -7,7 +7,6 @@ import {
   scanRuntimeCodexConfig,
 } from "../src/api.js";
 import {
-  configuredParentSessionThreadLimit,
   mergedCodexConfig,
   scanModelProvider,
   writeCodexConfig,
@@ -23,29 +22,6 @@ const { temporaryDirectory, cleanup } = createApiTestFixtures(
 afterEach(cleanup);
 
 describe("CodexSecurity preflight configuration", () => {
-  test.each([0, -1, 1.5])(
-    "rejects invalid parent session thread limit %s",
-    (limit) => {
-      expect(() =>
-        configuredParentSessionThreadLimit({
-          features: {
-            multi_agent_v2: { max_concurrent_threads_per_session: limit },
-          },
-        }),
-      ).toThrow(
-        "max_concurrent_threads_per_session must be a positive integer",
-      );
-    },
-  );
-
-  test("accepts a session limited to the parent thread", () => {
-    expect(
-      configuredParentSessionThreadLimit({
-        features: { multi_agent_v2: { max_concurrent_threads_per_session: 1 } },
-      }),
-    ).toBe(1);
-  });
-
   test("retains only native skill path and enabled settings for fallback workers", () => {
     const rootSkill = join(
       tmpdir(),
