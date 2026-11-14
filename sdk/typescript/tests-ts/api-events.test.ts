@@ -714,28 +714,32 @@ describe("one-shot scan events", () => {
     const onReconnect = mock();
     async function* events(): AsyncGenerator<ThreadEvent> {
       for (const message of [
-        "Reconnecting... 1/5 (ECONNRESET org-private)",
-        "Reconnecting... 2/5 (Rate limit reached for org-private. Please try again in 1.2s.)",
-        "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
-        "Reconnecting... 4/5",
-        "Reconnecting... 5/5 (429 rate limit reached org-private)",
-        "Reconnecting... 6/8 (Rate limit reached for org-private. Please try again in 28ms.)",
-        "Reconnecting... 7/8 (Rate limit reached. Please try again in 3600000ms.)",
-        "Reconnecting... 8/8 (Rate limit reached. Please try again in 3600001ms.)",
+        "Reconnecting... 1/10 (ECONNRESET org-private)",
+        "Reconnecting... 2/10 (Rate limit reached for org-private. Please try again in 1.2s.)",
+        "Reconnecting... 3/10 (Rate limit reached. Please try again in 999999s.)",
+        "Reconnecting... 4/10",
+        "Reconnecting... 5/10 (429 rate limit reached org-private)",
+        "Reconnecting... 6/10 (error sending request for url (https://example.test/v1?error=invalid.api.key))",
+        "Reconnecting... 7/10 (error sending request for url (https://example.test/v1#model.not.found))",
+        "Reconnecting... 8/10 (Rate limit reached for org-private. Please try again in 28ms.)",
+        "Reconnecting... 9/10 (Rate limit reached. Please try again in 3600000ms.)",
+        "Reconnecting... 10/10 (Rate limit reached. Please try again in 3600001ms.)",
       ])
         yield { type: "error", message };
       yield* completedEvents();
     }
     await runEvents(scanDir, events(), { onReconnect });
     expect(onReconnect.mock.calls).toEqual([
-      [1, 5, { reason: "network" }],
-      [2, 5, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
-      [3, 5, { reason: "rate_limit" }],
-      [4, 5, undefined],
-      [5, 5, { reason: "rate_limit" }],
-      [6, 8, { reason: "rate_limit", retryAfterSeconds: 0.028 }],
-      [7, 8, { reason: "rate_limit", retryAfterSeconds: 3600 }],
-      [8, 8, { reason: "rate_limit" }],
+      [1, 10, { reason: "network" }],
+      [2, 10, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
+      [3, 10, { reason: "rate_limit" }],
+      [4, 10, undefined],
+      [5, 10, { reason: "rate_limit" }],
+      [6, 10, { reason: "network" }],
+      [7, 10, { reason: "network" }],
+      [8, 10, { reason: "rate_limit", retryAfterSeconds: 0.028 }],
+      [9, 10, { reason: "rate_limit", retryAfterSeconds: 3600 }],
+      [10, 10, { reason: "rate_limit" }],
     ]);
   });
 
@@ -743,6 +747,7 @@ describe("one-shot scan events", () => {
     for (const message of [
       "Reconnecting... 1/5 (401 invalid API key org-private)",
       "Reconnecting... 1/5 (403 model access denied org-private)",
+      "Reconnecting... 1/5 (error sending request for url (https://example.test/v1) error=invalid.api.key)",
     ]) {
       const scanDir = join(await temporaryDirectory(), "partial-scan");
       await mkdir(scanDir, { mode: 0o700 });
@@ -781,10 +786,30 @@ describe("one-shot scan events", () => {
     });
   });
 
+  test("continues while Codex waits for the network to reconnect", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const onReconnect = mock();
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... waiting for network (error sending request for url (https://api.example.test/v1/responses))",
+      };
+      yield { type: "error", message: "Reconnecting... waiting for network" };
+      yield* completedEvents();
+    }
+    await runEvents(scanDir, events(), { onReconnect });
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
   test("keeps non-reconnect stream errors terminal", async () => {
     const scanDir = join(await temporaryDirectory(), "partial-scan");
     await mkdir(scanDir, { mode: 0o700 });
-    for (const message of ["stream disconnected", "Reconnecting... 6/5"]) {
+    for (const message of [
+      "stream disconnected",
+      "Reconnecting... 6/5",
+      "Reconnecting... waiting for networking",
+    ]) {
       async function* failedEvents(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
         yield { type: "turn.started" };

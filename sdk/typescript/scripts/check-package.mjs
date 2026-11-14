@@ -198,6 +198,7 @@ const posixMcpLauncher =
   "package/_bundled_plugin/scripts/launch_codex_security_mcp";
 for (const [path, name] of [
   ["package/bin/codex-security.mjs", "CLI"],
+  ["package/_bundled_plugin/scripts/dispatch_inventory_tool", "inventory tool"],
   [posixMcpLauncher, "MCP"],
 ]) {
   const permissions =

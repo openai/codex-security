@@ -559,54 +559,50 @@ describe("CLI findings history", () => {
     },
   );
 
-  test("shows the latest completed scan without requiring its identifier", async () => {
-    for (const command of [
-      ["scans", "show"],
-      ["scans", "show", "latest"],
-    ]) {
-      const calls: Array<readonly string[]> = [];
-      const stdout = capture();
-      expect(
-        await main(
-          [...command, "--json"],
-          stdout.stream,
-          capture().stream,
-          dependencies({
-            onWorkbench: (args): JsonObject => {
-              calls.push(args);
-              return args[0] === "list-scans"
-                ? {
-                    scans: [
-                      {
-                        scanId: "latest",
-                        targetPath: "/current/repository",
-                        progress: { status: "complete" },
-                        completedAt: "2025-12-01T00:00:00Z",
-                      },
-                    ],
-                  }
-                : { scan: { scanId: "latest", findings: [] } };
-            },
-          }),
-        ),
-      ).toBe(0);
-      expect(calls).toEqual([
-        [
-          "list-scans",
-          "--repository",
-          "/current/repository",
-          "--status",
-          "complete",
-          "--limit",
-          "1",
-        ],
-        ["get-scan", "--scan-id", "latest"],
-      ]);
-      expect(JSON.parse(stdout.text())).toEqual({
-        scanId: "latest",
-        findings: [],
-      });
-    }
+  test("resolves the literal latest scan identifier", async () => {
+    const calls: Array<readonly string[]> = [];
+    const stdout = capture();
+    expect(
+      await main(
+        ["scans", "show", "latest", "--json"],
+        stdout.stream,
+        capture().stream,
+        dependencies({
+          onWorkbench: (args): JsonObject => {
+            calls.push(args);
+            return args[0] === "list-scans"
+              ? {
+                  scans: [
+                    {
+                      scanId: "latest",
+                      targetPath: "/current/repository",
+                      progress: { status: "complete" },
+                      completedAt: "2025-12-01T00:00:00Z",
+                    },
+                  ],
+                }
+              : { scan: { scanId: "latest", findings: [] } };
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(calls).toEqual([
+      [
+        "list-scans",
+        "--repository",
+        "/current/repository",
+        "--prefer-worktree",
+        "--status",
+        "complete",
+        "--limit",
+        "1",
+      ],
+      ["get-scan", "--scan-id", "latest"],
+    ]);
+    expect(JSON.parse(stdout.text())).toEqual({
+      scanId: "latest",
+      findings: [],
+    });
   });
 
   test("explains when no completed scan is available", async () => {

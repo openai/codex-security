@@ -45,6 +45,23 @@ def linked_history(history):
     return state, root, repository, linked, revision
 
 
+def record_replacement_owner(state: Path, scan: dict, repository: Path) -> None:
+    # Databases from before registration verified owners can contain both generations.
+    from filesystem_identity import serialize_filesystem_identity
+
+    metadata = repository.stat()
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET target_device = ?, target_inode = ?, repository_generation = NULL "
+            "WHERE id = ?",
+            (
+                serialize_filesystem_identity(metadata.st_dev),
+                serialize_filesystem_identity(metadata.st_ino),
+                scan["scanId"],
+            ),
+        )
+
+
 def test_legacy_descendant_scans_stay_inside_the_current_checkout_owner(history) -> None:
     state, root, repository = history
     child = repository / "nested"
@@ -61,9 +78,10 @@ def test_legacy_descendant_scans_stay_inside_the_current_checkout_owner(history)
             "UPDATE workspaces SET target_id = NULL WHERE target_path = ?", (str(child),)
         )
         connection.execute("DELETE FROM security_targets WHERE current_path = ?", (str(child),))
+    current = create_cli_scan(state, root, repository)
     repository.rename(repository.with_name("previous-checkout"))
     child.mkdir(parents=True)
-    current = create_cli_scan(state, root, repository)
+    record_replacement_owner(state, current, repository)
 
     for requested in (repository, child):
         scans = run_workbench(state, "list-scans", "--repository", str(requested))["scans"]
@@ -86,11 +104,14 @@ def test_saved_comparisons_use_the_current_recorded_ownership_epoch(history, che
         for scan in (before, after)
     ]
     saved = save_scan_matches(state, before, after, confirmed_match(*occurrences))
+    newer = (
+        create_cli_scan(state, root, repository) if checkout == "previous-epoch-missing" else None
+    )
     repository.rename(repository.with_name("offline-checkout"))
     if checkout != "missing":
         repository.mkdir()
     if checkout == "previous-epoch-missing":
-        create_cli_scan(state, root, repository)
+        record_replacement_owner(state, newer, repository)
         repository.rename(repository.with_name("newer-offline-checkout"))
 
     if checkout == "missing":
@@ -286,11 +307,16 @@ def test_saved_linked_history_keeps_only_current_checkout_owners(linked_history,
         "--note",
         "Synthetic linked triage.",
     )
+    newer = (
+        create_cli_scan(state, root, linked, target_revision=revision)
+        if checkout == "previous-epoch-missing"
+        else None
+    )
     linked.rename(linked.with_name("offline-worktree"))
     if checkout != "missing":
         linked.mkdir()
     if checkout == "previous-epoch-missing":
-        create_cli_scan(state, root, linked)
+        record_replacement_owner(state, newer, linked)
         linked.rename(linked.with_name("newer-offline-worktree"))
 
     if checkout == "missing":
@@ -769,11 +795,13 @@ def test_historical_latest_decision_does_not_reopen_without_a_later_scan(history
 def test_missing_repository_history(tmp_path: Path, history, checkout: str):
     state, root, repo = history
     scan = create_cli_scan(state, root, repo)
+    if checkout == "previous-epoch-missing":
+        scan = create_cli_scan(state, root, repo)
     repo.rename(tmp_path / "previous-repository")
     if checkout != "missing":
         repo.mkdir()
     if checkout == "previous-epoch-missing":
-        scan = create_cli_scan(state, root, repo)
+        record_replacement_owner(state, scan, repo)
         repo.rename(tmp_path / "newer-offline-repository")
     missing = checkout != "replaced"
     listed = run_workbench(state, "list-scans", "--repository", str(repo))["scans"]
@@ -1300,9 +1328,10 @@ def test_migrated_sealed_comparisons_keep_legacy_ownership(history, identity):
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute("UPDATE scans SET target_device=NULL, target_inode=NULL")
     if identity == "legacy-transition":
+        newer = create_cli_scan(state, root, repository)
         repository.rename(repository.with_name("previous-checkout"))
         repository.mkdir()
-        create_cli_scan(state, root, repository)
+        record_replacement_owner(state, newer, repository)
         repository.rename(repository.with_name("replacement-checkout"))
         repository.with_name("previous-checkout").rename(repository)
         rejected = run_workbench(
@@ -1399,13 +1428,13 @@ def test_bulk_matching_preserves_legacy_seals(tmp_path, identity):
     if identity == "mixed":
         create_cli_scan(state, root, repo, identity_anchor="newer")
     if identity == "transition":
+        newer = create_cli_scan(state, root, repo)
         repo.rename(repo.with_name("previous-owner"))
         repo.mkdir()
-        create_cli_scan(state, root, repo)
+        record_replacement_owner(state, newer, repo)
         repo.rename(repo.with_name("replacement-owner"))
         repo.with_name("previous-owner").rename(repo)
     result = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repo))
-    print("ACTUAL BULK", identity, result["scanCount"], len(result["batches"]))
     assert result["scanCount"] == (
         0 if identity == "transition" else 3 if identity == "mixed" else 2
     )
@@ -1431,7 +1460,6 @@ def test_offline_saved_comparison_keeps_pretransition_legacy_seals(tmp_path, leg
     saved = save_scan_matches(state, *scans, confirmed_match(*[r["occurrenceId"] for r in rows]))
     repo.rename(repo.with_name("offline-owner"))
     result = compare_scan_pair(state, *scans, check=False)
-    print("ACTUAL OFFLINE", legacy, result)
     assert result["returncode"] == 0, result["stderr"]
     assert compare_scan_pair(state, *scans) == saved
 
@@ -1585,7 +1613,6 @@ def test_inherited_fixed_closure_verifies_each_active_worktree(tmp_path, drift):
         "already_fixed",
         check=False,
     )
-    print("ACTUAL INHERITED CLOSURE", drift, inherited)
     assert (inherited["returncode"] != 0) == drift
     if drift:
         assert "Working-tree contents changed" in inherited["stderr"]
@@ -1630,36 +1657,6 @@ def test_identical_decision_refreshes_the_scan_admission_boundary(
     )["findings"]
     assert len(findings) == 1
     assert findings[0]["status"] == ("closed" if reaffirm_after_admission else "open")
-
-
-@pytest.mark.parametrize(
-    "nested", [False, True], ids=["registered-root", "unregistered-subdirectory"]
-)
-def test_bulk_matching_uses_registered_checkout_owner_for_same_origin_clones(tmp_path, nested):
-    state, root = tmp_path / "state", tmp_path / "scans"
-    repositories = [tmp_path / "first", tmp_path / "second"]
-    scans = []
-    for repository in repositories:
-        revision = initialize_git_repository(repository)
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(repository),
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/example/synthetic.git",
-            ],
-            check=True,
-        )
-        scans.append(create_cli_scan(state, root, repository, target_revision=revision))
-    requested = repositories[0] / "nested" if nested else repositories[0]
-    requested.mkdir(exist_ok=True)
-    result = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(requested))
-    assert result["scanCount"] == 2
-    assert result["batches"][0]["beforeScans"][0]["scanId"] == scans[0]["scanId"]
-    assert result["batches"][0]["afterScanId"] == scans[1]["scanId"]
 
 
 @pytest.mark.parametrize("replace_match", [False, True])

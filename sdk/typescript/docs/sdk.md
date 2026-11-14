@@ -330,6 +330,10 @@ console.log(plan);
 `preflight()` checks local inputs without starting Codex or using the network. The returned `stateDirectory` identifies the checked storage root, including when the final scan directory will be allocated automatically.
 It does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
+Neither preflight starts a Deep Scan worker or executes a command under its
+generated permissions, so neither qualifies the worker sandbox. See [Deep Scan
+sandbox qualification](../../../docs/project-configuration.md#deep-scan-sandbox-qualification)
+for the boundary and the limits of what these checks establish.
 
 ### Set investigation time
 
@@ -689,6 +693,68 @@ For issue tracking, see [Linear publication](cli.md#publish-completed-scans-to-l
 
 ### Import external findings
 
+For an agent-written parser, use the normalized import API. Pass an absolute
+checkout path, a stable source namespace and the repository URL when known.
+Count each input occurrence in `read` and supply its evidence or a numbered
+exclusion. Keep the upstream occurrence ID as a string.
+
+```ts
+import { prepareNormalizedLocalImport } from "@openai/codex-security";
+
+const local = await prepareNormalizedLocalImport(
+  {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "17",
+        evidence: { title: "Unsafe eval", severity: "high" },
+      },
+    ],
+    excluded: [],
+  },
+  {
+    repository: checkout,
+    provider: "example-scanner",
+    sourceKey: "payments/main",
+    sourceRepositoryUrl: scmUrl,
+  },
+);
+console.log(local.preview);
+const { importId } = await local.import(); // After reviewing the preview.
+```
+
+A nonempty import returns an `importId`, including when every finding was
+unchanged. Use `listLocalExternalImports({ repository })` to find an import.
+`selectLocalExternalFindings({ repository, importId })` reads its members and
+fails if a finding has since changed. To select individual findings across
+imports, pass `{ repository, findings: [{ id, version }] }`.
+
+```ts
+import { prepareStoredFindingsPublication } from "@openai/codex-security";
+
+const { groups, excluded } = await prepareStoredFindingsPublication(
+  { repository: checkout, importId },
+  { repository: cloudRepository },
+);
+console.log(
+  groups.map(({ preview }) => preview),
+  excluded,
+);
+```
+
+Show the user all destinations, findings and exclusions together. For each
+approved group, retain its selection and review ID, then call
+`group.publish(approvedReviewId)`. Check the returned status, receipts and
+per-item errors before proceeding. If a submission is interrupted, reprepare
+that group and subsequent unstarted groups from their saved selections and use
+the original review IDs. Report a terminal partial result with its exclusions
+and errors. If the approved ID was lost or the preview changed, show the new
+preview for review.
+`listLocalFindingPublications({ repository, id })` returns receipts for a
+stored version, including completed private inbox job IDs. Custom provider
+names and Tenable can be used locally. Cloud eligibility follows its provider
+contract and the selected destination.
+
 For a saved scanner report, call `prepareLocalExternalImport` for a checkout
 or `prepareExternalPublication` for a connected Cloud repository. Review the
 returned `preview`, then call `import()` to save locally or `publish()` to
@@ -699,7 +765,7 @@ For normalized evidence, use `prepareNormalizedLocalImport(findings, options)`
 or `prepareNormalizedExternalPublication(findings, options)` and review the
 preview in the same way. Cloud file imports use `ExternalPublicationOptions`,
 and normalized Cloud imports use `NormalizedExternalPublicationOptions`. Keep
-Cloud receipts and saved requests when retrying an interrupted submission.
+Cloud receipts and saved requests when retrying an interrupted submission. Use the SDK build that created a pending submission to finish it before upgrading.
 
 Use `listLocalExternalFindings({ repository })` to read saved scanner evidence.
 It starts unassessed. Reimporting the same repository, provider, source key
@@ -727,10 +793,17 @@ Omit `issueKeys` to collect the project's open security issues. An empty list is
 If you know the source repository, pass its Git URL in `options.sourceRepositoryUrl`
 to check the Sonar binding before fetching issues.
 
-For AWS Continuum code findings, use `readContinuumFindings(path, sourceRepositoryUrl)`
-with a saved list or detail response, or `normalizeContinuumFindings(input, sourceRepositoryUrl)`
-with parsed JSON. Verify the repository for the selected findings before passing its Git URL.
+For AWS Continuum, use `readContinuumFindings(path, sourceRepositoryUrl)` with a
+saved issue export or finding response. Use
+`normalizeContinuumFindings(input, sourceRepositoryUrl)` with parsed JSON.
+Issue exports with a saved repository URL can omit the second argument.
+For other reports, pass the verified source repository URL.
 [Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
+
+Pass `"local"` as the third argument to retain full patch contents in collector
+captures. The Cloud projection records `contentOmitted: "cloud_evidence_limit"`
+when the patch contents exceed the evidence budget. Available patches are in
+`evidence.source_data.patches`.
 
 For a saved Checkmarx One CLI JSON or CxSAST XML report, use
 `readCheckmarxFindings(path, sourceRepositoryUrl, "local")` to inspect its evidence.

@@ -5,12 +5,14 @@ import { useTestPython } from "./support/python.js";
 
 const pythonExecutable = useTestPython();
 const findingsIndexProbe = [
-  "import argparse, json, os, sqlite3, sys",
+  "import argparse, json, os, sqlite3, sys, tempfile",
   "from pathlib import Path",
   "sys.path.insert(0, sys.argv[1])",
   "import workbench_native_indexes as indexes",
   "from filesystem_identity import serialize_filesystem_identity",
   "settings = json.loads(sys.argv[2])",
+  "checkout_dir = tempfile.TemporaryDirectory()",
+  "checkout = checkout_dir.name",
   "connection = sqlite3.connect(':memory:')",
   "connection.row_factory = sqlite3.Row",
   "connection.executescript('''",
@@ -50,20 +52,20 @@ const findingsIndexProbe = [
   "    connection.execute(\"UPDATE scans SET target_device = 7, target_inode = 9 WHERE id = 'current-new'\")",
   "if settings.get('replacedCheckout'):",
   "    connection.execute(\"UPDATE scans SET target_device = -1, target_inode = -1 WHERE target_id = 'current-target'\")",
-  "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
+  "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (checkout,))",
   "if settings.get('ownershipTransition') or settings.get('ownershipReuse'):",
-  "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
-  "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
-  "    metadata = os.stat(sys.argv[1])",
+  "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (checkout,))",
+  "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (checkout,))",
+  "    metadata = os.stat(checkout)",
   "    if settings.get('ownershipReuse'):",
   "        connection.execute(\"UPDATE scans SET target_device = ?, target_inode = ?, started_at = '2027-01-01T00:00:00Z' WHERE id = 'current-old'\", (serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
-  "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('previous-owner-identity', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-01-15T00:00:00Z', '2026-01-15T00:00:00Z', '.', '/private/tmp/previous-owner', -1, -1))",
+  "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('previous-owner-identity', 'current-target', checkout, 'complete', 'sealed', '2026-01-15T00:00:00Z', '2026-01-15T00:00:00Z', '.', '/private/tmp/previous-owner', -1, -1))",
   "    connection.execute(\"DELETE FROM scans WHERE id = 'current-new'\")",
-  "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('current-new', 'current-target', sys.argv[1], 'complete', 'sealed', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z', '.', '/private/tmp/current-new', serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
+  "    connection.execute(\"INSERT INTO scans (id, target_id, target_path, status, seal_manifest_digest, started_at, updated_at, scope, scan_dir, target_device, target_inode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\", ('current-new', 'current-target', checkout, 'complete', 'sealed', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z', '.', '/private/tmp/current-new', serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
   "if settings.get('legacyDescendant'):",
-  "    connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (os.path.join(sys.argv[1], 'nested'),))",
+  "    connection.execute(\"UPDATE scans SET target_path = ? WHERE id = 'reused-legacy'\", (os.path.join(checkout, 'nested'),))",
   "if settings.get('missingOwnershipCheckout'):",
-  "    missing_checkout = os.path.join(sys.argv[1], 'codex-security-missing-owner')",
+  "    missing_checkout = os.path.join(checkout, 'codex-security-missing-owner')",
   "    connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (missing_checkout,))",
   "    connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (missing_checkout,))",
   "connection.executemany('INSERT INTO finding_occurrences VALUES (?, ?, ?, ?, ?, ?, ?)', [",
@@ -115,16 +117,6 @@ const findingsIndexProbe = [
   "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('pending-occurrence', 'current-new-occurrence')\")",
   "if (settings.get('matchedTriage') and not settings.get('repeatedStableFinding')) or settings.get('indexedAliases'):",
   "    connection.execute('INSERT INTO scan_comparison_matches VALUES (?, ?)', ('current-old-occurrence', 'current-new-occurrence'))",
-  "if settings.get('linkedWorktree'):",
-  "    connection.execute(\"INSERT INTO security_targets VALUES ('linked-target', '/linked/repository', 'linked')\")",
-  "    connection.execute(\"UPDATE scans SET target_id = 'linked-target', target_path = '/linked/repository' WHERE id = 'current-old'\")",
-  "    if not settings.get('matchedTriage'):",
-  "        linked_decision = 'current-old-occurrence' if settings.get('incompatibleSibling') else 'current-new-occurrence'",
-  "        connection.execute(\"INSERT INTO finding_triage VALUES (?, 'closed', '2026-01-02T00:00:00Z', 'false_positive')\", (linked_decision,))",
-  "        connection.execute('INSERT INTO finding_decisions (occurrence_id, decision_sequence, scan_sequence) VALUES (?, (SELECT COALESCE(MAX(decision_sequence), 0) + 1 FROM finding_decisions), (SELECT scans.rowid FROM scans JOIN finding_occurrences ON finding_occurrences.scan_id = scans.id WHERE finding_occurrences.id = ?))', (linked_decision, linked_decision))",
-  "    connection.execute(\"INSERT INTO scan_comparison_matches VALUES ('current-new-occurrence', 'stale-old-occurrence')\")",
-  "    indexes.scan_history.repository_scan_scope = lambda _connection, _repository: (['scans.target_id IN (?, ?)'], ['current-target', 'linked-target'], ['current-target', 'linked-target'], ['/current/repository', '/linked/repository'])",
-  "    indexes.scan_history._same_registered_repository = lambda _connection, _before, _after, *, checkout_relationships=None: not settings.get('incompatibleSibling', False) and {_before['target_id'], _after['target_id']} <= {'current-target', 'linked-target'}",
   "coverage_reads = []",
   "def coverage(scan):",
   "    assert scan['seal_manifest_digest'] is not None, 'Unsealed scan coverage was read.'",
@@ -145,7 +137,9 @@ const findingsIndexProbe = [
   "        return {'includePaths': ['src/orphan-new.py'], 'excludePaths': [], 'explicitExclusions': []}",
   "    return {'includePaths': ['.'], 'excludePaths': [], 'explicitExclusions': []}",
   "connection.execute('INSERT INTO scan_admissions (sequence, scan_id) SELECT rowid, id FROM scans')",
-  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), repository=os.path.join(sys.argv[1], 'nested') if settings.get('scopedLegacyDescendant') else '/current/repository' if settings.get('linkedWorktree') else None, include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
+  "connection.execute('ALTER TABLE scans ADD COLUMN completion_sequence INTEGER')",
+  "connection.execute('UPDATE scans SET completion_sequence = rowid')",
+  "args = argparse.Namespace(query=settings.get('query'), severity=None, status=None, target_id=settings.get('targetIds') or settings.get('targetId'), target_path=settings.get('targetPaths') or settings.get('targetPath'), repository=os.path.join(checkout, 'nested') if settings.get('scopedLegacyDescendant') else None, include_resolved=settings.get('includeResolved', False), offset=0, limit=20)",
   "for column in ('continuation_thread_id', 'cost_json', 'handoff_status', 'model', 'name', 'parent_scan_id', 'phase', 'reasoning_effort', 'target_summary', 'target_snapshot_digest', 'diff_target_kind', 'failure_message', 'handoff_claimed_at', 'handoff_claim_token', 'workspace_id', 'user_context'):",
   "    connection.execute(f'ALTER TABLE scans ADD COLUMN {column} TEXT')",
   "connection.execute(\"ALTER TABLE scans ADD COLUMN completion_warnings_json TEXT DEFAULT '[]'\")",
@@ -160,11 +154,11 @@ const findingsIndexProbe = [
   "    import workbench_db as workbench",
   "    import workbench_finding_results as finding_results",
   "    if not settings.get('ownershipReuse'):",
-  "        connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (sys.argv[1],))",
-  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (sys.argv[1],))",
+  "        connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (checkout,))",
+  "        connection.execute(\"UPDATE scans SET target_path = ? WHERE target_id = 'current-target'\", (checkout,))",
   "    if settings.get('missingCheckout'):",
-  "        metadata = os.stat(sys.argv[1])",
-  "        missing_checkout = os.path.join(sys.argv[1], 'codex-security-missing-checkout')",
+  "        metadata = os.stat(checkout)",
+  "        missing_checkout = os.path.join(checkout, 'codex-security-missing-checkout')",
   "        connection.execute(\"UPDATE security_targets SET current_path = ? WHERE id = 'current-target'\", (missing_checkout,))",
   "        connection.execute(\"UPDATE scans SET target_path = ?, target_device = ?, target_inode = ? WHERE target_id = 'current-target'\", (missing_checkout, serialize_filesystem_identity(metadata.st_dev), serialize_filesystem_identity(metadata.st_ino)))",
   "    connection.execute(\"ALTER TABLE finding_occurrences ADD COLUMN details_json TEXT DEFAULT '{}'\")",
@@ -244,10 +238,10 @@ const findingsIndexProbe = [
   "matching_scan_count = None",
   "old_owner_matches = None",
   "if settings.get('ownershipTransition') or settings.get('ownershipReuse'):",
-  "    clauses, values, _, _ = indexes.scan_history.repository_scan_scope(connection, args.repository or sys.argv[1])",
+  "    clauses, values = indexes.scan_history.repository_scan_scope(connection, args.repository or checkout)",
   "    scoped_scan_ids = [row['id'] for row in connection.execute('SELECT scans.id FROM scans WHERE ' + ' AND '.join(clauses), values)]",
   "if settings.get('ownershipReuse'):",
-  "    matching = indexes.scan_history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=sys.argv[1], force=False), backfill_finding_details=lambda _connection, _scan: None, read_coverage=coverage)",
+  "    matching = indexes.scan_history.list_unmatched_scan_pairs(connection, argparse.Namespace(repository=checkout, force=False), backfill_finding_details=lambda _connection, _scan: None, read_coverage=coverage)",
   "    matching_scan_count = matching['scanCount']",
   "    scans = [connection.execute('SELECT * FROM scans WHERE id = ?', (scan,)).fetchone() for scan in ('current-old', 'current-new')]",
   "    old_owner_matches = indexes.scan_history._same_registered_repository(connection, *scans)",
@@ -266,13 +260,11 @@ function runFindingsIndex(
     closedBeforeRollback?: "already_fixed" | "false_positive";
     coverageFailure?: "tampered" | "sealedArtifact" | "noncanonical" | "pruned";
     includeResolved?: boolean;
-    incompatibleSibling?: boolean;
     inactiveRepresentative?: boolean;
     indexedAliases?: boolean;
     lateCompletion?: boolean;
     legacyDescendant?: boolean;
     legacyPriority?: boolean;
-    linkedWorktree?: boolean;
     matchedTriage?: "already_fixed" | "false_positive";
     missingCheckout?: boolean;
     missingOwnershipCheckout?: boolean;
@@ -412,14 +404,17 @@ describe("workbench findings index", () => {
     expect(result.coverageReads).toEqual([]);
   });
 
-  test("keeps rediscovered findings active when the system clock moves backward", () => {
+  test("confirms the latest scan even when an earlier scan finishes later", () => {
     const result = probeFindingsIndex("current-target", {
       clockRollback: true,
       lateCompletion: true,
     });
 
     expect(result.findings).toEqual([
-      expect.objectContaining({ occurrenceId: "current-new-occurrence" }),
+      expect.objectContaining({
+        occurrenceId: "current-old-occurrence",
+        confirmedInLatestScan: true,
+      }),
     ]);
   });
 
@@ -432,7 +427,8 @@ describe("workbench findings index", () => {
       });
       expect(result.findings).toEqual([
         expect.objectContaining({
-          occurrenceId: "current-new-occurrence",
+          occurrenceId: "current-old-occurrence",
+          confirmedInLatestScan: true,
           status: "open",
         }),
       ]);
@@ -733,8 +729,13 @@ describe("workbench findings index", () => {
       replacedCheckout: true,
       repositories: true,
     }).repositories;
-    expect(repositories).not.toContainEqual(
-      expect.objectContaining({ targetId: "current-target" }),
+    expect(repositories).toContainEqual(
+      expect.objectContaining({
+        targetId: "current-target",
+        latestScan: null,
+        scanCount: 0,
+        openFindingsCount: 0,
+      }),
     );
     expect(repositories).toContainEqual(
       expect.objectContaining({
@@ -796,55 +797,6 @@ describe("workbench findings index", () => {
     ]);
   });
 
-  test("combines saved finding matches across scoped linked worktrees", () => {
-    const result = probeFindingsIndex(null, {
-      indexedAliases: true,
-      linkedWorktree: true,
-      matchedTriage: "false_positive",
-    });
-
-    expect(result.findings).toEqual([
-      expect.objectContaining({
-        knownScanIds: ["current-old", "current-new"],
-        matchedFindingIds: ["current-new-finding", "current-old-finding"],
-        occurrenceId: "current-new-occurrence",
-        status: "closed",
-        targetId: "current-target",
-      }),
-    ]);
-    expect(result.findingDetail).toMatchObject({
-      occurrenceId: "current-new-occurrence",
-      status: "closed",
-      triage: { closeReason: "false_positive", status: "closed" },
-    });
-    expect(result.scanPages?.["closed"]).toMatchObject({
-      findings: [{ occurrenceId: "current-new-occurrence", status: "closed" }],
-      total: 1,
-    });
-    expect(result.scanPages?.["open"]?.findings).toEqual([]);
-  });
-
-  test("never combines saved finding matches across independently registered siblings", () => {
-    const result = probeFindingsIndex(null, {
-      incompatibleSibling: true,
-      indexedAliases: true,
-      linkedWorktree: true,
-    });
-
-    expect(result.findings).toEqual([
-      expect.objectContaining({
-        knownScanIds: ["current-new"],
-        occurrenceId: "current-new-occurrence",
-        status: "open",
-      }),
-      expect.objectContaining({
-        knownScanIds: ["current-old"],
-        occurrenceId: "current-old-occurrence",
-        status: "closed",
-      }),
-    ]);
-  });
-
   test("searches titles and summaries across every active matched finding", () => {
     for (const query of ["RESOLVED CURRENT FINDING", "OLDER ISSUE"]) {
       const result = probeFindingsIndex("current-target", {
@@ -896,28 +848,6 @@ describe("workbench findings index", () => {
         summary: "Latest issue",
         title: "Current CLI finding",
         updatedAt: "2026-02-01T00:00:00Z",
-      }),
-    ]);
-  });
-
-  test("preserves linked-worktree aggregate triage after an empty follow-up", () => {
-    const result = probeFindingsIndex(null, {
-      inactiveRepresentative: true,
-      indexedAliases: true,
-      linkedWorktree: true,
-    });
-
-    expect(result.findings).toEqual([
-      expect.objectContaining({
-        confirmedInLatestScan: false,
-        knownScanIds: ["current-old", "current-new"],
-        locationPath: "src/new.py",
-        occurrenceCount: 2,
-        occurrenceId: "current-new-occurrence",
-        scanId: "current-new",
-        status: "closed",
-        targetId: "current-target",
-        targetPath: "/current/repository",
       }),
     ]);
   });

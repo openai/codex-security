@@ -50,7 +50,7 @@ def directory_aliases(tmp_path, monkeypatch, workbench_api):
     history = workbench_api["scan_history"]
 
     def selected_scans(path):
-        clauses, values, _, _ = history.repository_scan_scope(connection, path)
+        clauses, values = history.repository_scan_scope(connection, path)
         return [
             row["id"]
             for row in connection.execute(

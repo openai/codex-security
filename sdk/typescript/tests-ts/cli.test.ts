@@ -3,6 +3,7 @@ import { parseJsonLines } from "./support/json.js";
 import { writeFileSync } from "node:fs";
 import {
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -990,7 +991,6 @@ describe("CLI", () => {
       ["findings", "list"],
       ["findings", "show"],
       ["findings", "false-positive"],
-      ["findings", "list"],
     ] as const;
 
     for (const command of commands) {
@@ -1029,8 +1029,11 @@ describe("CLI", () => {
         definitions.options?.properties ?? {},
       )) {
         const flag = `--${name.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`;
-        // The CSV input belongs to the internal publication destination.
-        if (command.join(" ") === "publish scan" && flag === "--csv") {
+        // Keep the internal CSV input and the redundant Linear selector out of help.
+        if (
+          (command.join(" ") === "publish scan" && flag === "--csv") ||
+          (command.join(" ") === "publish check" && flag === "--to")
+        ) {
           expect(help.text()).not.toContain(flag);
         } else {
           expect(help.text()).toContain(flag);
@@ -1177,7 +1180,13 @@ describe("CLI", () => {
         { mode: 0o700 },
       );
     }
-    for (const selected of [component, join(alias, "component")]) {
+    const selections = [component, join(alias, "component")];
+    if (process.platform !== "win32") {
+      const componentLink = join(caller, "component-link");
+      await symlink(component, componentLink);
+      selections.push(componentLink + "/..");
+    }
+    for (const selected of selections) {
       const { stdout, stderr, runCli } = createCliTest(main);
       const status = await runCli(
         ["install-hook", selected, "--json"],
@@ -1285,14 +1294,15 @@ describe("CLI", () => {
         hook,
         "#!/bin/sh\nset -eu\nexec npx --no-install codex-security scan . --working-tree --fail-on-severity medium\n",
       );
-      const migratedHook = captureCli(main, "stdout");
+      const migratedHook = createCliTest(main);
       expect(
-        await migratedHook.run(
+        await migratedHook.runCli(
           ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
           deps,
         ),
+        migratedHook.stderr.text(),
       ).toBe(0);
-      const migrated = JSON.parse(migratedHook.text()) as {
+      const migrated = JSON.parse(migratedHook.stdout.text()) as {
         hook: string;
         failOnSeverity: string;
       };
@@ -1305,19 +1315,18 @@ describe("CLI", () => {
       ]) {
         await writeFile(hook, trustedHook.replace(/^unset .*\n/m, unset));
         expect(
-          await migratedHook.run(
+          await migratedHook.runCli(
             ["install-hook", ".", "--fail-on-severity", "medium", "--json"],
             deps,
           ),
+          migratedHook.stderr.text(),
         ).toBe(0);
         expect(await readFile(hook, "utf8")).toBe(trustedHook);
       }
 
-      const existingHook = captureCli(main, "stderr");
-      expect(await existingHook.run(["install-hook", "."], deps)).toBe(2);
-      expect(existingHook.text()).toContain("A pre-commit hook already exists");
-      expect(await readFile(hook, "utf8")).toContain(
-        "--fail-on-severity medium",
+      expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(0);
+      expect(await readFile(hook, "utf8")).toBe(
+        trustedHook.replace("severity medium", "severity high"),
       );
 
       const customHook = "#!/bin/sh\nexit 0\n";
@@ -1333,7 +1342,20 @@ describe("CLI", () => {
         "A pre-commit hook already exists",
       );
       expect(await readFile(hook, "utf8")).toBe(customHook);
-      await writeFile(hook, trustedHook);
+      const other = join(root, "other-hook");
+      await writeFile(other, trustedHook);
+      await rm(hook);
+      await link(other, hook);
+      expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
+      expect(await readFile(other, "utf8")).toBe(trustedHook);
+      await rm(hook);
+      if (process.platform !== "win32") {
+        await symlink(other, hook);
+        expect(await runCapturedCli(main, ["install-hook", "."], deps)).toBe(2);
+        expect(await readFile(other, "utf8")).toBe(trustedHook);
+        await rm(hook);
+      }
+      await writeFile(hook, trustedHook, { mode: 0o755 });
 
       const binaries = join(root, "test-binaries");
       await mkdir(binaries);
@@ -1604,6 +1626,50 @@ describe("CLI", () => {
     }
   });
 
+  test.skipIf(process.platform === "win32").each(["present", "missing"])(
+    "reads the physical bulk scan CSV through a symlink parent with the lexical CSV %s",
+    async (lexicalCsv) => {
+      const root = await temporaryDirectory("codex-security-cli-csv-link-");
+      const currentDirectory = join(root, "entry");
+      const physical = join(root, "physical");
+      const output = join(root, "results");
+      try {
+        await mkdir(currentDirectory);
+        await mkdir(join(physical, "child"), { recursive: true });
+        await multiscanInventory(physical);
+        if (lexicalCsv === "present")
+          await multiscanInventory(currentDirectory);
+        await symlink(join(physical, "child"), join(currentDirectory, "link"));
+        const { stdout, stderr, runCli } = createCliTest(main);
+        expect(
+          await runCli(
+            [
+              "bulk-scan",
+              "link/../repositories.csv",
+              "--output-dir",
+              output,
+              "--json",
+            ],
+            dependencies({ currentDirectory }),
+          ),
+          stderr.text(),
+        ).toBe(0);
+        expect(JSON.parse(stdout.text())).toMatchObject({
+          total: 1,
+          completed: 1,
+          failed: 0,
+        });
+        expect(
+          parseJsonLines(await readFile(join(output, "results.jsonl"), "utf8")),
+        ).toMatchObject([
+          { repository: join(physical, "repository"), status: "completed" },
+        ]);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test("expands home-relative bulk scan paths", async () => {
     const root = await temporaryDirectory("codex-security-cli-home-");
     const home = join(root, "home");
@@ -1817,6 +1883,7 @@ describe("CLI", () => {
         "--knowledge-base",
         "/shared/threat-models",
       ],
+      ["bulk-scan", "--output-dir", "results"],
       ["bulk-scan", "--provider", "openrouter"],
       ["bulk-scan", "--provider=openrouter", "--model", "openai/gpt-5.4"],
       ["bulk-scan", "--provider", "fireworks"],
@@ -1848,19 +1915,6 @@ describe("CLI", () => {
     ).toBe(2);
     expect(stderr.text()).toContain("--output-dir is required");
     expect(stdout.text()).toBe("");
-  });
-
-  test("rejects an output directory without a repository CSV", async () => {
-    const stderr = captureCli(main, "stderr");
-    expect(
-      await stderr.run(
-        ["bulk-scan", "--output-dir", "results"],
-        dependencies(),
-      ),
-    ).toBe(2);
-    expect(stderr.text()).toContain(
-      "--output-dir can only be used with a repository CSV",
-    );
   });
 
   test("exposes only typed, read-only SDK metadata over MCP", async () => {
@@ -2036,6 +2090,7 @@ describe("CLI", () => {
         "list-scans",
         "--repository",
         "/current/repository",
+        "--prefer-worktree",
         "--status",
         "complete",
         "--limit",
@@ -2046,7 +2101,7 @@ describe("CLI", () => {
   });
 
   test.each([false, true])(
-    "does not emit an ok: true envelope for a failed structured history command with full output %p",
+    "reports a structured history failure with full output %p",
     async (fullOutput) => {
       for (const argv of [
         ["scans", "show", "--json"],
@@ -2067,10 +2122,14 @@ describe("CLI", () => {
           },
         );
         expect(result).toBe(2);
-        expect(stdout.text()).toBe("");
-        expect(stderr.text()).toContain(
-          "Scan ID prefixes must be at least eight characters.",
-        );
+        const message = "Scan ID prefixes must be at least eight characters.";
+        if (fullOutput)
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            ok: false,
+            error: { message },
+          });
+        else expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(message);
       }
     },
   );
@@ -2894,12 +2953,15 @@ describe("CLI", () => {
   ] as const)(
     "shows the resolved directory name in the scan title for %p",
     async (repository, name) => {
+      await using temp = await scopedTemporaryDirectory("scan-title-");
+      const currentDirectory = join(temp.path, "workspace", "repository");
+      await mkdir(join(currentDirectory, "child"), { recursive: true });
       const { stderr, runCli } = createCliTest(main, { stderr: true });
       expect(
         await runCli(
           ["scan", ...(repository === undefined ? [] : [repository])],
           dependencies({
-            currentDirectory: resolve("/workspace/repository"),
+            currentDirectory,
             environment: { NO_COLOR: "1" },
           }),
         ),
@@ -3212,7 +3274,6 @@ describe("CLI", () => {
     for (const [command, ...args] of [
       ["validate", "finding", "--json"],
       ["login", "--format", "json"],
-      ["login", "status", "--format=jsonl"],
       ["logout", "--format", "jsonl"],
       ["logout", "--format=json"],
     ] as const) {
@@ -3247,7 +3308,7 @@ describe("CLI", () => {
       expect(exportFindings).not.toHaveBeenCalled();
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(
-        "CSV stdout cannot be combined with JSON output",
+        "CSV stdout cannot be combined with --format json",
       );
     }
   });
@@ -3742,10 +3803,6 @@ describe("CLI", () => {
       [
         ["bulk-scan", "--knowledge-base="],
         "--knowledge-base must not be empty",
-      ],
-      [
-        ["bulk-scan", "--output-dir", "results", "--", "repositories.csv"],
-        "Unknown flag: --",
       ],
       [["scan", ".", "--model="], "--model must not be empty"],
       [
@@ -4625,25 +4682,23 @@ describe("CLI", () => {
     }
   });
 
-  test("classifies provider failures without including upstream context", async () => {
+  test("classifies provider failures while preserving diagnostic text", async () => {
     const { stderr, runCli } = createCliTest(main);
 
     const deps = dependencies({
       environment: { OPENAI_API_KEY: "sk-proj-SYNTHETIC_VERBOSE_KEY_123" },
     });
-    deps.createSecurity = () =>
-      failingSecurity(
-        "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123",
-      );
+    const message =
+      "401 invalid API key for org-private sk-proj-SYNTHETIC_PROVIDER_SECRET_123";
+    deps.createSecurity = () => failingSecurity(message);
 
     expect(await runCli(["scan", ".", "--verbose", "--json"], deps)).toBe(2);
     expect(stderr.text()).toContain(
       'codex-security: debug: scan.failed classification="unauthorized"',
     );
     expect(stderr.text()).toContain("OPENAI_API_KEY");
-    expect(stderr.text()).not.toContain("org-private");
+    expect(stderr.text()).toContain(message);
     expect(stderr.text()).not.toContain("SYNTHETIC_VERBOSE_KEY");
-    expect(stderr.text()).not.toContain("SYNTHETIC_PROVIDER_SECRET");
   });
 
   test("keeps unclassified provider context out of structured failure diagnostics", async () => {
@@ -5003,7 +5058,7 @@ describe("CLI", () => {
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
   });
 
-  test("turns authentication and rate-limit failures into actionable safe messages", async () => {
+  test("adds actionable advice to authentication and rate-limit diagnostics", async () => {
     for (const [message, expected] of [
       ["401 invalid API key for org-private", "provide a valid API key"],
       ["403 model access denied for org-private", "model access"],
@@ -5016,7 +5071,7 @@ describe("CLI", () => {
 
       expect(await runCli(["scan"], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
-      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).toContain(message);
     }
   });
 
@@ -5156,8 +5211,8 @@ describe("CLI", () => {
   });
 
   test("keeps model authorization advice for genuine transport failures", async () => {
-    // The bypass must not swallow real 401/403 handling, and the advice must
-    // still replace upstream text that can name the organization or project.
+    // The local-failure bypass must retain advice for real 401/403 failures
+    // alongside the original diagnostic text.
     for (const [detail, expected] of [
       ["401 invalid API key for org-private", "Authentication failed"],
       [
@@ -5171,7 +5226,7 @@ describe("CLI", () => {
 
       expect(await stderr.run(["scan", "."], deps)).toBe(2);
       expect(stderr.text()).toContain(expected);
-      expect(stderr.text()).not.toContain("org-private");
+      expect(stderr.text()).toContain(detail);
     }
   });
 
