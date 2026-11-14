@@ -1,6 +1,6 @@
 # MCP tests
 
-[Install the SDK and MCP app dependencies](../../../sdk/typescript/TESTING.md#install-dependencies) and [download the universal native payload](../native/README.md#package-inputs). Run the following from the **repository root**.
+[Install the SDK and MCP app dependencies](https://github.com/openai/codex-security/blob/main/sdk/typescript/TESTING.md#install-dependencies) and [download the universal native payload](../native/README.md#package-inputs). Run the following from the **repository root**.
 
 To rebuild the bundled plugin and run the MCP tests:
 
