@@ -7,6 +7,7 @@ const {
   classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
+  exceedsContext,
 } = await importModule({
   entryPoints: [
     fileURLToPath(new URL("../src/deep-scan/errors.ts", import.meta.url)),
@@ -101,5 +102,28 @@ test(function testNativeTurnFailureClassification() {
     const error = codexWorkerTurnError(message);
     assert.equal(error.name, "Error");
     assert.equal(error.message, message);
+  }
+});
+
+test(function testContextLimitClassification() {
+  for (const error of [
+    { code: "context_length_exceeded" },
+    new Error("context_length_exceeded"),
+    "Codex ran out of room in the model's context window.",
+    "Your input exceeds the context window of this model.",
+    "This model's maximum context length is 128000 tokens.",
+    "compaction service context window exceeded",
+    "The request exceeded the model's context window.",
+    "Context length exceeded",
+  ]) {
+    assert.equal(exceedsContext(error), true, String(error));
+  }
+  for (const error of [
+    { code: "rate_limit_exceeded" },
+    new Error("Keep the context window small when writing prompts."),
+    new Error("unknown_context_length_exceeded"),
+    new Error("context_length_exceeded_status"),
+  ]) {
+    assert.equal(exceedsContext(error), false, String(error));
   }
 });
