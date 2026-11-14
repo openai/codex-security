@@ -311,7 +311,6 @@ function projectArtifactBodies(
     compact[index] = artifact;
     remaining -= bytes;
   }
-  Object.assign(result.source_data!, projected);
   return result;
 }
 
@@ -505,9 +504,10 @@ export function selectFindingValidationArtifact(
       ...issueEvidenceDescriptor(artifact),
       body: {
         validationEvidence: {
-          ...(matches.length === 1 && {
-            exploitable: matches[0]!["exploitable"],
-          }),
+          ...(matches.length === 1 &&
+            "exploitable" in matches[0]! && {
+              exploitable: matches[0]!["exploitable"],
+            }),
           perFindingResults: matches,
         },
       },

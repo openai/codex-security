@@ -483,7 +483,16 @@ test("Cloud publication of a stored capture keeps fitting patches and identifies
   const finding = { ...continuumDetail(), duplicateOfIssueId: "otherissue" };
   const big = patchArtifact("bigpatch", "+example\n".repeat(32 * 1024));
   const small = patchArtifact("smallpatch", "+ok\n");
-  const input = { finding, patches: [big, small] };
+  // Saved scanner reports can contain a matching result without a verdict.
+  const proof = {
+    ...continuumValidationArtifact(),
+    body: {
+      validationEvidence: {
+        perFindingResults: [{ findingId: finding.findingId }],
+      },
+    },
+  };
+  const input = { finding, patches: [big, small], evidenceArtifacts: [proof] };
   const local = normalizeContinuumFindings(input, continuumRepository, "local");
   expect(local.excluded).toEqual([]);
   const stored = local.findings[0]!;
@@ -496,17 +505,22 @@ test("Cloud publication of a stored capture keeps fitting patches and identifies
     { ...descriptor, contentOmitted: "cloud_evidence_limit" },
     small,
   ]);
-  expect(
-    projectStoredFinding(
-      {
-        provider: "continuum",
-        sourceFindingId: stored.source_finding_id,
-        evidence: stored.evidence,
-      },
-      [],
-    ).findings,
-  ).toEqual(cloud.findings);
+  expect(publishStoredCapture(stored).findings).toEqual(cloud.findings);
 });
+
+// Local storage round-trips through JSON before a later Cloud publication.
+function publishStoredCapture(
+  stored: ReturnType<typeof normalize>["findings"][number],
+) {
+  return projectStoredFinding(
+    {
+      provider: "continuum",
+      sourceFindingId: stored.source_finding_id,
+      evidence: JSON.parse(JSON.stringify(stored.evidence)),
+    },
+    [],
+  );
+}
 
 // The first UTF-8 body fits the Cloud limit alone. The second exceeds it alone.
 test.each([87_300, 90_000])(
@@ -558,16 +572,7 @@ test.each([87_300, 90_000])(
         small,
       ],
     });
-    expect(
-      projectStoredFinding(
-        {
-          provider: "continuum",
-          sourceFindingId: stored.source_finding_id,
-          evidence: stored.evidence,
-        },
-        [],
-      ).findings,
-    ).toEqual(cloud.findings);
+    expect(publishStoredCapture(stored).findings).toEqual(cloud.findings);
   },
 );
 
@@ -622,16 +627,7 @@ test("adding oversized validation preserves a fitting proof when its patch body 
       evidence_artifacts: expected,
       patches: [{ ...patchDescriptor, ...marker }],
     });
-    expect(
-      projectStoredFinding(
-        {
-          provider: "continuum",
-          sourceFindingId: stored.source_finding_id,
-          evidence: stored.evidence,
-        },
-        [],
-      ).findings,
-    ).toEqual(cloud.findings);
+    expect(publishStoredCapture(stored).findings).toEqual(cloud.findings);
   }
 });
 
@@ -691,16 +687,7 @@ test("validation descriptors cannot exclude a selected finding and patches that 
     expect(stored.evidence.source_data?.["evidence_artifacts"]).toEqual(
       evidenceArtifacts,
     );
-    expect(
-      projectStoredFinding(
-        {
-          provider: "continuum",
-          sourceFindingId: stored.source_finding_id,
-          evidence: stored.evidence,
-        },
-        [],
-      ),
-    ).toEqual(expected);
+    expect(publishStoredCapture(stored)).toEqual(expected);
   }
 });
 
