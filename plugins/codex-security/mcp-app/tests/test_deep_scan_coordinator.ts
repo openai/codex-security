@@ -2404,14 +2404,17 @@ async function testRestartRestoresDispatchOrderAfterMixedResults(
   assert.equal(executor.discoveryCalls, 0);
 }
 
-async function testComparisonStopCondition(mode: "quota" | "deadline") {
+async function testComparisonStopCondition(
+  t: TestContext,
+  mode: "quota" | "deadline",
+) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
     stopAfterNoNew: 3,
     maxDiscoveryRuns: 6,
   });
   const worker = new FakeExecutor({ discoveryCandidateId: "candidate-1" });
-  const deadline = Promise.withResolvers<void>();
+  if (mode === "deadline") t.mock.timers.enable({ apis: ["setTimeout"] });
   let comparisons = 0;
   const terminal = await runCoordinator(
     fixture,
@@ -2436,7 +2439,8 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
           throw codexWorkerTurnError(
             "Quota exceeded. Check your plan and billing details.",
           );
-        await deadline.promise;
+        // Expire the discovery budget while comparison is in flight.
+        t.mock.timers.tick(500);
         signal.throwIfAborted();
         return JSON.stringify({
           uncertain: [],
@@ -2451,12 +2455,7 @@ async function testComparisonStopCondition(mode: "quota" | "deadline") {
         });
       },
     },
-    {
-      ...(mode === "deadline" && { discoveryTimeoutMs: 500 }),
-      log: (event) => {
-        if (event.event === "discovery_deadline_reached") deadline.resolve();
-      },
-    },
+    mode === "deadline" ? { discoveryTimeoutMs: 500 } : {},
   );
   assert.equal(comparisons, 1);
   assert.equal(worker.discoveryCalls, 2);
@@ -2982,7 +2981,9 @@ test(testWorkerScopedCandidateSourceAggregation);
 test(testRetryKeepsLogicalWorker);
 test(testSandboxDiagnosticSurvivesArtifactRetries);
 test(testSuccessfulDeepCoverageRetainsIndependentWorkerReviewStatus);
-registerCases(testComparisonStopCondition, [["quota"], ["deadline"]]);
+for (const mode of ["quota", "deadline"] as const)
+  test(`finding comparison stops at the ${mode} limit`, (t) =>
+    testComparisonStopCondition(t, mode));
 test({ timeout: 30_000 }, testDiscoveryDeadlineReducesSingleBufferedFinding);
 test(testDiscoveryAcceptedAtDeadlineIsReduced);
 test(testDiscoveryDeadlineWithoutAcceptedWorkersReturnsPartialEvidence);
