@@ -3714,6 +3714,33 @@ def test_closed_turn_coverage_accepts_delayed_receipt_for_same_turn(
     assert usage.warnings == set()
 
 
+@pytest.mark.parametrize("second_receipt", [False, True])
+def test_delayed_receipt_replaces_only_its_own_turn_counters(scan_usage, tmp_path, second_receipt):
+    at = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
+    events = []
+    for turn, model, tokens, cached in (
+        ("first", "model-a", 100, 0),
+        ("second", "model-b", 150, 70),
+    ):
+        events.append(_event(at, "turn_context", {"turn_id": turn, "model": model}))
+        events.append(_token_event(at, tokens, 0, cached_input_tokens=cached))
+    # The second counter refines the first turn's cache classification.
+    # Its late receipt is authoritative only for that first turn.
+    events.append(
+        _response_event(at, "scan-parent", "late", 100, 0, turn_id="first", cached_input_tokens=7)
+    )
+    if second_receipt:
+        events.append(_response_event(at, "scan-parent", "next", 50, 0, turn_id="second"))
+    models = {}
+    usage = _measure_rollout(
+        scan_usage, _rollout(tmp_path, "scan-parent", events), at, at, model_usage=models
+    )
+    second_cache = 0 if second_receipt else 50
+    assert usage.tokens == _counts(150, 7 + second_cache, 0)
+    assert models == {"model-a": _counts(100, 7, 0), "model-b": _counts(50, second_cache, 0)}
+    assert usage.warnings == set()
+
+
 def test_closed_turn_coverage_preserves_interruption_after_same_turn_resumes(
     scan_usage,
     tmp_path: Path,

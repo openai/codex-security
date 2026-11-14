@@ -1327,10 +1327,10 @@ def _read_rollout_usage(
     previous_cache_writes_reported = True
     prefix_unclassified = 0
     prefix_missing_cache: set[str] = set()
-    ambiguous_legacy_cache = False
+    ambiguous_legacy_turns: set[str | None] = set()
+    unpartitioned_turns: set[str | None] = set()
     boundary_reached = False
     usage_observed = False
-    completed_legacy_usage = _empty_token_usage()
     current_turn_id: str | None = None
     current_model: str | None = None
     completed_turn_measured = False
@@ -1340,12 +1340,11 @@ def _read_rollout_usage(
     closed_turns: set[str] = set()
     failed_turns: set[str] = set()
     measured_turns: set[str] = set()
-    observed_response_usage = _empty_token_usage()
-    current_response_usage_observed = False
-    turn_legacy_usage = _empty_token_usage()
-    turn_legacy_models: dict[str | None, dict[str, int]] = {}
+    observed_by_turn: dict[str | None, dict[str, int]] = {}
+    exact_turns: set[str | None] = set()
+    legacy_by_turn: dict[str | None, dict[str | None, dict[str, int]]] = {}
+    turn_models: dict[str | None, str | None] = {}
     response_ids: set[str] = set()
-    response_usage_observed = False
     response_tokens = 0
     expected_response_tokens = 0
     response_baseline_tokens = 0
@@ -1411,34 +1410,6 @@ def _read_rollout_usage(
     excluded_response_tokens: dict[str, tuple[int, int]] = {}
     local_models: dict[str | None, dict[str, int]] = {}
 
-    previous_turns_reported_cache_writes = True
-    previous_unreported_models: set[str | None] = set()
-
-    def begin_turn(turn_id: str | None) -> None:
-        nonlocal current_turn_id, current_response_usage_observed, observed_response_usage
-        nonlocal turn_legacy_usage, turn_legacy_models, ambiguous_legacy_cache
-        nonlocal previous_turns_reported_cache_writes, previous_unreported_models
-        if turn_id == current_turn_id:
-            return
-        if not current_response_usage_observed:
-            _add_token_usage(completed_legacy_usage, turn_legacy_usage)
-            if ambiguous_legacy_cache:
-                warnings.add("token_breakdown_unavailable")
-        previous_turns_reported_cache_writes = (
-            total.get("cacheWriteInputTokensReported") is not False
-        )
-        previous_unreported_models = {
-            model
-            for model, tokens in local_models.items()
-            if tokens.get("cacheWriteInputTokensReported") is False
-        }
-        ambiguous_legacy_cache = False
-        observed_response_usage = _empty_token_usage()
-        current_response_usage_observed = False
-        turn_legacy_usage = _empty_token_usage()
-        turn_legacy_models = {}
-        current_turn_id = turn_id
-
     def past_scan_end(timestamp: datetime, turn_id: object) -> bool:
         # The requested completion turn may finish after the scan was marked complete.
         return (
@@ -1497,7 +1468,9 @@ def _read_rollout_usage(
             if not isinstance(payload, dict):
                 continue
             if event.get("type") == "turn_context":
-                begin_turn(payload.get("turn_id"))
+                turn_id = payload.get("turn_id")
+                current_turn_id = turn_id if isinstance(turn_id, str) else None
+                turn_models[current_turn_id] = current_model
             if not boundary_reached:
                 if _is_owned_task_start(session.thread_id, event, payload):
                     task_started_at = _timestamp(event.get("timestamp"))
@@ -1538,7 +1511,9 @@ def _read_rollout_usage(
                     and payload.get("turn_id") != completed_turn_id
                 ):
                     break
-                begin_turn(payload.get("turn_id"))
+                turn_id = payload.get("turn_id")
+                current_turn_id = turn_id if isinstance(turn_id, str) else None
+                turn_models[current_turn_id] = current_model
                 if owner_turn_id is not None and current_turn_id != owner_turn_id:
                     continue
                 if not isinstance(current_turn_id, str) or not current_turn_id or timestamp is None:
@@ -1586,7 +1561,7 @@ def _read_rollout_usage(
                     and not past_scan_end(timestamp, current_turn_id)
                     and (owner_turn_id is None or current_turn_id == owner_turn_id)
                     and "compaction_response_id" not in payload
-                    and not current_response_usage_observed
+                    and current_turn_id not in exact_turns
                 ):
                     warnings.add("compaction_usage_unavailable")
                 continue
@@ -1626,55 +1601,47 @@ def _read_rollout_usage(
                         and payload.get("turn_id", current_turn_id) != owner_turn_id
                         else "owned",
                     )
-                turn_usage = _usage_counts(payload.get("turn_token_usage"))
-                receipt_turn_id = payload.get("turn_id")
-                if owner_turn_id is None or receipt_turn_id == owner_turn_id:
-                    if isinstance(receipt_turn_id, str):
-                        measured_turns.add(receipt_turn_id)
-                    if current_turn_id is None:
-                        current_turn_id = receipt_turn_id
-                        if isinstance(current_turn_id, str):
-                            open_turns.add(current_turn_id)
-                    _add_token_usage(observed_response_usage, usage)
-                if timestamp < started_at:
-                    if turn_usage is not None:
-                        observed_response_usage = turn_usage
-                    continue
                 if (
                     owner_turn_id is not None
                     and payload.get("turn_id", current_turn_id) != owner_turn_id
                 ):
                     continue
+                turn_usage = _usage_counts(payload.get("turn_token_usage"))
+                if not isinstance(receipt_turn_id, str):
+                    receipt_turn_id = current_turn_id
+                if isinstance(receipt_turn_id, str):
+                    measured_turns.add(receipt_turn_id)
+                    if current_turn_id is None:
+                        current_turn_id = receipt_turn_id
+                        open_turns.add(current_turn_id)
+                        # This receipt identifies preceding counters with no turn context.
+                        if None in legacy_by_turn:
+                            legacy_by_turn[current_turn_id] = legacy_by_turn.pop(None)
+                        if None in ambiguous_legacy_turns:
+                            ambiguous_legacy_turns.remove(None)
+                            ambiguous_legacy_turns.add(current_turn_id)
+                observed = observed_by_turn.setdefault(receipt_turn_id, _empty_token_usage())
+                _add_token_usage(observed, usage)
+                if timestamp < started_at:
+                    if turn_usage is not None:
+                        observed_by_turn[receipt_turn_id] = turn_usage
+                    continue
                 response_ids.add(response_id)
                 if accepted_response_ids is not None:
                     accepted_response_ids.add(response_id)
-                if not current_response_usage_observed:
-                    current_response_usage_observed = True
-                    for key in TOKEN_FIELDS.values():
-                        total[key] -= turn_legacy_usage[key]
-                    if previous_turns_reported_cache_writes:
-                        total.pop("cacheWriteInputTokensReported", None)
-                    for model, tokens in turn_legacy_models.items():
-                        if model not in previous_unreported_models:
-                            local_models[model].pop("cacheWriteInputTokensReported", None)
-                        for key in TOKEN_FIELDS.values():
-                            local_models[model][key] -= tokens[key]
-                    local_models = {
-                        model: tokens
-                        for model, tokens in local_models.items()
-                        if any(tokens.values())
-                    }
-                response_usage_observed = True
+                # A delayed receipt replaces only its own turn's provisional counters.
+                legacy_by_turn.pop(receipt_turn_id, None)
+                exact_turns.add(receipt_turn_id)
                 if completed_turn_id is not None and receipt_turn_id == completed_turn_id:
                     completed_turn_measured = True
                 if turn_usage is not None and any(
-                    turn_usage[key] > observed_response_usage[key] for key in TOKEN_FIELDS.values()
+                    turn_usage[key] > observed[key] for key in TOKEN_FIELDS.values()
                 ):
                     warnings.add("token_record_incomplete")
                 result.tokens_updated_at = max(result.tokens_updated_at or timestamp, timestamp)
                 response_tokens += usage["totalTokens"]
                 usage_observed = True
-                model = payload.get("model", current_model)
+                model = payload.get("model", turn_models.get(receipt_turn_id, current_model))
                 if not isinstance(model, str):
                     model = None
                 _add_token_usage(total, usage)
@@ -1687,8 +1654,12 @@ def _read_rollout_usage(
                 ):
                     # Matching thread totals account for turns left open or failed before resume.
                     cumulative = _usage_counts(payload.get("thread_token_usage"))
+                    measured = total.copy()
+                    for parts in legacy_by_turn.values():
+                        for part in parts.values():
+                            _add_token_usage(measured, part)
                     if cumulative is not None and all(
-                        cumulative[key] == total[key] for key in TOKEN_FIELDS.values()
+                        cumulative[key] == measured[key] for key in TOKEN_FIELDS.values()
                     ):
                         open_turns.intersection_update({current_turn_id})
                         closed_turns.difference_update(failed_turns - {current_turn_id})
@@ -1793,21 +1764,32 @@ def _read_rollout_usage(
                 completed_turn_measured = True
             result.tokens_updated_at = max(result.tokens_updated_at or timestamp, timestamp)
             delta["totalTokens"] = delta["inputTokens"] + delta["outputTokens"]
-            if not current_response_usage_observed:
-                local_models.setdefault(current_model, _empty_token_usage())
+            legacy = current_turn_id not in exact_turns
+            part = (
+                legacy_by_turn.setdefault(current_turn_id, {}).setdefault(
+                    current_model, _empty_token_usage()
+                )
+                if legacy
+                else None
+            )
             if delta["totalTokens"] <= 0 and not refines_classification:
                 continue
-            cache_write_capacity = (
-                _uncached_input(turn_legacy_usage) + delta["inputTokens"]
-                if refines_classification
-                else delta["inputTokens"]
-            )
-            # Late cumulative cache details can classify an earlier legacy turn.
-            completed_capacity = (
-                _uncached_input(completed_legacy_usage)
-                if refines_classification and not current_response_usage_observed
-                else 0
-            )
+            cache_write_capacity = delta["inputTokens"]
+            previous_parts = []
+            if refines_classification and part is not None:
+                cache_write_capacity += _uncached_input(part)
+                if (
+                    delta["cachedInputTokens"] + delta["cacheWriteInputTokens"]
+                    > cache_write_capacity
+                ):
+                    # A cumulative refinement can describe another model or turn.
+                    previous_parts = [
+                        (turn, model, tokens)
+                        for turn, parts in legacy_by_turn.items()
+                        for model, tokens in parts.items()
+                        if tokens is not part and _uncached_input(tokens) > 0
+                    ]
+            completed_capacity = sum(_uncached_input(part) for _, _, part in previous_parts)
             if (
                 prefix_unclassified > 0
                 and refines_classification
@@ -1820,32 +1802,37 @@ def _read_rollout_usage(
                 )
             ):
                 # The newly classified tokens could have occurred before this scan.
-                ambiguous_legacy_cache = True
+                ambiguous_legacy_turns.add(current_turn_id)
             for key in ("cacheWriteInputTokens", "cachedInputTokens"):
                 current = min(delta[key], cache_write_capacity)
                 completed = min(delta[key] - current, completed_capacity)
-                if completed and ambiguous_legacy_cache:
+                if completed and current_turn_id in ambiguous_legacy_turns:
                     warnings.add("token_breakdown_unavailable")
                 delta[key] = current
                 cache_write_capacity -= current
                 completed_capacity -= completed
-                completed_legacy_usage[key] += completed
-                total[key] += completed
+                if completed:
+                    # An aggregate refinement spanning different models has no priced partition.
+                    if completed_capacity and len({model for _, model, _ in previous_parts}) > 1:
+                        unpartitioned_turns.update(turn for turn, _, _ in previous_parts)
+                    for _, _, prior in previous_parts:
+                        classified = min(_uncached_input(prior), completed)
+                        prior[key] += classified
+                        completed -= classified
+                        if completed == 0:
+                            break
             delta["reasoningOutputTokens"] = min(
                 delta["reasoningOutputTokens"], delta["outputTokens"]
             )
             _add_token_usage(counter_total, delta)
-            if not current_response_usage_observed:
-                _add_token_usage(turn_legacy_usage, delta)
-                _add_token_usage(
-                    turn_legacy_models.setdefault(current_model, _empty_token_usage()), delta
-                )
-                _add_token_usage(total, delta)
-                _add_token_usage(
-                    local_models.setdefault(current_model, _empty_token_usage()), delta
-                )
+            if part is not None:
+                _add_token_usage(part, delta)
 
-    if not current_response_usage_observed and ambiguous_legacy_cache:
+    for parts in legacy_by_turn.values():
+        for model, part in parts.items():
+            _add_token_usage(total, part)
+            _add_token_usage(local_models.setdefault(model, _empty_token_usage()), part)
+    if ambiguous_legacy_turns - exact_turns:
         warnings.add("token_breakdown_unavailable")
     reconcile_receipt_counters()
 
@@ -1863,9 +1850,9 @@ def _read_rollout_usage(
             remainder["cachedInputTokens"] = remainder["cacheWriteInputTokens"] = 0
         _add_token_usage(total, remainder)
         _add_token_usage(local_models.setdefault(None, _empty_token_usage()), remainder)
-        if response_usage_observed and remainder["totalTokens"]:
+        if exact_turns and remainder["totalTokens"]:
             warnings.add("token_receipts_incomplete")
-    if response_usage_observed:
+    if exact_turns:
         warnings.discard("token_counter_regressed")
     if (
         expected_response_tokens
@@ -1880,6 +1867,8 @@ def _read_rollout_usage(
         if "token_record_incomplete" not in warnings:
             warnings.add("token_receipts_incomplete")
     if model_usage is not None:
+        if unpartitioned_turns.intersection(legacy_by_turn):
+            local_models = {None: total}
         for model, usage in local_models.items():
             _add_token_usage(model_usage.setdefault(model, _empty_token_usage()), usage)
     if not boundary_reached:
