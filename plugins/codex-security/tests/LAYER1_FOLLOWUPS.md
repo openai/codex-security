@@ -1,6 +1,6 @@
 # Layer 1 Deterministic CI Coverage
 
-Maintainers use this backlog to track deterministic plugin test coverage. The [CI workflow](../../../.github/workflows/node-ci.yml) defines the active jobs, and the [CI guide](../../../docs/ci.md) explains when they run. Update this list when adding coverage or completing a deferred item.
+Maintainers use this backlog to track deterministic plugin test coverage. The [CI workflow](https://github.com/openai/codex-security/blob/main/.github/workflows/node-ci.yml) defines the active jobs, and the [CI guide](https://github.com/openai/codex-security/blob/main/docs/ci.md) explains when they run. Update this list when adding coverage or completing a deferred item.
 
 ## Covered
 

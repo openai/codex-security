@@ -1,6 +1,6 @@
 # Codex Security skills
 
-With the plugin enabled, you can ask Codex to "check my uncommitted changes for security bugs." To pick the skill yourself, include its name in the request, as in `$security-diff-scan`. [Setup and CLI examples](../../../docs/agent-workflows.md)
+With the plugin enabled, you can ask Codex to "check my uncommitted changes for security bugs." To pick the skill yourself, include its name in the request, as in `$security-diff-scan`. [Setup and CLI examples](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md)
 
 ## Choosing a scan
 
