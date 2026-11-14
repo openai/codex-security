@@ -39,12 +39,14 @@ for (const kind of [
     cwd = repository,
     env = environment,
     encoding?: "base64",
+    input?: string | Uint8Array,
   ) => {
     const result = execFileSync("git", args, {
       cwd,
       env,
       encoding: encoding === "base64" ? "buffer" : "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      input,
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     return Buffer.isBuffer(result)
       ? result.toString(encoding ?? "utf8")
@@ -148,7 +150,8 @@ for (const kind of [
       onRepositoryCommand: async (command, args, cwd, options) => {
         const selectedEnvironment = { ...environment, ...options?.environment };
         if (command === "git") {
-          if (args[0] === "ls-remote") {
+          if (options?.patchTransport) {
+            selectedEnvironment["GIT_ALLOW_PROTOCOL"] = "file";
             for (const key of Object.keys(selectedEnvironment)) {
               if (
                 key.startsWith("GIT_CONFIG_KEY_") &&
@@ -162,6 +165,7 @@ for (const kind of [
             options?.directory ?? cwd,
             selectedEnvironment,
             options?.encoding,
+            options?.input,
           );
           if (args[args.indexOf("remote") + 1] === "get-url")
             result = result
@@ -205,7 +209,7 @@ for (const kind of [
       },
     }),
   );
-  assert.deepEqual(JSON.parse(output.text()).files, ["app.ts"]);
+  assert.deepEqual(JSON.parse(output.text()).files, ["app.ts"], error.text());
   outcomes.push({
     kind,
     exitCode,
