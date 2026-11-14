@@ -87,8 +87,10 @@ test("SDK registration measures the shell-visible instructions separately from u
         await beforeRegistration?.();
         const { scanId } = await runWorkbench(workbench, args, input);
         using database = new Database(join(state, "workbench.sqlite3"), {
-          readonly: true,
+          readwrite: true,
+          create: false,
         });
+        database.exec("PRAGMA query_only = ON");
         digest = database
           .query<{ digest: string | null }, [string]>(
             "SELECT instruction_digest AS digest FROM scans WHERE id = ?",

@@ -503,7 +503,7 @@ with ExitStack() as stack:
             repository_generation=registration.repository_generation,
             source_scopes={"version": 1, "revision": "synthetic", "scopes": []},
             target_root=root / "artifacts", target_summary=None, scope_file_count=0,
-            timestamp=timestamp, scan_dir=root / "artifacts" / "current",
+            timestamp=timestamp, scan_dir=root / "artifacts" / "current", instruction_digest=None,
         )
         connection.commit()
         add_scan("old-writer", "writer", generation=None)
