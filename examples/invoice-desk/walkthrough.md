@@ -6,9 +6,8 @@ an illustrative finding; it is **not a recorded model run**. Finding counts,
 severity, evidence, and coverage must come from your own saved results.
 
 The app is deliberately insecure. Use only its synthetic data on loopback, and
-keep the [QA guide](qa/README.md) outside the scan input. Ten seeded scenarios do
-not guarantee ten findings. The behavior tests establish the sample's behavior,
-not scanner recall.
+keep the [QA guide](qa/README.md) outside the scan input. Use the behavior tests
+to check the sample and the QA guide to score findings for the scanned revision.
 
 ## 1. Prepare a standalone copy
 
@@ -108,8 +107,8 @@ cross-workspace invoice read; it is not a claim that your scan found it.
 
 Inspect the [HTTP route](app/server.mjs) and [invoice helpers](app/invoices.mjs).
 The separate [QA harness](qa/app.test.mjs) reproduces this behavior as ID-002 and
-checks legitimate controls. Its scenario tests intentionally assert that seeded
-weaknesses remain present; they are not post-fix acceptance tests.
+checks legitimate controls. The ID-002 test expects the seeded weakness and
+needs a different assertion to verify a repair.
 
 If your scan reports this root cause, use its actual `occurrenceId` from this
 run's `findings.json`. Do not substitute the QA label `ID-002`, a title, or an ID

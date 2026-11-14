@@ -16,18 +16,13 @@ scanner. The application contains no QA-specific branches or vulnerability label
 | ID-006 | Credential destination confusion    | A different connection owner receives the Ledger credential.        |
 | ID-007 | Shared mutable security policy      | Changing one workspace's nested policy changes another's.           |
 | ID-008 | Validation and consumption mismatch | Import checks and persistence select different ownership metadata.  |
-| ID-009 | Mass assignment (remediated)         | Profile updates change only the display name, preserving the role.   |
+| ID-009 | Mass assignment (remediated)        | Profile updates change only the display name, preserving the role.   |
 | ID-010 | Stored HTML injection               | Notes become unescaped HTML in another user's invoice view.         |
 
 These are ten distinct root causes, not ten disjoint OWASP Top Ten groups. Some
 share broader authorization or disclosure classifications. The [scenario manifest](expected-findings.json) gives
 suggested CWE tags and source symbols; equivalent, more precise classifications
 are acceptable. Multiple reports of the same root cause count once.
-
-ID-009 is remediated and retained as a regression scenario. Its assertions require
-display-name updates to preserve the caller's role and administrator restrictions.
-The other nine scenarios remain expected findings. Exclude ID-009 from expected
-detection counts.
 
 The approval case is a deterministic version-binding error, not a timing race.
 The import mismatch uses outer document metadata and nested invoice metadata;
@@ -59,9 +54,10 @@ application revision or content digest, scanner version, model, mode, and effort
 alongside each result. Application behavior is deterministic apart from IDs,
 session tokens, and timestamps; model discovery remains variable.
 
-Evaluate each scenario as **found**, **missed**, or **uncertain**, based on the
-actual root cause and affected feature. Track unexpected findings and duplicate
-reports separately. Treat unexpected findings as needing review rather than
+Exclude scenarios marked `remediated` (ID-009) from expected detection counts.
+Evaluate each remaining scenario as **found**, **missed**, or **uncertain**,
+based on the actual root cause and affected feature. Track unexpected findings
+and duplicate reports separately. Treat unexpected findings as needing review rather than
 automatically declaring them false positives.
 
 For secret exposure, a report should identify the server credential crossing a
