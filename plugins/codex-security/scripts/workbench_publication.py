@@ -211,8 +211,12 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "storeExists": True,
         "receipts": [],
     }
-    path = db.database_path()
     if payload["action"] == "inspect" or require_history:
+        path = db.database_path()
+        if os.name == "nt":
+            from windows_scan_local_files import _extended_path
+
+            path = Path(_extended_path(path))
         try:
             path.stat()
         except FileNotFoundError:

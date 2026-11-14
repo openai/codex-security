@@ -9,7 +9,10 @@ import sqlite3
 import sys
 import uuid
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
+from unittest.mock import Mock
+from urllib.parse import quote
 
 import pytest
 from workbench_test_support import load_script, run_workbench, write_completed_contract
@@ -24,6 +27,64 @@ RECEIPT_MIGRATION = next(
 )
 LINEAR = {"type": "linear", "teamId": "team-example"}
 JIRA = {"type": "jira", "cloudId": "site-example", "projectId": "10001"}
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("root", ["C:\\", "\\\\server\\share\\"])
+def test_inspection_windows_filename_spelling(tmp_path: Path, monkeypatch, root) -> None:
+    publication = load_script("workbench_publication")
+    scan_dir, validated = source(tmp_path)
+    payload = {"action": "inspect", "scanDirectory": str(scan_dir), "destination": LINEAR}
+    directory = PureWindowsPath(root) / ("s" * (240 - len(root))) / "state #% é"
+    ordinary = directory / "workbench.sqlite3"
+    assert len(str(directory)) < 260 <= len(str(ordinary))
+    expected = (
+        ("\\\\?\\UNC\\" + str(ordinary)[2:])
+        if root.startswith("\\\\")
+        else "\\\\?\\" + str(ordinary)
+    )
+    stat = Mock()
+
+    class Filename(PureWindowsPath):
+        def stat(self):
+            return stat(str(self))
+
+    path = Filename(ordinary)
+    connect = Mock(return_value=sqlite3.connect(":memory:"))
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(publication, "validate_contract", lambda _: validated)
+    monkeypatch.setattr(publication, "Path", Filename)
+    monkeypatch.setattr(publication.sqlite3, "connect", connect)
+
+    result = publication.finding_issues(SimpleNamespace(database_path=lambda: path), payload)
+
+    assert result["storeExists"] is True
+    assert {"stat": stat.call_args.args[0], "uri": connect.call_args.args[0]} == {
+        "stat": expected,
+        "uri": f"file:{quote(expected, safe='')}?mode=ro",
+    }
+    assert connect.call_args.kwargs == {"uri": True, "timeout": 5}
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows extended-length paths")
+@pytest.mark.parametrize("extended", [False, True])
+def test_inspection_native_windows_filename_boundary(tmp_path: Path, extended: bool) -> None:
+    scan_dir, validated = source(tmp_path)
+    windows_files = load_script("windows_scan_local_files")
+    directory = tmp_path / ("s" * (244 - len(str(tmp_path))) + " #% é")
+    path = directory / "workbench.sqlite3"
+    assert len(str(path)) >= 260
+    native_path = Path(windows_files._extended_path(path))
+    legacy_database(native_path, validated, LINEAR)
+    original = native_path.read_bytes()
+
+    result = issues(native_path.parent if extended else directory, scan_dir, "inspect")
+
+    assert result["storeExists"] is True
+    assert result["receipts"][0]["issueIdentifier"] == "SEC-101"
+    assert native_path.read_bytes() == original
+    assert list(native_path.parent.iterdir()) == [native_path]
 
 
 def source(tmp_path: Path) -> tuple[Path, dict]:
