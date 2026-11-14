@@ -1673,10 +1673,10 @@ test("counts findings in each selected repository scope and preserves absent dec
     nextOffset: null,
   });
   expect(result["notScanned"]).toEqual({
-    counts: {},
-    ids: [],
+    counts: { refused: 0 },
+    ids: ["refused"],
     calls: [],
-    inspections: [],
+    inspections: all.inspections,
     nextOffset: null,
   });
   expect((result["openIds"] as string[]).sort()).toEqual([
