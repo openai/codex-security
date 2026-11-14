@@ -188,7 +188,7 @@ const result = await security.run("/path/to/repository", {
 | `knowledgeBasePaths`                        | Supporting text, PDF, DOCX files, or directories.                              |
 | `scanPrompt` / `scanPromptFile`             | Additional scan instructions. Inline text takes precedence.                    |
 | `validationPrompt` / `validationPromptFile` | Custom validation instructions for standard scans.                             |
-| `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions after the scan.                                         |
+| `postScanPrompt` / `postScanPromptFile`     | Follow-up instructions. A refused primary local Standard turn skips them.      |
 | `ownerSuggestions`                          | Write optional owner suggestions after a committed scan (default: `false`).    |
 | `outputDir`                                 | Results directory; omit to use the state directory.                            |
 | `archiveExisting`                           | Move previous results aside before reusing `outputDir`.                        |

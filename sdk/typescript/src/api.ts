@@ -199,6 +199,7 @@ import {
   workflowDigest,
 } from "./finding-workflow.js";
 import { reviewSqliteHome } from "./deduplication/codex-review.js";
+import { isReviewRefusal } from "./deduplication/refusal.js";
 import {
   ScanResult,
   type RepositoryFinding,
@@ -2260,6 +2261,7 @@ export class CodexSecurity {
     let completionCost: ScanCost | ReturnType<typeof measuredScanCost> = null;
     let validationThreadId: string | undefined;
     let nativeTurnFailure: string | undefined;
+    let latestPhase: ScanProgress["phase"] = "preflight";
     let scanTurnStatus: "in_progress" | "completed" | "failed" | null = null;
     let budgetRecovery: {
       expectation: ScanExpectation;
@@ -2665,7 +2667,6 @@ export class CodexSecurity {
         standardCapabilities?.["scopedInventoryReceipt"] === 1;
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
-      let latestPhase: ScanProgress["phase"] = "preflight";
       let reviewItems: ScanProgress["reviewItems"];
       let lastProgress: string | null = null;
       const progressKey = (progress: ScanProgress): string =>
@@ -4292,6 +4293,28 @@ export class CodexSecurity {
         }
       }
       if (
+        releaseStandardScan !== undefined &&
+        nativeTurnFailure !== undefined &&
+        isReviewRefusal(connectionAdviceDetail(nativeTurnFailure))
+      ) {
+        runPostScan = null;
+        if (activeScan !== null && latestPhase !== "preflight") {
+          // Progress can advance only while the scan is running. A failed
+          // progress write must still allow fail-scan to seal retained work.
+          await workbench(
+            { ...activeScan.options, signal: undefined },
+            workbenchArgs("update-progress", {
+              scanId: activeScan.id,
+              phase: latestPhase,
+            }),
+          ).catch((cause) => {
+            notifyObserver(
+              options,
+              "onWarning",
+            )(`Could not save scan progress: ${errorMessage(cause)}`);
+          });
+        }
+      } else if (
         activeScan !== null &&
         releaseStandardScan !== undefined &&
         !signal.aborted &&
