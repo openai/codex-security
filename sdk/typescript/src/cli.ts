@@ -12683,12 +12683,34 @@ async function hashPublicationFile(
   }
 }
 
+async function publicationBlobDigest(
+  root: string,
+  object: string,
+  dependencies: CliDependencies,
+  source: string[] = [],
+  environment?: NodeJS.ProcessEnv,
+): Promise<string> {
+  const hash = createHash("sha256");
+  await dependencies.runRepositoryCommand(
+    "git",
+    [...source, "cat-file", "blob", object],
+    root,
+    {
+      environment,
+      onStdout: (chunk) => {
+        hash.update(chunk);
+      },
+    },
+  );
+  return hash.digest("hex");
+}
+
 async function publicationContentDigests(
   root: string,
   paths: string[],
   signal?: AbortSignal,
+  digests = new Set<string>(),
 ): Promise<Set<string>> {
-  const digests = new Set<string>();
   if (paths.length === 0) return digests;
   const canonicalRoot = (await realpath(root, { encoding: "buffer" })).toString(
     "latin1",
@@ -12930,6 +12952,55 @@ async function preparePatchPublication(
         dependencies,
       )
     : [];
+  const stagedBlobs = new Set<string>();
+  const nestedRepositoryDigests = new Set<string>();
+  // An index can hold bytes absent from both HEAD and the worktree.
+  const captureStagedBlobs = async (checkout?: string) => {
+    const source = checkout === undefined ? [] : ["-C", checkout];
+    const environment =
+      checkout === undefined
+        ? undefined
+        : {
+            ...NESTED_PATCH_GIT_ENVIRONMENT,
+            GIT_INDEX_FILE: undefined,
+          };
+    const staged = await patchGitRecords(
+      root,
+      [
+        ...source,
+        "diff",
+        "--cached",
+        "--raw",
+        "--no-abbrev",
+        "--no-renames",
+        "--diff-filter=AMT",
+        "-z",
+        checkout === undefined ? parent : "HEAD",
+        "--",
+      ],
+      dependencies,
+      { environment },
+    );
+    for (let i = 0; i + 1 < staged.length; i += 2) {
+      const [, mode, previous, object] = staged[i]!.split(" ");
+      if (mode === "160000" || previous === object) continue;
+      if (object!.length === parent.length) stagedBlobs.add(object!);
+      else {
+        // A nested checkout with a different Git object format needs a
+        // content digest comparable with the parent publication.
+        nestedRepositoryDigests.add(
+          await publicationBlobDigest(
+            root,
+            object!,
+            dependencies,
+            source,
+            environment,
+          ),
+        );
+      }
+    }
+  };
+  if (dirtyFiles.size) await captureStagedBlobs();
   // The parent records a gitlink. Inventory local files in each initialized
   // checkout, including tracked edits and ignored files, before patching.
   if (gitControls?.nestedCheckouts.length) {
@@ -12964,6 +13035,8 @@ async function preparePatchPublication(
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
+      if (entries.some((entry) => /^[AMT]/u.test(entry)))
+        await captureStagedBlobs(checkout);
     }
   }
   const ignoredDigests = await publicationContentDigests(
@@ -12971,35 +13044,12 @@ async function preparePatchPublication(
     ignored.filter(Boolean),
     signal,
   );
-  const nestedRepositoryDigests = await publicationContentDigests(
+  await publicationContentDigests(
     root,
     nestedRepositoryPaths,
     signal,
+    nestedRepositoryDigests,
   );
-  const stagedBlobs = new Set<string>();
-  if (dirtyFiles.size) {
-    // The operator's index can contain bytes absent from both HEAD and the
-    // worktree. Keep the original object IDs before any patch turns run.
-    const staged = await patchGitRecords(
-      root,
-      [
-        "diff",
-        "--cached",
-        "--raw",
-        "--no-abbrev",
-        "--no-renames",
-        "--diff-filter=AMT",
-        "-z",
-        parent,
-        "--",
-      ],
-      dependencies,
-    );
-    for (let i = 0; i + 1 < staged.length; i += 2) {
-      const [, mode, previous, object] = staged[i]!.split(" ");
-      if (mode !== "160000" && previous !== object) stagedBlobs.add(object!);
-    }
-  }
   return {
     parent,
     branch,
@@ -13765,21 +13815,10 @@ async function createPatchPullRequest(
         : undefined;
       const [, mode, , object] = changed[index]!.split(" ");
       // Publication reuses captured blobs, even if assessment changed live files.
-      let capturedDigest: string | undefined;
-      if (checkFileDigests && (mode === "100644" || mode === "100755")) {
-        const captured = createHash("sha256");
-        await dependencies.runRepositoryCommand(
-          "git",
-          ["cat-file", "blob", object!],
-          root,
-          {
-            onStdout: (chunk) => {
-              captured.update(chunk);
-            },
-          },
-        );
-        capturedDigest = captured.digest("hex");
-      }
+      const capturedDigest =
+        checkFileDigests && mode !== "160000"
+          ? await publicationBlobDigest(root, object!, dependencies)
+          : undefined;
       const matches = (digests: Set<string>) =>
         (digest !== undefined && digests.has(digest)) ||
         (capturedDigest !== undefined && digests.has(capturedDigest));

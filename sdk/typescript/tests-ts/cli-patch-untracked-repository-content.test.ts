@@ -91,6 +91,8 @@ for (const kind of [
   "initialized submodule",
   "untracked file in initialized submodule",
   "tracked edit in initialized submodule",
+  "staged-only edit in initialized submodule",
+  "sha256 staged-only edit in initialized submodule",
   "raw",
   "scrubbed",
   "directory link",
@@ -110,11 +112,20 @@ for (const kind of [
         const nested = join(directory, "nested");
         await mkdir(nested);
         const nestedGit = repositoryGit(nested);
-        nestedGit("init", "--initial-branch=main");
+        nestedGit(
+          "init",
+          "--initial-branch=main",
+          ...(kind.startsWith("sha256") ? ["--object-format=sha256"] : []),
+        );
         nestedGit("config", "user.name", "Synthetic User");
         nestedGit("config", "user.email", "synthetic@example.test");
         nestedGit("config", "commit.gpgsign", "false");
-        const trackedEdit = kind === "tracked edit in initialized submodule";
+        const stagedEdit = kind.endsWith(
+          "staged-only edit in initialized submodule",
+        );
+        const trackedEdit =
+          stagedEdit || kind === "tracked edit in initialized submodule";
+        const committedContent = "Committed fixture baseline\n";
         const ordinarySubmoduleFile =
           kind === "untracked file in initialized submodule";
         await writeFile(
@@ -159,11 +170,14 @@ for (const kind of [
           source = join(nested, "linked", "local.txt");
         } else await writeFile(source, content);
         if (kind === "committed" || trackedEdit) {
-          if (trackedEdit)
-            await writeFile(source, "Committed fixture baseline\n");
+          if (trackedEdit) await writeFile(source, committedContent);
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
           if (trackedEdit) await writeFile(source, content);
+          if (stagedEdit) {
+            nestedGit("add", "--", "local.txt");
+            await writeFile(source, committedContent);
+          }
         }
         if (kind.endsWith("initialized submodule")) {
           const childRemote = await fixtures.create(
@@ -258,7 +272,11 @@ for (const kind of [
               nestedIndex = await readFile(join(nestedStorage, "index"));
               await writeFile(
                 join(directory, "selected.txt"),
-                copied ? await readFile(source) : "New independent content\n",
+                copied
+                  ? stagedEdit
+                    ? nestedGit("show", ":local.txt") + "\n"
+                    : await readFile(source)
+                  : "New independent content\n",
               );
               output?.stdout.write(
                 JSON.stringify({
@@ -317,7 +335,11 @@ for (const kind of [
         expect(await readFile(join(nestedStorage, "config"))).toEqual(
           configuration,
         );
-        expect(await readFile(source, "utf8")).toBe(content);
+        expect(await readFile(source, "utf8")).toBe(
+          stagedEdit ? committedContent : content,
+        );
+        if (stagedEdit)
+          expect(nestedGit("show", ":local.txt")).toBe(content.trim());
         expect(assessments).toBe(assessed ? 1 : 0);
         expect(await readFile(join(directory, "selected.txt"), "utf8")).toBe(
           kind === "scrubbed"
