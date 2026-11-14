@@ -29,7 +29,6 @@ from report_projection import SEVERITY_ORDER
 from review_state import review_state
 from workbench_constants import ARTIFACTS, DEFAULT_PAGE_SIZE, PRIMARY_FINDING_LOCATION_SQL
 from workbench_instruction_digest import scan_instruction_digests, verify_sealed_instruction_digests
-from workbench_scan_start import loaded_plugin_version
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe, requested_scan_paths
 from workbench_target import (
@@ -114,6 +113,8 @@ def workbench_completion_binding(
     manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the scan ID, timestamps, producer, target, and scope used to bind output artifacts at completion."""
+    from workbench_scan_start import loaded_plugin_version
+
     contract = wb.scan_contract(scan)
     target_contract = contract["target"]
     plugin_version = loaded_plugin_version()
