@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,9 +15,9 @@ from finalize_scan_contract import (
     _normalize_unsealed_open_questions,
     _read_json,
     _require_portable_relative_path,
+    _sha256_scan_local_file,
     _validate_resolved_deferred,
     _validate_schema_node,
-    open_scan_local_file_descriptor,
 )
 
 
@@ -353,11 +352,9 @@ class SavedCoverageOrigins:
             return None
         if ref not in self.receipt_digests:
             try:
-                descriptor = open_scan_local_file_descriptor(
+                self.receipt_digests[ref] = _sha256_scan_local_file(
                     self.scan_dir, ref, "Saved discovery receipt"
                 )
-                with os.fdopen(descriptor, "rb") as handle:
-                    self.receipt_digests[ref] = hashlib.sha256(handle.read()).hexdigest()
             except (ContractError, OSError):
                 self.receipt_digests[ref] = None
         return self.receipt_digests[ref]

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, posix, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -246,12 +246,9 @@ export async function readAcceptedDiscovery(
             location.components,
             "Saved discovery receipt",
           );
-          receiptDigests.set(
-            key,
-            createHash("sha256")
-              .update(await readFile(path))
-              .digest("hex"),
-          );
+          const digest = createHash("sha256");
+          for await (const chunk of createReadStream(path)) digest.update(chunk);
+          receiptDigests.set(key, digest.digest("hex"));
         } catch {
           // Missing evidence cannot establish an earlier receipt origin.
         }
