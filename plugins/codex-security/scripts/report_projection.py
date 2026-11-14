@@ -32,6 +32,7 @@ th { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
 .finding h2 { font-size: 1.1rem; }
 dl { display: grid; gap: .25rem 1rem; grid-template-columns: 9rem 1fr; }
 dt { font-weight: 600; }
+dd { white-space: pre-wrap; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 a { color: inherit; }
 """.strip()

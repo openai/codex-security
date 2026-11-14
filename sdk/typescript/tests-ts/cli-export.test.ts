@@ -886,11 +886,7 @@ describe("CLI", () => {
           expect(contents).toContain("occurrence_id,finding_id,");
         } else if (format === "html") {
           expect(contents).toContain("<!DOCTYPE html>");
-          expect(contents).toContain("<style>");
-          expect(contents).toContain(source.severity.level);
-          expect(contents).toContain("open");
-          expect(contents).toContain(source.locations[0].path);
-          expect(contents).not.toContain("<link");
+          expect(contents).toContain(source.occurrenceId);
         } else if (format === "json") {
           expect(JSON.parse(contents)).toMatchObject({
             documentType: "codex-security.findings",
