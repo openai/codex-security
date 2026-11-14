@@ -745,6 +745,12 @@ def test_repository_index_excludes_previous_checkout_owner(tmp_path: Path, legac
     assert remaining[0]["latestScan"]["scanId"] == other["scanId"]
     assert remaining[0]["scanCount"] == 1
     assert remaining[0]["openFindingsCount"] == 1
+    assert run_workbench(state_dir, "list-repositories", "--status", "not_scanned")[
+        "repositories"
+    ] == [replacement]
+    assert run_workbench(state_dir, "list-repositories", "--status", "scanned")["repositories"] == [
+        remaining[0]
+    ]
 
     # Modern registration rejects a different owner at a saved path.
     # Restore the saved checkout to verify that the persisted history remains available.

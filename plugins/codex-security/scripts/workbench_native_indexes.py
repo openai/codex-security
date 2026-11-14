@@ -157,7 +157,7 @@ def _indexed_findings(
     scan_scope: RepositoryScanScope | None = None,
     legacy_generations: dict[str, str] | None = None,
     allowed_scan_ids: set[str] | None = None,
-    through_scan_sequence: int | None = None,
+    through_admission_sequence: int | None = None,
     exclude_scan_id: str | None = None,
     require_current_owners: bool = False,
     query: str = "",
@@ -219,9 +219,11 @@ def _indexed_findings(
         )
 
     target_filter, target_values = scope_sql("scans")
-    if through_scan_sequence is not None:
-        target_filter += " AND scans.rowid <= ?"
-        target_values = (*target_values, through_scan_sequence)
+    if through_admission_sequence is not None:
+        target_filter += (
+            " AND scans.id IN (SELECT scan_id FROM scan_admissions WHERE sequence <= ?)"
+        )
+        target_values = (*target_values, through_admission_sequence)
     parents: dict[tuple[tuple[str, str], str], tuple[tuple[str, str], str]] = {}
 
     def group(identity: tuple[tuple[str, str], str]) -> tuple[tuple[str, str], str]:
@@ -542,7 +544,8 @@ def indexed_scan_findings(
         None
         if through_scan is None
         else connection.execute(
-            "SELECT MAX(rowid) FROM scans WHERE id IN (?, ?)", (scan["id"], through_scan["id"])
+            "SELECT MAX(sequence) FROM scan_admissions WHERE scan_id IN (?, ?)",
+            (scan["id"], through_scan["id"]),
         ).fetchone()[0]
     )
     indexed = _indexed_findings(
@@ -550,7 +553,7 @@ def indexed_scan_findings(
         identities=identities,
         scan_scope=scope,
         allowed_scan_ids=allowed,
-        through_scan_sequence=through,
+        through_admission_sequence=through,
         require_current_owners=True,
     )
     coverage_by_scan_id: dict[str, tuple[sqlite3.Row, dict[str, Any] | None]] = {}
@@ -697,12 +700,17 @@ def list_repositories(
             scans_by_target.setdefault(target_id, []).append(row)
 
     @cache
+    def owned_scans(target_id: str) -> list[sqlite3.Row]:
+        return [
+            row
+            for row in scans_by_target.get(target_id, [])
+            if scan_history.scan_has_current_owner(connection, row, identities)
+        ]
+
     def populate_scan_summary(target_id: str) -> None:
         repository = by_target[target_id]
         latest = None
-        for row in scans_by_target.get(target_id, []):
-            if not scan_history.scan_has_current_owner(connection, row, identities):
-                continue
+        for row in owned_scans(target_id):
             summary = scan_history.scan_summary(row)
             repository["scanCount"] += 1
             if latest is None or (
@@ -745,13 +753,13 @@ def list_repositories(
             repository
             for repository in repositories
             if (args.target_id is None or repository["targetId"] == args.target_id)
-            and (args.status != "scanned" or repository["targetId"] in scans_by_target)
-            and (args.status != "not_scanned" or repository["targetId"] not in scans_by_target)
             and (
                 not query
                 or query in repository["displayName"].casefold()
                 or query in repository["targetPath"].casefold()
             )
+            and (args.status != "scanned" or owned_scans(repository["targetId"]))
+            and (args.status != "not_scanned" or not owned_scans(repository["targetId"]))
             and (args.status != "open_findings" or open_findings_count(repository["targetId"]) > 0)
         ]
         if args.limit is not None or args.offset:
