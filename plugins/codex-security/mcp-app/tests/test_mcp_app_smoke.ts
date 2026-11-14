@@ -541,6 +541,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(result.scan.model, "gpt-5.6-sol");
     assert.equal(result.scan.reasoningEffort, "high");
     assert.equal(result.scan.userContext, headlessContext);
+    assert.equal(result.investigationPolicy, undefined);
 
     const joined = await headlessServer.callTool(4, {
       name: "start_codex_security_standard_scan",
@@ -600,6 +601,17 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       /only available for Deep or diff scans/,
     );
 
+    const allowance = await headlessServer.callSuccessfulTool(80, {
+      name: "update_codex_security_scan_context",
+      arguments: {
+        scanId: result.scanId,
+        handoffClaimToken: result.handoffClaimToken,
+        maxTimeMinutes: 3,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    const policy = allowance.structuredContent.investigationPolicy;
+    assert.equal(typeof policy, "string");
     await headlessServer.callSuccessfulTool(81, {
       name: "update_codex_security_scan_progress",
       arguments: {
@@ -625,6 +637,20 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       rejoinedAfterPreflight.structuredContent.scan.progress.phase,
       "discovery",
     );
+
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.scanId,
+      result.scanId,
+    );
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.handoffClaimToken,
+      result.handoffClaimToken,
+    );
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.investigationPolicy,
+      policy,
+    );
+    assert.ok(rejoinedAfterPreflight.content[0].text.includes(policy));
 
     for (const threadSource of [undefined, "security_scan"]) {
       let scan = result;

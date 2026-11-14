@@ -665,6 +665,7 @@ export function createCodexSecurityServer(): McpServer {
           scanId,
           scanDir,
           handoffClaimToken,
+          investigationPolicy: started.investigationPolicy,
           scan: modelScanContext({ scan }, { omitHandoffClaim: true }).scan,
         },
         [
