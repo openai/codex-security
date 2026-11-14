@@ -1434,10 +1434,10 @@ Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--post-scan-prompt-file` runs a follow-up even after failure, but not after
 cancellation or a cost stop.
 
-Concurrency defaults to four repositories. `--max-attempts` defaults to one
-attempt per pending repository per invocation. Repeating the command continues
-the campaign, skips completed results, and starts pending attempts. Occupied
-attempt directories stop that repository and suggest `--recover`.
+By default, `bulk-scan` runs up to four repositories concurrently and tries each
+unfinished CSV row once per run. With `--max-attempts 2`, a row that fails
+attempts 1 and 2 gets up to two more attempts (3 and 4) on the next run.
+An occupied attempt directory stops that row and prompts for `--recover`.
 If an ordinary attempt finds its checkout path already occupied, it stops before
 fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
 existing checkout before an ordinary retry.

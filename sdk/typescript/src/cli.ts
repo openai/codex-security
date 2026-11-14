@@ -6682,7 +6682,7 @@ export async function main(
         provider: PROVIDER_OPTION,
         maxAttempts: positiveInteger
           .default(1)
-          .describe("Maximum scan attempts per repository."),
+          .describe("Try each CSV row up to this many times per run."),
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
