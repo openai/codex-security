@@ -123,6 +123,9 @@ export async function remediationPrompt(
       prompt.push(
         'Return exactly one JSON object with a "patches" array. Include one object for every supplied finding: {"occurrenceId":"...","status":"verified|no_change|blocked|failed","files":["relative/path"],"verification":"required for verified and no_change outcomes: proof that the original issue is fixed or that the current code is already safe, and that legitimate behavior still works","reason":"required for blocked or failed outcomes"}. ' +
           'Use "verified" only when the supplied verification method establishes that the original attack path is closed and legitimate behavior is preserved. Preserve unrelated local changes.',
+        'For a blocked result, use "reason" to say whether this attempt changed any files, what stopped the fix, and what needs to happen next. ' +
+          "If a required change is outside the writable repository or path, explain what that component does and why it matters to the fix. Assume the reader knows only the current repository. " +
+          "Identify the required change and where it belongs when known. If additional access or an owner action is needed, state it before suggesting another attempt.",
       );
     }
   }

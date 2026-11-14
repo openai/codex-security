@@ -23,10 +23,11 @@ def test_scan_context_reports_only_other_running_deep_scans(
         workspace_id = str(uuid.uuid4())
         now = workbench_api["now"]()
         with workbench_db:
+            target_id = workbench_api["ensure_security_target"](workbench_db, str(target))
             workbench_db.execute(
-                "INSERT INTO workspaces (id, target_path, default_mode, submitted, created_at, "
-                "updated_at) VALUES (?, ?, ?, 1, ?, ?)",
-                (workspace_id, str(target), mode, now, now),
+                "INSERT INTO workspaces (id, target_id, target_path, default_mode, submitted, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+                (workspace_id, target_id, str(target), mode, now, now),
             )
         scans[name] = workbench_api["start_scan"](
             workbench_db,

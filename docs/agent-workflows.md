@@ -171,10 +171,10 @@ cs scans logs SCAN_ID
 ```
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
-selects the latest scan of any status. An interrupted Deep Scan still marked
+selects the latest scan of any status. An interrupted Standard or Deep Scan still marked
 `running` can use `cs scans resume SCAN_ID` with its original checkout, output,
 session, and state directory. Completed, failed, and canceled scans need a new
 attempt with `cs scans rerun SCAN_ID`. A rerun uses the current checkout and may
 need the original custom prompt files supplied again. See
-[resume requirements](../sdk/typescript/docs/cli.md#resuming-an-interrupted-deep-scan)
+[resume requirements](../sdk/typescript/docs/cli.md#resuming-an-interrupted-scan)
 and [runtime troubleshooting](../sdk/typescript/docs/cli.md#troubleshooting).

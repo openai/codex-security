@@ -63,7 +63,8 @@ def update_context(
     """Update user context on a running scan and return the refreshed scan context in the same workbench."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     minutes = args.max_time_minutes
-    if args.user_context is None and minutes is None:
+    replace_context = args.user_context_stdin or args.user_context is not None
+    if not replace_context and minutes is None:
         raise SystemExit("Provide a replacement user context or max-time-minutes.")
     connection.execute("BEGIN IMMEDIATE")
     with connection:
@@ -88,7 +89,7 @@ def update_context(
             )
         if minutes is not None:
             set_investigation_allowance(connection, scan, minutes)
-        if args.user_context is not None:
+        if replace_context:
             context = user_context_argument(args)
             timestamp = wb.now()
             connection.execute(

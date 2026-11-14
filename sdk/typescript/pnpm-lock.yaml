@@ -21,17 +21,20 @@ importers:
         specifier: 4.3.6
         version: 4.3.6(@types/node@26.6.6)
       '@linear/sdk':
-        specifier: 101.0.0
-        version: 101.0.0(graphql@17.0.2)
+        specifier: 101.1.0
+        version: 101.1.0(graphql@17.0.2)
       '@octokit/core':
         specifier: 7.0.8
         version: 7.0.8
       '@openai/codex':
-        specifier: 0.167.0
-        version: 0.167.0
+        specifier: 0.167.1
+        version: 0.167.1
       '@openai/codex-sdk':
-        specifier: 0.167.0
-        version: 0.167.0
+        specifier: 0.167.1
+        version: 0.167.1
+      add-mcp:
+        specifier: 2.6.1
+        version: 2.6.1
       ajv:
         specifier: 8.20.0
         version: 8.20.0
@@ -68,6 +71,9 @@ importers:
       strip-ansi:
         specifier: 7.2.0
         version: 7.2.0
+      tokenx:
+        specifier: 1.6.0
+        version: 1.6.0
       yaml:
         specifier: 2.9.1
         version: 2.9.1
@@ -133,6 +139,12 @@ packages:
 
   '@cfworker/json-schema@4.1.1':
     resolution: {integrity: sha512-gAmrUZSGtKc3AiBL71iNWxDsyUC5uMaKKGdvzYsBoTW/xi42JQHl7eKV2OYzCUqvc+D2RCcf7EXY2iCyFIk6og==}
+
+  '@clack/core@0.4.1':
+    resolution: {integrity: sha512-Pxhij4UXg8KSr7rPek6Zowm+5M22rbd2g1nfojHJkxp5YkFqiZ2+YLEM/XGVIzvGOcM0nqjIFxrpDwWRZYWYjA==}
+
+  '@clack/prompts@0.9.1':
+    resolution: {integrity: sha512-JIpyaboYZeWYlyP0H+OoPPxd6nqueG/CmN6ixBiNFsIDHREevjIf0n0Ohh5gr5C8pEDknzgvz+pIJ8dMhzWIeg==}
 
   '@esbuild/aix-ppc64@0.28.2':
     resolution: {integrity: sha512-XExcO+dvLKvVtNTibSTBej1NCAbaGhWn9Ww1ZPx80qsahhPFe/8jgWP0IchNe0F3HwkU7n8ejhH8bjonqht8mQ==}
@@ -295,6 +307,9 @@ packages:
     peerDependencies:
       graphql: ^0.8.0 || ^0.9.0 || ^0.10.0 || ^0.11.0 || ^0.12.0 || ^0.13.0 || ^14.0.0 || ^15.0.0 || ^16.0.0 || ^17.0.0
 
+  '@iarna/toml@2.2.5':
+    resolution: {integrity: sha512-trnsAYxU3xnS1gPHPyU961coFyLkh4gAD/0zQ5mymY4yOZ+CYvsPqUbOFSw0aDM4y0tV7tiFxL/1XfXPNC6IPg==}
+
   '@inquirer/ansi@2.0.10':
     resolution: {integrity: sha512-dwrc+1aqVZpHNkNDswXGtn1typ+Pxpo5FHZRyBw1le7onEJUkPUkYOY1FIFC1LvFMYUqqLuWBwElhAmencL7MQ==}
     engines: {node: '>=23.5.0 || ^22.13.0 || ^20.17.0'}
@@ -360,8 +375,8 @@ packages:
   '@jsdevtools/ono@7.1.3':
     resolution: {integrity: sha512-4JQNk+3mVzK3xh2rqd6RB4J46qUR19azEHBneZyTZM+c456qOrbbM/5xcR8huNCCcbVt7+UmizG6GuUvPvKUYg==}
 
-  '@linear/sdk@101.0.0':
-    resolution: {integrity: sha512-pQMaZmh/ewEMR9QmSZDuY+5NQy+xYS3DJDjqLEqlqj35M71Xde9vMHuNijamDZGqG6CojtCSU6YjgIg14pw+1A==}
+  '@linear/sdk@101.1.0':
+    resolution: {integrity: sha512-sDlYKMoTiOQU1C6+B2451qMbrR6zdKbBZfqIGp/dpZdVeOzYQSmp8e4uUHlCdMuFM7sRhQFMIl82AtwoaKYW5g==}
     engines: {node: ^20.19.0 || >=22.12.0}
 
   '@modelcontextprotocol/server@2.0.0-alpha.4':
@@ -473,47 +488,47 @@ packages:
   '@octokit/types@18.0.0':
     resolution: {integrity: sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA==}
 
-  '@openai/codex-sdk@0.167.0':
-    resolution: {integrity: sha512-dps+zHZeB1MJIL9AO8Azasw5vvS8A5AyI/xmvnTObX8868/8uUeB/UHhuM9SJ4BcX0E6q46PnxuOPbJ2bqD+dA==}
+  '@openai/codex-sdk@0.167.1':
+    resolution: {integrity: sha512-EJHNG/bZ+/rptIIZMigTgnqrukDAgc/rmUBXLeDrFwOeunno7tQ4sWt/VPzeRXnKGq6yd4jprpgRlzgpYvayzQ==}
     engines: {node: '>=18'}
 
-  '@openai/codex@0.167.0':
-    resolution: {integrity: sha512-1FSQgbTIKAdTub5Ln6z36NT4eXDmBRkinfigzycbgn9yLZdJ3UdkQZqr0N7jnl8/D1xxT/Pz3Fl2l7S2dmRaFA==}
+  '@openai/codex@0.167.1':
+    resolution: {integrity: sha512-39uApTRT9bkhE8tMXTIfZxaZ27oi7hPqWoF2Coyp+iQFAD3NVHgH838IYVUfJaX85leMSP2s4JOmVw0mMSCN5Q==}
     engines: {node: '>=16'}
     hasBin: true
 
-  '@openai/codex@0.167.0-darwin-arm64':
-    resolution: {integrity: sha512-7YtMDZX/jbWH9+fCVQg7BVsov8WvBzu4iuedXJEDlUdZxaTrYX2bEQwHIn3p0gxgSMfm30HGK9+bZm1aGSZaHw==}
+  '@openai/codex@0.167.1-darwin-arm64':
+    resolution: {integrity: sha512-IMUByWGPhdbJFZzuk18iIdF/mfd21cPwalRTp5vGYIsOCyv3SJGRY5snbzZd0zO37WGuNjfUvH/62LvQHqNT2A==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [darwin]
 
-  '@openai/codex@0.167.0-darwin-x64':
-    resolution: {integrity: sha512-wKoBiI6SBSg8fqiEYEOJs/NM/ZzKaCgy1cseX9LJbuDq3GCCKkeW9BUGe1ZEkyhhZ5Yfj+HzdUfp698abP2tDA==}
+  '@openai/codex@0.167.1-darwin-x64':
+    resolution: {integrity: sha512-SwJf87Qtuktk8qHSDsbNkjVjOerqQRCBgdrqw6gvAlF3tO8UizEp/Vs8qQVznNI1aJfFc6GoJLvcgBGVWVylDg==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [darwin]
 
-  '@openai/codex@0.167.0-linux-arm64':
-    resolution: {integrity: sha512-5cv+sybRWqpRJL6KCv3YSnIx1GHRmjek997C38n1Zfno4HomKDLkNSjWLDOOc2+ISlVNSRRnySWq4zKmzlY12g==}
+  '@openai/codex@0.167.1-linux-arm64':
+    resolution: {integrity: sha512-z13jj4X4GDk7CTd1kXHkhXC8Gj8zomd1jYsU2//0KjevbLelPxowWLSTqIcR1rarJCtzveBHsS8gR7B9pAWB0g==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [linux]
 
-  '@openai/codex@0.167.0-linux-x64':
-    resolution: {integrity: sha512-FNc7danfUng9Sp6w+Fh7kofNHHZpA6VMyNKWsWrS3OwHly69gywTWeiuwrUPXpJSho8Df4xqRsHfHRPzj7zYQg==}
+  '@openai/codex@0.167.1-linux-x64':
+    resolution: {integrity: sha512-qZteglyvMCj1QVymMyPyKdtw38HaXCv5gvw8WN+N0+JJstu3k/d8xiYj9ciL7OwFLhcujgP8bCGJgaREeqrHkw==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [linux]
 
-  '@openai/codex@0.167.0-win32-arm64':
-    resolution: {integrity: sha512-dYeYQZ66LCNnFXyF5vHRsbJQLyfbY3G8vDyn6XG3NxcwMFz4stkgSdC94UPc1NhCxkhpufHlkAm1oe+Z28Pw5Q==}
+  '@openai/codex@0.167.1-win32-arm64':
+    resolution: {integrity: sha512-KFUMwSMBlQmabCSbpfv7AgouF+kNJE8iNw/nYv+IgHbHCY0v1pAzLFdt3BscYRUD+KNOeJqnp6n4xwCteA5OcQ==}
     engines: {node: '>=16'}
     cpu: [arm64]
     os: [win32]
 
-  '@openai/codex@0.167.0-win32-x64':
-    resolution: {integrity: sha512-duPCBwflc8qhQdLekbL8fDYF646tW4gj0/l9BDnsVhEzoqm6OwxMAJXDFwSOLUUJPCmjBeM+eHYAx4fP/hwfjg==}
+  '@openai/codex@0.167.1-win32-x64':
+    resolution: {integrity: sha512-yvUA7s46paDIT5I3Phz8KcoGpSGlWR3pOS0npqQ3LQMpjtTOBWoLPRdjuoKVreuKIuOLDMxwWCID4nwojbbrSA==}
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
@@ -669,6 +684,11 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  add-mcp@2.6.1:
+    resolution: {integrity: sha512-Jimza7/1JLaC3RVoaImX+CJSYKrQZkKuBZoV77zdo5yZwl/ZI66ba2uBVz690VSiqXR3yWKIPaw6Ou4ntzuRwg==}
+    engines: {node: '>=18'}
+    hasBin: true
+
   ajv@8.20.0:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
 
@@ -704,6 +724,10 @@ packages:
   bun-types@1.4.4:
     resolution: {integrity: sha512-yjrJh5oGX7mMPKGd19YXyIjmEuj4G4zNC30bs7PM9Az7NQ3ndF3j6hbeRdvJTRQEhJ/FYQwW0a2moweEi2hMxQ==}
 
+  chalk@5.6.2:
+    resolution: {integrity: sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA==}
+    engines: {node: ^12.17.0 || ^14.13 || >=16.0.0}
+
   chalk@6.0.1:
     resolution: {integrity: sha512-/Ce6KNm3vIbWdMlNna6RVIZ/ICQxnJxCicet5LBKK9ZffBkqzDw0xh9EiKSljdRtiIQ1S1z4YgcscUUGzNCWrA==}
     engines: {node: '>=22'}
@@ -727,6 +751,10 @@ packages:
   code-excerpt@4.0.0:
     resolution: {integrity: sha512-xxodCmBen3iy2i0WtAK8FlFNrRzjUqjRsMfho58xT/wvZU1YTM3fCnRjcy1gJPMepaRlgm/0e6w8SpWHpn3/cA==}
     engines: {node: ^12.20.0 || ^14.13.1 || >=16.0.0}
+
+  commander@13.1.0:
+    resolution: {integrity: sha512-/rFeCpNJQbhSZjGVwO9RFV3xPqbnERS8MmIQzCtD/zl6gpJuV/bMLuN92oG3F7d8oDEHHRrujSXNUr8fpjntKw==}
+    engines: {node: '>=18'}
 
   content-type@3.0.0:
     resolution: {integrity: sha512-AIi5H6p0xk5uknXcN3/rmhP8jgp69OfSe/JuKiQAFprJ7UGw7mwj7m4XcmDzlrnJDG+cGpphAINGdU3g3g7kDw==}
@@ -861,6 +889,9 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
+  jsonc-parser@3.3.1:
+    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
+
   lodash@4.18.1:
     resolution: {integrity: sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==}
 
@@ -892,6 +923,9 @@ packages:
 
   pend@1.2.0:
     resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
+
+  picocolors@1.1.1:
+    resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
 
   picomatch@4.0.7:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
@@ -945,6 +979,9 @@ packages:
   signal-exit@4.1.0:
     resolution: {integrity: sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==}
     engines: {node: '>=14'}
+
+  sisteransi@1.0.5:
+    resolution: {integrity: sha512-bLGGlR1QxBcynn2d5YmDX4MGjlZvy2MRBDRNHLJ8VI6l6+9FUiyTFNJ0IveOSP0bcXgVDPRcfGqA0pjaqUpfVg==}
 
   slice-ansi@9.0.0:
     resolution: {integrity: sha512-SO/3iYL5S3W57LLEniscOGPZgOqZUPCx6d3dB+52B80yJ0XstzsC/eV8gnA4tM3MHDrKz+OCFSLNjswdSC+/bA==}
@@ -1037,6 +1074,17 @@ snapshots:
 
   '@cfworker/json-schema@4.1.1': {}
 
+  '@clack/core@0.4.1':
+    dependencies:
+      picocolors: 1.1.1
+      sisteransi: 1.0.5
+
+  '@clack/prompts@0.9.1':
+    dependencies:
+      '@clack/core': 0.4.1
+      picocolors: 1.1.1
+      sisteransi: 1.0.5
+
   '@esbuild/aix-ppc64@0.28.2':
     optional: true
 
@@ -1119,6 +1167,8 @@ snapshots:
     dependencies:
       graphql: 17.0.2
 
+  '@iarna/toml@2.2.5': {}
+
   '@inquirer/ansi@2.0.10': {}
 
   '@inquirer/checkbox@5.2.8(@types/node@26.6.6)':
@@ -1172,7 +1222,7 @@ snapshots:
 
   '@jsdevtools/ono@7.1.3': {}
 
-  '@linear/sdk@101.0.0(graphql@17.0.2)':
+  '@linear/sdk@101.1.0(graphql@17.0.2)':
     dependencies:
       '@graphql-typed-document-node/core': 3.2.0(graphql@17.0.2)
     transitivePeerDependencies:
@@ -1272,35 +1322,35 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 29.0.1
 
-  '@openai/codex-sdk@0.167.0':
+  '@openai/codex-sdk@0.167.1':
     dependencies:
-      '@openai/codex': 0.167.0
+      '@openai/codex': 0.167.1
 
-  '@openai/codex@0.167.0':
+  '@openai/codex@0.167.1':
     optionalDependencies:
-      '@openai/codex-darwin-arm64': '@openai/codex@0.167.0-darwin-arm64'
-      '@openai/codex-darwin-x64': '@openai/codex@0.167.0-darwin-x64'
-      '@openai/codex-linux-arm64': '@openai/codex@0.167.0-linux-arm64'
-      '@openai/codex-linux-x64': '@openai/codex@0.167.0-linux-x64'
-      '@openai/codex-win32-arm64': '@openai/codex@0.167.0-win32-arm64'
-      '@openai/codex-win32-x64': '@openai/codex@0.167.0-win32-x64'
+      '@openai/codex-darwin-arm64': '@openai/codex@0.167.1-darwin-arm64'
+      '@openai/codex-darwin-x64': '@openai/codex@0.167.1-darwin-x64'
+      '@openai/codex-linux-arm64': '@openai/codex@0.167.1-linux-arm64'
+      '@openai/codex-linux-x64': '@openai/codex@0.167.1-linux-x64'
+      '@openai/codex-win32-arm64': '@openai/codex@0.167.1-win32-arm64'
+      '@openai/codex-win32-x64': '@openai/codex@0.167.1-win32-x64'
 
-  '@openai/codex@0.167.0-darwin-arm64':
+  '@openai/codex@0.167.1-darwin-arm64':
     optional: true
 
-  '@openai/codex@0.167.0-darwin-x64':
+  '@openai/codex@0.167.1-darwin-x64':
     optional: true
 
-  '@openai/codex@0.167.0-linux-arm64':
+  '@openai/codex@0.167.1-linux-arm64':
     optional: true
 
-  '@openai/codex@0.167.0-linux-x64':
+  '@openai/codex@0.167.1-linux-x64':
     optional: true
 
-  '@openai/codex@0.167.0-win32-arm64':
+  '@openai/codex@0.167.1-win32-arm64':
     optional: true
 
-  '@openai/codex@0.167.0-win32-x64':
+  '@openai/codex@0.167.1-win32-x64':
     optional: true
 
   '@scalar/openapi-types@0.8.0': {}
@@ -1393,6 +1443,15 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
+  add-mcp@2.6.1:
+    dependencies:
+      '@clack/prompts': 0.9.1
+      '@iarna/toml': 2.2.5
+      chalk: 5.6.2
+      commander: 13.1.0
+      jsonc-parser: 3.3.1
+      yaml: 2.9.1
+
   ajv@8.20.0:
     dependencies:
       fast-deep-equal: 3.1.3
@@ -1423,6 +1482,8 @@ snapshots:
       '@types/node': 26.6.6
       undici-types: 8.9.0
 
+  chalk@5.6.2: {}
+
   chalk@6.0.1: {}
 
   cli-boxes@4.0.1: {}
@@ -1441,6 +1502,8 @@ snapshots:
   code-excerpt@4.0.0:
     dependencies:
       convert-to-spaces: 2.0.1
+
+  commander@13.1.0: {}
 
   content-type@3.0.0: {}
 
@@ -1591,6 +1654,8 @@ snapshots:
 
   json5@2.2.3: {}
 
+  jsonc-parser@3.3.1: {}
+
   lodash@4.18.1: {}
 
   mimic-fn@2.1.0: {}
@@ -1612,6 +1677,8 @@ snapshots:
       '@napi-rs/canvas': 1.1.0
 
   pend@1.2.0: {}
+
+  picocolors@1.1.1: {}
 
   picomatch@4.0.7: {}
 
@@ -1646,6 +1713,8 @@ snapshots:
   signal-exit@3.0.7: {}
 
   signal-exit@4.1.0: {}
+
+  sisteransi@1.0.5: {}
 
   slice-ansi@9.0.0:
     dependencies:

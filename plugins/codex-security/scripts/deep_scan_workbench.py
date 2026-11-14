@@ -25,6 +25,7 @@ from workbench.storage import (
 from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
+from workbench_target_state import require_scan_checkout_owner
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
@@ -611,6 +612,7 @@ def begin_deep_scan_for_scan(
 ) -> dict[str, Any]:
     scan_id = require_uuid(scan_id, "scan-id")
     candidate = dependencies().require_scan(connection, scan_id)
+    require_scan_checkout_owner(connection, candidate)
     model_thread_id = getattr(args, "model_thread_id", None)
     require_tokenless_scan_owner(connection, candidate, model_thread_id)
     workspace = dependencies().require_workspace(connection, candidate["workspace_id"])
@@ -695,6 +697,7 @@ def begin_deep_scan_for_scan(
     connection.execute("BEGIN IMMEDIATE")
     with connection:
         scan, _ = require_owned_scan(connection, scan_id, thread_id)
+        require_scan_checkout_owner(connection, scan)
         require_current_continuation(
             scan,
             args.claim_token,
@@ -761,6 +764,7 @@ def begin_deep_scan_for_target(
     with connection:
         existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
         if existing is not None:
+            require_scan_checkout_owner(connection, existing)
             connection.commit()
             return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
         current_target = dependencies().require_remediation_target(target_path)
@@ -785,6 +789,7 @@ def begin_deep_scan_for_target(
             target_inode,
         )
         if terminal is not None:
+            require_scan_checkout_owner(connection, terminal)
             connection.commit()
             return deep_scan_result(
                 connection,
@@ -814,7 +819,8 @@ def begin_deep_scan_for_target(
         workspace_id = str(uuid.uuid4())
         scan_id = str(uuid.uuid4())
         timestamp = dependencies().now()
-        target_id = dependencies().ensure_security_target(connection, target_path)
+        registration = dependencies().register_security_target(connection, target_path)
+        target_id = registration.target_id
         connection.execute(
             """
             INSERT INTO workspaces (
@@ -846,6 +852,7 @@ def begin_deep_scan_for_target(
             scope=scope,
             diff_target=None,
             target_identity=target_identity,
+            repository_generation=registration.repository_generation,
             source_scopes=source_scopes,
             target_root=target_root,
             target_summary=None,

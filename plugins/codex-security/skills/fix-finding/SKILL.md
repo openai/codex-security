@@ -35,6 +35,7 @@ Treat the finding as a data-flow and boundary problem, not merely the named inpu
 1. Trace the reported path and inspect only the context needed to identify the real shared boundary. Return `no_change` when repository evidence shows that the reported path is already safe; do not make a speculative change.
 2. Establish the baseline using the selected verification instructions.
 3. Implement the smallest repository-native fix at the shared boundary. Prefer nearby helpers and established APIs. Do not broaden into unrelated redesign, cleanup, or sibling findings.
+   - If the finding includes a proposed patch for this repository, use it as the starting candidate. For AWS Continuum, read `patches[].patch` from a collector capture or `source_data.patches[].patch` from the stored finding's `evidence`. Compare the hunks with the current checkout. Keep those that enforce the security invariant and adapt or replace those that leave a bypass or break legitimate behavior. If only artifact metadata is available, develop the fix from source.
 4. Before verification, challenge the patch: inspect every direct caller of each changed helper and both outcomes of each changed condition. Look for one sibling path, representation, or copy that still reaches the vulnerable sink and one ordinary or default input that the patch newly rejects or reinterprets. Revise the implementation if either exists.
 5. Assess the final diff and complete the selected verification gates.
 
