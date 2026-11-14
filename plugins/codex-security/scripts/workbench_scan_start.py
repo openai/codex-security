@@ -439,10 +439,10 @@ def insert_running_scan(
             target_device, target_inode, source_scopes_json, scope, mode, user_context,
             deep_scan_owner_thread_id, diff_target_kind, diff_base_revision,
             diff_head_revision, diff_content_digest, target_summary, scan_dir, model,
-            reasoning_effort, instruction_digest, status, phase, handoff_status, started_at, created_at, updated_at,
-            launch_surface, launch_package_version, launch_plugin_version, launch_kind
+            reasoning_effort, instruction_digest, status, phase, handoff_status,
+            started_at, created_at, updated_at, launch_surface, launch_package_version, launch_plugin_version, launch_kind
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan_id,
