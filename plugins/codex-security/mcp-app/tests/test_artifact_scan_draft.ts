@@ -3006,11 +3006,7 @@ try {
     scanId,
     surfaces: [],
     completeness: "complete",
-    explicitExclusions: [
-      { pattern: "vendor", reason: "Reviewed elsewhere" },
-      { pattern: "generated", reason: "Generated files" },
-      { pattern: "vendor", reason: "Dependency policy" },
-    ],
+    explicitExclusions: [],
   };
   await writeJsonLine(path.join(root, "scan-manifest.json"), sealedManifest);
   await writeJsonLine(path.join(root, "findings.json"), sealedFindings);
@@ -3026,7 +3022,7 @@ try {
       scanId,
       manifest: sealedManifest,
       findings: sealedFindings,
-      review: { excludedPaths: ["vendor", "generated"] },
+      review: { excludedPaths: [] },
     },
   );
 

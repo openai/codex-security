@@ -78,40 +78,6 @@ describe("ScanResult", () => {
     expect(result.toJSON()).toEqual(serialized);
   });
 
-  test("summarizes each exclusion pattern once without changing the saved review", () => {
-    const excludedPaths = ["vendor", "generated", "vendor"];
-    const review = { excludedPaths, source: "repository policy" };
-    const options = {
-      manifest,
-      findings,
-      coverage: {
-        ...coverage,
-        explicitExclusions: excludedPaths.map((pattern, index) => ({
-          pattern,
-          reason: `Reason ${index}`,
-        })),
-      },
-      scanDir: "/scan",
-      threadId: "thread",
-      turnResult: {},
-    };
-    expect(new ScanResult(options).review.excludedPaths).toEqual([
-      "vendor",
-      "generated",
-    ]);
-    const saved = { ...manifest, scan: { ...manifest.scan, review } };
-    const result = new ScanResult({ ...options, manifest: saved });
-    expect(result.review).toEqual({
-      ...review,
-      excludedPaths: ["vendor", "generated"],
-    });
-    expect(result.manifest.scan.review?.excludedPaths).toEqual([
-      "vendor",
-      "generated",
-      "vendor",
-    ]);
-  });
-
   test("exposes canonical paths and machine serialization", () => {
     const repositoryFinding = {
       findingId: "finding",

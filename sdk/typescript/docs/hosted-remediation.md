@@ -7,10 +7,12 @@ separate from the Standard scan API and does not create scan/workbench state.
 
 The host prepares an isolated checkout, freezes its HEAD, supplies the original
 finding evidence and repository instructions, and enforces the requested
-sandbox. For verification, the host must first apply the exact candidate patch
-to its recorded base. The API does not apply a patch or infer a branch from the
-finding. It checks HEAD before and after execution; the host owns checking the
-candidate's bytes/digest and verifying that verification did not change them.
+sandbox. For patching, the agent must edit the supplied checkout and leave its
+changes uncommitted so the host can capture the diff. For verification, the
+host must first apply the exact candidate patch to its recorded base. The API
+does not apply a patch or infer a branch from the finding. It checks HEAD
+before dispatch and before accepting a completed execution. The host checks
+the candidate's bytes/digest and verifies that verification did not change them.
 
 In this TypeScript host integration, `executor` is your application's
 `RemediationExecutor`. It runs the request in the prepared checkout and returns
@@ -95,7 +97,11 @@ result validation finished; it does not imply that a patch fixed the finding:
 
 For a fresh `verified` or `no_change` result, the executor must return a
 boolean `credentialRevocationPending`. The SDK omits the field from the public
-result when false. A missing executor decision is an invalid result.
+result when false. Before upgrading the SDK, update existing version 1 executors
+to emit this boolean for every successful code outcome. Return true for committed
+credentials or confirmed disclosures until dated issuer or owner evidence identifies
+each affected credential and confirms its retirement. Return false for unrelated
+findings. Omitting the field returns `failed` with `INVALID_RESULT`.
 
 For a checked-in credential or a confirmed runtime disclosure, `patch.status`
 describes the code repair.
@@ -146,6 +152,13 @@ forwarded as `remediation.progress` with `{ id: originalRunId, event }`. Send
 the final execution receipt so usage and session identity survive cancellation.
 The transport emits one terminal result. Preparation failures are JSON-RPC
 errors; a mismatched HEAD includes `error.data.reason: "revision_mismatch"`.
+
+If a completed execution ends at a different commit, the terminal `result` has
+`status: "failed"`, `error.code: "INVALID_RESULT"`, and
+`error.reason: "revision_changed"`. It retains the execution receipt and omits
+the patch or verification outcome. To retry, start a new attempt in a fresh
+checkout at `result.revision`. If Git cannot resolve HEAD after execution, the
+result also fails with `INVALID_RESULT` and omits `error.reason`.
 
 To run the deterministic installed-package smoke check, use a source checkout
 of this repository and run the following from `sdk/typescript`. The script is

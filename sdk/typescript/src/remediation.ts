@@ -30,7 +30,7 @@ export type FindingVerification = z.infer<typeof FindingVerificationSchema>;
 export const VerificationModeSchema = z.enum(["static", "standard"]);
 
 export const CREDENTIAL_PATCH_INSTRUCTIONS =
-  "For a verified or no_change code repair, set credentialRevocationPending to true for a committed credential or a confirmed runtime disclosure unless caller-supplied issuer or owner evidence confirms retirement of the affected credentials. For a repaired runtime leak path with no confirmed disclosure, set the field to false and ask the owner to check deployment history. Set it to false for other findings. Explain any outstanding owner action in the verification text. A replacement in use or a comment in the scanned code alone cannot establish retirement. Never try the credential or contact its issuer.";
+  "For a verified or no_change code repair, set credentialRevocationPending to true for a committed credential or a confirmed runtime disclosure unless dated, caller-supplied issuer or owner evidence identifies each affected credential and confirms its retirement. For a repaired runtime leak path with no confirmed disclosure, set the field to false and ask the owner to check deployment history. Set it to false for other findings. Explain any outstanding owner action in the verification text. A replacement in use or a comment in the scanned code alone cannot establish retirement. Never try the credential or contact its issuer.";
 
 export const STATIC_VERIFICATION_INSTRUCTIONS =
   "Verification mode: static. Follow the bundled skill's static scope throughout patch generation and verification, including repository and validation instructions. Do not install dependencies or run builds, tests, reproducers, or the application. Report source evidence and state that runtime checks were not performed. Missing runtime tooling alone is not a blocker; report material gaps in source evidence.";
@@ -114,6 +114,9 @@ export async function remediationPrompt(
             ? 'Use "verified" only when static evidence establishes that the original attack path is closed and legitimate behavior is preserved. '
             : 'Use "verified" only after the original issue no longer reproduces and relevant checks pass. ') +
           "Preserve unrelated local changes.",
+        'For a blocked result, use "reason" to say whether this attempt changed any files, what stopped the fix, and what needs to happen next. ' +
+          "If a required change is outside the writable repository or path, explain what that component does and why it matters to the fix. Assume the reader knows only the current repository. " +
+          "Identify the required change and where it belongs when known. If additional access or an owner action is needed, state it before suggesting another attempt.",
       );
     }
   }
