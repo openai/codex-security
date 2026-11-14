@@ -1086,7 +1086,7 @@ describe("scan and patch workflow", () => {
     const remote = join(directory, "remote.git");
     const url = "https://github.example.test/example/repository/pull/17";
     const expectedBody = [
-      "Applies a security fix generated for SEC-123.",
+      "Applies the repository changes generated for SEC-123.",
       "",
       "## Patch risk assessment",
       "",
@@ -1199,7 +1199,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-SEC-123",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedBody,
       ]);
@@ -1629,7 +1629,7 @@ describe("scan and patch workflow", () => {
       const detail = "Diagnostic detail: token=SYNTHETIC_RISK_VALUE";
       const summary = `${patchRiskSummary()}\n\n${detail}`;
       const expectedPullRequestBody = [
-        "Applies verified security fixes from a completed scan.",
+        "Applies verified code changes for findings from a completed scan.",
         "",
         "## Patch risk assessment",
         "",
@@ -1818,7 +1818,7 @@ describe("scan and patch workflow", () => {
         "--head",
         "codex-security/patch-scan",
         "--title",
-        "fix: patch verified security findings",
+        "fix: apply security patch",
         "--body",
         expectedPullRequestBody,
       ]);
@@ -2139,8 +2139,59 @@ describe("scan and patch workflow", () => {
     },
   );
 
+  test("keeps a saved finding's source patch while credential retirement is blocked", async () => {
+    const path = "deploy.env";
+    const fixtures = await publicationFixtures({
+      [path]: "TOKEN=synthetic-fixture\n",
+    });
+    const { currentDirectory: repository, git } = fixtures;
+    const patch = {
+      occurrenceId: "occ_1",
+      status: "blocked",
+      files: [path],
+      verification: "The deployment reads the token from its environment.",
+      reason: "The owner must revoke the old registry token.",
+    };
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        ...fixtures,
+        onRepositoryCommand: runGitRepositoryCommand,
+        onCodex: async (_args, output) => {
+          await writeFile(join(repository, path), "TOKEN=${REGISTRY_TOKEN}\n");
+          output?.stdout.write(JSON.stringify({ patches: [patch] }));
+          return 0;
+        },
+      },
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(1);
+    expect(outcome.stderr).toContain(patch.reason);
+    const response = JSON.parse(outcome.stdout);
+    expect(response).toMatchObject({
+      applied: true,
+      files: [path],
+      patches: [patch],
+    });
+    expect(response.pullRequest).toBeUndefined();
+    expect(git("diff", "--name-only")).toBe(path);
+    expect(git("branch", "--show-current")).toBe("main");
+  });
+
   test("does not publish blocked, unchanged, or repository-external patches", async () => {
-    for (const status of ["blocked", "no_change", "outside"] as const) {
+    const reason = "Revoke the exposed token with its issuer.";
+    for (const [status, files, exitCode] of [
+      ["blocked", ["src/finding-1.ts"], 1],
+      ["no_change", [], 0],
+      ["verified", ["../outside.ts"], 2],
+    ] as const) {
+      const patch = {
+        occurrenceId: "occ_1",
+        status,
+        files,
+        ...(status === "blocked"
+          ? { reason }
+          : { verification: "Focused checks pass." }),
+      };
       const fixtures = await publicationFixtures();
       let commandStarted = false;
       const outcome = await runWorkflow(
@@ -2148,42 +2199,29 @@ describe("scan and patch workflow", () => {
         {
           ...fixtures,
           onCodex: async (_args, output) => {
-            if (status === "outside")
+            if (files.length > 0)
               await writeFile(
                 join(fixtures.currentDirectory, "src", "finding-1.ts"),
                 "fixed\n",
               );
-            output?.stdout.write(
-              JSON.stringify({
-                patches: [
-                  {
-                    occurrenceId: "occ_1",
-                    status: status === "outside" ? "verified" : status,
-                    files: status === "outside" ? ["../outside.ts"] : [],
-                    ...(status === "blocked"
-                      ? { reason: "A required service is unavailable." }
-                      : { verification: "Focused checks pass." }),
-                  },
-                ],
-              }),
-            );
+            output?.stdout.write(JSON.stringify({ patches: [patch] }));
             return 0;
           },
           onRepositoryCommand: (command, args, cwd, options) => {
             commandStarted ||=
               command !== "git" ||
-              ["switch", "commit", "push"].includes(args[0]!);
+              ["checkout", "switch", "commit", "push"].includes(args[0]!);
             return runGitRepositoryCommand(command, args, cwd, options);
           },
         },
       );
 
       expect(commandStarted).toBe(false);
-      expect(outcome.exitCode).toBe(
-        status === "blocked" ? 1 : status === "outside" ? 2 : 0,
-      );
-      expect(JSON.parse(outcome.stdout)).not.toHaveProperty("pullRequest");
-      if (status === "outside") {
+      expect(outcome.exitCode).toBe(exitCode);
+      const response = JSON.parse(outcome.stdout);
+      expect(response).not.toHaveProperty("pullRequest");
+      expect(response.patches).toEqual(status === "verified" ? [] : [patch]);
+      if (status === "verified") {
         expect(outcome.stderr).toContain(
           "Patch files must remain inside the scanned repository.",
         );
@@ -2699,9 +2737,9 @@ describe("scan and patch workflow", () => {
             "--source-branch",
             "codex-security/patch-scan-1",
             "--title",
-            "fix: patch verified security findings",
+            "fix: apply security patch",
             "--description",
-            ">>>\nApplies verified security fixes from a completed scan.",
+            ">>>\nApplies verified code changes for findings from a completed scan.",
             "--yes",
             "--repo",
             selector,

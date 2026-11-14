@@ -3480,9 +3480,11 @@ async function pluginRuntimeProjection(
   if (environment !== undefined && !Array.isArray(environment)) return;
   server["env_vars"] = [
     ...(environment ?? []),
-    ...["CODEX_SECURITY_PLUGIN_ROOT", "CODEX_SECURITY_REPOSITORY"].filter(
-      (name) => !environment?.includes(name),
-    ),
+    ...[
+      "CODEX_SECURITY_PLUGIN_ROOT",
+      "CODEX_SECURITY_REPOSITORY",
+      "CODEX_SECURITY_POLICY_BASE",
+    ].filter((name) => !environment?.includes(name)),
   ];
   const files: PluginRuntimeProjection["files"] = new Map();
   server["command"] =

@@ -1475,6 +1475,7 @@ async function testWorkerRuntimeSettings() {
     "SYNTHETIC_HEADER_VALUE",
     "OPENROUTER_API_KEY",
     "FIREWORKS_API_KEY",
+    "CODEX_SECURITY_POLICY_BASE",
     "CODEX_SQLITE_HOME",
     "XDG_CACHE_HOME",
     "LD_LIBRARY_PATH",
@@ -2120,6 +2121,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         await Promise.all(
           executors.map((executor, index) => {
             // Snapshot each scan environment independently.
+            process.env.CODEX_SECURITY_POLICY_BASE = String(index).padStart(
+              40,
+              "0",
+            );
             Object.assign(process.env, scanGitEnvironments[index]);
             process.env.CODEX_MCP_NODE_PATH = nodePaths[index];
             process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH = path.dirname(
@@ -2214,6 +2219,10 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.equal(
             workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
             workerConfigurations[index].path,
+          );
+          assert.equal(
+            workerLaunch.environment!.CODEX_SECURITY_POLICY_BASE,
+            String(index).padStart(40, "0"),
           );
           const deepConfigPath =
             workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH!;

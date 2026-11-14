@@ -18196,16 +18196,28 @@ if __name__ == "__main__":
     git("branch", base);
     git("branch", head);
     const runStreamed = mock(async (_input: string) => fail("prompt captured"));
+    const createCodex = mock((_options: CodexOptions) =>
+      codexFactory(runStreamed)(),
+    );
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      createCodex: codexFactory(runStreamed),
+      createCodex,
     });
     const revision = gitText(["rev-parse", "HEAD"], { cwd: repository }).trim();
 
     await expect(
-      client.run(repository, { target: DiffTarget.refs({ base, head }) }),
+      client.run(repository, {
+        target: DiffTarget.refs({ base, head }),
+        scanPrompt: "Include standalone token exposures for this review.",
+      }),
     ).rejects.toThrow("prompt captured");
     const prompt = () => runStreamed.mock.lastCall?.[0] ?? "";
+    expect(
+      createCodex.mock.lastCall?.[0].env?.["CODEX_SECURITY_POLICY_BASE"],
+    ).toBe(revision);
+    expect(prompt()).toContain(
+      "Include standalone token exposures for this review.",
+    );
     expect(prompt()).toContain(
       `Scan target: Git diff from ${revision} to ${revision}.`,
     );
@@ -18269,6 +18281,9 @@ if __name__ == "__main__":
     await expect(
       client.run(repository, { target: DiffTarget.workingTree({ base }) }),
     ).rejects.toThrow("prompt captured");
+    expect(
+      createCodex.mock.lastCall?.[0].env?.["CODEX_SECURITY_POLICY_BASE"],
+    ).toBe(revision);
     expect(prompt()).toContain(
       `Scan target: staged and unstaged working-tree changes against ${revision}.`,
     );

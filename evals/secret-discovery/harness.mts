@@ -79,7 +79,7 @@ export const outputSchema = object({
       }),
       locations: array(location),
       rootCause: summary,
-      validation: summary,
+      validation: object({ summary: text, limitations: array(text) }),
       attackPath: object({ dataflow: summary, reachability: summary }),
       codeEvidence: array(
         object({
@@ -118,11 +118,14 @@ export const outputSchema = object({
 
 export async function prepareEval(
   root: string,
-  { corePromptPath = join(pluginRoot, "references/core-scan.md") } = {},
+  {
+    corePromptPath = join(pluginRoot, "references/core-scan.md"),
+    externalTokenScanner = false,
+  } = {},
 ) {
   const repo = join(root, "repository");
   const runtime = join(root, "runtime");
-  const fixture = createFixture();
+  const fixture = createFixture(externalTokenScanner);
   await writeFixture(repo, fixture);
   const policyFiles = (
     await readdir(repo, { recursive: true, withFileTypes: true })
@@ -177,6 +180,9 @@ export async function prepareEval(
     runtime,
     fixture,
     prompt,
+    reportingPolicy: externalTokenScanner
+      ? "external-token-scanner"
+      : "default",
     promptSha256: createHash("sha256").update(core).digest("hex"),
     referenceSha256,
   };
@@ -360,6 +366,7 @@ export async function runPreparedEval(
   if (!completed) throw new Error("Eval stream ended before turn.completed");
   const semanticResult = JSON.parse(finalResponse);
   const report = {
+    reportingPolicy: prepared.reportingPolicy,
     requestedModel: model ?? null,
     modelSelection: model
       ? "explicit"

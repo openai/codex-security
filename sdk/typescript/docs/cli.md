@@ -37,6 +37,7 @@ including file names that begin with a dash.
 - [Publish to Cloud](#publish-findings-to-cloud) or
   [Linear](#publish-completed-scans-to-linear), or [export results](#exports-and-ci).
 - [Draft a security policy](#generate-a-security-policy).
+- [Choose which checked-in credentials to report](#checked-in-credentials).
 - [Use a hosted executor](#hosted-standard-scan) or
   [run bulk scans in containers](#containerized-bulk-scans).
 
@@ -399,6 +400,44 @@ provide repository-wide scan guidance. Use a root `SECURITY.md` for that guidanc
 or a component `SECURITY.md` for guidance specific to that directory. Before
 replacing the policy target, check whether either reporting file links to it;
 the replacement can affect their guidance too.
+
+### Checked-in credentials
+
+Codex looks for credentials in the selected source, including tests and unused
+code. It assesses exposure offline. Severity reflects who can read the value
+and what access the evidence supports. Live status stays unknown unless the
+issuer or credential owner provides evidence.
+
+If another scanner handles known-format API keys and tokens, add one line to
+the repository’s root `SECURITY.md`:
+
+> Skip standalone findings for known-format API keys and tokens.
+
+This rule guides reporting. Codex still looks for hardcoded passwords, custom
+credentials, and bugs such as a server token sent to a browser. Remove the rule
+to restore the default, or put “Report standalone findings for known-format API
+keys and tokens” in a component’s `SECURITY.md` to opt that component back in.
+
+For one scan, override repository policy with an instruction file. Project
+configs use `scan.instructions_file`, and the SDK accepts `scanPrompt` or
+`scanPromptFile`.
+
+```bash
+codex-security scan . --scan-prompt-file credential-policy.md
+```
+
+When a scan finds a credential, share its type and location with the owner.
+Source snippets and diffs can contain the value.
+
+- **If you own the code**, replace a committed literal with a lookup in the
+  project’s secret store, or stop the runtime leak. For example, remove the
+  token from a public status response.
+- **If you own the credential**, a committed value is exposed to source readers.
+  For a runtime leak, check which deployments and credentials were affected.
+  Revoke an exposed credential immediately if you suspect misuse. Otherwise,
+  deploy a replacement, verify consumers still work, and confirm the issuer
+  has disabled the old credential. For signing keys, update the verifiers that
+  trust the old key. Review issuer logs for the exposure window.
 
 ### Generation options and saved files
 
@@ -2596,6 +2635,11 @@ execution. Both `validate` and `patch` accept files or literal text in the
 current directory. Patching by saved finding or occurrence ID selects the
 original repository.
 
+For a checked-in credential, `patch` can leave a verified source change in
+your working tree and report `blocked` pending confirmation of revocation.
+Review the diff and follow the [credential owner steps](#checked-in-credentials).
+Saved-finding `--create-pr` stops when a finding is blocked.
+
 Basic patching also works in ordinary directories and Git worktrees before their
 first commit. Directory change tracking excludes `.git` and `.svn` metadata.
 
@@ -2844,6 +2888,11 @@ SDK's local `validate()` and `patch()` methods use the same fallback.
 for `patch`. Omit it or use `--verification-mode standard` for the default checks.
 
 Results include evidence and `fixed`, `still_vulnerable`, or `inconclusive` status.
+For a checked-in credential, verified source cleanup with unknown retirement
+returns `inconclusive`. To verify again, put the original finding, source location,
+and issuer or owner confirmation in one file, omitting the credential value.
+Run `codex-security verify-fix finding.md` from the affected checkout.
+
 Without output options, each finding prints a verdict and its evidence.
 Explicit output formats, field selection and token controls operate on the
 structured result containing `repository`, optional `scanId`, and `results`.

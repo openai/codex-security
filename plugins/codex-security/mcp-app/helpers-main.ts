@@ -116,7 +116,9 @@ function runHelper(): void {
       },
     );
   } else if (command === "resolve-security-md") {
-    process.exitCode = resolveSecurityMdCommand(args, posixHome);
+    void resolveSecurityMdCommand(args, posixHome).then((code) => {
+      process.exitCode = code;
+    });
   } else if (command === "normalize-candidates") {
     process.exitCode = normalizeCandidatesCommand(args, posixHome);
   } else if (command === "validate-patch-risk-assessment") {

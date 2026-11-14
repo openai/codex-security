@@ -2,7 +2,7 @@
 
 Find real vulnerabilities in the authorized source. Start at an exposed entry point or a sensitive operation, trace who controls the data, and check whether the expected control holds. Use the actual code to decide which leads to pursue.
 
-Include any caller-supplied rendered investigation time allowance unchanged among the allowed inputs to every baseline auditor, architecture reviewer, focused investigator, and required follow-up. Do not initialize or reset an allowance here.
+Send the Secrets Exposed In Source guidance below to every baseline auditor and focused investigator. Include any caller-supplied rendered investigation time allowance unchanged among the allowed inputs to every baseline auditor, architecture reviewer, focused investigator, and required follow-up. Do not initialize or reset an allowance here.
 
 ## Core Workflow
 
@@ -27,7 +27,9 @@ In the scan shell, resolve inherited policy for each starting scope and deeper d
 
 ## Secrets Exposed In Source
 
-Review embedded credentials and private keys in code, configuration, documentation, tests, examples, and inactive code. A source reader obtaining a credential with authority beyond reading the source is a disclosure path; the containing code need not execute or accept attacker input.
+Review embedded credentials and private keys in code, configuration, documentation, tests, examples, and inactive code. Follow the supplied source inventory. When enumerating an in-scope directory yourself, include hidden files and respect ignore rules and scan exclusions (for example, `rg --files --hidden -g '!.git'`). A source reader obtaining a credential with authority beyond reading the source is a disclosure path; the containing code need not execute or accept attacker input.
+
+Report supported exposures by default. If the applicable `SECURITY.md` excludes standalone findings for known-format API keys or tokens, skip those findings and record the exclusion in the review state. Continue to assess hardcoded passwords, custom credentials, and distinct bugs such as sending a server token to a browser. For a runtime leak, tell the developer how to stop it. If past exposure is unknown, ask the owner to check deployments and rotate any values that reached callers. Explicit scan instructions override the repository’s reporting preference.
 
 Establish purpose from format and usage. Distinguish credential material from public keys, certificates, identifiers, secret-store references, and demonstrable dummy values. An opaque string is not sufficient evidence, and a test filename is not sufficient counterevidence. State source access as a prerequisite without inventing public access, live validity, or privileges. Unknown validity or rotation limits confidence and impact claims. Never use discovered credentials or contact services to validate them. Retain the source location, credential type, relevant context, and uncertainty.
 

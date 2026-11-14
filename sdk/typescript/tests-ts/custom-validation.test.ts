@@ -404,6 +404,8 @@ describe("custom validation", () => {
           "Synthetic proof.\n",
         );
         expect(prompt).toContain(f.prompt);
+        expect(prompt).toMatch(/never use the discovered credential/i);
+        expect(prompt).toMatch(/validity as unchecked/i);
         // Structured outputs cannot resolve plugin URIs or use regex lookaround.
         expect(JSON.stringify(schema)).not.toContain("codex-security://");
         expect(JSON.stringify(schema)).not.toMatch(/\(\?[=!<]/);
@@ -1294,6 +1296,7 @@ describe("custom validation", () => {
     expect(standard).not.toContain("validate-scan-findings.md");
     expect(standard).not.toContain("security-scan/SKILL.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
+    expect(diff).toContain("at the scan's exact base commit");
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",

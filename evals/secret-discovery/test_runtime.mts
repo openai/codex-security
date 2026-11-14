@@ -22,6 +22,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { delimiter, dirname, join, win32 } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
+import { expectedFindings } from "./fixtures.mts";
 import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import {
   codexSettings,
@@ -273,25 +274,7 @@ async function nativeFixture(
     mode: 0o755,
   });
   const result = {
-    findings: prepared.fixture.positives.map((expected) => ({
-      taxonomy: { category: "hardcoded-credentials", cwe: [expected.cwes[0]] },
-      locations: [
-        { path: expected.path, startLine: expected.line, role: "root_control" },
-      ],
-      codeEvidence: [
-        {
-          id: expected.id,
-          label: "Credential declaration",
-          path: expected.path,
-          startLine: expected.line,
-          code: prepared.fixture.files[expected.path]
-            .split("\n")
-            .slice(expected.line - 1, expected.endLine)
-            .join("\n"),
-          explanation: "Source-backed credential declaration.",
-        },
-      ],
-    })),
+    findings: expectedFindings(prepared.fixture),
     coverage: {
       surfaces: [],
       explicitExclusions: [],

@@ -3530,6 +3530,9 @@ export class CodexSecurity {
         CODEX_SECURITY_TARGET_ID: targetId,
         CODEX_SECURITY_TARGET_DISPLAY_NAME: basename(repo),
         CODEX_SECURITY_TARGET_KIND: targetKind,
+        ...(normalized.base === undefined
+          ? {}
+          : { CODEX_SECURITY_POLICY_BASE: normalized.base }),
         ...(targetRevision === null
           ? {}
           : { CODEX_SECURITY_TARGET_REVISION: targetRevision }),

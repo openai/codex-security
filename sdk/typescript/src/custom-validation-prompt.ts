@@ -9,17 +9,20 @@ import { PLUGIN_NAME } from "./runtime.js";
 // the ordinary validation sequence with a custom-validation request.
 const SOURCES = {
   "references/core-scan.md": [
+    "8369f748afa3197efac3df4ff1642ea1ba31868bc144d2bf057e905df01b9a36",
     "07abac7382a66338bfbe3def9a0e89e715a89561332c88ccb4477f97b6e84fe5",
     "0e301a70d9f20acbb797f5eafcac84c09dd0513991714812d5c4f7b1f64a4a89",
     "7690b6c854de07ff15984f6d2c25ddfa1f6ae65f65876cadf2f904054b4f0679",
     "83bafdc4089803e631eaaa86ec57167c7da3f51794514d0dcdb62c5afdced8a7",
     "848eb40d42b0bf9cf21748b9927d031b0461a4443f63e3954139f9801f41c3f6",
+    "d1680a529fefd5be0a0da4e2f43e2e08d30bc3200fd72d524889711d1db43e1c",
   ],
   "skills/security-scan/SKILL.md": [
     "b6a69658d48fff6979d6690e95d2096da236bb7e51b96ebb4f92102a9863d66c",
     "99cfcbbaa9d5b0450881ec752a116888b05b7fe21ea7af28fd22d088882dcd46",
   ],
   "skills/security-diff-scan/SKILL.md": [
+    "0ec82562b667daa8d19e1a6ecb550bdead7f4f7ef83d2a63d91e750f24f0e4d5",
     "09232fd5d96cfed2a5bdccd176c09b7e9ca53ebd7ac136d283bec884fde94b0d",
   ],
 };
