@@ -59,7 +59,7 @@ function inspectEvidence(finding, testCase) {
     !hasToken(
       `${normalized.vulnerable_component} ${normalized.affected_version_or_path}`,
       component.version,
-      "A-Za-z0-9_.-",
+      "A-Za-z0-9_.!+-",
     )
   )
     failures.push("Wrong or absent resolved version");

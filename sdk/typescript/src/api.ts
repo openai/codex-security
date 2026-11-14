@@ -193,6 +193,7 @@ import {
 } from "./custom-validation-prompt.js";
 import {
   AuthenticationRequiredError,
+  CodexConnectionError,
   CodexSecurityError,
   ConfigurationError,
   InvalidTargetError,
@@ -270,10 +271,14 @@ import {
 } from "./version.js";
 import { SCAN_MODES } from "./scan-modes.js";
 import { readSavedScanLifecycle } from "./saved-scan-bootstrap.js";
-import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
+import {
+  bundledCodexSdkEnvironment,
+  definedEnvironment,
+} from "./codex-sdk-environment.js";
 import {
   canonicalConfigPath,
   acquireCodexSecurityCredentialHomeLock,
+  acquireScanExecutionLock,
   withCredentialHomeLock,
   writeCredentialHomeConfig,
   bootstrapPlugin,
@@ -295,6 +300,8 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  SDK_NODE_SEARCH_PATH,
+  sdkNodeSearchPath,
   environmentWithGit,
   pluginMetadata,
   planOutputArchive,
@@ -340,6 +347,7 @@ import {
 } from "./targets.js";
 import { startHeadDriftMonitor } from "./target-drift.js";
 import {
+  campaignExecutable,
   inspectTrustedExecutable,
   isWithin,
   type InspectedExecutable,
@@ -377,6 +385,7 @@ interface PreparedRuntime {
 }
 
 interface PreparedSession {
+  toolRoots: readonly string[];
   pricingContext?: ScanPricingContext;
   safetyIdentifier?: string;
   runtime: PreparedRuntime;
@@ -2721,6 +2730,7 @@ export class CodexSecurity {
     let latestMeasurement: Readonly<ScanUsageMeasurement> | null = null;
     let notifiedLimit: number | undefined;
     let scanDir = "";
+    let releaseStandardScan: (() => void) | undefined;
     let targetPathsFile: string | null = null;
     let stagedPluginRoot: string | undefined;
     let stagedPluginDirectory: string | undefined;
@@ -2899,10 +2909,11 @@ export class CodexSecurity {
         ),
       };
       const hosted = this.#dependencies.hostedScan !== undefined;
-      for (const root of [
+      session.toolRoots = [
         (await gitMarkerRoot(repo, signal, "outermost")) ?? repo,
         ...(knowledgeBase?.protectedRoots ?? []),
-      ]) {
+      ];
+      for (const root of session.toolRoots) {
         git = await inspectTrustedExecutable("git", git.environment, root);
         if (this.#dependencies.hostedScan !== undefined) {
           // Match the hosted MCP launchers' PATH-based tool lookups.
@@ -2947,6 +2958,16 @@ export class CodexSecurity {
             );
       requireOutputOutsideRepository(protectedRoot, scanDir);
       requireModelSafeOutputDir(scanDir);
+      if (
+        !hosted &&
+        mode === "standard" &&
+        (normalized.kind === "repository" || normalized.kind === "paths")
+      ) {
+        releaseStandardScan = await acquireScanExecutionLock(
+          stateDirectory,
+          scanDir,
+        );
+      }
       if (!options.archiveExisting && options.resumeScanId === undefined) {
         notifyObserver(options, "onOutputDirReady")(scanDir);
       }
@@ -3436,6 +3457,7 @@ export class CodexSecurity {
       // The registered recipe now owns the private snapshot, including after completion.
       savedProviderProfile = undefined;
       const registeredScanId = registration["scanId"];
+      let timeBudgetStartedAt: string | undefined;
       const resumeThreadId =
         options.resumeScanId === undefined
           ? undefined
@@ -3455,6 +3477,10 @@ export class CodexSecurity {
             "The workbench returned mismatched scan resume context.",
           );
         }
+        const originalStart =
+          savedRecipe["timeBudgetStartedAt"] ?? registration["startedAt"];
+        if (typeof originalStart === "string")
+          timeBudgetStartedAt = originalStart;
         const savedSession = await findScanSession(
           runtime.codexHome,
           resumeThreadId,
@@ -3945,7 +3971,9 @@ export class CodexSecurity {
       }
       if (options.resumeScanId !== undefined) {
         prompt +=
-          "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan.";
+          mode === "deep"
+            ? "\nResume the existing Deep Scan through its coordinator. Preserve completed workers and saved artifacts; do not recreate the scan directory or restart completed analysis. If the coordinator already finished, continue with completion of this same scan."
+            : "\nContinue this Standard scan from the saved scan-manifest.json, findings.json, and review checkpoints in its output directory. Keep existing evidence, validation decisions, finding IDs, and surface IDs. Finish outstanding work and finalize the same scan.";
       }
       if (
         falsePositiveExamples.length > 0 &&
@@ -4122,13 +4150,14 @@ export class CodexSecurity {
           runtime.plugin.pluginRoot,
         );
         checkOpen();
-        prompt += `\n\n${renderScanTimeBudgetPolicy(
-          timePolicy,
-          scanTimeBudget(
-            options.maxTimeMinutes,
-            (this.#dependencies.now ?? Date.now)(),
-          ),
-        )}`;
+        const timing = scanTimeBudget(
+          options.maxTimeMinutes,
+          timeBudgetStartedAt === undefined
+            ? (this.#dependencies.now ?? Date.now)()
+            : Date.parse(timeBudgetStartedAt),
+        );
+        timeBudgetStartedAt = timing.startedAt;
+        prompt += `\n\n${renderScanTimeBudgetPolicy(timePolicy, timing)}`;
       }
       tracker.beginParentTurn(resumeThreadId !== undefined);
       const events = directDeepScan
@@ -4196,7 +4225,13 @@ export class CodexSecurity {
           try {
             await workbench(
               workbenchOptions,
-              workbenchArgs("set-scan-thread", { scanId, threadId }),
+              workbenchArgs("set-scan-thread", {
+                scanId,
+                threadId,
+                ...(registration["canSaveTimeBudgetStart"] === true && {
+                  timeBudgetStartedAt,
+                }),
+              }),
             );
           } catch (error) {
             notifyObserver(
@@ -4741,9 +4776,38 @@ export class CodexSecurity {
           );
         }
       }
-      // A failed attachment must not turn a resumable coordinator into a terminal failure.
-      // Deep Scan orchestration persists its own terminal failures and cancellations.
-      if (activeScan !== null && options.resumeScanId === undefined) {
+      if (
+        activeScan !== null &&
+        releaseStandardScan !== undefined &&
+        !signal.aborted &&
+        options.validationPrompt === undefined &&
+        scanTurnStatus !== null &&
+        terminalTurnStatus !== "completed" &&
+        failure instanceof CodexConnectionError
+      ) {
+        const saved = await workbench(
+          { ...activeScan.options, signal: undefined },
+          workbenchArgs("get-cli-scan-resume", {
+            scanId: activeScan.id,
+            allowUnavailable: true,
+          }),
+        ).catch(() => null);
+        if (saved?.["scanId"] === activeScan.id) {
+          failure = new ScanInterruptedError(
+            `${errorMessage(failure)}\nResume when connected: codex-security scans resume ${activeScan.id}`,
+            scanDir,
+            { cause: failure },
+          );
+          activeScan = null;
+          runPostScan = null;
+        }
+      }
+      // A resumed Deep Scan persists its own terminal status.
+      if (
+        activeScan !== null &&
+        (options.resumeScanId === undefined ||
+          releaseStandardScan !== undefined)
+      ) {
         if (
           options.validationPrompt !== undefined &&
           customValidation.status !== "complete"
@@ -4825,6 +4889,7 @@ export class CodexSecurity {
         warnCleanupFailed(options, error);
       }
       observeSettledScan(options, activeScan);
+      releaseStandardScan?.();
     }
   }
 
@@ -5229,15 +5294,20 @@ export class CodexSecurity {
       pluginVersion: session.runtime.plugin.version,
       providerFamily: requestContext.metadata["codex_security_provider"],
     });
+    const pluginPaths = {
+      ...runtimePaths,
+      [SDK_NODE_SEARCH_PATH]:
+        process.platform === "win32"
+          ? undefined
+          : await sdkNodeSearchPath(session.toolRoots),
+    };
     const hosted = this.#dependencies.hostedScan;
     if (hosted !== undefined) {
       const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
-      const environment = {
-        ...definedEnvironment(
-          environmentWithGit(session.runtime.environment, git),
-        ),
-        ...runtimePaths,
-      };
+      const environment = definedEnvironment({
+        ...environmentWithGit(session.runtime.environment, git),
+        ...pluginPaths,
+      });
       const model = scanModelConfiguration(session.effectiveConfig);
       return {
         environment,
@@ -5369,7 +5439,7 @@ export class CodexSecurity {
       ),
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
-      ...runtimePaths,
+      ...pluginPaths,
     };
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === SAFETY_IDENTIFIER_ENV)
@@ -5433,6 +5503,22 @@ export class CodexSecurity {
         codexPathOverride,
         sdkEnvironment,
       );
+    }
+    const executable = codexPathOverride ?? environment["CODEX_CLI_PATH"]!;
+    const campaign = campaignExecutable(executable, () =>
+      codexPathOverride === undefined
+        ? bundledCodexSdkEnvironment(executable, sdkEnvironment)
+        : sdkEnvironment,
+    );
+    if (campaign) {
+      const selected = await campaign;
+      // Pin the SDK launch so it cannot prepend its unfiltered bundled tools again.
+      codexPathOverride = selected.executable;
+      environment["CODEX_CLI_PATH"] = selected.executable;
+      sdkEnvironment = definedEnvironment({
+        ...selected.environment,
+        CODEX_CLI_PATH: selected.executable,
+      });
     }
     const codexOptions: CodexOptions & { nativeProfile?: string } = {
       ...(codexPathOverride === undefined
@@ -5535,6 +5621,7 @@ export class CodexSecurity {
         signal,
       });
       return {
+        toolRoots: protectedRoots,
         runtime,
         runtimeHome,
         effectiveConfig,
@@ -5750,6 +5837,7 @@ export class CodexSecurity {
       return {
         runtime,
         safetyIdentifier: options.safetyIdentifier,
+        toolRoots: protectedRoots,
         runtimeHome,
         effectiveConfig,
         preflightConfig,
@@ -6152,7 +6240,7 @@ export class CodexSecurity {
   ): Promise<LocalScanInputs> {
     if (
       options.resumeScanId !== undefined &&
-      (options.mode !== "deep" ||
+      ((options.mode !== "deep" && options.mode !== "standard") ||
         !options.outputDir ||
         options.archiveExisting ||
         options.parentScanId !== undefined ||
@@ -6160,7 +6248,7 @@ export class CodexSecurity {
         options.mock)
     ) {
       throw new CodexSecurityError(
-        "Resume requires the original Deep Scan output directory without archive, rerun, or workflow options.",
+        "Resume requires the original Standard or Deep Scan output directory without archive, rerun, or workflow options.",
       );
     }
     if (
@@ -6600,6 +6688,10 @@ export async function runScanEvents(
       );
     }
     if (status !== "completed") {
+      if (lastStreamError !== null) {
+        const error = codexTurnError(lastStreamError);
+        if (error instanceof CodexConnectionError) throw error;
+      }
       throw new IncompleteScanError(
         lastStreamError ??
           "Codex Security event stream ended before the turn completed.",
@@ -6707,6 +6799,13 @@ export async function runScanEvents(
   }
 }
 
+function codexTurnError(error: unknown): CodexSecurityError {
+  const classification = classifyConnectionFailure(error);
+  return classification === "network_error" || classification === "timeout"
+    ? new CodexConnectionError(errorMessage(error), { cause: error })
+    : new CodexSecurityError(errorMessage(error), { cause: error });
+}
+
 async function readCodexTurn(options: {
   thread: Pick<CodexThreadLike, "id">;
   events: AsyncGenerator<ScanEvent>;
@@ -6724,12 +6823,22 @@ async function readCodexTurn(options: {
       join(await bundledPluginRoot(), "scripts", "codex_session.mjs"),
     ).href
   );
+  async function* transportEvents() {
+    try {
+      yield* options.events;
+    } catch (error) {
+      const failure = codexTurnError(error);
+      if (failure instanceof CodexConnectionError) throw failure;
+      throw error;
+    }
+  }
   return readCodexSessionTurn({
     ...options,
+    events: transportEvents(),
     onEvent: async (event: ScanEvent) => {
       await options.onEvent?.(event);
       if (event.type === "turn.failed") {
-        throw new CodexSecurityError(turnFailureMessage(event["error"]));
+        throw codexTurnError(turnFailureMessage(event["error"]));
       }
       if (event.type === "error" && typeof event["message"] === "string") {
         const message = event["message"];
@@ -6742,8 +6851,7 @@ async function readCodexTurn(options: {
         }
         const reconnect = reconnectAttempt(message);
         if (reconnect !== null) options.onReconnect?.(message, reconnect);
-        else if (!waitingForNetwork(message))
-          throw new CodexSecurityError(message);
+        else if (!waitingForNetwork(message)) throw codexTurnError(message);
       }
     },
   });
@@ -7608,6 +7716,14 @@ function turnFailureMessage(error: unknown): string {
   return "The Codex Security scan turn failed without a readable error message.";
 }
 
+/** @internal Exclude endpoint URLs and TOML parser locations when choosing recovery advice. */
+export function connectionAdviceDetail(error: unknown): string {
+  const message = (
+    error instanceof Error ? error.message : String(error)
+  ).replace(/\bhttps?:\/\/[^\s"'`<>]+/giu, "");
+  return /\.toml:\d+:\d+:/iu.test(message) ? "" : message;
+}
+
 export function classifyConnectionFailure(
   error: unknown,
 ):
@@ -7617,7 +7733,7 @@ export function classifyConnectionFailure(
   | "network_error"
   | "timeout"
   | "unknown" {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = connectionAdviceDetail(error);
   if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
     return "unknown";
   }
@@ -7642,14 +7758,14 @@ export function classifyConnectionFailure(
     return "rate_limited";
   }
   if (
-    /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(
+    /\b401\b|\bunauthori[sz]ed\b|(?<![\w./\\-])(?:invalid[._ -](?:api[._ -]?key|authentication|token|credentials?)|(?:expired|revoked)[._ -](?:api[._ -]?key|token|credentials?)|(?:api[._ -]?key|token|credentials?)(?:[._ -]has)?[._ -](?:expired|been[._ -]revoked))(?!\.?[\w/\\-])/iu.test(
       message,
     )
   ) {
     return "unauthorized";
   }
   if (
-    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel[_ -]?not[_ -]?found\b/iu.test(
+    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|(?<![\w./\\-])model(?:[._ -]?not[._ -]?found|[._ -]access)(?!\.?[\w/\\-])/iu.test(
       message,
     )
   ) {
@@ -7662,7 +7778,12 @@ export function classifyConnectionFailure(
   ) {
     return "network_error";
   }
-  if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
+  if (
+    /(?<![\w./\\-])(?:request[.-])?(?:timed?[._ -]out|timeout)(?!\.?[\w/\\-])/iu.test(
+      message,
+    )
+  )
+    return "timeout";
   return "unknown";
 }
 
@@ -8351,16 +8472,7 @@ function standaloneFindingForPrompt(finding: string | object): string {
   return jsonForPrompt(finding);
 }
 
-/** @internal */
-export function definedEnvironment(
-  environment: ProcessEnvironment,
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
-}
+export { definedEnvironment };
 
 function withoutCodexHome(
   environment: ProcessEnvironment,

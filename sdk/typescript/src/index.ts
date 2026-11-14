@@ -384,6 +384,7 @@ export {
   type StoredFindingsPublicationGroup,
 } from "./stored-findings-publication.js";
 export { readTenableFindings } from "./tenable-findings.js";
+export { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
 export {
   normalizeOpenGrepFindings,
   readOpenGrepFindings,

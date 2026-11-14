@@ -7,6 +7,7 @@ import { readScannerJson, sarifRunRepositories } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
 import { CodexSecurityError } from "./errors.js";
 import { readTenableFindings } from "./tenable-findings.js";
+import { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -35,12 +36,21 @@ import { readCheckmarxFindings } from "./checkmarx-findings.js";
 import { normalizeInspectorFindings } from "./inspector-findings.js";
 import { isRecord } from "./record.js";
 import { readWizSelection, wizFindingRepository } from "./wiz-findings.js";
+import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 
-export type LocalFindingProvider = Provider | "tenable";
+/** Readers whose findings Cloud does not accept, with their display names. */
+export const LOCAL_ONLY_PROVIDERS = {
+  tenable: "Tenable",
+  crowdstrike: "CrowdStrike",
+} as const;
+type LocalOnlyProvider = keyof typeof LOCAL_ONLY_PROVIDERS;
+
+export type LocalFindingProvider = Provider | LocalOnlyProvider;
 
 /** File reader names mapped to the provider stored with each finding. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
+  armorcode: "armorcode",
   snyk: "snyk",
   semgrep: "semgrep",
   trivy: "trivy",
@@ -55,19 +65,23 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   continuum: "continuum",
   checkmarx: "checkmarx",
   tenable: "tenable",
+  crowdstrike: "crowdstrike",
 } as const satisfies Record<string, LocalFindingProvider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
-export type CloudFindingsReader = Exclude<ExternalFindingsReader, "tenable">;
+export type CloudFindingsReader = Exclude<
+  ExternalFindingsReader,
+  LocalOnlyProvider
+>;
 
 export function requireCloudReader(
   options: ExternalFindingsReaderOptions,
 ): asserts options is ExternalFindingsReaderOptions & {
   provider: CloudFindingsReader;
 } {
-  if (options.provider === "tenable")
+  if (Object.hasOwn(LOCAL_ONLY_PROVIDERS, options.provider))
     throw new CodexSecurityError(
-      "Tenable findings require a local import (--to local).",
+      `${LOCAL_ONLY_PROVIDERS[options.provider as LocalOnlyProvider]} findings require a local import (--to local).`,
     );
 }
 
@@ -185,6 +199,15 @@ export async function readExternalFindings(
     if (target === "cloud") requireCloudReader(options);
     return { findings: await readTenableFindings(path, url) };
   }
+  if (provider === "crowdstrike") {
+    if (target === "cloud") requireCloudReader(options);
+    return {
+      findings: await readCrowdStrikeFindings(
+        path,
+        options.sourceRepositoryUrl,
+      ),
+    };
+  }
   if (provider === "sonar") {
     const findings = await readSonarFindings(path, url, target);
     const binding = findings.report?.["repositoryUrl"];
@@ -221,6 +244,16 @@ export async function readExternalFindings(
       sourceRepositories.push({ url: options.sourceRepositoryUrl });
     return { findings, sourceRepositories };
   }
+  if (provider === "armorcode") {
+    const input = await readScannerJson(path);
+    return {
+      findings: normalizeArmorCodeFindings(
+        input,
+        target,
+        options.sourceRepositoryUrl,
+      ),
+    };
+  }
   if (provider === "github")
     return { findings: await readGitHubFindings(path, target) };
   if (provider === "wiz") {
@@ -249,9 +282,18 @@ export async function readExternalFindings(
         ),
     };
   }
+  if (provider === "continuum") {
+    const findings = normalizeContinuumFindings(input, url, target);
+    const binding = findings.report?.["sourceRepositoryUrl"];
+    return {
+      findings,
+      sourceRepositories: [
+        { url: typeof binding === "string" ? binding : url },
+      ],
+    };
+  }
   const normalize = {
     inspector: normalizeInspectorFindings,
-    continuum: normalizeContinuumFindings,
     blackduck: normalizeBlackDuckFindings,
     veracode: normalizeVeracodeFindings,
   }[provider];
