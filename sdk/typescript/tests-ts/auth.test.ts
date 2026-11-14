@@ -82,7 +82,7 @@ describe("Codex authentication process boundary", () => {
       '[model_providers.synthetic\nwire_api = "responses"\n',
     );
     await expect(readCodexHomeConfig(environment)).rejects.toMatchObject({
-      name: "CodexSecurityError",
+      name: "ConfigurationError",
       message: expect.stringContaining("illegal character in key"),
       cause: expect.objectContaining({
         message: expect.stringContaining("model_providers.synthetic"),
@@ -106,6 +106,7 @@ describe("Codex authentication process boundary", () => {
         await expect(
           readCodexHomeConfig({ CODEX_HOME: home }),
         ).rejects.toMatchObject({
+          name: "ConfigurationError",
           message: expect.stringContaining("EACCES"),
           cause: expect.objectContaining({ code: "EACCES", path: file }),
         });
