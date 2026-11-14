@@ -659,6 +659,64 @@ exit 1
     expect(model).not.toHaveBeenCalled();
   });
 
+  test
+    .skipIf(process.platform === "win32")
+    .each(["GIT_SSH", "GIT_ASKPASS"] as const)(
+    "stops publication when a patch retargets the selected %s launcher",
+    async (setting) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-ssh-launcher-");
+      const launcher = join(external, "launcher");
+      const approved = Bun.which("true")!;
+      const replacement = Bun.which("false")!;
+      await symlink(approved, launcher);
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        setting === "GIT_SSH"
+          ? "git@work:example/repository.git"
+          : "https://gitlab.com/example/repository.git",
+      );
+      let patched = false;
+      let attemptedAuthentication = false;
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment: { [setting]: launcher, GITLAB_HOST: "gitlab.com" },
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            await unlink(launcher);
+            await symlink(replacement, launcher);
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            patched = true;
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: (tool, args, cwd, options) => {
+            if (args.includes("codex-security-ssh-config")) {
+              attemptedAuthentication ||= patched;
+              return "hostname gitlab.com";
+            }
+            if (tool !== "git" || args.includes("push")) {
+              attemptedAuthentication ||= patched;
+              return "";
+            }
+            if (args.includes("ls-remote")) return "";
+            return runGitRepositoryCommand(tool, args, cwd, options);
+          },
+        },
+        { localHosting: false },
+      );
+      expect(patched).toBe(true);
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.stderr).toContain("Patch transport executable changed");
+      expect(attemptedAuthentication).toBe(false);
+    },
+  );
+
   test("push uses the SSH command approved before branch-conditional configuration activates", async () => {
     const { directory, git } = await publicationRepository();
     const external = await fixtures.create("patch-ssh-transport-");
@@ -1543,7 +1601,7 @@ process.exit(result.status ?? 1);
       await writeFile(config, "");
       const configOption =
         transport === "scp-command" ? (resume ? "NoNe" : "none") : config;
-      const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60`;
+      const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60 -o IdentityFile=none -oUserKnownHostsFile=NoNe`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")
@@ -1559,7 +1617,7 @@ process.exit(result.status ?? 1);
       environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] || coreCommand
-          ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60'`
+          ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60' '-o' 'IdentityFile=none' '-oUserKnownHostsFile=NoNe'`
           : `'${ssh}'`;
       const alias =
         transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"

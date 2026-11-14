@@ -1753,6 +1753,7 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
+  patchTransportExecutables?: Map<string, string>;
   patchCallerDirectory?: string;
   patchTransportContext?: { root: string; caller: string; directory: string };
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
@@ -3287,6 +3288,7 @@ export async function main(
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
   const parentDependencies = dependencies;
+  const patchTransportExecutables = new Map<string, string>();
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let publicationHooks: PatchPublicationHooks | undefined;
   let snapshotConfigPaths: readonly string[] | undefined;
@@ -3294,6 +3296,7 @@ export async function main(
   let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
+    patchTransportExecutables,
     sparsePatchSnapshots: new Map(),
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
@@ -3459,6 +3462,21 @@ export async function main(
             },
           },
         };
+      }
+      // The local SSH hostname probe also executes the previously selected launcher.
+      if (
+        options.patchTransport ||
+        command !== "git" ||
+        (args[0] === "-c" &&
+          args[1]?.startsWith("alias.codex-security-ssh-config=!") &&
+          args[2] === "codex-security-ssh-config")
+      ) {
+        for (const [launcher, selected] of patchTransportExecutables) {
+          if ((await patchTransportIdentity(launcher)) !== selected)
+            throw new CodexSecurityError(
+              "Patch transport executable changed before publication.",
+            );
+        }
       }
       return parentDependencies.runRepositoryCommand(
         command,
@@ -11664,6 +11682,13 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
+// Compare both the selected launcher target and the file behind that path.
+async function patchTransportIdentity(launcher: string): Promise<string> {
+  const target = await realpath(launcher);
+  const entry = await stat(target, { bigint: true });
+  return JSON.stringify([target, `${entry.dev}:${entry.ino}:${entry.ctimeNs}`]);
+}
+
 async function inspectPatchGitExecutable(
   command: string,
   repository: string,
@@ -11689,9 +11714,21 @@ async function inspectPatchGitExecutable(
       )
     ).replace(/\n$/u, "");
   const path = [execPath, hostPath].filter(Boolean).join(delimiter);
-  return inspectTrustedExecutable(command, { PATH: path }, protectedRoots, {
-    gitTransportDirectory: transportDirectory,
-  });
+  const result = await inspectTrustedExecutable(
+    command,
+    { PATH: path },
+    protectedRoots,
+    {
+      gitTransportDirectory: transportDirectory,
+    },
+  );
+  const launchers = dependencies.patchTransportExecutables;
+  if (launchers && result.executable && !launchers.has(result.executable))
+    launchers.set(
+      result.executable,
+      await patchTransportIdentity(result.executable),
+    );
+  return result;
 }
 
 async function runPatchTransport(
@@ -12046,6 +12083,7 @@ async function pinPublicationSshCommand(
           value,
         );
         if (pathSetting) {
+          if (pathSetting[2]!.toLowerCase() === "none") continue;
           // OpenSSH parses -o as another configuration line. A path with
           // whitespace could name more than one known-hosts file there.
           const physical = await bindFile(pathSetting[2]);
@@ -12977,6 +13015,23 @@ async function preparePatchPublication(
             ...NESTED_PATCH_GIT_ENVIRONMENT,
             GIT_INDEX_FILE: undefined,
           };
+    const captureBlob = async (mode: string, object: string) => {
+      if (mode === "160000") return;
+      if (object.length === parent.length) stagedBlobs.add(object);
+      else {
+        // A nested checkout with a different Git object format needs a
+        // content digest comparable with the parent publication.
+        nestedRepositoryDigests.add(
+          await publicationBlobDigest(
+            root,
+            object,
+            dependencies,
+            source,
+            environment,
+          ),
+        );
+      }
+    };
     const staged = await patchGitRecords(
       root,
       [
@@ -12986,7 +13041,7 @@ async function preparePatchPublication(
         "--raw",
         "--no-abbrev",
         "--no-renames",
-        "--diff-filter=AMT",
+        "--diff-filter=AMTU",
         "-z",
         checkout === undefined ? parent : "HEAD",
         "--",
@@ -12994,22 +13049,24 @@ async function preparePatchPublication(
       dependencies,
       { environment },
     );
+    let unmerged = false;
     for (let i = 0; i + 1 < staged.length; i += 2) {
-      const [, mode, previous, object] = staged[i]!.split(" ");
-      if (mode === "160000" || previous === object) continue;
-      if (object!.length === parent.length) stagedBlobs.add(object!);
-      else {
-        // A nested checkout with a different Git object format needs a
-        // content digest comparable with the parent publication.
-        nestedRepositoryDigests.add(
-          await publicationBlobDigest(
-            root,
-            object!,
-            dependencies,
-            source,
-            environment,
-          ),
-        );
+      const [, mode, previous, object, status] = staged[i]!.split(" ");
+      if (status === "U") unmerged = true;
+      else if (previous !== object) await captureBlob(mode!, object!);
+    }
+    if (unmerged) {
+      // A raw U record has no blob. Each side lives in a separate index stage.
+      const stages = await patchGitRecords(
+        root,
+        [...source, "ls-files", "--unmerged", "-z"],
+        dependencies,
+        { environment },
+      );
+      for (const entry of stages) {
+        if (!entry) continue;
+        const [mode, object] = entry.split(" ", 2);
+        await captureBlob(mode!, object!);
       }
     }
   };
@@ -13048,7 +13105,8 @@ async function preparePatchPublication(
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
-      if (entries.some((entry) => /^[AMT]/u.test(entry)))
+      // A conflict can also be reported as DD (both sides deleted).
+      if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);
     }
   }
