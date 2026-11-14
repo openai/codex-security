@@ -427,6 +427,8 @@ def test_native_directory_change_after_probe_remains_a_path_error(
 def test_stage_and_replace_valid_artifact_names(tmp_path, monkeypatch, name):
     monkeypatch.setattr(WINDOWS_FILES.secrets, "token_hex", lambda _: "0123456789abcdef")
     destination = tmp_path / name
+    if os.name == "nt":
+        destination = Path(WINDOWS_FILES._extended_path(destination))
     with ExitStack() as files:
         backend = WINDOWS_FILES
         if os.name != "nt":
@@ -439,4 +441,4 @@ def test_stage_and_replace_valid_artifact_names(tmp_path, monkeypatch, name):
         assert destination.read_bytes() == b"first"
         backend.atomic_write(tmp_path, name, b"updated")
     assert destination.read_bytes() == b"updated"
-    assert list(tmp_path.iterdir()) == [destination]
+    assert list(destination.parent.iterdir()) == [destination]
