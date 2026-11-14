@@ -1038,47 +1038,41 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
         name="accepted", coordinator_generation=generation
     )
     saved = result.read_bytes()
-    failed, prompt, artifacts, _ = deep.dispatch_discovery_worker(
-        name="quota", succeed=False, coordinator_generation=generation
-    )
     deep.dispatch_discovery_worker(
         name="unfinished", succeed=False, coordinator_generation=generation
     )
     message = "You’ve hit your usage limit. Try again later."
-    deep.upsert_worker(
-        worker_id=failed,
-        prompt_path=prompt,
-        artifact_dir=artifacts,
-        status="failed",
-        error=message,
-        terminal_failure=True,
-        coordinator_generation=generation,
-    )
-    paused = deep.command(
-        "fail-deep-scan",
-        "--deep-status",
-        "usage_limit",
-        "--message",
-        message,
-        "--coordinator-generation",
-        str(generation),
-    )["deepScan"]
-    assert paused["status"] == "interrupted"
-    assert paused["resumeAvailable"] is True
-    assert paused["error"] == message
-    assert paused["manifestPath"] is None
-    assert (
-        deep.command(
-            "fail-deep-scan",
+
+    def pause(worker_name: str, generation: int) -> dict[str, object]:
+        worker, prompt, artifacts, _ = deep.dispatch_discovery_worker(
+            name=worker_name, succeed=False, coordinator_generation=generation
+        )
+        deep.upsert_worker(
+            worker_id=worker,
+            prompt_path=prompt,
+            artifact_dir=artifacts,
+            status="failed",
+            error=message,
+            terminal_failure=True,
+            coordinator_generation=generation,
+        )
+        args = (
             "--deep-status",
             "usage_limit",
             "--message",
             message,
             "--coordinator-generation",
             str(generation),
-        )["deepScan"]
-        == paused
-    )
+        )
+        paused = deep.command("fail-deep-scan", *args)["deepScan"]
+        assert deep.command("fail-deep-scan", *args)["deepScan"] == paused
+        return paused
+
+    paused = pause("quota", generation)
+    assert paused["status"] == "interrupted"
+    assert paused["resumeAvailable"] is True
+    assert paused["error"] == message
+    assert paused["manifestPath"] is None
     assert result.read_bytes() == saved
     assert not (deep.directory / "scan-manifest.json").exists()
     assert next(w for w in paused["workers"] if w["id"] == accepted)["status"] == "succeeded"
@@ -1089,19 +1083,15 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
     sealed = deep.command("complete-scan", "--thread-id", "thread-deep-scan", check=False)
     assert sealed["returncode"] != 0
 
-    resume_options = (
-        "--model",
-        "later-turn-model",
-        "--reasoning-effort",
-        "high",
-    )
     for _ in range(2):
-        resumed = resume_deep_scan(
-            deep.state_dir,
-            deep.id,
+        resumed = deep.command(
+            "begin-deep-scan",
+            "--thread-id",
             "thread-deep-scan",
-            *resume_options,
-            environment=deep_environment(deep.codex_home),
+            "--model",
+            "later-turn-model",
+            "--reasoning-effort",
+            "high",
         )["deepScan"]
         assert resumed["model"] == "original-model"
         assert resumed["reasoningEffort"] == "medium"
@@ -1125,34 +1115,8 @@ def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path)
     assert "newer generation" in stale["stderr"]
 
     # Another quota cycle refunds only its unfinished attempt, not earlier ones.
-    generation = recovered["coordinatorGeneration"]
-    again, prompt, artifacts, _ = deep.dispatch_discovery_worker(
-        name="quota-again", succeed=False, coordinator_generation=generation
-    )
-    deep.upsert_worker(
-        worker_id=again,
-        prompt_path=prompt,
-        artifact_dir=artifacts,
-        status="failed",
-        error=message,
-        terminal_failure=True,
-        coordinator_generation=generation,
-    )
-    deep.command(
-        "fail-deep-scan",
-        "--deep-status",
-        "usage_limit",
-        "--message",
-        message,
-        "--coordinator-generation",
-        str(generation),
-    )
-    continued = resume_deep_scan(
-        deep.state_dir,
-        deep.id,
-        "thread-deep-scan",
-        environment=deep_environment(deep.codex_home),
-    )["deepScan"]
+    pause("quota-again", recovered["coordinatorGeneration"])
+    continued = deep.command("begin-deep-scan", "--thread-id", "thread-deep-scan")["deepScan"]
     assert continued["dispatchedCount"] == 1
     assert continued["completionSequence"] == 1
     assert continued["createdAt"] == paused["createdAt"]
@@ -1202,6 +1166,17 @@ def test_usage_limit_pause_rejects_changed_target_on_resume(tmp_path: Path) -> N
     canceled = deep.read("thread-deep-scan")
     assert canceled["status"] == "canceled"
     assert "resumeAvailable" not in canceled
+
+
+@pytest.mark.cross_platform
+def test_parent_failure_terminates_a_paused_deep_scan(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    deep.command("fail-deep-scan", "--deep-status", "usage_limit", "--message", "Quota exceeded.")
+    deep.command("fail-scan", "--message", "Owner session failed.")
+    run = deep.read("thread-deep-scan")
+    assert run["status"] == "failed"
+    assert run["error"] == "Owner session failed."
+    assert "resumeAvailable" not in run
 
 
 @pytest.mark.cross_platform

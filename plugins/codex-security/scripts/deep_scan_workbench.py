@@ -1869,7 +1869,7 @@ def fail_from_parent_scan(
         UPDATE deep_scan_runs
         SET status = 'failed', phase = 'terminal', cancel_requested = 1,
             error_message = ?, completed_at = ?, updated_at = ?
-        WHERE scan_id = ? AND status = 'running'
+        WHERE scan_id = ? AND status IN ('running', 'interrupted')
         """,
         (message, timestamp, timestamp, scan_id),
     )
