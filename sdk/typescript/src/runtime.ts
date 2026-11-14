@@ -6,6 +6,11 @@ import {
 } from "./executable-path.js";
 import { retryWindowsRename } from "./retry-windows-rename.js";
 export { executablePathForSpawn } from "./executable-path.js";
+import { bundledPluginRoot, hasPluginManifest } from "./bundled-plugin.js";
+export {
+  bundledPluginCandidates,
+  bundledPluginRoot,
+} from "./bundled-plugin.js";
 import {
   PLUGIN_PYTHON_PROBE,
   PLUGIN_PYTHON_PROBE_TIMEOUT_MS,
@@ -68,7 +73,6 @@ import {
   sep,
   win32,
 } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -97,6 +101,8 @@ import {
 } from "./config.js";
 import { isRecord } from "./record.js";
 import {
+  campaignExecutable,
+  inspectTrustedExecutable,
   isWithin,
   resolveTrustedExecutable,
   type InspectedExecutable,
@@ -1346,6 +1352,39 @@ export function sqliteDatabaseOpener(
   };
 }
 
+function sqliteBusy(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    (error["errcode"] === 5 || error["code"] === "SQLITE_BUSY")
+  );
+}
+
+export async function acquireScanExecutionLock(
+  stateDirectory: string,
+  scanDirectory: string,
+): Promise<() => void> {
+  const directory = join(stateDirectory, "scan-locks");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await requirePrivateDirectory(await stat(directory), directory, "scan locks");
+  const identity = createHash("sha256").update(scanDirectory).digest("hex");
+  const path = join(directory, `${identity}.sqlite3`);
+  const database = sqliteDatabaseOpener()(path);
+  try {
+    if (process.platform !== "win32") await chmod(path, 0o600);
+    database.exec("PRAGMA busy_timeout = 0");
+    database.exec("BEGIN EXCLUSIVE");
+  } catch (error) {
+    database.close();
+    if (sqliteBusy(error)) {
+      throw new CodexSecurityError(
+        "This scan is already running in another CLI or SDK call.",
+      );
+    }
+    throw error;
+  }
+  return () => database.close();
+}
+
 export async function withCredentialHomeLock<T>(
   codexHome: string,
   operation: () => Promise<T>,
@@ -1423,10 +1462,7 @@ export async function acquireCodexSecurityCredentialHomeLock(
         try {
           database.exec("BEGIN EXCLUSIVE");
         } catch (error) {
-          if (
-            !isRecord(error) ||
-            (error["errcode"] !== 5 && error["code"] !== "SQLITE_BUSY")
-          ) {
+          if (!sqliteBusy(error)) {
             throw error;
           }
           await delay(CREDENTIAL_LOCK_POLL_MILLISECONDS, undefined, { signal });
@@ -2172,25 +2208,6 @@ export async function runWorkbench(
     );
   }
   return result as JsonObject;
-}
-
-export function bundledPluginCandidates(moduleDirectory: string): string[] {
-  return [
-    resolve(moduleDirectory, "_bundled_plugin"),
-    resolve(moduleDirectory, "../_bundled_plugin"),
-  ];
-}
-
-export async function bundledPluginRoot(): Promise<string> {
-  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
-  for (const candidate of bundledPluginCandidates(moduleDirectory)) {
-    if (await hasPluginManifest(candidate)) {
-      return await realpath(candidate);
-    }
-  }
-  throw new PluginBootstrapError(
-    "The bundled Codex Security plugin is missing.",
-  );
 }
 
 export async function resolveScanOutputPath(
@@ -3414,6 +3431,30 @@ type PluginRuntimeProjection = {
   files: Map<string, { contents: Buffer; mode?: number }>;
 };
 
+// Private handoff to the staged SDK launcher and shell-invoked helpers.
+export const SDK_NODE_SEARCH_PATH = "_CODEX_SECURITY_SDK_NODE_SEARCH_PATH";
+
+export async function sdkNodeSearchPath(
+  roots: readonly string[],
+): Promise<string> {
+  let fallback = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  const current = dirname(process.execPath);
+  if (
+    process.release.name === "node" &&
+    !process.versions["bun"] &&
+    !process.versions["electron"] &&
+    basename(process.execPath) === "node" &&
+    !current.includes(":")
+  )
+    fallback += `:${current}`;
+  const inspected = await inspectTrustedExecutable(
+    "node",
+    { PATH: fallback },
+    roots,
+  );
+  return inspected.environment["PATH"] ?? "";
+}
+
 async function pluginRuntimeProjection(
   root: string,
   signal?: AbortSignal,
@@ -3454,7 +3495,7 @@ async function pluginRuntimeProjection(
         'if [ -n "${CODEX_SECURITY_PLUGIN_ROOT:-}" ]; then\n' +
         '  exec "$CODEX_SECURITY_PLUGIN_ROOT/scripts/launch_codex_security_mcp" "$@"\n' +
         "fi\n" +
-        'exec "$(dirname "$0")/launch_codex_security_mcp" "$@"\n',
+        'exec "$(command -p dirname "$0")/launch_codex_security_mcp" "$@"\n',
     ),
     mode: 0o755,
   });
@@ -4280,10 +4321,10 @@ export function isDisconnectedChildStdin(
 
 export async function runCodexCommand(
   command: CodexCommand,
-  args: readonly string[],
+  args: readonly string[] | ((executable: string) => readonly string[]),
   environment: ProcessEnvironment,
   input?: string | Uint8Array,
-  signal?: AbortSignal,
+  launchSignal?: AbortSignal | (() => AbortSignal),
   {
     registrationHandshake = false,
     stdinPrefix,
@@ -4294,17 +4335,23 @@ export async function runCodexCommand(
     cwd?: string;
   } = {},
 ): Promise<CodexCommandResult> {
+  const campaign = campaignExecutable(command.command, environment);
+  const selected = campaign && (await campaign);
+  const executable = selected?.executable ?? command.command;
+  const commandArgs = typeof args === "function" ? args(executable) : args;
+  const signal =
+    typeof launchSignal === "function" ? launchSignal() : launchSignal;
   const cancellation = registrationHandshake
     ? new AbortController()
     : undefined;
   const abort = () => cancellation?.abort(signal?.reason);
   const commandSignal = cancellation?.signal ?? signal;
   const child = spawn(
-    executablePathForSpawn(command.command),
-    [...(command.args ?? []), ...args],
+    executablePathForSpawn(executable),
+    [...(command.args ?? []), ...commandArgs],
     {
       cwd,
-      env: environment,
+      env: selected?.environment ?? environment,
       stdio: registrationHandshake
         ? ["pipe", "pipe", "pipe", "pipe"]
         : ["pipe", "pipe", "pipe"],
@@ -4387,8 +4434,14 @@ export async function probeCodexSandbox(
   // This preflight covers the Unix sandbox backends.
   if (process.platform === "win32") return;
   // Reuse the resolved Codex executable instead of looking up a probe on PATH.
-  const args = ["sandbox", "--", command.command, "--version"];
-  const timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
+  const args = (executable: string) => [
+    "sandbox",
+    "--",
+    executable,
+    "--version",
+  ];
+  signal?.throwIfAborted();
+  let timeout: AbortSignal | undefined;
   let detail: string;
   try {
     const result = await runCodexCommand(
@@ -4396,7 +4449,14 @@ export async function probeCodexSandbox(
       args,
       environment,
       undefined,
-      signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
+      () => {
+        // Campaign tool selection happens before the sandbox process starts.
+        signal?.throwIfAborted();
+        timeout = AbortSignal.timeout(SANDBOX_PROBE_TIMEOUT_MILLISECONDS);
+        return signal === undefined
+          ? timeout
+          : AbortSignal.any([signal, timeout]);
+      },
     );
     if (result.success) return;
     detail =
@@ -4405,7 +4465,7 @@ export async function probeCodexSandbox(
       `Codex exited with status ${result.exitCode}.`;
   } catch (error) {
     signal?.throwIfAborted();
-    if (timeout.aborted)
+    if (timeout?.aborted)
       throw new SandboxUnavailableError(
         `Codex sandbox probe timed out after ${SANDBOX_PROBE_TIMEOUT_MILLISECONDS / 1000} seconds.`,
         { cause: error },
@@ -4417,7 +4477,7 @@ export async function probeCodexSandbox(
       ? "\nOn Linux this usually means unprivileged user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1 on Ubuntu 24.04 and later), which Bubblewrap needs; inside the container image, use the AppArmor profile and Compose override from the SDK README."
       : "";
   throw new SandboxUnavailableError(
-    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args.join(" ")}'.${guidance}`,
+    `Codex could not run a command in its sandbox: ${detail}\nTo reproduce, run '${command.command} ${args(command.command).join(" ")}'.${guidance}`,
   );
 }
 
@@ -4633,13 +4693,6 @@ async function usablePython(
 
 export function isPythonPathCandidate(candidate: string): boolean {
   return candidate.includes("/") || candidate.includes("\\");
-}
-
-async function hasPluginManifest(root: string): Promise<boolean> {
-  return await lstat(join(root, ".codex-plugin", "plugin.json")).then(
-    (metadata) => metadata.isFile(),
-    () => false,
-  );
 }
 
 /** @internal Compare filesystem identity without depending on path spelling. */

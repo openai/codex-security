@@ -108,6 +108,7 @@ import {
   logoutCredentialHome,
   setCodexSecurityCredentialLogout,
   streamWindowsCredentialAclDescriptors,
+  sdkNodeSearchPath,
   windowsCredentialAncestorAclScript,
 } from "../src/runtime.js";
 import { inspectTrustedExecutable } from "../src/trusted-executable.js";
@@ -1002,6 +1003,8 @@ describe("plugin runtime preparation", () => {
       await mkdir(join(selected, "mcp"));
       await writeFile(join(home, "config.toml"), "[features]\nplugins=true\n");
       const declaredRoot = interpreter.endsWith("with root");
+      const declaresNodeSearchPath = interpreter.startsWith("shell");
+      const nodeSearchPath = join(root, "fallback node");
       const argumentsAfterEntry = [
         "--stdio",
         "synthetic ! % & argument",
@@ -1016,6 +1019,9 @@ describe("plugin runtime preparation", () => {
             env_vars: [
               "CODEX_HOME",
               "CODEX_MCP_NODE_PATH",
+              ...(declaresNodeSearchPath
+                ? ["_CODEX_SECURITY_SDK_NODE_SEARCH_PATH"]
+                : []),
               ...(declaredRoot ? ["CODEX_SECURITY_PLUGIN_ROOT"] : []),
             ],
             startup_timeout_sec: 20,
@@ -1047,7 +1053,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const result = request.method === "initialize"
     ? { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "synthetic-launcher", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1] } }, inputSchema: { type: "object", properties: {} } }] }
+      ? { tools: [{ name: "probe", description: "Reports test launcher details.", _meta: { launch: { pluginRoot, repository: process.env.CODEX_SECURITY_REPOSITORY, ambient: process.env.SYNTHETIC_UNDECLARED_VALUE, args: process.argv.slice(2), execArgv: process.execArgv, cwd: process.cwd(), entry: process.argv[1], nodeSearchPath: process.env._CODEX_SECURITY_SDK_NODE_SEARCH_PATH } }, inputSchema: { type: "object", properties: {} } }] }
       : request.method === "resources/list" ? { resources: [] }
       : request.method === "resources/templates/list" ? { resourceTemplates: [] }
       : {};
@@ -1104,6 +1110,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         SystemRoot: process.env["SystemRoot"],
         PATHEXT: process.env["PATHEXT"],
         CODEX_MCP_NODE_PATH: process.execPath,
+        _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: nodeSearchPath,
       };
       const command = resolveCodexCommand({});
       const installed = await bootstrapPlugin(home, selected, {
@@ -1222,6 +1229,9 @@ for await (const line of createInterface({ input: process.stdin })) {
           tools: { probe: { description: expect.any(String) } },
         });
         const details = server.tools.probe._meta.launch;
+        expect(details.nodeSearchPath).toBe(
+          declaresNodeSearchPath ? nodeSearchPath : undefined,
+        );
         expect(details.pluginRoot).toBe(await realpath(pluginRoot));
         expect(details.repository).toBe(
           join(root, pluginRoot === second ? "second source" : "first source"),
@@ -3194,6 +3204,18 @@ for await (const line of createInterface({ input: process.stdin })) {
         });
       }
       await removeTemporaryDirectory(root);
+    },
+  );
+
+  test.skipIf(process.platform === "win32")(
+    "filters SDK Node fallback directories against the scan source",
+    async () => {
+      const systemBin = await realpath("/usr/bin");
+      expect((await sdkNodeSearchPath([])).split(":")).toContain(systemBin);
+      expect((await sdkNodeSearchPath([systemBin])).split(":")).not.toContain(
+        systemBin,
+      );
+      expect(await sdkNodeSearchPath(["/"])).toBe("");
     },
   );
 
@@ -6388,6 +6410,7 @@ describe("runtime directories and plugin Python boundary", () => {
           ),
         ),
       );
+      const beforeCompletion = (await readdir(scanDir)).sort();
       const missing = requiredDrafts.filter(
         (filename) => !present.some((candidate) => candidate === filename),
       );
@@ -6403,7 +6426,7 @@ describe("runtime directories and plugin Python boundary", () => {
           ", ",
         )}. Check that the scan agent can run shell commands and write to the scan directory before retrying.`,
       );
-      expect((await readdir(scanDir)).sort()).toEqual([...present].sort());
+      expect((await readdir(scanDir)).sort()).toEqual(beforeCompletion);
       const stored = await runWorkbench(workbenchOptions, [
         "get-scan",
         "--scan-id",

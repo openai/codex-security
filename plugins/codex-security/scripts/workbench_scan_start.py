@@ -100,7 +100,7 @@ class WindowsResumeTarget:
 def prepare_cli_scan_target(
     target: Path, diff_target: dict[str, str] | None, mode: str, launch_kind: str
 ) -> tuple[tuple[str, str | None, int | str, int | str], WindowsResumeTarget | None]:
-    if os.name == "nt" and mode == "deep" and launch_kind == "scan":
+    if os.name == "nt" and mode in {"standard", "deep"} and launch_kind == "scan":
         from windows_scan_local_files import pinned_resume_checkout
 
         with pinned_resume_checkout(target) as native:

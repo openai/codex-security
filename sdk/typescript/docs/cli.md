@@ -725,8 +725,8 @@ Choose the next step from the recorded reason:
   start a new scan with the intended scope, including for plugin scans without
   a recipe. Retained findings can still be reviewed, but absence of findings
   from a stopped run is inconclusive.
-- **A Deep Scan was interrupted and is still recorded as `running`:** it may
-  support [resume](#resuming-an-interrupted-deep-scan) with the original checkout,
+- **A Standard or Deep Scan was interrupted and is still recorded as `running`:** it may
+  support [resume](#resuming-an-interrupted-scan) with the original checkout,
   artifacts, and session. Completed, failed, and canceled scans cannot resume.
 
 For example, after identifying an omitted API directory:
@@ -957,7 +957,7 @@ behavior are unchanged.
 
 The SDK setting is `maxTimeMinutes`; project files use `scan.max_time_minutes`.
 Each launched scan or rerun gets its own allowance after setup, and reconnects
-do not reset it. Standard scans still do not support resume. For batch and
+do not reset it. [Resumed Standard scans](#resuming-an-interrupted-scan) keep the original deadline. For batch and
 component scans, the project setting applies separately to each scan attempt,
 not to planning, result matching, or the total campaign.
 
@@ -1409,6 +1409,22 @@ including during recovery. Run post-scan prompts separately. A resumed scan also
 limit and includes prior recorded usage in its cost estimate.
 
 Bulk scans use clean shallow checkouts and support repository/path scopes.
+Bulk checkout, scan, and recovery processes select host tools outside every local
+source and campaign checkout. Inventory uses an external ripgrep executable or
+the copy shipped with the selected Codex installation.
+
+On POSIX, campaign processes and script-based inventory tools search readable
+tool directories. Launchers must be readable so their shebang interpreters can
+be checked. Use an absolute interpreter path for campaign scripts, including
+`#!/usr/bin/env sh`, because workers run in different directories. If a directory
+contains an ineligible executable, its other tools remain available through a
+temporary PATH. Scripts using the system `/bin/sh` or `/usr/bin/env` run from
+their installed location when the packaged dispatcher can start. Keep other
+prefix-sensitive tools, including Python virtual environments, in directories
+where every entry can be used. On Windows, the campaign omits a tool directory
+from the child PATH if its Git, ripgrep, or Node executable link passes through a
+selected source.
+
 CSV scopes are literal paths relative to each checkout, including names such
 as `~/src`.
 Configured diff or working-tree scopes are rejected unless every affected row
@@ -1541,13 +1557,13 @@ Supply the validation prompt again when rerunning.
 
 Choose the command by what you want to keep. [Scanner guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md) list the accepted vendor formats.
 
-| Input and goal                                               | Command                                                                        | Service contacted                 | Where to find the result                                                                                       |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------ | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Save vendor evidence for a checkout                          | `publish findings FILE --to local`                                             | None                              | `findings imported PATH` lists unassessed local findings.                                                      |
-| Publish a supported vendor report                            | [`publish findings FILE --to cloud`](#publish-findings-to-cloud)               | Codex Security Cloud              | The receipt identifies the private inbox job or repository records.                                            |
-| Collect upstream records to a file                           | `import github`, `import github-advisories`, `import semgrep` or `import snyk` | Selected vendor                   | Redirect the complete `--format json` output to a private file, then preview it with `publish findings`.       |
-| Collect live Sonar issues                                    | [`import sonar --dry-run`](#import-sonarqube-cloud-issues)                     | SonarQube Cloud during collection | The `capture` field gives a private file path. Replay it to save locally or save locally and publish to Cloud. |
-| Save Codex Security findings CSV or JSON as a completed scan | [`scan import`](#import-findings-as-a-saved-scan)                              | None                              | `scans list --scan-root DIR --json` shows imports under the artifact root.                                     |
+| Input and goal                                               | Command                                                                                            | Service contacted                 | Where to find the result                                                                                       |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Save vendor evidence for a checkout                          | `publish findings FILE --to local`                                                                 | None                              | `findings imported PATH` lists unassessed local findings.                                                      |
+| Publish a supported vendor report                            | [`publish findings FILE --to cloud`](#publish-findings-to-cloud)                                   | Codex Security Cloud              | The receipt identifies the private inbox job or repository records.                                            |
+| Collect upstream records to a file                           | `import continuum`, `import github`, `import github-advisories`, `import semgrep` or `import snyk` | Selected vendor                   | Redirect the complete `--format json` output to a private file, then preview it with `publish findings`.       |
+| Collect live Sonar issues                                    | [`import sonar --dry-run`](#import-sonarqube-cloud-issues)                                         | SonarQube Cloud during collection | The `capture` field gives a private file path. Replay it to save locally or save locally and publish to Cloud. |
+| Save Codex Security findings CSV or JSON as a completed scan | [`scan import`](#import-findings-as-a-saved-scan)                                                  | None                              | `scans list --scan-root DIR --json` shows imports under the artifact root.                                     |
 
 For `publish findings`, `--to` is required. With `--to local`, `--repository`
 takes a checkout path. Select the reader with `--provider` and give the source a stable `--source-key`.
@@ -1564,7 +1580,12 @@ codex-security publish findings /private/path/endor-findings.json --provider end
 After reviewing the findings and exclusions, rerun the command without
 `--dry-run` and confirm. [Save or publish and verify](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md#save-or-publish-and-verify).
 
+When you pass `--source-repository-url` to `publish findings`, the command warns
+on stderr to verify that every finding belongs to the repository you specify.
+
 For Tenable One Code Repository findings, use `--provider tenable --to local` and set `--source-repository-url` to the checkout’s verified HTTPS remote. [Tenable export and import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/tenable.md)
+
+For CrowdStrike FCS CLI 4.x IaC reports, use `--provider crowdstrike --to local` and select the directory where FCS ran with `--repository`. It does not need to be a Git checkout, but each scanned file must be unchanged since the scan. Add `--source-repository-url` to record the repository; it must match a fetch remote when the directory is a Git checkout. A `git::https://` report names its repository, and a different `--source-repository-url` stops the import. [CrowdStrike import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/crowdstrike.md)
 
 Local readback uses `findings imported [PATH]`. The path defaults to the current
 directory. Each imported record starts as `not_assessed`. Unknown revisions and
@@ -1595,6 +1616,31 @@ to set the scan root and check manifest paths.
 Use `--provider endor` for one Endor project and context. The
 [Endor Labs guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/endor.md) covers native Finding JSON,
 SARIF compatibility, and the local preview.
+
+## Collect AWS Continuum issues
+
+`import continuum ENVIRONMENT_ID --format json` writes one report to standard
+output after collecting every issue page and fetching each issue's linked
+findings, prevalidation signals (`EVIDENCE`), and validation results
+(`VALIDATION_EVIDENCE`). Install AWS CLI v2.38.5 or later outside the checkout.
+The command requires exactly one configured Git repository and records it in the
+report. It collects patches when Git is the only source.
+S3 sources are allowed alongside that repository.
+Collection covers the whole environment. Pass the short
+Continuum environment ID. Optional
+`--aws-profile PROFILE` and `--aws-region REGION` override the AWS CLI's
+credential and Region selection. Preview and import the report separately
+with `publish findings FILE --provider continuum`. Pass
+`--source-repository-url URL` when the report has no saved repository URL.
+
+For one finding and its generated patches, add `--finding-id FINDING_ID` and
+`--source-root CHECKOUT` with the absolute checkout path. The CLI uses
+`GetEnvironment` to verify that the environment has exactly one Git repository
+and no S3 sources before including unnamed patches. Pass
+`--repository-name AWS_SOURCE_NAME` for other environments to keep patches
+with that exact AWS source name. This mode accepts the same AWS profile and
+Region overrides and writes the finding-based JSON format for `publish findings`.
+[Continuum import guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/continuum.md)
 
 ## Import SonarQube Cloud issues
 
@@ -2136,7 +2182,7 @@ in the workbench, without changing sealed report timestamps.
 | `scans list [REPOSITORY]`                             | List scans; `--scan-root DIR` filters artifact roots.                            |
 | `scans show [SCAN_ID]`                                | Show a scan; defaults to latest completed.                                       |
 | `scans logs [SCAN_ID]`                                | Show session events; defaults to latest, including active.                       |
-| `scans resume SCAN_ID`                                | Continue an interrupted Deep Scan.                                               |
+| `scans resume SCAN_ID`                                | Continue an interrupted Standard or Deep Scan.                                   |
 | `scans rerun [SCAN_ID]`                               | Rerun a saved recipe in its checkout.                                            |
 | `scans match --all`                                   | Match completed scans in this repository generation, including linked worktrees. |
 | `scans compare [BEFORE] [AFTER]`                      | Compare scans; defaults to latest two completed.                                 |
@@ -2232,7 +2278,7 @@ work on all supported Node.js versions, including logs, feedback attachments,
 usage accounting, and saved-session discovery for resume. A bundled decoder
 reads concatenated frames and reports truncated streams as collection errors.
 
-### Resuming an interrupted Deep Scan
+### Resuming an interrupted scan
 
 ```bash
 codex-security scans list --scan-root /path/to/security-scans
@@ -2240,7 +2286,7 @@ codex-security scans resume SCAN_ID
 ```
 
 The terminal list shows the full scan ID and labels the last activity of a
-`running` scan after 24 hours without an update. For a Deep Scan with a saved
+`running` scan after 24 hours without an update. For a Standard or Deep Scan with a saved
 launch recipe and its original session, it also shows the resume command to use after interruption.
 
 The scan must still be `running`, with its original checkout, output directory,
@@ -2252,15 +2298,22 @@ output. It lets the workbench verify the original output even before the first
 checkpoint. If an older scan stopped with an empty output, start a new scan with
 `codex-security scans rerun SCAN_ID`.
 
-New Windows Deep Scans also record the checkout's native volume and file ID
+New Windows Standard and Deep Scans also record the checkout's native volume and file ID
 when the filesystem supplies them. Validation and remediation verify the same
 checkout identity. An older scan can resume across Python
 versions when its saved checkout identity can be verified. If the workbench
 cannot verify it, resume with the Python runtime that started the scan or use
 `codex-security scans rerun SCAN_ID` to start a new scan.
 
-Resume retains scan ID, completed workers, artifacts, accumulated cost, and saved
-settings/instructions. Knowledge-bearing scans save their extracted documents in
+Resume keeps the scan ID, saved settings and instructions, completed workers, artifacts,
+and accumulated cost. A Standard scan continues in its original Codex session with
+the same `--max-cost` limit and `--max-time` deadline. Only one CLI or SDK call
+can run it at a time. If the connection fails after the session is saved, the CLI
+prints the resume command. Work since the last checkpoint may need to be repeated.
+Use `scans rerun` for canceled or failed scans, including authentication failures.
+For custom validation, rerun with the original validation instructions.
+
+Knowledge-bearing scans save their extracted documents in
 the private `.scan-knowledge.json` continuation file beside the scan artifacts.
 Resume verifies and uses that snapshot even if the original files changed or were
 deleted. Preserve it with the scan directory; canonical reports do not embed its

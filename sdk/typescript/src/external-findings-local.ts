@@ -51,11 +51,16 @@ import {
   EXTERNAL_FINDINGS_READERS,
   localFindingRepositories,
   semgrepSarifRepositories,
+  LOCAL_ONLY_PROVIDERS,
 } from "./external-findings-read.js";
 import {
   tenableReportFormat,
   tenableSourceRepository,
 } from "./tenable-findings.js";
+import {
+  crowdstrikeCheckout,
+  crowdstrikeReportFormat,
+} from "./crowdstrike-findings.js";
 import {
   guardianFindingRepository,
   guardianSelectionFormat,
@@ -81,6 +86,7 @@ import { continuumReportRepositories } from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
+import { armorCodeRepositoryUrl } from "./armorcode-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
 import { isRecord } from "./record.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
@@ -954,7 +960,11 @@ export function distinctSourceRepositories(
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
   options: NormalizedLocalImportOptions &
-    ({ provider: "tenable" } | { provider: Provider }),
+    (
+      | { provider: "tenable" }
+      | { provider: "crowdstrike" }
+      | { provider: Provider }
+    ),
   dependencies: LocalExternalImportDependencies,
   readerSources = distinctSourceRepositories(
     snapshotSourceRepositories(dependencies.sourceRepositories),
@@ -980,16 +990,20 @@ export async function prepareLocalImport(
     "local",
     options.provider,
   );
-  if (
-    options.provider !== "tenable" &&
-    (current.report?.["format"] === tenableReportFormat ||
-      current.findings.some(
-        (row) => row.evidence?.source_data?.["format"] === tenableReportFormat,
-      ))
-  )
-    throw new CodexSecurityError(
-      "Retained Tenable evidence requires the tenable provider.",
-    );
+  for (const [provider, format] of [
+    ["tenable", tenableReportFormat],
+    ["crowdstrike", crowdstrikeReportFormat],
+  ] as const)
+    if (
+      options.provider !== provider &&
+      (current.report?.["format"] === format ||
+        current.findings.some(
+          (row) => row.evidence?.source_data?.["format"] === format,
+        ))
+    )
+      throw new CodexSecurityError(
+        `Retained ${LOCAL_ONLY_PROVIDERS[provider]} evidence requires the ${provider} provider.`,
+      );
   checkTrivyReportProvider(options.provider, current.report);
   let dependabotSource: string | undefined;
   validateFindingIds(current);
@@ -1013,12 +1027,11 @@ export async function prepareLocalImport(
     dependabotSource = native;
   }
   const context = await localContext(options.repository, dependencies);
-  if (options.provider === "tenable") {
-    const source = tenableSourceRepository(
-      current,
-      options.sourceRepositoryUrl,
-      [...readerSources, ...parsedSources],
-    );
+  // Neither report records the checkout, so check the operator's URL against its remotes.
+  const requireFetchRemote = async (
+    source: ExternalSourceRepository,
+    provider: keyof typeof LOCAL_ONLY_PROVIDERS,
+  ) => {
     const remotes = await hostedCheckoutRemotes(
       context.repository,
       context.options.protectedRoot,
@@ -1027,11 +1040,40 @@ export async function prepareLocalImport(
     );
     if (!remotes?.some((remote) => hostedRepositoryMatches(source, remote)))
       throw new CodexSecurityError(
-        "Tenable's source repository must match a configured Git fetch remote of the selected checkout.",
+        `${LOCAL_ONLY_PROVIDERS[provider]}'s source repository must match a configured Git fetch remote of the selected checkout.`,
       );
+  };
+  if (options.provider === "tenable") {
+    const source = tenableSourceRepository(
+      current,
+      options.sourceRepositoryUrl,
+      [...readerSources, ...parsedSources],
+    );
+    await requireFetchRemote(source, "tenable");
     return preparedLocalStorage(current, options, context, dependencies, true, {
       sourceRepositories: [source],
     });
+  }
+  if (options.provider === "crowdstrike") {
+    const source = await crowdstrikeCheckout(
+      current,
+      options.sourceRepositoryUrl,
+      [...readerSources, ...parsedSources],
+      context.repository,
+    );
+    // FCS scans plain directories; only a Git checkout has remotes to compare.
+    const bound =
+      source !== undefined &&
+      (await hasGitMetadata(context.repository, dependencies.signal));
+    if (bound) await requireFetchRemote(source, "crowdstrike");
+    return preparedLocalStorage(
+      current,
+      options,
+      context,
+      dependencies,
+      bound,
+      source ? { sourceRepositories: [source] } : {},
+    );
   }
   const { repository, options: workbenchOptions } = context;
   const sources = new Map<string, ExternalSourceRepository>();
@@ -1189,6 +1231,10 @@ export async function prepareLocalImport(
       if (semgrep.migration) Object.assign(finding.evidence, semgrep.migration);
     }
     const { evidence } = finding;
+    if (options.provider === "armorcode") {
+      const nativeUrl = armorCodeRepositoryUrl(evidence.source_data, "local");
+      if (nativeUrl) sources.set(nativeUrl, { url: nativeUrl });
+    }
     if (options.provider === "github") {
       const source = retainedGitHubRepository(
         finding,
@@ -1437,6 +1483,20 @@ export async function prepareLocalImport(
     throw new Error(
       "The retained Checkmarx report repository does not match the finding repository.",
     );
+  if (options.provider === "armorcode") {
+    if (options.sourceRepositoryUrl !== undefined) {
+      const url = declaredScannerRepositoryUrl(
+        options.sourceRepositoryUrl,
+        "ArmorCode",
+        "local",
+      );
+      sources.set(url, { url });
+    }
+    if (!sameRepositories(sources.keys()))
+      throw new CodexSecurityError(
+        "ArmorCode findings must belong to a single source repository.",
+      );
+  }
   const sonarSources = sonarRepositoryUrls(
     options.provider,
     current.findings,
