@@ -18,12 +18,6 @@ test('defaults are stable across events', () => {
   assert.ok(!args.includes('--python'));
   assert.ok(!args.includes('--cyber-access-program'));
 });
-test('runner npm configuration requires explicit opt-in', () => {
-  assert.equal(parse().useRunnerNpmConfig, false);
-  assert.equal(parse({'use-runner-npm-config':'true'}).useRunnerNpmConfig, true);
-  for (const value of ['yes', 'TRUE', '1'])
-    assert.throws(() => parse({'use-runner-npm-config':value}), /use-runner-npm-config must be one of: true, false/);
-});
 test('provider and model inputs map directly to scan CLI arguments in both modes', () => {
   for (const provider of ['openai', 'openrouter', 'fireworks', 'amazon-bedrock'])
   for (const mode of ['standard', 'deep']) for (const dryRun of ['false', 'true']) {

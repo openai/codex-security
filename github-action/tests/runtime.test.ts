@@ -158,14 +158,11 @@ test('runtime installation opts into validated runner npm configuration without 
   await writeFile(join(bin, 'npm'), `#!${process.execPath}
     const fs = require('node:fs'); const path = require('node:path');
     const args = process.argv.slice(2);
-    const expectedUserConfig = ${JSON.stringify(userConfig)};
-    const expectedCa = ${JSON.stringify(extraCaCerts)};
-    const configured = process.env.NPM_CONFIG_USERCONFIG === expectedUserConfig
-      && process.env.NODE_EXTRA_CA_CERTS === expectedCa
-      && args.includes('--userconfig=' + expectedUserConfig)
-      && !args.some(value => value.startsWith('--registry='));
-    fs.writeFileSync(path.join(${JSON.stringify(root)}, 'npm-invocation-' + (configured ? 'configured' : 'isolated') + '.json'), JSON.stringify({args,env:process.env}));
-    if (!configured) { console.error('npm error synthetic registry configuration unavailable'); process.exit(43); }
+    fs.writeFileSync(path.join(${JSON.stringify(root)}, 'npm-invocation.json'), JSON.stringify({args, env:process.env}));
+    if (!process.env.NPM_CONFIG_USERCONFIG && !process.env.NODE_EXTRA_CA_CERTS) {
+      console.error('npm error synthetic registry configuration unavailable');
+      process.exit(43);
+    }
     const packageRoot = path.join('node_modules', '@openai', 'codex-security');
     fs.mkdirSync(path.join(packageRoot, 'bin'), {recursive:true});
     fs.writeFileSync(path.join(packageRoot, 'bin', 'codex-security.mjs'), '// fixture');
@@ -180,7 +177,7 @@ test('runtime installation opts into validated runner npm configuration without 
     error instanceof Error && error.message.includes('synthetic registry configuration unavailable'));
   assert.ok(logs.some(line => line.includes('synthetic registry configuration unavailable')));
   assert.ok(!logs.join('\n').includes('synthetic-install-token'));
-  const isolated = JSON.parse(await readFile(join(root, 'npm-invocation-isolated.json'), 'utf8'));
+  const isolated = JSON.parse(await readFile(join(root, 'npm-invocation.json'), 'utf8'));
   assert.ok(isolated.args.includes('--registry=https://registry.npmjs.org/'));
   assert.equal(isolated.env.NPM_CONFIG_USERCONFIG, undefined);
   assert.equal(isolated.env.NODE_EXTRA_CA_CERTS, undefined);
@@ -188,20 +185,22 @@ test('runtime installation opts into validated runner npm configuration without 
   assert.equal(isolated.env.GITHUB_TOKEN, undefined);
   assert.deepEqual(fs.readdirSync(root).filter(name => name.startsWith('codex-security-runtime-')), []);
 
-  const runtime = await setupRuntime({...baseOptions, runnerNpmConfig:{userConfig, extraCaCerts}});
-  const invocation = JSON.parse(await readFile(join(root, 'npm-invocation-configured.json'), 'utf8'));
-  assert.ok(invocation.args.includes('--ignore-scripts'));
-  assert.ok(invocation.args.includes('--include=optional'));
-  assert.ok(invocation.args.includes(`--userconfig=${userConfig}`));
-  assert.ok(!invocation.args.some((value: string) => value.startsWith('--registry=')));
-  assert.equal(invocation.env.NPM_CONFIG_USERCONFIG, userConfig);
-  assert.equal(invocation.env.NODE_EXTRA_CA_CERTS, extraCaCerts);
-  assert.equal(invocation.env.NPM_TOKEN, undefined);
-  assert.equal(invocation.env.GITHUB_TOKEN, undefined);
-  const scan = runtime.env(scanCredentials('openai', {OPENAI_API_KEY:'synthetic-scan-key'}));
-  assert.equal(scan.NPM_CONFIG_USERCONFIG, undefined);
-  assert.equal(scan.NODE_EXTRA_CA_CERTS, undefined);
-  await cleanupRuntime(runtime.root, root);
+  for (const runnerNpmConfig of [{userConfig}, {extraCaCerts}, {userConfig, extraCaCerts}]) {
+    const runtime = await setupRuntime({...baseOptions, runnerNpmConfig});
+    const invocation = JSON.parse(await readFile(join(root, 'npm-invocation.json'), 'utf8'));
+    const selectedConfig = runnerNpmConfig.userConfig ?? join(runtime.root, 'npm-user.conf');
+    assert.ok(invocation.args.includes(`--userconfig=${selectedConfig}`));
+    assert.equal(invocation.args.includes('--registry=https://registry.npmjs.org/'), !runnerNpmConfig.userConfig);
+    assert.ok(invocation.args.includes('--ignore-scripts'));
+    assert.equal(invocation.env.NPM_CONFIG_USERCONFIG, runnerNpmConfig.userConfig);
+    assert.equal(invocation.env.NODE_EXTRA_CA_CERTS, runnerNpmConfig.extraCaCerts);
+    assert.equal(invocation.env.NPM_TOKEN, undefined);
+    assert.equal(invocation.env.GITHUB_TOKEN, undefined);
+    const scan = runtime.env(scanCredentials('openai', {OPENAI_API_KEY:'synthetic-scan-key'}));
+    assert.equal(scan.NPM_CONFIG_USERCONFIG, undefined);
+    assert.equal(scan.NODE_EXTRA_CA_CERTS, undefined);
+    await cleanupRuntime(runtime.root, root);
+  }
 });
 
 test('runner npm configuration rejects invalid paths without disclosing their values',

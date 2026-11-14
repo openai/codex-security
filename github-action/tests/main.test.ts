@@ -181,11 +181,8 @@ test('runner npm configuration is captured only with explicit opt-in', async t =
   let result = await app.run();
   assert.equal(result.setupOptions?.runnerNpmConfig, undefined);
 
-  const optedIn = await harness(t);
-  optedIn.setInput('use-runner-npm-config', 'true');
-  process.env.NPM_CONFIG_USERCONFIG = '/runner/trusted/npmrc';
-  process.env.NODE_EXTRA_CA_CERTS = '/runner/trusted/ca.pem';
-  result = await optedIn.run();
+  app.setInput('use-runner-npm-config', 'true');
+  result = await app.run();
   assert.deepEqual(result.setupOptions?.runnerNpmConfig, {
     userConfig: '/runner/trusted/npmrc',
     extraCaCerts: '/runner/trusted/ca.pem',
