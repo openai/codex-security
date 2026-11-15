@@ -2775,7 +2775,8 @@ rules for Git's standard credential stores and for operator-selected
 `store --file` commands with a literal absolute file path. Use forward slashes
 and a drive letter for an explicit store on Windows. Other helpers, including
 shell commands and OS credential managers, can use storage outside those
-files. When an operator configuration names one of these helpers, a patch
+files. A nonregular credential source such as a named pipe is handled the same
+way. When an operator configuration names one of these helpers, a patch
 stops before running a publication hook that could call it. Configured filters
 can stay installed. If a file's attributes select one, Git reports the
 incompatible helper before processing the file. An empty helper reset controls

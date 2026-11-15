@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
 import {
   mkdir,
@@ -127,15 +128,27 @@ test.each([
   },
 );
 
-test.each(["unused", "activated", "disabled", "checkout driver"] as const)(
+test.each([
+  "unused",
+  "activated",
+  "disabled",
+  "checkout driver",
+  ...(process.platform === "win32" ? [] : ["FIFO store"]),
+])(
   "file attributes with an opaque credential helper (%s filter)",
   async (mode) => {
     const { directory, git } = await publicationRepository(fixtures);
     const global = join(await fixtures.create("patch-lfs-auth-"), "gitconfig");
-    git("config", "--file", global, "credential.helper", "manager");
+    let helper = "manager";
+    if (mode === "FIFO store") {
+      const fifo = global + ".fifo";
+      execFileSync("mkfifo", [fifo]);
+      helper = `store --file='${fifo}'`;
+    }
+    git("config", "--file", global, "credential.helper", helper);
     git("config", "--file", global, "filter.lfs.clean", "git-lfs clean -- %f");
     git("config", "--file", global, "filter.lfs.required", "false");
-    if (mode === "checkout driver")
+    if (mode === "checkout driver" || mode === "FIFO store")
       git("config", "filter.synthetic.clean", "cat");
     if (mode === "disabled") {
       git("config", "--file", global, "filter.synthetic.clean", "cat");
@@ -168,7 +181,11 @@ test.each(["unused", "activated", "disabled", "checkout driver"] as const)(
         return 0;
       },
     });
-    if (mode === "activated" || mode === "checkout driver") {
+    if (
+      mode === "activated" ||
+      mode === "checkout driver" ||
+      mode === "FIFO store"
+    ) {
       expect(outcome.exitCode, outcome.stderr).toBe(2);
       expect(outcome.stderr).toContain("Cannot run Git filter");
     } else {

@@ -1046,6 +1046,7 @@ export async function capturePatchGitControls(
   // An untrusted delegate can select "store" itself, even when no helper was
   // configured. Deny the default stores as well as explicitly named files.
   let hostMayReadStore = false;
+  let unisolatedCredentialHelper = false;
   const storeTarget = async (path: string): Promise<string> => {
     try {
       return await realControlPath(path);
@@ -1063,6 +1064,12 @@ export async function capturePatchGitControls(
   const protectStore = async (path: string) => {
     try {
       const metadata = await stat(path).catch(missing);
+      if (metadata && !metadata.isFile() && !metadata.isDirectory()) {
+        // Git can read credentials from a FIFO. Do not open it during capture
+        // or assume that a regular-file sandbox rule isolates its producer.
+        unisolatedCredentialHelper = true;
+        return;
+      }
       if (metadata?.isFile()) hostMayReadStore = true;
       // Mounting a deny at a symlink itself fails on Linux. Git's file store
       // follows the link when locking and replacing its backing file.
@@ -1195,7 +1202,6 @@ export async function capturePatchGitControls(
   const conditionalFilters = new Set<string>();
   const protectedFilterKeys = () => [...delegateFilters].map(configPath);
   let externalInlineAuthentication = false;
-  let unisolatedCredentialHelper = false;
   const captureCredentialHelper = async (key: string, value: string) => {
     if (
       mode === "external" ||
