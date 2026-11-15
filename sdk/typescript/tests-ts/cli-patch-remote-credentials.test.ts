@@ -1,11 +1,19 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  readFile,
+  realpath,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   completePatches,
   publicationRepository,
+  repositoryGit,
   resultWithFindings,
   runGitRepositoryCommand,
   runWorkflow,
@@ -14,6 +22,96 @@ import {
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+
+test("later patch grants remove writable directories from SSH's command search path", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const external = await fixtures.create("patch-ssh-search-");
+  const writable = await fixtures.create("patch-ssh-later-grant-");
+  const global = join(external, "gitconfig");
+  const config = join(external, "ssh_config");
+  const marker = join(external, "invoked");
+  const helper = "synthetic-ssh-later-helper";
+  await writeFile(
+    config,
+    "Host *\n  BatchMode yes\n  ProxyCommand " + helper + "\n",
+  );
+  git(
+    "config",
+    "--file",
+    global,
+    "core.sshCommand",
+    `ssh -F "${config.replaceAll("\\", "/")}"`,
+  );
+  git(
+    "remote",
+    "set-url",
+    "origin",
+    "ssh://git@127.0.0.1:1/example/repository.git",
+  );
+  const environment = {
+    PATH: [writable, process.env["PATH"]].join(delimiter),
+    GIT_CONFIG_GLOBAL: global,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GITLAB_HOST: "127.0.0.1",
+    PATCH_SSH_MARKER: marker,
+  };
+  let turns = 0;
+  let preflightPath: string | undefined;
+  let pushPath: string | undefined;
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      environment,
+      manualCodexPreparation: true,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high", "high"]), "scan-1", directory),
+      async onCodex(args, output) {
+        turns++;
+        output!.appServer!.onPermissions!({
+          directory,
+          environment,
+          profile: {
+            extends: ":workspace",
+            network: { enabled: false },
+            workspace_roots: turns === 1 ? {} : { [writable]: true },
+            filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
+          },
+        });
+        await output!.appServer!.onBeforeTurn?.();
+        if (turns === 2)
+          await writeFile(
+            join(writable, helper),
+            '#!/bin/sh\necho invoked > "$PATCH_SSH_MARKER"\nexit 1\n',
+            { mode: 0o755 },
+          );
+        await writeFile(join(directory, `src/finding-${turns}.ts`), "fixed\n");
+        completePatches(args, output);
+        return 0;
+      },
+      onRepositoryCommand(tool, args, cwd, options) {
+        if (tool !== "git") return "";
+        if (args.includes("ls-remote")) {
+          preflightPath = options?.environment?.["PATH"];
+          return "";
+        }
+        if (options?.patchTransport && args.includes("push"))
+          pushPath = options.environment?.["PATH"];
+        return runGitRepositoryCommand(tool, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+    },
+    { localHosting: false },
+  );
+  expect(turns).toBe(2);
+  expect(preflightPath?.split(delimiter), outcome.stderr).toContain(writable);
+  expect(pushPath, outcome.stderr).toBeDefined();
+  expect(pushPath!.split(delimiter)).not.toContain(writable);
+  expect(outcome.exitCode, outcome.stderr).toBe(2);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 test.each([
   "initial",
@@ -427,5 +525,248 @@ test.each(["local", "included checkout", "operator"])(
         ? "Fixture transport reached"
         : "checkout-selected HTTP",
     );
+  },
+);
+
+async function runSshPreflight(
+  selected: string,
+  global: string,
+  marker: string,
+  inspectHostname = false,
+) {
+  repositoryGit(selected)(
+    "remote",
+    "set-url",
+    "origin",
+    "ssh://git@127.0.0.1:1/team/repository.git",
+  );
+  const environment = {
+    GIT_CONFIG_GLOBAL: global,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_SSH_VARIANT: "ssh",
+    PATCH_SSH_MARKER: marker,
+    ...(inspectHostname ? { GITLAB_HOST: "gitlab.example.invalid" } : {}),
+  };
+  let hostnameCommand: string | undefined;
+  const model = mock(async () => 0);
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: selected,
+      environment,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high"]), "scan-1", selected),
+      onCodex: model,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (command !== "git") return "[]";
+        const phase = args.includes("codex-security-ssh-config")
+          ? "hostname"
+          : args.includes("ls-remote")
+            ? "preflight"
+            : undefined;
+        if (phase === "hostname") hostnameCommand = args[1];
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: {
+            ...environment,
+            ...options?.environment,
+            PATCH_SSH_PHASE: phase,
+          },
+        });
+      },
+    },
+    { localHosting: false },
+  );
+  expect(outcome.exitCode).toBe(2);
+  const invoked = await readFile(marker, "utf8").catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return "";
+    },
+  );
+  expect(model).not.toHaveBeenCalled();
+  return { invoked: invoked.trim(), stderr: outcome.stderr, hostnameCommand };
+}
+
+test.each(["worktree", "operator", "linked directory"] as const)(
+  "checks the enclosing worktree for SSH configuration on a subdirectory scan: %s",
+  async (source) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const selected = join(directory, "src");
+    const external = await fixtures.create("patch-subdirectory-ssh-");
+    const global = join(external, "global.gitconfig");
+    const marker = join(external, "ssh-invoked");
+    const checkoutConfig = join(directory, "ssh.config");
+    const operatorConfig = join(external, "ssh.config");
+    const link = join(external, "selected");
+    if (source === "linked directory")
+      await symlink(
+        selected,
+        link,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    // Keep the link/.. spelling when passing it to Git.
+    const included =
+      source === "linked directory"
+        ? link.replaceAll("\\", "/") + "/../ssh.config"
+        : source === "worktree"
+          ? checkoutConfig
+          : operatorConfig;
+    git("config", "--file", global, "include.path", included);
+    const script = join(external, "ssh helper.cjs");
+    await writeFile(
+      script,
+      'require("node:fs").writeFileSync(process.env.PATCH_SSH_MARKER, process.argv[2]); process.exitCode = 1;\n',
+    );
+    const command = (location: string) =>
+      `node ${JSON.stringify(script.replaceAll("\\", "/"))} ${location}`;
+    for (const [file, owner] of [
+      [checkoutConfig, "worktree"],
+      [operatorConfig, "operator"],
+    ] as const)
+      git("config", "--file", file, "core.sshCommand", command(owner));
+    // Git for Windows and POSIX can resolve a junction/.. differently.
+    const fromCheckout =
+      git(
+        "config",
+        "--file",
+        global,
+        "--includes",
+        "--get",
+        "core.sshCommand",
+      ) === command("worktree");
+    const result = await runSshPreflight(selected, global, marker);
+    expect(result.invoked).toBe(fromCheckout ? "" : "operator");
+    if (fromCheckout)
+      expect(result.stderr).toContain("checkout-selected core.sshCommand");
+  },
+);
+
+test.each([".", "src"])(
+  "an external SSH setting cannot run a checkout-relative executable during preflight from %s",
+  async (subdirectory) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const selected = join(directory, subdirectory);
+    const external = await fixtures.create("patch-relative-ssh-");
+    const global = join(external, "gitconfig");
+    const marker = join(external, "invoked");
+    for (const [root, owner] of [
+      [directory, "worktree"],
+      [join(directory, "src"), "subdirectory"],
+    ] as const) {
+      await writeFile(
+        join(root, "transport.sh"),
+        [
+          "#!/bin/sh",
+          `echo ${owner} > "$PATCH_SSH_MARKER"`,
+          "exit 73",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+    }
+    git("add", ".");
+    git("commit", "-m", "Add synthetic transport names");
+    git("config", "--file", global, "core.sshCommand", "./transport.sh");
+    const result = await runSshPreflight(selected, global, marker);
+    expect(result.invoked).toBe("");
+  },
+);
+
+test.each(["checkout-relative", "operator-absolute"] as const)(
+  "external OpenSSH configuration resolves %s commands during hostname lookup and transport",
+  async (location) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const external = await fixtures.create("patch-ssh-config-");
+    const global = join(external, "gitconfig");
+    const config = join(external, "ssh_config");
+    const marker = join(external, "invoked");
+    const name = "transport.cjs";
+    const script =
+      'require("node:fs").appendFileSync(process.env.PATCH_SSH_MARKER, process.env.PATCH_SSH_PHASE + ":" + process.argv[2] + "\\n");\n';
+    await writeFile(join(directory, name), script);
+    if (location === "operator-absolute")
+      await writeFile(join(external, name), script);
+    git("add", name);
+    git("commit", "-m", "Add synthetic repository SSH command");
+    const target =
+      location === "operator-absolute"
+        ? join(external, name).replaceAll("\\", "/")
+        : "./" + name;
+    await writeFile(
+      config,
+      [
+        "Host *",
+        "  BatchMode yes",
+        `  ProxyCommand node "${target}" proxy`,
+        `Match exec "node \\\"${target}\\\" match"`,
+        "  LogLevel ERROR",
+        "",
+      ].join("\n"),
+    );
+    const sshCommand = `ssh -F "${config.replaceAll("\\", "/")}"`;
+    git("config", "--file", global, "core.sshCommand", sshCommand);
+
+    // Raw Git selects the SSH client and invokes Match exec from this checkout.
+    // Prove the fixture command runs there before testing publication's safe cwd.
+    const control = spawnSync(
+      "git",
+      [
+        "-c",
+        `alias.test-ssh-config=!${sshCommand} -G`,
+        "test-ssh-config",
+        "127.0.0.1",
+      ],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATCH_SSH_MARKER: marker,
+          PATCH_SSH_PHASE: "control",
+        },
+      },
+    );
+    expect(control.status, control.stderr).toBe(0);
+    expect(control.stdout, control.stderr).toContain("hostname 127.0.0.1");
+    const rawMarker = await readFile(marker, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return "";
+      },
+    );
+    expect(rawMarker, control.stderr).toContain("control:match");
+    await unlink(marker);
+
+    // Git's POSIX shell may find its bundled OpenSSH before the Windows client.
+    // Its argument conversion supplies the native spelling to the test process.
+    const runtime = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
+    const selected = git(
+      "-c",
+      `alias.test-ssh-path=!${runtime} -p 'process.argv[1]' "$(command -v ssh)"`,
+      "test-ssh-path",
+    );
+    const executable = await realpath(
+      process.platform === "win32" && !selected.toLowerCase().endsWith(".exe")
+        ? selected + ".exe"
+        : selected,
+    );
+    const { invoked, stderr, hostnameCommand } = await runSshPreflight(
+      directory,
+      global,
+      marker,
+      true,
+    );
+    expect(hostnameCommand, stderr).toContain(
+      executable.replaceAll("'", "'\\''"),
+    );
+    if (location === "operator-absolute") {
+      const records = invoked.split(/\r?\n/u);
+      expect(records, stderr).toContain("hostname:match");
+      expect(records, stderr).toContain("preflight:match");
+      expect(records, stderr).toContain("preflight:proxy");
+    } else {
+      expect(invoked).toBe("");
+    }
   },
 );

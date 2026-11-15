@@ -172,6 +172,8 @@ describe("GitLab patch destinations", () => {
       const url = "https://gitlab.com/example/repository/-/merge_requests/14";
       const listedTargets: string[] = [];
       const creations: string[][] = [];
+      let preflights = 0;
+      let patches = 0;
       let pushes = 0;
       let lookups = 0;
       const outcome = await runWorkflow(
@@ -194,19 +196,22 @@ describe("GitLab patch destinations", () => {
           onWorkbench: () =>
             savedScan(resultWithFindings(["high"]), "scan-1", directory),
           onCodex: async (args, output) => {
+            patches++;
             await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
             completePatches(args, output);
             return 0;
           },
           onRepositoryCommand: (command, args, cwd, options) => {
             if (command === "git") {
-              if (args.includes("ls-remote"))
+              if (args.includes("ls-remote")) {
+                preflights++;
                 return runLocalHostingTransport(
                   command,
                   ["ls-remote", "--heads", "--", remote],
                   cwd,
                   options,
                 );
+              }
               if (args[0] === "push") {
                 pushes++;
                 return runLocalHostingTransport(
@@ -261,6 +266,17 @@ describe("GitLab patch destinations", () => {
         },
         { localHosting: false },
       );
+      if (mode === "explicit HTTP port fork") {
+        expect(outcome.exitCode).toBe(2);
+        expect(outcome.stderr).toContain("plain HTTP origin URL");
+        expect(preflights).toBe(0);
+        expect(patches).toBe(0);
+        expect(lookups).toBe(0);
+        expect(listedTargets).toEqual([]);
+        expect(creations).toEqual([]);
+        expect(pushes).toBe(0);
+        return;
+      }
       const blocked =
         mode === "different saved commit" || mode === "source lookup failure";
       expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);

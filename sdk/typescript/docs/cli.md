@@ -2770,10 +2770,37 @@ additional writable roots and network access in your user configuration.
 Snapshot Git retains access to external Git configuration files selected by the
 operator. The patch model’s filesystem profile denies access to those files.
 When a snapshot filter or publication hook can run, keep inline Git credentials
-out of external configuration files, including conditional includes. Use a
-credential helper for transport authentication. A patch stops before it runs
-a delegate with an authorization header, credential-bearing URL or proxy, or
-inline helper password available in those files.
+out of external configuration files, including conditional includes. A patch
+stops before running a delegate with an authorization header, credential-bearing
+URL or proxy, or inline helper password available in those files.
+
+HTTPS publication runs named Git credential helpers and executable wrappers
+outside the checkout. Operator settings can also select `!gh auth git-credential`
+or an interpreter with an absolute external script. Put shell logic in an
+external executable wrapper. Git applies the original URL scopes and empty
+helper resets when choosing which helper to invoke.
+
+Git's built-in `store` helper can authenticate the host publication transport.
+The patch model, snapshot filters, and publication hooks have filesystem deny
+rules for Git's standard credential stores and for operator-selected
+`store --file` commands with a literal absolute file path. Use forward slashes
+and a drive letter for an explicit store on Windows. The native sandbox applies
+these rules when it launches a command. Keep credential-store files stable
+until active patch commands finish. For a Windows store that does not yet exist,
+use a path the native sandbox can represent with ordinary drive or UNC syntax.
+Other helpers, including
+shell commands and OS credential managers, can use storage outside those
+files. A nonregular credential source such as a named pipe is handled the same
+way. When an operator configuration names one of these helpers, a patch
+stops before running a publication hook that could call it. Configured filters
+can stay installed. If a file's attributes select one, Git reports the
+incompatible helper before processing the file. An empty helper reset controls
+Git's lookup order. A filter can still read and invoke an earlier helper named
+in the same configuration. For patching with those delegates, select a
+configuration that omits the opaque helper. When a file-backed store is in use,
+the host commit reuses the captured filtered blobs so it can authenticate the
+push without re-running the filters outside the snapshot sandbox.
+
 An external Git administration directory must belong to a registered worktree or
 be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git
 directory points to a separate external common directory, select that common
@@ -2821,17 +2848,31 @@ Patch results are `verified`, `no_change`, `blocked`, or
 ### Create or resume a draft pull request
 
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
-Publication checks the source of `core.sshCommand` before it runs SSH and
-rechecks the selected launcher and explicit SSH file operands during publication.
-Keep SSH, askpass and proxy executables, virtual environments and explicit SSH
-input files outside directories the patch can write. If a launcher symlink
-crosses one of those directories, Git uses the approved executable target.
-A virtualenv interpreter needs a protected launcher path to retain its environment.
+Publication checks the source of `core.sshCommand` and binds its executable
+before Git probes a host or examines remote branches. Keep SSH, askpass and
+proxy launchers, identity files and explicit configuration files outside
+directories the patch can write. Use absolute paths for explicit file operands.
+Identity files and configuration files selected by `-i` or `-F` must already
+exist. OpenSSH can create a new `UserKnownHostsFile` during a connection when
+its parent directory exists outside the patch's writable roots. SSH and its
+configuration probes run from the filesystem volume root, with checkout
+directories excluded from their command search path. For a command that needs
+shell expansion, use an operator-owned wrapper on a trusted PATH.
+
+If a launcher symlink crosses a directory the patch can write, Git uses the
+approved executable target. A virtualenv interpreter needs a protected launcher
+path to retain its environment. Publication rechecks the selected transport
+files before dispatch. If they change, inspect them before retrying.
+`--resume-pr` selects the current operator settings for that invocation.
 With `--external-sandbox`, the operator supplies the filesystem isolation.
-If a transport file changes, inspect the file and your transport settings before
-retrying. `--resume-pr` selects the current operator settings for that invocation.
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
 HTTP fetch and push URLs before contacting the hosting service.
+
+For HTTPS, publication checks `GIT_ASKPASS`, the operator's `core.askPass`, and
+`SSH_ASKPASS` in order. The first defined value selects the helper. An empty
+value disables askpass. If the patch branch activates a new helper, inspect
+the configuration and run `codex-security patch --resume-pr BRANCH` to publish
+the saved commit.
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.

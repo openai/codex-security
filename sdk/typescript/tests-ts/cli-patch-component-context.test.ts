@@ -821,3 +821,72 @@ for (const linked of [false, true]) {
     });
   });
 }
+
+test("isolates relative credential stores selected from an external Git caller", async () => {
+  const { directory } = await publicationRepository(fixtures);
+  const caller = await fixtures.create("patch-credential-caller-");
+  const environment = {
+    GIT_DIR: join(directory, ".git"),
+    GIT_WORK_TREE: directory,
+    HOME: "home",
+    USERPROFILE: "home",
+    XDG_CONFIG_HOME: "xdg",
+    GIT_CONFIG_GLOBAL: join(caller, "global.gitconfig"),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  const stores = [
+    { parent: "home", name: ".git-credentials", host: "home.example.invalid" },
+    {
+      parent: join("xdg", "git"),
+      name: "credentials",
+      host: "xdg.example.invalid",
+    },
+  ];
+  for (const { parent, name, host } of stores) {
+    for (const [root, user] of [
+      [caller, "caller"],
+      [directory, "worktree"],
+    ] as const) {
+      await mkdir(join(root, parent), { recursive: true });
+      await writeFile(
+        join(root, parent, name),
+        `https://${user}:fixture@${host}\n`,
+      );
+    }
+    const credential = await runGitRepositoryCommand(
+      "git",
+      [
+        "-c",
+        "credential.helper=",
+        "-c",
+        "credential.helper=store",
+        "credential",
+        "fill",
+      ],
+      caller,
+      { environment, input: `protocol=https\nhost=${host}\n\n` },
+    );
+    expect(credential).toContain("username=caller");
+  }
+  let protectedStores: readonly string[] | undefined;
+  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+    currentDirectory: caller,
+    environment,
+    onRepositoryCommand: (command, args, cwd, options) =>
+      runGitRepositoryCommand(command, args, cwd, {
+        ...options,
+        environment: { ...environment, ...options?.environment },
+      }),
+    onCodex: async (_args, output) => {
+      protectedStores = output!.appServer!.permissions!.credentialStorePaths;
+      await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+      output!.stdout.write("Verified the synthetic patch.");
+      return 0;
+    },
+  });
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  expect(protectedStores?.toSorted()).toEqual(
+    stores.map(({ parent, name }) => join(caller, parent, name)).sort(),
+  );
+});
