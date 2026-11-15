@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { inventoryToolEnvironment } from "./support/inventory.js";
 import { nodeCommand } from "./support/shell.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
@@ -37,6 +38,7 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
       { path: "^src/route-0" },
     ]),
   );
+  const env = inventoryToolEnvironment();
   const run = (command: string, values: string[], input?: string) =>
     spawnSync(
       nodeCommand().command,
@@ -47,7 +49,7 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
         scan,
         ...values,
       ],
-      { encoding: "utf8", input },
+      { encoding: "utf8", input, env },
     );
   const success = (command: string, ...values: string[]) => {
     const result = run(command, values);

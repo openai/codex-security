@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { inventoryToolEnvironment } from "./support/inventory.js";
 import { nodeCommand } from "./support/shell.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
@@ -41,7 +42,7 @@ function fixture() {
     JSON.stringify([{ path: "[.]ts$" }]),
   );
   const scopesFile = join(root, "scopes.json");
-  const env = { ...process.env };
+  const env = inventoryToolEnvironment();
   delete env["CODEX_SECURITY_TARGET_PATHS_FILE"];
   const run = (...args: string[]) => {
     const result = spawnSync(
