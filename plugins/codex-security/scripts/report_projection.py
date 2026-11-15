@@ -72,11 +72,17 @@ def _escape_markdown(value: str) -> str:
 def _text(value: Any, fallback: str) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
-    if re.match(
-        r"^(?:(?:#{1,6}|[-*+>])(?: |$)|\d+[.)] |[0-9]{1,9}[.)]$|-[- ]*-$|```|~~~|\|)", normalized
-    ):
+    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
         normalized = f"Text: {normalized}"
     return _escape_markdown(normalized)
+
+
+def _block_text(text: str) -> str:
+    """Keep a marker visible when formatted text starts a paragraph or list item."""
+    # Inline escaping has already quoted a literal asterisk or greater-than sign.
+    if re.fullmatch(r"#{1,6}|[-+]|\\[*>]|[0-9]{1,9}[.)]|-[- ]*-", text):
+        return f"Text: {text}"
+    return text
 
 
 def _string_values(value: Any) -> Iterator[str]:
@@ -247,7 +253,7 @@ def _hardening_portfolio_path(scan: dict[str, Any]) -> str | None:
 
 
 def _bullet_section(heading: str, items: list[str]) -> list[str]:
-    return ["", heading, *(f"- {item}" for item in items)] if items else []
+    return ["", heading, *(f"- {_block_text(item)}" for item in items)] if items else []
 
 
 def code_evidence_rows(*catalogs: Any) -> Iterator[dict[str, Any]]:
@@ -449,7 +455,7 @@ def _code_evidence_lines(evidence: list[dict[str, Any]]) -> list[str]:
             heading += f" — {marker}{padding}{location}{padding}{marker}"
         lines.extend(["", heading])
         if explanation:
-            lines.extend(["", explanation])
+            lines.extend(["", _block_text(explanation)])
         lines.extend(["", f"{fence}{language}", code, fence])
     return lines
 
@@ -510,7 +516,7 @@ def _surface_notes(surface: dict[str, Any]) -> str:
 
 def _remediation_section(finding: dict[str, Any]) -> list[str]:
     remediation = _text(finding.get("remediation"), "No canonical remediation was recorded.")
-    lines = ["", "#### Remediation", "", remediation]
+    lines = ["", "#### Remediation", "", _block_text(remediation)]
     seen = {remediation}
     originals: list[tuple[str, dict[str, Any]]] = []
     pending = [("finding", finding)]
@@ -649,14 +655,14 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         "",
         "#### Summary",
         "",
-        _text(finding["summary"], "No canonical finding summary was recorded."),
+        _block_text(_text(finding["summary"], "No canonical finding summary was recorded.")),
     ]
     if root_cause_summary or root_cause_code_evidence:
         lines.extend(["", "#### Root Cause", ""])
         if root_cause_summary:
-            lines.append(root_cause_summary)
+            lines.append(_block_text(root_cause_summary))
         lines.extend(_code_evidence_lines(root_cause_code_evidence))
-    lines.extend(["", "#### Validation", "", validation_summary])
+    lines.extend(["", "#### Validation", "", _block_text(validation_summary)])
     if validation.get("method"):
         lines.extend(["", f"Validation method: {_text(validation['method'], 'not recorded')}"])
     if validation_outcomes:
@@ -669,7 +675,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         ("Limitations", "limitations"),
     ):
         lines.extend(_bullet_section(f"{label}:", _strings(validation.get(key))))
-    lines.extend(["", "#### Dataflow", "", dataflow_summary])
+    lines.extend(["", "#### Dataflow", "", _block_text(dataflow_summary)])
     lines.extend(_bullet_section("Attack steps:", _strings(attack_path.get("steps"))))
     for label, key in (("Source", "source"), ("Sink", "sink"), ("Outcome", "outcome")):
         if dataflow.get(key):
@@ -678,7 +684,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
         _bullet_section("Transformations:", [_text(value, "") for value in transformations])
     )
     lines.extend(_code_evidence_lines(dataflow_code_evidence))
-    lines.extend(["", "#### Reachability", "", reachability_summary])
+    lines.extend(["", "#### Reachability", "", _block_text(reachability_summary)])
     for label, key in (
         ("Attacker", "attacker"),
         ("Entry point", "entrypoint"),
@@ -709,7 +715,7 @@ def _finding_section(number: int, finding: dict[str, Any]) -> list[str]:
             "",
             f"**{severity['level'].capitalize()}** — {severity_rationale}",
             "",
-            severity_change,
+            _block_text(severity_change),
         ]
     )
     for label, key in (("Impact", "impact"), ("Likelihood", "likelihood")):
@@ -812,9 +818,11 @@ def build_report_markdown(
         "",
         "## Scope",
         "",
-        _text(
-            scope.get("summary"),
-            "The scan was configured for the include paths and exclusions listed below.",
+        _block_text(
+            _text(
+                scope.get("summary"),
+                "The scan was configured for the include paths and exclusions listed below.",
+            )
         ),
         "",
         f"- Scan mode: {coverage['mode']}",
@@ -871,15 +879,19 @@ def build_report_markdown(
         lines.append(content)
     else:
         lines.append(
-            _text(
-                threat_model.get("summary"),
-                "No explicit canonical threat-model summary was recorded.",
+            _block_text(
+                _text(
+                    threat_model.get("summary"),
+                    "No explicit canonical threat-model summary was recorded.",
+                )
             )
         )
         for heading, key in THREAT_MODEL_SECTIONS:
             values = _strings(threat_model.get(key))
             if values:
-                lines.extend(["", f"### {heading}", "", *(f"- {value}" for value in values)])
+                lines.extend(
+                    ["", f"### {heading}", "", *(f"- {_block_text(value)}" for value in values)]
+                )
     reviews = scan.get("reviewState", {}).get("reviews")
     if isinstance(reviews, list) and any(
         isinstance(review, dict) and isinstance(review.get("threatModel"), dict)
@@ -1036,7 +1048,9 @@ def build_report_markdown(
         for question in questions:
             if not isinstance(question, dict):
                 continue
-            lines.append(f"- {_text(question.get('question'), 'Unspecified open question.')}")
+            lines.append(
+                f"- {_block_text(_text(question.get('question'), 'Unspecified open question.'))}"
+            )
             prompt = _text(question.get("followUpPrompt"), "")
             if prompt:
                 lines.append(f"  - Follow-up prompt: {prompt}")

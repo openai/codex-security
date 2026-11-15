@@ -104,9 +104,10 @@ def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> Non
     ["#", "######", "-", "+", "1.", "999999999)", "--", "-- -", "1000000000. item", "١) item"],
 )
 def test_projection_prefixes_markdown_markers_and_existing_numbered_prose(marker: str) -> None:
-    markdown = report_with_finding(remediation=marker)
+    markdown = report_with_finding(summary=marker, remediation=marker)
 
-    assert f"\nText: {marker}\n" in markdown
+    for heading in ("Summary", "Remediation"):
+        assert f"#### {heading}\n\nText: {marker}\n" in markdown
 
 
 @pytest.mark.parametrize(
@@ -116,6 +117,15 @@ def test_projection_keeps_ordinary_text_that_starts_with_marker_characters(value
     markdown = report_with_finding(remediation=value)
 
     assert f"\n{value}\n" in markdown
+
+
+def test_projection_handles_bare_markers_in_list_items_and_table_cells() -> None:
+    markdown = report_with_finding(
+        remediationTests=["--"], confidence={"level": "high", "rationale": "--"}
+    )
+
+    assert "Tests:\n- Text: --\n" in markdown
+    assert "| Confidence rationale | -- |" in markdown
 
 
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
