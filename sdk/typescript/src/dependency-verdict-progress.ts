@@ -19,6 +19,18 @@ function oneLine(value: string) {
   );
 }
 
+function shortenedLine(value: string, maxLength: number): string {
+  const line = oneLine(value);
+  if (line.length <= maxLength) return line;
+  const characters = [...line];
+  return characters.length <= maxLength
+    ? line
+    : `${characters
+        .slice(0, maxLength - 1)
+        .join("")
+        .trimEnd()}…`;
+}
+
 interface Entry {
   caller: string;
   callerKey: string | undefined;
@@ -198,7 +210,19 @@ export function createDependencyVerdictProgress(
         place?.observationWindow,
         place?.deploymentBasis,
       ];
-      const scope = oneLine([label, ...selection].filter(Boolean).join(", "));
+      // Keep descriptive proof and full identity in the assessment and report.
+      const scope = shortenedLine(
+        [
+          shortenedLine(label, 88),
+          place?.environment,
+          shortenedLine(place?.artifact ?? place?.revision ?? "", 28),
+          place?.observationWindow,
+          place?.deploymentBasis !== "unknown" && place?.deploymentBasis,
+        ]
+          .filter((part) => part && part !== use.verdict)
+          .join(", "),
+        120,
+      );
       const assessment = JSON.stringify([
         source ?? id,
         use.proof?.sink?.function,
@@ -223,7 +247,13 @@ export function createDependencyVerdictProgress(
         callerKey: source,
         scope: scope ? ` (${scope})` : "",
         verdict: use.verdict,
-        reason: text,
+        reason: shortenedLine(
+          use.proof?.conditions.find(
+            ({ status, explanation }) =>
+              status === use.verdict && oneLine(explanation),
+          )?.explanation ?? reason,
+          180,
+        ),
         signature: JSON.stringify([
           caller,
           use.verdict,

@@ -2054,7 +2054,7 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
       await enqueue(assessment("first", 1));
       await waitForReviewStart(() => lines().length > 0);
       expect(lines()[0]).toMatch(
-        /app\.ts:1 ruled_out — Source checked\. Shared validation\.$/u,
+        /app\.ts:1 ruled_out — The shared reader validates input\.$/u,
       );
       expect(stdout.text()).toBe("");
 
@@ -2403,4 +2403,101 @@ test("removes invalidated approvals before a coalesced verdict update", () => {
   expect(output[2]).toContain("app.ts:2 corrected ruled_out → unknown");
   progress.flush();
   expect(output).toHaveLength(3);
+});
+
+test("keeps reviewed stderr concise without merging distinct places", () => {
+  const output: string[] = [];
+  const progress = createDependencyVerdictProgress("example", {
+    write: (line) => output.push(line),
+  });
+  const path = `src/${"nested/".repeat(14)}reader.ts`;
+  const callSite = { path, line: 7 };
+  const longReason = "The selected reader has its own review findings. ".repeat(
+    20,
+  );
+  const context = "Unresolved consumer route; ".repeat(20);
+  const use: DependencyUse = {
+    location: `${path}:7`,
+    component: "example",
+    version: null,
+    verdict: "ruled_out",
+    deployment: "configured",
+    reason: longReason,
+    evidence: [{ path, startLine: 7, endLine: 7, supports: [] }],
+    observations: [],
+    proof: {
+      sink: { function: "read", callSite },
+      conditions: [
+        {
+          label: "Unsafe input",
+          status: "ruled_out",
+          explanation: "The reader validates the input before opening it.",
+          citations: [callSite],
+        },
+      ],
+    },
+    place: {
+      kind: "service",
+      environment: "staging",
+      revision: "revision123456789",
+      artifact: `sha256:${"a".repeat(64)}`,
+      observationWindow: "first observation window",
+      deploymentBasis: "configured",
+      deploymentDetail: "Long internal deployment narrative. ".repeat(20),
+      dependencySelection: "Long component-selection narrative. ".repeat(20),
+      patch: null,
+      unresolvedQuestions: ["Lengthy deciding questions. ".repeat(20)],
+    },
+  };
+  const firstPlace = use.place!;
+  const review = {
+    use,
+    callSite,
+    reason: longReason,
+    evidenceKeys: ["source"],
+    sharedEvidenceKeys: ["source"],
+  };
+  progress.update("first-place", review);
+  progress.update("second-place", {
+    ...review,
+    use: {
+      ...use,
+      place: { ...firstPlace, observationWindow: "second observation window" },
+    },
+  });
+  progress.flush();
+
+  expect(output).toHaveLength(3);
+  expect(output[0]).toContain(`${path}:7 (staging, sha256:`);
+  expect(output[0]).toContain("first observation window");
+  expect(output[1]).toContain("second observation window");
+  expect(output[2]).toContain("(1 callsite, 2 assessments)");
+  expect(output[0]).toEndWith(
+    " — The reader validates the input before opening it.\n",
+  );
+  for (const line of output) {
+    expect(line.length).toBeLessThan(path.length + 240);
+    expect(line).not.toContain("narrative");
+    expect(line).not.toContain(longReason);
+  }
+
+  progress.update("ambiguous", {
+    ...review,
+    callSite: undefined,
+    use: {
+      ...use,
+      location: `\x1b[31m${context}\x1b[0m\n`,
+      verdict: "unknown",
+    },
+  });
+  const ambiguous = output.at(-1)!;
+  expect(ambiguous).toContain(
+    `${path}:7 (sink, caller unresolved, submitted location:`,
+  );
+  expect(ambiguous).not.toContain(context);
+  expect(ambiguous).not.toContain("\x1b");
+  const fallback = ambiguous.split(" — ")[1]!.trimEnd();
+  expect(fallback).toEndWith("…");
+  expect(fallback.length).toBeLessThanOrEqual(180);
+  expect(use.reason).toBe(longReason);
 });
