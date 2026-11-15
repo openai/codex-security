@@ -52,9 +52,11 @@ export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } fro
 });
 
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
-await testJoiningCallerAdmission("fresh-empty");
-await testJoiningCallerAdmission("resumed-empty");
-await testJoiningCallerAdmission("resumed-with-source");
+await testJoiningCallerAdmission("fresh", "empty");
+await testJoiningCallerAdmission("fresh", "ignored-only");
+await testJoiningCallerAdmission("resumed", "empty");
+await testJoiningCallerAdmission("resumed", "ignored-only");
+await testJoiningCallerAdmission("resumed", "with-source");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -77,7 +79,8 @@ await testCoordinatorCommitResponseRecovery("record-deep-scan-iteration");
 await testCoordinatorCommitResponseRecovery("finish-deep-scan");
 
 async function testJoiningCallerAdmission(
-  scenario: "fresh-empty" | "resumed-empty" | "resumed-with-source",
+  claim: "fresh" | "resumed",
+  contents: "empty" | "ignored-only" | "with-source",
 ) {
   const { fixtureRoot, targetPath, environment } = await createWorkbenchFixture(
     "deep-scan-joining-caller-",
@@ -93,7 +96,24 @@ async function testJoiningCallerAdmission(
   registry.start = (options: CoordinatorOptions) =>
     start({ ...options, executor });
   try {
-    const created = await owner.begin({ targetPath, threadId, scanRoot });
+    const gitTarget = contents !== "empty";
+    const selected = gitTarget
+      ? path.join(targetPath, "generated")
+      : targetPath;
+    const source = path.join(selected, "fixture.py");
+    if (gitTarget) {
+      await execFileAsync("git", ["init", "-q", targetPath]);
+      await writeFile(path.join(targetPath, ".gitignore"), "*.ignored\n");
+      await mkdir(selected);
+      await writeFile(path.join(selected, "cache.ignored"), "");
+      if (claim === "resumed" && contents === "ignored-only")
+        await writeFile(source, "");
+    }
+    const created = await owner.begin({
+      targetPath: selected,
+      threadId,
+      scanRoot,
+    });
     const lease = { scanId: created.scanId, threadId };
     // Admission uses the later claim, even if the owner entered discovery before it expired.
     const discoveryProgress = {
@@ -102,7 +122,7 @@ async function testJoiningCallerAdmission(
     } as const;
     const joined = await joiner.begin({ ...lease, scanRoot });
     assert.equal(joined.discoveryStarted, false);
-    if (scenario !== "fresh-empty") {
+    if (claim === "resumed") {
       const claimed = await owner.claimCoordinator(lease);
       assert.equal(claimed.acquired, true);
       await owner.updateProgress(discoveryProgress);
@@ -112,8 +132,8 @@ async function testJoiningCallerAdmission(
       assert.equal(observer.run.dispatchedCount, 0);
       await expireLease(environment, created.scanId);
     }
-    if (scenario !== "resumed-with-source")
-      await rm(path.join(targetPath, "fixture.py"));
+    if (contents === "with-source") await writeFile(source, "");
+    else if (contents === "empty" || claim === "resumed") await rm(source);
     const { coordinator } = await startDeepScanEngine({
       run: joined,
       store: joiner,
@@ -130,9 +150,8 @@ async function testJoiningCallerAdmission(
         coordinator.wait(undefined, 30_000),
       ]);
       const persisted = await joiner.get(created.scanId, threadId);
-      if (scenario !== "fresh-empty")
-        assert.equal(persisted.coordinatorGeneration, 3);
-      if (scenario === "resumed-with-source") {
+      if (claim === "resumed") assert.equal(persisted.coordinatorGeneration, 3);
+      if (contents === "with-source") {
         assert.ok(executor.discoveryCalls > 0, terminal?.error);
         assert.ok(persisted.dispatchedCount > 0);
         await assert.rejects(
@@ -140,12 +159,16 @@ async function testJoiningCallerAdmission(
           /newer generation/,
         );
       } else {
+        assert.equal(executor.discoveryCalls, 0, contents);
         assert.equal(terminal?.status, "failed");
         assert.match(terminal.error, /target is empty.*no security audit/iu);
-        assert.equal(executor.discoveryCalls, 0);
         assert.equal(persisted.status, "failed");
         assert.deepEqual(persisted.persistedWorkers, []);
         assert.equal(persisted.dispatchedCount, 0);
+        for (const artifact of ["scan-manifest.json", "report.md"])
+          await assert.rejects(stat(path.join(created.scanDir, artifact)), {
+            code: "ENOENT",
+          });
       }
     } finally {
       coordinator.cancel("fixture cleanup");

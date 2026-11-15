@@ -118,6 +118,7 @@ export async function checkFreshTarget(
         targetPath: run.targetPath,
         includePaths: run.includePaths ?? [run.scope],
         filePaths: run.filePaths ?? [],
+        workbenchDatabasePath: run.workbenchDatabasePath,
       }),
       "Deep Scan target check",
       signal,

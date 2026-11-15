@@ -696,6 +696,11 @@ def _visible_git_character(char: str) -> str:
     return ascii(char)[1:-1]
 
 
+def _git_diagnostic(stderr: bytes) -> str:
+    detail = stderr.decode("utf-8", errors="backslashreplace").replace("\r\n", "\n")
+    return "".join(map(_visible_git_character, detail))
+
+
 def _canonical_patch_chunks(output: BinaryIO) -> Iterator[bytes]:
     """Drop Git's optional function label while preserving hunk coordinates and content."""
     line_start = True
@@ -773,10 +778,7 @@ def _update_digest_field_from_git(
             environment_overrides=environment_overrides,
         )
         if completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
-                "\r\n", "\n"
-            )
-            detail = "".join(map(_visible_git_character, detail))
+            detail = _git_diagnostic(completed.stderr)
             raise SystemExit(
                 f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
             )
@@ -1196,10 +1198,26 @@ def _windows_inventory_query(
 
 
 def git_directory_snapshot_paths(
-    target: Path, *, replay_git_dir: Path | None = None
+    target: Path,
+    *,
+    replay_git_dir: Path | None = None,
+    onerror: Callable[[OSError], None] | None = None,
 ) -> list[Path] | None:
     if replay_git_dir is None:
-        if git_output(target, "rev-parse", "--show-toplevel") is None:
+        probe = git_command(target, "rev-parse", "--show-toplevel", text=False)
+        if probe.returncode or not probe.stdout:
+            # A broken worktree must not turn into an unfiltered directory scan.
+            if (
+                onerror
+                and probe.stderr
+                and any(
+                    (parent / marker).is_file()
+                    for parent in (target, *target.parents)
+                    for marker in (".git", ".git/HEAD", ".git/config")
+                )
+            ):
+                onerror(OSError(_git_diagnostic(probe.stderr).rstrip()))
+                return []
             return None
         repository, pathspec = git_worktree_context(target)
     else:
@@ -1221,7 +1239,7 @@ def git_directory_snapshot_paths(
         else:
             listing_args.append("--no-literal-pathspecs")
             inventory_pathspec = f":(icase,literal){pathspec}"
-    listed = git_bytes(
+    listing = git_command(
         repository,
         *listing_args,
         "ls-files",
@@ -1232,15 +1250,27 @@ def git_directory_snapshot_paths(
         "-z",
         "--",
         inventory_pathspec,
+        # Git localizes its warning prefix. Admission distinguishes warnings from trace output.
+        environment_overrides={"LC_ALL": "C", "LANGUAGE": "C"} if onerror else None,
+        text=False,
         git_dir=replay_git_dir,
         work_tree=repository if replay_git_dir else None,
     )
-    if listed is None:
-        raise SystemExit("Could not inspect files in the selected Git working tree.")
+    # ls-files can succeed with a partial listing and a permission diagnostic.
+    if listing.returncode:
+        message = "Could not inspect files in the selected Git working tree."
+        if onerror:
+            onerror(OSError(_git_diagnostic(listing.stderr).rstrip() or message))
+            return []
+        raise SystemExit(message)
+    if onerror:
+        # Git trace output also goes to stderr. Only diagnostics imply a partial inventory.
+        if any(line.startswith((b"warning: ", b"error: ")) for line in listing.stderr.splitlines()):
+            onerror(OSError(_git_diagnostic(listing.stderr).rstrip()))
     paths: list[Path] = []
     junctions: dict[tuple[int, int], Path] = {}
     nested_worktrees: set[tuple[int, int]] = set()
-    for entry in (entry for entry in listed.split(b"\0") if entry):
+    for entry in (entry for entry in listing.stdout.split(b"\0") if entry):
         relative = Path(os.fsdecode(entry[2:]))
         if not SOURCE_METADATA_DIRECTORIES.isdisjoint(relative.parts):
             continue
@@ -1267,6 +1297,11 @@ def git_directory_snapshot_paths(
         except (FileNotFoundError, NotADirectoryError):
             # The index can retain deleted paths, including directory-to-file replacements.
             continue
+        except OSError as exc:
+            if onerror is None:
+                raise
+            onerror(exc)
+            continue
         if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
             # Case aliases share the link's identity. Prefer the stable index
             # spelling over untracked descendants added in its external target.
@@ -1282,12 +1317,12 @@ def git_directory_snapshot_paths(
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
-            nested_paths = git_directory_snapshot_paths(path)
+            nested_paths = git_directory_snapshot_paths(path, onerror=onerror)
             if nested_paths is not None:
                 nested_worktrees.add((metadata.st_dev, metadata.st_ino))
                 paths.extend(nested_paths)
                 continue
-        paths.extend(source_directory_snapshot_paths(path))
+        paths.extend(source_directory_snapshot_paths(path, onerror=onerror))
 
     if _WINDOWS:
         # Git omits empty untracked directories from its file listing. Inventory
@@ -1295,6 +1330,13 @@ def git_directory_snapshot_paths(
         git_directory = replay_git_dir or git_output(target, "rev-parse", "--absolute-git-dir")
         if git_directory is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
+
+        def directory_query_error(stderr: bytes) -> None:
+            message = "Could not inspect directories in the selected Git working tree."
+            if onerror is None:
+                raise SystemExit(message)
+            onerror(OSError(_git_diagnostic(stderr).rstrip() or message))
+
         directories = _windows_inventory_query(
             target,
             "--no-literal-pathspecs",
@@ -1309,9 +1351,14 @@ def git_directory_snapshot_paths(
             git_dir=Path(git_directory),
             work_tree=repository,
         )
-        if directories.returncode != 0:
-            raise SystemExit("Could not inspect directories in the selected Git working tree.")
-        pending = [target / os.fsdecode(path) for path in directories.stdout.split(b"\0") if path]
+
+        pending: list[Path] = []
+        if directories.returncode:
+            directory_query_error(directories.stderr)
+        else:
+            pending = [
+                target / os.fsdecode(path) for path in directories.stdout.split(b"\0") if path
+            ]
         while pending:
             children: list[Path] = []
             for path in pending:
@@ -1332,8 +1379,9 @@ def git_directory_snapshot_paths(
                         continue
                     try:
                         children.extend(path.iterdir())
-                    except PermissionError:
-                        # Match Git's treatment of unreadable descendants.
+                    except PermissionError as exc:
+                        if onerror:
+                            onerror(exc)
                         continue
             candidates: dict[bytes, Path] = {}
             for path in children:
@@ -1341,7 +1389,11 @@ def git_directory_snapshot_paths(
                     continue
                 try:
                     metadata = path.lstat()
-                except (FileNotFoundError, NotADirectoryError, PermissionError):
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except PermissionError as exc:
+                    if onerror:
+                        onerror(exc)
                     continue
                 if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
                     continue
@@ -1364,7 +1416,8 @@ def git_directory_snapshot_paths(
                 },
             )
             if ignored.returncode not in (0, 1):
-                raise SystemExit("Could not inspect directories in the selected Git working tree.")
+                directory_query_error(ignored.stderr)
+                break
             excluded = set(ignored.stdout.split(b"\0"))
             pending = [path for raw, path in candidates.items() if raw not in excluded]
     paths.extend(junctions.values())

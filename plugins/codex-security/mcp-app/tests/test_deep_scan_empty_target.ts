@@ -100,8 +100,13 @@ test("only registered paths determine whether the target is empty", async () => 
   );
   await assert.rejects(inspect(run), /target is empty.*no security audit/iu);
 
-  // A file counts even when normal source inventory would ignore it.
-  await writeFile(join(right, ".gitignore"), "*");
+  const ignored = "right/generated.py";
+  await writeFile(join(run.targetPath, ".gitignore"), "*.py\n");
+  await writeFile(join(run.targetPath, ignored), "");
+  await assert.rejects(inspect(run), /no security audit/iu);
+
+  await inspect({ ...run, includePaths: [ignored], filePaths: [ignored] });
+  git("add", "-f", "--", ignored);
   await inspect(run);
   run.includePaths.reverse();
   await inspect(run);
@@ -143,12 +148,16 @@ test(
   { skip: process.platform === "win32" || process.getuid?.() === 0 },
   async () => {
     const { run } = await fixtureRun();
-    const denied = join(run.targetPath, "denied");
+    const denied = join(run.targetPath, "selected", "denied");
     await mkdir(denied, { recursive: true });
+    execFileSync("git", ["init", "-q", run.targetPath]);
+    await writeFile(join(run.targetPath, ".gitignore"), "*.ignored\n");
+    await writeFile(join(run.targetPath, "selected", "cache.ignored"), "");
+    await writeFile(join(denied, "source.py"), "");
     await writeFile(join(run.targetPath, "ok"), "");
     await chmod(denied, 0);
     try {
-      run.includePaths = ["denied"];
+      run.includePaths = ["selected"];
       await assert.rejects(inspect(run), /permission denied|EACCES/iu);
       run.includePaths.push("ok");
       await inspect(run);

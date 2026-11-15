@@ -1,13 +1,20 @@
-"""Reject registered Deep Scan targets containing only empty directories."""
+"""Check registered Deep Scan targets before their first worker starts."""
 
 from __future__ import annotations
 
 import errno
 import json
 import os
+import sqlite3
 import stat
 import sys
+from contextlib import ExitStack, closing
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from snapshot_sqlite import readonly_sqlite_uri
+from workbench_schema import migration_target_paths, recorded_git_checkout_roots
+from workbench_target import git_directory_snapshot_paths, scoped_git_discovery
 
 
 def check_selected_targets(root: Path, selections: list[str], file_paths: list[str]) -> None:
@@ -46,6 +53,29 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
         check_path(selection)
 
     def has_content(selection: str) -> bool:
+        target, regular = check_path(selection)
+        if regular:
+            return True
+        errors: list[OSError] = []
+        paths = git_directory_snapshot_paths(target, onerror=errors.append)
+        if paths is not None:
+            for path in paths:
+                try:
+                    info = path.lstat()
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError as exc:
+                    errors.append(exc)
+                    continue
+                if (
+                    not stat.S_ISDIR(info.st_mode)
+                    or getattr(info, "st_reparse_tag", 0) & 0x20000000
+                ):
+                    return True
+            if errors:
+                raise errors[0]
+            return False
+
         pending = [selection]
         failure = None
         while pending:
@@ -90,8 +120,20 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
 if __name__ == "__main__":
     request = json.load(sys.stdin)
     try:
-        check_selected_targets(
-            Path(request["targetPath"]), request["includePaths"], request["filePaths"]
-        )
-    except (OSError, ValueError) as exc:
+        root = Path(request["targetPath"])
+        with ExitStack() as stack:
+            database = request.get("workbenchDatabasePath")
+            if database and "CODEX_SECURITY_GIT" not in os.environ:
+                connection = stack.enter_context(
+                    closing(sqlite3.connect(readonly_sqlite_uri(Path(database)), uri=True))
+                )
+                connection.row_factory = sqlite3.Row
+                stack.enter_context(
+                    scoped_git_discovery(
+                        lambda: [*migration_target_paths(connection), root],
+                        recorded_git_roots=lambda: recorded_git_checkout_roots(connection),
+                    )
+                )
+            check_selected_targets(root, request["includePaths"], request["filePaths"])
+    except (OSError, ValueError, sqlite3.Error) as exc:
         sys.exit(str(exc))

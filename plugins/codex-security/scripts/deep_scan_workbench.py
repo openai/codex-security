@@ -1005,10 +1005,13 @@ def claim_deep_scan_coordinator_locked(
             """,
             (int(args.coordinator_generation != run["coordinator_generation"]), timestamp, scan_id),
         )
-    return {
-        **deep_scan_result(connection, scan_id),
-        "coordinatorDisposition": disposition,
-    }
+    result = deep_scan_result(connection, scan_id)
+    # The cancellable target probe resolves ambient Git against this workbench's history.
+    database = connection.execute(
+        "SELECT CAST(file AS BLOB) FROM pragma_database_list WHERE name = 'main'"
+    ).fetchone()[0]
+    result["deepScan"]["workbenchDatabasePath"] = os.fsdecode(database)
+    return {**result, "coordinatorDisposition": disposition}
 
 
 def recover_expired_coordinator(

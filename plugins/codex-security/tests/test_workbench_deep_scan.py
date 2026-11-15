@@ -6,7 +6,10 @@ import hashlib
 import json
 import os
 import runpy
+import shutil
 import sqlite3
+import subprocess
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -126,6 +129,40 @@ def test_target_admission_stops_at_the_first_non_directory_entry(
     monkeypatch.setattr(os, "scandir", scandir)
     check_selected_targets(tmp_path, ["."], [])
     assert events == ["read", "closed"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="uses a POSIX executable witness")
+def test_admission_excludes_git_in_another_saved_workbench_target(tmp_path, monkeypatch):
+    historical = tmp_path / "historical"
+    historical.mkdir()
+    monkeypatch.delenv("CODEX_SECURITY_GIT", raising=False)
+    deep = start_empty_target_scan(tmp_path)
+    begin_target_scan(
+        deep.state_dir, deep.codex_home, historical, tmp_path / "scans", thread_id="other"
+    )
+    host_git = shutil.which("git")
+    assert host_git is not None
+    target = tmp_path / "target"
+    subprocess.run([host_git, "init", "-q", target], check=True)
+    (target / "source.py").touch()
+    marker = tmp_path / "historical-git-ran"
+    candidate = historical / "git"
+    candidate.write_text('#!/bin/sh\ntouch "$MARKER"\nexec "$HOST_GIT" "$@"\n')
+    candidate.chmod(0o700)
+    monkeypatch.setenv("PATH", str(historical) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("HOST_GIT", host_git)
+    monkeypatch.setenv("MARKER", str(marker))
+    claimed = deep.command("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan")[
+        "deepScan"
+    ]
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
+    subprocess.run(
+        [sys.executable, "-I", "-B", str(script)],
+        input=json.dumps(claimed),
+        text=True,
+        check=True,
+    )
+    assert not marker.exists()
 
 
 def restore_v53_schema(state_dir: Path) -> None:

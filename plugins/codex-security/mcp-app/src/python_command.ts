@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -134,6 +134,38 @@ export function missingPythonHelperMessage(
   return `${error instanceof Error ? error.message : String(error)}\n${MISSING_PYTHON_HELPER_MESSAGE}`;
 }
 
+/** A target probe can be waiting on Git when discovery is canceled. */
+function killPythonProcessTree(child: ChildProcess): void {
+  if (
+    child.pid === undefined ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  )
+    return;
+  if (process.platform === "win32") {
+    const command = path.win32.join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "taskkill.exe",
+    );
+    const killer = spawn(command, ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.unref();
+    killer.once("error", () => child.kill("SIGKILL"));
+    killer.once("exit", (code) => {
+      if (code !== 0) child.kill("SIGKILL");
+    });
+  } else {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }
+}
+
 /** Run an existing Python helper with in-memory input and preserve its output. */
 export function runPythonWithInput(
   python: string,
@@ -143,9 +175,9 @@ export function runPythonWithInput(
   signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
     const child = spawn(python, ["-B", ...args], {
-      signal,
-      killSignal: "SIGKILL",
+      detached: signal !== undefined && process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -158,25 +190,27 @@ export function runPythonWithInput(
       .setEncoding("utf8")
       .on("data", (chunk: string) => errors.push(chunk));
     let inputError: Error | undefined;
-    child.on("error", (error) => {
-      if (signal?.aborted) {
-        // A killed helper can remain in a kernel filesystem call until its mount responds.
-        child.stdin.destroy();
-        child.stdout.destroy();
-        child.stderr.destroy();
-        child.unref();
-      }
-      reject(error);
-    });
+    const cancel = () => {
+      killPythonProcessTree(child);
+      // A killed helper can remain in a kernel filesystem call until its mount responds.
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", cancel, { once: true });
+    child.on("error", reject);
     child.stdin.on("error", (error: Error) => {
       inputError = error;
     });
-    child.on("close", (code, signal) => {
+    child.on("close", (code, exitSignal) => {
+      signal?.removeEventListener("abort", cancel);
       const detail = errors.join("").trim();
       if (code !== 0 && detail) reject(new Error(detail));
       else if (inputError) reject(inputError);
       else if (code === 0) resolve(output.join(""));
-      else reject(new Error(`${label} exited with ${signal ?? code}.`));
+      else reject(new Error(`${label} exited with ${exitSignal ?? code}.`));
     });
     child.stdin.end(input);
   });

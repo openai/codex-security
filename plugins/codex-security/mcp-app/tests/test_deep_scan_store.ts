@@ -105,11 +105,16 @@ async function testBeginProtocolAndParsing() {
       deepScan: {
         includePaths: ["api", "README.md"],
         filePaths: ["README.md"],
+        workbenchDatabasePath: "/fixture/state/workbench.sqlite3",
       },
     }),
   );
   assert.deepEqual(scoped.includePaths, ["api", "README.md"]);
   assert.deepEqual(scoped.filePaths, ["README.md"]);
+  assert.equal(
+    scoped.workbenchDatabasePath,
+    "/fixture/state/workbench.sqlite3",
+  );
 }
 
 async function testScopeResponseParsing() {

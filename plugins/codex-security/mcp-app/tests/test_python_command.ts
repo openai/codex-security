@@ -7,6 +7,8 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { once } from "node:events";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { syncBuiltinESMExports } from "node:module";
 import os, { tmpdir } from "node:os";
 import path from "node:path";
@@ -167,6 +169,40 @@ const python =
 const previousPython = process.env.PYTHON;
 const previousResolvedPython = process.env.CODEX_SECURITY_PYTHON_COMMAND;
 try {
+  // A Git process started by the admission helper must also exit on cancellation.
+  const listener = createServer();
+  const controller = new AbortController();
+  let witness: Socket | undefined;
+  try {
+    listener.listen(0, "127.0.0.1");
+    await once(listener, "listening");
+    const connected = once(listener, "connection", {
+      signal: AbortSignal.timeout(10_000),
+    });
+    const helper = runPythonWithInput(
+      python,
+      [
+        "-c",
+        "import subprocess, sys; subprocess.run([sys.executable, '-c', sys.argv[1], sys.argv[2]], check=True)",
+        "import socket, sys; s = socket.create_connection(('127.0.0.1', int(sys.argv[1]))); s.recv(1)",
+        String((listener.address() as AddressInfo).port),
+      ],
+      "",
+      "Admission fixture",
+      controller.signal,
+    );
+    const rejected = assert.rejects(helper, { name: "AbortError" });
+    [witness] = (await connected) as [Socket];
+    const disconnected = once(witness, "close", {
+      signal: AbortSignal.timeout(5_000),
+    });
+    controller.abort();
+    await Promise.all([disconnected, rejected]);
+  } finally {
+    controller.abort();
+    witness?.destroy();
+    listener.close();
+  }
   const directoryCandidate = path.join(executableFixtureRoot, "directory");
   const fileCandidate = path.join(executableFixtureRoot, "python3");
   await mkdir(directoryCandidate);
