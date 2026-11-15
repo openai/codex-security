@@ -149,6 +149,15 @@ try {
       await client.close();
     }
   });
+  for (const target of [
+    "standard",
+    "commit",
+    "range",
+    "working_tree",
+  ] as const) {
+    await test(`shipped: a resumed findings feed reflects final changes to a ${target} scan`, () =>
+      testResumedFindingsFeed(shipped, target));
+  }
   await test("shipped: registered scan uses its attached thread", () =>
     testRegisteredScanOwner(shipped));
   await test("shipped: semantic scan draft completion", () =>
@@ -324,6 +333,189 @@ async function testLargeScanDraftCheckpoints(
       assert.deepEqual(await client.ping(), {});
     }
   } finally {
+    await client.close();
+  }
+}
+
+async function testResumedFindingsFeed(
+  bundle: string,
+  target: "standard" | "working_tree" | "range" | "commit",
+) {
+  const { repoRoot, environment } = await createScanFixture(
+    `finding-updates-${target}`,
+  );
+  const file = "src/example.ts";
+  await writeFile(
+    path.join(repoRoot, file),
+    "// Synthetic fixture\n// Second line\n",
+  );
+  let diffTarget;
+  if (target !== "standard") {
+    const git = (...args: string[]) =>
+      gitText([
+        "-C",
+        repoRoot,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        ...args,
+      ]).trim();
+    git("init", "-q");
+    git("commit", "--allow-empty", "-qm", "baseline");
+    const baseRevision = git("rev-parse", "HEAD");
+    git("add", ".");
+    if (target === "working_tree") {
+      diffTarget = { kind: target, baseRevision };
+    } else {
+      git("commit", "-qm", "selected changes");
+      diffTarget = {
+        kind: target,
+        baseRevision,
+        headRevision: git("rev-parse", "HEAD"),
+      };
+    }
+  }
+  const client = await startClient(bundle, environment);
+  const call = toolCaller(client, "findings-feed");
+  let observer: Client | undefined;
+  try {
+    const { workspace } = requireSuccessfulTool<WorkspaceResult>(
+      await call("start_codex_security_prompt_only_scan", {
+        targetPath: repoRoot,
+        scope: ".",
+        mode: target === "standard" ? "standard" : "diff",
+        diffTarget,
+      }),
+    );
+    const { scanId } = workspace.results;
+    const validation = {
+      method: "Static source review",
+      summary: "Reviewed the source location and its caller.",
+    };
+    const kept = { ...finding("kept", file), validation };
+    const removed = {
+      ...finding("removed", file),
+      validation,
+      provenance: { source: "local_plugin", candidateId: "removed" },
+    };
+    const checkpoint = {
+      ...workerDraft([kept, removed]),
+      scanId,
+      complete: false,
+    };
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", checkpoint),
+    );
+    type Update = {
+      findingId: string;
+      kind: string;
+      title: string;
+      severity: string;
+      changedFields?: string[];
+    };
+    const readPage = async (reader: Client, afterCursor: number) =>
+      requireSuccessfulTool<{
+        updates: Update[];
+        hasMore: boolean;
+        nextCursor: number;
+        status: string;
+      }>(
+        await reader.callTool({
+          name: "list_codex_security_finding_updates",
+          arguments: { scanId, afterCursor, limit: 1 },
+        }),
+      );
+    observer = await startClient(bundle, environment);
+    const first = await readPage(observer, 0);
+    const second = await readPage(observer, first.nextCursor);
+    await observer.close();
+    observer = undefined;
+    assert.equal(first.status, "running");
+    assert.equal(first.hasMore, true);
+    assert.equal(second.hasMore, false);
+    const initial = [...first.updates, ...second.updates];
+    assert.deepEqual(
+      initial.map((update) => update.kind),
+      ["reviewed", "reviewed"],
+    );
+    const keptId = initial.find(
+      (update) => update.title === kept.title,
+    )!.findingId;
+    const withdrawnId = initial.find(
+      (update) => update.title === removed.title,
+    )!.findingId;
+    const revision = {
+      ...checkpoint,
+      complete: false,
+      findings: [{ ...kept, severity: { level: "medium" } }],
+      reviewState: {
+        ...checkpoint.reviewState,
+        surfaces: [
+          {
+            label: "Reviewed second observation",
+            disposition: "rejected",
+            candidateId: "removed",
+            notes: "The second observation was rejected after review.",
+          },
+        ],
+      },
+    };
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", revision),
+    );
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", revision),
+    );
+    requireSuccessfulTool(
+      await call("record_codex_security_scan_draft", {
+        ...revision,
+        complete: true,
+      }),
+    );
+    requireSuccessfulTool(
+      await call("complete_codex_security_scan", { scanId }),
+    );
+    observer = await startClient(bundle, environment);
+    let page = await readPage(observer, second.nextCursor);
+    assert.equal(page.status, "complete");
+    const changes = [...page.updates];
+    while (page.hasMore) {
+      const next = await readPage(observer, page.nextCursor);
+      assert.ok(next.nextCursor > page.nextCursor);
+      changes.push(...next.updates);
+      page = next;
+    }
+    assert.deepEqual(
+      changes
+        .filter((update) => update.findingId === keptId)
+        .map(({ kind, severity }) => [kind, severity]),
+      [
+        ["updated", "medium"],
+        ["finalized", "medium"],
+      ],
+    );
+    assert.deepEqual(
+      changes
+        .filter((update) => update.findingId === withdrawnId)
+        .map((update) => update.kind),
+      ["withdrawn"],
+    );
+    assert.deepEqual(
+      changes.find(
+        (update) => update.kind === "updated" && update.findingId === keptId,
+      )?.changedFields,
+      ["severity"],
+    );
+    const result = requireSuccessfulTool<CompletedResult>(
+      await call("get_codex_security_completed_scan", { scanId }),
+    );
+    assert.deepEqual(
+      result.findings.findings.map((finding) => finding.findingId),
+      [keptId],
+    );
+  } finally {
+    await observer?.close();
     await client.close();
   }
 }
@@ -506,6 +698,22 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: record the compact diff validation`,
     );
+    const readFeed = async () =>
+      requireSuccessfulTool<{
+        status: string;
+        updates: unknown[];
+        nextCursor: number;
+      }>(
+        await call(
+          "list_codex_security_finding_updates",
+          { scanId },
+          "independent-reader",
+        ),
+      );
+    const live = await readFeed();
+    assert.equal(live.status, "running");
+    assert.deepEqual(live.updates, []);
+    assert.equal(live.nextCursor, 0);
     requireSuccessfulTool(
       await call("record_candidate_attack_paths", {
         scanId,
@@ -576,6 +784,7 @@ async function testCompactDiffScanCompletion(
     );
     assert.equal(completed.manifest.scan.mode, "branch_diff");
     assert.equal(completed.findings.findings.length, 0);
+    assert.deepEqual(await readFeed(), { ...live, status: "complete" });
   } finally {
     await client.close();
   }
@@ -672,6 +881,10 @@ async function testSemanticScanDraftCompletion(
       title: "Untrusted query text reaches SQL execution",
       summary:
         "The execution helper passes a query argument directly to its SQL sink.",
+      validation: {
+        method: "Static source review",
+        summary: "Checked the query at the SQL execution call.",
+      },
       severity: { level: "high" },
       confidence: {
         level: "high",
@@ -925,9 +1138,29 @@ async function testSemanticScanDraftCompletion(
       findings: [finding],
       reviewState: { ...reviewState },
     };
+    const readUpdates = async (afterCursor?: number) =>
+      requireSuccessfulTool<{
+        status: string;
+        nextCursor: number;
+        hasMore: boolean;
+        updates: { findingId: string; title: string; kind: string }[];
+      }>(
+        await call("list_codex_security_finding_updates", {
+          scanId,
+          afterCursor,
+          limit: 1,
+        }),
+      );
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
     );
+    const live = await readUpdates();
+    assert.equal(live.status, "running");
+    assert.equal(live.hasMore, false);
+    assert.equal(live.updates.length, 1);
+    assert.equal(live.updates[0].kind, "reviewed");
+    assert.equal(live.updates[0].title, finding.title);
+    assert.deepEqual((await readUpdates(live.nextCursor)).updates, []);
     const checkpointDeferred = (
       await readJson(scanDirectory, "scan-manifest.json")
     ).scan.reviewState.deferred;
@@ -1013,6 +1246,10 @@ async function testSemanticScanDraftCompletion(
     );
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
+    const sealed = await readUpdates(live.nextCursor);
+    assert.equal(sealed.status, "complete");
+    assert.equal(sealed.updates[0].kind, "finalized");
+    assert.equal(sealed.updates[0].findingId, live.updates[0].findingId);
 
     const results = requireSuccessfulTool<CompletedResult>(
       await call("get_codex_security_completed_scan", {
@@ -1428,6 +1665,7 @@ async function testParentToolList(bundle: string) {
       "record_codex_security_candidate_validations",
       "record_candidate_attack_paths",
       "record_codex_security_scan_draft",
+      "list_codex_security_finding_updates",
       "get_codex_security_completed_scan",
     ];
     for (const name of [
@@ -1461,6 +1699,10 @@ async function testParentToolList(bundle: string) {
       assertNoArtifactDestination(tool);
       if (tool.name === "record_codex_security_scan_draft")
         assertSemanticInputProperties(tool.inputSchema);
+      if (tool.name === "list_codex_security_finding_updates") {
+        assert.equal(tool.annotations?.readOnlyHint, true);
+        assert.deepEqual(tool._meta?.ui, { visibility: ["app", "model"] });
+      }
     }
 
     const deepScanTool = tools.find(

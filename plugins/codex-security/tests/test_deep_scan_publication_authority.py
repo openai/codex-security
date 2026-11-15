@@ -37,15 +37,189 @@ def stage_publication(scan, *, generation, result_path, title, complete=True):
             "resultPath": str(result_path),
         }
     draft_path.write_text(json.dumps(draft))
-    checkpoint_path.write_text(
-        json.dumps({"scanId": scan.scan_id, "findings": findings, "coverage": scan.coverage})
-    )
+    checkpoint = {"scanId": scan.scan_id, "findings": findings, "coverage": scan.coverage}
+    if not complete:
+        checkpoint["complete"] = False
+    checkpoint_path.write_text(json.dumps(checkpoint))
     return Namespace(
         scan_id=scan.scan_id,
         claim_token=None,
         draft_path=str(draft_path),
         checkpoint_path=str(checkpoint_path),
         expected_draft_digest=None,
+    )
+
+
+@pytest.fixture
+def active_publication(workbench_db, publication_scan):
+    scan = publication_scan(scope="subdir")
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_runs SET status = 'running', manifest_path = NULL, coordinator_generation = 2 "
+            "WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+
+    return scan
+
+
+def read_feed(scan, after=0):
+    return scan.api["list_finding_updates"](
+        scan.api["require_scan"],
+        scan.connection,
+        Namespace(scan_id=scan.scan_id, after_cursor=after, limit=20),
+    )
+
+
+def stage_iteration(scan, number, findings):
+    worker = scan.add_worker()
+    pending = copy.deepcopy(scan.findings[0])
+    pending["title"] = "Pending worker observation"
+    pending["identity"]["instance"] = "worker-only"
+    worker.write_text(json.dumps(scan.worker_draft([pending])))
+    with scan.connection:
+        scan.connection.execute(
+            "UPDATE deep_scan_workers SET merge_state = 'buffered' WHERE id = ?",
+            (worker.parent.name,),
+        )
+    result = scan.scan_dir / f"dedup-{number:04d}" / "result.json"
+    result.parent.mkdir()
+    result.write_text(json.dumps(scan.worker_draft(findings)))
+    return Namespace(
+        scan_id=scan.scan_id,
+        worker_id=str(uuid.uuid4()),
+        input_worker_id=[worker.parent.name],
+        result_manifest_path=str(result),
+        coordinator_generation=2,
+        no_new_streak=number - 1,
+        consecutive_errors=0,
+    )
+
+
+def test_deep_feed_tracks_only_selected_in_scope_results(workbench_db, active_publication):
+    scan = active_publication
+    kept = scan.findings[0]
+    removed = copy.deepcopy(kept)
+    removed["identity"]["instance"] = "removed"
+    removed["title"] = "First pass observation"
+    outside = copy.deepcopy(kept)
+    outside["identity"]["instance"] = "outside"
+    outside["title"] = "Outside the requested directory"
+    outside["locations"] = [{"path": "subdirectory/extract.py", "startLine": 1}]
+    first = stage_iteration(scan, 1, [kept, removed, outside])
+    admit = scan.api["deep_scan"].record_deep_scan_iteration
+    assert read_feed(scan)["updates"] == []
+    with pytest.raises(SystemExit, match="coordinator"):
+        admit(workbench_db, Namespace(**{**vars(first), "coordinator_generation": 1}))
+    assert read_feed(scan)["updates"] == []
+    admit(workbench_db, first)
+    page = read_feed(scan)
+    assert page["status"] == "running"
+    assert [(u["kind"], u["title"]) for u in page["updates"]] == [
+        ("reviewed", kept["title"]),
+        ("reviewed", removed["title"]),
+    ]
+    kept_id, removed_id = [u["findingId"] for u in page["updates"]]
+    admit(workbench_db, first)
+    assert read_feed(scan, page["nextCursor"])["updates"] == []
+
+    kept["severity"]["level"] = "medium"
+    second = stage_iteration(scan, 2, [kept, outside])
+    admit(workbench_db, second)
+    revised = read_feed(scan, page["nextCursor"])
+    assert [(u["kind"], u["findingId"]) for u in revised["updates"]] == [
+        ("updated", kept_id),
+        ("withdrawn", removed_id),
+    ]
+    assert revised["updates"][0]["changedFields"] == ["severity"]
+    parent = stage_publication(
+        scan, generation=2, result_path=second.result_manifest_path, title=kept["title"]
+    )
+    scan.api["saved_results"].write_scan_draft(
+        scan.api["_WORKBENCH_DB_CONTEXT"], workbench_db, parent
+    )
+    assert read_feed(scan, revised["nextCursor"])["updates"] == []
+    # A late parent checkpoint can be retained as evidence after selection.
+    # It must not replace the accepted aggregate or its live preview.
+    late = stage_publication(
+        scan, generation=None, result_path=None, title="Unselected late parent", complete=False
+    )
+    scan.api["saved_results"].write_scan_draft(
+        scan.api["_WORKBENCH_DB_CONTEXT"], workbench_db, late
+    )
+    assert read_feed(scan, revised["nextCursor"])["updates"] == []
+    scan.api["deep_scan"].finish_deep_scan(
+        workbench_db,
+        Namespace(
+            scan_id=scan.scan_id,
+            coordinator_generation=2,
+            terminal_reason="saturated",
+            manifest_path=str(scan.scan_dir / "scan-manifest.json"),
+            staged_manifest_path=None,
+            omitted_worker_id=[],
+        ),
+    )
+    scan.complete()
+    terminal = read_feed(scan, revised["nextCursor"])
+    assert terminal["status"] == "complete"
+    assert [(u["kind"], u["findingId"]) for u in terminal["updates"]] == [("finalized", kept_id)]
+    [sealed] = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    assert sealed["findingId"] == kept_id and sealed["severity"]["level"] == "medium"
+    assert read_feed(scan, terminal["nextCursor"])["updates"] == []
+
+
+def test_failed_deep_feed_write_preserves_iteration_and_recovers_at_next_pass(active_publication):
+    scan = active_publication
+    db = scan.connection
+    finding = scan.findings[0]
+    other = copy.deepcopy(finding)
+    other["identity"]["instance"] = "sibling"
+    other["title"] = "Another reviewed finding"
+    findings = [finding, other]
+    first = stage_iteration(scan, 1, findings)
+    db.execute(
+        """CREATE TRIGGER fail_second_update BEFORE INSERT ON scan_finding_updates
+           WHEN NEW.cursor = 2 BEGIN SELECT RAISE(ABORT, 'feed unavailable'); END"""
+    )
+    admit = scan.api["deep_scan"].record_deep_scan_iteration
+    admit(db, first)
+    assert (
+        db.execute(
+            "SELECT merge_state FROM deep_scan_workers WHERE id=?", first.input_worker_id
+        ).fetchone()[0]
+        == "merged"
+    )
+    assert read_feed(scan)["updates"] == []
+
+    db.execute("DROP TRIGGER fail_second_update")
+    selected = stage_iteration(scan, 3, findings)
+    admit(db, selected)
+    page = read_feed(scan)
+    assert [(e["cursor"], e["kind"], e["title"]) for e in page["updates"]] == [
+        (1, "reviewed", finding["title"]),
+        (2, "reviewed", other["title"]),
+    ]
+    # A late, lower-numbered aggregate cannot withdraw the current pass's findings.
+    admit(db, stage_iteration(scan, 2, []))
+    assert read_feed(scan, page["nextCursor"])["updates"] == []
+
+
+@pytest.mark.parametrize("invalid_scope", [None, "unrecognized legacy scope"])
+def test_deep_feed_ignores_invalid_saved_scope(active_publication, invalid_scope):
+    scan = active_publication
+    first = stage_iteration(scan, 1, scan.findings)
+    saved = Path(first.result_manifest_path)
+    saved.write_text(json.dumps({**json.loads(saved.read_text()), "scope": invalid_scope}))
+
+    admit = scan.api["deep_scan"].record_deep_scan_iteration
+    admit(scan.connection, first)
+    assert read_feed(scan)["updates"] == []
+    admit(scan.connection, stage_iteration(scan, 2, scan.findings))
+    [reviewed] = read_feed(scan)["updates"]
+    assert (reviewed["cursor"], reviewed["kind"], reviewed["title"]) == (
+        1,
+        "reviewed",
+        scan.findings[0]["title"],
     )
 
 

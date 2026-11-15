@@ -111,10 +111,13 @@ const {
 } = host;
 
 test("three Standard scans publish two distinct findings with their original evidence", async (t) => {
-  const { run, store, completeScan, runWorkbench } = await createFixture(t, {
-    deepConfig:
-      "[deep_scan]\nworkers = 1\nstop_after_no_new = 1\nmax_discovery_runs = 3\n",
-  });
+  const { run, store, completeScan, runWorkbench, call } = await createFixture(
+    t,
+    {
+      deepConfig:
+        "[deep_scan]\nworkers = 1\nstop_after_no_new = 1\nmax_discovery_runs = 3\n",
+    },
+  );
   const { run: claimed } = await store.claimCoordinator({
     scanId: run.scanId,
     threadId: owner,
@@ -122,6 +125,21 @@ test("three Standard scans publish two distinct findings with their original evi
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
   });
+  const readFeed = (afterCursor = 0) =>
+    call(
+      "list_codex_security_finding_updates",
+      { scanId: run.scanId, afterCursor },
+      { "openai/threadId": "independent-publication-reader" },
+    );
+  function feedPage(result: ToolResult) {
+    assertSuccess(result);
+    return result.structuredContent as {
+      status: string;
+      nextCursor: number;
+      updates: { kind: string; findingId: string; title: string }[];
+    };
+  }
+  const workerReads: ToolResult[] = [];
   const coordinator = new DeepScanCoordinator({
     run: claimed,
     store,
@@ -162,6 +180,8 @@ test("three Standard scans publish two distinct findings with their original evi
             reviewState,
           },
         );
+        // The worker has written its result. Only earlier iterations have committed.
+        workerReads.push(await readFeed());
         return {};
       },
     },
@@ -179,6 +199,18 @@ test("three Standard scans publish two distinct findings with their original evi
   const terminal = await coordinator.wait(undefined, 30_000);
   assert.equal(terminal?.status, "succeeded");
   assert.equal(terminal.dispatchedCount, 3);
+  const duringDiscovery = workerReads.map(feedPage);
+  assert.deepEqual(
+    duringDiscovery.map((page) => [
+      page.status,
+      page.updates.filter((u) => u.kind === "reviewed").map((u) => u.title),
+    ]),
+    [
+      ["running", []],
+      ["running", ["response.write(tenant)"]],
+      ["running", ["response.write(tenant)", "response.write(account)"]],
+    ],
+  );
   assertSuccess(await completeScan());
   const saved = JSON.parse(
     (await snapshot(run)).files["findings.json"]!,
@@ -189,6 +221,21 @@ test("three Standard scans publish two distinct findings with their original evi
         f.provenance.sourceFindingIds.length,
     ),
     [2, 1],
+  );
+  const expectedIds = saved
+    .map((f: { findingId: string }) => f.findingId)
+    .sort();
+  const reviewed = duringDiscovery[2].updates.filter(
+    (u) => u.kind === "reviewed",
+  );
+  assert.deepEqual(reviewed.map((u) => u.findingId).sort(), expectedIds);
+  const terminalFeed = feedPage(await readFeed(duringDiscovery[2].nextCursor));
+  assert.equal(terminalFeed.status, "complete");
+  const finals = terminalFeed.updates.filter((u) => u.kind === "finalized");
+  assert.deepEqual(finals.map((u) => u.findingId).sort(), expectedIds);
+  assert.deepEqual(
+    feedPage(await readFeed(terminalFeed.nextCursor)).updates,
+    [],
   );
 });
 

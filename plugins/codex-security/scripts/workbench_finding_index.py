@@ -15,6 +15,19 @@ _finding_json = json.JSONDecoder(
 )
 
 
+def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
+    if not isinstance(finding, dict):
+        return False
+    return (
+        finding.get("findingId") == row["finding_id"]
+        and finding.get("title") == row["title"]
+        and finding.get("summary") == row["summary"]
+        and finding.get("remediation") == row["remediation"]
+        and finding["severity"]["level"] == row["severity"]
+        and finding["confidence"]["level"] == row["confidence"]
+    )
+
+
 def upsert_finding(
     connection: sqlite3.Connection,
     finding: dict[str, Any],

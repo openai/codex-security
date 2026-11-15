@@ -377,6 +377,27 @@ and the plugin version used at launch. Missing fields stay unknown.
 If `run()` rejects before you receive a registration, record the error separately
 from saved scan outcomes. The caller may have missed the registration receipt.
 
+Use `onFindingUpdate` to observe reviewed findings during a local Standard,
+Diff, or Deep scan.
+The same finding ID links the first assessment to later changes and the final
+disposition. For example:
+
+```ts
+await security.run(repository, {
+  onFindingUpdate(update) {
+    console.log(update.kind, update.findingId, update.severity, update.title);
+  },
+});
+```
+
+Standard and Diff publish accepted review checkpoints. Deep publishes the
+coordinator's merged findings after a batch of completed passes. Resuming a
+scan can replay earlier events. Use `(scanId, cursor)` to recognize a
+delivery your application has already processed. An SDK scan
+using the file-only handoff can first surface findings when the SDK seals its
+result. Use the [plugin MCP feed](../../docs/agent-workflows.md#follow-reviewed-findings-during-a-scan)
+to read from a saved cursor.
+
 Use `onProgress` for scan progress and `onMeasurement` for observed token/cost
 subtotals, coverage, and collection time. `onCost` and `onUsage` report complete
 totals. `onUsageObservation` reports the native token measurement time

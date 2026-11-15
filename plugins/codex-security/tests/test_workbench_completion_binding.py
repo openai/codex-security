@@ -25,6 +25,7 @@ from workbench_test_support import (
     initialize_git_repository,
     load_script,
     mark_deep_coordinator_succeeded,
+    read_draft_documents,
     read_review_state,
     resume_deep_scan,
     run_workbench,
@@ -473,6 +474,45 @@ def _seal_draft(scan_dir: Path, target: Path) -> None:
         check=True,
         text=True,
     )
+
+
+@pytest.mark.parametrize("kind", ["commit", "range", "working_tree"])
+def test_diff_finding_feed_matches_the_sealed_snapshot(tmp_path: Path, kind: str) -> None:
+    state, _, scan = _start_diff_scan_with_draft(tmp_path, kind)
+    scan_id, directory = scan["scanId"], Path(scan["scanDir"])
+    docs = read_draft_documents(directory)
+    docs["manifest"]["scan"]["complete"] = False
+    (directory / "drafts").mkdir(exist_ok=True)
+    draft = directory / "drafts" / f"{uuid.uuid4()}.json"
+
+    def publish():
+        draft.write_text(json.dumps(docs))
+        return scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(draft))
+
+    def read(after):
+        return scan_command(state, "list-finding-updates", scan_id, "--after-cursor", str(after))
+
+    publish()
+    page = read(0)
+    assert page["status"] == "running"
+    [reviewed] = page["updates"]
+    assert reviewed["kind"] == "reviewed" and reviewed["locations"][0]["file"] == "README.md"
+    docs["findings"]["findings"][0]["severity"]["level"] = "medium"
+    docs["manifest"]["scan"]["complete"] = True
+    publish()
+    revised = read(page["nextCursor"])
+    [updated] = revised["updates"]
+    assert updated["kind"] == "updated" and updated["changedFields"] == ["severity"]
+    scan_command(state, "complete-scan", scan_id)
+    terminal = read(revised["nextCursor"])
+    [final] = terminal["updates"]
+    [sealed] = json.loads((directory / "findings.json").read_text())["findings"]
+    assert terminal["status"] == "complete" and final["kind"] == "finalized"
+    assert final["severity"] == sealed["severity"]["level"] == "medium"
+    assert (
+        final["findingId"] == updated["findingId"] == reviewed["findingId"] == sealed["findingId"]
+    )
+    assert read(terminal["nextCursor"])["updates"] == []
 
 
 def _sealed_artifacts(scan_dir: Path) -> dict[str, bytes]:

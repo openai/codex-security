@@ -95,6 +95,7 @@ import {
   matchScanFindingsInternal,
 } from "../src/scan-comparison.js";
 import { normalizeTarget } from "../src/targets.js";
+import { git } from "./git-fixture.js";
 import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import {
   copyCompletedScan,
@@ -1652,6 +1653,91 @@ describe("CodexSecurity orchestration", () => {
       await expect(client.run(repository)).rejects.toThrow(
         "Standard handoff captured",
       );
+    },
+  );
+
+  test.each([
+    ["legacy", "standard", true],
+    ["legacy", "refs", false],
+    ["legacy", "deep", false],
+    ["current", "refs", true],
+    ["current", "working_tree", true],
+    ["current", "deep", true],
+  ] as const)(
+    "negotiates live finding updates with the %s plugin for %s scans",
+    async (version, kind, supported) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const pluginRoot = await copyCredentialTestPlugin(root);
+      const manifestPath = join(pluginRoot, ".codex-plugin/plugin.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.codexSecurity.standardFindingUpdates = 1;
+      if (version === "legacy") delete manifest.codexSecurity.findingUpdates;
+      else manifest.codexSecurity.findingUpdates = 1;
+      await writeFile(manifestPath, JSON.stringify(manifest));
+      let target: ScanOptions["target"];
+      if (kind === "refs" || kind === "working_tree") {
+        await cp(
+          join(PLUGIN_ROOT, "skills/security-diff-scan"),
+          join(pluginRoot, "skills/security-diff-scan"),
+          { recursive: true },
+        );
+        git(repository, "init", "-q");
+        git(repository, "commit", "--allow-empty", "-qm", "test revision");
+        target =
+          kind === "refs"
+            ? DiffTarget.refs({ base: "HEAD", head: "HEAD" })
+            : DiffTarget.workingTree({ base: "HEAD" });
+      }
+      const onFindingUpdate =
+        mock<NonNullable<ScanOptions["onFindingUpdate"]>>();
+      const reads: number[] = [];
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(codexHome);
+          runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
+          return runtime;
+        },
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] !== "list-finding-updates")
+            return mockWorkbench(args, input);
+          const cursor = Number(args[args.indexOf("--after-cursor") + 1]);
+          reads.push(cursor);
+          return {
+            scanId: "scan_example_001",
+            hasMore: false,
+            nextCursor: 1,
+            updates:
+              cursor === 0
+                ? [
+                    {
+                      cursor: 1,
+                      kind: "reviewed",
+                      findingId: "reviewed-finding",
+                      title: "Reviewed finding",
+                      severity: "low",
+                      summary: "Reviewed",
+                      validation: "Source review",
+                      locations: [],
+                    },
+                  ]
+                : [],
+          };
+        },
+        createCodex: codexFactory(async () => {
+          expect(onFindingUpdate).toHaveBeenCalledTimes(supported ? 1 : 0);
+          throw new Error("Synthetic scan ended");
+        }),
+      });
+      await expect(
+        client.run(repository, {
+          mode: kind === "deep" ? "deep" : "standard",
+          target,
+          onFindingUpdate,
+        }),
+      ).rejects.toThrow("Synthetic scan ended");
+      expect([...new Set(reads)]).toEqual(supported ? [0, 1] : []);
+      expect(onFindingUpdate).toHaveBeenCalledTimes(supported ? 1 : 0);
     },
   );
 
@@ -3810,6 +3896,7 @@ if __name__ == "__main__":
   test("keeps hosted executor progress authoritative", async () => {
     const { repository, codexHome, scanDir } = await scanDirectories();
     const updates: ScanProgress[] = [];
+    const findingReads: string[] = [];
     const savedProgress = Promise.withResolvers<JsonObject>();
     const client = new TestClient(
       {
@@ -3821,6 +3908,7 @@ if __name__ == "__main__":
       {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input) => {
+          if (args[0] === "list-finding-updates") findingReads.push(args[0]);
           if (args[0] === "register-cli-scan") {
             return { ...mockScanRegistration(args, input), scopeFileCount: 8 };
           }
@@ -3869,8 +3957,10 @@ if __name__ == "__main__":
       await expect(
         client.run(repository, {
           onProgress: (progress) => updates.push(progress),
+          onFindingUpdate: mock(),
         }),
       ).rejects.toThrow("hosted execution failed");
+      expect(findingReads).toEqual([]);
       expect(
         updates.map(({ phase, filesCompleted }) => [phase, filesCompleted]),
       ).toEqual([

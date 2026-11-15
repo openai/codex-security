@@ -80,7 +80,8 @@ from workbench_constants import (
     SQLITE_RETRY_ATTEMPTS,
 )
 from workbench_feedback import get_scan_feedback
-from workbench_finding_index import index_findings
+from workbench_finding_index import index_findings, legacy_finding_matches
+from workbench_finding_updates import list_finding_updates, record_final_finding_updates
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
     archive_scan,
@@ -1514,6 +1515,7 @@ def complete_scan_locked(
                 )
         connection.execute("DELETE FROM finding_occurrences WHERE scan_id = ?", (scan["id"],))
         index_findings(connection, scan["id"], findings, timestamp)
+        record_final_finding_updates(connection, scan, manifest, findings, warnings)
         finding_count = len(findings.get("findings", []))
         connection.execute(
             """
@@ -3031,19 +3033,6 @@ def backfill_legacy_finding_details(connection: sqlite3.Connection, scan: sqlite
             )
 
 
-def legacy_finding_matches(row: sqlite3.Row, finding: Any) -> bool:
-    if not isinstance(finding, dict):
-        return False
-    return (
-        finding.get("findingId") == row["finding_id"]
-        and finding.get("title") == row["title"]
-        and finding.get("summary") == row["summary"]
-        and finding.get("remediation") == row["remediation"]
-        and finding["severity"]["level"] == row["severity"]
-        and finding["confidence"]["level"] == row["confidence"]
-    )
-
-
 def finding_result(
     connection: sqlite3.Connection,
     scan: sqlite3.Row,
@@ -3390,6 +3379,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
                     "get-scan",
                     "read-scan-usage",
                     "list-scans",
+                    "list-finding-updates",
                     "database-info",
                     "update-progress",
                 },
@@ -3428,6 +3418,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,
             "list-findings": list_findings,
+            "list-finding-updates": partial(list_finding_updates, require_scan),
             "complete-budget-exhausted-scan": complete_budget_exhausted_scan,
             "set-finding-triage": set_finding_triage,
             "request-finding-remediation": request_finding_remediation,

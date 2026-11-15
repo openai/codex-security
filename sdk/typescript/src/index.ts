@@ -95,6 +95,7 @@ export type {
   ScanWorkerEvent,
 } from "./cost.js";
 export type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
+export type { FindingUpdate } from "./finding-updates.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";

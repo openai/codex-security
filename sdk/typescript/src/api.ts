@@ -116,6 +116,7 @@ import {
 import type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 import { measuredScanCost, combineMeasurements } from "./scan-measurement.js";
 import { ScanProgressTracker, type DeepScanProgress } from "./scan-progress.js";
+import { FindingUpdateTracker, type FindingUpdate } from "./finding-updates.js";
 import { findScanSession } from "./scan-logs.js";
 import {
   DIRECT_DEEP_SCAN_CONTROL_USAGE,
@@ -459,6 +460,9 @@ export interface ScanOptions extends ScanSettings {
   onSessionEvent?: (event: ScanSessionEvent) => void;
   onProgress?: (progress: ScanProgress) => void;
   onDeepProgress?: (progress: DeepScanProgress) => void;
+  /** Reviewed finding changes for local scans in cursor order. Resuming replays
+   * earlier updates; use (scanId, cursor) as the delivery identity. */
+  onFindingUpdate?: (update: FindingUpdate) => void;
   /** Best-effort, model-reported phase dispatch counts. */
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
   /**
@@ -702,6 +706,7 @@ type ScanObserverName =
   | "onSessionEvent"
   | "onProgress"
   | "onDeepProgress"
+  | "onFindingUpdate"
   | "onWorkerStatus"
   | "onWorkerEvent"
   | "onStage"
@@ -2252,6 +2257,7 @@ export class CodexSecurity {
     let knowledgeBase: PreparedKnowledgeBase | null = null;
     let costTracker: ScanCostTracker | null = null;
     let scanProgressTracker: ScanProgressTracker | null = null;
+    let findingUpdateTracker: FindingUpdateTracker | undefined;
     let savedProviderProfile: ProviderProfile | undefined;
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     const customValidation = {
@@ -2610,11 +2616,10 @@ export class CodexSecurity {
             authentication.credentialType === "api_key")) &&
         (this.#dependencies.canRunDirectDeepScan?.() ??
           !process.versions["bun"]);
-      const standardCapabilities =
-        skillName === "security-scan"
-          ? await pluginCapabilities(shellPluginRoot)
-          : undefined;
-      const standard = standardCapabilities?.["standardScanHandoff"] === 1;
+      const capabilities = await pluginCapabilities(shellPluginRoot);
+      const standard =
+        skillName === "security-scan" &&
+        capabilities?.["standardScanHandoff"] === 1;
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined
@@ -2662,7 +2667,7 @@ export class CodexSecurity {
         !hosted &&
         normalized.kind === "paths" &&
         standard &&
-        standardCapabilities?.["scopedInventoryReceipt"] === 1;
+        capabilities?.["scopedInventoryReceipt"] === 1;
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
       let latestPhase: ScanProgress["phase"] = "preflight";
@@ -3278,6 +3283,19 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       const localStandard = standard && !hosted;
+      if (
+        !hosted &&
+        options.onFindingUpdate &&
+        supportsFindingUpdates(capabilities, skillName)
+      ) {
+        findingUpdateTracker = findingUpdatesForScan(
+          scanId,
+          workbench,
+          workbenchOptions,
+          options,
+        );
+        findingUpdateTracker.start();
+      }
       latestPhase =
         scanPhaseSchema.safeParse(registration["phase"]).data ?? latestPhase;
       const registeredFileCount = registration["scopeFileCount"];
@@ -3912,6 +3930,8 @@ export class CodexSecurity {
       stopHeadDriftMonitor?.();
       activeScan = null;
       const completedScan = completion["scan"];
+      await findingUpdateTracker?.finish(callerSignal);
+      findingUpdateTracker = undefined;
       notifyScanLifecycle(options, completedScan);
       await finalizeScanUsage(
         scanId,
@@ -4386,6 +4406,7 @@ export class CodexSecurity {
       stopHeadDriftMonitor?.();
       budgetAbortController.abort();
       scanProgressTracker?.stop();
+      await findingUpdateTracker?.finish(callerSignal);
       // Temporary-input cleanup must not replace the scan's outcome.
       try {
         for (const cleanup of await Promise.allSettled([
@@ -5652,6 +5673,20 @@ export class CodexSecurity {
       ]);
       activeScan = undefined;
       const completedScan = completion["scan"];
+      if (
+        options.onFindingUpdate &&
+        supportsFindingUpdates(
+          await pluginCapabilities(pluginRoot),
+          skillNameFor(local.target, local.mode),
+        )
+      ) {
+        await findingUpdatesForScan(
+          scanId,
+          workbench,
+          workbenchOptions,
+          options,
+        ).finish(signal);
+      }
       notifyScanLifecycle(options, completedScan);
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         for (const warning of completedScan["warnings"]) {
@@ -7108,6 +7143,39 @@ function observeSettledScan(
   } catch {
     // Preserve the original failure when its persisted outcome cannot be read.
   }
+}
+
+function supportsFindingUpdates(
+  capabilities: Record<string, unknown> | undefined,
+  skillName: string,
+): boolean {
+  return (
+    capabilities?.["findingUpdates"] === 1 ||
+    (skillName === "security-scan" &&
+      capabilities?.["standardFindingUpdates"] === 1)
+  );
+}
+
+function findingUpdatesForScan(
+  scanId: string,
+  workbench: typeof runWorkbench,
+  workbenchOptions: WorkbenchCommandOptions,
+  options: ScanOptions,
+): FindingUpdateTracker {
+  return new FindingUpdateTracker({
+    scanId,
+    read: (afterCursor, signal) =>
+      workbench(
+        { ...workbenchOptions, signal },
+        workbenchArgs("list-finding-updates", { scanId, afterCursor }),
+      ),
+    onUpdate: notifyObserver(options, "onFindingUpdate"),
+    onError: (error) =>
+      notifyObserver(
+        options,
+        "onWarning",
+      )(`Could not read live finding updates: ${errorMessage(error)}`),
+  });
 }
 
 function notifyObserver<Name extends ScanObserverName>(

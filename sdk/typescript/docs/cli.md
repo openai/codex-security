@@ -1236,6 +1236,15 @@ directory name, so `scan .` shows the current directory's name. CI, redirected o
 diagnostics go to stderr. Press `d` in the dashboard for details, then `a` for
 all sources, `m` for the main scan, or `1`–`9` for a worker.
 
+Local Standard, Diff (`cs scan . --diff main`), and Deep (`cs scan . --mode deep`)
+scans show reviewed findings. Standard and Diff report accepted checkpoints.
+Deep reports findings when the coordinator merges a batch of completed passes.
+Use `--headless` for plain progress lines on stderr.
+Follow the same finding ID to see revisions, withdrawals, and the final
+assessment. The completed report remains the source for the final set.
+The [plugin MCP feed](../../docs/agent-workflows.md#follow-reviewed-findings-during-a-scan)
+lets another client replay these changes by scan ID.
+
 Token totals include input plus output; cache reads and writes are subsets of
 input. Missing cache-write usage makes the uncached/cache-write breakdown
 unavailable. The CLI cannot recover missing information already recorded as zero
