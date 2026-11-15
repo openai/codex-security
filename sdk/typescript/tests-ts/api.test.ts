@@ -16075,12 +16075,11 @@ if __name__ == "__main__":
       "--thread-id",
       "scan-thread",
     ]);
-    expect(commands.at(-2)).toEqual([
-      "get-scan",
-      "--scan-id",
-      "scan_example_001",
-    ]);
-    expect(commands.at(-1)).toEqual([
+    const finalRead = ["get-scan", "--scan-id", "scan_example_001"];
+    expect(commands.at(-3)).toEqual(finalRead);
+    expect(commands.at(-1)).toEqual(finalRead);
+    const failure = commands.at(-2)!;
+    expect(failure).toEqual([
       "fail-scan",
       "--scan-id",
       "scan_example_001",
@@ -16088,7 +16087,7 @@ if __name__ == "__main__":
       "--cost-json",
       expect.any(String),
     ]);
-    expect(JSON.parse(commands.at(-1)![5]!)).toMatchObject({
+    expect(JSON.parse(failure[5]!)).toMatchObject({
       usage: {
         source: "codex_runtime",
         coverage: "complete",

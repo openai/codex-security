@@ -1452,6 +1452,7 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
             **row,
             "target_id": target_id,
             "log_completed_at": None,
+            "observed_files_read_at": None,
             "windows_resume_output_identity": None,
             "windows_resume_target_identity": None,
             "repository_generation": None,
