@@ -209,6 +209,57 @@ function table(snapshot: unknown = snapshotTime) {
 
 const textEnvelope = (text: string) => ({ content: [{ type: "text", text }] });
 
+test("detects transport text truncation despite parseable results and preserves returned matches", () => {
+  const truncated = '{"rows":[…13 chars truncated…';
+  const complete = { complete: true, status: "matched" };
+  const audit = new DependencySearchAudit();
+  for (const [index, result] of [
+    textEnvelope(truncated),
+    textEnvelope(
+      JSON.stringify({
+        content: [
+          { type: "text", text: JSON.stringify(complete) },
+          { type: "text", text: truncated },
+        ],
+      }),
+    ),
+    textEnvelope(
+      JSON.stringify({ ...complete, rows: ["head…13 chars truncated…tail"] }),
+    ),
+  ].entries()) {
+    audit.recordInventory(`inventory-${index}`, "fixture", result, {
+      tool: "fixture_query",
+      arguments: {},
+    });
+  }
+  expect(audit.snapshot([])).toMatchObject([
+    { completeness: "partial", result: "returned" },
+    { completeness: "partial", result: "matches" },
+    { completeness: "partial", result: "matches" },
+  ]);
+});
+
+test("keeps plain text and structured row values distinct from a transport omission marker", () => {
+  const audit = new DependencySearchAudit();
+  audit.recordInventory(
+    "inventory-1",
+    "fixture",
+    {
+      ...textEnvelope("Output may be truncated."),
+      structuredContent: {
+        complete: true,
+        status: "matched",
+        rows: ["Example notation: …13 chars truncated…"],
+      },
+    },
+    { tool: "fixture_query", arguments: {} },
+  );
+  expect(audit.snapshot([])[0]).toMatchObject({
+    completeness: "complete",
+    result: "matches",
+  });
+});
+
 function stagedPodAudit(value: unknown, args = podQueryArgs) {
   const audit = new DependencySearchAudit();
   audit.recordInventory("inventory-1", "fixture", value, {

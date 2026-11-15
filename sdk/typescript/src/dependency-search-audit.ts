@@ -167,28 +167,28 @@ function inventoryRecords(
       value["coverage"],
       value["metadata"],
       inventoryResultPayload(value, null),
-      ...(Array.isArray(content)
-        ? content.map((block, index) => {
-            const parsed = inventoryResultPayload(value, index);
-            if (
-              parsed !== undefined ||
-              !podTable ||
-              !isRecord(block) ||
-              block["type"] !== "text" ||
-              typeof block["text"] !== "string"
-            )
-              return parsed;
-            // Only the transport's explicit omission marker denotes a
-            // truncated table. Arbitrary malformed text proves no dates.
-            if (!/…[1-9]\d* chars truncated…/u.test(block["text"]))
-              return undefined;
-            return {
-              truncated: true,
-              coverage: completePodCoverage(block["text"]),
-            };
-          })
-        : []),
     ];
+    if (Array.isArray(content)) {
+      for (const [index, block] of content.entries()) {
+        const parsed = inventoryResultPayload(value, index);
+        next.push(parsed);
+        // The transport can omit bytes while leaving parseable JSON.
+        if (
+          isRecord(block) &&
+          block["type"] === "text" &&
+          typeof block["text"] === "string" &&
+          /…[1-9]\d* chars truncated…/u.test(block["text"])
+        ) {
+          next.push({
+            truncated: true,
+            coverage:
+              podTable && parsed === undefined
+                ? completePodCoverage(block["text"])
+                : undefined,
+          });
+        }
+      }
+    }
     for (const item of next)
       if (isRecord(item) && !records.includes(item)) records.push(item);
   }
