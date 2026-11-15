@@ -6,6 +6,8 @@ import type { PatchPublicationHooks } from "./patch-git-controls.js";
 
 export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
 
+export const httpCredentialFile = /^http(?:\..*)?\.(?:cookiefile|sslkey)$/iu;
+
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
   environment: NodeJS.ProcessEnv,
@@ -48,6 +50,7 @@ export function filterCommandConfig(
   parseGit = spawnSync,
   stripUrlCredentials = withoutUrlCredentials,
   proxyCredentials = proxyUserinfo,
+  credentialFile = httpCredentialFile,
 ): void {
   function credentialSetting(key: string, value: string): boolean {
     if (/^(?:http|remote)(?:\..*)?\.proxy$/i.test(key))
@@ -55,7 +58,8 @@ export function filterCommandConfig(
     return (
       stripUrlCredentials(key) !== key ||
       stripUrlCredentials(value) !== value ||
-      /^credential\.|^http(?:\..*)?\.(?:extraheader|cookiefile|sslkey|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
+      credentialFile.test(key) ||
+      /^credential\.|^http(?:\..*)?\.(?:extraheader|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
         key,
       )
     );
@@ -188,7 +192,7 @@ const removeCredentials = ${removePatchCredentials};
 removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo});
 environment.CODEX_HOME = plan.home;
 
-filterCommandConfig(environment, plan.git, plan.marker, spawnSync, withoutUrlCredentials, ${proxyUserinfo});
+filterCommandConfig(environment, plan.git, plan.marker, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile});
 const bindings = Object.entries(environment).filter(([name]) =>
   /^(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|PREFIX|EDITOR|ATTR_SOURCE|ATTR_NOSYSTEM|CONFIG(?:_GLOBAL|_SYSTEM|_NOSYSTEM|_PARAMETERS|_COUNT|_(?:KEY|VALUE)_\d+)?)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME)$/i.test(
     name,

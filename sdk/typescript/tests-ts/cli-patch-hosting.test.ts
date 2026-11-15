@@ -36,16 +36,17 @@ describe("patch change tracking", () => {
   async function loopbackTls(
     config: string,
     git: (...args: string[]) => string,
+    usage: "server" | "client" = "server",
   ) {
     const directory = dirname(config);
-    const settings = join(directory, "openssl.cnf");
-    const key = join(directory, "key.pem");
-    const cert = join(directory, "cert.pem");
+    const settings = join(directory, `${usage}-openssl.cnf`);
+    const key = join(directory, `${usage}-key.pem`);
+    const cert = join(directory, `${usage}-cert.pem`);
     await writeFile(
       settings,
       "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=extensions\n" +
-        "[dn]\nCN=Loopback test server\n" +
-        "[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=serverAuth\n" +
+        `[dn]\nCN=Loopback test ${usage}\n` +
+        `[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=${usage}Auth\n` +
         "subjectAltName=IP:127.0.0.1,IP:127.0.0.2\n",
     );
     // Git for Windows supplies OpenSSL on its shell PATH.
@@ -69,8 +70,16 @@ describe("patch change tracking", () => {
       "-out",
       cert,
     );
-    git("config", "--file", config, "http.sslCAInfo", cert);
-    git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
+    if (usage === "client") {
+      git("config", "--file", config, "http.sslCert", cert);
+      git("config", "--file", config, "http.sslKey", key);
+      // Git for Windows also offers Schannel, which uses a certificate store.
+      if (process.platform === "win32")
+        git("config", "--file", config, "http.sslBackend", "openssl");
+    } else {
+      git("config", "--file", config, "http.sslCAInfo", cert);
+      git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
+    }
     return { key: await readFile(key), cert: await readFile(cert) };
   }
 
@@ -1094,7 +1103,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
   );
 
   test.each([false, true])(
-    "preserves operator remote proxy settings with collision=%j",
+    "preserves the operator's proxy, HTTPS cookie and TLS key with collision=%j",
     async (collision) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
@@ -1110,12 +1119,20 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         await fixtures.create("patch-proxy-config-"),
         "gitconfig",
       );
+      const client = await loopbackTls(config, git, "client");
       const origin = Bun.serve({
-        tls: await loopbackTls(config, git),
+        tls: {
+          ...(await loopbackTls(config, git)),
+          ca: client.cert,
+          requestCert: true,
+          rejectUnauthorized: true,
+        },
         hostname: "127.0.0.1",
         port: 0,
         async fetch(request) {
           requests++;
+          if (request.headers.get("cookie") !== "patch-session=synthetic")
+            return new Response(null, { status: 403 });
           const url = new URL(request.url);
           const child = Bun.spawn(["git", "http-backend"], {
             env: {
@@ -1174,6 +1191,18 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         client.on("error", () => upstream.destroy());
       });
       try {
+        const cookieFile = join(dirname(config), "operator cookies.txt");
+        await writeFile(
+          cookieFile,
+          "# Netscape HTTP Cookie File\n127.0.0.2\tFALSE\t/\tTRUE\t0\tpatch-session\tsynthetic\n",
+        );
+        git(
+          "config",
+          "--file",
+          config,
+          `http.https://127.0.0.2:${origin.port}/.cookieFile`,
+          cookieFile,
+        );
         proxy.listen(0, "127.0.0.1");
         await once(proxy, "listening");
         const address = proxy.address();
@@ -1202,6 +1231,20 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           `http://127.0.0.1:${address.port}`,
         );
         environment["GIT_CONFIG_GLOBAL"] = config;
+        // A public certificate alone cannot complete the client handshake.
+        await expect(
+          promisify(execFile)(
+            "git",
+            [
+              "-c",
+              `http.sslKey=${join(dirname(config), "missing.key")}`,
+              "ls-remote",
+              "origin",
+            ],
+            { cwd: directory, env: environment },
+          ),
+        ).rejects.toThrow();
+        expect(requests).toBe(0);
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
         const outcome = await runWorkflow(

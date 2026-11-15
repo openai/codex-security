@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, matchesGlob } from "node:path";
+import { dirname, join, matchesGlob, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -592,6 +592,43 @@ if (git.stdout) process.stdout.write(git.stdout);`;
   );
 }, 90000);
 
+async function captureFilterPermissions(
+  repository: string,
+  environment: NodeJS.ProcessEnv,
+  driver: string,
+  program: string,
+): Promise<PatchPermissions> {
+  for (const [key, value] of [
+    ["clean", "node " + program],
+    ["required", "true"],
+  ] as const)
+    execFileSync(
+      "git",
+      ["config", "--local", `filter.${driver}.${key}`, value],
+      { cwd: repository },
+    );
+  // Collect the permissions the CLI passes to its native app-server.
+  let selected: PatchPermissions | undefined;
+  const stopped = "Captured synthetic patch permissions";
+  const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+    currentDirectory: repository,
+    environment: { ...process.env, ...environment },
+    manualCodexPreparation: true,
+    onRepositoryCommand: (cmd, args, cwd, options) =>
+      runGitRepositoryCommand(cmd, args, cwd, {
+        ...options,
+        environment: { ...environment, ...options?.environment },
+      }),
+    onCodex: (_args, output) => {
+      selected = output?.appServer?.permissions;
+      throw new Error(stopped);
+    },
+  });
+  expect(outcome.stderr).toContain(stopped);
+  expect(selected).toBeDefined();
+  return selected!;
+}
+
 test("patch model and snapshot filters cannot recover credentials from Git stores", async () => {
   const gitHome = await fixtures.create("patch-store-home-");
   const configDirectory = join(
@@ -716,45 +753,124 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
         hash(JSON.stringify(Array(7).fill(true))),
       );
     },
-    async (repository) => {
-      // Collect the permissions the CLI passes to its native app-server.
-      execFileSync(
-        "git",
-        [
-          "config",
-          "--local",
-          "filter.snapshot-store.clean",
-          "node " + probeFile,
-        ],
-        { cwd: repository },
+    (repository) =>
+      captureFilterPermissions(
+        repository,
+        environment,
+        "snapshot-store",
+        probeFile,
+      ),
+  );
+}, 60_000);
+
+test("patch model and clean filters cannot read HTTP cookie files and TLS keys", async () => {
+  const operator = await fixtures.create("patch-http-auth-files-");
+  const config = join(operator, "selected.gitconfig");
+  const environment = {
+    HOME: operator,
+    USERPROFILE: operator,
+    XDG_CONFIG_HOME: join(operator, ".config"),
+    GIT_CONFIG_GLOBAL: config,
+    GIT_CONFIG_NOSYSTEM: "1",
+  };
+  await mkdir(join(environment.XDG_CONFIG_HOME, "git"), { recursive: true });
+  const settings = [
+    "http.cookieFile",
+    "http.sslKey",
+    "http.https://scoped.example.invalid/.cookieFile",
+    "http.https://scoped.example.invalid/.sslKey",
+  ];
+  const drive =
+    process.platform === "win32" ? /^[a-z]:/iu.exec(operator)?.[0] : undefined;
+  if (drive !== undefined)
+    settings.push(
+      "http.https://drive.example.invalid/.cookieFile",
+      "http.https://root.example.invalid/.sslKey",
+    );
+  const paths = settings.map((_, i) => join(operator, `auth ${i}.txt`));
+  const contents = settings.map((_, i) => `synthetic auth input ${i}\n`);
+  for (const i of [0, 1])
+    await writeFile(paths[i]!, contents[i]!, { mode: 0o600 });
+  const readFiles = `const fs = require("node:fs");
+const contents = [];
+for (const path of ${JSON.stringify(paths)}) {
+  try { contents.push(fs.readFileSync(path, "utf8")); }
+  catch (error) { if (!["EACCES", "EPERM", "ENOENT"].includes(error.code)) throw error; }
+}`;
+  const program = "auth-filter.cjs";
+  await resolvePatchProfile(
+    false,
+    false,
+    false,
+    async (context, inspectModel) => {
+      for (let i = 2; i < paths.length; i++)
+        await writeFile(paths[i]!, contents[i]!, { mode: 0o600, flag: "wx" });
+      const repo = context.repository;
+      const input = "INTENDED PATCH BYTES\n";
+      await writeFile(join(repo, "candidate.txt"), input);
+      await writeFile(
+        join(repo, ".gitattributes"),
+        "candidate.txt filter=auth-file\n",
       );
-      execFileSync(
-        "git",
-        ["config", "--local", "filter.snapshot-store.required", "true"],
-        { cwd: repository },
+      await writeFile(
+        join(repo, program),
+        readFiles +
+          '\nprocess.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "utf8").toLowerCase());\n',
       );
-      let selected: PatchPermissions | undefined;
-      const stopped = "Captured synthetic patch permissions";
-      const outcome = await runWorkflow(
-        ["patch", "Synthetic issue", "--json"],
-        {
-          currentDirectory: repository,
-          environment: { ...process.env, ...environment },
-          manualCodexPreparation: true,
-          onRepositoryCommand: (cmd, args, cwd, options) =>
-            runGitRepositoryCommand(cmd, args, cwd, {
-              ...options,
-              environment: { ...environment, ...options?.environment },
-            }),
-          onCodex: (_args, output) => {
-            selected = output?.appServer?.permissions;
-            throw new Error(stopped);
-          },
+      const git = (args: string[], extra: NodeJS.ProcessEnv = {}) =>
+        execFileSync("git", args, {
+          cwd: repo,
+          env: { ...process.env, ...environment, ...extra },
+          encoding: "utf8",
+        });
+      const add = ["add", "--", "candidate.txt"];
+      const staged = ["cat-file", "blob", ":candidate.txt"];
+      git(add);
+      expect(git(staged)).toBe(contents.join(""));
+      const snapshot = {
+        GIT_INDEX_FILE: join(repo, "snapshot-index"),
+        GIT_OBJECT_DIRECTORY: join(repo, "snapshot-objects"),
+      };
+      await mkdir(snapshot.GIT_OBJECT_DIRECTORY);
+      await runRepositoryCommand("git", add, repo, {
+        environment: snapshot,
+        sandbox: {
+          directory: repo,
+          environment: patchSnapshotEnvironment(context.temporaryDirectory, {
+            ...process.env,
+            ...environment,
+            CODEX_HOME: context.home,
+          }),
+          gitEnvironment: { ...environment, ...snapshot },
+          profile: context.snapshotProfile,
         },
+      });
+      expect(git(staged, snapshot)).toBe("intended patch bytes\n");
+      expect(
+        await inspectModel(
+          readFiles + "\nprocess.stdout.write(JSON.stringify(contents));",
+        ),
+      ).toBe("[]");
+    },
+    (repository) => {
+      const scopedCookie = relative(repository, paths[2]!).replaceAll("\\", "/");
+      expect(scopedCookie.startsWith("../")).toBe(true);
+      const values = [paths[0]!, "~/auth 1.txt", scopedCookie, paths[3]!];
+      if (drive !== undefined) {
+        expect(repository.slice(0, 2).toUpperCase()).toBe(drive.toUpperCase());
+        values.push(
+          drive + relative(repository, paths[4]!),
+          paths[5]!.slice(drive.length),
+        );
+      }
+      for (const [i, setting] of settings.entries())
+        execFileSync("git", ["config", "--file", config, setting, values[i]!]);
+      return captureFilterPermissions(
+        repository,
+        environment,
+        "auth-file",
+        program,
       );
-      expect(outcome.stderr).toContain(stopped);
-      expect(selected).toBeDefined();
-      return selected!;
     },
   );
 }, 60_000);

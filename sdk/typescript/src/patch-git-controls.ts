@@ -26,6 +26,7 @@ import {
   sep,
 } from "node:path";
 import {
+  httpCredentialFile,
   proxyUserinfo,
   withoutUrlCredentials,
 } from "./patch-publication-hooks.js";
@@ -443,6 +444,27 @@ const realControlPath = async (path: string) =>
 // Append before realpath so a link/.. path keeps the filesystem's meaning.
 const relativeFile = (directory: string, path: string) =>
   isAbsolute(path) ? path : `${directory}${sep}${path}`;
+
+function httpCredentialPath(directory: string, file: string): string {
+  if (process.platform === "win32") {
+    const drive = /^[a-z]:(?![\\/])/iu.exec(file)?.[0];
+    if (drive) {
+      const current = /^(?:\\\\[?.]\\)?([a-z]:)[\\/]/iu.exec(directory)?.[1];
+      if (drive.toLowerCase() !== current?.toLowerCase())
+        throw new Error(
+          "Use a fully qualified path for a Git HTTP credential file on another Windows drive.",
+        );
+      return `${directory}${sep}${file.slice(2)}`;
+    }
+    if (/^[\\/](?![\\/])/u.test(file)) {
+      const volume =
+        /^\\\\[?.]\\UNC\\[^\\]+\\[^\\]+/iu.exec(directory)?.[0] ??
+        parse(directory).root;
+      return `${volume.replace(/[\\/]$/u, "")}${file}`;
+    }
+  }
+  return relativeFile(directory, file);
+}
 
 async function readGitMarker(
   marker: string | Buffer,
@@ -1202,13 +1224,32 @@ export async function capturePatchGitControls(
   const conditionalFilters = new Set<string>();
   const protectedFilterKeys = () => [...delegateFilters].map(configPath);
   let externalInlineAuthentication = false;
-  const captureCredentialHelper = async (key: string, value: string) => {
-    if (
-      mode === "external" ||
-      !/^credential(?:\..*)?\.helper$/iu.test(key) ||
-      value === ""
-    )
+  const captureCredentialSource = async (
+    checkout: string,
+    key: string,
+    value: string,
+  ) => {
+    if (mode === "external" || !value) return;
+    if (httpCredentialFile.test(key)) {
+      // The transport may create a cookie jar after capture. Keep host Git
+      // from re-running a checkout filter even when the file is still absent.
+      hostMayReadStore = true;
+      const file = await expandConfigurationPath(configPath(value));
+      if (!file) return;
+      const selected = httpCredentialPath(checkout, file);
+      await protectStore(selected);
+      // Git can keep an external caller's cwd for transport while the
+      // coordinator runs its snapshot commands from the worktree root.
+      if (checkout === root) {
+        const caller = await realControlPath(directory);
+        if (!inside(root, caller)) {
+          const fromCaller = httpCredentialPath(caller, file);
+          if (fromCaller !== selected) await protectStore(fromCaller);
+        }
+      }
       return;
+    }
+    if (!/^credential(?:\..*)?\.helper$/iu.test(key)) return;
     if (value === "store") {
       hostMayReadStore = true;
       return;
@@ -1313,18 +1354,19 @@ export async function capturePatchGitControls(
       if (origin.startsWith("file:")) {
         const inline = hasInlineGitAuthentication(key, value);
         if (
-          (inline || /^credential(?:\..*)?\.helper$/iu.test(key)) &&
+          (inline ||
+            httpCredentialFile.test(key) ||
+            /^credential(?:\..*)?\.helper$/iu.test(key)) &&
           (await userSelectedConfig(scope, configPath(origin), checkout))
         ) {
           externalInlineAuthentication ||= inline;
-          await captureCredentialHelper(key, value);
+          await captureCredentialSource(checkout, key, value);
         }
         const path = relativeFile(checkout, configPath(origin.slice(5)));
         activeConfigurations.add(path);
       } else if (scope === "command") {
-        // Command-scope credentials are filtered from delegates. A configured
-        // store remains a file the delegate could select or open independently.
-        await captureCredentialHelper(key, value);
+        // Removing a command-scope setting does not prevent opening its file.
+        await captureCredentialSource(checkout, key, value);
       }
     }
     const captureHooks = async (configured?: string): Promise<void> => {
@@ -1452,7 +1494,7 @@ export async function capturePatchGitControls(
             key,
             value,
           );
-          await captureCredentialHelper(key, value);
+          await captureCredentialSource(checkout, key, value);
         }
         recordConfiguredHook(
           publicationHooks,
