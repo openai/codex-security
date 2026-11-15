@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, matchesGlob } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -389,16 +389,24 @@ glob_scan_max_depth = 8
       RpcMessage
     >;
     expect(Object.keys(profiles)).toEqual([name]);
+    const storeDenies = Object.entries(snapshotProfile!["filesystem"]).filter(
+      ([, access]) =>
+        access === "deny" || (access as RpcMessage)["."] === "deny",
+    );
+    const stores = permissions.credentialStorePaths ?? [];
+    expect(storeDenies).toHaveLength(stores.length);
+    for (const store of stores) {
+      expect(
+        storeDenies.filter(([key, access]) =>
+          access === "deny" ? matchesGlob(store, key) : key === store,
+        ),
+      ).toHaveLength(1);
+    }
     const snapshotFilesystem = {
       ...Object.fromEntries(
         permissions.readOnlyPaths.map((path) => [path, { ".": "read" }]),
       ),
-      ...Object.fromEntries(
-        (permissions.credentialStorePaths ?? []).map((path) => [
-          path,
-          { ".": "deny" },
-        ]),
-      ),
+      ...Object.fromEntries(storeDenies),
       ...(configured ? { ":tmpdir": {}, ":slash_tmp": {} } : {}),
     };
     expect(snapshotProfile).toEqual({
@@ -583,12 +591,14 @@ test("patch model and snapshot filters cannot recover credentials from Git store
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
   };
-  for (const [index, path] of stores.entries())
-    await writeFile(
-      path,
+  const createStore = (index: number) =>
+    writeFile(
+      stores[index]!,
       `https://fixture:synthetic-fixture-${index}@host-${index}.invalid\n`,
-      { mode: 0o600 },
+      { mode: 0o600, flag: "wx" },
     );
+  await createStore(0);
+  await createStore(2);
   const customHelper =
     "store --file='" +
     stores[2]!.replaceAll("\\", "/").replaceAll("'", "'\\''") +
@@ -636,6 +646,9 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
     false,
     async (context, inspectModel) => {
       const repo = context.repository;
+      // Git can create the XDG store after the two native profiles have been
+      // selected. The model and snapshot filter must honor its deny rule too.
+      await createStore(1);
       await writeFile(join(repo, probeFile), probe);
       await writeFile(
         join(repo, ".gitattributes"),
