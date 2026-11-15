@@ -274,6 +274,43 @@ export function repositoryFilePath(value: unknown): string | null {
     : path;
 }
 
+const manifests = new Set([
+  "package.json",
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "Cargo.toml",
+  "Cargo.lock",
+  "composer.json",
+  "composer.lock",
+  "Gemfile",
+  "Gemfile.lock",
+  "go.mod",
+  "go.sum",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "gradle.lockfile",
+  "Pipfile",
+  "Pipfile.lock",
+  "poetry.lock",
+  "pyproject.toml",
+  "uv.lock",
+  "packages.config",
+  "packages.lock.json",
+]);
+
+export function manifestPath(path: string | null): string | null {
+  if (!path) return null;
+  const name = posix.basename(path);
+  return manifests.has(name) ||
+    /^requirements(?:[-_.].*)?\.txt$/u.test(name) ||
+    /\.(?:csproj|fsproj|vbproj|gemspec)$/u.test(name)
+    ? path
+    : null;
+}
+
 export function stableId(prefix: string, fields: unknown[]): string {
   return `${prefix}:${hash("sha256", JSON.stringify(fields))}`;
 }

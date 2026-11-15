@@ -14,10 +14,7 @@ outside the checkout.
 grype dir:. -o json --file /private/path/grype.json
 ```
 
-Grype also scans an SBOM (`grype sbom:bom.json`) or a container image. An image
-scan records absolute container paths. Those paths are kept in the native
-evidence but are not repository locations, so image findings import without a
-file location.
+Grype also scans an SBOM (`grype sbom:bom.json`) or a container image. The reader projects checkout-relative paths only from a directory source. Confirm that Grype scanned the selected checkout root. Image locations and paths from an SBOM without a directory source stay in the original evidence.
 
 ## Preview the report
 
@@ -65,15 +62,14 @@ and the manifest location.
 ```
 
 - `advisory_ids` starts with the match `id` and adds each `relatedVulnerabilities` id. `evidence.url` is the vulnerability `dataSource` when it is an HTTP link.
-- `packages[0]` carries the artifact name, the PURL type as its ecosystem, the installed version, the `fix.versions` as fixed versions, and the first checkout-relative location as the manifest path.
-- `locations` lists each checkout-relative artifact location. Grype reports no line numbers. Absolute image paths stay in `source_data` only.
+- `packages[0]` carries the artifact name, the PURL type as its ecosystem, the installed version, the `fix.versions` as fixed versions, and the manifest or lockfile path when exactly one reported checkout location has a recognized manifest filename.
+- `locations` lists each checkout-relative artifact location. Grype reports no line numbers. All image paths stay in `source_data` only.
 - Grype ranks Negligible below Low. A Negligible match imports as `informational`; an Unknown or missing severity imports as `unknown`.
 - `evidence.source_data` keeps the native match, the scan `source`, and the Grype version. A saved preview imports under the `grype` provider.
 
 ## Repeat an import
 
-The reader identifies a match by ecosystem, advisory, package name and manifest
-path. A new severity, installed version or fix updates the same occurrence. A
-different advisory, package or manifest is a separate finding. Two matches with
+The reader identifies a match by ecosystem, advisory, package name and the sorted set of reported artifact paths. A new severity, installed version or fix updates the same occurrence. A
+different advisory, package or set of paths is a separate finding. Two matches with
 the same identity are excluded as a group. Keep the same source key for one
 project and branch.

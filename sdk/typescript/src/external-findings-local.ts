@@ -861,6 +861,23 @@ export async function prepareNormalizedLocalImport(
   requireIdentity(settings.sourceKey, "Source key");
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
   validateFindingIds(current);
+  return prepareLocalImportWithDeclaredSources(
+    current,
+    settings,
+    dependencies,
+    references,
+  );
+}
+
+// Local reports without an SCM binding use the caller's checkout. Validate any
+// source claims on normalized evidence using the same rules as custom readers.
+async function prepareLocalImportWithDeclaredSources(
+  current: ExternalFindings,
+  settings: NormalizedLocalImportOptions,
+  dependencies: LocalExternalImportDependencies,
+  references: readonly ExternalSourceRepository[],
+) {
+  const { signal } = dependencies;
   if (current.report !== undefined && !isRecord(current.report))
     throw new CodexSecurityError("Report metadata must be an object.");
   if (current.read !== current.findings.length + current.excluded.length)
@@ -1029,6 +1046,13 @@ export async function prepareLocalImport(
       );
     dependabotSource = native;
   }
+  if (options.provider === "grype")
+    return prepareLocalImportWithDeclaredSources(
+      current,
+      options,
+      dependencies,
+      readerSources,
+    );
   const context = await localContext(options.repository, dependencies);
   // Neither report records the checkout, so check the operator's URL against its remotes.
   const requireFetchRemote = async (
@@ -1076,16 +1100,6 @@ export async function prepareLocalImport(
       dependencies,
       bound,
       source ? { sourceRepositories: [source] } : {},
-    );
-  }
-  if (options.provider === "grype") {
-    return preparedLocalStorage(
-      current,
-      options,
-      context,
-      dependencies,
-      false,
-      {},
     );
   }
   const { repository, options: workbenchOptions } = context;

@@ -129,6 +129,33 @@ test("a different advisory, package or manifest is a separate occurrence", () =>
   expect(ids.size).toBe(4);
 });
 
+test("location order preserves identity and different location sets stay distinct", () => {
+  const a = match();
+  a.artifact.locations.push({ path: "a/lock.json" });
+  const b = match();
+  b.artifact.locations.push({ path: "b/lock.json" });
+  const before = normalizeGrypeFindings(report(a, b));
+  expect(before.excluded).toEqual([]);
+  a.artifact.locations.reverse();
+  const after = normalizeGrypeFindings(report(a, b));
+  expect(after.findings.map((finding) => finding.source_finding_id)).toEqual(
+    before.findings.map((finding) => finding.source_finding_id),
+  );
+});
+
+test("excludes a malformed match and retains valid siblings", () => {
+  const output = normalizeGrypeFindings(report(null, match()));
+  expect(output.read).toBe(2);
+  expect(output.findings).toHaveLength(1);
+  expect(output.excluded).toEqual([
+    {
+      position: 1,
+      source_finding_id: null,
+      reason: "Grype match must be an object.",
+    },
+  ]);
+});
+
 test("excludes ambiguous duplicate matches sharing an identity", () => {
   const output = normalizeGrypeFindings(report(match(), match()));
   expect(output.read).toBe(2);
@@ -137,15 +164,31 @@ test("excludes ambiguous duplicate matches sharing an identity", () => {
   expect(output.excluded[0]!.reason).toMatch(/ambiguous duplicate/i);
 });
 
-test("keeps absolute image paths out of repository locations", () => {
+test("keeps relative and absolute image paths out of repository locations", () => {
   const image = match();
   image.artifact.locations = [
     { path: "/usr/lib/node_modules/parser/index.js" },
+    { path: "app/package-lock.json" },
   ];
-  const finding = normalizeGrypeFindings(report(image)).findings[0]!;
+  const input = report(image);
+  input.source.type = "image";
+  const finding = normalizeGrypeFindings(input).findings[0]!;
   expect(finding.evidence.locations).toEqual([]);
   expect(finding.evidence.packages![0]!.manifest_path).toBeNull();
   expect(finding.source_finding_id).toBeTruthy();
+});
+
+test("keeps an installed file as a location and selects only an unambiguous manifest", () => {
+  const input = match();
+  input.artifact.locations = [{ path: "bin/tool" }];
+  const evidence = () =>
+    normalizeGrypeFindings(report(input)).findings[0]!.evidence;
+  expect(evidence().locations).toEqual([{ path: "bin/tool", line: null }]);
+  expect(evidence().packages![0]!.manifest_path).toBeNull();
+  input.artifact.locations.push({ path: "package-lock.json" });
+  expect(evidence().packages![0]!.manifest_path).toBe("package-lock.json");
+  input.artifact.locations.push({ path: "other/package-lock.json" });
+  expect(evidence().packages![0]!.manifest_path).toBeNull();
 });
 
 test("falls back to a plain advisory id and drops a non-HTTP data source", () => {

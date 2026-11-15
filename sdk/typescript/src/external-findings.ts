@@ -234,10 +234,6 @@ export function snapshotImportOptions<P extends string>({
     throw new CodexSecurityError(
       "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
     );
-  if (provider === "grype" && sourceRepositoryUrl !== undefined)
-    throw new CodexSecurityError(
-      "Grype reports record no source repository; do not supply --source-repository-url.",
-    );
   if (trivyScanRoot !== undefined && provider !== "trivy")
     throw new CodexSecurityError(
       "--trivy-scan-root applies only to --provider trivy.",

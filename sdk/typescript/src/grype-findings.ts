@@ -1,15 +1,15 @@
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalFindings } from "./external-findings.js";
-import type { ExternalImportTarget } from "./external-import-contract.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import { asRecord, isRecord } from "./record.js";
 import {
   array,
+  manifestPath,
   normalizeRecords,
-  readScannerJson,
   record,
   repositoryFilePath,
   requiredText,
+  scannerJsonReader,
   scannerSeverity,
   stableId,
   strings,
@@ -20,10 +20,13 @@ export const grypeReportFormat = "grype-scan/v1";
 
 type NativeRecord = Record<string, unknown>;
 
-interface Match {
-  match: NativeRecord;
-  vulnerability: NativeRecord;
-  artifact: NativeRecord;
+function matchFields(value: unknown) {
+  const match = record(value, "Grype match");
+  return {
+    match,
+    vulnerability: record(match["vulnerability"], "Grype vulnerability"),
+    artifact: record(match["artifact"], "Grype artifact"),
+  };
 }
 
 // Grype ranks Negligible below Low; treat it as the informational floor.
@@ -40,24 +43,16 @@ function ecosystem(artifact: NativeRecord): string | null {
   return fromPurl ?? text(artifact["language"]) ?? text(artifact["type"]);
 }
 
-function locationPaths(artifact: NativeRecord): string[] {
-  const paths: string[] = [];
+function artifactPaths(artifact: NativeRecord): string[] {
+  const paths = new Set<string>();
   for (const value of array(
     artifact["locations"] ?? [],
     "Grype artifact locations",
   )) {
-    const path = repositoryFilePath(record(value, "Grype location")["path"]);
-    if (path && !paths.includes(path)) paths.push(path);
-  }
-  return paths;
-}
-
-function firstLocationPath(artifact: NativeRecord): string | null {
-  for (const value of array(artifact["locations"] ?? [], "Grype locations")) {
     const path = text(record(value, "Grype location")["path"]);
-    if (path) return path;
+    if (path) paths.add(path);
   }
-  return null;
+  return [...paths].sort();
 }
 
 function advisoryIds(match: NativeRecord, primary: string): string[] {
@@ -84,10 +79,7 @@ function fixedVersions(vulnerability: NativeRecord): string[] {
 
 /** Import native `grype -o json` SCA matches as one dependency finding each. Grype
  * records no source-control URL, so findings bind to the selected local checkout. */
-export function normalizeGrypeFindings(
-  input: unknown,
-  target: ExternalImportTarget = "local",
-): ExternalFindings {
+export function normalizeGrypeFindings(input: unknown): ExternalFindings {
   const document = record(input, "Grype report");
   if (!Array.isArray(document["matches"]))
     throw new CodexSecurityError(
@@ -96,25 +88,26 @@ export function normalizeGrypeFindings(
   const descriptor = asRecord(document["descriptor"]);
   const version = text(descriptor?.["version"]);
   const source = asRecord(document["source"]);
-  const matches: Match[] = array(document["matches"], "Grype matches").map(
-    (value) => {
-      const match = record(value, "Grype match");
-      return {
-        match,
-        vulnerability: record(match["vulnerability"], "Grype vulnerability"),
-        artifact: record(match["artifact"], "Grype artifact"),
-      };
-    },
-  );
+  const directory = source?.["type"] === "directory";
   return normalizeRecords(
-    matches,
-    ({ match, vulnerability, artifact }) => {
+    document["matches"],
+    (value) => {
+      const { match, vulnerability, artifact } = matchFields(value);
       const advisory = requiredText(
         vulnerability["id"],
         "Grype vulnerability id",
       );
       const name = requiredText(artifact["name"], "Grype artifact name");
-      const paths = locationPaths(artifact);
+      const paths = directory
+        ? [
+            ...new Set(
+              artifactPaths(artifact)
+                .map(repositoryFilePath)
+                .filter((path) => path !== null),
+            ),
+          ]
+        : [];
+      const manifests = paths.filter((path) => manifestPath(path) !== null);
       return validateExternalEvidence(
         {
           title: `${advisory} in ${name}`,
@@ -128,7 +121,7 @@ export function normalizeGrypeFindings(
               ecosystem: ecosystem(artifact),
               installed_version: text(artifact["version"]),
               fixed_versions: fixedVersions(vulnerability),
-              manifest_path: paths[0] ?? null,
+              manifest_path: manifests.length === 1 ? manifests[0] : null,
             },
           ],
           locations: paths.map((path) => ({ path, line: null })),
@@ -139,17 +132,19 @@ export function normalizeGrypeFindings(
             match,
           }),
         },
-        target,
+        "local",
       );
     },
-    ({ vulnerability, artifact }) =>
-      stableId("grype", [
+    (value) => {
+      const { vulnerability, artifact } = matchFields(value);
+      return stableId("grype", [
         ecosystem(artifact),
         requiredText(vulnerability["id"], "Grype vulnerability id"),
         requiredText(artifact["name"], "Grype artifact name"),
-        locationPaths(artifact)[0] ?? firstLocationPath(artifact),
-      ]),
-    target,
+        artifactPaths(artifact),
+      ]);
+    },
+    "local",
     {
       report: {
         format: grypeReportFormat,
@@ -159,9 +154,4 @@ export function normalizeGrypeFindings(
   );
 }
 
-export async function readGrypeFindings(
-  path: string,
-  target: ExternalImportTarget = "local",
-): Promise<ExternalFindings> {
-  return normalizeGrypeFindings(await readScannerJson(path), target);
-}
+export const readGrypeFindings = scannerJsonReader(normalizeGrypeFindings);

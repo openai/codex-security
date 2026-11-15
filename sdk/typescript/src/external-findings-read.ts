@@ -213,6 +213,10 @@ export async function readExternalFindings(
   }
   if (provider === "grype") {
     if (target === "cloud") requireCloudReader(options);
+    if (options.sourceRepositoryUrl !== undefined)
+      throw new CodexSecurityError(
+        "Grype reports record no source repository; do not supply --source-repository-url.",
+      );
     return { findings: await readGrypeFindings(path) };
   }
   if (provider === "sonar") {

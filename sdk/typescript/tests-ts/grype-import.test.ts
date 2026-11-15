@@ -2,6 +2,8 @@ import { expect, mock, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { main } from "../src/cli.js";
+import { normalizeGrypeFindings } from "../src/grype-findings.js";
+import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
 import {
   type NormalizedExternalPublicationOptions,
   prepareExternalPublication,
@@ -30,7 +32,7 @@ async function report() {
   return JSON.parse(await readFile(exampleReport, "utf8"));
 }
 
-test("the CLI previews the saved report without a repository or credentials", async () => {
+test("the CLI previews the saved report without a source URL or credentials", async () => {
   await using fixture = await localReportFixture("grype-report.json", source);
   await fixture.writeJson(await report());
   const cli = createCliTest(main);
@@ -122,6 +124,36 @@ test("the reader rejects a source repository URL grype cannot corroborate", asyn
   ).rejects.toThrow(/source repository/i);
 });
 
+test("normalized Grype findings retain validation and repository matching", async () => {
+  const remote = "https://github.com/example/project.git";
+  await using fixture = await localReportFixture("grype.json", source, {
+    remote,
+  });
+  const input = {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "example",
+        evidence: { title: "Example finding", severity: "low" as const },
+      },
+    ],
+    excluded: [],
+  };
+  await expect(
+    fixture.prepareNormalized({ ...input, read: 0 }),
+  ).rejects.toThrow(/accounted for/);
+  const prepare = (sourceRepositoryUrl: string) =>
+    prepareNormalizedLocalImport(
+      input,
+      { ...source, repository: fixture.repository, sourceRepositoryUrl },
+      { environment: fixture.environment },
+    );
+  expect((await prepare(remote)).matchesRepositoryRemote).toBe(true);
+  await expect(prepare("https://github.com/example/other.git")).rejects.toThrow(
+    /does not match/,
+  );
+});
+
 test("Cloud rejects grype findings before file access or credential lookup", async () => {
   await using fixture = await localReportFixture("grype-report.json", source);
   const unexpected = mock(async () => {
@@ -145,5 +177,14 @@ test("Cloud rejects grype findings before file access or credential lookup", asy
       deps,
     ),
   ).rejects.toThrow(/local/i);
+  const normalized = normalizeGrypeFindings(await report());
+  for (const retained of [normalized, { ...normalized, report: undefined }])
+    await expect(
+      prepareNormalizedExternalPublication(
+        retained,
+        { ...options, provider: "wiz" },
+        deps,
+      ),
+    ).rejects.toThrow(/Grype findings require a local import/);
   expect(unexpected).not.toHaveBeenCalled();
 });
