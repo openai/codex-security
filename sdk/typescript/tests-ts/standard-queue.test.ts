@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   mkdirSync,
@@ -84,18 +85,47 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
         resolved_questions: [],
       }),
     );
+  const worker = {
+    batch: second.id,
+    count: 99,
+    findings: [{ title: "Retained claim" }],
+    reviewed_files: [
+      ...first.files.slice(1),
+      "src/unused.ts",
+      "outside.ts",
+      second.files[0],
+    ],
+    resolved_questions: ["The supporting file guards one caller."],
+    notes: "One assigned file still needs review.",
+  };
   const partial = () =>
-    reviewed(first.id, first.files.slice(1), [{ title: "Retained claim" }]);
+    run("reviewed", [String(first.id)], JSON.stringify(worker));
+  const acknowledgement = partial();
+  expect(acknowledgement.status, acknowledgement.stderr).toBe(0);
   expect(partial().status).toBe(0);
-  expect(partial().status).toBe(0);
+  expect(success("pending", "0", "2").pending).toEqual([
+    { id: first.id, files: ["selected.txt"] },
+    second,
+  ]);
   expect(reviewed(second.id, second.files).status).toBe(0);
+  expect(
+    run(
+      "reviewed",
+      [String(second.id)],
+      JSON.stringify({
+        findings: [],
+        resolved_questions: [],
+        reviewed_files: second.files,
+      }),
+    ).status,
+  ).toBe(0);
   expect(success("pending", "0", "2").pending).toEqual([
     { id: 1, files: ["selected.txt"] },
   ]);
   expect(run("check", []).status).toBe(1);
   expect(run("build", [repo, "."]).status).toBe(1);
   expect(run("reviewed", [String(first.id)], "{}").status).toBe(1);
-  expect(reviewed(first.id, second.files).status).toBe(1);
+  expect(reviewed(first.id, ["../outside.ts"]).status).toBe(1);
   expect(reviewed(first.id, ["selected.txt"]).status).toBe(0);
   expect(success("check").remaining).toBe(0);
   const queue = JSON.parse(
@@ -107,7 +137,20 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
   const saved = JSON.parse(
     readFileSync(join(scan, queue.returns[0].file), "utf8"),
   );
-  expect(saved.findings).toEqual([{ title: "Retained claim" }]);
+  expect(saved).toEqual({ ...worker, batch: first.id });
+  const legacyDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        batch: second.id,
+        reviewed_files: second.files,
+        findings: [],
+        resolved_questions: [],
+      }),
+    )
+    .digest("hex");
+  expect(queue.returns[1].file).toBe(
+    `artifacts/02_discovery/standard-returns/${legacyDigest}.json`,
+  );
   unlinkSync(join(context, "standard-queue.json"));
   expect(run("build", [repo, "src", "selected.txt"]).stderr).toContain(
     "Restore the queue before resuming",

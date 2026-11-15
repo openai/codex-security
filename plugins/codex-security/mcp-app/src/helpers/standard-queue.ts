@@ -3,6 +3,7 @@ import { readdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { artifactDestination, replaceArtifactJson } from "../artifact-io.js";
+import { normalizedScanRelativePath } from "../contract-values.js";
 import { sqliteFilename } from "../windows-path";
 import { loadScopes, scopedSourceFiles } from "./generate-inventory";
 import { environmentValue, readFile, resolvedPathText } from "./helper-files";
@@ -136,16 +137,33 @@ export async function standardQueue(args: string[], home?: string) {
     const batch = Number(values[0]);
     const assigned = queue.batches[batch - 1];
     if (!assigned) throw new Error("Expected the assigned file batch ID.");
-    const { reviewed_files, findings, resolved_questions } = JSON.parse(
-      readFile(0).toString("utf8"),
-    );
+    const {
+      reviewed_files,
+      findings,
+      resolved_questions,
+      batch: _workerBatch,
+      ...details
+    } = JSON.parse(readFile(0).toString("utf8"));
     if (![reviewed_files, findings, resolved_questions].every(Array.isArray))
       throw new Error("Expected the worker's complete JSON return.");
     for (const path of reviewed_files) {
-      if (!assigned.includes(path))
-        throw new Error(`File is outside batch ${batch}: ${path}`);
+      if (
+        typeof path !== "string" ||
+        (!assigned.includes(path) &&
+          normalizedScanRelativePath(path) === undefined)
+      )
+        throw new Error(
+          "Expected repository-relative paths in reviewed_files.",
+        );
     }
-    const result = { batch, reviewed_files, findings, resolved_questions };
+    // Keep the original field order so a retry resolves to its saved receipt.
+    const result = {
+      batch,
+      reviewed_files,
+      findings,
+      resolved_questions,
+      ...details,
+    };
     const digest = createHash("sha256")
       .update(JSON.stringify(result))
       .digest("hex");
@@ -158,7 +176,10 @@ export async function standardQueue(args: string[], home?: string) {
         queue.returns.push({ file: returned, count: findings.length });
       }
       queue.reviewed = [
-        ...new Set([...queue.reviewed, ...reviewed_files]),
+        ...new Set([
+          ...queue.reviewed,
+          ...assigned.filter((path) => reviewed_files.includes(path)),
+        ]),
       ].sort();
       await replaceArtifactJson(file, queue);
     });
