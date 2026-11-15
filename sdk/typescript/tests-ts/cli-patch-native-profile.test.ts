@@ -39,6 +39,7 @@ interface PatchProfileContext {
   snapshotProfile: RpcMessage;
   repository: string;
   home: string;
+  temporaryDirectory: string;
   storage: string;
   controls: Awaited<ReturnType<typeof capturePatchGitControls>>;
 }
@@ -55,10 +56,7 @@ async function resolvePatchProfile(
   existingStorage = false,
   exercise?: (
     context: PatchProfileContext,
-    inspectModel: (
-      source: string,
-      temporaryDirectory: string,
-    ) => Promise<string>,
+    inspectModel: (source: string) => Promise<string>,
   ) => Promise<void>,
   capturePermissions?: (repository: string) => Promise<PatchPermissions>,
 ): Promise<PatchProfileContext> {
@@ -66,9 +64,28 @@ async function resolvePatchProfile(
   const home = join(root, "home");
   const repository = join(root, "repository");
   const extra = join(root, "extra-workspace");
-  for (const path of [home, repository, extra, join(repository, ".codex")])
+  const temporaryDirectory = join(root, "temp");
+  for (const path of [
+    home,
+    repository,
+    extra,
+    temporaryDirectory,
+    join(repository, ".codex"),
+  ])
     await mkdir(path, { recursive: true });
-  execFileSync("git", ["init", "--quiet", repository]);
+  // Native Windows grants persist on disk. Keep config files and temp write
+  // roots inside this fixture, away from the shard's shared temporary directory.
+  const selectedConfig = join(root, "selected.gitconfig");
+  const gitEnvironment = {
+    HOME: home,
+    USERPROFILE: home,
+    GIT_CONFIG_GLOBAL: selectedConfig,
+    GIT_CONFIG_NOSYSTEM: "1",
+    XDG_CONFIG_HOME: join(home, ".config"),
+  };
+  execFileSync("git", ["init", "--quiet", repository], {
+    env: { ...process.env, ...gitEnvironment },
+  });
   const administration = join(repository, ".git");
   let readOnlyPaths: readonly string[] = [administration];
   let modelOnlyReadOnlyPaths: readonly string[] = [];
@@ -94,7 +111,6 @@ async function resolvePatchProfile(
         join(repository, "cache"),
         process.platform === "win32" ? "junction" : "dir",
       );
-    const selectedConfig = join(root, "selected.gitconfig");
     if (optionalStorage === "selected") {
       await writeFile(
         selectedConfig,
@@ -119,6 +135,7 @@ async function resolvePatchProfile(
       ],
       {
         cwd: repository,
+        env: { ...process.env, ...gitEnvironment },
       },
     );
     controls = await capturePatchGitControls(
@@ -127,15 +144,28 @@ async function resolvePatchProfile(
         runGitRepositoryCommand("git", args, checkout, {
           ...options,
           environment: {
-            ...(optionalStorage === "selected"
-              ? { GIT_CONFIG_GLOBAL: selectedConfig, GIT_CONFIG_NOSYSTEM: "1" }
-              : {}),
+            ...gitEnvironment,
             ...options?.environment,
           },
         }),
       true,
+      true,
+      undefined,
+      {
+        global: selectedConfig,
+        system: undefined,
+        noSystem: "1",
+        xdgConfigHome: gitEnvironment.XDG_CONFIG_HOME,
+        objectDirectory: undefined,
+        alternateObjectDirectories: undefined,
+      },
     );
     expect(controls).toBeDefined();
+    expect([...controls!.externalConfigPaths].sort()).toEqual(
+      optionalStorage === "selected"
+        ? [selectedConfig, join(root, "included.gitconfig")].sort()
+        : [],
+    );
     expect(controls!.snapshotStoragePaths).toEqual(
       optionalStorage === "selected" ? [storage] : [],
     );
@@ -203,7 +233,7 @@ glob_scan_max_depth = 8
   );
   const child = spawn("node", [nativeCli, "app-server"], {
     cwd: repository,
-    env: {
+    env: patchSnapshotEnvironment(temporaryDirectory, {
       PATH: process.env["PATH"],
       ...(process.env["SystemRoot"] === undefined
         ? {}
@@ -211,9 +241,8 @@ glob_scan_max_depth = 8
       HOME: home,
       USERPROFILE: home,
       CODEX_HOME: home,
-      TMPDIR: root,
       RUST_LOG: "off",
-    },
+    }),
     stdio: ["pipe", "pipe", "pipe"],
   });
   const closed = new Promise<void>((resolve) =>
@@ -406,6 +435,7 @@ glob_scan_max_depth = 8
       snapshotProfile: snapshotProfile!,
       repository,
       home,
+      temporaryDirectory,
       storage,
       controls,
     };
@@ -417,17 +447,13 @@ glob_scan_max_depth = 8
         mergeStrategy: "replace",
         filePath: join(home, "config.toml"),
       });
-      await exercise(context, async (source, temporaryDirectory) => {
+      await exercise(context, async (source) => {
         // Model tools and command/exec share native permission preparation.
         const result = await rpc("command/exec", {
           command: ["node", "-e", source],
           cwd: repository,
           permissionProfile: name,
-          env: {
-            TEMP: temporaryDirectory,
-            TMP: temporaryDirectory,
-            TMPDIR: temporaryDirectory,
-          },
+          env: patchSnapshotEnvironment(temporaryDirectory, {}),
           timeoutMs: 30_000,
         });
         expect(result["exitCode"] as number, result["stderr"] as string).toBe(
@@ -498,7 +524,6 @@ test("patch model cannot read external Git configuration used by snapshots", asy
       const root = dirname(context.repository);
       const selected = join(root, "selected.gitconfig");
       const included = join(root, "included.gitconfig");
-      const temporary = await fixtures.create("patch-model-config-");
       const reads = await inspectModel(
         `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
@@ -509,7 +534,6 @@ for (const path of paths) {
 }
 const git = spawnSync("git", ["config", "--file", paths[0], "--get", "http.extraHeader"]);
 if (git.stdout) process.stdout.write(git.stdout);`,
-        temporary,
       );
       expect(reads).not.toContain("Synthetic fixture");
       expect(reads).not.toContain("Included fixture");
@@ -517,7 +541,7 @@ if (git.stdout) process.stdout.write(git.stdout);`,
         GIT_CONFIG_GLOBAL: selected,
         GIT_CONFIG_NOSYSTEM: "1",
       };
-      const environment = patchSnapshotEnvironment(temporary, {
+      const environment = patchSnapshotEnvironment(context.temporaryDirectory, {
         ...process.env,
         CODEX_HOME: context.home,
         ...gitEnvironment,
@@ -629,12 +653,14 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
       expect(git(filtered, "synthetic input")).toBe(
         hash(JSON.stringify(Array(7).fill(true))),
       );
-      const temporary = await fixtures.create("patch-store-tmp-");
-      const sandboxEnvironment = patchSnapshotEnvironment(temporary, {
-        ...process.env,
-        ...environment,
-        CODEX_HOME: context.home,
-      });
+      const sandboxEnvironment = patchSnapshotEnvironment(
+        context.temporaryDirectory,
+        {
+          ...process.env,
+          ...environment,
+          CODEX_HOME: context.home,
+        },
+      );
       const actual = await runRepositoryCommand("git", filtered, repo, {
         input: "synthetic input",
         sandbox: {
@@ -645,7 +671,7 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
         },
       });
       expect(actual).toBe(hash(protectedResult));
-      expect(await inspectModel(probe, temporary)).toBe(protectedResult);
+      expect(await inspectModel(probe)).toBe(protectedResult);
       expect(git(filtered, "synthetic input")).toBe(
         hash(JSON.stringify(Array(7).fill(true))),
       );
@@ -697,10 +723,10 @@ test.each(["administration", "direct-administration"] as const)(
   "storage keeps overlapping Git administration protected in snapshots: %s",
   async (storage) => {
     const context = await resolvePatchProfile(false, storage);
-    const environment = patchSnapshotEnvironment(
-      await fixtures.create("patch-cache-overlap-"),
-      { ...process.env, CODEX_HOME: context.home },
-    );
+    const environment = patchSnapshotEnvironment(context.temporaryDirectory, {
+      ...process.env,
+      CODEX_HOME: context.home,
+    });
     const source = `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(join(context.storage, "objects", "synthetic"))},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`;
     const output = await runRepositoryCommand(
       "git",
@@ -734,9 +760,6 @@ test.each(["inside", "outside"] as const)(
       location,
       false,
       async (context, inspectModel) => {
-        const temporaryDirectory = await fixtures.create(
-          "patch-cache-temporary-",
-        );
         const paths = ["objects", "tmp"].map((part) =>
           join(context.storage, part),
         );
@@ -752,7 +775,6 @@ const attempts=paths.map(path=>{
     attempt(()=>fs.writeFileSync(path+"/synthetic","changed")),
   ];
 });fs.writeSync(1,JSON.stringify(attempts));`,
-          temporaryDirectory,
         );
         const results = JSON.parse(attempts);
         expect(results).toHaveLength(paths.length);
@@ -784,13 +806,13 @@ for (const location of ["inside", "outside", "selected"] as const) {
         location,
         existing,
         async (context, inspectModel) => {
-          const temporaryDirectory = await fixtures.create(
-            "patch-cache-temporary-",
+          const environment = patchSnapshotEnvironment(
+            context.temporaryDirectory,
+            {
+              ...process.env,
+              CODEX_HOME: context.home,
+            },
           );
-          const environment = patchSnapshotEnvironment(temporaryDirectory, {
-            ...process.env,
-            CODEX_HOME: context.home,
-          });
           const paths = [
             join(context.storage, "objects"),
             join(context.storage, "tmp"),
@@ -829,7 +851,6 @@ for (const location of ["inside", "outside", "selected"] as const) {
           await context.controls!.validate();
           const model = await inspectModel(
             `const fs=require("node:fs");try{fs.writeFileSync(${JSON.stringify(file)},"changed");fs.writeSync(1,"allowed");}catch(error){fs.writeSync(1,error.code);}`,
-            temporaryDirectory,
           );
           expect(["EROFS", "EACCES", "EPERM"]).toContain(model);
           expect(await readFile(file, "utf8")).toBe("unchanged");
