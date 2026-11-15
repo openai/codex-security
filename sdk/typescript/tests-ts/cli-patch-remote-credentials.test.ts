@@ -6,6 +6,7 @@ import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
   completePatches,
   publicationRepository,
+  repositoryGit,
   resultWithFindings,
   runGitRepositoryCommand,
   runWorkflow,
@@ -420,6 +421,53 @@ test.each(["local", "included checkout", "operator"])(
   },
 );
 
+async function runSshPreflight(
+  selected: string,
+  global: string,
+  marker: string,
+) {
+  repositoryGit(selected)(
+    "remote",
+    "set-url",
+    "origin",
+    "ssh://git@127.0.0.1:1/team/repository.git",
+  );
+  const environment = {
+    GIT_CONFIG_GLOBAL: global,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_SSH_VARIANT: "ssh",
+    PATCH_SSH_MARKER: marker,
+  };
+  const model = mock(async () => 0);
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: selected,
+      environment,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high"]), "scan-1", selected),
+      onCodex: model,
+      onRepositoryCommand: (command, args, cwd, options) =>
+        command === "git"
+          ? runGitRepositoryCommand(command, args, cwd, {
+              ...options,
+              environment: { ...environment, ...options?.environment },
+            })
+          : "[]",
+    },
+    { localHosting: false },
+  );
+  expect(outcome.exitCode).toBe(2);
+  const invoked = await readFile(marker, "utf8").catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return "";
+    },
+  );
+  expect(model).not.toHaveBeenCalled();
+  return { invoked: invoked.trim(), stderr: outcome.stderr };
+}
+
 test.each(["worktree", "operator", "linked directory"] as const)(
   "checks the enclosing worktree for SSH configuration on a subdirectory scan: %s",
   async (source) => {
@@ -445,8 +493,13 @@ test.each(["worktree", "operator", "linked directory"] as const)(
           ? checkoutConfig
           : operatorConfig;
     git("config", "--file", global, "include.path", included);
+    const script = join(external, "transport.cjs");
+    await writeFile(
+      script,
+      'require("node:fs").writeFileSync(process.env.PATCH_SSH_MARKER, process.argv[2]); process.exitCode = 1;\n',
+    );
     const command = (location: string) =>
-      "echo " + location + ' > "$PATCH_SSH_MARKER"; exit 1';
+      `node ${JSON.stringify(script.replaceAll("\\", "/"))} ${location}`;
     for (const [file, owner] of [
       [checkoutConfig, "worktree"],
       [operatorConfig, "operator"],
@@ -462,47 +515,40 @@ test.each(["worktree", "operator", "linked directory"] as const)(
         "--get",
         "core.sshCommand",
       ) === command("worktree");
-    git(
-      "remote",
-      "set-url",
-      "origin",
-      "ssh://git@127.0.0.1:1/team/repository.git",
-    );
-    const environment = {
-      GIT_CONFIG_GLOBAL: global,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_SSH_VARIANT: "ssh",
-      PATCH_SSH_MARKER: marker,
-    };
-    const model = mock(async () => 0);
-    const outcome = await runWorkflow(
-      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
-      {
-        currentDirectory: selected,
-        environment,
-        onWorkbench: () =>
-          savedScan(resultWithFindings(["high"]), "scan-1", selected),
-        onCodex: model,
-        onRepositoryCommand: (command, args, cwd, options) =>
-          command === "git"
-            ? runGitRepositoryCommand(command, args, cwd, {
-                ...options,
-                environment: { ...environment, ...options?.environment },
-              })
-            : "[]",
-      },
-      { localHosting: false },
-    );
-    expect(outcome.exitCode).toBe(2);
-    const invoked = await readFile(marker, "utf8").catch(
-      (error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-        return "";
-      },
-    );
-    expect(invoked.trim()).toBe(fromCheckout ? "" : "operator");
+    const result = await runSshPreflight(selected, global, marker);
+    expect(result.invoked).toBe(fromCheckout ? "" : "operator");
     if (fromCheckout)
-      expect(outcome.stderr).toContain("checkout-selected core.sshCommand");
-    expect(model).not.toHaveBeenCalled();
+      expect(result.stderr).toContain("checkout-selected core.sshCommand");
+  },
+);
+
+test.each([".", "src"])(
+  "an external SSH setting cannot run a checkout-relative executable during preflight from %s",
+  async (subdirectory) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const selected = join(directory, subdirectory);
+    const external = await fixtures.create("patch-relative-ssh-");
+    const global = join(external, "gitconfig");
+    const marker = join(external, "invoked");
+    for (const [root, owner] of [
+      [directory, "worktree"],
+      [join(directory, "src"), "subdirectory"],
+    ] as const) {
+      await writeFile(
+        join(root, "transport.sh"),
+        [
+          "#!/bin/sh",
+          `echo ${owner} > "$PATCH_SSH_MARKER"`,
+          "exit 73",
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+    }
+    git("add", ".");
+    git("commit", "-m", "Add synthetic transport names");
+    git("config", "--file", global, "core.sshCommand", "./transport.sh");
+    const result = await runSshPreflight(selected, global, marker);
+    expect(result.invoked).toBe("");
   },
 );
