@@ -7,7 +7,8 @@ import { findingEntry } from "./value.js";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import { workflowDigest } from "./finding-workflow.js";
-import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
+import { readKnowledgeBaseSnapshot } from "./knowledge-base.js";
+import type { DocumentRoots } from "./prompt-files.js";
 import type { Finding } from "./models.js";
 import {
   runReadOnlyCodex,
@@ -123,6 +124,7 @@ export async function classifySeverityInternal(
   options: ClassifySeverityOptions = {},
   surface: "sdk" | "cli" = "sdk",
   checkpoint?: SeverityClassificationCheckpoint,
+  roots?: DocumentRoots,
 ): Promise<SeverityClassification> {
   options.signal?.throwIfAborted();
   const classificationRuns = reviewRunsOption.parse(options.classificationRuns);
@@ -141,10 +143,10 @@ export async function classifySeverityInternal(
     defaultRubric = await getDefaultSeverityRubric(options);
     rubric = [defaultRubric.markdown];
   } else {
-    rubric = await readDocuments([options.rubricPath], options.signal);
+    rubric = await readDocuments([options.rubricPath], options.signal, roots);
   }
   const knowledge = options.knowledgeBasePaths?.length
-    ? await readDocuments(options.knowledgeBasePaths, options.signal)
+    ? await readDocuments(options.knowledgeBasePaths, options.signal, roots)
     : null;
   const rubricCheckpointSha256 = workflowDigest(rubric);
   const metadata = {
@@ -221,8 +223,12 @@ export async function classifySeverityInternal(
 async function readDocuments(
   paths: readonly string[],
   signal?: AbortSignal,
+  roots?: DocumentRoots,
 ): Promise<string[]> {
-  const contents = await readKnowledgeBaseDocuments(paths, signal);
+  const { documents } = await readKnowledgeBaseSnapshot(paths, signal, roots);
+  const contents = Object.keys(documents)
+    .sort()
+    .map((name) => documents[name]!);
   if (contents.every((text) => !text.trim())) {
     throw new CodexSecurityError("Classification documents must not be empty.");
   }

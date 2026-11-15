@@ -1,12 +1,15 @@
 import { hash } from "node:crypto";
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
-import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
+import {
+  normalizeEndorFindings,
+  requiresStructuredEndorReport,
+} from "./endor-findings.js";
+import type { ExternalFinding } from "./external-findings.js";
 import type { ImportSource } from "./external-import-models.js";
 import { canonicalJson, isRecord } from "./record.js";
+import { normalizeWizJson } from "./wiz-findings.js";
 
 const structuredFormat = "security.findings.v1";
 const privateFormat = z.enum([
@@ -89,6 +92,8 @@ const jobSchema = z.object({
 export type PrivateImportContext = z.infer<typeof contextSchema>;
 export type PrivateImportJob = z.infer<typeof jobSchema>;
 
+class PrivateReportSizeError extends CodexSecurityError {}
+
 export function privateReport(
   findings: ExternalFinding[],
   limits: PrivateImportContext["limits"],
@@ -117,14 +122,14 @@ export function privateReport(
       },
     };
     if (Buffer.byteLength(canonicalJson(record)) > limits.max_record_bytes)
-      throw new CodexSecurityError(
+      throw new PrivateReportSizeError(
         `Finding ${JSON.stringify(source_finding_id)} exceeds the private import record limit.`,
       );
     return record;
   });
   const bytes = canonicalJson({ format: structuredFormat, findings: records });
   if (Buffer.byteLength(bytes) > limits.max_direct_file_bytes)
-    throw new CodexSecurityError(
+    throw new PrivateReportSizeError(
       "The selected report exceeds the Cloud direct-upload limit. Split this selection.",
     );
   return {
@@ -134,163 +139,95 @@ export function privateReport(
   };
 }
 
-const endorExport = z.strictObject({
-  list: z.strictObject({
-    objects: z.array(z.unknown()),
-    response: z
-      .strictObject({
-        next_page_id: z.literal(["", null]).optional(),
-        next_page_token: z.literal(["", "0", 0, null]).optional(),
-        total_size: z.union([z.string(), z.number()]).optional(),
-      })
-      .optional(),
-  }),
-});
-const wizExport = z.strictObject({
-  vulnerabilityFindings: z.strictObject({
-    nodes: z.array(z.unknown()),
-    pageInfo: z
-      .strictObject({
-        hasNextPage: z.literal(false).optional(),
-        hasPreviousPage: z.literal(false).optional(),
-        startCursor: z.string().nullable().optional(),
-        endCursor: z.string().nullable().optional(),
-      })
-      .optional(),
-  }),
-});
-
-// Only complete, known envelopes can be sent byte for byte. Unreviewed sibling
-// collections, metadata or partial pages keep the normalized projection.
-function nativeRecords(
-  payload: unknown,
+/** Encode only the reviewed occurrences, whether they came from a file or the workbench. */
+export function selectPrivateReport(
+  findings: ExternalFinding[],
   provider: string,
-): unknown[] | undefined {
-  if (provider === "wiz" && Array.isArray(payload)) return payload;
-  if (!isRecord(payload)) return;
-  if (provider === "endor") {
-    if (isRecord(payload["spec"])) return [payload];
-    return endorExport.safeParse(payload).data?.list.objects;
-  }
-  if (typeof payload["id"] === "string") return [payload];
-  const data =
-    Object.keys(payload).length === 1 && "data" in payload
-      ? payload["data"]
-      : payload;
-  return wizExport.safeParse(data).data?.vulnerabilityFindings.nodes;
-}
-
-export async function selectPrivateReport(
-  selection: ExternalFindings,
-  provider: string,
-  path: string | undefined,
   context: PrivateImportContext,
-  saved: string | undefined,
-  requiresStructuredReport = false,
-): Promise<ReturnType<typeof privateReport>> {
-  const checkpoint =
-    saved === undefined ? undefined : checkpointSchema.parse(JSON.parse(saved));
-  const originalFormat =
-    checkpoint?.contextVersion === context.context_version
-      ? checkpoint.format
-      : undefined;
-  if (requiresStructuredReport && !originalFormat) {
-    if (!context.formats.includes(structuredFormat))
-      throw new CodexSecurityError(
-        `This Cloud service must support ${structuredFormat} to publish the reviewed Endor fields.`,
-      );
-    return privateReport(selection.findings, context.limits);
-  }
-  const format =
+  approvedFormat?: PrivateImportFormat,
+): ReturnType<typeof privateReport> {
+  const nativeFormat =
     provider === "endor"
       ? "endor.findings_json.v1"
       : provider === "wiz"
         ? "wiz.vulnerability_json.v1"
         : undefined;
-  if (
-    format &&
-    path &&
-    selection.excluded.length === 0 &&
-    selection.read <= 10_000 &&
-    selection.findings.length === selection.read &&
-    (originalFormat
-      ? originalFormat === format
-      : context.formats.includes(format))
-  ) {
-    const handle = await open(
-      path,
-      constants.O_RDONLY | (constants.O_NONBLOCK ?? 0),
-    );
-    let bytes: string | undefined;
+  let format =
+    approvedFormat ??
+    (context.formats.includes(structuredFormat)
+      ? structuredFormat
+      : nativeFormat);
+  let sizeError: PrivateReportSizeError | undefined;
+  if (!nativeFormat || !format || format === structuredFormat) {
     try {
-      const info = await handle.stat();
+      return privateReport(findings, context.limits);
+    } catch (error) {
       if (
-        info.isFile() &&
-        info.size > 0 &&
-        info.size <= context.limits.max_direct_file_bytes
-      ) {
-        const buffer = Buffer.alloc(info.size + 1);
-        let count = 0;
-        while (count < buffer.length) {
-          const { bytesRead } = await handle.read(
-            buffer,
-            count,
-            buffer.length - count,
-          );
-          if (bytesRead === 0) break;
-          count += bytesRead;
-        }
-        if (count === info.size) {
-          try {
-            bytes = new TextDecoder("utf-8", {
-              fatal: true,
-              ignoreBOM: true,
-            }).decode(buffer.subarray(0, count));
-          } catch {
-            /* Binary exports use the normalized selection. */
-          }
-        }
-      }
-    } finally {
-      await handle.close();
-    }
-    if (bytes !== undefined) {
-      let payload: unknown;
-      try {
-        payload = JSON.parse(bytes.replace(/^\uFEFF/u, ""));
-      } catch {
-        /* JSONL and other exports use the normalized selection. */
-      }
-      const records = nativeRecords(payload, provider);
-      if (
-        records &&
-        records.length === selection.findings.length &&
-        records.every((raw, index) => {
-          const reviewed = selection.findings[index]!;
-          if (!isRecord(raw)) return false;
-          const record = canonicalJson(raw);
-          return (
-            raw[provider === "endor" ? "uuid" : "id"] ===
-              reviewed.source_finding_id &&
-            reviewed.source_finding_id === reviewed.source_finding_id.trim() &&
-            reviewed.evidence.source_data != null &&
-            record === canonicalJson(reviewed.evidence.source_data) &&
-            Buffer.byteLength(record) <= context.limits.max_record_bytes
-          );
-        })
+        !(error instanceof PrivateReportSizeError) ||
+        approvedFormat ||
+        !nativeFormat ||
+        !context.formats.includes(nativeFormat)
       )
+        throw error;
+      sizeError = error;
+      format = nativeFormat;
+    }
+  }
+  if (!approvedFormat && !context.formats.includes(format))
+    throw new CodexSecurityError(
+      "Private findings import is unavailable for this report format.",
+    );
+
+  // The native endpoint derives its own evidence. Verify that it will receive
+  // the selected occurrences with exactly the fields the user reviewed.
+  const rows = findings.map(({ evidence }) => evidence.source_data);
+  const endor = provider === "endor";
+  const payload = endor ? { list: { objects: rows } } : rows;
+  let totalRowBytes = 0;
+  if (
+    format === nativeFormat &&
+    findings.length > 0 &&
+    findings.length <= 10_000 &&
+    rows.every((row, i) => {
+      if (!isRecord(row)) return false;
+      const id = findings[i]!.source_finding_id;
+      const bytes = Buffer.byteLength(canonicalJson(row));
+      totalRowBytes += bytes;
+      return (
+        row[endor ? "uuid" : "id"] === id &&
+        id === id.trim() &&
+        (endor || !("source_finding_id" in row)) &&
+        bytes <= context.limits.max_record_bytes &&
+        totalRowBytes <= context.limits.max_direct_file_bytes
+      );
+    })
+  ) {
+    const projected = endor
+      ? normalizeEndorFindings(payload)
+      : normalizeWizJson(payload, "cloud");
+    if (
+      !projected.excluded.length &&
+      !requiresStructuredEndorReport(projected) &&
+      projected.findings.length === findings.length &&
+      projected.findings.every(
+        (row, i) =>
+          row.source_finding_id === findings[i]!.source_finding_id &&
+          canonicalJson(row.evidence) === canonicalJson(findings[i]!.evidence),
+      )
+    ) {
+      const bytes = canonicalJson(payload);
+      if (Buffer.byteLength(bytes) <= context.limits.max_direct_file_bytes)
         return { format, bytes, digest: hash("sha256", bytes) };
     }
   }
-  if (originalFormat && originalFormat !== structuredFormat)
-    throw new CodexSecurityError(
-      "The original native report is required to resume this private import.",
-    );
-  return privateReport(selection.findings, context.limits);
+  if (sizeError) throw sizeError;
+  throw new CodexSecurityError(
+    `The selection cannot be represented exactly within the limits of ${nativeFormat}. This Cloud service must support ${structuredFormat} to publish it.`,
+  );
 }
 
 const checkpointSchema = z.object({
-  format: privateFormat.default(structuredFormat),
+  format: privateFormat,
   apiBaseUrl: z.string(),
   accountId: z.string(),
   contextVersion: z.string(),
@@ -299,9 +236,8 @@ const checkpointSchema = z.object({
   repository: z.object({ id: z.string(), repo_connector_id: z.string() }),
   uploadRequestId: z.uuid(),
   jobRequestId: z.uuid(),
-  // Earlier checkpoints used the unversioned job route.
   jobApiVersion: jobVersion.optional(),
-  approvedRepositoryUrl: z.string().optional(),
+  approvedRepositoryUrl: z.string(),
   approvedRepositoryPlatform: z.literal("other").optional(),
   fileId: fileId.optional(),
   jobId: jobSchema.shape.id.optional(),
@@ -333,12 +269,14 @@ export function unsuccessfulJob(job: PrivateImportJob | undefined) {
   return job?.status === "failed" || job?.status === "cancelled";
 }
 
-export function parsePrivateCheckpoint(serialized: string) {
-  return checkpointSchema.parse(JSON.parse(serialized));
+export function parsePrivateCheckpoint(serialized: string | undefined) {
+  return serialized === undefined
+    ? undefined
+    : checkpointSchema.parse(JSON.parse(serialized));
 }
 
 export function readPrivateCheckpoint(
-  serialized: string | undefined,
+  checkpoint: ReturnType<typeof parsePrivateCheckpoint>,
   expected: {
     format: PrivateImportFormat;
     apiBaseUrl: string;
@@ -349,8 +287,7 @@ export function readPrivateCheckpoint(
     repository: { id: string; repo_connector_id: string };
   },
 ) {
-  if (serialized === undefined) return;
-  const checkpoint = parsePrivateCheckpoint(serialized);
+  if (!checkpoint) return;
   const { fileId, jobId, receipt, previousReceipt } = checkpoint;
   const { apiBaseUrl, accountId, source, repository } = checkpoint;
   const { contextVersion, format, sha256, ...scope } = expected;
@@ -376,7 +313,7 @@ export function readPrivateCheckpoint(
   return sameContext ? checkpoint : undefined;
 }
 
-export class PrivateImportRequestError extends CodexSecurityError {
+class PrivateImportRequestError extends CodexSecurityError {
   constructor(
     readonly status: number,
     readonly code: string | undefined,

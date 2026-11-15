@@ -122,6 +122,13 @@ test("a fully excluded SDK selection still verifies the checkout against the sel
   });
   expect(selected.findings).toHaveLength(0);
   expect(selected.excluded).toHaveLength(1);
+  // SDK readers may expose the collection scope outside the enumerable JSON payload.
+  for (const field of [
+    "sourceFormat",
+    "semgrepPlatformScope",
+    "sourceRepositoryUrl",
+  ])
+    Object.defineProperty(selected, field, { enumerable: false });
   await using fixture = await localFindingsFixture({ remote: url + "-other" });
   await expect(
     prepareNormalizedLocalImport(

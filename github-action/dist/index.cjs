@@ -53751,13 +53751,12 @@ function parseInputs(read, workspace) {
     }
     return n;
   };
-  const list = (name) => str(name).split(/\r?\n/).map((v) => v.trim()).filter(Boolean);
   const safeRelative = (name, value) => {
     if (value.startsWith("/") || /^[A-Za-z]:/.test(value) || value.includes("\\") || value.split("/").includes("..") || /[\x00-\x1f\x7f]/.test(value))
-      throw new Error(`${name} must contain literal repository-relative paths, without '..'.`);
+      throw new Error(`${name} must contain literal repository-relative paths without '..', backslashes or control characters.`);
     return value;
   };
-  const paths = [...new Set(list("paths").map((v) => safeRelative("paths", v).split("/").filter((part) => part && part !== ".").join("/") || "."))];
+  const paths = [...new Set(read("paths").split(/\r?\n/).filter(Boolean).map((v) => safeRelative("paths", v).split("/").filter((part) => part && part !== ".").join("/") || "."))];
   const scope = choice("scope", ["repository", "diff"], "repository");
   if (scope !== "repository" && paths.length)
     throw new Error(`paths cannot be combined with scope: ${scope}. Remove paths to scan changes, or use scope: repository to scan selected paths.`);
@@ -53829,7 +53828,7 @@ function scanArguments(inputs, target, resultsDirectory) {
     ["--diff", target.diffBase],
     ["--head", target.diffHead],
     ["--max-cost", inputs.maxCost],
-    ["--max-time-hours", inputs.maxTimeHours]
+    ["--max-time", inputs.maxTimeHours === void 0 ? void 0 : inputs.maxTimeHours * 60]
   ];
   for (const [name, value] of options) if (value !== void 0) args.push(name, String(value));
   if (inputs.failOnSeverity !== "none") args.push("--fail-on-severity", inputs.failOnSeverity);
@@ -97640,7 +97639,7 @@ async function runAction(actionRoot, overrides = {}) {
   setOutput("report-status", "failed");
   setOutput("sarif-upload-ready", "false");
   try {
-    inputs = parseInputs((name) => getInput(name), process.env.GITHUB_WORKSPACE ?? "");
+    inputs = parseInputs((name) => getInput(name, { trimWhitespace: false }), process.env.GITHUB_WORKSPACE ?? "");
     const credentials = scanCredentials(inputs.provider, process.env);
     const event = await context5();
     target = await resolveTarget(inputs, event);

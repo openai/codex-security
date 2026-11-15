@@ -24,9 +24,11 @@ which changes can give an occurrence a different ID.
 | Report                                                                                | What identifies one record                                                                                                                                                               |
 | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [Amazon Inspector](inspector.md), [Endor Labs](endor.md), [SonarQube Cloud](sonar.md) | Inspector finding ARN, Endor Finding UUID or Sonar issue key. Endor native JSON and SARIF use the same UUID.                                                                             |
-| [AWS Continuum](continuum.md)                                                         | Continuum finding ARN. A list summary and a detailed response for that ARN identify the same finding.                                                                                    |
+| [ArmorCode](armorcode.md)                                                             | ArmorCode finding ID (`id`) within the source key.                                                                                                                                       |
+| [AWS Continuum](continuum.md)                                                         | Issue ARN for issue exports. For finding exports, a list summary and a detailed response share the finding ARN.                                                                          |
 | [Tenable One](tenable.md)                                                             | Exact Tenable `finding_id` within the local checkout and a stable tenant/asset source key. Use the Code Repository asset UUID in the key.                                                |
 | [Checkmarx SAST](checkmarx.md)                                                        | Checkmarx One uses the similarity ID and result hash. CxSAST scopes the similarity ID and ordered flow to the project and query.                                                         |
+| [CrowdStrike](crowdstrike.md)                                                         | FCS IaC rule UUID, file, line, resource type and name, reason and module path. A detection on a new line gets a new ID.                                                                  |
 | [Wiz](wiz.md)                                                                         | Package occurrence ID, or a SAST, repository-secret or IaC occurrence ID prefixed with its family. Normalized JSONL uses the supplied ID.                                                |
 | [GitHub Dependabot](github-dependabot.md), [code scanning](github-code-scanning.md)   | Host, repository, alert family and alert number. Code scanning also includes the selected ref. Two alerts citing one GHSA remain separate.                                               |
 | [GitHub advisories](github-security-advisories.md)                                    | Host, repository or global scope, and GHSA ID. This identifies a disclosure. Check installed packages separately.                                                                        |
@@ -143,26 +145,18 @@ With the SDK, repeat the preparation call that created the submission, using
 the same options. For `prepareExternalPublication()`, supply the original
 export file. For `prepareNormalizedExternalPublication()`, supply the original
 `ExternalFindings`. Check `preview.resumed` before calling `publish()`.
-Use the same SDK version throughout a submission when possible.
+For stored findings, reprepare the interrupted source group with its saved selection
+and review ID. Its checkpoint belongs to the selected checkout and finding versions.
+After a repository reset, the workbench records any acknowledged receipts before
+retiring the old request. Review the new destination before publishing again.
 
-For hosted Semgrep or Snyk imports, finish any pending request before sending
-updated evidence for the same finding IDs. Selections with distinct
-scanner-issued IDs can proceed independently. If the checkpoint records
-only the source, finish that request before starting another for the same
-source and destination.
-
-**Resuming across SDK versions.** Keep the SDK input that produced the
-checkpoint, including report context and caller-added fields. Serializing it
-as JSON can change the values used to identify the approved request. Retry on
-the original deployment. If the SDK can verify the saved selection, it reuses
-the request IDs and skips batches with receipts. Otherwise it preserves the
-checkpoint and stops before uploading. If it cannot identify the approved
-findings, a new submission for the same source and destination can also be blocked.
-
-After a repository rename, a checkpoint that records only the repository ID
-can still be retried with the original normalized findings and report metadata.
-Omit supplemental repository declarations for that retry. A new declaration
-requires a matching catalog entry or a URL recorded in the approval.
+**Upgrading from an earlier import client.** Finish pending Cloud submissions with
+the CLI or SDK build that created their checkpoints. Keep the original input and
+state directory. If the outcome is uncertain, check the private inbox job or
+read back the repository’s source reports to identify the accepted findings
+before preparing a fresh submission. The current client starts a new approval
+for a submission made with the retired checkpoint format.
+[Verify an import](README.md#verify-the-import)
 
 See [results and exit codes](../../sdk/typescript/docs/cli.md#results-and-exit-codes)
 for cumulative counts and interrupted readback.

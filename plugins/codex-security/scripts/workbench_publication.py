@@ -12,7 +12,6 @@ import sys
 from contextlib import closing
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -27,6 +26,7 @@ from finalize_scan_contract import (
     write_export_output,
     write_sarif_projection,
 )
+from snapshot_sqlite import readonly_sqlite_uri
 from validate_scan_contract import validate_contract
 from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
@@ -226,9 +226,8 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         except PermissionError:
             pass  # Let SQLite report the open failure used by the host's state fallback.
     if payload["action"] == "inspect":
-        database_uri = f"file:{quote(str(path), safe='')}?mode=ro"
         try:
-            connection = sqlite3.connect(database_uri, uri=True, timeout=5)
+            connection = sqlite3.connect(readonly_sqlite_uri(path), uri=True, timeout=5)
         except sqlite3.OperationalError as exc:
             if str(exc) == "unable to open database file":
                 exc._codex_security_state_unavailable = True

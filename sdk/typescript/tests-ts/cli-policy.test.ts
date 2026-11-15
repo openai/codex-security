@@ -173,7 +173,7 @@ describe("policy CLI", () => {
     expect(stdout.text()).not.toContain("--outputDir");
     expect(stdout.text()).not.toContain("--write true");
     expect(stdout.text()).toContain(
-      "--headless --output-dir /path/outside/repository/policy --json",
+      "codex-security policy . --output-dir ../policy-draft --json",
     );
   });
 

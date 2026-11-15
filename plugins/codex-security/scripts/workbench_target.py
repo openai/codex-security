@@ -15,9 +15,10 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, cast
 
@@ -29,6 +30,7 @@ from workbench_constants import GIT_REPOSITORY_ENVIRONMENT
 
 SOURCE_METADATA_DIRECTORIES = {".git", ".svn"}
 _WINDOWS = os.name == "nt"
+_SCOPED_GIT: ContextVar[Callable[[Path], str] | None] = ContextVar("workbench_git", default=None)
 
 
 class UnreadableLocalFile(SystemExit):
@@ -207,8 +209,10 @@ def _stream_is_binary(output: BinaryIO, size: int, *, drain: bool = False) -> bo
 
 def _protected_repository_root(target: Path) -> Path:
     root = target.resolve()
-    if root.is_file():
-        root = root.parent
+    return _outer_checkout_root(root.parent if root.is_file() else root)
+
+
+def _outer_checkout_root(root: Path) -> Path:
     protected = root
     for ancestor in (root, *root.parents):
         try:
@@ -219,9 +223,67 @@ def _protected_repository_root(target: Path) -> Path:
     return protected
 
 
+def rejected_checkout_roots(value: str) -> list[str] | None:
+    # Retain both spellings before a checkout marker or symlink can move.
+    try:
+        lexical = Path(value).expanduser().absolute()
+        canonical = lexical.resolve()
+        lexical_root = _outer_checkout_root(lexical)
+        roots = {
+            lexical,
+            canonical,
+            lexical_root,
+            lexical_root.resolve(),
+            _protected_repository_root(canonical),
+        }
+        return sorted(map(str, roots))
+    except (OSError, RuntimeError):
+        return None
+
+
+def pin_scoped_git(target: Path) -> str | None:
+    scoped = _SCOPED_GIT.get()
+    return scoped(target) if scoped is not None else None
+
+
 def trusted_git_executable(protected_root: Path) -> str | None:
     """Validate host-selected Git, or discover Git for a direct plugin invocation."""
     configured = os.environ.get("CODEX_SECURITY_GIT")
+    if configured is None:
+        configured = pin_scoped_git(protected_root)
+    return _resolve_git_executable(protected_root, configured)
+
+
+def _historical_repository_roots(target: Path) -> Iterator[Path]:
+    try:
+        yield _protected_repository_root(target)
+    except (OSError, RuntimeError):
+        # Keep checking lexical ancestry when the saved path cannot be resolved.
+        pass
+    # A moved or unavailable descendant still excludes its lexical checkout ancestry.
+    root = Path(os.path.abspath(target))
+    protected = root
+    for ancestor in (root, *root.parents):
+        try:
+            (ancestor / ".git").lstat()
+        except (OSError, RuntimeError):
+            continue
+        protected = ancestor
+    yield protected
+    try:
+        yield protected.resolve()
+    except (OSError, RuntimeError):
+        # The lexical root above still excludes tools at an unavailable checkout.
+        pass
+
+
+def _resolve_git_executable(
+    protected_root: Path,
+    configured: str | None,
+    *,
+    discovery_roots: Iterable[Path] = (),
+    recorded_git_roots: Iterable[Path] | None = (),
+) -> str | None:
     windows = sys.platform == "win32"
     if configured is None:
         names = ("git.exe", "git.com") if windows else ("git",)
@@ -239,7 +301,22 @@ def trusted_git_executable(protected_root: Path) -> str | None:
         candidates = iter((candidate,))
 
     try:
-        repository = _protected_repository_root(protected_root)
+        repositories = [_protected_repository_root(protected_root)]
+        if configured is None:
+            # A legacy Git target has no trustworthy boundary to exclude from PATH.
+            if recorded_git_roots is None:
+                return None
+            saved_boundaries = tuple(recorded_git_roots)
+            for root in saved_boundaries:
+                repositories.extend(_historical_repository_roots(root))
+            for root in discovery_roots:
+                for repository in _historical_repository_roots(root):
+                    if not repository.is_dir() and not any(
+                        repository.is_relative_to(boundary) for boundary in saved_boundaries
+                    ):
+                        # Its former checkout is neither discoverable nor already excluded.
+                        return None
+                    repositories.append(repository)
     except (OSError, RuntimeError):
         return None
 
@@ -264,6 +341,7 @@ def trusted_git_executable(protected_root: Path) -> str | None:
             continue
         if any(
             path == repository or repository in path.parents
+            for repository in repositories
             for path in (lexical, invocation, canonical)
         ):
             if configured is not None:
@@ -271,6 +349,39 @@ def trusted_git_executable(protected_root: Path) -> str | None:
             continue
         return str(invocation)
     return None
+
+
+@contextmanager
+def scoped_git_discovery(
+    protected_roots: Callable[[], Iterable[Path]],
+    *,
+    recorded_git_roots: Callable[[], Iterable[Path] | None] = lambda: (),
+) -> Iterator[None]:
+    """Pin ambient Git when an operation first needs to inspect repository targets."""
+    if os.environ.get("CODEX_SECURITY_GIT") is not None:
+        yield
+        return
+    executable: str | None = None
+
+    def resolve_once(target: Path) -> str:
+        nonlocal executable
+        if executable is None:
+            executable = (
+                _resolve_git_executable(
+                    Path.cwd(),
+                    None,
+                    discovery_roots=(*protected_roots(), target),
+                    recorded_git_roots=recorded_git_roots(),
+                )
+                or ""
+            )
+        return executable
+
+    token = _SCOPED_GIT.set(resolve_once)
+    try:
+        yield
+    finally:
+        _SCOPED_GIT.reset(token)
 
 
 def git_command(
@@ -585,6 +696,56 @@ def _visible_git_character(char: str) -> str:
     return ascii(char)[1:-1]
 
 
+def _canonical_patch_chunks(output: BinaryIO) -> Iterator[bytes]:
+    """Drop Git's optional function label while preserving hunk coordinates and content."""
+    line_start = True
+    # Limit each read even when source lines are arbitrarily large.
+    for part in iter(lambda: output.readline(1024 * 1024), b""):
+        next_line_start = part.endswith(b"\n")
+        if line_start and part.startswith(b"@@ "):
+            coordinates, end, _ = part.partition(b" @@")
+            if end:
+                part = coordinates + end + b"\n"
+        yield part
+        line_start = next_line_start
+
+
+@contextmanager
+def _diff_driver_config(
+    target: Path, git_dir: Path | None, work_tree: Path | None
+) -> Iterator[tuple[str, ...]]:
+    names = git_command(
+        target,
+        "config",
+        "--name-only",
+        "--null",
+        "--get-regexp",
+        r"^diff\..+\.binary$",
+        text=False,
+        git_dir=git_dir,
+        work_tree=work_tree,
+        environment_overrides={"LC_ALL": "C"},
+    )
+    if names.returncode == 1:  # Git returns 1 when there are no matching keys.
+        yield ()
+        return
+    if names.returncode:
+        raise SystemExit(
+            os.fsdecode(names.stderr) or "Could not inspect Git diff-driver configuration."
+        )
+    # A private command-scope include preserves case and arbitrary driver-name bytes
+    # without putting an unbounded number of keys on the command line.
+    with tempfile.TemporaryDirectory(prefix="codex-security-diff-") as directory:
+        config = Path(directory) / "drivers"
+        with config.open("wb") as stream:
+            for key in names.stdout.split(b"\0"):
+                if key:
+                    driver = key.removeprefix(b"diff.").removesuffix(b".binary")
+                    escaped = driver.replace(b"\\", b"\\\\").replace(b'"', b'\\"')
+                    stream.write(b'[diff "' + escaped + b'"]\n\tbinary = auto\n')
+        yield "-c", f"include.path={config}"
+
+
 def _update_digest_field_from_git(
     digest: Any,
     label: bytes,
@@ -592,15 +753,24 @@ def _update_digest_field_from_git(
     *args: str,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    environment_overrides: dict[str, str] | None = None,
+    stable_display: bool = False,
 ) -> None:
-    with tempfile.TemporaryFile() as output:
+    with tempfile.TemporaryFile() as output, ExitStack() as stack:
+        driver_config = (
+            stack.enter_context(_diff_driver_config(target, git_dir, work_tree))
+            if stable_display
+            else ()
+        )
         completed = git_command(
             target,
+            *driver_config,
             *args,
             text=False,
             git_dir=git_dir,
             work_tree=work_tree,
             stdout_file=output,
+            environment_overrides=environment_overrides,
         )
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", errors="backslashreplace").replace(
@@ -610,25 +780,36 @@ def _update_digest_field_from_git(
             raise SystemExit(
                 f"Could not snapshot the selected working-tree changes.\n{detail}".rstrip("\n")
             )
-        output.seek(0, os.SEEK_END)
-        value_size = output.tell()
+        if stable_display:
+            output.seek(0)
+            value_size = sum(len(part) for part in _canonical_patch_chunks(output))
+        else:
+            value_size = output.seek(0, os.SEEK_END)
         _update_digest_field_header(digest, label, value_size)
         output.seek(0)
-        for chunk in iter(lambda: output.read(1024 * 1024), b""):
+        chunks = (
+            _canonical_patch_chunks(output)
+            if stable_display
+            else iter(lambda: output.read(1024 * 1024), b"")
+        )
+        for chunk in chunks:
             digest.update(chunk)
 
 
-def worktree_content_digest(target: Path) -> str:
+def worktree_content_digest(target: Path, *, expected_digest: str | None = None) -> str:
     """Return the worktree digest for the selected path after checking the state of its submodules."""
     require_clean_submodule_worktrees(target)
     repository, pathspec = git_worktree_context(target)
-    return worktree_content_digest_for_context(repository, pathspec)
+    return worktree_content_digest_for_context(
+        repository, pathspec, expected_digest=expected_digest
+    )
 
 
 def remediation_checkout_snapshot(
     scan: sqlite3.Row,
     *,
     expected_revision: str | None = None,
+    expected_digest: str | None = None,
     head_changed_message: str = (
         "Repository HEAD changed. Regenerate the remediation patch against the current checkout."
     ),
@@ -640,7 +821,7 @@ def remediation_checkout_snapshot(
         if revision != required_revision:
             raise SystemExit(head_changed_message)
         content_digest = (
-            worktree_content_digest(target)
+            worktree_content_digest(target, expected_digest=expected_digest)
             if revision != "unversioned"
             else directory_content_digest(target, excluded=(Path(scan["scan_dir"]),))
         )
@@ -661,12 +842,16 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
                 raise SystemExit(head_changed_message)
             require_clean_submodule_worktrees(target)
         return
-    _, current_digest = remediation_checkout_snapshot(
-        scan, head_changed_message=head_changed_message
-    )
     if scan["diff_target_kind"] == "working_tree":
         expected_digest = scan["diff_content_digest"]
     elif scan["diff_target_kind"] in {"commit", "range"}:
+        expected_digest = clean_worktree_content_digest()
+    else:
+        expected_digest = scan["target_snapshot_digest"]
+    _, current_digest = remediation_checkout_snapshot(
+        scan, expected_digest=expected_digest, head_changed_message=head_changed_message
+    )
+    if scan["diff_target_kind"] in {"commit", "range"}:
         target = Path(scan["target_path"])
         tracked = git_bytes(target, "ls-files", "-v", "-z")
         if tracked is None:
@@ -679,9 +864,6 @@ def require_scan_target_unchanged(scan: sqlite3.Row) -> None:
             )
         if any(entry.startswith(b"h ") for entry in entries):
             verify_assumed_unchanged_files(target)
-        expected_digest = clean_worktree_content_digest()
-    else:
-        expected_digest = scan["target_snapshot_digest"]
     if current_digest != expected_digest:
         raise SystemExit(
             "Scan target contents changed since the scan. "
@@ -728,6 +910,28 @@ def worktree_content_digest_for_context(
     *,
     git_dir: Path | None = None,
     work_tree: Path | None = None,
+    expected_digest: str | None = None,
+) -> str:
+    def calculate(stable_display: bool) -> str:
+        return _git_content_digest(repository, pathspec, git_dir, work_tree, stable_display)
+
+    current = calculate(True)
+    # Older sealed snapshots may have included the user's Git display settings.
+    if (
+        expected_digest is not None
+        and current != expected_digest
+        and calculate(False) == expected_digest
+    ):
+        return expected_digest
+    return current
+
+
+def _git_content_digest(
+    repository: Path,
+    pathspec: str,
+    git_dir: Path | None,
+    work_tree: Path | None,
+    stable_display: bool,
 ) -> str:
     digest = hashlib.sha256()
     update_digest_field(digest, b"format", b"codex-security-snapshot/v1")
@@ -736,12 +940,44 @@ def worktree_content_digest_for_context(
         ":(top,glob,exclude)**/.svn",
         ":(top,glob,exclude)**/.svn/**",
     ]
+    config = (
+        (
+            "-c",
+            "core.quotePath=true",
+            "-c",
+            "diff.suppressBlankEmpty=false",
+            "-c",
+            "core.compression=1",  # Git uses the fastest zlib level for binary patches by default.
+        )
+        if stable_display
+        else ()
+    )
+    display = (
+        (
+            "--no-color",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--unified=3",
+            "--diff-algorithm=myers",
+            "--indent-heuristic",
+            "--inter-hunk-context=0",
+            "--find-renames=50%",
+            "-l1000",  # Git's default inexact rename limit.
+            "--submodule=short",
+            "-O",
+            os.devnull,
+        )
+        if stable_display
+        else ()
+    )
     _update_digest_field_from_git(
         digest,
         b"tracked-diff",
         repository,
+        *config,
         "--no-literal-pathspecs",
         "diff",
+        *display,
         "--binary",
         "--full-index",
         "--no-ext-diff",
@@ -752,6 +988,9 @@ def worktree_content_digest_for_context(
         *source_pathspecs,
         git_dir=git_dir,
         work_tree=work_tree,
+        # GIT_DIFF_OPTS overrides even an explicit --unified option.
+        environment_overrides={"GIT_DIFF_OPTS": ""} if stable_display else None,
+        stable_display=stable_display,
     )
     untracked = git_bytes(
         repository,
@@ -1221,19 +1460,37 @@ def directory_content_digest(
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def directory_snapshot_regular_file_count(target: Path) -> int:
+def directory_snapshot_regular_files(target: Path) -> Iterator[Path]:
     paths = git_directory_snapshot_paths(target)
     if paths is None:
         paths = source_directory_snapshot_paths(target)
-    count = 0
     for path in paths:
         try:
             metadata = path.lstat()
         except OSError as exc:
             raise SystemExit(f"Could not inspect local file: {path.relative_to(target)}") from exc
         if stat.S_ISREG(metadata.st_mode):
-            count += 1
-    return count
+            yield path
+
+
+def directory_snapshot_regular_file_count(target: Path) -> int:
+    return sum(1 for _ in directory_snapshot_regular_files(target))
+
+
+def scoped_regular_file_count(repository: Path, scopes: list[str]) -> int:
+    # Count directory entries once while retaining explicitly requested ignored files.
+    names: set[str] = set()
+    for scope in scopes:
+        selected = (repository / scope).resolve(strict=True)
+        if not selected.is_relative_to(repository):
+            raise SystemExit("Requested scope must be inside the repository.")
+        if not SOURCE_METADATA_DIRECTORIES.isdisjoint(selected.relative_to(repository).parts):
+            continue
+        if selected.is_file():
+            names.add(selected.as_posix())
+        elif selected.is_dir():
+            names.update(path.as_posix() for path in directory_snapshot_regular_files(selected))
+    return len(names)
 
 
 def copy_directory_excluding(
@@ -1570,7 +1827,7 @@ def scan_target_warning(scan: sqlite3.Row) -> str | None:
             expected_digest = (
                 scan["diff_content_digest"] if working_tree else scan["target_snapshot_digest"]
             )
-            if worktree_content_digest(target) != expected_digest:
+            if worktree_content_digest(target, expected_digest=expected_digest) != expected_digest:
                 return (
                     "Working-tree contents changed while the scan was running; "
                     "results were saved for the original snapshot."

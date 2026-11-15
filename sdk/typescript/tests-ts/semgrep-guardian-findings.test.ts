@@ -70,6 +70,19 @@ test("a signed-in Guardian selection and Web API collection keep independent row
   });
   expect(await fixture.read()).toHaveLength(0);
   expect((await preview.import()).counts.created).toBe(1);
+  const replay = await prepareNormalizedLocalImport(
+    preview.preview,
+    {
+      repository: fixture.repository,
+      provider: "semgrep",
+      sourceKey: fixture.sourceKey,
+    },
+    {
+      environment: fixture.environment,
+      sourceRepositories: [{ url: sourceRepositoryUrl }],
+    },
+  );
+  expect((await replay.import()).counts.unchanged).toBe(1);
 
   // Guardian returns a string; the Web API can send the same digits as a JSON integer.
   const webId = (JSON as JSON & { rawJSON(value: string): unknown }).rawJSON(
