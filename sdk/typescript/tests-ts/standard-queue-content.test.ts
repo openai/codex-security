@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { inventoryToolEnvironment } from "./support/inventory.js";
 import { nodeCommand } from "./support/shell.js";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 
@@ -26,15 +27,19 @@ function contentQueue() {
         join(context, "standard-rules.json"),
         JSON.stringify(rules),
       );
-      execFileSync(nodeCommand().command, [
-        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-        "standard-queue",
-        "build",
-        scan,
-        repo,
-        ".",
-        ...explicit,
-      ]);
+      execFileSync(
+        nodeCommand().command,
+        [
+          join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+          "standard-queue",
+          "build",
+          scan,
+          repo,
+          ".",
+          ...explicit,
+        ],
+        { env: inventoryToolEnvironment() },
+      );
       return JSON.parse(
         readFileSync(join(context, "standard-queue.json"), "utf8"),
       ).batches.flat();
