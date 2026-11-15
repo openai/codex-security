@@ -1873,6 +1873,21 @@ test
   },
 );
 
+async function trustedRecoveryPython(python: string): Promise<string> {
+  // The host interpreter may itself be installed in a checkout (e.g. Homebrew).
+  const venv = await temporaryDirectory();
+  const created = runPython(python, [
+    "-m",
+    "venv",
+    "--copies",
+    "--without-pip",
+    "--system-site-packages",
+    venv,
+  ]);
+  expect(created.exitCode, created.stderr.toString()).toBe(0);
+  return join(venv, "bin", "python3");
+}
+
 function legacyNativeProfileRecipe(): {
   config: JsonObject;
   scanInputs: JsonObject;
@@ -1918,7 +1933,10 @@ test
       });
     }
     await using client = clients.createSecurity({
-      pythonPath: kind === "legacy native" ? f.python : "python3",
+      pythonPath:
+        kind === "legacy native"
+          ? await trustedRecoveryPython(f.python)
+          : "python3",
     });
     const result = await client.run(f.repository, options);
     expect(result.manifest.scan.id).toBe(f.scanId);
@@ -1954,13 +1972,15 @@ test.skipIf(process.platform === "win32").each([
       : ["scans", "resume", f.scanId];
     const alias = join(f.root, "linked-tools");
     if (selection === "checkout symlink") await symlink(bin, alias, "dir");
-    const configuredPython = {
-      named: "python3",
-      absolute: python,
-      "trusted absolute": f.python,
-      ambient: undefined,
-      "checkout symlink": join(alias, "python3"),
-    }[selection];
+    const configuredPython =
+      selection === "trusted absolute"
+        ? await trustedRecoveryPython(f.python)
+        : {
+            named: "python3",
+            absolute: python,
+            ambient: undefined,
+            "checkout symlink": join(alias, "python3"),
+          }[selection];
     const cli = join(import.meta.dirname, "../src/cli.ts");
     const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], {
       cwd: f.root,
