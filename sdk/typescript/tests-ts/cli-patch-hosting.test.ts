@@ -333,11 +333,21 @@ exit 1
       if (removesComponent) await mkdir(component);
       const global = join(external, "global.gitconfig");
       let challenged = false;
+      let authenticated = false;
+      const username = "synthetic";
+      const password = "synthetic-transport-only";
       const server = Bun.serve({
         tls: await loopbackTls(global, git),
         hostname: "127.0.0.1",
         port: 0,
-        fetch() {
+        fetch(request) {
+          if (
+            request.headers.get("authorization") ===
+            `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
+          ) {
+            authenticated = true;
+            return new Response(null, { status: 404 });
+          }
           challenged = true;
           return new Response(null, {
             status: 401,
@@ -351,7 +361,7 @@ exit 1
         const script = join(external, "helper.cjs");
         await writeFile(
           script,
-          `const fs = require("node:fs"); const path = fs.readFileSync(0, "utf8").split("\\n").find(line => line.startsWith("path=")); fs.appendFileSync(${JSON.stringify(marker)}, process.argv[2] + " " + path + "\\n");`,
+          `const fs = require("node:fs"); const path = fs.readFileSync(0, "utf8").split("\\n").find(line => line.startsWith("path=")); fs.appendFileSync(${JSON.stringify(marker)}, process.argv[2] + " " + path + "\\n"); if (process.argv[3] === "get") process.stdout.write(${JSON.stringify(`username=${username}\npassword=${password}\n`)});`,
         );
         const helper = (owner: string) =>
           `!node "${script.replaceAll("\\", "/")}" ${owner}`;
@@ -435,6 +445,7 @@ exit 1
         );
         expect(outcome.exitCode, outcome.stderr).toBe(2);
         expect(challenged, outcome.stderr).toBe(true);
+        expect(authenticated, outcome.stderr).toBe(true);
         expect(await readFile(marker, "utf8")).toBe(
           "operator path=example/repository.git\n",
         );

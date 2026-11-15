@@ -335,3 +335,86 @@ process.stdout.write(input === "model edit\\n" ? Buffer.from(fs.readFileSync(${J
     }
   },
 );
+
+test("host publication cannot rerun an operator filter edited by the patch", async () => {
+  const { directory, git, remote } = await publicationRepository(fixtures);
+  const support = await fixtures.create("patch-host-filter-");
+  const config = join(support, "gitconfig");
+  const marker = join(support, "host-filter-ran");
+  const file = "src/finding-1.ts";
+  const script = join(directory, "clean.sh");
+  const query = "protocol=https\nhost=example.invalid\n\n";
+  const environment = {
+    HOME: support,
+    USERPROFILE: support,
+    GIT_CONFIG_GLOBAL: config,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  await writeFile(
+    join(support, ".git-credentials"),
+    "https://fixture:synthetic@example.invalid\n",
+  );
+  git("config", "--file", config, "credential.helper", "store");
+  git("config", "--file", config, "filter.synthetic.clean", "sh ./clean.sh");
+  expect(
+    await runGitRepositoryCommand("git", ["credential", "fill"], directory, {
+      environment,
+      input: query,
+    }),
+  ).toContain("password=synthetic");
+  await writeFile(
+    join(directory, ".gitattributes"),
+    file + " filter=synthetic\n",
+  );
+  await writeFile(script, "cat\n");
+  git("add", ".");
+  git("commit", "-m", "Configure the synthetic filter");
+  const outcome = await runWorkflow(
+    ["patch", "Synthetic issue", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      environment,
+      onRepositoryCommand(command, args, cwd, options) {
+        if (command !== "git")
+          return args[1] === "list"
+            ? "[]"
+            : "https://github.example.test/example/repository/pull/1";
+        // Mark the host publication commands so the filter can distinguish them
+        // from its intended execution while capturing the verified tree.
+        const publishing = args.includes("switch") || args.includes("commit");
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: {
+            ...environment,
+            ...options?.environment,
+            SYNTHETIC_HOST_MARKER:
+              publishing && !options?.sandbox
+                ? marker.replaceAll("\\", "/")
+                : undefined,
+          },
+        });
+      },
+      async onCodex(_args, output) {
+        await writeFile(
+          script,
+          [
+            'if test -n "${SYNTHETIC_HOST_MARKER-}"; then',
+            "  printf 'protocol=https\\nhost=example.invalid\\n\\n' | git credential fill > \"$SYNTHETIC_HOST_MARKER\"",
+            "fi",
+            "sed 's/model edit/filtered edit/'",
+            "",
+          ].join("\n"),
+        );
+        await writeFile(join(directory, file), "model edit\n");
+        output!.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    },
+  );
+  expect(outcome.exitCode, outcome.stderr).toBe(0);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  const receiver = repositoryGit(remote);
+  const branch = receiver("for-each-ref", "--format=%(refname)");
+  expect(receiver("show", branch + ":" + file)).toBe("filtered edit");
+});

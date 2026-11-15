@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -427,5 +427,92 @@ test.each(["local", "included checkout", "operator"])(
         ? "Fixture transport reached"
         : "checkout-selected HTTP",
     );
+  },
+);
+
+test.each(["worktree", "operator", "linked directory"] as const)(
+  "checks the enclosing worktree for SSH configuration on a subdirectory scan: %s",
+  async (source) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const selected = join(directory, "src");
+    const external = await fixtures.create("patch-subdirectory-ssh-");
+    const global = join(external, "global.gitconfig");
+    const marker = join(external, "ssh-invoked");
+    const checkoutConfig = join(directory, "ssh.config");
+    const operatorConfig = join(external, "ssh.config");
+    const link = join(external, "selected");
+    if (source === "linked directory")
+      await symlink(
+        selected,
+        link,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    // Keep the link/.. spelling when passing it to Git.
+    const included =
+      source === "linked directory"
+        ? link.replaceAll("\\", "/") + "/../ssh.config"
+        : source === "worktree"
+          ? checkoutConfig
+          : operatorConfig;
+    git("config", "--file", global, "include.path", included);
+    const command = (location: string) =>
+      "echo " + location + ' > "$PATCH_SSH_MARKER"; exit 1';
+    for (const [file, owner] of [
+      [checkoutConfig, "worktree"],
+      [operatorConfig, "operator"],
+    ] as const)
+      git("config", "--file", file, "core.sshCommand", command(owner));
+    // Git for Windows and POSIX can resolve a junction/.. differently.
+    const fromCheckout =
+      git(
+        "config",
+        "--file",
+        global,
+        "--includes",
+        "--get",
+        "core.sshCommand",
+      ) === command("worktree");
+    git(
+      "remote",
+      "set-url",
+      "origin",
+      "ssh://git@127.0.0.1:1/team/repository.git",
+    );
+    const environment = {
+      GIT_CONFIG_GLOBAL: global,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_SSH_VARIANT: "ssh",
+      PATCH_SSH_MARKER: marker,
+    };
+    const model = mock(async () => 0);
+    const outcome = await runWorkflow(
+      ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+      {
+        currentDirectory: selected,
+        environment,
+        onWorkbench: () =>
+          savedScan(resultWithFindings(["high"]), "scan-1", selected),
+        onCodex: model,
+        onRepositoryCommand: (command, args, cwd, options) =>
+          command === "git"
+            ? runGitRepositoryCommand(command, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              })
+            : "[]",
+      },
+      { localHosting: false },
+    );
+    expect(outcome.exitCode).toBe(2);
+    const invoked = await readFile(marker, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return "";
+      },
+    );
+    expect(invoked.trim()).toBe(fromCheckout ? "" : "operator");
+    if (fromCheckout)
+      expect(outcome.stderr).toContain("checkout-selected core.sshCommand");
+    expect(model).not.toHaveBeenCalled();
   },
 );
