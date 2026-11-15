@@ -365,9 +365,24 @@ def _same_repository(
     )
 
 
-SCAN_SUMMARY_COLUMNS = """
+FILE_REVIEW_COUNT = "(SELECT COUNT(*) FROM standard_reviewed_files WHERE scan_id = scans.id)"
+
+
+def scan_coverage(row: sqlite3.Row) -> dict[str, Any]:
+    coverage = {
+        "closedRows": row["review_items_completed"],
+        "filesTotal": row["scope_file_count"],
+        "worklistRows": row["review_items_total"],
+    }
+    if row["files_reviewed"]:
+        coverage["filesReviewed"] = row["files_reviewed"]
+    return coverage
+
+
+SCAN_SUMMARY_COLUMNS = f"""
     scans.*,
     lifecycle.snapshot AS lifecycle_json,
+    {FILE_REVIEW_COUNT} AS files_reviewed,
     progress.reportable_findings_count,
     progress.scope_file_count,
     progress.review_items_completed,
@@ -389,8 +404,9 @@ JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
 
 def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     return connection.execute(
-        """
-        SELECT scans.*, lifecycle.snapshot AS lifecycle_json, progress.updated_at AS progress_updated_at,
+        f"""
+        SELECT scans.*, lifecycle.snapshot AS lifecycle_json, {FILE_REVIEW_COUNT} AS files_reviewed,
+               progress.updated_at AS progress_updated_at,
                progress.scope_file_count, progress.reportable_findings_count,
                progress.review_items_total, progress.review_items_completed, progress.deep_review_pass,
                progress.phase_items_total, progress.phase_items_completed, progress.phase_progress_unit,
@@ -420,11 +436,7 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
         "parentScanId": row["parent_scan_id"],
         "progress": {
             "candidates": {"reportable": row["reportable_findings_count"]},
-            "coverage": {
-                "closedRows": row["review_items_completed"],
-                "filesTotal": row["scope_file_count"],
-                "worklistRows": row["review_items_total"],
-            },
+            "coverage": scan_coverage(row),
             "phase": row["phase"],
             "status": "canceled" if row["canceled_at"] else row["status"],
             "updatedAt": row["progress_updated_at"],

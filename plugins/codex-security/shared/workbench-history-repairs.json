@@ -303,5 +303,22 @@
     "        quote((SELECT name FROM history WHERE version = 2)) || ', ?)'",
     "    FROM legacy WHERE present",
     "ORDER BY position;"
+  ],
+  [
+    "-- The original preview kept all inventoried paths. Copy only its explicit reviews.",
+    "WITH preview AS (",
+    "    SELECT json_extract(value, '$.statements[0]') AS create_table FROM json_each(:history)",
+    "    WHERE json_extract(value, '$.name') = 'retain explicitly reviewed Standard scan files'",
+    "        AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 78)",
+    "        AND EXISTS (SELECT 1 FROM schema_migrations WHERE version = 42",
+    "            AND name = 'bind Standard review progress to per-file receipts')",
+    "        AND EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'standard_review_receipts')",
+    ")",
+    "SELECT 0 AS position, 'sql' AS operation, create_table AS value FROM preview",
+    "UNION ALL",
+    "SELECT 1, 'sql', 'INSERT INTO standard_reviewed_files (scan_id, relative_path, content_sha256, closed_at)",
+    "    SELECT scan_id, relative_path, content_sha256, closed_at FROM standard_review_receipts",
+    "    WHERE closed_at IS NOT NULL' FROM preview",
+    "ORDER BY position;"
   ]
 ]

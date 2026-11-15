@@ -388,6 +388,12 @@ export function renderScanHistory(
               `${clean(coverage["filesTotal"])} file${coverage["filesTotal"] === 1 ? "" : "s"}`,
             ]),
       ];
+      const filesReviewed = coverage["filesReviewed"];
+      if (typeof filesReviewed === "number" && filesReviewed > 0) {
+        parts.push(
+          `${filesReviewed} file review receipt${filesReviewed === 1 ? "" : "s"}`,
+        );
+      }
       if (parts.length > 0) {
         lines.push(
           `  ${strong("REVIEW")}  ${parts.join(`  ${accent("·")}  `)}`,

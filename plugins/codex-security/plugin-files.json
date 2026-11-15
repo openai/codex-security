@@ -114,6 +114,7 @@
     "scripts/workbench_setup.py",
     "scripts/workbench_source_excerpt.py",
     "scripts/workbench_source_scopes.py",
+    "scripts/workbench_standard_review.py",
     "scripts/workbench_target.py",
     "scripts/workbench_target_state.py",
     "scripts/workbench_validation.py",

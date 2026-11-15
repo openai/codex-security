@@ -79,7 +79,7 @@ function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
       database
         .prepare("SELECT name FROM schema_migrations WHERE version = ?")
         .get(version)?.name,
-      workbenchMigrations[version - 1].name,
+      workbenchMigrations.find((item) => item.version === version)!.name,
     );
 }
 
@@ -1356,6 +1356,80 @@ with sqlite3.connect(sys.argv[2]) as database:
   assert.equal(result.status, 0, result.stderr || String(result.error));
 }
 
+for (const reader of ["Python", "Node"]) {
+  for (const preview of ["original", "reopened", "missing table"]) {
+    test(`${reader} imports explicit Standard reviews from the ${preview} preview`, async () => {
+      const directory = await temporary.create("standard-review-upgrade-");
+      const path = join(directory, "workbench.sqlite3");
+      pythonMigrations(path, preview === "reopened" ? 72 : 41);
+      const old = new DatabaseSync(path);
+      insertScan(old);
+      old.exec("UPDATE scans SET mode='standard' WHERE id='scan'");
+      if (preview === "reopened")
+        old.exec("UPDATE scans SET name='Saved title' WHERE id='scan'");
+      const previewName = "bind Standard review progress to per-file receipts";
+      old
+        .prepare(
+          "INSERT OR REPLACE INTO schema_migrations VALUES (42, ?, 'original')",
+        )
+        .run(previewName);
+      const digest = "a".repeat(64);
+      if (preview !== "missing table") {
+        old.exec(`CREATE TABLE standard_review_receipts (
+          scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+          relative_path TEXT NOT NULL, content_sha256 TEXT NOT NULL CHECK(length(content_sha256) = 64),
+          closed_at TEXT, PRIMARY KEY (scan_id, relative_path))`);
+        const add = old.prepare(
+          "INSERT INTO standard_review_receipts VALUES ('scan', ?, ?, ?)",
+        );
+        add.run("reviewed", digest, "first review");
+        add.run("unread", digest, null);
+      }
+      old.close();
+
+      for (let open = 0; open < 2; open++) {
+        if (reader === "Python") pythonMigrations(path);
+        else await databaseInfo(directory);
+      }
+      const current = new DatabaseSync(path);
+      try {
+        const reviewed = current
+          .prepare(
+            "SELECT relative_path, content_sha256, closed_at FROM standard_reviewed_files WHERE scan_id = 'scan'",
+          )
+          .all();
+        assert.deepEqual(
+          reviewed.map(Object.values),
+          preview === "missing table"
+            ? []
+            : [["reviewed", digest, "first review"]],
+        );
+        const receipt = current
+          .prepare(
+            "SELECT name, applied_at FROM schema_migrations WHERE version=42",
+          )
+          .get();
+        assert.equal(receipt?.name, previewName);
+        assert.equal(receipt?.applied_at, "original");
+        assert.equal(
+          storedValue(current, "scans", "name"),
+          preview === "reopened" ? "Saved title" : null,
+        );
+        if (preview !== "missing table")
+          assert.equal(
+            current
+              .prepare("SELECT count(*) AS n FROM standard_review_receipts")
+              .get()?.n,
+            2,
+          );
+        assert.deepEqual(current.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally {
+        current.close();
+      }
+    });
+  }
+}
+
 function storedRows(database: DatabaseSync) {
   return database
     .prepare(
@@ -1691,6 +1765,7 @@ with sqlite3.connect(sys.argv[2]) as connection:
           name !== "external_finding_imports" &&
           name !== "external_finding_import_members" &&
           name !== "external_finding_publications" &&
+          name !== "standard_reviewed_files" &&
           name !== "sqlite_sequence",
       )
       .map(([name, rows]) => {

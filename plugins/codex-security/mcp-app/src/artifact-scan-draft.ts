@@ -3269,11 +3269,14 @@ function buildCoverage(
   scope: JsonObject,
   target: JsonObject,
 ): JsonObject {
-  const openQuestions = semanticCoverage.openQuestions as
+  // File receipts come from the submitted Standard checkpoint. Reconciled
+  // coverage can include older work and must not republish its declarations.
+  const { reviewedFiles: _reviewedFiles, ...coverage } = semanticCoverage;
+  const openQuestions = coverage.openQuestions as
     Array<string | JsonObject> | undefined;
 
   return {
-    ...semanticCoverage,
+    ...coverage,
     mode: coverageMode(context, contract),
     inventoryStrategy: inventoryStrategy(context, scope, target),
     includePaths: scope.includePaths,

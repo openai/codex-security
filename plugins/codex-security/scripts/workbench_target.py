@@ -675,17 +675,31 @@ def update_digest_field(digest: Any, label: bytes, value: bytes) -> None:
     digest.update(value)
 
 
-def _update_regular_file_digest(digest: Any, path: Path, prefix: bytes = b"") -> None:
+def _update_regular_file_digest(
+    digest: Any, path: Path, prefix: bytes = b"", *, source_root: Path | None = None
+) -> bytes:
     """Record the file kind, byte count, and SHA-256 in the snapshot digest."""
     content = hashlib.sha256()
     size = 0
-    with path.open("rb") as handle:
+    if source_root is None:
+        handle = path.open("rb")
+    else:
+        from finalize_scan_contract import open_scan_local_file_descriptor
+
+        relative = path.relative_to(source_root).as_posix()
+        descriptor = open_scan_local_file_descriptor(
+            source_root, relative, "review source", portable=False
+        )
+        handle = os.fdopen(descriptor, "rb")
+    with handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             content.update(chunk)
             size += len(chunk)
     update_digest_field(digest, prefix + b"kind", b"file")
     update_digest_field(digest, prefix + b"size", str(size).encode())
-    update_digest_field(digest, prefix + b"content-sha256", content.digest())
+    file_digest = content.digest()
+    update_digest_field(digest, prefix + b"content-sha256", file_digest)
+    return file_digest
 
 
 def _visible_git_character(char: str) -> str:
@@ -1410,7 +1424,10 @@ def directory_content_digest(
     include_ignored: bool = False,
     include_git_metadata: bool = False,
     replay_git_dir: Path | None = None,
+    capture_file_digests: dict[str, str] | None = None,
 ) -> str:
+    """Hash the directory snapshot and optionally fill the selected regular-file digests."""
+
     def raise_walk_error(error: OSError) -> None:
         raise error
 
@@ -1452,7 +1469,13 @@ def directory_content_digest(
             update_digest_field(digest, b"kind", b"directory")
         elif stat.S_ISREG(mode):
             try:
-                _update_regular_file_digest(digest, path)
+                source_root = target if capture_file_digests is not None else None
+                file_digest = _update_regular_file_digest(digest, path, source_root=source_root)
+                if (
+                    capture_file_digests is not None
+                    and relative_path.as_posix() in capture_file_digests
+                ):
+                    capture_file_digests[relative_path.as_posix()] = file_digest.hex()
             except OSError as exc:
                 raise UnreadableLocalFile(f"Could not read local file: {relative_path}") from exc
         else:
