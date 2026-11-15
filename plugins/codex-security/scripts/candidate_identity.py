@@ -41,7 +41,7 @@ def archive_candidate_payloads(destination: dict[str, Any], rows: list[dict[str,
 
 
 def candidate_owner(*values: Any) -> str | None:
-    return next((value for value in values if isinstance(value, str) and value.strip()), None)
+    return next((value for value in values if _has_identity_text(value)), None)
 
 
 def coverage_owner(item: dict[str, Any]) -> Any:
@@ -56,7 +56,7 @@ def coverage_owner(item: dict[str, Any]) -> Any:
 
 
 def candidate_key(candidate_id: Any, owner: Any = None) -> CandidateKey | None:
-    if not isinstance(candidate_id, str) or not candidate_id.strip():
+    if not _has_identity_text(candidate_id):
         return None
     return candidate_owner(owner), candidate_id
 

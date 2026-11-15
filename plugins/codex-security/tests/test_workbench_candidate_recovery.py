@@ -1553,6 +1553,15 @@ def test_worker_terminal_copies_do_not_reopen_their_own_candidate(
                 "receiptRefs": [],
             }
         ]
+    # Older checkpoints allow arbitrary extension metadata on scope exclusions.
+    pending["coverage"]["explicitExclusions"].append(
+        {
+            "pattern": "vendor/**",
+            "reason": "Outside the review scope.",
+            "candidateId": "review",
+            "disposition": {"status": "historical"},
+        }
+    )
     output = tmp_path / "worker"
     output.mkdir()
     result_path = output / "result.json"

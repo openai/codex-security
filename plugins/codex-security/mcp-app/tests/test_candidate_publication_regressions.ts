@@ -27,6 +27,159 @@ const { preserveDiffCandidateDecisions } = await importSource(
   fileURLToPath(new URL("../src/artifact-diff-candidates.ts", import.meta.url)),
 );
 
+for (const layout of ["standard", "diff", "deep"] as const) {
+  test(`${layout}: a retained finding only suppresses late progress from the same owner`, async (t) => {
+    const f = await fixture(t, layout);
+    const confirmed = {
+      ...finding("confirmed", "src/example.ts"),
+      provenance: {
+        source: "local_plugin",
+        workerId: "worker-a",
+        candidateId: "shared",
+      },
+    };
+    await f.write(f.findingsDraft([confirmed], { complete: true }));
+    const work = (workerId: string) => ({
+      id: `review-${workerId}`,
+      candidateId: "shared",
+      sourceWorkerId: workerId,
+      reason: "Synthetic evidence still needs review.",
+    });
+    for (const input of [
+      f.draft({ deferred: [work("worker-a"), work("worker-b")] }),
+      f.draft(),
+    ]) {
+      await f.write(input);
+      assert.equal(await f.readComplete(), false);
+      assert.deepEqual((await f.read()).deferred, [work("worker-b")]);
+    }
+    await assert.rejects(
+      f.write(
+        f.draft(
+          { resolvedDeferred: [{ id: "review-worker-b", reason: "Reviewed" }] },
+          true,
+        ),
+      ),
+      layout === "deep"
+        ? /terminal Deep drafts cannot resolve child deferred work/
+        : /cannot close candidate review-worker-b/,
+    );
+  });
+}
+
+for (const layout of ["standard", "diff", "deep"] as const) {
+  for (const disposition of ["rejected", "not_applicable"] as const) {
+    test(`${layout}: a retained ${disposition} exclusion resolves only its owner's late progress`, async (t) => {
+      const f = await fixture(t, layout);
+      const exclusion = {
+        pattern: "src/excluded.ts",
+        reason: "Reviewed the synthetic candidate.",
+        disposition,
+        candidateId: "shared",
+        sourceWorkerId: "worker-b",
+      };
+      const final = f.draft({ explicitExclusions: [exclusion] }, true);
+      final.findings.push({
+        ...finding("confirmed", "src/example.ts"),
+        provenance: {
+          source: "local_plugin",
+          workerId: "worker-a",
+          candidateId: "shared",
+        },
+      });
+      await f.write(final);
+      const work = (workerId: string) => ({
+        id: `review-${workerId}`,
+        sourceWorkerId: workerId,
+        candidateId: "shared",
+        reason: "Synthetic evidence still needs review.",
+      });
+      await f.write(f.draft({ deferred: [work("worker-b")] }));
+      assert.notEqual(await f.readComplete(), false);
+      assert.deepEqual((await f.read()).deferred, []);
+      await f.write(
+        f.draft({ deferred: [work("worker-b"), work("worker-c")] }),
+      );
+      assert.equal(await f.readComplete(), false);
+      const saved = await f.read();
+      assert.deepEqual(saved.deferred, [work("worker-c")]);
+      assert.deepEqual(saved.explicitExclusions, [exclusion]);
+    });
+  }
+}
+
+for (const layout of ["standard", "diff", "deep", "worker"] as const) {
+  for (const [link, priorOwner, nextOwner] of [
+    ["generic task", undefined, undefined],
+    ["new task", undefined, undefined],
+    ["candidate alias", "worker-a", "worker-a"],
+    ["candidate alias", undefined, undefined],
+    ["candidate alias", "worker-a", "worker-b"],
+  ] as const) {
+    test(`${layout}: reopened surface receipts for ${link}, ${priorOwner ?? "shared"} to ${nextOwner ?? "shared"}`, async (t) => {
+      const f = await fixture(t, layout);
+      const surface = {
+        id: "api",
+        label: "API",
+        disposition: "no_issue_found",
+        receiptRefs: ["artifacts/old.md"],
+        ...(priorOwner && { sourceWorkerId: priorOwner }),
+      };
+      const priorTask = {
+        id: surface.id,
+        reason: "Review remaining caller.",
+        ...(link === "candidate alias" && {
+          candidateId: surface.id,
+          sourceWorkerId: "worker-a",
+          surfaceIds: [surface.id],
+        }),
+      };
+      const nextTask = {
+        ...priorTask,
+        reason: "Investigate another caller.",
+        ...(link === "candidate alias" && {
+          id: "api-new",
+          sourceWorkerId: nextOwner ?? "worker-a",
+        }),
+      };
+      await mkdir(path.join(f.root, "artifacts"), { recursive: true });
+      for (const name of ["old.md", "new.md"])
+        await writeFile(
+          path.join(f.root, "artifacts", name),
+          "Synthetic evidence.",
+        );
+      await f.writeReviewState(
+        {
+          surfaces: [surface],
+          deferred: link === "new task" ? [] : [priorTask],
+        },
+        true,
+      );
+      await f.writeReviewState({
+        surfaces: [
+          {
+            ...surface,
+            disposition: "needs_follow_up",
+            receiptRefs: ["artifacts/new.md"],
+            ...(nextOwner && { sourceWorkerId: nextOwner }),
+          },
+        ],
+        deferred: [nextTask],
+      });
+      const saved = await f.read();
+      assert.equal(saved.surfaces.length, 1);
+      assert.equal(saved.surfaces[0].disposition, "needs_follow_up");
+      const sameOwner = layout === "worker" || priorOwner === nextOwner;
+      assert.deepEqual(
+        saved.surfaces[0].receiptRefs.map((ref: string) =>
+          path.posix.basename(ref),
+        ),
+        link !== "new task" && sameOwner ? ["new.md", "old.md"] : ["new.md"],
+      );
+    });
+  }
+}
+
 for (const field of ["surfaces", "explicitExclusions", "deferred"] as const) {
   test(`coverage history retains separate legacy workers in ${field}`, () => {
     const rows = ["worker-one", "worker-two"].map((workerId) => ({

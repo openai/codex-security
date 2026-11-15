@@ -1345,7 +1345,7 @@ def test_budget_terminal_refresh_archives_previous_candidate_snapshot(
     assert original in surface["originalCandidates"]
 
 
-@pytest.mark.parametrize("edited_field", [None, "reason", "paths"])
+@pytest.mark.parametrize("edited_field", [None, "reason", "paths", "malformed_paths"])
 def test_legacy_budget_pending_refresh_keeps_authored_fields(
     tmp_path: Path, edited_field: str | None
 ) -> None:
@@ -1367,7 +1367,9 @@ def test_legacy_budget_pending_refresh_keeps_authored_fields(
         "paths": [row["path"] for row in original["locations"]],
         "surfaceIds": [surface["id"]],
     }
-    if edited_field is not None:
+    if edited_field == "malformed_paths":
+        pending["paths"] = [{}]
+    elif edited_field is not None:
         pending[edited_field] = (
             "Authored reason." if edited_field == "reason" else ["app.py", "authored.py"]
         )
@@ -1389,6 +1391,13 @@ def test_legacy_budget_pending_refresh_keeps_authored_fields(
         "locations": [{"path": "updated.py", "start_line": 1, "end_line": 1, "role": "sink"}],
     }
     ledger.write_text(json.dumps(current) + "\n")
+    if edited_field == "malformed_paths":
+        result = complete_budget_scan(state_dir, scan_id, check=False)
+        assert result["returncode"] != 0
+        assert "coverage.deferred[0].paths[0]: expected a string" in result["stderr"]
+        scan = run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]
+        assert scan["progress"]["status"] == "failed"
+        return
     complete_budget_scan(state_dir, scan_id)
     coverage = read_review_state(state_dir, scan_dir)
     actual = next(

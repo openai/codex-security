@@ -339,6 +339,19 @@ def test_projection_does_not_infer_candidates_from_legacy_deferred_items() -> No
     assert "A saved question." in markdown
 
 
+def test_projection_uses_sdk_whitespace_rules_for_saved_candidate_ids() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["deferred"] = [
+        {"id": "blank", "candidateId": "\ufeff", "reason": "Unfinished work."},
+        {"id": "pending", "candidateId": "\u0085", "reason": "Review pending."},
+    ]
+
+    assert CANDIDATES.unresolved_candidates(coverage, []) == [coverage["deferred"][1]]
+    assert "| Unresolved candidates | 1 |" in PROJECTION.build_report_markdown(
+        manifest, findings, coverage
+    )
+
+
 @pytest.mark.parametrize(
     ("provenance", "extensions", "resolved_id"),
     [
@@ -462,7 +475,7 @@ def test_projection_preserves_coverage_owner_precedence(
     ) == ("actual-worker", "shared-candidate")
 
 
-@pytest.mark.parametrize("source_owner", ["", " "])
+@pytest.mark.parametrize("source_owner", ["", " ", "\ufeff"])
 def test_projection_finding_resolves_blank_canonical_candidate_owner(source_owner: str) -> None:
     manifest, findings, coverage = canonical_documents()
     findings["findings"][0]["provenance"] = {

@@ -437,6 +437,7 @@ def preserve_budget_candidates(
                 f"{surface.get('label')}. Evidence: {surface.get('notes')}"
             )
             and isinstance(item.get("paths"), list)
+            and all(isinstance(path, str) for path in item["paths"])
         }
         previous_candidates = [
             surface["candidate"]
@@ -691,7 +692,7 @@ def copied_report_has_later_pending(
         and not any(
             isinstance(row, dict)
             and coverage_candidate_key(row, owner) == key
-            and row.get("disposition") in {"rejected", "not_applicable"}
+            and row.get("disposition") in ("rejected", "not_applicable")
             for field in ("surfaces", "explicitExclusions")
             for row in _coverage_rows(draft["reviewState"], field)
         )
