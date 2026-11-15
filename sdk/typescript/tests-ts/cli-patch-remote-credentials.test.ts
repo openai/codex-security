@@ -104,6 +104,75 @@ test.each([
   },
 );
 
+test.each([
+  "origin",
+  "secondary push URL",
+  "changed before push",
+  "changed with inherited git -c",
+])("blocks plain HTTP publication transport (%s)", async (stage) => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const http = "http://127.0.0.1:1/team/repository.git";
+  const https = "https://127.0.0.1:1/team/repository.git";
+  const branch = "codex-security/patch-scan-1";
+  git("remote", "set-url", "origin", stage === "origin" ? http : https);
+  if (stage === "secondary push URL") {
+    git("config", "--add", "remote.origin.pushurl", https);
+    git("config", "--add", "remote.origin.pushurl", http);
+  }
+  const resume = stage.startsWith("changed");
+  if (resume) {
+    git("branch", branch);
+    git(
+      "config",
+      `branch.${branch}.codexSecurityPatchCommit`,
+      git("rev-parse", "HEAD"),
+    );
+  }
+  const environment = {
+    GITLAB_HOST: "127.0.0.1:1",
+    ...(stage === "changed with inherited git -c"
+      ? { GIT_CONFIG_PARAMETERS: "'protocol.http.allow'='always'" }
+      : { GIT_ALLOW_PROTOCOL: "http:https" }),
+  };
+  const model = mock(async () => 0);
+  const calls: string[] = [];
+  const outcome = await runWorkflow(
+    resume
+      ? ["patch", "--resume-pr", branch, "--json"]
+      : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      environment,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high"]), "scan-1", directory),
+      onCodex: model,
+      onRepositoryCommand: (command, args, cwd, options) => {
+        if (command !== "git") {
+          calls.push(command);
+          return "";
+        }
+        if (args.includes("ls-remote"))
+          throw new Error("Unexpected publication preflight transport");
+        if (args.includes("push")) {
+          calls.push("push");
+          git("remote", "set-url", "origin", http);
+        }
+        return runGitRepositoryCommand(command, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+    },
+    { localHosting: false },
+  );
+  expect(outcome.exitCode).toBe(2);
+  expect(outcome.stderr).toContain(
+    resume ? "transport 'http' not allowed" : "plain HTTP",
+  );
+  expect(calls).toEqual(resume ? ["glab", "push"] : []);
+  expect(model).not.toHaveBeenCalled();
+});
+
 test.each(["github.example.test", "gitlab.com"])(
   "keeps remote credentials in Git configuration for %s",
   async (host) => {
@@ -240,9 +309,7 @@ test.each([
   async (stage, field) => {
     const { directory, git, remote } = await publicationRepository(fixtures);
     const key = `remote.origin.${field}`;
-    const hosted = field.startsWith("proxy")
-      ? "http://gitlab.com/example/repository.git"
-      : "https://gitlab.com/example/repository.git";
+    const hosted = "https://gitlab.com/example/repository.git";
     const branch = "codex-security/patch-scan-1";
     git("remote", "set-url", "origin", hosted);
     if (field === "uploadpack" || field === "receivepack") {

@@ -2767,6 +2767,13 @@ The assessment does not change the patch or merge state.
 Git snapshots, including snapshots of initialized submodules, run configured Git
 filters with the workspace permissions from your Codex configuration. Configure
 additional writable roots and network access in your user configuration.
+Snapshot Git retains access to external Git configuration files selected by the
+operator. The patch model’s filesystem profile denies access to those files.
+When a snapshot filter or publication hook can run, keep inline Git credentials
+out of external configuration files, including conditional includes. Use a
+credential helper for transport authentication. A patch stops before it runs
+a delegate with an authorization header, credential-bearing URL or proxy, or
+inline helper password available in those files.
 An external Git administration directory must belong to a registered worktree or
 be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git
 directory points to a separate external common directory, select that common
@@ -2818,6 +2825,8 @@ Publication checks the source of `core.sshCommand` before it runs SSH and
 rechecks the selected launcher and explicit SSH file operands during publication.
 If a transport file changes, inspect the file and your transport settings before
 retrying. `--resume-pr` selects the current operator settings for that invocation.
+Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
+HTTP fetch and push URLs before contacting the hosting service.
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.

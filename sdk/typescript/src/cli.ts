@@ -92,6 +92,7 @@ import {
   activePatchPublicationHooks,
   capturePatchGitControls,
   PATCH_LOCAL_GIT_ENVIRONMENT,
+  type PatchGitControlMode,
   type PatchGitControls,
   type PatchPublicationHooks,
   ensureWindowsSnapshotConfigReadable,
@@ -1424,6 +1425,7 @@ interface SkillPermissions {
   readonly name: string;
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
+  readonly externalConfigPaths?: readonly string[];
   readonly externalCachePaths?: readonly string[];
 }
 
@@ -8591,6 +8593,16 @@ export async function main(
                   });
                 publicationHooks = await activePatchPublicationHooks(read);
                 if (!publicationHooks.events.size) return;
+                if (
+                  publicationHooks.events.has("pre-push") ||
+                  publicationHooks.events.has("reference-transaction")
+                )
+                  await readPatchGitControls(
+                    directory,
+                    dependencies,
+                    false,
+                    "resumed-hook",
+                  );
                 const gitDirectories = (
                   await read([
                     "rev-parse",
@@ -11436,10 +11448,14 @@ async function patchPublicationDestination(
   ).replace(/\n$/u, "");
   // Git dispatches helper names literally, including schemes that URL would lowercase.
   for (const url of [fetchRemote, ...remotes]) {
+    if (url.startsWith("http://"))
+      throw new CodexSecurityError(
+        "Patch publication cannot use a plain HTTP origin URL. Use HTTPS or SSH to protect Git credentials.",
+      );
     if (
       /^[A-Za-z0-9+.-]+::/u.test(url) ||
       (/^[A-Za-z0-9+.-]+:\/\//u.test(url) &&
-        !/^(?:https?|ssh|git(?:\+ssh)?|ssh\+git|file):\/\//u.test(url))
+        !/^(?:https|ssh|git(?:\+ssh)?|ssh\+git|file):\/\//u.test(url))
     )
       throw new CodexSecurityError(
         "Patch publication cannot use a Git remote helper selected by the checkout.",
@@ -11805,7 +11821,13 @@ async function runPatchTransport(
     dependencies.environment,
     "GIT_CONFIG_PARAMETERS",
   )
-    ? ["-c", "protocol.file.allow=never", ...args]
+    ? [
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "protocol.http.allow=never",
+        ...args,
+      ]
     : args;
   const run = async (overrides: NodeJS.ProcessEnv = {}) => {
     const result = await dependencies.runRepositoryCommand(
@@ -12038,6 +12060,7 @@ async function patchTransportEnvironment(
   };
   // Git resolves the remote again when the actual transport starts.
   set("protocol.file.allow", "never");
+  set("protocol.http.allow", "never");
   const protocols = environmentEntry(
     dependencies.environment,
     "GIT_ALLOW_PROTOCOL",
@@ -12045,11 +12068,11 @@ async function patchTransportEnvironment(
   if (protocols !== undefined)
     pinned["GIT_ALLOW_PROTOCOL"] = protocols
       .split(":")
-      .filter((protocol) => protocol !== "file")
+      .filter((protocol) => protocol !== "file" && protocol !== "http")
       .join(":");
   // An empty command-scope value clears every inherited server-side push option.
   if (pushing) set("push.pushOption", "");
-  if (!remotes.some((remote) => /^https?:\/\//u.test(remote))) return pinned;
+  if (!remotes.some((remote) => remote.startsWith("https://"))) return pinned;
   // Git accumulates credential helpers until an empty helper resets them.
   const entries = await patchScopedConfig(
     "^((http|credential)\\..*|core\\.askpass)$",
@@ -12766,12 +12789,16 @@ async function bindPatchCommandContext(
 async function hashPatchFile(
   stream: Readable,
   signal?: AbortSignal,
+  objectHash?: ReturnType<typeof createHash>,
 ): Promise<string> {
   const closed = finished(stream).catch(() => undefined);
   try {
     if (signal !== undefined) addAbortSignal(signal, stream);
     const digest = createHash("sha256");
-    for await (const chunk of stream) digest.update(chunk);
+    for await (const chunk of stream) {
+      digest.update(chunk);
+      objectHash?.update(chunk);
+    }
     signal?.throwIfAborted();
     return digest.digest("hex");
   } finally {
@@ -12784,6 +12811,7 @@ async function hashPublicationFile(
   root: string,
   pathKey: string,
   signal?: AbortSignal,
+  unchangedBlob?: string,
 ): Promise<string | undefined> {
   signal?.throwIfAborted();
   const path = patchFilePath(root, pathKey);
@@ -12816,10 +12844,20 @@ async function hashPublicationFile(
         "Patch publication content must remain the selected regular file.",
       );
     signal?.throwIfAborted();
-    return await hashPatchFile(
+    const objectHash =
+      unchangedBlob === undefined
+        ? undefined
+        : createHash(unchangedBlob.length === 40 ? "sha1" : "sha256").update(
+            `blob ${opened.size}\0`,
+          );
+    const digest = await hashPatchFile(
       file.createReadStream({ autoClose: false }),
       signal,
+      objectHash,
     );
+    return objectHash && objectHash.digest("hex") === unchangedBlob
+      ? undefined
+      : digest;
   } finally {
     await file.close();
   }
@@ -12890,6 +12928,76 @@ async function publicationContentDigests(
     }
   }
   return digests;
+}
+
+async function captureHiddenPatchContent(
+  root: string,
+  checkout: string,
+  dependencies: CliDependencies,
+  environment: NodeJS.ProcessEnv,
+  digests: Set<string>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const source = ["-C", checkout, "-c", "core.fsmonitor=false"];
+  const tracked = await patchGitRecords(
+    root,
+    [...source, "ls-files", "-v", "--stage", "-z"],
+    dependencies,
+    { environment, patchSnapshot: [] },
+  );
+  const materialized = new Map<string, string>();
+  for (const entry of tracked) {
+    // Lowercase tags mean assume-unchanged and S means skip-worktree.
+    const header = /^[a-zS] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
+      entry,
+    );
+    if (!header) continue;
+    const path = entry.slice(header[0].length);
+    const digest = await hashPublicationFile(
+      checkout,
+      path,
+      signal,
+      header[1]!,
+    ).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+      throw error;
+    });
+    if (digest !== undefined) materialized.set(path, digest);
+  }
+  if (!materialized.size) return;
+  const directory = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-checkout-"),
+  );
+  try {
+    // Compare raw bytes with what Git would check out. A clean filter can
+    // discard a local change, and a smudge filter can legitimately add bytes.
+    await dependencies.runRepositoryCommand(
+      "git",
+      [
+        ...source,
+        "checkout-index",
+        "--ignore-skip-worktree-bits",
+        `--prefix=${directory.split(sep).join("/")}/`,
+        "-z",
+        "--stdin",
+      ],
+      root,
+      {
+        patchSnapshot: [directory],
+        environment,
+        input: Buffer.from(
+          [...materialized.keys()].join("\0") + "\0",
+          "latin1",
+        ),
+      },
+    );
+    for (const [path, digest] of materialized) {
+      if (digest !== (await hashPublicationFile(directory, path, signal)))
+        digests.add(digest);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 async function preparePatchPublication(
@@ -13169,6 +13277,11 @@ async function preparePatchPublication(
     for (const checkout of gitControls.nestedCheckouts) {
       signal?.throwIfAborted();
       const prefix = patchPathKey(relative(canonicalRoot, checkout));
+      const environment = {
+        ...NESTED_PATCH_GIT_ENVIRONMENT,
+        GIT_INDEX_FILE: undefined,
+        GIT_OPTIONAL_LOCKS: "0",
+      };
       const entries = await patchGitRecords(
         root,
         [
@@ -13185,17 +13298,18 @@ async function preparePatchPublication(
           "-z",
         ],
         dependencies,
-        {
-          patchSnapshot: [],
-          environment: {
-            ...NESTED_PATCH_GIT_ENVIRONMENT,
-            GIT_INDEX_FILE: undefined,
-            GIT_OPTIONAL_LOCKS: "0",
-          },
-        },
+        { patchSnapshot: [], environment },
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
+      await captureHiddenPatchContent(
+        root,
+        checkout,
+        dependencies,
+        environment,
+        nestedRepositoryDigests,
+        signal,
+      );
       // A conflict can also be reported as DD (both sides deleted).
       if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);
@@ -16132,6 +16246,129 @@ function captureOutput() {
   };
 }
 
+async function readPatchGitControls(
+  directory: string,
+  dependencies: CliDependencies,
+  automaticPublication: boolean | undefined,
+  mode: PatchGitControlMode,
+  options: Pick<SkillRunOptions, "patchGitContext"> = {},
+) {
+  const selectedGitDirectory = environmentValue(
+    dependencies.environment,
+    "GIT_DIR",
+  );
+  return capturePatchGitControls(
+    directory,
+    async (root, checkout, args, commandOptions) => {
+      const context = options.patchGitContext;
+      const current =
+        context === undefined
+          ? patchCommandDirectoryDependencies(directory, dependencies)
+          : (
+              await bindPatchCommandContext(
+                directory,
+                context.root,
+                context,
+                dependencies,
+              )
+            ).dependencies;
+      const selected =
+        root === checkout
+          ? current
+          : await nestedPatchGitDependencies(
+              root,
+              current,
+              checkout,
+              undefined,
+              {
+                inspectWorktreeBinding:
+                  args.length === 2 &&
+                  args[0] === "rev-parse" &&
+                  args[1] === "--show-toplevel",
+              },
+            );
+      let gitArgs = args;
+      if (commandOptions?.callerContext) {
+        const setupDirectory = await dependencies.runRepositoryCommand(
+          "git",
+          ["rev-parse", "--path-format=absolute", "--git-path", "objects"],
+          context?.root ?? root,
+          {
+            trim: false,
+            directory: context?.callerDirectory ?? directory,
+            protectedRoots:
+              context === undefined
+                ? [directory]
+                : patchExecutableRoots(context),
+            environment: { LC_ALL: "C", GIT_OBJECT_DIRECTORY: "." },
+          },
+        );
+        gitArgs = ["-C", setupDirectory.replace(/\n$/u, ""), ...gitArgs];
+      }
+      return selected.runRepositoryCommand(
+        "git",
+        args.includes("ls-files")
+          ? ["--literal-pathspecs", ...args, "--", checkout]
+          : gitArgs,
+        root === checkout ? (context?.root ?? checkout) : checkout,
+        {
+          trim: false,
+          encoding: commandOptions?.encoding,
+          input: commandOptions?.input,
+          maxBuffer: Infinity,
+          environment: {
+            LC_ALL: "C",
+            ...(root === checkout ? {} : { GIT_INDEX_FILE: undefined }),
+            ...(commandOptions?.nestedProbe
+              ? {
+                  ...NESTED_PATCH_GIT_ENVIRONMENT,
+                  GIT_OBJECT_DIRECTORY: await configuredPatchObjectDirectory(
+                    root,
+                    current,
+                  ),
+                }
+              : {}),
+            ...(commandOptions?.indexFile === undefined
+              ? {}
+              : { GIT_INDEX_FILE: commandOptions.indexFile }),
+            ...commandOptions?.environment,
+          },
+        },
+      );
+    },
+    selectedGitDirectory === undefined,
+    environmentValue(dependencies.environment, "GIT_COMMON_DIR") === undefined,
+    options.patchGitContext !== undefined || selectedGitDirectory === undefined
+      ? undefined
+      : isAbsolute(selectedGitDirectory)
+        ? selectedGitDirectory
+        : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
+    options.patchGitContext?.administrationReferences,
+    {
+      global: environmentEntry(dependencies.environment, "GIT_CONFIG_GLOBAL"),
+      system: environmentEntry(dependencies.environment, "GIT_CONFIG_SYSTEM"),
+      noSystem: environmentEntry(
+        dependencies.environment,
+        "GIT_CONFIG_NOSYSTEM",
+      ),
+      xdgConfigHome: environmentEntry(
+        dependencies.environment,
+        "XDG_CONFIG_HOME",
+      ),
+      objectDirectory: environmentEntry(
+        dependencies.environment,
+        "GIT_OBJECT_DIRECTORY",
+      ),
+      alternateObjectDirectories: environmentEntry(
+        dependencies.environment,
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+      ),
+    },
+    automaticPublication,
+    mode,
+  );
+}
+
 async function runSkill(
   skill: "validation" | "fix-finding" | "verify-fix" | "assess-patch-risk",
   inputs: readonly (string | ImportedIssue)[],
@@ -16398,135 +16635,16 @@ async function runSkill(
   );
   try {
     const { prompt } = preparedPrompt;
-    const selectedGitDirectory = environmentValue(
-      dependencies.environment,
-      "GIT_DIR",
-    );
     const savedControls = options.patchGitContext?.gitControls;
     if (savedControls) await savedControls.validateCapturedSelection();
     const gitControls = patch
       ? (savedControls ??
-        (await capturePatchGitControls(
+        (await readPatchGitControls(
           directory,
-          async (root, checkout, args, commandOptions) => {
-            const current =
-              options.patchGitContext === undefined
-                ? patchCommandDirectoryDependencies(directory, dependencies)
-                : (
-                    await bindPatchCommandContext(
-                      directory,
-                      options.patchGitContext.root,
-                      options.patchGitContext,
-                      dependencies,
-                    )
-                  ).dependencies;
-            const selected =
-              root === checkout
-                ? current
-                : await nestedPatchGitDependencies(
-                    root,
-                    current,
-                    checkout,
-                    undefined,
-                    {
-                      inspectWorktreeBinding:
-                        args.length === 2 &&
-                        args[0] === "rev-parse" &&
-                        args[1] === "--show-toplevel",
-                    },
-                  );
-            let gitArgs = args;
-            if (commandOptions?.callerContext) {
-              const setupDirectory = await dependencies.runRepositoryCommand(
-                "git",
-                [
-                  "rev-parse",
-                  "--path-format=absolute",
-                  "--git-path",
-                  "objects",
-                ],
-                options.patchGitContext?.root ?? root,
-                {
-                  trim: false,
-                  directory:
-                    options.patchGitContext?.callerDirectory ?? directory,
-                  protectedRoots:
-                    options.patchGitContext === undefined
-                      ? [directory]
-                      : patchExecutableRoots(options.patchGitContext),
-                  environment: { LC_ALL: "C", GIT_OBJECT_DIRECTORY: "." },
-                },
-              );
-              gitArgs = ["-C", setupDirectory.replace(/\n$/u, ""), ...gitArgs];
-            }
-            return selected.runRepositoryCommand(
-              "git",
-              args.includes("ls-files")
-                ? ["--literal-pathspecs", ...args, "--", checkout]
-                : gitArgs,
-              root === checkout
-                ? (options.patchGitContext?.root ?? checkout)
-                : checkout,
-              {
-                trim: false,
-                encoding: commandOptions?.encoding,
-                input: commandOptions?.input,
-                maxBuffer: Infinity,
-                environment: {
-                  LC_ALL: "C",
-                  ...(root === checkout ? {} : { GIT_INDEX_FILE: undefined }),
-                  ...(commandOptions?.nestedProbe
-                    ? {
-                        ...NESTED_PATCH_GIT_ENVIRONMENT,
-                        GIT_OBJECT_DIRECTORY:
-                          await configuredPatchObjectDirectory(root, current),
-                      }
-                    : {}),
-                  ...(commandOptions?.indexFile === undefined
-                    ? {}
-                    : { GIT_INDEX_FILE: commandOptions.indexFile }),
-                  ...commandOptions?.environment,
-                },
-              },
-            );
-          },
-          selectedGitDirectory === undefined,
-          environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
-            undefined,
-          options.patchGitContext !== undefined ||
-            selectedGitDirectory === undefined
-            ? undefined
-            : isAbsolute(selectedGitDirectory)
-              ? selectedGitDirectory
-              : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
-          options.patchGitContext?.administrationReferences,
-          {
-            global: environmentEntry(
-              dependencies.environment,
-              "GIT_CONFIG_GLOBAL",
-            ),
-            system: environmentEntry(
-              dependencies.environment,
-              "GIT_CONFIG_SYSTEM",
-            ),
-            noSystem: environmentEntry(
-              dependencies.environment,
-              "GIT_CONFIG_NOSYSTEM",
-            ),
-            xdgConfigHome: environmentEntry(
-              dependencies.environment,
-              "XDG_CONFIG_HOME",
-            ),
-            objectDirectory: environmentEntry(
-              dependencies.environment,
-              "GIT_OBJECT_DIRECTORY",
-            ),
-            alternateObjectDirectories: environmentEntry(
-              dependencies.environment,
-              "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            ),
-          },
+          dependencies,
           options.automaticPublication,
+          options.externalSandbox ? "external" : "sandbox",
+          options,
         )))
       : undefined;
     const patchPermissions =
@@ -16659,6 +16777,7 @@ async function runSkill(
                       permissions: {
                         name: patchPermissions,
                         readOnlyPaths: gitControls!.readOnlyPaths,
+                        externalConfigPaths: gitControls!.externalConfigPaths,
                         ...(gitControls!.externalCachePaths.length
                           ? {
                               externalCachePaths:
@@ -16997,6 +17116,28 @@ export async function readSkillCommandOutput(
             const modelReadOnlyPaths = new Set(
               appServer.permissions.modelOnlyReadOnlyPaths,
             );
+            const parentProtected = [...modelReadOnlyPaths].filter((path) =>
+              Object.hasOwn(profile.filesystem, dirname(path)),
+            );
+            if (parentProtected.length) {
+              const roots = await Promise.all(
+                Object.keys(profile.workspace_roots).map((root) =>
+                  canonicalConfigPath(root),
+                ),
+              );
+              // A second read mount for an absent child cannot be created
+              // below a read-only parent. Keep it only for an overlapping
+              // workspace grant that could override the parent's restriction.
+              for (const path of parentProtected)
+                if (
+                  !roots.some(
+                    (root) =>
+                      relative(dirname(path), root) === "" ||
+                      !isOutsidePath(relative(path, root)),
+                  )
+                )
+                  modelReadOnlyPaths.delete(path);
+            }
             if (appServer.permissions.externalCachePaths?.length) {
               for (const root of Object.keys(profile.workspace_roots)) {
                 const canonical = await realpath(root).catch(
@@ -17012,7 +17153,8 @@ export async function readSkillCommandOutput(
                     modelReadOnlyPaths.add(path);
               }
             }
-            // Cache restrictions for the model do not change snapshot access.
+            // Snapshot Git still needs the operator configuration. The model
+            // must not read those files through its inherited workspace policy.
             startThread({
               ...workspaceOverride,
               default_permissions: permissionProfile!,
@@ -17026,6 +17168,11 @@ export async function readSkillCommandOutput(
                         path,
                         { ".": "read" },
                       ]),
+                    ),
+                    ...Object.fromEntries(
+                      (appServer.permissions.externalConfigPaths ?? []).map(
+                        (path) => [path, { ".": "deny" }],
+                      ),
                     ),
                   },
                 },

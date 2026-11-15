@@ -18,6 +18,7 @@ import {
   publicationRepository as createPublicationRepository,
 } from "./cli-patch-fixtures.js";
 import { gitText } from "./support/shell.js";
+import { loopbackProxy, loopbackTls } from "./support/loopback-git-proxy.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { emptyPage } from "./support/linear-pagination.js";
 import { resolving } from "./support/promises.js";
@@ -7894,7 +7895,12 @@ describe("patch change tracking", () => {
       const { directory, git } = await publicationRepository();
       const original = git("rev-parse", "HEAD");
       const requests: string[] = [];
+      const globalConfig = join(
+        await fixtures.create("patch-proxy-config-"),
+        "gitconfig",
+      );
       const server = Bun.serve({
+        tls: await loopbackTls(globalConfig, git),
         hostname: "127.0.0.1",
         port: 0,
         fetch(request) {
@@ -7910,21 +7916,18 @@ describe("patch change tracking", () => {
         },
       });
       try {
-        const proxy = `http://127.0.0.1:${server.port}`;
+        using proxy = await loopbackProxy(server.port!);
+        const host = kind === "required" ? "127.0.0.2" : "127.0.0.1";
         git(
           "remote",
           "set-url",
           "origin",
-          `${kind === "required" ? "http://127.0.0.1:1" : proxy}/repository.git`,
-        );
-        const globalConfig = join(
-          await fixtures.create("patch-proxy-config-"),
-          "gitconfig",
+          `https://${host}:${server.port}/repository.git`,
         );
         const setConfig = (key: string, value: string) =>
           git("config", "--file", globalConfig, key, value);
         setConfig("http.proxy", "http://127.0.0.1:1");
-        setConfig("remote.origin.proxy", kind === "required" ? proxy : "");
+        setConfig("remote.origin.proxy", kind === "required" ? proxy.url : "");
         const environment = {
           GIT_CONFIG_GLOBAL: globalConfig,
           GIT_CONFIG_NOSYSTEM: "1",

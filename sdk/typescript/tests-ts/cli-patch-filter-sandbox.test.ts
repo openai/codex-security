@@ -13,6 +13,8 @@ import type { JsonObject } from "../src/index.js";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
   patchRiskAssessment,
+  publicationRepository,
+  runGitRepositoryCommand,
   repositoryGit,
   runWorkflow,
 } from "./cli-patch-fixtures.js";
@@ -24,6 +26,112 @@ import {
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+
+test.each([
+  ["filter", "Authorization: Bearer synthetic-fixture", true],
+  ["filter", "X-Routing-Tag: synthetic", false],
+  ["no delegate", "Authorization: Bearer synthetic-fixture", false],
+  ["disabled filter", "Authorization: Bearer synthetic-fixture", false],
+  ["unused pre-push", "Authorization: Bearer synthetic-fixture", false],
+  ["configured index hook", "Authorization: Bearer synthetic-fixture", true],
+  ["resume hook", "Authorization: Bearer synthetic-fixture", true],
+] as const)(
+  "external Git configuration with %s and %s",
+  async (delegate, header, blocked) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const host = await fixtures.create("patch-filter-host-config-");
+    const config = join(host, "gitconfig");
+    const included = join(host, "transport-config");
+    await writeFile(config, "");
+    // The model can change a filter's delegate, and a resumed hook can open an
+    // inactive include directly even though Git did not apply it on this branch.
+    const resume = delegate === "resume hook";
+    git(
+      "config",
+      "--file",
+      config,
+      resume ? "includeIf.onbranch:unused.path" : "include.path",
+      "transport-config",
+    );
+    git("config", "--file", included, "http.extraHeader", header);
+    git(
+      "config",
+      "--file",
+      included,
+      "credential.helper",
+      "!gh auth git-credential",
+    );
+    git("config", "--file", included, "core.sshCommand", "ssh");
+    if (delegate.endsWith("filter")) {
+      git("config", "--file", config, "filter.synthetic.clean", "cat");
+      if (delegate === "disabled filter")
+        git("config", "filter.synthetic.clean", "");
+    }
+    const head = git("rev-parse", "HEAD");
+    const branch = "codex-security/saved-filter";
+    if (delegate === "configured index hook") {
+      git("config", "hook.synthetic.event", "post-index-change");
+      git(
+        "config",
+        "hook.synthetic.command",
+        "echo ran > .git/synthetic-index-hook",
+      );
+    }
+    if (resume) {
+      git("branch", branch);
+      git("config", `branch.${branch}.codexSecurityPatchCommit`, head);
+    }
+    if (resume || delegate === "unused pre-push") {
+      await writeFile(
+        join(directory, ".git", "hooks", "pre-push"),
+        "#!/bin/sh\nexit 1\n",
+        { mode: 0o755 },
+      );
+    }
+    const environment = { GIT_CONFIG_GLOBAL: config, GIT_CONFIG_NOSYSTEM: "1" };
+    let model = false;
+    let indexHookDisabled = false;
+    const outcome = await runWorkflow(
+      resume
+        ? ["patch", "--resume-pr", branch, "--json"]
+        : ["patch", "Synthetic issue", "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        manualCodexPreparation: true,
+        onRepositoryCommand: (command, args, cwd, options) => {
+          if (command !== "git") throw new Error("Unexpected hosting command");
+          if (
+            args.includes("read-tree") &&
+            delegate === "configured index hook"
+          ) {
+            expect(args).toContain("hook.synthetic.enabled=false");
+            indexHookDisabled = true;
+          }
+          return runGitRepositoryCommand(command, args, cwd, {
+            ...options,
+            environment: { ...environment, ...options?.environment },
+          });
+        },
+        onCodex: () => {
+          model = true;
+          throw new Error("Reached synthetic model");
+        },
+      },
+    );
+    expect(outcome.stderr).toContain(
+      blocked ? "inline authentication" : "Reached synthetic model",
+    );
+    expect(model).toBe(!blocked);
+    if (delegate === "configured index hook") {
+      expect(indexHookDisabled).toBe(true);
+      await expect(
+        readFile(join(directory, ".git", "synthetic-index-hook")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(git("rev-parse", "HEAD")).toBe(head);
+  },
+);
 
 // The callback substitutes for the model; bookkeeping uses the real native sandbox.
 for (const fixture of [

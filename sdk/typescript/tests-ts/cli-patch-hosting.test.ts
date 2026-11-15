@@ -1,4 +1,5 @@
 import { gitText } from "./support/shell.js";
+import { loopbackProxy, loopbackTls } from "./support/loopback-git-proxy.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
 import {
@@ -323,15 +324,17 @@ exit 1
   );
 
   test.each(["preflight", "push", "push from removed component"] as const)(
-    "HTTP %s uses the operator credential helper without executing checkout helpers",
+    "HTTPS %s uses the operator credential helper without executing checkout helpers",
     async (stage) => {
       const { directory, git } = await publicationRepository();
       const external = await fixtures.create("patch-credentials-");
       const component = join(directory, "component");
       const removesComponent = stage === "push from removed component";
       if (removesComponent) await mkdir(component);
+      const global = join(external, "global.gitconfig");
       let challenged = false;
       const server = Bun.serve({
+        tls: await loopbackTls(global, git),
         hostname: "127.0.0.1",
         port: 0,
         fetch() {
@@ -346,7 +349,6 @@ exit 1
         const remote = new URL("example/repository.git", server.url).href;
         const marker = join(external, "helper-log");
         const script = join(external, "helper.cjs");
-        const global = join(external, "global.gitconfig");
         await writeFile(
           script,
           `const fs = require("node:fs"); const path = fs.readFileSync(0, "utf8").split("\\n").find(line => line.startsWith("path=")); fs.appendFileSync(${JSON.stringify(marker)}, process.argv[2] + " " + path + "\\n");`,
@@ -1286,7 +1288,12 @@ exit 1
       const environment = { ...process.env };
       for (const key of Object.keys(environment))
         if (/^(?:https?|all|no)_proxy$/iu.test(key)) delete environment[key];
-      const proxy = Bun.serve({
+      const config = join(
+        await fixtures.create("patch-proxy-config-"),
+        "gitconfig",
+      );
+      const origin = Bun.serve({
+        tls: await loopbackTls(config, git),
         hostname: "127.0.0.1",
         port: 0,
         async fetch(request) {
@@ -1334,11 +1341,12 @@ exit 1
         },
       });
       try {
+        using proxy = await loopbackProxy(origin.port!);
         git(
           "remote",
           "set-url",
           "origin",
-          `http://127.0.0.2:${proxy.port}/${remote.split(/[\\/]/u).at(-1)!}`,
+          `https://127.0.0.2:${origin.port}/${remote.split(/[\\/]/u).at(-1)!}`,
         );
         for (const destination of [remote, secondary])
           git(
@@ -1347,19 +1355,9 @@ exit 1
             "--add",
             "--push",
             "origin",
-            `http://127.0.0.2:${proxy.port}/${destination.split(/[\\/]/u).at(-1)!}`,
+            `https://127.0.0.2:${origin.port}/${destination.split(/[\\/]/u).at(-1)!}`,
           );
-        const config = join(
-          await fixtures.create("patch-proxy-config-"),
-          "gitconfig",
-        );
-        git(
-          "config",
-          "--file",
-          config,
-          "remote.origin.proxy",
-          `http://127.0.0.1:${proxy.port}`,
-        );
+        git("config", "--file", config, "remote.origin.proxy", proxy.url);
         environment["GIT_CONFIG_GLOBAL"] = config;
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
@@ -1410,7 +1408,7 @@ exit 1
               ),
             ).toBe("fixed");
       } finally {
-        proxy.stop(true);
+        origin.stop(true);
       }
     },
   );
