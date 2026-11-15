@@ -12,7 +12,7 @@ from finalize_scan_contract import (
     finding_candidate_id,
     write_scan_local_bytes,
 )
-from standard_validation import DECISIONS, QUEUE, read_optional
+from standard_validation import DECISIONS, read_optional, read_standard_queue
 
 RETURNS = "artifacts/02_discovery/standard-returns"
 STANDARD_STOP_SNAPSHOT = f"{RETURNS}/stopped.json"
@@ -39,7 +39,7 @@ def capture_standard_stop(scan_dir: Path, scan_id: str, warnings: list[str]) -> 
     # reviewed replaces the queue atomically after writing the receipt. Read the
     # index once while committing the terminal transition. Orphans and later
     # acknowledgements never become recovery inputs.
-    queue = read_optional(scan_dir, QUEUE)
+    queue = read_standard_queue(scan_dir)
     if not queue:
         return
     rows = []

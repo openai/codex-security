@@ -40,7 +40,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
-from standard_validation import QUEUE, require_standard_decisions
+from standard_validation import has_standard_review_state, require_standard_decisions
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
@@ -1411,7 +1411,7 @@ def _capture_standard_work_on_stop(db, connection, scan):
     warnings = []
     try:
         scan_dir = Path(scan["scan_dir"])
-        if not (scan_dir / QUEUE).is_file():
+        if not has_standard_review_state(scan_dir):
             return
         capture_standard_stop(db.require_canonical_scan_directory(scan_dir), scan["id"], warnings)
     except (OSError, SystemExit, TypeError, ValueError) as exc:

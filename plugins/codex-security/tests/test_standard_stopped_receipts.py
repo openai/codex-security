@@ -162,3 +162,17 @@ def test_stopped_scan_clears_only_confirmed_exhausted_files(tmp_path, queue, exh
     queue_path.write_text(json.dumps({"batches": [["b.py"]], "reviewed": [], "returns": []}))
     scan_command(state, "recover-scan-results", scan_id)
     assert read_review_state(state, scan)["deferred"] == rows
+
+
+@pytest.mark.parametrize("stop", ["fail-scan", "cancel-scan"])
+def test_stop_warns_if_worker_returns_lost_their_index(tmp_path, stop):
+    state, target, scan_id, scan = empty_target_scan(tmp_path)
+    write_completed_contract(scan, scan_id, target)
+    receipt = write_receipt(scan, "Unindexed candidate")
+    extra = ("--message", "Interrupted.") if stop == "fail-scan" else ()
+    scan_command(state, stop, scan_id, *extra)
+    saved = get_scan(state, scan_id)["scan"]
+    assert saved["findingCount"] == 1
+    assert any("Standard file queue is missing" in warning for warning in saved["warnings"])
+    assert "Unindexed candidate" not in (scan / "findings.json").read_text()
+    assert (scan / receipt["file"]).is_file()

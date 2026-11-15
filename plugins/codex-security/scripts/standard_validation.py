@@ -32,6 +32,23 @@ def read_optional(scan_dir: Path, name: str) -> dict:
         return {}
 
 
+def has_standard_review_state(scan_dir: Path) -> bool:
+    return any(
+        (scan_dir / marker).exists()
+        for marker in (QUEUE, DECISIONS, "artifacts/02_discovery/standard-returns")
+    )
+
+
+def read_standard_queue(scan_dir: Path) -> dict:
+    queue = read_optional(scan_dir, QUEUE)
+    if not queue and has_standard_review_state(scan_dir):
+        raise RecoverableContractError(
+            "The Standard file queue is missing or incomplete. Restore the queue before "
+            "publishing its results, or rebuild it if no worker returns were saved."
+        )
+    return queue
+
+
 def pending_candidates(scan_dir: Path, queue: dict, decisions: dict, after: int):
     offset = 0
     for ref in queue.get("returns", []):
@@ -131,15 +148,7 @@ def require_standard_decisions(
     if scan["mode"] != "standard":
         return False
     scan_dir = Path(scan["scan_dir"])
-    queue = read_optional(scan_dir, QUEUE)
-    if not queue and any(
-        (scan_dir / marker).exists()
-        for marker in (QUEUE, DECISIONS, "artifacts/02_discovery/standard-returns")
-    ):
-        raise RecoverableContractError(
-            "The Standard file queue is missing or incomplete. Restore the queue before "
-            "publishing its results, or rebuild it if no worker returns were saved."
-        )
+    queue = read_standard_queue(scan_dir)
     remaining = (
         {path for batch in queue["batches"] for path in batch} - set(queue["reviewed"])
         if queue
