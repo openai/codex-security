@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   realpath,
+  rename,
   rmdir,
   symlink,
   unlink,
@@ -1108,6 +1109,112 @@ exit 1
           ? "fixture reached push"
           : "Patch transport file changed",
       );
+    },
+  );
+
+  test.each([
+    "created during preflight",
+    "stays absent",
+    "replaced after preflight creation",
+    "appears during the patch",
+    "parent replaced",
+    "writable parent",
+    "dangling link",
+  ] as const)(
+    "binds an initially absent SSH known-hosts file: %s",
+    async (mode) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-known-hosts-");
+      const parent = join(external, "keys");
+      const hosts = join(parent, "known_hosts");
+      await mkdir(parent);
+      if (mode === "dangling link") {
+        const target = join(external, "removed");
+        await mkdir(target);
+        await symlink(
+          target,
+          hosts,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        await rmdir(target);
+      }
+      const environment = {
+        GIT_SSH_COMMAND: `ssh -o "UserKnownHostsFile=${hosts.replaceAll("\\", "/")}" -o StrictHostKeyChecking=accept-new`,
+        GITLAB_HOST: "gitlab.example.test",
+      };
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        "git@gitlab.example.test:example/repository.git",
+      );
+      let turnStarted = false;
+      let pushed = false;
+      const outcome = await runWorkflow(
+        ["patch", "Synthetic issue", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment,
+          manualCodexPreparation: true,
+          onCodex: async (_args, output) => {
+            output!.appServer!.onPermissions!({
+              directory,
+              environment,
+              profile: {
+                extends: ":workspace",
+                workspace_roots:
+                  mode === "writable parent" ? { [parent]: true } : {},
+                filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
+              },
+            });
+            await output!.appServer!.onBeforeTurn?.();
+            turnStarted = true;
+            if (mode === "parent replaced") {
+              await rename(parent, join(external, "original"));
+              await mkdir(parent);
+            } else if (mode === "appears during the patch") {
+              await writeFile(hosts, "unexpected key\n", { flag: "wx" });
+            } else if (mode === "replaced after preflight creation") {
+              await writeFile(hosts, "replacement key\n", { flag: "r+" });
+            }
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            output!.stdout.write("Synthetic patch complete.\n");
+            return 0;
+          },
+          onRepositoryCommand: async (tool, args, cwd, options) => {
+            if (tool !== "git") return "";
+            if (args.includes("ls-remote")) {
+              if (
+                mode === "created during preflight" ||
+                mode === "replaced after preflight creation"
+              ) {
+                // Model the authorized SSH connection recording a host for the first time.
+                await writeFile(hosts, "first host key\n", { flag: "wx" });
+              }
+              return "";
+            }
+            if (args.includes("push")) {
+              pushed = true;
+              throw new Error("fixture reached push");
+            }
+            return runGitRepositoryCommand(tool, args, cwd, options);
+          },
+        },
+        { localHosting: false },
+      );
+      const allowed =
+        mode === "created during preflight" || mode === "stays absent";
+      expect(pushed, outcome.stderr).toBe(allowed);
+      expect(turnStarted, outcome.stderr).toBe(
+        mode !== "writable parent" && mode !== "dangling link",
+      );
+      if (allowed) expect(outcome.stderr).toContain("fixture reached push");
+      else if (turnStarted)
+        expect(outcome.stderr).toContain("Patch transport file changed");
+      else if (mode === "writable parent")
+        expect(outcome.stderr).toContain("outside patch-writable directories");
+      if (mode === "stays absent")
+        await expect(readFile(hosts)).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
 

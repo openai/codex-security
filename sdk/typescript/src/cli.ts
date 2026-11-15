@@ -1790,12 +1790,13 @@ type PatchTransportFile = {
   target: string;
   stamp: string;
   digest?: string;
-  kind: "executable" | "file" | "known-hosts";
+  kind: "executable" | "file" | "known-hosts" | "missing-known-hosts";
 };
 
 interface PatchTransportAccess {
   readonly writable: Set<string>;
-  readonly invocations: Map<string, string>;
+  // A null target represents a known-hosts file that SSH may create.
+  readonly invocations: Map<string, string | null>;
   external: boolean;
   unknownWriters?: boolean;
 }
@@ -11878,6 +11879,22 @@ async function patchTransportIdentity(
         (kind === "executable" ? "executable" : "file") +
         " changed before publication. Inspect the selected transport settings and files before resuming.",
     );
+  if (kind === "missing-known-hosts") {
+    const parent = dirname(path);
+    const directory = await lstat(parent, { bigint: true });
+    const stamp = [directory.dev, directory.ino].join(":");
+    if (
+      !directory.isDirectory() ||
+      (await realpath(parent)) !== parent ||
+      (selected && selected.stamp !== stamp)
+    )
+      throw changed();
+    const leaf = await gitPublicationPathMetadata(path);
+    if (!leaf) return { kind, target: path, stamp };
+    // Only a successful SSH transport can populate the previously absent file.
+    if (!updatedHostKeys || !leaf.isFile()) throw changed();
+    kind = "known-hosts";
+  }
   const target = await realpath(path);
   if (selected && target !== selected.target) throw changed();
   const entry = await stat(target, { bigint: true });
@@ -11955,9 +11972,15 @@ async function addPatchTransportWriters(
     const resolveHostPath = await trustedHostPathResolver(sandbox.directory, [
       ...access.writable,
     ]);
-    for (const [path, target] of access.invocations)
-      if (resolveHostPath(path) !== target)
+    for (const [path, target] of access.invocations) {
+      if (target === null) {
+        // Resolve the existing parent, and also reject a grant for the leaf itself.
+        requireStablePatchTransportTarget(path, access);
+        if (resolveHostPath(dirname(path)) !== dirname(path))
+          throw writablePatchTransportError(path);
+      } else if (resolveHostPath(path) !== target)
         throw writablePatchTransportError(path);
+    }
   }
 }
 
@@ -12108,11 +12131,26 @@ async function runPatchTransport(
       const files = dependencies.patchTransportFiles;
       if (files)
         for (const [path, selected] of files) {
-          if (selected.kind !== "known-hosts") continue;
-          files.set(
+          if (
+            selected.kind !== "known-hosts" &&
+            selected.kind !== "missing-known-hosts"
+          )
+            continue;
+          const updated = await patchTransportIdentity(
             path,
-            await patchTransportIdentity(path, selected.kind, selected, true),
+            selected.kind,
+            selected,
+            true,
           );
+          files.set(path, updated);
+          if (
+            selected.kind === "missing-known-hosts" &&
+            updated.kind === "known-hosts"
+          )
+            dependencies.patchTransportAccess?.invocations.set(
+              path,
+              updated.target,
+            );
         }
     }
     return result;
@@ -12449,7 +12487,21 @@ async function pinPublicationSshCommand(
   if (!executable) throw unsupported();
   const bindFile = async (file: string | undefined, knownHosts = false) => {
     if (!file || !isAbsolute(file)) throw unsupported();
-    const physical = await realpath(file).catch(() => undefined);
+    let physical = await realpath(file).catch(() => undefined);
+    let kind: PatchTransportFile["kind"] = knownHosts ? "known-hosts" : "file";
+    if (
+      !physical &&
+      knownHosts &&
+      !file.endsWith("/") &&
+      !file.endsWith(sep) &&
+      (await gitPublicationPathMetadata(file)) === undefined
+    ) {
+      const parent = await realpath(dirname(file)).catch(() => undefined);
+      if (parent) {
+        physical = join(parent, basename(file));
+        kind = "missing-known-hosts";
+      }
+    }
     if (
       !physical ||
       protectedRoots.some(
@@ -12461,12 +12513,11 @@ async function pinPublicationSshCommand(
       physical,
       dependencies.patchTransportAccess,
     );
-    await bindPatchTransportFile(
+    await bindPatchTransportFile(physical, kind, dependencies);
+    dependencies.patchTransportAccess?.invocations.set(
       physical,
-      knownHosts ? "known-hosts" : "file",
-      dependencies,
+      kind === "missing-known-hosts" ? null : physical,
     );
-    dependencies.patchTransportAccess?.invocations.set(physical, physical);
     return physical;
   };
   if (/^ssh(?:\.exe)?$/iu.test(basename(program))) {
@@ -13881,7 +13932,7 @@ async function checkDeinitializedPatchSubmodules(
   }
 }
 
-function gitPublicationPathMetadata(path: Buffer) {
+function gitPublicationPathMetadata(path: string | Buffer) {
   return lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "ENOENT") throw error;
     return undefined;

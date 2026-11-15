@@ -2841,11 +2841,13 @@ For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
 Publication checks the source of `core.sshCommand` and binds its executable
 before Git probes a host or examines remote branches. Keep SSH, askpass and
 proxy launchers, identity files and explicit configuration files outside
-directories the patch can write. Use existing files and absolute paths for
-explicit file operands such as `-i` and `-F`. SSH and its configuration probes
-run from the filesystem volume root, with checkout directories excluded from
-their command search path. For a command that needs shell expansion, use an
-operator-owned wrapper on a trusted PATH.
+directories the patch can write. Use absolute paths for explicit file operands.
+Identity files and configuration files selected by `-i` or `-F` must already
+exist. OpenSSH can create a new `UserKnownHostsFile` during a connection when
+its parent directory exists outside the patch's writable roots. SSH and its
+configuration probes run from the filesystem volume root, with checkout
+directories excluded from their command search path. For a command that needs
+shell expansion, use an operator-owned wrapper on a trusted PATH.
 
 If a launcher symlink crosses a directory the patch can write, Git uses the
 approved executable target. A virtualenv interpreter needs a protected launcher
