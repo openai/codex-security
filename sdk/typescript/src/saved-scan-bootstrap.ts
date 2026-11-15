@@ -470,11 +470,13 @@ function exactTargets(
         requestedId.scanDir,
       );
       if (targets.length || process.platform !== "win32") return targets;
-      // A case-only rename can leave a different spelling in an older receipt.
+      // Match the workbench's Windows path key even when Bun's path.relative
+      // only folds ASCII case. A receipt can predate a case-only rename.
+      const scanDir = requestedId.scanDir.toLowerCase();
       return readRows<ScanTarget & { scan_dir: string }>(
         database,
         "SELECT id, target_path, scan_dir FROM scans",
-      ).filter((row) => relative(row.scan_dir, requestedId.scanDir) === "");
+      ).filter((row) => relative(row.scan_dir.toLowerCase(), scanDir) === "");
     }
     const scanId = tableColumns(database, "finding_workflows").has("scan_id")
       ? "workflow.scan_id"
