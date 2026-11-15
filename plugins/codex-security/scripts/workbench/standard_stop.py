@@ -137,22 +137,39 @@ def capture_standard_stop(scan_dir: Path, scan_id: str, warnings: list[str]) -> 
         write_scan_local_bytes(scan_dir, STANDARD_STOP_SNAPSHOT, json.dumps(snapshot).encode())
 
 
-def add_unfinished_standard_work(rows, coverage, findings):
+def add_unfinished_standard_work(rows, coverage, findings, provisional_duplicates):
+    # A checkpoint can predate a reviewer's decision. Only the stop-time snapshot
+    # establishes whether a proposed duplicate was confirmed before interruption.
+    confirmed_aliases = {
+        row["id"] for row in rows if "duplicateOf" in row and "decision" not in row
+    }
+    pending_aliases = set(provisional_duplicates) | (
+        set(provisional_duplicates.values()) - confirmed_aliases
+    )
     reported = set()
     for finding in findings:
         reported.add(finding_candidate_id(finding))
-        aliases = finding.get("provenance", {}).get("duplicateCandidateIds", [])
+        provenance = finding.get("provenance", {})
+        aliases = provenance.get("duplicateCandidateIds")
         if isinstance(aliases, list):
+            aliases = [
+                alias
+                for alias in aliases
+                if not isinstance(alias, str) or alias not in pending_aliases
+            ]
+            provenance["duplicateCandidateIds"] = aliases
             reported.update(alias for alias in aliases if isinstance(alias, str))
     reported.discard(None)
     represented = set()
     for surface in coverage.get("surfaces", []):
+        if not isinstance(surface, dict) or not isinstance(surface.get("candidateId"), str):
+            continue
         if (
-            isinstance(surface, dict)
-            and surface.get("disposition") in ("rejected", "not_applicable")
-            and surface.get("notes")
-            and isinstance(surface.get("candidateId"), str)
+            surface.get("disposition") == "reported"
+            and surface["candidateId"] in provisional_duplicates
         ):
+            surface["disposition"] = "needs_follow_up"
+        if surface.get("disposition") in ("rejected", "not_applicable") and surface.get("notes"):
             represented.add(surface["candidateId"])
     represented.update(
         row[key]

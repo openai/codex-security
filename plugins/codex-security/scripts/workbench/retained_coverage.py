@@ -2376,6 +2376,10 @@ def merge_saved_results(
             and not _has_candidate_metadata(row)
         )
 
+    provisional_duplicates = {
+        row["id"]: row["duplicateOf"] for row in standard_deferred if "decision" in row
+    }
+
     def retain_findings(relative, draft, worker_id, selected_candidates, skip_superseded_findings):
         normalized_findings = copy.deepcopy(draft["findings"])
         _ensure_finding_identities(
@@ -2384,6 +2388,13 @@ def merge_saved_results(
         for index, (value, normalized) in enumerate(
             zip(draft["findings"], normalized_findings, strict=True)
         ):
+            # A stale forward duplicate must not displace a confirmed finding with the same identity.
+            if (
+                provisional_duplicates
+                and isinstance(value, dict)
+                and finding_candidate_id(value) in provisional_duplicates
+            ):
+                continue
             if precedes_terminal_parent(relative, worker_id) or replaced_parent_finding(
                 relative, worker_id, value
             ):
@@ -3171,7 +3182,10 @@ def merge_saved_results(
             ]
         if standard_deferred:
             add_unfinished_standard_work(
-                standard_deferred, coverage, (f for f in findings if valid_finding(f))
+                standard_deferred,
+                coverage,
+                (f for f in findings if valid_finding(f)),
+                provisional_duplicates,
             )
         item = {"id": "scan-stopped", "reason": reason}
         if item not in coverage["deferred"]:

@@ -36,7 +36,8 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
         path = scan / "findings.json"
         findings = json.loads(path.read_text())
         findings["findings"][0]["provenance"].update(
-            candidateId="standard-2.1", duplicateCandidateIds=["standard-6.1", "standard-7.1"]
+            candidateId="standard-2.1",
+            duplicateCandidateIds=["standard-4.1", "standard-6.1", "standard-7.1"],
         )
         path.write_text(json.dumps(findings))
         path = scan / "coverage.json"
@@ -104,6 +105,10 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
     scan_command(state, stop, scan_id, *extra)
     saved = get_scan(state, scan_id)["scan"]
     assert saved["findingCount"] == int(stop == "fail-scan")
+    if stop == "fail-scan":
+        finding = json.loads((scan / "findings.json").read_text())["findings"][0]
+        assert finding["provenance"]["candidateId"] == "standard-2.1"
+        assert finding["provenance"]["duplicateCandidateIds"] == ["standard-4.1"]
     assert any("Could not retain Standard return" in w for w in saved["warnings"])
     rows = read_review_state(state, scan)["deferred"]
     link = next(row for row in rows if row["id"] == "standard-6.1")
@@ -194,3 +199,68 @@ def test_stop_warns_if_worker_returns_lost_their_index(tmp_path, stop):
     assert any("Standard file queue is missing" in warning for warning in saved["warnings"])
     assert "Unindexed candidate" not in (scan / "findings.json").read_text()
     assert (scan / receipt["file"]).is_file()
+
+
+@pytest.mark.parametrize("target_disposition", ["rejected", "duplicate"])
+def test_stopped_scan_defers_unconfirmed_duplicate_from_an_incomplete_checkpoint(
+    tmp_path, target_disposition
+):
+    from test_standard_decision_lifecycle import decision_scan, record, stage_draft
+
+    state, scan_id, scan, draft = decision_scan(tmp_path, 3)
+    queue = scan / "artifacts/01_context/standard-queue.json"
+    index = json.loads(queue.read_text())
+    index["returns"] = [write_receipt(scan, "Suspected duplicate", "Proposed target", "Verified")]
+    queue.write_text(json.dumps(index))
+    provisional = {
+        "disposition": "duplicate",
+        "duplicateOf": "standard-2.1",
+        "reason": "Possible same guard.",
+    }
+    record(scan, {"candidateId": "standard-1", "parts": [provisional]})
+    target = {"disposition": target_disposition, "reason": "Traced the independent guard."}
+    if target_disposition == "duplicate":
+        target["duplicateOf"] = "standard-3.1"
+    record(
+        scan,
+        {"candidateId": "standard-2", "parts": [target]},
+        {
+            "candidateId": "standard-3",
+            "parts": [{"disposition": "reportable", "reason": "Verified."}],
+        },
+    )
+    draft["manifest"]["scan"]["complete"] = False
+    findings = draft["findings"]["findings"]
+    verified = json.loads(json.dumps(findings[0]))
+    verified["title"] = "Verified separate claim"
+    verified["provenance"].update(
+        candidateId="standard-3.1", duplicateCandidateIds=["standard-2.1"]
+    )
+    findings.append(verified)
+    findings[0]["provenance"]["candidateId"] = "standard-1.1"
+    surface = draft["reviewState"]["surfaces"][0]
+    surface["candidateId"] = "standard-1.1"
+    (scan / "findings.json").write_text(json.dumps(draft["findings"]))
+    scan_command(state, "write-scan-draft", scan_id, "--draft-path", stage_draft(scan, draft))
+    scan_command(state, "fail-scan", scan_id, "--message", "Stopped during validation.")
+
+    def assert_stopped():
+        kept = json.loads((scan / "findings.json").read_text())["findings"]
+        assert [f["provenance"]["candidateId"] for f in kept] == ["standard-3.1"]
+        assert kept[0]["provenance"]["duplicateCandidateIds"] == (
+            ["standard-2.1"] if target_disposition == "duplicate" else []
+        )
+        review = read_review_state(state, scan)
+        assert (
+            next(row for row in review["surfaces"] if row["id"] == surface["id"])["disposition"]
+            == "needs_follow_up"
+        )
+        pending = next(
+            row for row in review["deferred"] if row.get("candidateId") == "standard-1.1"
+        )
+        assert pending["decision"] == provisional
+        assert pending["workerCandidate"] == {"title": "Suspected duplicate"}
+
+    assert_stopped()
+    scan_command(state, "recover-scan-results", scan_id)
+    assert_stopped()
