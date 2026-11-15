@@ -142,6 +142,7 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_surface")
         connection.executescript("""
+            DROP TABLE scan_finding_updates;
             DROP TABLE external_finding_publications;
             DROP TABLE external_finding_import_members;
             DROP TABLE external_finding_imports;

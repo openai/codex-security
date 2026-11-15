@@ -352,6 +352,11 @@ interface CodexClientLike {
   resumeThread?(threadId: string, options: ThreadOptions): CodexThreadLike;
 }
 
+interface RegisteredScan {
+  id: string;
+  options: WorkbenchCommandOptions;
+}
+
 interface PreparedRuntime {
   codexHome: string;
   bootstrapWorkspace?: string;
@@ -2279,10 +2284,7 @@ export class CodexSecurity {
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
-    let activeScan: {
-      id: string;
-      options: WorkbenchCommandOptions;
-    } | null = null;
+    let activeScan: RegisteredScan | null = null;
     let stopHeadDriftMonitor: (() => void) | undefined;
     const prepareArtifactRestorer =
       this.#dependencies.prepareScanArtifactRestorer ??
@@ -2616,10 +2618,11 @@ export class CodexSecurity {
             authentication.credentialType === "api_key")) &&
         (this.#dependencies.canRunDirectDeepScan?.() ??
           !process.versions["bun"]);
-      const capabilities = await pluginCapabilities(shellPluginRoot);
-      const standard =
-        skillName === "security-scan" &&
-        capabilities?.["standardScanHandoff"] === 1;
+      const standardCapabilities =
+        skillName === "security-scan"
+          ? await pluginCapabilities(shellPluginRoot)
+          : undefined;
+      const standard = standardCapabilities?.["standardScanHandoff"] === 1;
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined
@@ -2667,7 +2670,7 @@ export class CodexSecurity {
         !hosted &&
         normalized.kind === "paths" &&
         standard &&
-        capabilities?.["scopedInventoryReceipt"] === 1;
+        standardCapabilities?.["scopedInventoryReceipt"] === 1;
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
       let latestPhase: ScanProgress["phase"] = "preflight";
@@ -3283,18 +3286,15 @@ export class CodexSecurity {
         await chmod(targetPathsFile, 0o400);
       }
       const localStandard = standard && !hosted;
-      if (
-        !hosted &&
-        options.onFindingUpdate &&
-        supportsFindingUpdates(capabilities, skillName)
-      ) {
-        findingUpdateTracker = findingUpdatesForScan(
-          scanId,
+      if (!hosted) {
+        findingUpdateTracker = await findingUpdatesForScan(
+          activeScan,
           workbench,
-          workbenchOptions,
           options,
+          skillName,
+          standardCapabilities,
         );
-        findingUpdateTracker.start();
+        findingUpdateTracker?.start();
       }
       latestPhase =
         scanPhaseSchema.safeParse(registration["phase"]).data ?? latestPhase;
@@ -5516,8 +5516,7 @@ export class CodexSecurity {
       join(temporaryRoot, "codex-security-mock-"),
     );
     const workbench = this.#dependencies.runWorkbench ?? runWorkbench;
-    let activeScan:
-      { id: string; options: WorkbenchCommandOptions } | undefined;
+    let activeScan: RegisteredScan | undefined;
     let scanDir = "";
     try {
       const pluginRoot = await resolvePluginPath(
@@ -5671,22 +5670,15 @@ export class CodexSecurity {
         scanId,
         ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
       ]);
+      const findingUpdates = await findingUpdatesForScan(
+        activeScan,
+        workbench,
+        options,
+        skillNameFor(local.target, local.mode),
+      );
       activeScan = undefined;
       const completedScan = completion["scan"];
-      if (
-        options.onFindingUpdate &&
-        supportsFindingUpdates(
-          await pluginCapabilities(pluginRoot),
-          skillNameFor(local.target, local.mode),
-        )
-      ) {
-        await findingUpdatesForScan(
-          scanId,
-          workbench,
-          workbenchOptions,
-          options,
-        ).finish(signal);
-      }
+      await findingUpdates?.finish(signal);
       notifyScanLifecycle(options, completedScan);
       if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
         for (const warning of completedScan["warnings"]) {
@@ -7086,7 +7078,7 @@ function notifyScanLifecycle(
 
 async function stopRegisteredScan(
   workbench: typeof runWorkbench,
-  activeScan: { id: string; options: WorkbenchCommandOptions },
+  activeScan: RegisteredScan,
   options: ScanOptions,
   canceled: boolean,
   error: unknown,
@@ -7129,8 +7121,7 @@ async function stopRegisteredScan(
 
 function observeSettledScan(
   options: ScanOptions,
-  activeScan:
-    { id: string; options: WorkbenchCommandOptions } | null | undefined,
+  activeScan: RegisteredScan | null | undefined,
 ): void {
   if (!activeScan || !options.onLifecycle) return;
   // An interrupted workbench command can commit before its caller receives the result.
@@ -7145,36 +7136,40 @@ function observeSettledScan(
   }
 }
 
-function supportsFindingUpdates(
-  capabilities: Record<string, unknown> | undefined,
-  skillName: string,
-): boolean {
-  return (
-    capabilities?.["findingUpdates"] === 1 ||
-    (skillName === "security-scan" &&
-      capabilities?.["standardFindingUpdates"] === 1)
-  );
-}
-
-function findingUpdatesForScan(
-  scanId: string,
+async function findingUpdatesForScan(
+  scan: RegisteredScan,
   workbench: typeof runWorkbench,
-  workbenchOptions: WorkbenchCommandOptions,
   options: ScanOptions,
-): FindingUpdateTracker {
+  skillName: string,
+  capabilities?: Record<string, unknown>,
+): Promise<FindingUpdateTracker | undefined> {
+  if (!options.onFindingUpdate) return;
+  const warn = notifyObserver(options, "onWarning");
+  const onError = (error: unknown) =>
+    warn(`Could not read live finding updates: ${errorMessage(error)}`);
+  capabilities ??= await pluginCapabilities(scan.options.pluginRoot).catch(
+    (error: unknown) => {
+      onError(error);
+      return undefined;
+    },
+  );
+  if (
+    capabilities?.["findingUpdates"] !== 1 &&
+    !(
+      skillName === "security-scan" &&
+      capabilities?.["standardFindingUpdates"] === 1
+    )
+  )
+    return;
   return new FindingUpdateTracker({
-    scanId,
+    scanId: scan.id,
     read: (afterCursor, signal) =>
       workbench(
-        { ...workbenchOptions, signal },
-        workbenchArgs("list-finding-updates", { scanId, afterCursor }),
+        { ...scan.options, signal },
+        workbenchArgs("list-finding-updates", { scanId: scan.id, afterCursor }),
       ),
     onUpdate: notifyObserver(options, "onFindingUpdate"),
-    onError: (error) =>
-      notifyObserver(
-        options,
-        "onWarning",
-      )(`Could not read live finding updates: ${errorMessage(error)}`),
+    onError,
   });
 }
 

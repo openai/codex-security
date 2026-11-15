@@ -10,7 +10,6 @@ import {
 } from "../coverage-publication.js";
 import {
   buildFindings,
-  findingsWithinScope,
   parsePersistedScanDraft,
   scanDraftInputSchema,
   retainRecordedReceiptOwnership,
@@ -40,34 +39,17 @@ function publicationIdentity(finding: Finding) {
 }
 
 /** Keep each surviving aggregate finding's first published identity. */
-export function allocatePublicationIdentities(
-  result: ScanUnion,
-  includePaths: readonly string[],
-  filePaths?: readonly string[],
-): void {
-  const retained: {
-    finding: Finding;
-    identity: NonNullable<Finding["identity"]>;
-  }[] = [];
+export function allocatePublicationIdentities(findings: Finding[]): void {
+  const retained: Finding[] = [];
   const added: Finding[] = [];
-  for (const finding of findingsWithinScope(
-    result.findings,
-    includePaths,
-    filePaths,
-  )) {
+  for (const finding of findings) {
     const identity = publicationIdentity(finding);
-    if (identity) retained.push({ finding, identity });
+    if (identity) retained.push({ ...finding, identity });
     else added.push(finding);
   }
   // Reserve existing allocations first, even if the reducer has reordered groups.
   if (added.length === 0) return;
-  const allocated = buildFindings(
-    [
-      ...retained.map(({ finding, identity }) => ({ ...finding, identity })),
-      ...added,
-    ],
-    "deep",
-  );
+  const allocated = buildFindings([...retained, ...added], "deep");
   for (const [index, finding] of added.entries()) {
     finding.provenance.deepScanPublicationIdentity =
       allocated[retained.length + index].identity;

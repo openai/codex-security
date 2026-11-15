@@ -1819,7 +1819,7 @@ export function createCodexSecurityServer(): McpServer {
     {
       title: "List Codex Security Finding Updates",
       description:
-        "Read reviewed finding changes from a local Standard, Diff, or Deep scan. Standard and Diff publish accepted review checkpoints. Deep publishes findings from merged passes. All three reconcile with the sealed result. Omit afterCursor on the first call, then pass nextCursor as afterCursor, including after an empty page.",
+        "Follow reviewed findings through the sealed result. Local Standard and Diff scans publish accepted review checkpoints. Deep publishes merged passes. Start without afterCursor, then poll with the returned nextCursor, including after an empty page.",
       inputSchema: {
         ...scanSchema,
         afterCursor: nonnegativeInteger.optional(),
@@ -1828,13 +1828,9 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: { ui: { visibility: ["app", "model"] } },
     },
-    async ({ scanId, afterCursor, limit }) => {
-      const page = await workbench("list-finding-updates", {
-        scanId,
-        afterCursor,
-        limit,
-      });
-      return scanActionResult(page, JSON.stringify(page), scanId);
+    async (input) => {
+      const page = await workbench("list-finding-updates", input);
+      return scanActionResult(page, JSON.stringify(page), input.scanId);
     },
   );
 

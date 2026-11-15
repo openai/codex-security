@@ -1663,6 +1663,7 @@ describe("CodexSecurity orchestration", () => {
     ["current", "refs", true],
     ["current", "working_tree", true],
     ["current", "deep", true],
+    ["unreadable", "refs", false],
   ] as const)(
     "negotiates live finding updates with the %s plugin for %s scans",
     async (version, kind, supported) => {
@@ -1673,7 +1674,12 @@ describe("CodexSecurity orchestration", () => {
       manifest.codexSecurity.standardFindingUpdates = 1;
       if (version === "legacy") delete manifest.codexSecurity.findingUpdates;
       else manifest.codexSecurity.findingUpdates = 1;
-      await writeFile(manifestPath, JSON.stringify(manifest));
+      await writeFile(
+        manifestPath,
+        version === "unreadable"
+          ? "invalid fixture JSON"
+          : JSON.stringify(manifest),
+      );
       let target: ScanOptions["target"];
       if (kind === "refs" || kind === "working_tree") {
         await cp(
@@ -1690,6 +1696,7 @@ describe("CodexSecurity orchestration", () => {
       }
       const onFindingUpdate =
         mock<NonNullable<ScanOptions["onFindingUpdate"]>>();
+      const onWarning = mock();
       const reads: number[] = [];
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
@@ -1734,10 +1741,15 @@ describe("CodexSecurity orchestration", () => {
           mode: kind === "deep" ? "deep" : "standard",
           target,
           onFindingUpdate,
+          onWarning,
         }),
       ).rejects.toThrow("Synthetic scan ended");
       expect([...new Set(reads)]).toEqual(supported ? [0, 1] : []);
       expect(onFindingUpdate).toHaveBeenCalledTimes(supported ? 1 : 0);
+      if (version === "unreadable")
+        expect(onWarning).toHaveBeenCalledWith(
+          expect.stringContaining("Could not read live finding updates"),
+        );
     },
   );
 

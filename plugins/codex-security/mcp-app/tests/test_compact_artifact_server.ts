@@ -183,6 +183,20 @@ async function createScanFixture(label: string) {
   return { repoRoot, environment };
 }
 
+function fixtureGit(repoRoot: string) {
+  return (...args: string[]) =>
+    gitText(
+      [
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.com",
+        ...args,
+      ],
+      { cwd: repoRoot },
+    ).trim();
+}
+
 async function testRegisteredScanOwner(bundle: string) {
   const { repoRoot, environment } = await createScanFixture("registered-owner");
   const runWorkbench = (...args: string[]) =>
@@ -351,16 +365,7 @@ async function testResumedFindingsFeed(
   );
   let diffTarget;
   if (target !== "standard") {
-    const git = (...args: string[]) =>
-      gitText([
-        "-C",
-        repoRoot,
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.com",
-        ...args,
-      ]).trim();
+    const git = fixtureGit(repoRoot);
     git("init", "-q");
     git("commit", "--allow-empty", "-qm", "baseline");
     const baseRevision = git("rev-parse", "HEAD");
@@ -389,6 +394,10 @@ async function testResumedFindingsFeed(
       }),
     );
     const { scanId } = workspace.results;
+    const save = async (draft: Record<string, unknown>) =>
+      requireSuccessfulTool(
+        await call("record_codex_security_scan_draft", draft),
+      );
     const validation = {
       method: "Static source review",
       summary: "Reviewed the source location and its caller.",
@@ -404,31 +413,11 @@ async function testResumedFindingsFeed(
       scanId,
       complete: false,
     };
-    requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", checkpoint),
-    );
-    type Update = {
-      findingId: string;
-      kind: string;
-      title: string;
-      severity: string;
-      changedFields?: string[];
-    };
-    const readPage = async (reader: Client, afterCursor: number) =>
-      requireSuccessfulTool<{
-        updates: Update[];
-        hasMore: boolean;
-        nextCursor: number;
-        status: string;
-      }>(
-        await reader.callTool({
-          name: "list_codex_security_finding_updates",
-          arguments: { scanId, afterCursor, limit: 1 },
-        }),
-      );
+    await save(checkpoint);
     observer = await startClient(bundle, environment);
-    const first = await readPage(observer, 0);
-    const second = await readPage(observer, first.nextCursor);
+    const read = findingUpdateReader(toolCaller(observer, null), scanId, 1);
+    const first = await read();
+    const second = await read(first.nextCursor);
     await observer.close();
     observer = undefined;
     assert.equal(first.status, "running");
@@ -447,7 +436,6 @@ async function testResumedFindingsFeed(
     )!.findingId;
     const revision = {
       ...checkpoint,
-      complete: false,
       findings: [{ ...kept, severity: { level: "medium" } }],
       reviewState: {
         ...checkpoint.reviewState,
@@ -461,35 +449,26 @@ async function testResumedFindingsFeed(
         ],
       },
     };
-    requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", revision),
-    );
-    requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", revision),
-    );
-    requireSuccessfulTool(
-      await call("record_codex_security_scan_draft", {
-        ...revision,
-        complete: true,
-      }),
-    );
+    await save(revision);
+    await save(revision); // Retrying the checkpoint must not duplicate an update.
+    await save({ ...revision, complete: true });
     requireSuccessfulTool(
       await call("complete_codex_security_scan", { scanId }),
     );
     observer = await startClient(bundle, environment);
-    let page = await readPage(observer, second.nextCursor);
+    const resume = findingUpdateReader(toolCaller(observer, null), scanId, 1);
+    let page = await resume(second.nextCursor);
     assert.equal(page.status, "complete");
     const changes = [...page.updates];
     while (page.hasMore) {
-      const next = await readPage(observer, page.nextCursor);
+      const next = await resume(page.nextCursor);
       assert.ok(next.nextCursor > page.nextCursor);
       changes.push(...next.updates);
       page = next;
     }
+    const keptChanges = changes.filter((update) => update.findingId === keptId);
     assert.deepEqual(
-      changes
-        .filter((update) => update.findingId === keptId)
-        .map(({ kind, severity }) => [kind, severity]),
+      keptChanges.map(({ kind, severity }) => [kind, severity]),
       [
         ["updated", "medium"],
         ["finalized", "medium"],
@@ -501,12 +480,7 @@ async function testResumedFindingsFeed(
         .map((update) => update.kind),
       ["withdrawn"],
     );
-    assert.deepEqual(
-      changes.find(
-        (update) => update.kind === "updated" && update.findingId === keptId,
-      )?.changedFields,
-      ["severity"],
-    );
+    assert.deepEqual(keptChanges[0].changedFields, ["severity"]);
     const result = requireSuccessfulTool<CompletedResult>(
       await call("get_codex_security_completed_scan", { scanId }),
     );
@@ -527,17 +501,7 @@ async function testCompactDiffScanCompletion(
   const { repoRoot, environment } = await createScanFixture(
     `compact-diff-${runtimeLabel}`,
   );
-  const git = (...arguments_: string[]) =>
-    gitText(
-      [
-        "-c",
-        "user.name=Fixture",
-        "-c",
-        "user.email=fixture@example.com",
-        ...arguments_,
-      ],
-      { cwd: repoRoot },
-    ).trim();
+  const git = fixtureGit(repoRoot);
   git("init", "-q");
   await writeFile(path.join(repoRoot, "src", "guard.py"), "allowed = True\n");
   await writeFile(path.join(repoRoot, "src", "handler.py"), "value = 1\n");
@@ -698,19 +662,11 @@ async function testCompactDiffScanCompletion(
       }),
       `${runtimeLabel}: record the compact diff validation`,
     );
-    const readFeed = async () =>
-      requireSuccessfulTool<{
-        status: string;
-        updates: unknown[];
-        nextCursor: number;
-      }>(
-        await call(
-          "list_codex_security_finding_updates",
-          { scanId },
-          "independent-reader",
-        ),
-      );
-    const live = await readFeed();
+    const read = findingUpdateReader(
+      toolCaller(client, "independent-reader"),
+      scanId,
+    );
+    const live = await read();
     assert.equal(live.status, "running");
     assert.deepEqual(live.updates, []);
     assert.equal(live.nextCursor, 0);
@@ -784,7 +740,7 @@ async function testCompactDiffScanCompletion(
     );
     assert.equal(completed.manifest.scan.mode, "branch_diff");
     assert.equal(completed.findings.findings.length, 0);
-    assert.deepEqual(await readFeed(), { ...live, status: "complete" });
+    assert.deepEqual(await read(), { ...live, status: "complete" });
   } finally {
     await client.close();
   }
@@ -1138,29 +1094,17 @@ async function testSemanticScanDraftCompletion(
       findings: [finding],
       reviewState: { ...reviewState },
     };
-    const readUpdates = async (afterCursor?: number) =>
-      requireSuccessfulTool<{
-        status: string;
-        nextCursor: number;
-        hasMore: boolean;
-        updates: { findingId: string; title: string; kind: string }[];
-      }>(
-        await call("list_codex_security_finding_updates", {
-          scanId,
-          afterCursor,
-          limit: 1,
-        }),
-      );
     requireSuccessfulTool(
       await call("record_codex_security_scan_draft", checkpoint),
     );
-    const live = await readUpdates();
+    const read = findingUpdateReader(call, scanId);
+    const live = await read();
     assert.equal(live.status, "running");
     assert.equal(live.hasMore, false);
     assert.equal(live.updates.length, 1);
     assert.equal(live.updates[0].kind, "reviewed");
     assert.equal(live.updates[0].title, finding.title);
-    assert.deepEqual((await readUpdates(live.nextCursor)).updates, []);
+    assert.deepEqual((await read(live.nextCursor)).updates, []);
     const checkpointDeferred = (
       await readJson(scanDirectory, "scan-manifest.json")
     ).scan.reviewState.deferred;
@@ -1246,7 +1190,7 @@ async function testSemanticScanDraftCompletion(
     );
     assert.equal(completed.scan.progress.status, "complete");
     assert.equal(completed.scan.reportAvailable, true);
-    const sealed = await readUpdates(live.nextCursor);
+    const sealed = await read(live.nextCursor);
     assert.equal(sealed.status, "complete");
     assert.equal(sealed.updates[0].kind, "finalized");
     assert.equal(sealed.updates[0].findingId, live.updates[0].findingId);
@@ -1608,6 +1552,37 @@ function requireSuccessfulTool<Result = Record<string, unknown>>(
   );
   assert.ok(result.structuredContent, `${label}: missing structured result`);
   return result.structuredContent as Result;
+}
+
+function findingUpdateReader(
+  call: ReturnType<typeof toolCaller>,
+  scanId: string,
+  limit?: number,
+) {
+  return async (afterCursor?: number) => {
+    const result = await call("list_codex_security_finding_updates", {
+      scanId,
+      afterCursor,
+      limit,
+    });
+    const page = requireSuccessfulTool<{
+      status: string;
+      nextCursor: number;
+      hasMore: boolean;
+      updates: {
+        findingId: string;
+        kind: string;
+        title: string;
+        severity: string;
+        changedFields?: string[];
+      }[];
+    }>(result);
+    assert.deepEqual(
+      JSON.parse((result.content as TextContent[])[0].text),
+      page,
+    );
+    return page;
+  };
 }
 
 function requireToolError(

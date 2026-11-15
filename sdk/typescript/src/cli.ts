@@ -12114,19 +12114,17 @@ async function executeScan(
           : undefined,
       onFindingUpdate: (update) => {
         const location = update.locations[0];
-        const message = diagnosticValue(
-          `Finding ${update.kind} · ${update.findingId} · [${update.severity}] ${update.title}` +
-            (location ? ` · ${location.file}:${location.line}` : "") +
-            (update.changedFields?.length
-              ? ` · Changed: ${update.changedFields.join(", ")}`
-              : "") +
-            (update.kind === "updated" && update.validation
-              ? ` · ${update.validation}`
-              : "") +
-            (update.kind === "updated" && update.summary
-              ? ` · ${update.summary}`
-              : ""),
-        );
+        const details = [
+          `Finding ${update.kind}`,
+          update.findingId,
+          `[${update.severity}] ${update.title}`,
+        ];
+        if (location) details.push(`${location.file}:${location.line}`);
+        if (update.changedFields?.length)
+          details.push(`Changed: ${update.changedFields.join(", ")}`);
+        if (update.kind === "updated")
+          details.push(...[update.validation, update.summary].filter(Boolean));
+        const message = diagnosticValue(details.join(" · "));
         if (dashboard !== null) {
           dashboardFindingUpdates.push(message);
           dashboard.note(message);

@@ -223,6 +223,19 @@ def test_deep_feed_ignores_invalid_saved_scope(active_publication, invalid_scope
     )
 
 
+def test_deep_feed_keeps_prior_finding_when_saved_locations_are_malformed(active_publication):
+    scan = active_publication
+    admit = scan.api["deep_scan"].record_deep_scan_iteration
+    admit(scan.connection, stage_iteration(scan, 1, scan.findings))
+    [reviewed] = read_feed(scan)["updates"]
+    damaged = {**scan.findings[0], "locations": None}
+    admit(scan.connection, stage_iteration(scan, 2, [damaged]))
+    assert read_feed(scan, reviewed["cursor"])["updates"] == []
+    admit(scan.connection, stage_iteration(scan, 3, []))
+    [withdrawn] = read_feed(scan, reviewed["cursor"])["updates"]
+    assert (withdrawn["kind"], withdrawn["findingId"]) == ("withdrawn", reviewed["findingId"])
+
+
 @pytest.mark.parametrize(
     ("stale", "complete"),
     [

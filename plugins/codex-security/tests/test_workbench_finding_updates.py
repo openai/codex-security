@@ -112,6 +112,9 @@ def test_direct_files_and_historical_index_are_replayed(tmp_path):
     state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     assert not scan_command(state, "list-finding-updates", scan_id)["updates"]
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("""CREATE TRIGGER fail_feed_append BEFORE INSERT ON scan_finding_updates
+                      BEGIN SELECT RAISE(ABORT, 'feed unavailable'); END""")
     scan_command(state, "complete-scan", scan_id)
     page = scan_command(state, "list-finding-updates", scan_id)
     [final] = page["updates"]
@@ -119,7 +122,13 @@ def test_direct_files_and_historical_index_are_replayed(tmp_path):
 
     # Old completed scans had no feed, and the oldest indexed rows had no details_json.
     with sqlite3.connect(state / "workbench.sqlite3") as db:
-        db.execute("DELETE FROM scan_finding_updates WHERE scan_id = ?", (scan_id,))
+        assert (
+            "feed unavailable"
+            in db.execute(
+                "SELECT completion_warnings_json FROM scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0]
+        )
+        db.execute("UPDATE scans SET completion_warnings_json = '[]' WHERE id = ?", (scan_id,))
         db.execute(
             "UPDATE finding_occurrences SET details_json = '{}' WHERE scan_id = ?", (scan_id,)
         )

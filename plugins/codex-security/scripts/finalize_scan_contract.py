@@ -17,7 +17,7 @@ import re
 import stat
 import struct
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -1765,15 +1765,18 @@ def path_within_scope(path: str, scope: str) -> bool:
     return candidate.is_relative_to(requested)
 
 
-def finding_within_scope(finding: dict[str, Any], scope: list[tuple[str, bool]]) -> bool:
-    """Match a reviewed finding against requested directory and exact-file scopes."""
+def location_paths_within_scope(paths: Iterable[str], scope: Sequence[tuple[str, bool]]) -> bool:
     return any(
-        PurePosixPath(location["path"]) == PurePosixPath(path)
+        PurePosixPath(candidate) == PurePosixPath(path)
         if is_file
-        else path_within_scope(location["path"], path)
-        for location in finding["locations"]
+        else path_within_scope(candidate, path)
+        for candidate in paths
         for path, is_file in scope
     )
+
+
+def finding_within_scope(finding: dict[str, Any], scope: Sequence[tuple[str, bool]]) -> bool:
+    return location_paths_within_scope((loc["path"] for loc in finding["locations"]), scope)
 
 
 def _validate_finding(finding: dict[str, Any], context: str) -> None:

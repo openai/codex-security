@@ -110,6 +110,7 @@ const distModules = [
   "feedback",
   "finding-catalogue",
   "finding-prompt",
+  "finding-updates",
   "findings-import",
   "git-remote",
   "local-git-metadata",

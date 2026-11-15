@@ -1202,7 +1202,6 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                         manifest,
                         visible,
                         final=False,
-                        replace=scan["mode"] == "deep",
                     )
             except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
                 print(f"Could not record live finding updates: {exc}", file=sys.stderr)

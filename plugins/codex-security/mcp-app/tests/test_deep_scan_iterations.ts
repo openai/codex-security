@@ -861,7 +861,7 @@ test("a legacy report without source IDs keeps its published identity after adop
     provenance: { ...lookup.provenance, candidateId: "shared" },
   };
   const result = parseScanUnion({ scanId: randomUUID(), findings: [original] });
-  allocatePublicationIdentities(result, ["."]);
+  allocatePublicationIdentities(result.findings);
   const { mergeBatch } = await importSource(
     join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
   );
@@ -883,7 +883,7 @@ test("a legacy report without source IDs keeps its published identity after adop
       throw error;
     },
   );
-  allocatePublicationIdentities(result, ["."]);
+  allocatePublicationIdentities(result.findings);
   const restored = parseScanUnion(
     JSON.parse(JSON.stringify(persistedScanUnion(result))),
   );
@@ -892,7 +892,7 @@ test("a legacy report without source IDs keeps its published identity after adop
       (row: ScanDraftInput["findings"][number]) => !row.identity,
     ),
   );
-  allocatePublicationIdentities(restored, ["."]);
+  allocatePublicationIdentities(restored.findings);
   assert.deepEqual(
     scanUnionToDraft(restored).findings.map(
       (row: ScanDraftInput["findings"][number]) => row.identity,

@@ -60,12 +60,16 @@ export class FindingUpdateTracker {
     }
   }
 
-  async #readPages(
-    signal: AbortSignal,
-    read: FindingUpdateOptions["read"] = this.#options.read,
-  ): Promise<void> {
+  async #readPages(signal: AbortSignal, retryRead = false): Promise<void> {
     while (!signal.aborted) {
-      const result = await read(this.#cursor, signal);
+      let result: unknown;
+      try {
+        result = await this.#options.read(this.#cursor, signal);
+      } catch (error) {
+        if (!retryRead || signal.aborted) throw error;
+        retryRead = false;
+        continue;
+      }
       if (signal.aborted) return;
       const page = pageSchema.parse(result);
       let previous = this.#cursor;
@@ -94,18 +98,8 @@ export class FindingUpdateTracker {
   async finish(signal: AbortSignal): Promise<void> {
     this.#pollController.abort();
     await this.#polling;
-    // There is no next poll after sealing. Retry a failed transport read once
-    // from the last delivered page, without replaying an accepted page.
-    let retry = true;
-    await this.#readPages(signal, async (cursor, active) => {
-      try {
-        return await this.#options.read(cursor, active);
-      } catch (error) {
-        if (!retry || active.aborted) throw error;
-        retry = false;
-        return await this.#options.read(cursor, active);
-      }
-    }).catch((error: unknown) => {
+    // A transient read failure has no next poll after sealing.
+    await this.#readPages(signal, true).catch((error: unknown) => {
       if (!signal.aborted) this.#options.onError(error);
     });
   }

@@ -482,13 +482,12 @@ function restoreRepairGroups(findings: Finding[]): RestoredGroup[] {
         originals.delete(id);
         members.push(source);
       }
-      const finding = scanDraftInputSchema.shape.findings.element.safeParse(
+      const original = scanDraftInputSchema.shape.findings.element.safeParse(
         representative ?? members[0]!.finding,
       ).data;
-      if (!finding) return visibleGroups();
-      delete finding.provenance.deepScanRepairGroups;
+      if (!original) return visibleGroups();
+      const finding = withoutSourceHistory(original);
       // On a split only the original primary group keeps the published ID.
-      delete finding.provenance.deepScanPublicationIdentity;
       if (order === target && visible.provenance.deepScanPublicationIdentity)
         finding.provenance.deepScanPublicationIdentity =
           visible.provenance.deepScanPublicationIdentity;
@@ -642,11 +641,7 @@ export async function mergeBatch(
           );
         });
       if (!group) {
-        const finding = structuredClone(source);
-        finding.provenance.sourceFindingIds = [];
-        finding.provenance.sourceFindings = [];
-        delete finding.provenance.deepScanRepairGroups;
-        delete finding.provenance.deepScanPublicationIdentity;
+        const finding = structuredClone(withoutSourceHistory(source));
         group = { id, finding, worker: workerIndex, target: id };
         retained.push(group);
       } else {
