@@ -150,6 +150,7 @@ import {
   dependencyReviewQueueDescription,
   dependencyReviewQueueSchema,
 } from "./dependency-report-submission.js";
+import { createDependencyVerdictProgress } from "./dependency-verdict-progress.js";
 import {
   createDependencyCandidates,
   type DependencyCandidates,
@@ -3274,6 +3275,14 @@ export async function main(
           let evidenceTools: ReturnType<
             typeof createDependencyInvestigationTools
           >;
+          const progress = createDependencyVerdictProgress(
+            "cve" in advisory
+              ? advisory.cve
+              : "id" in advisory
+                ? advisory.id
+                : `${advisory.package.ecosystem}:${advisory.package.name}`,
+            errorOutput,
+          );
           const submission = createDependencyReportSubmission({
             repository,
             advisory,
@@ -3285,6 +3294,7 @@ export async function main(
             candidates,
             sourceWorkCoverage: () => dependencyGraph?.sourceWorkCoverage,
             onBlocked: (failure) => scope.abort(failure),
+            onReviewedUse: progress.update,
             isConfiguredTool(server, tool) {
               const config = inventoryServers[server];
               if (!isJsonObject(config) || config["enabled"] === false)
@@ -3628,6 +3638,7 @@ export async function main(
             try {
               await submission.close();
             } finally {
+              progress.flush();
               try {
                 await dependencyGraph?.close();
               } finally {

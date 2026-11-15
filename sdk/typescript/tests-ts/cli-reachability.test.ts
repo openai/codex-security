@@ -8,7 +8,9 @@ import { promisify } from "node:util";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
+import type { DependencyUse } from "../src/dependency-reachability.js";
 import { DependencyReportCoverage } from "../src/dependency-report-coverage.js";
+import { createDependencyVerdictProgress } from "../src/dependency-verdict-progress.js";
 import { canonicalJson } from "../src/record.js";
 import { bundledPluginRoot } from "../src/runtime.js";
 import { dependencies, type OnCodex } from "./cli-fixtures.js";
@@ -1910,4 +1912,495 @@ test("shares catalog MCPs, but not runtime-only MCPs, with the resolver", async 
   );
   expect(onCodex).toHaveBeenCalledTimes(1);
   expect(resolveServices).toHaveBeenCalledTimes(1);
+});
+
+test("streams accepted callsite verdicts before the final JSON report", async () => {
+  await using temp = await scopedTemporaryDirectory("dependency-progress-");
+  git(temp.path, "init", "--quiet");
+  await writeFile(
+    join(temp.path, "app.ts"),
+    [
+      ...Array.from({ length: 28 }, () => "read(input);"),
+      'read(input, "strict");',
+      'read(input, "validated");',
+    ].join("\n") + "\n",
+  );
+  await writeFile(join(temp.path, "reader.ts"), "decode(validated(input));\n");
+  await writeFile(join(temp.path, "other.ts"), "decode(validated(input));\n");
+  const config = join(temp.path, "inventory.json");
+  await writeFile(
+    config,
+    JSON.stringify({
+      exploitability: { service_catalog_mcps: ["catalog"] },
+      codex: {
+        mcp_servers: { catalog: { url: "https://catalog.invalid/mcp" } },
+      },
+    }),
+  );
+
+  type Verdict =
+    "ruled_out" | "unknown" | "potentially_exploitable" | "exploitable";
+  const record = "reader@rev1";
+  function assessment(
+    id: string,
+    line: number,
+    verdict: Verdict = "ruled_out",
+  ) {
+    const affected =
+      verdict === "potentially_exploitable" || verdict === "exploitable";
+    return {
+      id,
+      kind: "use",
+      candidateIds: [],
+      receiptIds: [] as string[],
+      supportingClaims: [] as { id: string; revision: number; hash: string }[],
+      use: {
+        location: `app.ts:${line}`,
+        component: decoder.name,
+        version: affected ? "1" : null,
+        verdict,
+        deployment: verdict === "exploitable" ? "confirmed" : "unknown",
+        place:
+          undefined as import("../src/dependency-reachability.js").DependencyUse["place"],
+        reason:
+          verdict === "ruled_out"
+            ? "The shared reader validates input."
+            : "The selected reader is uncertain.",
+        evidence: [
+          {
+            path: "app.ts",
+            startLine: line,
+            endLine: line,
+            supports: affected ? ["affected_copy", "affected_use"] : [],
+          },
+          { path: "reader.ts", startLine: 1, endLine: 1, supports: [] },
+        ],
+        observations:
+          verdict === "exploitable"
+            ? [{ server: "catalog", record, supports: ["running", "access"] }]
+            : [],
+        proof: {
+          sink: {
+            function: "decode",
+            callSite: { path: "reader.ts", line: 1 },
+          },
+          conditions: [
+            {
+              label: "Unvalidated input",
+              status: "ruled_out",
+              explanation: "The shared reader validates input.",
+              citations: [{ path: "reader.ts", line: 1 }],
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  const { runCli, stdout, stderr } = createCliTest(main);
+  const lines = () =>
+    stderr
+      .text()
+      .split("\n")
+      .filter((line) => line.includes("] reviewed "));
+  const delayed = Promise.withResolvers<void>();
+  let staleStarted = false;
+  const started = new Set<string>();
+  const holds = new Map<
+    string,
+    ReturnType<typeof Promise.withResolvers<void>>
+  >();
+  const deps = dependencies({
+    currentDirectory: temp.path,
+    onCodex: async (_argv, output) => {
+      const tool = output!.appServer!.dependencyReport;
+      assert(
+        tool?.queue && tool.queueClaims && tool.queryClaims && tool.submit,
+      );
+      const selected = new Map<string, { id: string; revision: number }>();
+      const enqueue = async (...items: ReturnType<typeof assessment>[]) => {
+        const result = await tool.queue!({ items });
+        expect(result.queued, result.feedback).toBe(true);
+        for (const entry of result.items!) selected.set(entry.id, entry);
+      };
+      await tool.queueClaims({
+        claims: [
+          {
+            id: "validation",
+            payload: "The shared reader validates input.",
+            scope: "Shared reader",
+            evidence: [{ path: "reader.ts", startLine: 1, endLine: 1 }],
+          },
+          {
+            id: "advisory-note",
+            payload: "The advisory applies to unvalidated input.",
+            scope: "Advisory prerequisites",
+          },
+        ],
+      });
+      const approvalDeadline = Date.now() + 2_000;
+      const queryPremises = () =>
+        tool.queryClaims!({ ids: ["validation", "advisory-note"] });
+      let premises = (await queryPremises()).claims;
+      while (!premises.every(({ state }) => state === "approved")) {
+        if (Date.now() > approvalDeadline)
+          throw new Error("The premises were not approved.");
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        premises = (await queryPremises()).claims;
+      }
+      const advisoryNote = premises.find(({ id }) => id === "advisory-note")!;
+      const validation = premises.find(({ id }) => id === "validation")!;
+      expect(lines()).toEqual([]);
+      await enqueue(assessment("first", 1));
+      await waitForReviewStart(() => lines().length > 0);
+      expect(lines()[0]).toMatch(
+        /app\.ts:1 ruled_out — Source checked\. Shared validation\.$/u,
+      );
+      expect(stdout.text()).toBe("");
+
+      const other = assessment("other", 4);
+      other.use.evidence[1]!.path = "other.ts";
+      other.use.proof.sink.callSite.path = "other.ts";
+      other.use.proof.conditions[0]!.citations[0]!.path = "other.ts";
+      await enqueue(
+        assessment("second", 2),
+        assessment("third", 3),
+        assessment("first-alias", 1),
+        other,
+      );
+      await waitForReviewStart(() =>
+        lines().some((line) => line.includes("(3 callsites)")),
+      );
+      expect(lines().filter((line) => line.includes("callsites"))).toHaveLength(
+        1,
+      );
+      expect(lines().some((line) => line.includes("app.ts:4 ruled_out"))).toBe(
+        true,
+      );
+      expect(
+        lines().filter((line) => line.includes("app.ts:1 ruled_out")),
+      ).toHaveLength(2);
+
+      const replacement = Promise.withResolvers<void>();
+      holds.set("second:2", replacement);
+      try {
+        await enqueue(assessment("second", 2, "unknown"));
+        await waitForReviewStart(() => started.has("second:2"));
+        await enqueue(
+          assessment("while-pending-a", 9),
+          assessment("while-pending-b", 26),
+        );
+        await waitForReviewStart(() =>
+          lines().some((line) => line.includes("(4 callsites)")),
+        );
+        expect(lines().some((line) => line.includes("(5 callsites)"))).toBe(
+          false,
+        );
+      } finally {
+        replacement.resolve();
+      }
+      await waitForReviewStart(() =>
+        lines().some((line) => line.includes("app.ts:2 corrected")),
+      );
+      expect(
+        lines().some((line) =>
+          line.includes("app.ts:2 corrected ruled_out → unknown"),
+        ),
+      ).toBe(true);
+      const otherPlace = assessment(
+        "other-place",
+        1,
+        "potentially_exploitable",
+      );
+      otherPlace.use.location = "Configured reader (app.ts:1)";
+      const receipt = tool.recordInventory(
+        "catalog",
+        { content: [{ type: "text", text: record }] },
+        { tool: "lookup" },
+      );
+      assert(receipt);
+      otherPlace.receiptIds.push(receipt);
+      otherPlace.use.observations.push({
+        server: "catalog",
+        record,
+        supports: [],
+      });
+      const running = assessment("running", 5, "exploitable");
+      running.receiptIds.push(receipt);
+      await enqueue(otherPlace, running);
+      await waitForReviewStart(() =>
+        lines().some((line) => line.includes("app.ts:5 exploitable")),
+      );
+      expect(
+        lines().some((line) =>
+          line.includes("app.ts:1 (Configured reader) potentially_exploitable"),
+        ),
+      ).toBe(true);
+
+      try {
+        await enqueue(assessment("late", 6));
+        await waitForReviewStart(() => staleStarted);
+        expect(lines().some((line) => line.includes("app.ts:6"))).toBe(false);
+        await enqueue(assessment("late", 6, "unknown"));
+      } finally {
+        delayed.resolve();
+      }
+      await waitForReviewStart(() =>
+        lines().some((line) => line.includes("app.ts:6 unknown")),
+      );
+      expect(lines().filter((line) => line.includes("app.ts:6"))).toHaveLength(
+        1,
+      );
+      // Restore a previously reviewed exact fingerprint while its new
+      // revision remains in flight. The host can use its cached approval.
+      const cacheGate = Promise.withResolvers<void>();
+      holds.set("first:2", cacheGate);
+      const cacheRevision = assessment("first", 1, "unknown");
+      try {
+        const before = lines().length;
+        await enqueue(cacheRevision);
+        await waitForReviewStart(() => started.has("first:2"));
+        await enqueue(assessment("first", 1));
+        expect(selected.get("first")?.revision).toBe(3);
+        expect(lines()).toHaveLength(before);
+      } finally {
+        cacheGate.resolve();
+      }
+
+      // Windows are distinct place assessments of the same physical call.
+      const scoped = (window: string) => {
+        const item = assessment(window, 1);
+        item.use.place = {
+          kind: "library_caller",
+          environment: null,
+          revision: null,
+          artifact: null,
+          observationWindow: window,
+          deploymentBasis: "configured",
+          deploymentDetail: null,
+          dependencySelection: null,
+          patch: null,
+          unresolvedQuestions: [],
+        };
+        return item;
+      };
+      const local = (line: number, advisoryOnly = false) => {
+        const item = assessment(
+          `${advisoryOnly ? "advisory-" : ""}mode-${line}`,
+          line,
+        );
+        item.use.proof.conditions[0]!.citations[0] = { path: "app.ts", line };
+        if (advisoryOnly) {
+          const { id, revision, hash } = advisoryNote;
+          item.supportingClaims.push({ id, revision, hash });
+        }
+        return item;
+      };
+      const selectedMode = (line: number) => {
+        const item = assessment(`selected-mode-${line}`, line);
+        const { id, revision, hash } = validation;
+        item.supportingClaims.push({ id, revision, hash });
+        return item;
+      };
+      const ambiguous = (line: number) => {
+        const item = assessment(`ambiguous-${line}`, line);
+        item.use.location = `app.ts:${line}, app.ts:${line + 1}`;
+        item.use.evidence.push({
+          path: "app.ts",
+          startLine: line + 1,
+          endLine: line + 1,
+          supports: [],
+        });
+        return item;
+      };
+      await enqueue(
+        scoped("window-a"),
+        scoped("window-b"),
+        local(7),
+        local(8),
+        local(27, true),
+        local(28, true),
+        selectedMode(29),
+        selectedMode(30),
+        ambiguous(7),
+        ambiguous(8),
+      );
+      await waitForReviewStart(() =>
+        lines().some((line) => line.includes("(4 callsites, 6 assessments)")),
+      );
+      expect(
+        lines().some((line) =>
+          line.includes("window-a, configured) ruled_out"),
+        ),
+      ).toBe(true);
+      expect(
+        lines().some((line) =>
+          line.includes("window-b, configured) ruled_out"),
+        ),
+      ).toBe(true);
+      expect(
+        lines().filter((line) =>
+          line.match(/app\.ts:(?:[78]|2[789]|30) ruled_out —/u),
+        ),
+      ).toHaveLength(6);
+      for (const context of ["app.ts:7, app.ts:8", "app.ts:8, app.ts:9"]) {
+        expect(
+          lines().filter((line) =>
+            line.includes(
+              `reader.ts:1 (sink, caller unresolved, submitted location: ${context}) ruled_out —`,
+            ),
+          ),
+        ).toHaveLength(1);
+      }
+
+      // Each queue waits for its own review to start, so these occupy all
+      // 16 actual batch slots. Deliver them in reverse order.
+      const concurrent = Array.from({ length: 16 }, (_, i) =>
+        assessment(`parallel-${i}`, i + 10),
+      );
+      try {
+        for (const item of concurrent) {
+          const key = `${item.id}:1`;
+          holds.set(key, Promise.withResolvers<void>());
+          await enqueue(item);
+          await waitForReviewStart(() => started.has(key));
+        }
+        expect(stdout.text()).toBe("");
+        expect(lines().some((line) => line.includes("20 callsites"))).toBe(
+          false,
+        );
+      } finally {
+        for (const item of [...concurrent].reverse())
+          holds.get(`${item.id}:1`)?.resolve();
+      }
+      await waitForReviewStart(() =>
+        lines().some((line) => line.includes("(20 callsites, 22 assessments)")),
+      );
+      expect(started.has("first:3")).toBe(false);
+      expect(stderr.text()).not.toContain("\x1b");
+      expect(stdout.text()).toBe("");
+
+      const outcome = await tool.submit({
+        candidateGeneration: 0,
+        reviewItems: [...selected.values()],
+        limitations: [],
+      });
+      expect(outcome.accepted, outcome.feedback).toBe(true);
+      return 0;
+    },
+  });
+  deps.lookupDependencyAdvisory = async () => advisory;
+  deps.reviewDependencyReport = async (prompt) => {
+    const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as {
+      excerpts: Record<string, { path: string }>;
+      items: (Pick<ReturnType<typeof assessment>, "use"> & {
+        advisoryEvidenceId?: string;
+        id: string;
+        revision: number;
+        hash: string;
+        excerptIds: string[];
+        receiptIds: string[];
+      })[];
+    };
+    return JSON.stringify({
+      items: await Promise.all(
+        packet.items.map(async (item) => {
+          const key = `${item.id}:${item.revision}`;
+          started.add(key);
+          await holds.get(key)?.promise;
+          if (item.id === "late" && item.revision === 1) {
+            staleStarted = true;
+            await delayed.promise;
+          }
+          return {
+            id: item.id,
+            revision: item.revision,
+            hash: item.hash,
+            accepted: true,
+            reason: "Source checked.\n\x1b[31mShared validation.\x1b[0m",
+            citedVersion: ["exploitable", "potentially_exploitable"].includes(
+              item.use?.verdict,
+            )
+              ? "1"
+              : null,
+            evidenceIds: item.id.startsWith("advisory-mode-")
+              ? [
+                  ...item.excerptIds.filter(
+                    (id) => packet.excerpts[id]?.path === "app.ts",
+                  ),
+                  "claim:advisory-note",
+                ]
+              : [
+                  ...item.excerptIds,
+                  ...item.receiptIds,
+                  ...(item.advisoryEvidenceId && !item.excerptIds.length
+                    ? [item.advisoryEvidenceId]
+                    : []),
+                  ...(item.id.startsWith("selected-mode-")
+                    ? ["claim:validation"]
+                    : []),
+                ],
+          };
+        }),
+      ),
+    });
+  };
+  expect(await runCli([...args, "--config", config], deps), stderr.text()).toBe(
+    0,
+  );
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    cve: advisory.cve,
+    schemaVersion: 2,
+    uses: expect.arrayContaining([
+      expect.objectContaining({ location: "app.ts:2", verdict: "unknown" }),
+      expect.objectContaining({ location: "app.ts:5", verdict: "exploitable" }),
+      expect.objectContaining({ location: "app.ts:6", verdict: "unknown" }),
+    ]),
+  });
+  expect(JSON.parse(stdout.text()).uses).toHaveLength(36);
+});
+
+test("removes invalidated approvals before a coalesced verdict update", () => {
+  const output: string[] = [];
+  const progress = createDependencyVerdictProgress("example", {
+    write: (line) => output.push(line),
+  });
+  function approve(
+    id: string,
+    line: number,
+    verdict: DependencyUse["verdict"] = "ruled_out",
+  ) {
+    const reason = "The wrapper validates input.";
+    progress.update(id, {
+      callSite: { path: "app.ts", line },
+      use: {
+        location: `app.ts:${line}`,
+        component: "example",
+        version: null,
+        verdict,
+        deployment: "unknown",
+        reason,
+        evidence: [
+          { path: "app.ts", startLine: line, endLine: line, supports: [] },
+        ],
+        observations: [],
+      },
+      reason,
+      evidenceKeys: [`excerpt:call-${line}`, "excerpt:wrapper"],
+      sharedEvidenceKeys: ["excerpt:wrapper"],
+    });
+  }
+  approve("first", 1);
+  approve("second", 2);
+  progress.update("second");
+  progress.flush();
+  expect(output).toHaveLength(1);
+  approve("third", 3);
+  approve("fourth", 4);
+  progress.flush();
+  expect(output[1]).toContain("(3 callsites)");
+  approve("second", 2, "unknown");
+  expect(output[2]).toContain("app.ts:2 corrected ruled_out → unknown");
+  progress.flush();
+  expect(output).toHaveLength(3);
 });

@@ -2338,6 +2338,12 @@ codex-security exploitability check npm:example-package \
   --vuln-description "Version 2.3.1 may skip signature verification when reading a manifest"
 ```
 
+The check writes independently reviewed callsite verdicts to stderr as they
+become available, including when stdout is redirected with `--json`. Repeated
+rule-outs with the same reason and deciding evidence are summarized with a
+representative location and a distinct callsite count. The final report on
+stdout includes every reviewed use selected for the report.
+
 A healthy lookup with missing, empty, stale, incomplete, or mismatched records
 leaves the affected conclusion unknown. It does not prove safety or a tool outage.
 Investigators escalate unusable required capabilities to the coordinator while

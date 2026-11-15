@@ -50,6 +50,7 @@ import {
 } from "./dependency-reachability.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import { createDependencySourceIdentityReader } from "./dependency-source-identity.js";
+import type { DependencyVerdictUpdate } from "./dependency-verdict-progress.js";
 
 const identity = z.string().trim().min(1);
 const candidateIds = z
@@ -314,6 +315,60 @@ function digest(value: unknown): string {
 function excerptKey(range: Omit<DependencyExcerpt, "text">): string {
   return `${range.path}:${range.startLine}-${range.endLine}`;
 }
+type CallSite = NonNullable<DependencyVerdictUpdate["callSite"]>;
+
+function callLocation(site: CallSite) {
+  return `${site.path}:${site.line}`;
+}
+function covers(
+  range: Pick<DependencyExcerpt, "path" | "startLine" | "endLine">,
+  site: CallSite,
+) {
+  return (
+    range.path === site.path &&
+    range.startLine <= site.line &&
+    range.endLine >= site.line
+  );
+}
+
+function reviewedDependencyCallSite(
+  use: DependencyUse,
+  candidates: readonly BoundCandidate[],
+): CallSite | undefined {
+  // Prefer an explicitly cited caller over the inner sink shared by wrappers.
+  const anchors = new Map<string, CallSite>();
+  for (const [path, ranges] of Map.groupBy(use.evidence, ({ path }) => path)) {
+    const prefix = `${path}:`;
+    for (
+      let index = use.location.indexOf(prefix);
+      index >= 0;
+      index = use.location.indexOf(prefix, index + prefix.length)
+    ) {
+      if (index > 0 && /[^\s(\[]/u.test(use.location[index - 1]!)) continue;
+      const match = /^(\d+)(?=$|[\s),;\]])/u.exec(
+        use.location.slice(index + prefix.length),
+      );
+      const site = { path, line: Number(match?.[1]) };
+      if (ranges.some((range) => covers(range, site)))
+        anchors.set(callLocation(site), site);
+    }
+  }
+  const sink = use.proof?.sink?.callSite;
+  if (anchors.size > 1 && sink) anchors.delete(callLocation(sink));
+  if (anchors.size) {
+    return anchors.size === 1 ? anchors.values().next().value : undefined;
+  }
+  const callers = new Map<string, CallSite>();
+  for (const { path, line, package: dependency } of candidates) {
+    if (dependency || line === undefined) continue;
+    const site = { path, line };
+    if (sink && callLocation(site) === callLocation(sink)) continue;
+    if (use.evidence.some((range) => covers(range, site)))
+      callers.set(callLocation(site), site);
+  }
+  return callers.size === 1 ? callers.values().next().value : undefined;
+}
+
 function claim(input: ReviewItem) {
   if (input.kind === "use") return { kind: input.kind, use: input.use };
   return {
@@ -349,6 +404,7 @@ export function createDependencyReportSubmission(options: {
   >["profileCoverage"];
   signal?: AbortSignal;
   onBlocked?: (failure: DependencyInvestigationBlockedError) => void;
+  onReviewedUse?: (id: string, review?: DependencyVerdictUpdate) => void;
   isConfiguredTool?: (server: string, tool: string) => boolean;
 }) {
   const controller = new AbortController();
@@ -391,11 +447,14 @@ export function createDependencyReportSubmission(options: {
   let blocked: DependencyInvestigationBlockedError | undefined;
   let closing: Promise<void> | undefined;
 
-  const claims = createDependencyClaims({
-    advisory: options.advisory,
-    callerScope: options.callerScope ?? null,
-    callerScopeIsDefault: options.callerScopeIsDefault ?? false,
-  } as unknown as JsonValue);
+  const claims = createDependencyClaims(
+    {
+      advisory: options.advisory,
+      callerScope: options.callerScope ?? null,
+      callerScopeIsDefault: options.callerScopeIsDefault ?? false,
+    } as unknown as JsonValue,
+    (id) => notifyReviewedUse(id),
+  );
   const claimKey = (ref: DependencyClaimReference) =>
     JSON.stringify([ref.id, ref.revision, ref.hash]);
   const applicationId = (id: string) => `application:${id}`;
@@ -839,6 +898,8 @@ export function createDependencyReportSubmission(options: {
     };
     items.set(prepared.input.id, state);
     accepted = undefined;
+    if (cached?.accepted && claims.state(conclusionClaim)?.state === "approved")
+      publishReviewedUse(state, cached);
     return state;
   }
   function setDecision(item: ItemState, decision: Decision) {
@@ -852,6 +913,89 @@ export function createDependencyReportSubmission(options: {
     decisions.set(item.fingerprint, decision);
     item.status = decision.accepted ? "accepted" : "rejected";
     item.feedback = decision.reason;
+    if (decision.accepted) publishReviewedUse(item, decision);
+  }
+
+  function notifyReviewedUse(id: string, review?: DependencyVerdictUpdate) {
+    try {
+      options.onReviewedUse?.(id, review);
+    } catch {
+      // Progress cannot alter the review lifecycle.
+    }
+  }
+
+  function publishReviewedUse(item: ItemState, decision: Decision) {
+    if (!options.onReviewedUse || item.input.kind !== "use") return;
+    try {
+      const { id, use } = item.input;
+      const callSite = reviewedDependencyCallSite(use, item.candidates);
+      if (!callSite && !use.proof?.sink) return;
+      const conditions = use.proof?.conditions ?? [];
+      const proofSites = conditions.flatMap(({ citations }) => citations);
+      if (use.proof?.sink) proofSites.push(use.proof.sink.callSite);
+      const evidence = new Set(decision.evidenceKeys);
+      const exclusions = conditions
+        .filter(({ status }) => status === "ruled_out")
+        .flatMap(({ citations }) => citations);
+      if (use.verdict === "ruled_out") {
+        for (const excerpt of item.excerpts) {
+          if (exclusions.some((site) => covers(excerpt, site)))
+            evidence.add(`excerpt:${digest(excerpt)}`);
+        }
+      }
+
+      // A separately reviewed condition or premise can justify comparing
+      // caller bindings by line content instead of coordinates. Keep every
+      // cited condition and sink at its exact coordinates.
+      const sharedCondition = exclusions.some((site) =>
+        item.excerpts.some(
+          (excerpt) =>
+            (!callSite || !covers(excerpt, callSite)) &&
+            covers(excerpt, site) &&
+            decision.evidenceKeys.includes(`excerpt:${digest(excerpt)}`),
+        ),
+      );
+      const sharedPremise = decidingPremises(
+        item.input.supportingClaims ?? [],
+        evidence,
+      ).some((premise) => {
+        const deciding = new Set(premise.decision?.evidenceKeys);
+        return (
+          premise.excerpts.some(
+            (excerpt) =>
+              (!callSite || !covers(excerpt, callSite)) &&
+              deciding.has(`excerpt:${digest(excerpt)}`),
+          ) ||
+          premise.receipts.some((receipt) =>
+            deciding.has(`receipt:${receipt.key}`),
+          )
+        );
+      });
+      const canGroup = sharedCondition || sharedPremise;
+      if (callSite && canGroup) {
+        for (const excerpt of item.excerpts) {
+          if (
+            excerpt.startLine === excerpt.endLine &&
+            covers(excerpt, callSite) &&
+            !proofSites.some((site) => covers(excerpt, site)) &&
+            evidence.delete(`excerpt:${digest(excerpt)}`)
+          )
+            evidence.add(
+              `caller-line:${createHash("sha256").update(excerpt.text).digest("hex")}`,
+            );
+        }
+      }
+      evidence.delete("advisory");
+      options.onReviewedUse(id, {
+        use,
+        callSite,
+        reason: decision.reason,
+        evidenceKeys: decision.evidenceKeys,
+        sharedEvidenceKeys: canGroup ? [...evidence] : [],
+      });
+    } catch {
+      // Preparing and displaying progress are both best-effort.
+    }
   }
 
   /** Re-read only selected sources and original receipt identities, once per boundary. */

@@ -193,7 +193,10 @@ function evidenceMaterial(claim: PreparedDependencyClaim) {
 }
 
 /** Immutable claim revisions in the existing investigation's review lifecycle. */
-export function createDependencyClaims(context: JsonValue) {
+export function createDependencyClaims(
+  context: JsonValue,
+  onInvalidatedApplication?: (assessmentId: string) => void,
+) {
   const contextHash = dependencyClaimHash(context);
   const history = new Map<string, Map<number, DependencyClaimRecord>>();
   const current = new Map<string, DependencyClaimRecord>();
@@ -253,6 +256,8 @@ export function createDependencyClaims(context: JsonValue) {
       seen.add(selected);
       const record = find(next.ref);
       if (!record || record.state === "stale") continue;
+      if (record.state === "approved" && record.application)
+        onInvalidatedApplication?.(record.application.assessmentId);
       record.state = "stale";
       invalidated.push(reference(record));
       record.error = next.reason;
