@@ -594,13 +594,16 @@ if (git.stdout) process.stdout.write(git.stdout);`;
 
 test("patch model and snapshot filters cannot recover credentials from Git stores", async () => {
   const gitHome = await fixtures.create("patch-store-home-");
-  const configDirectory = join(gitHome, "settings");
+  const configDirectory = join(
+    gitHome,
+    process.platform === "win32" ? "settings[git]{a,b}" : "settings",
+  );
   await mkdir(join(configDirectory, "git"), { recursive: true });
   const config = join(gitHome, "selected.gitconfig");
   const stores = [
     join(gitHome, ".git-credentials"),
     join(configDirectory, "git", "credentials"),
-    join(gitHome, "selected.store"),
+    join(gitHome, "selected-[store]{a,b}.txt"),
   ];
   const environment = {
     HOME: gitHome,
@@ -617,7 +620,9 @@ test("patch model and snapshot filters cannot recover credentials from Git store
       { mode: 0o600, flag: "wx" },
     );
   await createStore(0);
-  await createStore(2);
+  const neighbor = join(configDirectory, "git", "config");
+  const neighborContents = "[fixture]\n source = neighbor\n";
+  await writeFile(neighbor, neighborContents);
   const customHelper =
     "store --file='" +
     stores[2]!.replaceAll("\\", "/").replaceAll("'", "'\\''") +
@@ -631,6 +636,8 @@ test("patch model and snapshot filters cannot recover credentials from Git store
   ]);
   const probe = `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
+if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== ${JSON.stringify(neighborContents)})
+  throw new Error("Cannot read the configuration next to the XDG store");
 const stores = ${JSON.stringify(stores)};
 const environment = { ...process.env, ...${JSON.stringify(environment)} };
 delete environment.GIT_CONFIG_PARAMETERS;
@@ -668,6 +675,7 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
       // Git can create the XDG store after the two native profiles have been
       // selected. The model and snapshot filter must honor its deny rule too.
       await createStore(1);
+      await createStore(2);
       await writeFile(join(repo, probeFile), probe);
       await writeFile(
         join(repo, ".gitattributes"),
@@ -897,6 +905,36 @@ for (const location of ["inside", "outside", "selected"] as const) {
     }, 30_000);
   }
 }
+
+(process.platform === "win32" ? test : test.skip)(
+  "a verbatim-only missing store stops before snapshot or model execution",
+  async () => {
+    const requests: string[] = [];
+    const stream = new PassThrough();
+    const input = new Writable({
+      write(chunk, _encoding, callback) {
+        requests.push(JSON.parse(String(chunk)).method);
+        callback();
+      },
+    });
+    stream.end('{"id":1,"result":{}}\n{"id":4,"result":{"config":{}}}\n');
+    await expect(
+      readSkillCommandOutput(stream, {
+        directory: process.cwd(),
+        prompt: "Synthetic patch",
+        threadSource: "security_remediation",
+        input,
+        permissions: {
+          name: "synthetic",
+          readOnlyPaths: [],
+          credentialStorePaths: [String.raw`\\?\C:\synthetic.\credentials`],
+        },
+      }),
+    ).rejects.toThrow("requires verbatim lookup");
+    for (const method of ["thread/start", "command/exec", "turn/start"])
+      expect(requests).not.toContain(method);
+  },
+);
 
 test("a failed prepared snapshot prevents the model turn and preserves its diagnostic", async () => {
   const stream = new PassThrough();

@@ -467,6 +467,7 @@ import {
   type UpdateNotice,
   VERSION,
 } from "./version.js";
+import { isWindowsUnsafePathComponent } from "./windows-path.js";
 
 import {
   readProjectConfig,
@@ -1544,6 +1545,40 @@ async function removeSnapshotProfiles(profiles: PatchSnapshotProfiles) {
   );
 }
 
+// Use the ordinary spelling only when removing a verbatim prefix preserves
+// Win32 lookup. Device names, dot components and legacy-length handling differ.
+function windowsMissingStorePattern(path: string): string {
+  if (/^\\\\[?.]\\/u.test(path)) {
+    const drive = /^\\\\\?\\([a-z]:\\)/iu;
+    const unc = /^\\\\\?\\UNC\\/iu;
+    const ordinary = drive.test(path)
+      ? path.replace(drive, "$1")
+      : path.replace(unc, "\\\\");
+    const components = ordinary.replace(/^(?:[a-z]:\\|\\\\)/iu, "").split("\\");
+    if (
+      ordinary === path ||
+      ordinary.length >= 260 ||
+      components.some(
+        (part) =>
+          !part ||
+          part === "." ||
+          part === ".." ||
+          isWindowsUnsafePathComponent(part),
+      )
+    )
+      throw new CodexSecurityError(
+        "Cannot isolate an absent Git credential store whose Windows device path requires verbatim lookup.",
+      );
+    path = ordinary;
+  }
+  const escape = (part: string) => part.replace(/[*?[\]{},]/gu, "[$&]");
+  const file = escape(basename(path));
+  // A missing literal can become a directory during native Windows ACL setup.
+  // Braces alone do not select a native glob. The other alternative is a literal
+  // question mark, which cannot name a Windows file.
+  return join(escape(dirname(path)), `{${file},[?]}`);
+}
+
 function patchWorkspaceProfile(
   workspace: JsonObject,
   readOnlyPaths: readonly string[],
@@ -1566,11 +1601,7 @@ function patchWorkspaceProfile(
         credentialStorePaths.map((path) => {
           if (process.platform !== "win32" || existsSync(path))
             return [path, { ".": "deny" }];
-          // A literal deny on Windows can materialize an absent file as a
-          // directory. Match its exact name with an absolute glob instead.
-          const escape = (part: string) => part.replace(/[*?[\]{},]/gu, "[$&]");
-          const file = escape(basename(path));
-          return [join(escape(dirname(path)), `{${file},${file}}`), "deny"];
+          return [windowsMissingStorePattern(path), "deny"];
         }),
       ),
       ...(workspace["exclude_tmpdir_env_var"] === true
