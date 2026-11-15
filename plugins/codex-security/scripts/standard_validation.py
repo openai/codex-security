@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -129,15 +130,20 @@ def require_standard_decisions(scan, findings: dict, coverage: dict) -> None:
     reported = set()
     for finding in findings.get("findings", []):
         root = finding_candidate_id(finding)
-        if root not in outcomes:
-            continue
-        disposition = outcomes[root]["disposition"]
-        if disposition != "reportable":
+        aliases = finding.get("provenance", {}).get("duplicateCandidateIds", [])
+        identities = {root} if root else set()
+        if isinstance(aliases, list):
+            identities.update(alias for alias in aliases if isinstance(alias, str))
+        for identity in identities:
+            if identity not in outcomes and re.fullmatch(r"standard-[0-9]+(?:\.[0-9]+)?", identity):
+                raise RecoverableContractError(
+                    f"Standard ID {identity} has no recorded claim decision."
+                )
+        if root in outcomes and outcomes[root]["disposition"] != "reportable":
             raise RecoverableContractError(
-                f"Standard claim {root} is {disposition} and cannot be a finding."
+                f"Standard claim {root} is {outcomes[root]['disposition']} and cannot be a finding."
             )
-        reported.add(root)
-        reported.update(finding.get("provenance", {}).get("duplicateCandidateIds", []))
+        reported.update(identities)
     deferred = {row.get("candidateId") for row in coverage.get("deferred", [])}
     rejected = {
         (row.get("candidateId"), row["disposition"])

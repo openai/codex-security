@@ -157,5 +157,32 @@ def test_standard_cannot_publish_a_shortlist(tmp_path):
     finding["provenance"]["duplicateCandidateIds"].pop()
     stage.write_text(json.dumps(documents))
     scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(stage))
+    # Both publication paths must reject a candidate ID without a per-claim decision.
+    extra = {
+        **sibling,
+        "identity": {"anchor": "additional-finding"},
+        "provenance": {"source": "local_plugin", "candidateId": "standard-3"},
+    }
+    documents["findings"]["findings"].append(extra)
+    stage.write_text(json.dumps(documents))
+    (scan / "findings.json").write_text(json.dumps(documents["findings"]))
+    draft = scan_command(
+        state, "write-scan-draft", scan_id, "--draft-path", str(stage), check=False
+    )
+    final = scan_command(state, "complete-scan", scan_id, check=False)
+    for result in (draft, final):
+        assert "standard-3 has no recorded claim decision" in result["stderr"]
+
+    # A separate finding can use its own ID. Any Standard aliases still need a claim decision.
+    extra["provenance"]["candidateId"] = "independent-review"
+    extra["provenance"]["duplicateCandidateIds"] = ["standard-1.3"]
+    stage.write_text(json.dumps(documents))
+    rejected = scan_command(
+        state, "write-scan-draft", scan_id, "--draft-path", str(stage), check=False
+    )
+    assert "standard-1.3 has no recorded claim decision" in rejected["stderr"]
+    del extra["provenance"]["duplicateCandidateIds"]
+    stage.write_text(json.dumps(documents))
+    scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(stage))
     completed = scan_command(state, "complete-scan", scan_id)
-    assert completed["scan"]["findingCount"] == 2
+    assert completed["scan"]["findingCount"] == 3
