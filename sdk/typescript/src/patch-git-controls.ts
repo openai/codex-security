@@ -26,6 +26,7 @@ import {
   sep,
 } from "node:path";
 import {
+  httpCredentialFile,
   proxyUserinfo,
   withoutUrlCredentials,
 } from "./patch-publication-hooks.js";
@@ -453,6 +454,30 @@ const realControlPath = async (path: string) =>
 // Append before realpath so a link/.. path keeps the filesystem's meaning.
 const relativeFile = (directory: string, path: string) =>
   isAbsolute(path) ? path : `${directory}${sep}${path}`;
+
+function httpCredentialPath(directory: string, file: string): string {
+  if (process.platform === "win32") {
+    const windowsDirectory = directory.replaceAll("/", "\\");
+    const drive = /^[a-z]:(?![\\/])/iu.exec(file)?.[0];
+    if (drive) {
+      const current = /^(?:\\\\[?.]\\)?([a-z]:)[\\/]/iu.exec(
+        windowsDirectory,
+      )?.[1];
+      if (drive.toLowerCase() !== current?.toLowerCase())
+        throw new Error(
+          "Use a fully qualified path for a Git HTTP credential file on another Windows drive.",
+        );
+      return `${directory}${sep}${file.slice(2)}`;
+    }
+    if (/^[\\/](?![\\/])/u.test(file)) {
+      const volume =
+        /^\\\\[?.]\\UNC\\[^\\]+\\[^\\]+/iu.exec(windowsDirectory)?.[0] ??
+        parse(windowsDirectory).root;
+      return `${volume.replace(/[\\/]$/u, "")}${file}`;
+    }
+  }
+  return relativeFile(directory, file);
+}
 
 async function readGitMarker(
   marker: string | Buffer,
@@ -1259,13 +1284,31 @@ export async function capturePatchGitControls(
   const conditionalFilters = new Set<string>();
   const protectedFilterKeys = () => [...delegateFilters].map(configPath);
   let externalInlineAuthentication = false;
-  const captureCredentialHelper = async (key: string, value: string) => {
-    if (
-      mode === "external" ||
-      !/^credential(?:\..*)?\.helper$/iu.test(key) ||
-      value === ""
-    )
+  const captureCredentialSource = async (
+    checkout: string,
+    configurationDirectory: string,
+    key: string,
+    value: string,
+  ) => {
+    if (mode === "external" || !value) return;
+    if (httpCredentialFile.test(key)) {
+      // The transport may create a cookie jar after capture. Keep host Git
+      // from re-running a checkout filter even when the file is still absent.
+      hostMayReadStore = true;
+      const file = await expandConfigurationPath(configPath(value));
+      if (!file) return;
+      // Git can keep a separate caller's cwd for transport, while snapshot
+      // commands and nested checkouts can use their own setup directory.
+      const paths = new Set([
+        httpCredentialPath(checkout, file),
+        httpCredentialPath(configurationDirectory, file),
+      ]);
+      if (checkout === root && !inside(root, requestedDirectory))
+        paths.add(httpCredentialPath(requestedDirectory, file));
+      for (const path of paths) await protectStore(path);
       return;
+    }
+    if (!/^credential(?:\..*)?\.helper$/iu.test(key)) return;
     if (value === "store") {
       hostMayReadStore = true;
       return;
@@ -1376,7 +1419,9 @@ export async function capturePatchGitControls(
       if (origin.startsWith("file:")) {
         const inline = hasInlineGitAuthentication(key, value);
         if (
-          (inline || /^credential(?:\..*)?\.helper$/iu.test(key)) &&
+          (inline ||
+            httpCredentialFile.test(key) ||
+            /^credential(?:\..*)?\.helper$/iu.test(key)) &&
           (await userSelectedConfig(
             scope,
             configPath(origin),
@@ -1384,7 +1429,12 @@ export async function capturePatchGitControls(
           ))
         ) {
           externalInlineAuthentication ||= inline;
-          await captureCredentialHelper(key, value);
+          await captureCredentialSource(
+            checkout,
+            configurationDirectory,
+            key,
+            value,
+          );
         }
         const path = relativeFile(
           configurationDirectory,
@@ -1392,9 +1442,13 @@ export async function capturePatchGitControls(
         );
         activeConfigurations.add(path);
       } else if (scope === "command") {
-        // Command-scope credentials are filtered from delegates. A configured
-        // store remains a file the delegate could select or open independently.
-        await captureCredentialHelper(key, value);
+        // Removing a command-scope setting does not prevent opening its file.
+        await captureCredentialSource(
+          checkout,
+          configurationDirectory,
+          key,
+          value,
+        );
       }
     }
     const captureHooks = async (configured?: string): Promise<void> => {
@@ -1525,7 +1579,12 @@ export async function capturePatchGitControls(
             key,
             value,
           );
-          await captureCredentialHelper(key, value);
+          await captureCredentialSource(
+            checkout,
+            configurationDirectory,
+            key,
+            value,
+          );
         }
         recordConfiguredHook(
           publicationHooks,
@@ -1651,6 +1710,8 @@ export async function capturePatchGitControls(
   const selectedDirectories = await Promise.all(
     selectedPaths.map(realControlPath),
   );
+  const requestedDirectory =
+    mode === "resumed-hook" ? root : await realControlPath(directory);
   if (mode === "resumed-hook") {
     // Resume has already found a hook. Inspect only its config graph, including
     // inactive includes it could open directly. No private index or working tree
@@ -1664,7 +1725,6 @@ export async function capturePatchGitControls(
   const commonDirectory = selectedDirectories[1]!;
   // A checkout's core.worktree can change Git's reported top-level directory.
   // Anchor implicit metadata to the checkout selected by the caller.
-  const requestedDirectory = await realControlPath(directory);
   const gitDirectorySelected =
     !usesWorktreeMarker ||
     (!usesCommonDirectoryMarker &&

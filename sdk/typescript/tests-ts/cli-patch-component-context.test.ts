@@ -835,6 +835,19 @@ test("isolates relative credential stores selected from an external Git caller",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
   };
+  const cookie = "operator-cookies.txt";
+  await runGitRepositoryCommand(
+    "git",
+    [
+      "config",
+      "--file",
+      environment.GIT_CONFIG_GLOBAL,
+      "http.cookieFile",
+      cookie,
+    ],
+    caller,
+    { environment },
+  );
   const stores = [
     { parent: "home", name: ".git-credentials", host: "home.example.invalid" },
     {
@@ -887,6 +900,10 @@ test("isolates relative credential stores selected from an external Git caller",
   });
   expect(outcome.exitCode, outcome.stderr).toBe(0);
   expect(protectedStores?.toSorted()).toEqual(
-    stores.map(({ parent, name }) => join(caller, parent, name)).sort(),
+    [
+      ...stores.map(({ parent, name }) => join(caller, parent, name)),
+      join(caller, cookie),
+      join(directory, cookie),
+    ].sort(),
   );
 });

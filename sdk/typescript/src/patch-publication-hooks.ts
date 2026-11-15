@@ -6,6 +6,8 @@ import type { PatchPublicationHooks } from "./patch-git-controls.js";
 
 export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
 
+export const httpCredentialFile = /^http(?:\..*)?\.(?:cookiefile|sslkey)$/iu;
+
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
   environment: NodeJS.ProcessEnv,
@@ -48,6 +50,7 @@ export function filterCommandConfig(
   parseGit = spawnSync,
   stripUrlCredentials = withoutUrlCredentials,
   proxyCredentials = proxyUserinfo,
+  credentialFile = httpCredentialFile,
 ): void {
   function credentialSetting(key: string, value: string): boolean {
     if (/^(?:http|remote)(?:\..*)?\.proxy$/i.test(key))
@@ -55,7 +58,8 @@ export function filterCommandConfig(
     return (
       stripUrlCredentials(key) !== key ||
       stripUrlCredentials(value) !== value ||
-      /^credential\.|^http(?:\..*)?\.(?:extraheader|cookiefile|sslkey|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
+      credentialFile.test(key) ||
+      /^credential\.|^http(?:\..*)?\.(?:extraheader|sslcertpasswordprotected)$|^core\.(?:askpass|sshcommand)$/i.test(
         key,
       )
     );
@@ -188,7 +192,7 @@ const removeCredentials = ${removePatchCredentials};
 removeCredentials(environment, plan.credentialNames, plan.stripAwsCredentials, ${proxyUserinfo});
 environment.CODEX_HOME = plan.home;
 
-filterCommandConfig(environment, plan.git, plan.marker, spawnSync, withoutUrlCredentials, ${proxyUserinfo});
+filterCommandConfig(environment, plan.git, plan.marker, spawnSync, withoutUrlCredentials, ${proxyUserinfo}, ${httpCredentialFile});
 const bindings = Object.entries(environment).filter(([name]) =>
   /^(?:GIT_(?:DIR|WORK_TREE|COMMON_DIR|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|INDEX_FILE|PREFIX|EDITOR|ATTR_SOURCE|ATTR_NOSYSTEM|CONFIG(?:_GLOBAL|_SYSTEM|_NOSYSTEM|_PARAMETERS|_COUNT|_(?:KEY|VALUE)_\d+)?)|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|XDG_CONFIG_HOME)$/i.test(
     name,
@@ -270,6 +274,25 @@ function readMessage(opened) {
   }
   return bytes;
 }
+// Create the message under the hook's write grant. On Windows a file
+// created by the host before the sandbox starts can retain a read-only ACL.
+function stageMessage() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const [destination, length] = process.argv.splice(1, 2);
+  const bytes = Buffer.alloc(Number(length));
+  for (let offset = 0; offset < bytes.length;) {
+    const count = fs.readSync(0, bytes, offset, bytes.length - offset, null);
+    if (count === 0) throw new Error("Incomplete commit-message frame.");
+    offset += count;
+  }
+  const fresh = path.join(
+    path.dirname(destination),
+    require("node:crypto").randomUUID(),
+  );
+  fs.writeFileSync(fresh, bytes, { flag: "wx", mode: 0o600 });
+  fs.renameSync(fresh, destination);
+}
 let original, originalBytes, privateMessage;
 let input;
 try {
@@ -289,15 +312,8 @@ try {
       plan.messageDirectory,
       path.basename(plan.message),
     );
-    const fresh = path.join(
-      plan.messageDirectory,
-      require("node:crypto").randomUUID(),
-    );
-    fs.writeFileSync(fresh, originalBytes, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    fs.renameSync(fresh, privateMessage);
+    // A failed launch must not copy back a previous hook's message.
+    fs.rmSync(privateMessage, { force: true });
     // Git for Windows passes slash-separated paths to both native and shell hooks.
     args[0] = privateMessage.split(path.sep).join("/");
   }
@@ -383,8 +399,9 @@ try {
       "--",
       plan.runtime,
       "-e",
-      plan.runner,
+      original ? "(" + stageMessage + ")();\n" + plan.runner : plan.runner,
       "--",
+      ...(original ? [privateMessage, String(originalBytes.length)] : []),
       String(header.length),
       plan.git,
       "-C",
@@ -393,14 +410,17 @@ try {
     ],
     {
       env: environment,
-      input: header,
+      input: original ? Buffer.concat([originalBytes, header]) : header,
       stdio: ["pipe", "inherit", "inherit"],
       windowsHide: true,
     },
   );
   if (result.error) throw result.error;
   // Git keeps a validator's message edits even when it vetoes the commit.
-  if (original) {
+  if (
+    original &&
+    (result.status === 0 || fs.lstatSync(privateMessage, { throwIfNoEntry: false }))
+  ) {
     const edited = openMessage(privateMessage, fs.constants.O_RDONLY);
     try {
       const bytes = readMessage(edited);

@@ -1780,7 +1780,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
   );
 
   test.each([false, true])(
-    "preserves operator remote proxy settings with collision=%j",
+    "preserves the operator's proxy, HTTPS cookie and TLS key with collision=%j",
     async (collision) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
@@ -1796,12 +1796,20 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         await fixtures.create("patch-proxy-config-"),
         "gitconfig",
       );
+      const client = await loopbackTls(config, git, "client");
       const origin = Bun.serve({
-        tls: await loopbackTls(config, git),
+        tls: {
+          ...(await loopbackTls(config, git)),
+          ca: client.cert,
+          requestCert: true,
+          rejectUnauthorized: true,
+        },
         hostname: "127.0.0.1",
         port: 0,
         async fetch(request) {
           requests++;
+          if (request.headers.get("cookie") !== "patch-session=synthetic")
+            return new Response(null, { status: 403 });
           const url = new URL(request.url);
           const child = Bun.spawn(["git", "http-backend"], {
             env: {
@@ -1845,6 +1853,18 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         },
       });
       try {
+        const cookieFile = join(dirname(config), "operator cookies.txt");
+        await writeFile(
+          cookieFile,
+          "# Netscape HTTP Cookie File\n127.0.0.2\tFALSE\t/\tTRUE\t0\tpatch-session\tsynthetic\n",
+        );
+        git(
+          "config",
+          "--file",
+          config,
+          `http.https://127.0.0.2:${origin.port}/.cookieFile`,
+          cookieFile,
+        );
         using proxy = await loopbackProxy(origin.port!);
         git(
           "remote",
@@ -1863,6 +1883,20 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           );
         git("config", "--file", config, "remote.origin.proxy", proxy.url);
         environment["GIT_CONFIG_GLOBAL"] = config;
+        // A public certificate alone cannot complete the client handshake.
+        await expect(
+          promisify(execFile)(
+            "git",
+            [
+              "-c",
+              `http.sslKey=${join(dirname(config), "missing.key")}`,
+              "ls-remote",
+              "origin",
+            ],
+            { cwd: directory, env: environment },
+          ),
+        ).rejects.toThrow();
+        expect(requests).toBe(0);
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
         const outcome = await runWorkflow(
@@ -2212,7 +2246,10 @@ process.exit(result.status ?? 1);
           : {};
       if (transport === "local-fetch-ghrepo" || transport.endsWith("push-only"))
         environment["GH_REPO"] = "upstream-owner/repository";
-      environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
+      environment["GIT_EXEC_PATH"] = tools;
+      environment["PATH"] = [git("--exec-path"), process.env["PATH"]].join(
+        delimiter,
+      );
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] || coreCommand
           ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60' '-o' 'IdentityFile=none' '-oUserKnownHostsFile=NoNe'`
