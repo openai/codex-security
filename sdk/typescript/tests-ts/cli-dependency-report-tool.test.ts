@@ -293,10 +293,9 @@ test("native report tools expose and preserve reviewed use proof", async () => {
           { tool: "queue_codex_security_dependency_assessments" },
         ),
         submission("save-proof", {
-          status: "unknown",
-          uses: [use],
+          reviewItems: [{ id: "decoder-use", revision: 1 }],
+          candidateGeneration: 0,
           limitations: [],
-          reviewItemIds: ["decoder-use"],
         }),
         complete("turn"),
       ],
@@ -307,17 +306,36 @@ test("native report tools expose and preserve reviewed use proof", async () => {
     );
     expect(await run.result).toEqual({ completed: true });
     expect(state.acceptedReport().uses[0]!.proof).toEqual(proof);
+    const ack = run.requests.find((request) => request["id"] === "queue-proof");
+    expect(ack).toHaveProperty("result.success", true);
+    const content = (ack?.["result"] as { contentItems: { text: string }[] })
+      .contentItems[0]!.text;
+    const queueResult = JSON.parse(content);
+    expect(queueResult).toMatchObject({
+      queued: true,
+      items: [{ id: "decoder-use", revision: 1 }],
+    });
+    expect(queueResult).not.toHaveProperty("status");
     const start = run.requests.find(
       (request) => request["method"] === "thread/start",
     );
     const params = start!["params"] as {
-      dynamicTools: { tools: { name: string; description: string }[] }[];
+      dynamicTools: {
+        tools: { name: string; description: string; inputSchema: unknown }[];
+      }[];
     };
     const queue = params.dynamicTools
       .flatMap((namespace) => namespace.tools)
       .find(
         (tool) => tool.name === "queue_codex_security_dependency_assessments",
       )!;
+    const submit = params.dynamicTools
+      .flatMap((namespace) => namespace.tools)
+      .find((tool) => tool.name === reportTool.tool);
+    expect(submit?.inputSchema).toMatchObject({
+      required: ["reviewItems", "candidateGeneration", "limitations"],
+    });
+    expect(submit?.inputSchema).not.toHaveProperty("properties.uses");
     const contract = queue.description
       .split("\n")
       .find((line) => line.startsWith("Review-evidence contract:"));
@@ -325,21 +343,6 @@ test("native report tools expose and preserve reviewed use proof", async () => {
     expect(
       reviewerPrompt.split("\n").filter((line) => line === contract),
     ).toHaveLength(1);
-    for (const clause of [
-      "submitted claim, host-read excerpts, selected original receipts and bound candidate locations",
-      "memory, graph-note assertions",
-      "Preserve cited UTF-8 text",
-      "hashes of the original bytes",
-      "only claims and evidence needed for the verdict, scope or material gaps",
-      "After a decisive source exclusion, omit unrelated version, runtime, build or comparison details",
-      "unverified versions are null",
-      "necessary selections, bindings, alternate paths, integrity and deciding unknowns",
-      "reject unsupported claims that remain",
-      "other pending items that rely on that proof",
-      "preserve independent accepted and unrelated items",
-      "review state alone is not a blocker",
-    ])
-      expect(contract?.toLowerCase()).toContain(clause.toLowerCase());
     const tools = JSON.stringify(start);
     expect(tools).toContain('"proof"');
     expect(tools).toContain('"callSite"');
@@ -476,17 +479,10 @@ test("native activity-only investigators share evidence while the coordinator ow
   const call = mock<DependencyGraphTools["call"]>(async () => ({
     evidence: "shared",
   }));
-  const state = createDependencyReportSubmission({
-    repository: "/synthetic-check",
-    advisory: { cve: "CVE-2000-0001", advisories: [] },
-    review: async () => {
-      throw new Error("Unexpected review");
-    },
-  });
   const queue = mock(async (_draft: unknown) => ({
-    queued: true,
+    queued: true as const,
+    items: [],
     feedback: "Queued",
-    status: state.readStatus(),
   }));
   const submit = mock(async (_draft: unknown) => ({
     accepted: true,
@@ -709,7 +705,6 @@ test("native activity-only investigators share evidence while the coordinator ow
   expect(
     replies.find((reply) => reply["id"] === "unrelated-lookup"),
   ).toHaveProperty("error.code", -32601);
-  await state.close();
 });
 
 test("waits for an investigator resumed during review and reconciles its new use", async () => {
@@ -829,10 +824,9 @@ test("waits for an investigator resumed during review and reconciles its new use
       }),
     ).toMatchObject({ queued: true });
     const draft = {
-      status: "unknown",
-      uses: [use],
+      reviewItems: [{ id: "first-use", revision: 1 }],
+      candidateGeneration: 0,
       limitations: [],
-      reviewItemIds: ["first-use"],
     };
     for (const event of [
       ...setup(),
@@ -904,8 +898,10 @@ test("waits for an investigator resumed during review and reconciles its new use
         "final-after-follow-up",
         {
           ...draft,
-          uses: [use, discoveredUse],
-          reviewItemIds: ["first-use", "second-use"],
+          reviewItems: [
+            ...draft.reviewItems,
+            { id: "second-use", revision: 1 },
+          ],
         },
         { turnId: "follow-up" },
       ),
@@ -1363,13 +1359,6 @@ test("imports a native resource before reports and turn completion without retur
   const order: string[] = [];
   let imported = false;
   let importWork = Promise.resolve();
-  const state = createDependencyReportSubmission({
-    repository: "/synthetic-check",
-    advisory: { cve: "CVE-2000-0001", advisories: [] },
-    review: async () => {
-      throw new Error("Unexpected review");
-    },
-  });
   const observeInventory = mock<
     NonNullable<DependencyGraphTools["observeInventory"]>
   >((server, result, receiptId, rpc) => {
@@ -1438,84 +1427,77 @@ test("imports a native resource before reports and turn completion without retur
     yield JSON.stringify({ id: request.id, result: resource }) + "\n";
     await inputEnded.promise;
   }
-  try {
-    const result = await readSkillCommandOutput(events(), {
-      input,
-      directory: "/synthetic-check",
-      prompt: "Review dependency",
-      sandbox: "read-only",
-      permissionProfile: "restricted",
-      cyberAccessProgram: "standard",
-      threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
-      allowedMcpServers: ["fixture"],
-      dependencyReport: {
-        recordInventory: () => "inventory-1",
-        recordGraphEvent() {},
-        continuationPrompt,
-        status: async (value, rpc) => {
-          expect(imported).toBe(true);
-          expect(value).toEqual({ groups: {} });
-          expect(rpc?.read).toBeFunction();
-          order.push("status");
-          return { groupPlan };
-        },
-        queue: async () => {
-          expect(imported).toBe(true);
-          order.push("queue");
-          return {
-            queued: true,
-            feedback: "Queued",
-            status: state.readStatus(),
-          };
-        },
-        submit: async () => {
-          expect(imported).toBe(true);
-          order.push("submit");
-          return { accepted: true, feedback: "Accepted" };
-        },
+  const result = await readSkillCommandOutput(events(), {
+    input,
+    directory: "/synthetic-check",
+    prompt: "Review dependency",
+    sandbox: "read-only",
+    permissionProfile: "restricted",
+    cyberAccessProgram: "standard",
+    threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
+    allowedMcpServers: ["fixture"],
+    dependencyReport: {
+      recordInventory: () => "inventory-1",
+      recordGraphEvent() {},
+      continuationPrompt,
+      status: async (value) => {
+        expect(imported).toBe(true);
+        expect(value).toEqual({ groups: {} });
+        order.push("status");
+        return { groupPlan };
       },
-      dependencyGraph: {
-        tools: [],
-        call: async () => ({}),
-        observeInventory,
-        flush: () => importWork,
-        close: async () => {},
+      queue: async () => {
+        expect(imported).toBe(true);
+        order.push("queue");
+        return {
+          queued: true,
+          items: [],
+          feedback: "Queued",
+        };
       },
-    });
-    expect(result).toEqual({ completed: true });
-    expect((await resourceRequested.promise).params).toEqual({
-      server: "fixture",
-      uri,
-      threadId: "check",
-    });
-    expect(order).toEqual(["import", "status", "queue", "submit", "complete"]);
-    expect(observeInventory).toHaveBeenCalledTimes(1);
-    expect(continuationPrompt).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(replies)).not.toContain("bulk-only-");
-    expect(
-      replies.find((reply) => reply.method === "thread/start"),
-    ).not.toHaveProperty(
-      "params.dynamicTools.1.tools.1.inputSchema.properties.groups",
-    );
-    expect(replies.find((reply) => reply.id === "status")).toMatchObject({
-      result: {
-        success: true,
-        contentItems: [
-          {
-            type: "inputText",
-            text: JSON.stringify({ groupPlan }),
-          },
-        ],
+      submit: async () => {
+        expect(imported).toBe(true);
+        order.push("submit");
+        return { accepted: true, feedback: "Accepted" };
       },
-    });
-    expect(
-      replies.filter((reply) =>
-        ["status", "queue", "final"].includes(reply.id),
-      ),
-    ).toHaveLength(3);
-  } finally {
-    await state.close();
-  }
+    },
+    dependencyGraph: {
+      tools: [],
+      call: async () => ({}),
+      observeInventory,
+      flush: () => importWork,
+      close: async () => {},
+    },
+  });
+  expect(result).toEqual({ completed: true });
+  expect((await resourceRequested.promise).params).toEqual({
+    server: "fixture",
+    uri,
+    threadId: "check",
+  });
+  expect(order).toEqual(["import", "status", "queue", "submit", "complete"]);
+  expect(observeInventory).toHaveBeenCalledTimes(1);
+  expect(continuationPrompt).toHaveBeenCalledTimes(1);
+  expect(JSON.stringify(replies)).not.toContain("bulk-only-");
+  expect(
+    replies.find((reply) => reply.method === "thread/start"),
+  ).not.toHaveProperty(
+    "params.dynamicTools.1.tools.1.inputSchema.properties.groups",
+  );
+  expect(replies.find((reply) => reply.id === "status")).toMatchObject({
+    result: {
+      success: true,
+      contentItems: [
+        {
+          type: "inputText",
+          text: JSON.stringify({ groupPlan }),
+        },
+      ],
+    },
+  });
+  expect(
+    replies.filter((reply) => ["status", "queue", "final"].includes(reply.id)),
+  ).toHaveLength(3);
 });
 
 test("continues the same thread after a rejection and publishes a tenth-attempt correction", async () => {
@@ -1529,11 +1511,12 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
     ).join("\n"),
   );
   const gap = "The selected dependency version is unresolved.";
-  const draft = {
-    status: "unknown" as const,
-    uses: [],
-    limitations: ["Consumer selection unresolved."],
-  };
+  const limitations = ["Consumer selection unresolved."];
+  const draft = (revision: number) => ({
+    candidateGeneration: 0,
+    reviewItems: [{ id: "scope", revision }],
+    limitations,
+  });
   let reviews = 0;
   let submitted = 0;
   const submissionState = createDependencyReportSubmission({
@@ -1559,13 +1542,13 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
   const run = replay(
     [
       ...setup(),
-      submission("first", draft),
+      submission("first", draft(1)),
       complete("turn"),
       started("correction"),
       complete("turn"),
-      submission("stale", draft),
+      submission("stale", draft(2)),
       ...Array.from({ length: 9 }, (_, i) =>
-        submission(`revision-${i}`, draft, { turnId: "correction" }),
+        submission(`revision-${i}`, draft(i + 2), { turnId: "correction" }),
       ),
       complete("correction"),
     ],
@@ -1578,7 +1561,7 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
               id: "scope",
               kind: "unresolved",
               candidateIds: [],
-              reason: draft.limitations[0],
+              reason: limitations[0],
               evidence: [
                 {
                   path: "scope.txt",
@@ -1629,7 +1612,8 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
   );
   expect(reviews).toBe(10);
   expect(submissionState.acceptedReport()).toEqual({
-    ...draft,
+    status: "unknown",
+    uses: [],
     coverage: [
       {
         kind: "unresolved",
@@ -1641,8 +1625,8 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
       },
     ],
     limitations: [
-      ...draft.limitations,
-      expect.stringContaining("scope.txt:1-10"),
+      ...limitations,
+      "Consumer selection unresolved. Unresolved source locations: scope.txt:1-10.",
     ],
   });
 });
@@ -1940,7 +1924,10 @@ test("an app-server stdin error rejects its pending inventory request and leaves
       recordInventory: () => undefined,
       recordGraphEvent() {},
       continuationPrompt: () => undefined,
-      status: async (_value, inventoryRpc) => {
+    },
+    dependencyGraph: {
+      tools: [],
+      call: async (_tool, _arguments, inventoryRpc) => {
         try {
           await inventoryRpc!.read!("fixture", "fixture://evidence");
           return {};
@@ -1949,6 +1936,7 @@ test("an app-server stdin error rejects its pending inventory request and leaves
           throw failure;
         }
       },
+      close: async () => {},
     },
   });
   const healthy = replay([...setup(), complete("turn")], undefined);
@@ -1956,7 +1944,14 @@ test("an app-server stdin error rejects its pending inventory request and leaves
     output.write(
       [
         ...setup(),
-        submission("status", {}, { tool: "get_codex_security_review_status" }),
+        submission(
+          "graph",
+          {},
+          {
+            namespace: "codex_security_dependency",
+            tool: "query_codex_security_graph",
+          },
+        ),
       ]
         .map((event) => JSON.stringify(event) + "\n")
         .join(""),

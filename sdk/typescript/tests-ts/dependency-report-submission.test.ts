@@ -106,6 +106,178 @@ function draft(): DependencyAssessment {
   };
 }
 
+function finalize(
+  submission: ReturnType<typeof createDependencyReportSubmission>,
+  limitations: string[],
+  ids: string[] = [],
+) {
+  const { candidateGeneration, items } = submission.readStatus();
+  return submission.submit({
+    reviewItems: ids.map((id) => {
+      const selected = items.find((item) => item.id === id);
+      if (!selected) throw new Error(`No queued assessment for ${id}`);
+      return { id, revision: selected.revision };
+    }),
+    candidateGeneration,
+    limitations,
+  });
+}
+
+function queueUse(
+  submission: ReturnType<typeof createDependencyReportSubmission>,
+  use: DependencyAssessment["uses"][number],
+  id = "worker",
+) {
+  return submission.queue({
+    items: [{ id, kind: "use", candidateIds: [], use }],
+  });
+}
+
+test("distinguishes default scope from an explicit deployment assumption", async () => {
+  await using repo = await scopedTemporaryDirectory("review-caller-scope-");
+  await writeFile(join(repo.path, "worker.ts"), "start\nchecked entry\n");
+  const callerScope =
+    "Assess the service and assume the worker is not deployed.";
+  const use: DependencyAssessment["uses"][number] = {
+    ...draft().uses[0]!,
+    place: {
+      kind: "job",
+      environment: null,
+      revision: null,
+      artifact: null,
+      observationWindow: null,
+      deploymentBasis: "assumed_not_deployed",
+      deploymentDetail: "assume the worker is not deployed",
+      dependencySelection: null,
+      patch: null,
+      unresolvedQuestions: [],
+    },
+  };
+  const run = async (callerScopeIsDefault?: true) => {
+    const reviewed: unknown[] = [];
+    const submission = createDependencyReportSubmission({
+      repository: repo.path,
+      advisory,
+      callerScope,
+      ...(callerScopeIsDefault && { callerScopeIsDefault }),
+      review: async (prompt) => {
+        reviewed.push(reviewPacket(prompt));
+        return reviewDecision(prompt, approved);
+      },
+    });
+    try {
+      const acknowledgment = await queueUse(submission, use);
+      if (!callerScopeIsDefault) {
+        expect(await finalize(submission, [], ["worker"])).toMatchObject({
+          accepted: true,
+        });
+        expect(submission.publicReport().assumptions).toEqual([callerScope]);
+        expect(reviewed).toEqual([expect.objectContaining({ callerScope })]);
+      } else {
+        expect(reviewed).toEqual([]);
+      }
+      return acknowledgment;
+    } finally {
+      await submission.close();
+    }
+  };
+  expect(await run(true)).toMatchObject({
+    queued: false,
+    feedback: expect.stringContaining("explicit"),
+  });
+  expect(await run()).toMatchObject({ queued: true });
+});
+
+test("requires a current generation and re-reviews changed source before finalizing", async () => {
+  await using repo = await scopedTemporaryDirectory("review-changed-source-");
+  const file = join(repo.path, "worker.ts");
+  await writeFile(file, "start\nchecked entry\n");
+  let reviews = 0;
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    review: async (prompt) => {
+      reviews++;
+      return reviewDecision(prompt, approved);
+    },
+  });
+  try {
+    const acknowledgment = await queueUse(submission, draft().uses[0]!);
+    expect(acknowledgment).toEqual({
+      queued: true,
+      items: [{ id: "worker", revision: 1 }],
+      feedback: expect.any(String),
+    });
+    expect(
+      await submission.submit({
+        reviewItems: [{ id: "worker", revision: 1 }],
+        candidateGeneration: 1,
+        limitations: [],
+      }),
+    ).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("candidate generation changed"),
+    });
+    await writeFile(file, "start\nupdated entry\n");
+    expect(await finalize(submission, [], ["worker"])).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining(
+        "Evidence changed for worker (revision 2)",
+      ),
+    });
+    expect(await finalize(submission, [], ["worker"])).toMatchObject({
+      accepted: true,
+    });
+    expect(
+      submission.readStatus({ assessmentIds: ["worker"] }).assessmentItems?.[0]
+        ?.revision,
+    ).toBe(2);
+    expect(reviews).toBeGreaterThan(0);
+  } finally {
+    await submission.close();
+  }
+});
+
+test("findings queued during final review cannot disappear from the report", async () => {
+  await using repo = await scopedTemporaryDirectory("review-late-use-");
+  await writeFile(join(repo.path, "worker.ts"), "start\nchecked entry\n");
+  const reviewing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    review: async (prompt) => {
+      reviewing.resolve();
+      await release.promise;
+      return reviewDecision(prompt, approved);
+    },
+  });
+  try {
+    const [use] = draft().uses;
+    expect((await queueUse(submission, use!)).queued).toBe(true);
+    const finalizing = finalize(submission, [], ["worker"]);
+    await reviewing.promise;
+    expect(
+      (await queueUse(submission, { ...use!, location: "second" }, "second"))
+        .queued,
+    ).toBe(true);
+    release.resolve();
+    expect(await finalizing).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("changed during finalization"),
+    });
+    expect(await finalize(submission, [], ["worker", "second"])).toMatchObject({
+      accepted: true,
+    });
+    expect(
+      submission.acceptedReport().uses.map(({ location }) => location),
+    ).toEqual(["worker", "second"]);
+  } finally {
+    release.resolve();
+    await submission.close();
+  }
+});
+
 test("starts queued review promptly, coalesces items and preserves reviewer concurrency without finalization", async () => {
   await using repo = await scopedTemporaryDirectory("review-dispatch-");
   await writeFile(join(repo.path, "worker.ts"), "const value = 1;\n");
@@ -188,12 +360,11 @@ test("keeps reviewed source exclusions in the final report", async () => {
       }),
     ).toMatchObject({ queued: true });
     expect(
-      await submission.submit({
-        status: "unknown",
-        uses: [],
-        limitations: ["The assessment covers the selected output operation."],
-        reviewItemIds: ["output-scope"],
-      }),
+      await finalize(
+        submission,
+        ["The assessment covers the selected output operation."],
+        ["output-scope"],
+      ),
     ).toMatchObject({ accepted: true });
     expect(submission.acceptedReport()).toHaveProperty("coverage", [exclusion]);
     expect(submission.acceptedReport().uses).toEqual([]);
@@ -351,13 +522,13 @@ test("accounts for exact test-only candidates in one reviewed production-scope d
         unresolved,
       ],
     });
-    const report = {
-      status: "unknown",
-      uses: [],
-      limitations: ["The selected production image scope is explicit."],
-      reviewItemIds: [grouped.id, "build", unresolved.id],
-    };
-    expect(await submission.submit(report)).toMatchObject({ accepted: true });
+    expect(
+      await finalize(
+        submission,
+        ["The selected production image scope is explicit."],
+        [grouped.id, "build", unresolved.id],
+      ),
+    ).toMatchObject({ accepted: true });
     expect(groupReviews).toBe(1);
     expect(submission.acceptedReport().coverage?.[0]).toMatchObject({
       classification,
@@ -426,12 +597,11 @@ test("a scoped reviewer can reject a test dismissal for an explicitly included C
       queued: true,
     });
     expect(
-      await submission.submit({
-        status: "unknown",
-        uses: [],
-        limitations: ["The requested caller scope includes CI."],
-        reviewItemIds: [item.id],
-      }),
+      await finalize(
+        submission,
+        ["The requested caller scope includes CI."],
+        [item.id],
+      ),
     ).toMatchObject({
       accepted: false,
       feedback: expect.stringContaining("includes this CI connector"),
@@ -509,20 +679,17 @@ test.each(["dismissed", "use"] as const)(
       kind === "use"
         ? { ...identity, kind, use: makeUse(testOnly) }
         : { ...identity, kind, reason: testOnly, evidence, observations: [] };
-    const submit = (reason?: string, found = true) =>
-      state.submit({
-        status: found ? "ruled_out" : "unknown",
-        uses: found ? [makeUse(reason!)] : [],
-        limitations: found
-          ? []
-          : ["The implicated test call is within requested scope."],
-        reviewItemIds: [identity.id],
-      });
+    const submit = () =>
+      finalize(
+        state,
+        ["The implicated test call is within requested scope."],
+        [identity.id],
+      );
     try {
       expect(await state.queue({ items: [first] })).toMatchObject({
         queued: true,
       });
-      expect(await submit(testOnly, kind === "use")).toMatchObject({
+      expect(await submit()).toMatchObject({
         accepted: false,
         feedback: expect.stringContaining("Test status cannot exclude"),
       });
@@ -530,7 +697,7 @@ test.each(["dismissed", "use"] as const)(
       expect(
         await state.queue({ items: [{ ...identity, kind: "use", use }] }),
       ).toMatchObject({ queued: true });
-      expect(await submit(ordinaryExclusion)).toMatchObject({ accepted: true });
+      expect(await submit()).toMatchObject({ accepted: true });
     } finally {
       await state.close();
     }
@@ -589,11 +756,11 @@ test("reviews structured sink and condition claims and preserves only the approv
     submission.queue({
       items: [{ id: "decoder", kind: "use", candidateIds: [], use: value }],
     });
-  const final = (value: typeof use) =>
+  const final = (revision: number) =>
     submission.submit({
-      ...report,
-      uses: [value],
-      reviewItemIds: ["decoder"],
+      candidateGeneration: 0,
+      limitations: report.limitations,
+      reviewItems: [{ id: "decoder", revision }],
     });
   try {
     expect(await queue(use)).toMatchObject({ queued: true });
@@ -608,14 +775,15 @@ test("reviews structured sink and condition claims and preserves only the approv
     changed.proof!.conditions[0]!.status = "met";
     changed.proof!.conditions[0]!.explanation =
       "The caller selects unsafe mode.";
-    expect(await final(changed)).toMatchObject({
-      accepted: false,
-      feedback: expect.stringContaining("must exactly match"),
+    expect(await queue(changed)).toMatchObject({
+      queued: true,
+      items: [{ id: "decoder", revision: 2 }],
     });
-    expect(reviews).toBe(1);
-
-    expect(await queue(changed)).toMatchObject({ queued: true });
-    expect(await final(changed)).toMatchObject({
+    expect(await final(1)).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("changed from revision 1 to 2"),
+    });
+    expect(await final(2)).toMatchObject({
       accepted: false,
       feedback: expect.stringContaining("contradicting the met condition"),
     });
@@ -626,7 +794,7 @@ test("reviews structured sink and condition claims and preserves only the approv
     expect(reviews).toBe(2);
 
     expect(await queue(use)).toMatchObject({ queued: true });
-    expect(await final(use)).toMatchObject({ accepted: true });
+    expect(await final(3)).toMatchObject({ accepted: true });
     expect(reviews).toBe(2);
     expect(submission.acceptedReport().uses[0]!.proof).toEqual(use.proof);
   } finally {
@@ -671,10 +839,10 @@ test("an unconfirmed graph requires a fresh query and reopens changed accepted c
     status: "failed",
   });
   state.recordGraphEvent("item/completed", graphItem("old", 1, 0));
-  expect((await state.submit(report)).accepted).toBe(false);
+  expect((await finalize(state, report.limitations)).accepted).toBe(false);
   state.recordGraphEvent("item/started", graphItem("new", 1, 0));
   state.recordGraphEvent("item/completed", graphItem("new", 1, 0));
-  expect((await state.submit(report)).accepted).toBe(true);
+  expect((await finalize(state, report.limitations)).accepted).toBe(true);
   state.recordGraphEvent("item/completed", graphItem("new-work", 2, 1));
   expect(() => state.acceptedReport()).toThrow(
     "evidence changed after finalization",
@@ -709,12 +877,12 @@ test("a sibling source finding reopens the report while duplicate note reads pre
   }
   try {
     state.recordGraphEvent("item/completed", sourceNotes(0));
-    expect((await state.submit(report)).accepted).toBe(true);
+    expect((await finalize(state, report.limitations)).accepted).toBe(true);
     state.recordGraphEvent("item/completed", sourceNotes(1));
     expect(() => state.acceptedReport()).toThrow(
       "evidence changed after finalization",
     );
-    expect((await state.submit(report)).accepted).toBe(true);
+    expect((await finalize(state, report.limitations)).accepted).toBe(true);
     state.recordGraphEvent("item/completed", sourceNotes(1));
     expect(state.acceptedReport()).toEqual(report);
   } finally {
@@ -742,7 +910,7 @@ test.each(["native", "resource", "failed resource", "empty resource"])(
       limitations: ["Runtime evidence is incomplete."],
     };
     try {
-      expect((await state.submit(report)).accepted).toBe(true);
+      expect((await finalize(state, report.limitations)).accepted).toBe(true);
       if (kind === "native") {
         state.recordInventory(
           "inventory",
@@ -778,7 +946,7 @@ test.each(["native", "resource", "failed resource", "empty resource"])(
       expect(state.continuationPrompt()).toContain(
         "evidence changed after finalization",
       );
-      expect((await state.submit(report)).accepted).toBe(true);
+      expect((await finalize(state, report.limitations)).accepted).toBe(true);
       expect(state.acceptedReport()).toEqual(report);
     } finally {
       await state.close();
@@ -808,7 +976,10 @@ test("duplicate inventory preserves acceptance and new evidence preserves unchan
   const receiptId = state.recordInventory("inventory", original, metadata);
   const report = draft();
   try {
-    expect((await state.submit(report)).accepted).toBe(true);
+    await queueUse(state, report.uses[0]!);
+    expect(
+      (await finalize(state, report.limitations, ["worker"])).accepted,
+    ).toBe(true);
     expect(
       state.recordInventory("inventory", structuredClone(original), metadata),
     ).toBe(receiptId);
@@ -822,7 +993,9 @@ test("duplicate inventory preserves acceptance and new evidence preserves unchan
     expect(() => state.acceptedReport()).toThrow(
       "evidence changed after finalization",
     );
-    expect((await state.submit(report)).accepted).toBe(true);
+    expect(
+      (await finalize(state, report.limitations, ["worker"])).accepted,
+    ).toBe(true);
     expect(state.acceptedReport()).toEqual(report);
     expect(reviews).toBe(1);
   } finally {
@@ -850,7 +1023,8 @@ test("inventory arriving during final review rejects the stale report without re
   });
   try {
     const report = draft();
-    const finalizing = state.submit(report);
+    await queueUse(state, report.uses[0]!);
+    const finalizing = finalize(state, report.limitations, ["worker"]);
     await reviewStarted.promise;
     state.recordInventory(
       "inventory",
@@ -865,7 +1039,9 @@ test("inventory arriving during final review rejects the stale report without re
       ),
     });
     expect(() => state.acceptedReport()).toThrow("changed during finalization");
-    expect((await state.submit(report)).accepted).toBe(true);
+    expect(
+      (await finalize(state, report.limitations, ["worker"])).accepted,
+    ).toBe(true);
     expect(state.acceptedReport()).toEqual(report);
     expect(reviews).toBe(1);
   } finally {
@@ -921,9 +1097,15 @@ test.each(["exclusion", "unknown use", "scope gap"])(
           "The selected artifact's patch state is unknown.";
       } else if (kind === "scope gap") {
         report.status = "unknown";
+        report.uses = [];
         await queueScopeGap(state, "A selected caller handoff is unverified.");
       }
-      expect(await state.submit(report)).toMatchObject({ accepted: true });
+      if (report.uses.length) await queueUse(state, report.uses[0]!);
+      expect(
+        await finalize(state, report.limitations, [
+          kind === "scope gap" ? "scope" : "worker",
+        ]),
+      ).toMatchObject({ accepted: true });
       expect(reviews).toBeGreaterThan(0);
       expect(state.acceptedReport()).toMatchObject({
         status: kind === "exclusion" ? "ruled_out" : "unknown",
@@ -963,12 +1145,16 @@ test("uncompleted service work can only yield a reviewed, explicitly partial ass
       ...(failed ? { status: "failed" } : {}),
     });
     const report = draft();
-    report.status = "unknown";
+    await queueUse(state, report.uses[0]!);
     if (pending || failed) {
       for (let i = 0; i < 9; i++)
-        expect((await state.submit(report)).accepted).toBe(false);
+        expect(
+          (await finalize(state, report.limitations, ["worker"])).accepted,
+        ).toBe(false);
     }
-    expect((await state.submit(report)).accepted).toBe(true);
+    expect(
+      (await finalize(state, report.limitations, ["worker"])).accepted,
+    ).toBe(true);
     expect(reviews).toBe(1);
     const partial = state.acceptedReport();
     expect(partial.status).toBe("unknown");
@@ -1003,7 +1189,10 @@ test("returns scoped feedback to the investigator and publishes only the approve
     },
   });
   const original = draft();
-  const rejection = await submission.submit(original);
+  await queueUse(submission, original.uses[0]!);
+  const rejection = await finalize(submission, original.limitations, [
+    "worker",
+  ]);
   expect(rejection.accepted).toBe(false);
   for (const feedback of [
     rejection.feedback,
@@ -1022,11 +1211,16 @@ test("returns scoped feedback to the investigator and publishes only the approve
   expect(packets[0]).not.toContain("check(entry);");
   const corrected = draft();
   corrected.uses[0]!.evidence[0]!.endLine = 3;
-  expect((await submission.submit(corrected)).accepted).toBe(true);
+  await queueUse(submission, corrected.uses[0]!);
+  expect(
+    (await finalize(submission, corrected.limitations, ["worker"])).accepted,
+  ).toBe(true);
   expect(packets[1]).toContain("check(entry);");
   expect(packets[1]).not.toContain(gap.reason);
   expect(submission.acceptedReport()).toEqual(corrected);
-  expect((await submission.submit(original)).accepted).toBe(false);
+  expect(
+    (await finalize(submission, original.limitations, ["worker"])).accepted,
+  ).toBe(false);
   original.uses[0]!.reason = "Unrelated assertion";
   expect(submission.acceptedReport()).toEqual(corrected);
   expect(packets).toHaveLength(2);
@@ -1052,7 +1246,7 @@ test("reviews an explicitly cited search lead and requires a disposition for a l
   const use = report.uses[0]!;
   use.evidence[0]!.startLine = 1;
   const item = { id: "worker", kind: "use", use };
-  const final = { ...report, reviewItemIds: [item.id] };
+  const final = () => finalize(state, report.limitations, [item.id]);
   await candidates.observeGraph("trace_codex_security_code", {
     textMatches: [{ source: "worker.ts", text: "check", lines: [2] }],
   });
@@ -1061,19 +1255,19 @@ test("reviews an explicitly cited search lead and requires a disposition for a l
   ).toMatchObject({
     queued: true,
   });
-  expect((await state.submit(final)).accepted).toBe(true);
+  expect((await final()).accepted).toBe(true);
 
   const [call] = await candidates.observeGraph("query_codex_security_graph", {
     paths: [{ relation: "candidate_call", source: "worker.ts", line: 2 }],
   });
-  expect(await state.submit(final)).toMatchObject({
+  expect(await final()).toMatchObject({
     accepted: false,
     feedback: expect.stringContaining(call!.id),
   });
   expect(
     await state.queue({ items: [{ ...item, candidateIds: [call!.id] }] }),
   ).toMatchObject({ queued: true });
-  expect((await state.submit(final)).accepted).toBe(true);
+  expect((await final()).accepted).toBe(true);
   expect(state.acceptedReport()).toEqual(report);
 });
 
@@ -1145,19 +1339,17 @@ test("reviews each package declared on the same manifest line under its own iden
     observations: [],
   }));
   expect(await state.queue({ items })).toMatchObject({ queued: true });
-  const report = { status: "unknown", uses: [], limitations: [] };
-  expect(
-    await state.submit({ ...report, reviewItemIds: [items[0]!.id] }),
-  ).toMatchObject({
+  expect(await finalize(state, [], [items[0]!.id])).toMatchObject({
     accepted: false,
     feedback: expect.stringContaining(traced[1]!.id),
   });
   expect(
     (
-      await state.submit({
-        ...report,
-        reviewItemIds: items.map(({ id }) => id),
-      })
+      await finalize(
+        state,
+        [],
+        items.map(({ id }) => id),
+      )
     ).accepted,
   ).toBe(true);
   expect(reviewed).toMatchObject(
@@ -1190,17 +1382,21 @@ test("compares the version with an independent reading of the same use's citatio
       return reviewDecision(prompt, approved, citedVersion);
     },
   });
-  expect((await submission.submit(report)).feedback).toContain(literal);
+  const submit = async () => {
+    await queueUse(submission, use);
+    return finalize(submission, report.limitations, ["worker"]);
+  };
+  expect((await submit()).feedback).toContain(literal);
   use.version = null;
-  expect((await submission.submit(report)).accepted).toBe(false);
+  expect((await submit()).accepted).toBe(false);
   use.version = literal;
   citedVersion = null;
-  expect((await submission.submit(report)).accepted).toBe(false);
+  expect((await submit()).accepted).toBe(false);
   citedVersion = literal;
   // An unchanged rejected packet keeps its decision. Add the missing context.
-  expect((await submission.submit(report)).accepted).toBe(false);
+  expect((await submit()).accepted).toBe(false);
   use.evidence[0]!.startLine = 1;
-  expect((await submission.submit(report)).accepted).toBe(true);
+  expect((await submit()).accepted).toBe(true);
   expect(submission.acceptedReport().uses[0]!.version).toBe(literal);
 });
 
@@ -1264,13 +1460,27 @@ test("each use needs its own deciding citation, even when both appear in the sam
     },
   });
   submission.recordInventory("inventory", { text: "second unit inventory" });
-  expect(await submission.submit(assessment)).toMatchObject({
+  await submission.queue({
+    items: [first, second].map((use) => ({
+      id: use.location,
+      kind: "use",
+      candidateIds: [],
+      use,
+    })),
+  });
+  expect(
+    await finalize(submission, assessment.limitations, ["one", "two"]),
+  ).toMatchObject({
     accepted: false,
     feedback: expect.stringContaining(gap.reason),
   });
   expect(reviewedLocations).toEqual([["one", "two"]]);
   first.evidence.push(receipt);
-  expect((await submission.submit(assessment)).accepted).toBe(true);
+  await queueUse(submission, first, "one");
+  expect(
+    (await finalize(submission, assessment.limitations, ["one", "two"]))
+      .accepted,
+  ).toBe(true);
   // Its unchanged sibling keeps approval while the corrected item is reviewed.
   expect(reviewedLocations).toEqual([["one", "two"], ["one"]]);
 });
@@ -1343,13 +1553,7 @@ test("reads the exact shared item for an in-place citation repair", async () => 
     }),
   ).toMatchObject({ queued: true });
   const id = "route";
-  const report = {
-    status: "ruled_out",
-    uses: [other, first],
-    limitations: [],
-    reviewItemIds: [id, "sibling"],
-  };
-  expect(await state.submit(report)).toMatchObject({
+  expect(await finalize(state, [], ["sibling", id])).toMatchObject({
     accepted: false,
     feedback: expect.stringContaining(
       "needs its own installed version and patch evidence",
@@ -1380,9 +1584,9 @@ test("reads the exact shared item for an in-place citation repair", async () => 
   expect(await state.queue({ items: [target] })).toMatchObject({
     queued: true,
   });
-  expect(
-    await state.submit({ ...report, uses: [other, target.use] }),
-  ).toMatchObject({ accepted: true });
+  expect(await finalize(state, [], ["sibling", id])).toMatchObject({
+    accepted: true,
+  });
   expect(state.acceptedReport().uses).toEqual([other, target.use]);
   const compact = state.readStatus();
   expect(compact.items.map((entry) => entry.id)).toEqual([id, "sibling"]);
@@ -1438,7 +1642,7 @@ test("verifies the inventory claim against actual results from cited inventory s
     record: "release-1",
     supports: ["running"],
   });
-  expect((await submission.submit(report)).accepted).toBe(false);
+  expect((await queueUse(submission, report.uses[0]!)).queued).toBe(false);
   expect(prompts).toHaveLength(0);
   submission.recordInventory("inventory", {
     row: "release-1",
@@ -1447,7 +1651,10 @@ test("verifies the inventory claim against actual results from cited inventory s
   submission.recordInventory("other", {
     diagnostic: "UNCITED_INVENTORY_RESULT",
   });
-  expect((await submission.submit(report)).accepted).toBe(true);
+  await queueUse(submission, report.uses[0]!);
+  expect(
+    (await finalize(submission, report.limitations, ["worker"])).accepted,
+  ).toBe(true);
   expect(prompts[0]).toContain('"runningRevision":"xyz"');
   expect(prompts[0]).not.toContain("UNCITED_INVENTORY_RESULT");
 });
@@ -1481,7 +1688,7 @@ test("ten rejected submissions exhaust the budget and preserve the cached review
     "No verified dependency report was submitted",
   );
   for (let i = 1; i < 10; i++) {
-    const reply = await submission.submit(report);
+    const reply = await finalize(submission, report.limitations, ["scope"]);
     expect(reply.accepted).toBe(false);
     expect(reply.feedback).toContain(`Attempts remaining: ${10 - i}`);
     expect(submission.continuationPrompt()).toContain(
@@ -1490,8 +1697,12 @@ test("ten rejected submissions exhaust the budget and preserve the cached review
   }
   const message =
     /after 10 attempts: scope \(revision 1\): Unresolved fact on draft 1/;
-  await expect(submission.submit(report)).rejects.toThrow(message);
-  await expect(submission.submit(report)).rejects.toThrow(message);
+  await expect(
+    finalize(submission, report.limitations, ["scope"]),
+  ).rejects.toThrow(message);
+  await expect(
+    finalize(submission, report.limitations, ["scope"]),
+  ).rejects.toThrow(message);
   expect(() => submission.continuationPrompt()).toThrow(message);
   expect(prompts).toHaveLength(1);
   expect(() => submission.acceptedReport()).toThrow(message);
@@ -1518,7 +1729,7 @@ test("a turn without a submission costs one attempt and the final attempt can st
     },
   });
   await queueScopeGap(submission, report.limitations[0]!);
-  await submission.submit(report);
+  await finalize(submission, report.limitations, ["scope"]);
   expect(submission.continuationPrompt()).toContain("Attempts remaining: 9");
   for (let remaining = 8; remaining >= 1; remaining--) {
     const prompt = submission.continuationPrompt();
@@ -1526,7 +1737,9 @@ test("a turn without a submission costs one attempt and the final attempt can st
     expect(prompt).toContain(gap.reason);
   }
   await queueScopeGap(submission, report.limitations[0]!, 3);
-  expect((await submission.submit(report)).accepted).toBe(true);
+  expect(
+    (await finalize(submission, report.limitations, ["scope"])).accepted,
+  ).toBe(true);
   expect(submission.continuationPrompt()).toBeUndefined();
   expect(submission.acceptedReport()).toEqual({
     ...report,
@@ -1560,11 +1773,7 @@ test("a final turn missing its submission preserves the last evidence gap", asyn
     review: async (prompt) => reviewDecision(prompt, gap, null),
   });
   await queueScopeGap(submission, "Dependency version unavailable.");
-  await submission.submit({
-    status: "unknown",
-    uses: [],
-    limitations: ["Dependency version unavailable."],
-  });
+  await finalize(submission, ["Dependency version unavailable."], ["scope"]);
   for (let i = 1; i < 10; i++) submission.continuationPrompt();
   expect(() => submission.continuationPrompt()).toThrow(
     /after 10 attempts: The turn ended without a final report submission.[\s\S]*No cited loop/,
@@ -1604,7 +1813,8 @@ test("an incomplete, malformed or failed verifier never approves a report", asyn
       },
     });
     for (let attempt = 0; attempt < 2; attempt++) {
-      const reply = await submission.submit(draft());
+      await queueUse(submission, draft().uses[0]!);
+      const reply = await finalize(submission, [], ["worker"]);
       expect(reply.accepted).toBe(false);
       expect(reply.feedback).toContain("Review failed:");
       expect(() => submission.acceptedReport()).toThrow("Review failed:");
@@ -1632,15 +1842,18 @@ test("returns an unsupported positive for correction before invoking the reviewe
   const use = report.uses[0]!;
   use.verdict = report.status;
   use.evidence[0]!.supports = ["affected_copy", "affected_use"];
-  const result = await submission.submit(report);
-  expect(result.accepted).toBe(false);
+  const result = await queueUse(submission, use);
+  expect(result.queued).toBe(false);
   expect(result.feedback).toContain("affected revision running");
   expect(calls).toBe(0);
   report.status = "potentially_exploitable";
   use.verdict = report.status;
   use.reason =
     "The checked-out copy is affected; the running revision and access are unknown.";
-  expect((await submission.submit(report)).accepted).toBe(true);
+  await queueUse(submission, use);
+  expect(
+    (await finalize(submission, report.limitations, ["worker"])).accepted,
+  ).toBe(true);
   expect(submission.acceptedReport()).toEqual(report);
   expect(calls).toBe(1);
 });
@@ -1731,7 +1944,7 @@ test("reviews a release recipe with the bound source and provenance receipts", a
       }),
     ).toMatchObject({ queued: true });
     expect(
-      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+      await finalize(submission, report.limitations, ["worker"]),
     ).toMatchObject({ accepted: true });
     expect(submission.acceptedReport()).toEqual(report);
   } finally {
@@ -1818,10 +2031,7 @@ test("requires the reviewer to cite the receipt that identifies the affected dep
           ],
         }),
       ).toMatchObject({ queued: true });
-      const result = await submission.submit({
-        ...report,
-        reviewItemIds: ["worker"],
-      });
+      const result = await finalize(submission, report.limitations, ["worker"]);
       expect(result.accepted).toBe(citeBuild);
       if (citeBuild) expect(submission.acceptedReport()).toEqual(report);
       else
@@ -1867,7 +2077,7 @@ test("a runtime-only provider does not force a receipt for a source-backed use w
       queued: true,
     });
     expect(
-      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+      await finalize(submission, report.limitations, ["worker"]),
     ).toMatchObject({ accepted: true });
   } finally {
     await submission.close();
@@ -1912,12 +2122,9 @@ test("requires inventory lookups for each potentially exploitable use when a cat
     use.evidence[0]!.supports = ["affected_copy", "affected_use"];
     use.reason = "The deployed build and caller access are unresolved.";
     const item = { id: "worker", kind: "use", candidateIds: [], use };
-    expect(await submission.submit(report)).toMatchObject({
-      accepted: false,
-      feedback: expect.stringContaining("Use the configured inventory tools"),
-    });
     expect(await submission.queue({ items: [item] })).toMatchObject({
       queued: false,
+      feedback: expect.stringContaining("Use the configured inventory tools"),
     });
     expect(
       submission.recordInventory(
@@ -1939,7 +2146,7 @@ test("requires inventory lookups for each potentially exploitable use when a cat
       await submission.queue({ items: [{ ...item, receiptIds: [identity] }] }),
     ).toMatchObject({ queued: true });
     expect(
-      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+      await finalize(submission, report.limitations, ["worker"]),
     ).toMatchObject({
       accepted: false,
       feedback: expect.stringContaining("caller access for worker"),
@@ -1982,7 +2189,7 @@ test("requires inventory lookups for each potentially exploitable use when a cat
       await submission.queue({ items: [{ ...item, receiptIds: [lookup] }] }),
     ).toMatchObject({ queued: true });
     expect(
-      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+      await finalize(submission, report.limitations, ["worker"]),
     ).toMatchObject({ accepted: true });
     expect(submission.acceptedReport().status).toBe("potentially_exploitable");
     submission.recordInventoryStartup(

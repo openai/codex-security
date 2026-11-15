@@ -112,6 +112,4 @@ export interface TraceResult {
   }[];
   /** Sample of the next lookups that did not fit the hop budget. */
   frontier: TraceScope[];
-  /** Which lookup led to another lookup. */
-  expansions: { from: number; to: number }[];
 }

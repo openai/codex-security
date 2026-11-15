@@ -62,7 +62,6 @@ export async function processTrace(
   const ids = new Map<string, number>();
   const queue: number[] = [];
   const results = new Map<number, TraceScope[]>();
-  const edges = new Map<string, TraceResult["expansions"][number]>();
   const limits = new Set<string>();
   const atHopLimit = new Set<number>();
 
@@ -75,13 +74,12 @@ export async function processTrace(
         scopes[existing].hops = hops;
         expand(existing);
       }
-      return existing;
+      return;
     }
     const id = scopes.length;
     ids.set(key, id);
     scopes.push({ id, scope, hops, evidence: [], complete: false });
     queue.push(id);
-    return id;
   }
 
   function expand(id: number) {
@@ -95,11 +93,7 @@ export async function processTrace(
       return;
     }
     atHopLimit.delete(id);
-    for (const scope of next) {
-      const to = schedule(scope, discovery ? depth : depth + 1);
-      const key = id + "/" + to;
-      edges.set(key, { from: id, to });
-    }
+    for (const scope of next) schedule(scope, discovery ? depth : depth + 1);
   }
 
   const running = new Map<
@@ -198,7 +192,6 @@ export async function processTrace(
       complete: limits.size === 0 && scopes.every((entry) => entry.complete),
       limits: [...limits],
       scopes,
-      expansions: [...edges.values()],
     };
   } finally {
     clearTimeout(deadline);

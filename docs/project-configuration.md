@@ -83,8 +83,9 @@ You can also omit the hint. The CLI validates the file using its bundled schema.
 
 ## Inventory lookups for dependency checks
 
-An `exploitability check` uses checkout evidence by default. Optionally set
-`exploitability.service_catalog_mcps` to select native Codex MCP servers for
+An `exploitability check` assesses [production callers by default](../sdk/typescript/docs/cli.md#check-a-dependency-for-vulnerabilities).
+The command applies that scope automatically and uses checkout evidence with no
+inventory servers configured. Optionally set `exploitability.service_catalog_mcps` to select native Codex MCP servers for
 service identity, running revision and caller access lookups. The list accepts
 several servers, and the same server can supply both identity and runtime
 observations. Select a server that looks up known runtime artifacts or native

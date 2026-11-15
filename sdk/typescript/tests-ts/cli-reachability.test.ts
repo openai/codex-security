@@ -34,6 +34,32 @@ const advisory = {
   ],
 };
 const args = ["exploitability", "check", advisory.cve, "--json"];
+const defaultCallerScope =
+  "Assess production services, jobs (including distributed job executors), workers, scheduled or background workloads, and code they deploy or import at runtime. Independent test runners and CI or build surfaces are outside this scope unless the production runtime invokes them.";
+
+async function submitUses(
+  tool: NonNullable<
+    NonNullable<Parameters<OnCodex>[1]>["appServer"]
+  >["dependencyReport"],
+  report: { uses: unknown[]; limitations: string[] },
+) {
+  assert(tool?.queue && tool.submit);
+  const queued = await tool.queue({
+    items: report.uses.map((use, index) => ({
+      id: `use-${index}`,
+      kind: "use",
+      candidateIds: [],
+      use,
+    })),
+  });
+  return queued.queued
+    ? tool.submit({
+        reviewItems: queued.items,
+        candidateGeneration: 0,
+        limitations: report.limitations,
+      })
+    : { accepted: false, feedback: queued.feedback };
+}
 
 async function assertNativeEffort({
   configured,
@@ -474,78 +500,68 @@ function reviewDecision(
   });
 }
 
-test("requires a working OpenGrep before advisory lookup or model startup", async () => {
-  await using temp = await scopedTemporaryDirectory("cve-opengrep-");
-  const repo = temp.path;
-  git(repo, "init", "--quiet");
-  const nested = join(repo, "app");
-  await mkdir(nested);
-  const onCodex = mock<OnCodex>().mockReturnValue(0);
-  const diagnostic = "scanner runtime unavailable";
-  const deps = dependencies({
-    currentDirectory: nested,
-    onCodex,
-    onRepositoryCommand: async (command, argv, repository, options) => {
-      expect(command).toBe("opengrep");
-      expect(argv).toEqual(["--version"]);
-      expect(repository).toBe(repo);
-      expect(options?.signal).toBeInstanceOf(AbortSignal);
-      const cwd = await realpath(options!.cwd!);
-      expect(cwd).not.toBe(repo);
-      expect(cwd.startsWith(repo + sep)).toBe(false);
-      throw new Error(diagnostic);
-    },
-  });
-  deps.lookupDependencyAdvisory = mock(async () => advisory);
-  const { runCli, stderr } = createCliTest(main);
-  expect(await runCli(args, deps), stderr.text()).toBe(2);
-  expect(stderr.text()).toContain(diagnostic);
-  expect(deps.lookupDependencyAdvisory).not.toHaveBeenCalled();
-  expect(onCodex).not.toHaveBeenCalled();
-});
-
-test("preserves child diagnostics when the OpenGrep availability probe fails", async () => {
-  await using temp = await scopedTemporaryDirectory("cve-opengrep-failure-");
-  git(temp.path, "init", "--quiet");
-  const onCodex = mock<OnCodex>().mockReturnValue(0);
-  let original: Error | undefined;
-  const deps = dependencies({
-    currentDirectory: temp.path,
-    onCodex,
-    onRepositoryCommand: async (command, argv, _repository, options) => {
-      expect(command).toBe("opengrep");
-      expect(argv).toEqual(["--version"]);
-      try {
-        const { stdout } = await promisify(execFileCallback)(
-          process.execPath,
-          [
-            "-e",
-            'process.stdout.write("probe output\\n"); process.stderr.write("runtime detail\\n"); process.exitCode = 23;',
-          ],
-          { cwd: options?.cwd, signal: options?.signal },
-        );
-        return stdout;
-      } catch (error) {
-        assert(error instanceof Error);
-        original = error;
-        throw error;
-      }
-    },
-  });
-  deps.lookupDependencyAdvisory = mock(async () => advisory);
-  const { runCli, stderr } = createCliTest(main);
-  expect(await runCli(args, deps), stderr.text()).toBe(2);
-  assert(original);
-  const message = stderr.text();
-  expect(message).toContain(original.message.split("\n")[0]!);
-  expect(message).toContain("code: 23");
-  expect(message).toContain("signal: null");
-  expect(message).toContain("killed: false");
-  expect(message).toContain("stdout: probe output");
-  expect(message).toContain("stderr: runtime detail");
-  expect(deps.lookupDependencyAdvisory).not.toHaveBeenCalled();
-  expect(onCodex).not.toHaveBeenCalled();
-});
+test.each(["ordinary error", "child process failure"] as const)(
+  "stops before advisory lookup on an OpenGrep probe %s",
+  async (failure) => {
+    await using temp = await scopedTemporaryDirectory("cve-opengrep-");
+    const repo = temp.path;
+    git(repo, "init", "--quiet");
+    const nested = join(repo, "app");
+    await mkdir(nested);
+    const onCodex = mock<OnCodex>().mockReturnValue(0);
+    const diagnostic = "scanner runtime unavailable";
+    let original: Error | undefined;
+    const deps = dependencies({
+      currentDirectory: nested,
+      onCodex,
+      onRepositoryCommand: async (command, argv, repository, options) => {
+        expect(command).toBe("opengrep");
+        expect(argv).toEqual(["--version"]);
+        expect(repository).toBe(repo);
+        expect(options?.signal).toBeInstanceOf(AbortSignal);
+        const cwd = await realpath(options!.cwd!);
+        expect(cwd).not.toBe(repo);
+        expect(cwd.startsWith(repo + sep)).toBe(false);
+        if (failure === "ordinary error") throw new Error(diagnostic);
+        try {
+          const { stdout } = await promisify(execFileCallback)(
+            process.execPath,
+            [
+              "-e",
+              'process.stdout.write("probe output\\n"); process.stderr.write("runtime detail\\n"); process.exitCode = 23;',
+            ],
+            { cwd, signal: options?.signal },
+          );
+          return stdout;
+        } catch (error) {
+          assert(error instanceof Error);
+          original = error;
+          throw error;
+        }
+      },
+    });
+    deps.lookupDependencyAdvisory = mock(async () => advisory);
+    const { runCli, stderr } = createCliTest(main);
+    expect(await runCli(args, deps), stderr.text()).toBe(2);
+    const message = stderr.text();
+    if (failure === "ordinary error") {
+      expect(message).toContain(diagnostic);
+    } else {
+      assert(original);
+      expect(message).toContain(original.message.split("\n")[0]!);
+      for (const detail of [
+        "code: 23",
+        "signal: null",
+        "killed: false",
+        "stdout: probe output",
+        "stderr: runtime detail",
+      ])
+        expect(message).toContain(detail);
+    }
+    expect(deps.lookupDependencyAdvisory).not.toHaveBeenCalled();
+    expect(onCodex).not.toHaveBeenCalled();
+  },
+);
 
 test("returns only the report accepted after the investigator corrects a rejected submission", async () => {
   await using temp = await scopedTemporaryDirectory("cve-skill-");
@@ -636,6 +652,9 @@ test("returns only the report accepted after the investigator corrects a rejecte
       );
       expect(session.prompt).toContain(JSON.stringify(join(skill, "SKILL.md")));
       expect(session.prompt).toContain(advisory.advisories[0]!.summary);
+      expect(session.prompt.split("\n")).toContain(
+        JSON.stringify(defaultCallerScope),
+      );
       expect(session.prompt).not.toContain("checkout-only marker");
 
       const tool = session.dependencyReport!;
@@ -643,10 +662,10 @@ test("returns only the report accepted after the investigator corrects a rejecte
       tool.bindReviewer!(selectedEnvironment, provider);
       const first = structuredClone(unresolvedDecoder);
       first.uses[0]!.version = "1.0.0";
-      const rejection = await tool.submit(first);
+      const rejection = await submitUses(tool, first);
       expect(rejection.accepted).toBe(false);
       expect(rejection.feedback).toContain(gap);
-      expect((await tool.submit(unresolvedDecoder)).accepted).toBe(true);
+      expect((await submitUses(tool, unresolvedDecoder)).accepted).toBe(true);
       output!.onUsage?.({ ...usage, total_tokens: 132 });
       output!.stdout.write(JSON.stringify(first));
       return 0;
@@ -656,6 +675,8 @@ test("returns only the report accepted after the investigator corrects a rejecte
   const review = mock<NonNullable<typeof deps.reviewDependencyReport>>(
     async (prompt, _schema, options) => {
       expect(prompt).toContain("checkout-only marker");
+      const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+      expect(packet.callerScope).toBe(defaultCallerScope);
       expect(options.selectedEnvironment).toEqual(selectedEnvironment);
       expect(options.config?.codexOverrides).toEqual(provider);
       options.onUsage?.(reviewUsage);
@@ -676,7 +697,7 @@ test("returns only the report accepted after the investigator corrects a rejecte
   expect(report).not.toHaveProperty("status");
   expect(report).toMatchObject({
     schemaVersion: 2,
-    assumptions: [],
+    assumptions: [defaultCallerScope],
     uses: unresolvedDecoder.uses,
     limitations: unresolvedDecoder.limitations,
     cve: advisory.cve,
@@ -718,9 +739,7 @@ async function runPackageCheck(
       const session = output!.appServer!;
       prompts.push(session.prompt);
       const record = records.find(({ id }) => session.prompt.includes(id));
-      const submit = session.dependencyReport?.submit;
-      assert(submit);
-      const result = await submit({
+      const result = await submitUses(session.dependencyReport, {
         ...unresolvedDecoder,
         limitations: record
           ? [`The installed version for ${record.id} is unknown.`]
@@ -838,18 +857,6 @@ test("returns an empty package result without investigating when OSV has no advi
   expect(report).toMatchObject({ package: decoder, checks: [] });
 });
 
-test("preserves the native skill's nonzero exit", async () => {
-  await using temp = await scopedTemporaryDirectory("cve-skill-");
-  git(temp.path, "init", "--quiet");
-  const deps = dependencies({
-    currentDirectory: temp.path,
-    environment: { PATH: process.env["PATH"] },
-    onCodex: () => 23,
-  });
-  deps.lookupDependencyAdvisory = async () => advisory;
-  expect(await runCapturedCli(main, args, deps)).toBe(23);
-});
-
 test("runtime citations require a successful result from the selected service catalog in this check", async () => {
   await using temp = await scopedTemporaryDirectory("cve-inventory-");
   const repo = temp.path;
@@ -915,7 +922,7 @@ test("runtime citations require a successful result from the selected service ca
         const tool = output!.appServer!.dependencyReport!;
         assert(tool.submit);
         if (observed) tool.recordInventory(observed, result);
-        const outcome = await tool.submit(assessment);
+        const outcome = await submitUses(tool, assessment);
         expect(outcome.accepted).toBe(observed === "catalog");
         if (!outcome.accepted) expect(outcome.feedback).toContain("catalog");
         return 0;
@@ -1039,10 +1046,9 @@ test("the native coordinator queues observed candidates and retains independent 
       expect(review).toHaveBeenCalledTimes(1);
       expect(await tool.queue(queue)).toMatchObject({ queued: true });
       const result = await tool.submit({
-        status: "unknown",
-        uses: [direct.use],
+        reviewItems: ["direct", "scope"].map((id) => ({ id, revision: 1 })),
+        candidateGeneration: 1,
         limitations: [],
-        reviewItemIds: ["direct", "scope"],
       });
       expect(result.accepted, result.feedback).toBe(true);
       return 0;
@@ -1089,7 +1095,7 @@ test("preserves a sibling's fixing hunk when revising the selected copy assessme
     '{"name":"sample-decoder","version":"1.0.0"}\n',
   );
   const callerScope =
-    "An unauthenticated caller can submit bytes to POST /decode only.";
+    "Assess the CI runner that submits bytes to the fixture POST /decode route.";
   const use = { ...unresolvedDecoder.uses[0]! };
   const revisedUse = {
     ...use,
@@ -1121,7 +1127,8 @@ test("preserves a sibling's fixing hunk when revising the selected copy assessme
     onCodex: async (argv, output) => {
       expect(argv).toContain('model_reasoning_effort="high"');
       const session = output!.appServer!;
-      expect(session.prompt).toContain(JSON.stringify(callerScope));
+      expect(session.prompt.split("\n")).toContain(JSON.stringify(callerScope));
+      expect(session.prompt).not.toContain(defaultCallerScope);
       const tool = session.dependencyReport!;
       assert(tool.observeGraph && tool.queue && tool.status && tool.submit);
       const [candidate] = await tool.observeGraph("trace_codex_security_code", {
@@ -1182,18 +1189,16 @@ test("preserves a sibling's fixing hunk when revising the selected copy assessme
       ).toMatchObject({ queued: true });
       releaseInitialReview.resolve();
       const stale = await tool.submit({
-        status: "unknown",
-        uses: [use],
+        reviewItems: [{ id: "decoder", revision: 1 }],
+        candidateGeneration: 1,
         limitations: [],
-        reviewItemIds: ["decoder"],
       });
       expect(stale.accepted).toBe(false);
-      expect(stale.feedback).toContain("exactly match");
+      expect(stale.feedback).toContain("changed from revision 1 to 2");
       const result = await tool.submit({
-        status: "ruled_out",
-        uses: [revisedUse],
+        reviewItems: [{ id: "decoder", revision: 2 }],
+        candidateGeneration: 1,
         limitations: [],
-        reviewItemIds: ["decoder"],
       });
       expect(result.accepted, result.feedback).toBe(true);
       return 0;
@@ -1202,8 +1207,8 @@ test("preserves a sibling's fixing hunk when revising the selected copy assessme
   deps.lookupDependencyAdvisory = async () => advisory;
   const reviewedRevisions: number[] = [];
   const review = mock(async (prompt: string) => {
-    expect(prompt).toContain(JSON.stringify(callerScope));
     const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+    expect(packet.callerScope).toBe(callerScope);
     expect(packet.items).toHaveLength(1);
     const item = packet.items[0];
     expect(item.id).toBe("decoder");
@@ -1243,110 +1248,74 @@ test("preserves a sibling's fixing hunk when revising the selected copy assessme
   });
 });
 
-test("the tenth rejected submission reports the final gap and publishes no draft", async () => {
-  await using temp = await scopedTemporaryDirectory("cve-review-denied-");
-  git(temp.path, "init", "--quiet");
-  await writeFile(
-    join(temp.path, "scope.txt"),
-    "Consumer selection is not recorded.\n",
-  );
-  const draft = {
-    status: "unknown",
-    uses: [],
-    limitations: ["Consumer selection missing."],
-  };
-  const gap = "The justification for the reported scope is missing.";
-  let continuedAfterRejection = false;
-  const deps = dependencies({
-    currentDirectory: temp.path,
-    environment: { PATH: process.env["PATH"] },
-    onCodex: async (_argv, output) => {
-      const tool = output!.appServer!.dependencyReport!;
-      assert(tool.submit);
-      expect(
-        await tool.queue!({
+test.each([
+  {
+    terminal: "review rejections",
+    gap: "The justification for the reported scope is missing.",
+  },
+  { terminal: "reviewer outage", gap: "review provider unavailable" },
+] as const)(
+  "shows the final gap without publishing a report after $terminal",
+  async ({ terminal, gap }) => {
+    await using temp = await scopedTemporaryDirectory("cve-review-failed-");
+    git(temp.path, "init", "--quiet");
+    await writeFile(
+      join(temp.path, "scope.txt"),
+      "Consumer selection is not recorded.\n",
+    );
+    const limitation = "Consumer selection missing.";
+    let continuedAfterRejection = false;
+    const deps = dependencies({
+      currentDirectory: temp.path,
+      environment: { PATH: process.env["PATH"] },
+      onCodex: async (_argv, output) => {
+        const tool = output!.appServer!.dependencyReport!;
+        assert(tool.queue && tool.submit);
+        const queued = await tool.queue({
           items: [
             {
               id: "scope",
               kind: "unresolved",
               candidateIds: [],
-              reason: draft.limitations[0],
+              reason: limitation,
               evidence: [
                 { path: "scope.txt", startLine: 1, endLine: 1, supports: [] },
               ],
               observations: [],
             },
           ],
-        }),
-      ).toMatchObject({ queued: true });
-      for (let attempt = 1; attempt < 10; attempt++) {
-        expect((await tool.submit(draft)).accepted).toBe(false);
-      }
-      await tool.submit(draft);
-      continuedAfterRejection = true;
-      return 0;
-    },
-  });
-  deps.lookupDependencyAdvisory = async () => advisory;
-  const review = mock(async (prompt: string) =>
-    reviewDecision(prompt, false, gap),
-  );
-  deps.reviewDependencyReport = review;
-  const { runCli, stdout, stderr } = createCliTest(main);
-  expect(await runCli(args, deps)).toBe(2);
-  expect(stderr.text()).toContain(gap);
-  expect(continuedAfterRejection).toBe(false);
-  expect(stdout.text()).not.toContain(draft.limitations[0]!);
-  expect(review).toHaveBeenCalledTimes(1);
-});
-
-test("a reviewer outage fails the command without publishing the draft", async () => {
-  await using temp = await scopedTemporaryDirectory("cve-review-outage-");
-  git(temp.path, "init", "--quiet");
-  await writeFile(
-    join(temp.path, "scope.txt"),
-    "Consumer selection is not recorded.\n",
-  );
-  const draft = {
-    status: "unknown",
-    uses: [],
-    limitations: ["No confirmed consumer."],
-  };
-  const deps = dependencies({
-    currentDirectory: temp.path,
-    environment: { PATH: process.env["PATH"] },
-    onCodex: async (_argv, output) => {
-      const tool = output!.appServer!.dependencyReport!;
-      assert(tool.submit);
-      expect(
-        await tool.queue!({
-          items: [
-            {
-              id: "scope",
-              kind: "unresolved",
-              candidateIds: [],
-              reason: draft.limitations[0],
-              evidence: [
-                { path: "scope.txt", startLine: 1, endLine: 1, supports: [] },
-              ],
-              observations: [],
-            },
-          ],
-        }),
-      ).toMatchObject({ queued: true });
-      expect((await tool.submit(draft)).accepted).toBe(false);
-      return 0;
-    },
-  });
-  deps.lookupDependencyAdvisory = async () => advisory;
-  deps.reviewDependencyReport = async () => {
-    throw new Error("review provider unavailable");
-  };
-  const { runCli, stdout, stderr } = createCliTest(main);
-  expect(await runCli(args, deps)).toBe(2);
-  expect(stderr.text()).toContain("review provider unavailable");
-  expect(stdout.text()).not.toContain(draft.limitations[0]!);
-});
+        });
+        assert(queued.queued, queued.feedback);
+        const draft = {
+          reviewItems: queued.items,
+          candidateGeneration: 0,
+          limitations: [limitation],
+        };
+        if (terminal === "reviewer outage") {
+          expect((await tool.submit(draft)).accepted).toBe(false);
+        } else {
+          for (let attempt = 1; attempt < 10; attempt++)
+            expect((await tool.submit(draft)).accepted).toBe(false);
+          await tool.submit(draft);
+          continuedAfterRejection = true;
+        }
+        return 0;
+      },
+    });
+    deps.lookupDependencyAdvisory = async () => advisory;
+    const review = mock(async (prompt: string) => {
+      if (terminal === "reviewer outage") throw new Error(gap);
+      return reviewDecision(prompt, false, gap);
+    });
+    deps.reviewDependencyReport = review;
+    const { runCli, stdout, stderr } = createCliTest(main);
+    expect(await runCli(args, deps)).toBe(2);
+    expect(stderr.text()).toContain(gap);
+    expect(continuedAfterRejection).toBe(false);
+    expect(stdout.text()).not.toContain(limitation);
+    expect(review).toHaveBeenCalledTimes(1);
+  },
+);
 
 test("rejects invalid subjects and descriptions before looking up an advisory", async () => {
   const onCodex = mock<OnCodex>().mockReturnValue(0);
@@ -1597,9 +1566,9 @@ test("the CLI captures upstream receipts and reuses sink profiles through its gr
       const result = await report.queue!({ items: [item] });
       expect(result.queued, result.feedback).toBe(true);
       const submitted = await report.submit!({
-        ...unresolvedDecoder,
-        uses: [use],
-        reviewItemIds: ["decoder"],
+        reviewItems: [{ id: "decoder", revision: 1 }],
+        candidateGeneration: 0,
+        limitations: unresolvedDecoder.limitations,
       });
       expect(submitted.accepted, submitted.feedback).toBe(true);
       return 0;

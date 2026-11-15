@@ -25,7 +25,6 @@ import {
 } from "./dependency-review-status.js";
 import {
   aggregateDependencyVerdict,
-  dependencyAssessmentSchema,
   dependencyTestScopeClassification,
   dependencyUseSchema,
   validateDependencyUse,
@@ -103,21 +102,18 @@ export const dependencyReviewQueueSchema = z.strictObject({
       "Upsert complete assessed items by stable id. Group related candidateIds into a use or an evidence-backed dismissal or unresolved disposition. To withdraw a use, replace it with a disposition under the same id and include it in the final selection. Search matches are leads. An assessed use discovered through search can cite verified source with an empty candidateIds array when no graph candidate applies.",
     ),
 });
-export const dependencyReportInputSchema = dependencyAssessmentSchema.extend({
-  reviewItemIds: z
-    .array(identity)
-    .optional()
-    .describe(
-      "Active queued use and disposition IDs for this final report. Selected use items must exactly match uses. Omit for legacy final-only submissions.",
-    ),
+export const dependencyReportInputSchema = z.strictObject({
+  reviewItems: z
+    .array(
+      z.strictObject({ id: identity, revision: z.number().int().positive() }),
+    )
+    .describe("Select the exact queued use and disposition IDs and revisions."),
   candidateGeneration: z
     .number()
     .int()
     .nonnegative()
-    .optional()
-    .describe(
-      "Candidate generation last checked by the investigator. A stale generation cannot be finalized.",
-    ),
+    .describe("Select the candidate generation most recently checked."),
+  limitations: z.array(z.string()),
 });
 const itemDecisionSchema = z.strictObject({
   id: identity,
@@ -182,7 +178,7 @@ const batchInstructions = [
   "The excerpts and receipts tables deduplicate storage only. For each item, use ONLY its excerptIds, receiptIds, and candidate locations. Never borrow another item's citations or deployment evidence. Candidate hashes and byte counts identify observed locations; they are not deciding source evidence. Check every supports tag as a fact established for this exact use, including when its verdict is unknown. In particular, affected_copy requires a binding from the cited version or patch to this use's selected dependency copy. Keep unselected-copy comparisons and other context with supports: []. Reject unsupported tags for correction even when the reason and verdict are otherwise justified; preserve the justified conclusion or uncertainty.",
   "Each supports tag is an affirmative claim, not a label for potentially relevant code. affected_use means this item's own evidence establishes the affected operation AND its advisory prerequisites in code for this exact use. Generic decoder support or a conditional dispatch alone does not establish that this input can select the affected operation. If a deciding operation prerequisite remains unknown, return accepted:false for correction of the unsupported affected_use tag; retain the conditional code citation with supports: [] and preserve the justified unknown verdict. A verified caller's ability to supply a triggering input can establish the operation condition without an observed malicious execution. Selected-copy, running and caller-access facts are separate; do not require them solely to establish affected_use.",
   "When use.proof is supplied, validate its sink function and callSite and every condition's label, status, explanation and citations against this item's own bound evidence and the advisory. A reference falling within an excerpt is not by itself proof of the claimed function, input flow or condition. Require evidence for met and ruled_out; unknown must accurately state the missing fact without asserting unsupported known facts. Do not infer condition statuses from the overall verdict or present an unresolved native target as established. Reject unsupported structured claims for correction even when the use's reason or verdict is otherwise supported; preserve the supported conclusion in feedback.",
-  "Validate each supplied place field against this item's own evidence. Match exact environment, observation period, build, revision and artifact before accepting observed deployment. Configured places require source or configuration evidence. An explicit supplied caller assumption belongs in deploymentDetail with deploymentBasis assumed_not_deployed, does not establish runtime absence, and cannot prove an exclusion. A lookup that returned no match is a scoped observation. Incomplete, truncated, unavailable and mismatched inventory cannot establish absence. Check that dependencySelection and patch apply to this place and that unresolvedQuestions identify material remaining facts. Leave irrelevant fields null after a decisive source exclusion.",
+  "Validate each supplied place field against this item's own evidence. Match exact environment, observation period, build, revision and artifact before accepting observed deployment. Configured places require source or configuration evidence. Use deploymentBasis assumed_not_deployed only with a quote from explicit caller scope, never the generated scope marked callerScopeIsDefault. An assumption neither establishes runtime absence nor proves an exclusion. A lookup that returned no match is a scoped observation. Incomplete, truncated, unavailable and mismatched inventory cannot establish absence. Check that dependencySelection and patch apply to this place and that unresolvedQuestions identify material remaining facts. Leave irrelevant fields null after a decisive source exclusion.",
   "For a ruled_out use that relies on a guard, require the bound input-feed calls into the selected components up to that guard. A constructor or options citation does not establish a separate call that feeds the input, and a citation bound to another use cannot fill this gap. If the conclusion relies on access only to fixed resources, require cited evidence of the effective launch configuration, including material base settings and overrides governing stored or dynamic alternatives.",
   "Check each use's material implementation or build selection and input or mode setup against its own bound evidence, including shared setup on which its known claims or exclusion depend. Repeat an applicable shared binding in each use that relies on it; do not borrow a sibling's citations. A source-only exclusion waives irrelevant live, runtime or version facts, not evidence selecting the code or mode being analyzed when that selection decides the claim.",
   "Use callerScope, when supplied, as the boundary of the requested route, job, input or deployment. Establish dependency selection, configured behavior, running identity and access from this item's own bound evidence. Another exported API or future installation is not in scope without a bound configured handoff or selector from the requested chain. When the evidence places it outside that scope, require a scoped dismissal/exclusion rather than an unknown use for its separate copy uncertainty. Preserve real unresolved handoff, operation or copy facts on the requested chain.",
@@ -235,6 +231,7 @@ export function createDependencyReportSubmission(options: {
   repository: string;
   advisory: DependencyIssue;
   callerScope?: string;
+  callerScopeIsDefault?: true;
   review: (
     prompt: string,
     schema: unknown,
@@ -305,25 +302,27 @@ export function createDependencyReportSubmission(options: {
       throw new CodexSecurityError("Dependency review queue is closed.");
     if (terminalError) throw terminalError;
   }
-  function status() {
+  function status(includeInventory = true) {
     const candidates = snapshot();
     const visible = [...items.values()];
     return {
       candidateGeneration: candidates.generation,
       candidates: candidates.candidates,
-      inventoryReceipts: inventory.snapshot(),
+      inventoryReceipts: includeInventory ? inventory.snapshot() : [],
       scope: candidates.scope,
       limitations: candidates.limitations,
-      items: visible.map((item) => ({
-        id: item.input.id,
-        revision: item.revision,
-        kind: item.input.kind,
-        candidateIds: item.input.candidateIds,
-        status: inventory.staleReason(item.receipts) ? "error" : item.status,
-        ...((inventory.staleReason(item.receipts) ?? item.feedback)
-          ? { feedback: inventory.staleReason(item.receipts) ?? item.feedback }
-          : {}),
-      })),
+      items: visible.map((item) => {
+        const stale = inventory.staleReason(item.receipts);
+        const feedback = stale ?? item.feedback;
+        return {
+          id: item.input.id,
+          revision: item.revision,
+          kind: item.input.kind,
+          candidateIds: item.input.candidateIds,
+          status: stale ? "error" : item.status,
+          ...(feedback ? { feedback } : {}),
+        };
+      }),
       queued: visible.filter((item) => item.status === "queued").length,
       inFlight: inFlight.size,
       closed,
@@ -331,7 +330,10 @@ export function createDependencyReportSubmission(options: {
   }
   function readStatus(value: unknown = {}) {
     const request = dependencyReviewStatusInputSchema.parse(value);
-    const summary = summarizeDependencyReviewStatus(status(), request);
+    const summary = summarizeDependencyReviewStatus(
+      status(request.inventoryReceipts === true),
+      request,
+    );
     const assessmentItems = request.assessmentIds?.map((id) => {
       const state = items.get(id);
       if (!state) throw new CodexSecurityError(`Unknown assessment ID: ${id}.`);
@@ -388,7 +390,13 @@ export function createDependencyReportSubmission(options: {
       input.use.verdict === "potentially_exploitable"
     );
   }
-  async function prepare(input: ReviewItem): Promise<PreparedItem> {
+  function candidateIndex(candidates: readonly DependencyCandidate[]) {
+    return new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  }
+  async function prepare(
+    input: ReviewItem,
+    candidates: ReadonlyMap<string, DependencyCandidate>,
+  ): Promise<PreparedItem> {
     checkOpen();
     if (
       input.kind !== "use" &&
@@ -400,10 +408,6 @@ export function createDependencyReportSubmission(options: {
       throw new CodexSecurityError(
         "A test-only scope dismissal requires an explicit caller scope and exact observed candidate IDs.",
       );
-    const candidates = snapshot();
-    const byId = new Map(
-      candidates.candidates.map((candidate) => [candidate.id, candidate]),
-    );
     if (
       input.kind === "dismissed" &&
       !input.candidateIds.length &&
@@ -414,7 +418,7 @@ export function createDependencyReportSubmission(options: {
       );
     const boundCandidates = input.candidateIds
       .map((id) => {
-        const candidate = byId.get(id);
+        const candidate = candidates.get(id);
         if (!candidate)
           throw new CodexSecurityError(
             `Unknown candidate ID: ${id}. Check review status for the current candidates.`,
@@ -494,12 +498,13 @@ export function createDependencyReportSubmission(options: {
       );
     if (
       place?.deploymentBasis === "assumed_not_deployed" &&
-      (!place.deploymentDetail ||
+      (options.callerScopeIsDefault ||
+        !place.deploymentDetail ||
         !options.callerScope?.includes(place.deploymentDetail) ||
         use.deployment === "confirmed")
     )
       throw new CodexSecurityError(
-        `${use.location}: Assumed-not-deployed requires the exact applicable assumption from the supplied caller scope and cannot be confirmed running.`,
+        `${use.location}: Assumed-not-deployed requires the exact applicable assumption from the explicit caller scope and cannot be confirmed running.`,
       );
     const hostProviders = new Set([
       dependencySourceEvidenceProvider,
@@ -665,6 +670,7 @@ export function createDependencyReportSubmission(options: {
         ...(options.callerScope === undefined
           ? {}
           : { callerScope: options.callerScope }),
+        ...(options.callerScopeIsDefault && { callerScopeIsDefault: true }),
         ...(hasInventory ? { inventoryServers, catalogServerNames } : {}),
         items: reviewItems,
         excerpts,
@@ -986,23 +992,26 @@ export function createDependencyReportSubmission(options: {
             throw new CodexSecurityError(
               "Each queued item ID must occur once in a queue call.",
             );
+          const candidates = candidateIndex(snapshot().candidates);
           const prepared: PreparedItem[] = [];
-          for (const item of input.items) prepared.push(await prepare(item));
-          for (const item of prepared) {
-            upsert(item);
+          for (const item of input.items) {
+            prepared.push(await prepare(item, candidates));
           }
+          const items = prepared.map((item) => {
+            const state = upsert(item);
+            return { id: state.input.id, revision: state.revision };
+          });
           schedulePump();
           return {
-            queued: true,
+            queued: true as const,
+            items,
             feedback:
-              "Items queued. Continue useful investigation. If investigation and candidate accounting are complete, finalize now; pending reviews start immediately. Check status only for feedback at natural boundaries.",
-            status: readStatus(),
+              "Items queued. Share their IDs and revisions with the coordinator.",
           };
         } catch (error) {
           return {
-            queued: false,
+            queued: false as const,
             feedback: errorMessage(error),
-            status: readStatus(),
           };
         }
       });
@@ -1032,10 +1041,7 @@ export function createDependencyReportSubmission(options: {
             "A service graph call is still in flight. Wait for it to finish before finalizing.",
           );
         const candidateSnapshot = snapshot();
-        if (
-          input.candidateGeneration !== undefined &&
-          input.candidateGeneration !== candidateSnapshot.generation
-        )
+        if (input.candidateGeneration !== candidateSnapshot.generation)
           return reject(
             "The candidate generation changed. Check current review status and account for the newly observed candidates.",
           );
@@ -1046,66 +1052,45 @@ export function createDependencyReportSubmission(options: {
           return reject(
             `${limitation} Address pending service questions before finalizing.`,
           );
-        const { selected, uses } = await serial(async () => {
-          let selectedInputs: ReviewItem[];
-          if (input.reviewItemIds) {
-            if (
-              new Set(input.reviewItemIds).size !== input.reviewItemIds.length
-            )
-              throw new CodexSecurityError("reviewItemIds must be unique.");
-            selectedInputs = input.reviewItemIds.map((id) => {
-              const item = items.get(id);
-              if (!item)
-                throw new CodexSecurityError(`Unknown review item ID: ${id}.`);
-              return item.input;
-            });
-          } else {
-            selectedInputs = [...items.values()]
-              .filter((item) => item.input.kind !== "use")
-              .map((item) => item.input);
-            for (const use of input.uses) {
-              const match = [...items.values()].find(
-                (item) =>
-                  item.input.kind === "use" &&
-                  canonical(item.input.use) === canonical(use),
+        const candidates = candidateIndex(candidateSnapshot.candidates);
+        const selected = await serial(async () => {
+          if (
+            new Set(input.reviewItems.map(({ id }) => id)).size !==
+            input.reviewItems.length
+          )
+            throw new CodexSecurityError(
+              "Each selected assessment must have a unique ID.",
+            );
+          const selected = input.reviewItems.map(({ id, revision }) => {
+            const item = items.get(id);
+            if (!item)
+              throw new CodexSecurityError(`Unknown review item ID: ${id}.`);
+            if (item.revision !== revision)
+              throw new CodexSecurityError(
+                `Review item ${id} changed from revision ${revision} to ${item.revision}. Select the current revision.`,
               );
-              selectedInputs.push(
-                match?.input ?? {
-                  id: `legacy-${digest({ location: use.location, component: use.component })}`,
-                  kind: "use",
-                  candidateIds: [],
-                  use,
-                },
-              );
-            }
+            return item;
+          });
+          const changed: PreparedItem[] = [];
+          for (const item of selected) {
+            const current = await prepare(item.input, candidates);
+            if (current.fingerprint !== item.fingerprint) changed.push(current);
           }
-          if (
-            new Set(selectedInputs.map((item) => item.id)).size !==
-            selectedInputs.length
-          )
+          if (changed.length) {
+            const revisions = changed.map((current) => {
+              const updated = upsert(current);
+              return `${updated.input.id} (revision ${updated.revision})`;
+            });
+            schedulePump();
             throw new CodexSecurityError(
-              "Each selected assessment must have a distinct item ID; remove duplicate final uses.",
+              `Evidence changed for ${revisions.join(", ")}. Check review status and select the current revisions.`,
             );
-          const selectedUses = selectedInputs.flatMap((item) =>
-            item.kind === "use"
-              ? [[canonical(item.use), item.use] as const]
-              : [],
-          );
-          const submittedKeys = input.uses.map(canonical);
-          if (
-            canonical(selectedUses.map(([key]) => key).sort()) !==
-            canonical([...submittedKeys].sort())
-          )
-            throw new CodexSecurityError(
-              "The final uses must exactly match the selected queued use items. Include disposition IDs as well as use IDs in reviewItemIds.",
-            );
-          const queuedUses = new Map(selectedUses);
-          const uses = submittedKeys.map((key) => queuedUses.get(key)!);
-          const prepared: PreparedItem[] = [];
-          for (const item of selectedInputs) prepared.push(await prepare(item));
-          return { selected: prepared.map(upsert), uses };
+          }
+          return selected;
         });
-        pump();
+        const uses = selected.flatMap(({ input: item }) =>
+          item.kind === "use" ? [item.use] : [],
+        );
         const selectedIds = new Set(selected.map((item) => item.input.id));
         const omittedUses = [...knownUses.keys()].filter(
           (id) => !selectedIds.has(id),
@@ -1134,7 +1119,7 @@ export function createDependencyReportSubmission(options: {
               )
               .join(
                 ", ",
-              )}. Read candidate pages to account for every location; set unassignedOnly:false to see existing assessmentIds that may be missing from reviewItemIds. Queue supported missing assessments or include the appropriate existing items.`,
+              )}. Read candidate pages to account for every location; set unassignedOnly:false to see existing assessmentIds that may be missing from reviewItems. Queue supported missing assessments or include the appropriate existing items.`,
           );
         for (const [id, bound] of bindings) {
           if (
@@ -1152,10 +1137,6 @@ export function createDependencyReportSubmission(options: {
         const derivedStatus = aggregateDependencyVerdict(uses, {
           unresolved,
         });
-        if (input.status !== derivedStatus)
-          return reject(
-            `The overall verdict must be ${derivedStatus}, derived from the validated uses and unresolved coverage; the report claims ${input.status}. If a real source or investigation scope gap remains, queue an evidence-backed unresolved item (candidateIds may be empty for a scope gap) and include its ID in reviewItemIds. Do not change a conclusion merely to obtain acceptance.`,
-          );
         if (
           !uses.length &&
           !input.limitations.some((text) => text.trim()) &&
@@ -1178,6 +1159,7 @@ export function createDependencyReportSubmission(options: {
           coverage.generation !== coverageGeneration ||
           snapshot().generation !== candidateSnapshot.generation ||
           inventory.generation() !== inventoryGeneration ||
+          [...knownUses.keys()].some((id) => !selectedIds.has(id)) ||
           selected.some(
             (item) =>
               items.get(item.input.id) !== item ||
@@ -1237,18 +1219,12 @@ export function createDependencyReportSubmission(options: {
           limitations.add(
             `Profile collection ${collectionId} has unassessed rows ${firstRow}–${lastRow}.`,
           );
-        const candidateById = new Map(
-          candidateSnapshot.candidates.map((candidate) => [
-            candidate.id,
-            candidate,
-          ]),
-        );
         for (const item of selected) {
           if (item.input.kind !== "unresolved") continue;
           const locations = new Map<string, Set<number>>();
           const wholeFiles = new Set<string>();
           for (const id of item.input.candidateIds) {
-            const candidate = candidateById.get(id);
+            const candidate = candidates.get(id);
             if (!candidate) continue;
             const lines = locations.get(candidate.path) ?? new Set<number>();
             if (candidate.line === undefined) wholeFiles.add(candidate.path);
@@ -1288,7 +1264,7 @@ export function createDependencyReportSubmission(options: {
                   ...(item.classification && {
                     classification: item.classification,
                     locations: item.candidateIds.map((candidateId) => {
-                      const { path, line } = candidateById.get(candidateId)!;
+                      const { path, line } = candidates.get(candidateId)!;
                       return {
                         candidateId,
                         path,
@@ -1299,15 +1275,8 @@ export function createDependencyReportSubmission(options: {
                 },
               ],
         );
-        const reviewed = new Map(
-          selected.flatMap((item) =>
-            item.input.kind === "use"
-              ? [[canonical(item.input.use), item] as const]
-              : [],
-          ),
-        );
-        acceptedPlaces = uses.map((use) => {
-          const item = reviewed.get(canonical(use))!;
+        acceptedPlaces = selected.flatMap((item) => {
+          if (item.input.kind !== "use") return [];
           const keys = new Set(decisions.get(item.fingerprint)?.evidenceKeys);
           const references: DependencyReviewReference[] = [];
           for (const excerpt of item.excerpts) {
@@ -1326,7 +1295,7 @@ export function createDependencyReportSubmission(options: {
               ...(selection && { selection }),
             });
           }
-          return withReviewedPlace(use, references);
+          return [withReviewedPlace(item.input.use, references)];
         });
         accepted = {
           status: derivedStatus,

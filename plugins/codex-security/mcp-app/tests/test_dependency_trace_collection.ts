@@ -301,7 +301,12 @@ test("all source batches and evidence survive collection while model replies sta
   assert.deepEqual(new Set(visited), new Set(files));
   assert.equal(peak, 3);
   assert.equal(result.scopes.length, 258);
-  assert.equal(result.expansions.length, 257);
+  const batches = result.scopes.filter(
+    ({ scope }) => scope.kind === "source_batch",
+  );
+  assert.equal(batches.length, 257);
+  assert.ok(batches.every(({ hops }) => hops === 0));
+  assert.deepEqual(result.frontier, []);
   assert.equal(
     result.scopes.flatMap(({ evidence }) => evidence).length,
     files.length,

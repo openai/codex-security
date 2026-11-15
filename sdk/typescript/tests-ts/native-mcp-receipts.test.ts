@@ -210,7 +210,11 @@ test("authenticates the first ordinary child receipt even when later metadata is
         tool: "get_record",
         arguments: { artifact: "selected" },
         itemId: "first",
+        finishedAt: expect.any(String),
       },
+    );
+    expect(run.record.mock.calls[0]?.[2]?.finishedAt).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u,
     );
     expect(run.graph).not.toHaveBeenCalled();
     expect(run.requests.find((r) => r["id"] === "child-call")).toHaveProperty(

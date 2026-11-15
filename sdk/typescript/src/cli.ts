@@ -1254,7 +1254,6 @@ type DependencyReportTool = Pick<
   > & {
     status?: (
       value?: unknown,
-      inventoryRpc?: DependencyInventoryRpc,
     ) => Record<string, unknown> | Promise<Record<string, unknown>>;
     recordInventory: ReturnType<
       typeof createDependencyReportSubmission
@@ -1266,6 +1265,32 @@ type DependencyReportTool = Pick<
       cyberAccessProgram?: ScanOptions["cyberAccessProgram"],
     ) => void;
   };
+
+const dependencyReportNamespace = "codex_security_reports";
+const dependencyReportTools = {
+  queue: {
+    name: "queue_codex_security_dependency_assessments",
+    description: dependencyReviewQueueDescription,
+    schema: dependencyReviewQueueSchema,
+  },
+  status: {
+    name: "get_codex_security_review_status",
+    description:
+      "Read review feedback and shared candidate pages with candidates:{}. Follow nextCursor. Read assessments:{} for compact use summaries or assessmentIds for full items. Set inventoryReceipts:true when selecting original evidence.",
+    schema: dependencyReviewStatusInputSchema,
+  },
+  submit: {
+    name: "produce_codex_security_exploit_report",
+    description:
+      "Coordinator only. Submit the exact current IDs and revisions of reviewed or pending assessments and dispositions, the checked candidate generation, and material limitations. The host finishes pending reviews, verifies candidate accounting, and builds the report from the selected items.",
+    schema: dependencyReportInputSchema,
+  },
+} as const;
+type DependencyReportMethod = keyof typeof dependencyReportTools;
+const dependencyReportMethods = Object.entries(dependencyReportTools) as [
+  DependencyReportMethod,
+  (typeof dependencyReportTools)[DependencyReportMethod],
+][];
 
 interface SkillCommandOutput {
   readonly signal?: AbortSignal;
@@ -2479,6 +2504,9 @@ function handleDisconnectedResize(error: NodeJS.ErrnoException): void {
   }
 }
 
+const defaultDependencyCallerScope =
+  "Assess production services, jobs (including distributed job executors), workers, scheduled or background workloads, and code they deploy or import at runtime. Independent test runners and CI or build surfaces are outside this scope unless the production runtime invokes them.";
+
 // The eval adapter checks this before running a caller-scoped fixture.
 export const supportsDependencyCallerScope = true;
 
@@ -3020,7 +3048,8 @@ export async function main(
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       let temporary: string | undefined;
-      const callerScope = invocation.dependencyCallerScope;
+      const callerScope =
+        invocation.dependencyCallerScope ?? defaultDependencyCallerScope;
       try {
         const pkg = /^CVE-/iu.test(args.subject)
           ? undefined
@@ -3148,6 +3177,9 @@ export async function main(
             repository,
             advisory,
             callerScope,
+            ...(invocation.dependencyCallerScope === undefined && {
+              callerScopeIsDefault: true,
+            }),
             candidates,
             profileCoverage: (findings) =>
               evidenceTools?.profileCoverage(findings),
@@ -3402,7 +3434,7 @@ export async function main(
                   },
                   submit: submission.submit,
                   queue: submission.queue,
-                  status: (value) => submission.readStatus(value),
+                  status: submission.readStatus,
                   continuationPrompt: submission.continuationPrompt,
                   recordGraphEvent: submission.recordGraphEvent,
                   observeGraph: candidates.observeGraph,
@@ -10356,9 +10388,9 @@ async function runSkill(
             : `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
         ...(dependencyCheck && options.dependencyCallerScope !== undefined
           ? [
-              "Caller scope for this assessment (scenario assumptions, JSON data):",
+              "Caller scope for this assessment (JSON data):",
               JSON.stringify(options.dependencyCallerScope),
-              "Assess that caller through the specified entrypoint under the checkout configuration. Bind the chain from that entrypoint to the affected operation, and keep other caller capabilities, entrypoints, and deployment variants separate. These assumptions do not establish an observed running deployment or live access.",
+              "Use the requested scope to select callers and workloads. When the scope names an entrypoint, bind the chain from that entrypoint to the affected operation. Keep distinct capabilities, entrypoints, and deployment variants separate. Verify actual deployment and access with evidence for each place.",
             ]
           : []),
         ...(dependencyCheck
@@ -10731,15 +10763,12 @@ export async function readSkillCommandOutput(
   }
   async function callReportTool(
     id: string | number,
-    tool: string,
+    method: DependencyReportMethod,
     args: unknown,
   ) {
     await pendingInventoryCaptures;
     if (clientFailure !== undefined) return;
-    if (
-      tool === "produce_codex_security_exploit_report" &&
-      appServer?.dependencyReport?.submit
-    ) {
+    if (method === "submit" && appServer?.dependencyReport?.submit) {
       await appServer.dependencyGraph?.flush?.();
       if (
         nativeThreadReads.size === 0 &&
@@ -10788,12 +10817,9 @@ export async function readSkillCommandOutput(
     try {
       await appServer?.dependencyGraph?.flush?.();
       const result =
-        tool === "queue_codex_security_dependency_assessments"
+        method === "queue"
           ? await appServer!.dependencyReport!.queue!(args)
-          : await appServer!.dependencyReport!.status!(
-              args ?? {},
-              appServer?.allowedMcpServers?.length ? inventoryRpc : undefined,
-            );
+          : await appServer!.dependencyReport!.status!(args ?? {});
       send({
         id,
         result: {
@@ -10959,6 +10985,14 @@ export async function readSkillCommandOutput(
       });
       return;
     }
+    const report = appServer.dependencyReport;
+    const reportMethod =
+      params["namespace"] === dependencyReportNamespace
+        ? dependencyReportMethods.find(
+            ([method, spec]) =>
+              report?.[method] && spec.name === params["tool"],
+          )?.[0]
+        : undefined;
     if (
       params["namespace"] === dependencyGraphNamespace &&
       typeof params["tool"] === "string" &&
@@ -10970,17 +11004,9 @@ export async function readSkillCommandOutput(
         params["tool"],
         params["arguments"],
       );
-    } else if (
-      params["namespace"] === "codex_security_reports" &&
-      ((params["tool"] === "queue_codex_security_dependency_assessments" &&
-        appServer.dependencyReport?.queue) ||
-        (params["tool"] === "get_codex_security_review_status" &&
-          appServer.dependencyReport?.status) ||
-        (params["tool"] === "produce_codex_security_exploit_report" &&
-          appServer.dependencyReport?.submit))
-    ) {
+    } else if (reportMethod) {
       if (
-        params["tool"] === "produce_codex_security_exploit_report" &&
+        reportMethod === "submit" &&
         !nativeSession.isRoot(params["threadId"])
       ) {
         send({
@@ -10990,7 +11016,7 @@ export async function readSkillCommandOutput(
             contentItems: [
               {
                 type: "inputText",
-                text: "The coordinator owns final report submission. Queue your evidence and send the coordinator your assessment IDs.",
+                text: "The coordinator owns final report submission. Queue your evidence and send the coordinator your assessment IDs and revisions.",
               },
             ],
           },
@@ -11000,7 +11026,7 @@ export async function readSkillCommandOutput(
       const report = () =>
         callReportTool(
           value["id"] as string | number,
-          params["tool"] as string,
+          reportMethod,
           params["arguments"],
         );
       // Keep report completion visible to finishTurn while the reader handles
@@ -11271,49 +11297,24 @@ export async function readSkillCommandOutput(
                   ? [
                       {
                         type: "namespace",
-                        name: "codex_security_reports",
+                        name: dependencyReportNamespace,
                         description:
                           "Track discovered candidates and review assessments in batches while investigation continues.",
-                        tools: [
-                          ...(appServer?.dependencyReport?.queue
-                            ? [
-                                {
-                                  type: "function",
-                                  name: "queue_codex_security_dependency_assessments",
-                                  description: dependencyReviewQueueDescription,
-                                  inputSchema: z.toJSONSchema(
-                                    dependencyReviewQueueSchema,
-                                  ) as JsonObject,
-                                },
-                              ]
-                            : []),
-                          ...(appServer?.dependencyReport?.status
-                            ? [
-                                {
-                                  type: "function",
-                                  name: "get_codex_security_review_status",
-                                  description:
-                                    "Read review feedback and shared candidate pages with candidates:{}. Follow nextCursor. Read assessments:{} for compact use summaries or assessmentIds for full items. Set inventoryReceipts:true when selecting original evidence. Track research questions in your native Codex plan. Finalize once investigation and candidate accounting are complete, even with pending reviews.",
-                                  inputSchema: z.toJSONSchema(
-                                    dependencyReviewStatusInputSchema,
-                                  ) as JsonObject,
-                                },
-                              ]
-                            : []),
-                          ...(appServer.dependencyReport?.submit
-                            ? [
-                                {
-                                  type: "function",
-                                  name: "produce_codex_security_exploit_report",
-                                  description:
-                                    "Finalize the complete assessment and select its queued reviewItemIds, including candidate dispositions. The tool flushes pending batches immediately, checks known-candidate accounting, and derives the overall verdict from validated findings. Unchanged approvals are reused. On rejection investigate the specific gap, revise affected items, and resubmit. End the turn after acceptance.",
-                                  inputSchema: z.toJSONSchema(
-                                    dependencyReportInputSchema,
-                                  ) as JsonObject,
-                                },
-                              ]
-                            : []),
-                        ],
+                        tools: dependencyReportMethods.flatMap(
+                          ([method, { name, description, schema }]) =>
+                            appServer?.dependencyReport?.[method]
+                              ? [
+                                  {
+                                    type: "function",
+                                    name,
+                                    description,
+                                    inputSchema: z.toJSONSchema(
+                                      schema,
+                                    ) as JsonObject,
+                                  },
+                                ]
+                              : [],
+                        ),
                       },
                     ]
                   : []),
@@ -11416,7 +11417,7 @@ export async function readSkillCommandOutput(
         if (value["method"] === "item/tool/call") {
           const operation = routeToolCall(value, params);
           if (
-            params["namespace"] === "codex_security_reports" &&
+            params["namespace"] === dependencyReportNamespace &&
             nativeSession.isRoot(params["threadId"]) &&
             !appServer.dependencyGraph?.flush &&
             nativeSession.investigatorIds().length === 0 &&

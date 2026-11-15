@@ -2484,20 +2484,24 @@ share the check's graph, tracer, and configured read-only MCP tools. They send
 follow-up questions to the coordinator, which records and assigns them in the
 plan. A question closes with checked evidence or a specific missing fact.
 
-Without a narrower caller scope, the coordinator checks the checkout's runnable
-consumers and build environments, including tools, CI and fuzzing harnesses.
-An explicit caller scope also bounds leads, the final coverage check and the
-overall answer. Unrelated APIs or future installation recipes do not add an
-unknown to that answer; unresolved handoffs or selections on the requested
-chain remain in scope.
-It checks that coverage once before submission. For dispatching or delegating
-entrypoints, an investigator independent of the original assessors performs
-this check. Supplied references are starting points; it can search the checkout
-and shared graph for missing caller, operation and copy bindings. Observed
-dispatch and optional dependency links create follow-up leads even when a
-primary implementation is fixed. Related test/helper candidates can share a
-disposition when the same context and evidence apply; distinct consumers,
-builds, copies and controls remain separate. Unknown selection stays bound to
+The command defaults to production caller scope. It covers production services,
+jobs (including distributed job executors), workers, scheduled or background
+workloads, and code they deploy or import at runtime. Independent test runners
+and CI or build surfaces are outside that scope unless the production runtime
+invokes them. Packaging and build files can still establish what a production
+caller selects. When the invocation supplies an explicit caller scope, the check
+uses it instead, including CI, build or test callers when requested. The resolved
+scope appears in JSON `assumptions` and bounds discovery, leads and conclusions.
+It does not establish a running deployment or caller access.
+
+The coordinator checks final coverage against that scope. It assigns an
+independent follow-up when a specific gap could change the result. Follow-up
+may search source and the shared graph for missing caller, operation and copy
+bindings. Observed dispatch and optional dependency links create follow-up
+leads even when a primary implementation is fixed. Group test-only call sites
+when source shows that the same scope boundary excludes each one. A tests path
+can still contain a production-imported helper. Keep distinct consumers, builds,
+copies and controls separate. Unknown selection stays bound to
 the relevant caller; a proved exclusion closes only its own path. Investigators
 inspect custom input transformations when their output decides an advisory condition
 or exclusion, and keep access permissions separate from input influence.

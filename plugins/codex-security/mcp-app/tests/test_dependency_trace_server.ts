@@ -623,7 +623,6 @@ test("trace groups citations and keeps linked and similarly named endpoints dist
     complete: true,
     limits: [],
     frontier: [],
-    expansions: [{ from: 0, to: 1 }],
     scopes: [
       {
         scope,

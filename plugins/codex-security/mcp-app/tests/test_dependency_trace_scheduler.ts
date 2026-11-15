@@ -59,14 +59,15 @@ test("a fast branch can finish its shared child before the other branch returns"
   );
   assert.equal(result.complete, true);
   assert.equal(calls.get("shared"), 1);
-  const child = result.scopes.find((entry) => entry.scope.path === "shared");
   assert.deepEqual(
-    result.expansions
-      .filter((edge) => edge.to === child!.id)
-      .map((e) => e.from)
-      .sort(),
-    [0, 1],
+    result.scopes.map(({ scope, hops }) => [scope.path, hops]),
+    [
+      ["a", 0],
+      ["b", 0],
+      ["shared", 1],
+    ],
   );
+  assert.deepEqual(result.frontier, []);
 });
 
 test("a shorter path can reopen a hop-limited scope without rerunning the provider", async () => {
@@ -94,6 +95,15 @@ test("a shorter path can reopen a hop-limited scope without rerunning the provid
   assert.equal(result.complete, true);
   assert.equal(calls.filter((p) => p === "shared").length, 1);
   assert.ok(calls.includes("leaf"));
+  assert.equal(
+    result.scopes.find(({ scope }) => scope.path === "shared")?.hops,
+    1,
+  );
+  assert.equal(
+    result.scopes.find(({ scope }) => scope.path === "leaf")?.hops,
+    2,
+  );
+  assert.deepEqual(result.frontier, []);
 });
 
 test("zero hops returns unresolved candidate scopes and deadline retains completed work", async () => {

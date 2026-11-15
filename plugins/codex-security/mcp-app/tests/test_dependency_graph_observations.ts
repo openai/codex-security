@@ -184,7 +184,6 @@ test("build scopes disambiguate runtime frames and source names remain separate"
     {
       complete: true,
       limits: [],
-      expansions: [],
       frontier: [],
       scopes: [
         {

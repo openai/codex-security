@@ -33,7 +33,6 @@ function trace(...evidence: TraceEvidence[]): TraceResult {
         evidence,
       },
     ],
-    expansions: [],
     frontier: [],
   };
 }
