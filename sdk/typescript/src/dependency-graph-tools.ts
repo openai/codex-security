@@ -5,6 +5,12 @@ import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { JsonObject, JsonValue } from "./config.js";
 import {
+  dependencyEndpointQuerySchema,
+  dependencyEndpointTool,
+  openDependencyEndpoints,
+  type DependencyEndpointGraph,
+} from "./dependency-endpoints.js";
+import {
   createGraphEvidenceIngestion,
   graphEvidenceResourceSchema,
   type GraphEvidenceObservations,
@@ -69,6 +75,7 @@ export interface DependencyGraphTools {
   ): void;
   flush?(): Promise<void>;
   sourceWorkCoverage?: DependencySourceWorkCoverage;
+  endpoints?: DependencyEndpointGraph;
   ingestProfileCollection?(resource: string, receiptId: string): void;
 }
 
@@ -91,8 +98,10 @@ export async function openDependencyGraph(
     ) => JsonObject;
   },
   excludedSourcePaths?: readonly string[],
-): Promise<DependencyGraphTools> {
+  endpointOptions?: Parameters<typeof openDependencyEndpoints>[0],
+): Promise<DependencyGraphTools & { endpoints: DependencyEndpointGraph }> {
   const sourceRoot = await realpath(repository);
+  const endpoints = await openDependencyEndpoints(endpointOptions);
   const readSourceIdentity = createDependencySourceIdentityReader(sourceRoot);
   const { createDependencyGraphSession } = (
     await import(pathToFileURL(join(plugin, "mcp/helpers.mjs")).href)
@@ -198,6 +207,7 @@ export async function openDependencyGraph(
   };
   return {
     sourceWorkCoverage: sourceWork.coverage,
+    endpoints,
     tools: [
       ...(supplemental?.tools ?? []),
       ...graph.tools.map((tool) =>
@@ -207,6 +217,7 @@ export async function openDependencyGraph(
               description:
                 tool.description +
                 " Use evidence:{} to list shared source-note IDs and questions, evidence:{id} to read host-captured excerpts, or evidence:{search} to search notes. Note claims and scope associations are investigator assertions." +
+                " Use endpoints:{} for a compact endpoint page, endpoints:{id} for the full record, or filter by role, origin or scope. Use page:{limit,cursor} within the endpoint selection. A supplied side is a complete boundary." +
                 " Use sourceWork:{} for source-plan remainder counts, sourceWork:{rosterId} or sourceWork:{partitionId} for a summary, and page:{view,limit,cursor} within that selection for exact paths, gaps or search receipts. Follow nextCursor until null." +
                 (supplemental?.readInventoryReceipt
                   ? " Use inventory:{receiptId} for original runtime receipt metadata and shape, or inventory:{receiptId,textBlock,record} for an exact value. textBlock=null selects structured content. Set original:true for an explicit whole ordinary result when necessary."
@@ -217,6 +228,9 @@ export async function openDependencyGraph(
                   ...(isRecord(tool.inputSchema["properties"])
                     ? tool.inputSchema["properties"]
                     : {}),
+                  endpoints: z.toJSONSchema(
+                    dependencyEndpointQuerySchema,
+                  ) as JsonObject,
                   evidence: z.toJSONSchema(evidenceQuerySchema) as JsonObject,
                   sourceWork: z.toJSONSchema(
                     sourceWorkQuerySchema,
@@ -232,6 +246,7 @@ export async function openDependencyGraph(
           : tool,
       ),
       sourceWorkTool,
+      dependencyEndpointTool,
       {
         name: "record_codex_security_evidence",
         description:
@@ -243,10 +258,12 @@ export async function openDependencyGraph(
       boundTraceResponse: graph.boundTraceResponse,
     }),
     async close() {
+      await endpoints.flush();
       await evidence?.flush();
       await graph.close();
     },
     flush: async () => {
+      await endpoints.flush();
       await evidence?.flush();
     },
     observeInventory: (server, result, receiptId, rpc) =>
@@ -257,6 +274,14 @@ export async function openDependencyGraph(
     },
     async call(name, args, inventoryRpc) {
       signal?.throwIfAborted();
+      if (name === dependencyEndpointTool.name)
+        return focusedReply({ endpoints: await endpoints.record(args) });
+      if (
+        name === "query_codex_security_graph" &&
+        isRecord(args) &&
+        args["endpoints"] !== undefined
+      )
+        return focusedReply({ endpoints: endpoints.query(args["endpoints"]) });
       if (name === sourceWorkTool.name)
         return focusedReply({ source_work: sourceWork.mutate(args) });
       if (

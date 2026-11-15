@@ -2521,6 +2521,49 @@ share the check's graph, tracer, and configured read-only MCP tools. They send
 follow-up questions to the coordinator, which records and assigns them in the
 plan. A question closes with checked evidence or a specific missing fact.
 
+The existing `--config FILE` input can supply `exploitability.sources` and
+`exploitability.sinks`. Each present array defines that complete endpoint
+boundary, including an explicit empty array. Omitted sides remain discoverable.
+Endpoints retain stable IDs, functions, named or numeric input ports, exact
+runtime selectors and evidence references. Investigators query them through the
+shared graph and can register advisory sinks or discovered intermediates without
+widening a supplied boundary.
+
+`exploitability.scope.caller` sets the caller investigation scope. An explicit
+SDK invocation scope takes precedence; otherwise the existing production default
+applies. `exploitability.scope.runtime` supplies the cluster, service and
+`window: {start, end}` for profile reads, with optional container and image name
+or tag. This runtime filter does not narrow the caller investigation scope or
+establish deployment or access. Existing configurations keep their defaults.
+
+For example, a caller scope and profile filter can be configured together:
+
+```json
+{
+  "exploitability": {
+    "scope": {
+      "caller": "Only the example API request handler and code it calls.",
+      "runtime": {
+        "cluster": "example-cluster",
+        "service": "example-api",
+        "window": {
+          "start": "2026-01-01T00:00:00Z",
+          "end": "2026-01-01T00:01:00Z"
+        }
+      }
+    }
+  }
+}
+```
+
+The profiler collector resolves endpoint IDs into batched selectors. Ordered
+source/sink pairs are filtered before the provider's limit; sink-only searches
+support discovery. Stack resources remain outside model context. The graph
+retains searched windows, observations, original receipts and coverage gaps.
+Exact requests reuse their captured result without turning incomplete coverage
+into proof of absence. CPU samples establish sampled execution and ancestry;
+arguments, input control and selected builds require their own evidence.
+
 The command defaults to production caller scope. It covers production services,
 jobs (including distributed job executors), workers, scheduled or background
 workloads, and code they deploy or import at runtime. Independent test runners

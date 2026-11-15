@@ -45,6 +45,11 @@ export type {
   ProjectConfigInput,
   ProjectScope,
 } from "./project-config-schema.js";
+export type {
+  DependencyEndpointConfiguration,
+  DependencyRuntimeScope,
+  DependencyRuntimeSelector,
+} from "./dependency-endpoints.js";
 export type { ScanSettings } from "./scan-settings.js";
 export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";

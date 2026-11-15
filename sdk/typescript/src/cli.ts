@@ -3137,8 +3137,26 @@ export async function main(
           project?.input.exploitability?.scope?.exclude_paths?.map((path) =>
             safeRelativePath(path, "exploitability.scope.exclude_paths"),
           );
+        const dependencyConfiguration = project?.input.exploitability;
         const callerScope = [
-          invocation.dependencyCallerScope ?? defaultDependencyCallerScope,
+          invocation.dependencyCallerScope ??
+            dependencyConfiguration?.scope?.caller ??
+            defaultDependencyCallerScope,
+          ...(dependencyConfiguration?.sources !== undefined
+            ? [
+                `Operator-supplied complete source boundary (scenario, not execution proof): ${JSON.stringify(dependencyConfiguration.sources)}`,
+              ]
+            : []),
+          ...(dependencyConfiguration?.sinks !== undefined
+            ? [
+                `Operator-supplied complete sink boundary (scenario, not execution proof): ${JSON.stringify(dependencyConfiguration.sinks)}`,
+              ]
+            : []),
+          ...(dependencyConfiguration?.scope?.runtime
+            ? [
+                `Runtime observation filter: ${JSON.stringify(dependencyConfiguration.scope.runtime)}. This bounds runtime requests and evidence, not the caller investigation scope or proof of deployment, access or absence.`,
+              ]
+            : []),
           ...(excludedSourcePaths?.length
             ? [
                 `Operator-selected broad structural discovery exclusions: ${JSON.stringify(excludedSourcePaths)}. For broad structural scans use trace_codex_security_code with directory paths and source_terms so the host applies this boundary. Retain discovered candidate IDs. Follow source, build, wrapper and matched workload evidence into these locations with explicit file traces. An omission describes discovery scope only.`,
@@ -3260,9 +3278,10 @@ export async function main(
             repository,
             advisory,
             callerScope,
-            ...(invocation.dependencyCallerScope === undefined && {
-              callerScopeIsDefault: true,
-            }),
+            ...(invocation.dependencyCallerScope === undefined &&
+              dependencyConfiguration?.scope?.caller === undefined && {
+                callerScopeIsDefault: true,
+              }),
             candidates,
             sourceWorkCoverage: () => dependencyGraph?.sourceWorkCoverage,
             onBlocked: (failure) => scope.abort(failure),
@@ -3337,6 +3356,7 @@ export async function main(
                 // The directory belongs to this check's authenticated session.
                 providerKey: JSON.stringify([profileServer, profileTool, 1]),
                 authorize: () => signal.throwIfAborted(),
+                endpointGraph: () => dependencyGraph?.endpoints,
                 recordCollection(capture) {
                   const receiptId = submission.recordProfileCollection({
                     ...capture,
@@ -3519,6 +3539,13 @@ export async function main(
                 readInventoryReceipt: submission.readInventoryReceipt,
               },
               excludedSourcePaths,
+              {
+                configuration: dependencyConfiguration,
+                snapshotPath: join(
+                  reviewDirectory,
+                  "dependency-endpoints.json",
+                ),
+              },
             );
             exitCode = await runSkill(
               "dependency-exploitability",

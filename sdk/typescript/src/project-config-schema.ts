@@ -1,5 +1,9 @@
 import { z } from "zod";
 import {
+  dependencyEndpointInputSchema,
+  dependencyRuntimeScopeSchema,
+} from "./dependency-endpoints.js";
+import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,
   ScanSettingsSchema,
@@ -83,8 +87,30 @@ export const ProjectConfigInputSchema = z.strictObject({
     ),
   exploitability: z
     .strictObject({
+      sources: z
+        .array(dependencyEndpointInputSchema)
+        .optional()
+        .describe(
+          "Complete supplied source boundary. An empty array supplies a boundary with no members. Omit to discover sources.",
+        ),
+      sinks: z
+        .array(dependencyEndpointInputSchema)
+        .optional()
+        .describe(
+          "Complete supplied sink boundary. An empty array supplies a boundary with no members. Omit to discover sinks.",
+        ),
       scope: z
         .strictObject({
+          caller: nonempty
+            .optional()
+            .describe(
+              "Caller investigation scope in plain text. Applies independently of runtime observation filters.",
+            ),
+          runtime: dependencyRuntimeScopeSchema
+            .optional()
+            .describe(
+              "Runtime workload and time window to investigate. This filter does not establish deployment or access.",
+            ),
           exclude_paths: z
             .array(nonempty)
             .optional()

@@ -172,9 +172,212 @@
     "exploitability": {
       "type": "object",
       "properties": {
+        "sources": {
+          "description": "Complete supplied source boundary. An empty array supplies a boundary with no members. Omit to discover sources.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "function": { "type": "string", "minLength": 1 },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    { "type": "string", "minLength": 1 },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  ]
+                }
+              },
+              "runtime_selectors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "observed_name": { "type": "string", "minLength": 1 },
+                    "frame_type": { "type": "string", "minLength": 1 },
+                    "location": { "type": "string", "minLength": 1 },
+                    "binary": { "type": "string", "minLength": 1 },
+                    "line": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "build_id": { "type": "string", "minLength": 1 },
+                    "build_hash": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["name"],
+                  "additionalProperties": false
+                }
+              },
+              "package": { "type": "string", "minLength": 1 },
+              "symbol": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "file": { "type": "string", "minLength": 1 },
+              "binary": { "type": "string", "minLength": 1 },
+              "line": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "location": { "type": "string", "minLength": 1 },
+              "evidence": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "relationships": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "maps_to",
+                        "reaches",
+                        "produces",
+                        "writes_cache",
+                        "creates_async"
+                      ]
+                    },
+                    "endpoint_id": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["kind", "endpoint_id"],
+                  "additionalProperties": false
+                }
+              },
+              "scope": { "type": "string", "minLength": 1 }
+            },
+            "required": ["function"],
+            "additionalProperties": false
+          }
+        },
+        "sinks": {
+          "description": "Complete supplied sink boundary. An empty array supplies a boundary with no members. Omit to discover sinks.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "function": { "type": "string", "minLength": 1 },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    { "type": "string", "minLength": 1 },
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  ]
+                }
+              },
+              "runtime_selectors": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "observed_name": { "type": "string", "minLength": 1 },
+                    "frame_type": { "type": "string", "minLength": 1 },
+                    "location": { "type": "string", "minLength": 1 },
+                    "binary": { "type": "string", "minLength": 1 },
+                    "line": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "build_id": { "type": "string", "minLength": 1 },
+                    "build_hash": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["name"],
+                  "additionalProperties": false
+                }
+              },
+              "package": { "type": "string", "minLength": 1 },
+              "symbol": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "file": { "type": "string", "minLength": 1 },
+              "binary": { "type": "string", "minLength": 1 },
+              "line": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "location": { "type": "string", "minLength": 1 },
+              "evidence": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "relationships": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "maps_to",
+                        "reaches",
+                        "produces",
+                        "writes_cache",
+                        "creates_async"
+                      ]
+                    },
+                    "endpoint_id": { "type": "string", "minLength": 1 }
+                  },
+                  "required": ["kind", "endpoint_id"],
+                  "additionalProperties": false
+                }
+              },
+              "scope": { "type": "string", "minLength": 1 }
+            },
+            "required": ["function"],
+            "additionalProperties": false
+          }
+        },
         "scope": {
           "type": "object",
           "properties": {
+            "caller": {
+              "description": "Caller investigation scope in plain text. Applies independently of runtime observation filters.",
+              "type": "string",
+              "minLength": 1
+            },
+            "runtime": {
+              "description": "Runtime workload and time window to investigate. This filter does not establish deployment or access.",
+              "type": "object",
+              "properties": {
+                "cluster": { "type": "string", "minLength": 1 },
+                "service": { "type": "string", "minLength": 1 },
+                "window": {
+                  "type": "object",
+                  "properties": {
+                    "start": {
+                      "type": "string",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "end": {
+                      "type": "string",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    }
+                  },
+                  "required": ["start", "end"],
+                  "additionalProperties": false
+                },
+                "container": { "type": "string", "minLength": 1 },
+                "image_name": { "type": "string", "minLength": 1 },
+                "image_tag": { "type": "string", "minLength": 1 }
+              },
+              "required": ["cluster", "service", "window"],
+              "additionalProperties": false
+            },
             "exclude_paths": {
               "description": "Literal checkout-relative files or directories to omit from broad exploitability structural discovery. Explicit file traces and exact caller leads can revisit them.",
               "type": "array",

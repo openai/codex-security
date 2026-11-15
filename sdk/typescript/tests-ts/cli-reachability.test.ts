@@ -633,6 +633,7 @@ test("returns only the report accepted after the investigator corrects a rejecte
         "resolve_codex_security_services",
         "query_codex_security_graph",
         "record_codex_security_source_work",
+        "record_codex_security_endpoint",
         "record_codex_security_evidence",
       ]);
       const paths = ["app/index.ts"];

@@ -16,6 +16,7 @@ import {
 } from "./config.js";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
+import { validateDependencyEndpointConfiguration } from "./dependency-endpoints.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
 import {
@@ -120,6 +121,7 @@ function nativeMcpConfiguration(config: JsonObject): JsonObject {
 export interface ResolvedProjectConfig {
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
+  exploitability?: ProjectConfigInput["exploitability"];
   sources: ConfigurationSources;
   projectConfig?: ProjectConfigProvenance;
 }
@@ -314,6 +316,14 @@ function requireProjectConfig(
       `Invalid project configuration${path === undefined ? "" : ` at ${path}`}: ${issues}`,
     );
   }
+  try {
+    validateDependencyEndpointConfiguration(value.exploitability);
+  } catch (error) {
+    throw new ConfigurationError(
+      `Invalid exploitability configuration${path === undefined ? "" : ` at ${path}`}: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
 }
 
 export function resolveScanSettings(
@@ -485,6 +495,9 @@ export function resolveScanSettings(
   return {
     config: { codexOverrides },
     options: settings,
+    ...(file?.exploitability === undefined
+      ? {}
+      : { exploitability: structuredClone(file.exploitability) }),
     sources: resolvedSources,
     ...(project?.path === undefined
       ? {}
