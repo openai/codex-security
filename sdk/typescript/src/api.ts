@@ -5631,6 +5631,12 @@ export class CodexSecurity {
         );
       }
       activeScan = { id: scanId, options: workbenchOptions };
+      const findingUpdates = await findingUpdatesForScan(
+        activeScan,
+        workbench,
+        options,
+        skillNameFor(local.target, local.mode),
+      );
       notifyScanLifecycle(options, registration);
       notifyObserver(
         options,
@@ -5670,12 +5676,6 @@ export class CodexSecurity {
         scanId,
         ...(cost === null ? [] : ["--cost-json", JSON.stringify(cost)]),
       ]);
-      const findingUpdates = await findingUpdatesForScan(
-        activeScan,
-        workbench,
-        options,
-        skillNameFor(local.target, local.mode),
-      );
       activeScan = undefined;
       const completedScan = completion["scan"];
       await findingUpdates?.finish(signal);
