@@ -16,6 +16,15 @@ import { git } from "./git-fixture.js";
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
+async function waitForReviewStart(predicate: () => boolean) {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() > deadline)
+      throw new Error("Expected the background reviewer to start.");
+    await Bun.sleep(1);
+  }
+}
+
 const decoder = { ecosystem: "npm", name: "sample-decoder" };
 const advisory = {
   cve: "CVE-2024-1000",
@@ -485,6 +494,7 @@ function reviewDecision(
     items: {
       id: string;
       revision: number;
+      hash: string;
       excerptIds: string[];
       receiptIds: string[];
     }[];
@@ -493,6 +503,7 @@ function reviewDecision(
     items: packet.items.map((item) => ({
       id: item.id,
       revision: item.revision,
+      hash: item.hash,
       accepted,
       reason,
       citedVersion,
@@ -1096,7 +1107,7 @@ test("the native coordinator queues observed candidates and retains independent 
       expect(await tool.queue({ items: [direct] })).toMatchObject({
         queued: true,
       });
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await waitForReviewStart(() => review.mock.calls.length > 0);
       expect(review).toHaveBeenCalledTimes(1);
       expect(await tool.queue(queue)).toMatchObject({ queued: true });
       const result = await tool.submit({
@@ -1203,7 +1214,7 @@ test("preserves a sibling's fixing hunk when revising the selected copy assessme
       expect(await tool.queue({ items: [original] })).toMatchObject({
         queued: true,
       });
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await waitForReviewStart(() => review.mock.calls.length > 0);
       expect(review).toHaveBeenCalledTimes(1);
 
       // A sibling writes its finding before returning a summary or an assessment.

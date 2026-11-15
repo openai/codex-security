@@ -1,3 +1,8 @@
+import {
+  dependencyClaimReferenceSchema,
+  dependencyApprovedClaimSchema,
+  dependencyClaimEvidenceSchema,
+} from "./dependency-claims.js";
 import { realpath } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { z } from "zod";
@@ -422,6 +427,8 @@ export type DependencySearch = z.infer<typeof dependencySearchSchema>;
 export const reviewedDependencyUseSchema = dependencyUseSchema.safeExtend({
   place: dependencyPlaceSchema,
   decidingEvidence: z.array(reviewReference),
+  conclusionClaim: dependencyClaimReferenceSchema.optional(),
+  supportingClaims: z.array(dependencyClaimReferenceSchema).optional(),
 });
 export type ReviewedDependencyUse = z.infer<typeof reviewedDependencyUseSchema>;
 
@@ -430,6 +437,8 @@ export const dependencyReachabilityReportSchema = dependencyAssessmentSchema
   .extend({
     schemaVersion: z.literal(2),
     uses: z.array(reviewedDependencyUseSchema),
+    claims: z.array(dependencyApprovedClaimSchema).optional(),
+    claimEvidence: dependencyClaimEvidenceSchema.optional(),
     assumptions: z.array(z.string()),
     searches: z.array(dependencySearchSchema),
     coverage: z.array(dependencyCoverageDispositionSchema).optional(),

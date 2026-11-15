@@ -97,11 +97,13 @@ function approve(prompt: string) {
       (item: {
         id: string;
         revision: number;
+        hash: string;
         excerptIds: string[];
         receiptIds: string[];
       }) => ({
         id: item.id,
         revision: item.revision,
+        hash: item.hash,
         accepted: true,
         reason:
           "The submitted source supports the scope and missing deciding fact.",

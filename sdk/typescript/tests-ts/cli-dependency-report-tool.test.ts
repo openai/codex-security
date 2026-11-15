@@ -258,11 +258,13 @@ test("native report tools expose and preserve reviewed use proof", async () => {
           (item: {
             id: string;
             revision: number;
+            hash: string;
             excerptIds: string[];
             receiptIds: string[];
           }) => ({
             id: item.id,
             revision: item.revision,
+            hash: item.hash,
             accepted: true,
             reason:
               "decoder.ts establishes the call and leaves its copy unknown.",
@@ -729,7 +731,12 @@ test("waits for an investigator resumed during review and reconciles its new use
     advisory: { cve: "CVE-2000-0001", advisories: [] },
     review: async (prompt) => {
       const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as {
-        items: { id: string; revision: number; excerptIds: string[] }[];
+        items: {
+          id: string;
+          revision: number;
+          hash: string;
+          excerptIds: string[];
+        }[];
       };
       reviewed.push(packet.items.map((item) => item.id));
       if (reviewed.length === 1) {
@@ -740,6 +747,7 @@ test("waits for an investigator resumed during review and reconciles its new use
         items: packet.items.map((item) => ({
           id: item.id,
           revision: item.revision,
+          hash: item.hash,
           accepted: true,
           reason: "The cited call and missing selected copy are supported.",
           citedVersion: null,
@@ -1528,13 +1536,19 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
     repository: repo.path,
     review: async (prompt) => {
       const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as {
-        items: { id: string; revision: number; excerptIds: string[] }[];
+        items: {
+          id: string;
+          revision: number;
+          hash: string;
+          excerptIds: string[];
+        }[];
       };
       const accepted = ++reviews === 10;
       return JSON.stringify({
         items: packet.items.map((item) => ({
           id: item.id,
           revision: item.revision,
+          hash: item.hash,
           accepted,
           reason: gap,
           citedVersion: null,
@@ -1595,6 +1609,8 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
           name: "codex_security_reports",
           tools: [
             { name: "queue_codex_security_dependency_assessments" },
+            { name: "queue_claims" },
+            { name: "query_claims" },
             { name: "get_codex_security_review_status" },
             { name: reportTool.tool },
             { name: "abort_codex_security_investigation" },
@@ -2193,12 +2209,18 @@ test("finalizes after native source work calls and preserves known remaining cov
     sourceWorkCoverage: () => graph.sourceWorkCoverage,
     review: async (prompt) => {
       const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as {
-        items: { id: string; revision: number; excerptIds: string[] }[];
+        items: {
+          id: string;
+          revision: number;
+          hash: string;
+          excerptIds: string[];
+        }[];
       };
       return JSON.stringify({
-        items: packet.items.map(({ id, revision, excerptIds }) => ({
+        items: packet.items.map(({ id, revision, hash, excerptIds }) => ({
           id,
           revision,
+          hash,
           accepted: true,
           reason: "The fixed format excludes this call.",
           citedVersion: null,
@@ -2340,5 +2362,107 @@ test("finalizes after native source work calls and preserves known remaining cov
   } finally {
     state.close();
     await graph.close();
+  }
+});
+
+test("native shared claim tools register object schemas and preserve opaque JSON", async () => {
+  await using repo = await scopedTemporaryDirectory("native-claims-");
+  await writeFile(join(repo.path, "writer.ts"), 'saveImage(output, "PNG");\n');
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory: { cve: "CVE-2024-1000", advisories: [] },
+    review: async (prompt) => {
+      const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as {
+        items: {
+          id: string;
+          revision: number;
+          hash: string;
+          excerptIds: string[];
+        }[];
+      };
+      return JSON.stringify({
+        items: packet.items.map((row) => ({
+          id: row.id,
+          revision: row.revision,
+          hash: row.hash,
+          accepted: true,
+          reason: "writer.ts establishes the selected fixture statement.",
+          citedVersion: null,
+          evidenceIds: row.excerptIds,
+        })),
+      });
+    },
+  });
+  const payload = {
+    state: "approved",
+    id: "opaque-only",
+    nested: [null, false, 17, { modes: ["PNG", "JPEG"] }],
+  };
+  try {
+    const run = replay(
+      [
+        ...setup(),
+        submission(
+          "claim-save",
+          {
+            claims: [
+              {
+                id: "writer-mode",
+                payload,
+                scope: { repository: "fixture", modes: ["PNG", "JPEG"] },
+                evidence: [{ path: "writer.ts", startLine: 1, endLine: 1 }],
+              },
+            ],
+          },
+          { tool: "queue_claims" },
+        ),
+        submission(
+          "claim-read",
+          { ids: ["writer-mode"] },
+          { tool: "query_claims" },
+        ),
+        complete("turn"),
+      ],
+      undefined,
+      () => undefined,
+      "standard",
+      state,
+    );
+    expect(await run.result).toEqual({ completed: true });
+    const start = run.requests.find(
+      (request) => request["method"] === "thread/start",
+    ) as {
+      params: {
+        dynamicTools: {
+          name: string;
+          tools: {
+            name: string;
+            inputSchema: { type: string; properties: unknown };
+          }[];
+        }[];
+      };
+    };
+    const reportTools = start.params.dynamicTools.find(
+      (namespace) => namespace.name === "codex_security_reports",
+    )!.tools;
+    for (const name of ["queue_claims", "query_claims"]) {
+      const definition = reportTools.find((tool) => tool.name === name)!;
+      expect(definition.inputSchema.type).toBe("object");
+      expect(definition.inputSchema.properties).toBeDefined();
+    }
+    const response = run.requests.find(
+      (request) => request["id"] === "claim-read",
+    ) as {
+      result: { success: boolean; contentItems: { text: string }[] };
+    };
+    expect(response.result.success).toBe(true);
+    expect(JSON.parse(response.result.contentItems[0]!.text)).toMatchObject({
+      claims: [{ id: "writer-mode", payload }],
+    });
+    expect(
+      (await state.queryClaims({ ids: ["writer-mode"] })).claims[0]!.id,
+    ).toBe("writer-mode");
+  } finally {
+    await state.close();
   }
 });

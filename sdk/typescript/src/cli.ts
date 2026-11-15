@@ -154,6 +154,12 @@ import {
   createDependencyCandidates,
   type DependencyCandidates,
 } from "./dependency-candidates.js";
+import {
+  dependencyClaimQueueDescription,
+  dependencyClaimQueueSchema,
+  dependencyClaimQueryDescription,
+  dependencyClaimQuerySchema,
+} from "./dependency-claims.js";
 import { dependencyNativeCoordinatorPrompt } from "./dependency-native-prompt.js";
 import {
   createDependencyInvestigationTools,
@@ -1255,14 +1261,21 @@ type SkillThreadSource = Extract<
 
 type DependencyReportTool = Pick<
   ReturnType<typeof createDependencyReportSubmission>,
-  "continuationPrompt" | "recordGraphEvent"
+  "recordGraphEvent"
 > &
   Partial<
     Pick<
       ReturnType<typeof createDependencyReportSubmission>,
-      "submit" | "queue" | "recordInventoryStartup" | "abort" | "blockedOutcome"
+      | "submit"
+      | "queue"
+      | "queueClaims"
+      | "queryClaims"
+      | "recordInventoryStartup"
+      | "abort"
+      | "blockedOutcome"
     >
   > & {
+    continuationPrompt: () => string | undefined | Promise<string | undefined>;
     status?: (
       value?: unknown,
     ) => Record<string, unknown> | Promise<Record<string, unknown>>;
@@ -1283,6 +1296,16 @@ const dependencyReportTools = {
     name: "queue_codex_security_dependency_assessments",
     description: dependencyReviewQueueDescription,
     schema: dependencyReviewQueueSchema,
+  },
+  queueClaims: {
+    name: "queue_claims",
+    description: dependencyClaimQueueDescription,
+    schema: dependencyClaimQueueSchema,
+  },
+  queryClaims: {
+    name: "query_claims",
+    description: dependencyClaimQueryDescription,
+    schema: dependencyClaimQuerySchema,
   },
   status: {
     name: "get_codex_security_review_status",
@@ -3534,8 +3557,13 @@ export async function main(
                   blockedOutcome: submission.blockedOutcome,
                   submit: submission.submit,
                   queue: submission.queue,
+                  queueClaims: submission.queueClaims,
+                  queryClaims: submission.queryClaims,
                   status: submission.readStatus,
-                  continuationPrompt: submission.continuationPrompt,
+                  continuationPrompt: async () => {
+                    await submission.refreshAcceptedReport();
+                    return submission.continuationPrompt();
+                  },
                   recordGraphEvent: submission.recordGraphEvent,
                   observeGraph: candidates.observeGraph,
                   recordInventory: submission.recordInventory,
@@ -3554,6 +3582,7 @@ export async function main(
               );
             const advisoryDetails =
               "advisories" in advisory ? advisory.advisories : undefined;
+            await submission.refreshAcceptedReport();
             return reviewedDependencyCheckSchema.parse({
               ...submission.publicReport(),
               advisories: advisoryDetails?.map((entry) => entry.url) ?? [],
@@ -11010,7 +11039,11 @@ export async function readSkillCommandOutput(
       const result =
         method === "queue"
           ? await appServer!.dependencyReport!.queue!(args)
-          : await appServer!.dependencyReport!.status!(args ?? {});
+          : method === "queueClaims"
+            ? await appServer!.dependencyReport!.queueClaims!(args)
+            : method === "queryClaims"
+              ? await appServer!.dependencyReport!.queryClaims!(args ?? {})
+              : await appServer!.dependencyReport!.status!(args ?? {});
       send({
         id,
         result: {
@@ -11281,7 +11314,7 @@ export async function readSkillCommandOutput(
         nativeThreadReads.size > 0 || nativeSession.hasActiveInvestigators()
           ? "Wait for the active native investigators, reconcile their saved evidence, then submit the complete report."
           : (pendingResearchPrompt() ??
-            appServer.dependencyReport.continuationPrompt());
+            (await appServer.dependencyReport.continuationPrompt()));
       if (prompt !== undefined) {
         finishedTurns.add(turn.id);
         turnRequestId = `dependency-turn-${finishedTurns.size + 1}`;

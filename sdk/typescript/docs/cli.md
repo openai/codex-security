@@ -2636,12 +2636,37 @@ code-level findings should also handle `potentially_exploitable`.
 
 The skill queues completed assessments for background review while it continues
 investigating. Ready items are batched on the next event-loop turn, with at most
-two batches in flight. Small batches do not wait a fixed minute. Final submission
+16 batches in flight. Small batches do not wait a fixed minute. Final submission
 flushes pending work immediately.
 One model call checks a batch against the advisory and each item's cited source
 and inventory records. It independently reads the dependency version from those
 records. Changes trigger review of the affected items; unchanged approvals are
 reused.
+
+Investigators can share independently reviewed premises through
+`codex_security_reports.queue_claims` and `codex_security_reports.query_claims`.
+A proposed claim has a stable `id`, free-form JSON `payload` and `scope`, deciding
+source ranges or original receipt selections, and exact approved dependency
+references. The existing reviewer saves approvals automatically. The host owns
+the immutable revision, content hash and review state; a payload cannot grant
+itself approval. Changes to a premise or its deciding evidence invalidate
+dependent approvals.
+
+Query by a literal `search` to read a compact index, following `nextCursor` in
+`page.cursor`, or by `ids` to fetch selected complete claim envelopes. Search
+pages default to 50 rows and preserve the full stored ledger. Pending claims
+remain discoverable so investigators can avoid duplicate work. Use the exact
+`{id, revision, hash}` when depending on an approved claim, and
+`expectedRevision` when changing it.
+
+Assessment items can include `supportingClaims` for those premises. Each use
+still retains its actual call site, caller arguments, selected dependency,
+conditions, verdict, unknowns and citations. The host prepares a conclusion
+claim from that exact use; review checks the new caller binding and inference
+without re-proving an unchanged approved premise. A claim about one artifact
+does not authorize a different artifact. Reports retain each use's conclusion
+reference and the exact referenced approved claim closure, including the
+deciding source and selected receipt evidence.
 
 The reviewer can use a release recipe when bound inventory receipts connect the
 running artifact to an exact source revision and cited source at that revision
@@ -2652,8 +2677,15 @@ and same-file flows observed by the tracer. Each needs an assessment, an
 evidence-backed dismissal, or a specific unresolved question. Plain text
 matches and shell searches provide leads and can supply citations. The
 investigator can group candidates when the same build, dependency copy, and
-controls apply. The host checks report structure and evidence and accounts for
+controls apply, while retaining every covered call's identity and evidence.
+Shared premises can be reused across callers; each distinct caller binding and
+conclusion still needs review. The host checks report structure and evidence and accounts for
 known candidates. Neutral inventory observations can use `supports: []`.
+
+A non-use disposition superseded by current complete coverage may be omitted
+from the final selection while remaining in the audit history. Actual use
+history must be retained or replaced with a supported conclusion under its stable ID. A
+superseded dismissal should not be revised to an empty candidate list.
 
 Queue acknowledgments and review status return concise progress and actionable
 feedback. Candidate locations are available on request in pages, defaulting to

@@ -22,6 +22,7 @@ interface ReviewPacket {
   items: {
     id: string;
     revision: number;
+    hash: string;
     kind: string;
     classification?: string;
     candidates?: { path: string; line?: number; testCandidate?: true }[];
@@ -55,11 +56,23 @@ function reviewDecision(
     items: reviewPacket(prompt).items.map((item) => ({
       id: item.id,
       revision: item.revision,
+      hash: item.hash,
       ...decision,
       citedVersion,
       evidenceIds: [...item.excerptIds, ...item.receiptIds],
     })),
   });
+}
+
+async function waitForReview(predicate: () => boolean) {
+  const until = Date.now() + 2_000;
+  while (!predicate()) {
+    if (Date.now() > until)
+      throw new Error(
+        "The background review did not reach the expected state.",
+      );
+    await Bun.sleep(1);
+  }
 }
 
 async function queueScopeGap(
@@ -300,15 +313,15 @@ test("starts queued review promptly, coalesces items and preserves reviewer conc
     evidence: [{ path: "worker.ts", startLine: 1, endLine: 1, supports: [] }],
     observations: [],
   });
-  const dispatched = () =>
-    new Promise<void>((resolve) => setImmediate(resolve));
+  const dispatched = (expected: number) =>
+    waitForReview(() => batches.length >= expected);
   try {
     await submission.queue({ items: [item("first")] });
-    await dispatched();
+    await dispatched(1);
     expect(batches).toEqual([["first"]]);
 
     await submission.queue({ items: [item("second"), item("third")] });
-    await dispatched();
+    await dispatched(2);
     expect(batches).toEqual([["first"], ["second", "third"]]);
 
     const remaining = Array.from(
@@ -317,7 +330,7 @@ test("starts queued review promptly, coalesces items and preserves reviewer conc
     );
     for (const id of remaining) {
       await submission.queue({ items: [item(id)] });
-      await dispatched();
+      await dispatched(remaining.indexOf(id) + 3);
     }
     const expected = [
       ["first"],
@@ -327,11 +340,11 @@ test("starts queued review promptly, coalesces items and preserves reviewer conc
     expect(batches).toEqual(expected);
 
     await submission.queue({ items: [item("fourth")] });
-    await dispatched();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     expect(batches).toHaveLength(16);
 
     release.resolve();
-    await dispatched();
+    await dispatched(17);
     expect(batches).toEqual([...expected, ["fourth"]]);
   } finally {
     release.resolve();
@@ -475,6 +488,7 @@ test("accounts for exact test-only candidates in one reviewed production-scope d
           return {
             id: item.id,
             revision: item.revision,
+            hash: item.hash,
             ...approved,
             citedVersion: null,
             evidenceIds: item.excerptIds,
@@ -779,7 +793,9 @@ test("reviews structured sink and condition claims and preserves only the approv
     });
   try {
     expect(await queue(use)).toMatchObject({ queued: true });
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await waitForReview(
+      () => submission.status().items[0]?.status === "accepted",
+    );
     expect(submission.status().items[0]).toMatchObject({
       revision: 1,
       status: "accepted",
@@ -1143,6 +1159,7 @@ test.each(["exclusion", "unknown use", "scope gap"])(
           items: packet.items.map((item) => ({
             id: item.id,
             revision: item.revision,
+            hash: item.hash,
             ...approved,
             citedVersion: item.kind === "use" ? "1.0" : null,
             evidenceIds: [...item.excerptIds, ...item.receiptIds],
@@ -1521,6 +1538,7 @@ test("each use needs its own deciding citation, even when both appear in the sam
           return {
             id: item.id,
             revision: item.revision,
+            hash: item.hash,
             ...decision,
             citedVersion: "1.0",
             evidenceIds: [...item.excerptIds, ...item.receiptIds],
@@ -1592,6 +1610,7 @@ test("reads the exact shared item for an in-place citation repair", async () => 
           return {
             id: item.id,
             revision: item.revision,
+            hash: item.hash,
             ...(hasPatch
               ? approved
               : {
