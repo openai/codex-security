@@ -666,11 +666,14 @@ export function createCodexSecurityServer(): McpServer {
           scanDir,
           handoffClaimToken,
           investigationPolicy: started.investigationPolicy,
+          reviewerFeedbackPath: started.reviewerFeedbackPath,
           scan: modelScanContext({ scan }, { omitHandoffClaim: true }).scan,
         },
         [
           advisory,
           `${started.startDisposition === "created" ? "Started" : "Rejoined"} Standard scan ${scanId}. Use its target, scope and token for this review.`,
+          typeof started.reviewerFeedbackPath === "string" &&
+            `Read the saved reviewer feedback at ${started.reviewerFeedbackPath}.`,
         ]
           .filter(Boolean)
           .join("\n"),

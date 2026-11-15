@@ -552,6 +552,16 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(joined);
+    for (const empty of [started.result, joined.result]) {
+      assert.equal(
+        Object.hasOwn(empty.structuredContent, "reviewerFeedbackPath"),
+        false,
+      );
+      assert.doesNotMatch(
+        empty.content[0].text,
+        /false_positive_feedback\.json/u,
+      );
+    }
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
     assert.match(
@@ -655,17 +665,38 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     for (const threadSource of [undefined, "security_scan"]) {
       let scan = result;
       if (threadSource) {
-        const usageScan = await headlessServer.callSuccessfulTool(83, {
+        const launch = {
           name: "start_codex_security_standard_scan",
           arguments: {
             targetPath: target,
             userContext: "Check completion usage.",
           },
           _meta: { "openai/threadId": ownerThread },
-        });
+        };
+        const usageScan = await headlessServer.callSuccessfulTool(83, launch);
         scan = usageScan.structuredContent;
         assert.equal(scan.startDisposition, "created");
         assert.notEqual(scan.scanId, result.scanId);
+        const rejoined = await headlessServer.callSuccessfulTool(85, launch);
+        assert.equal(rejoined.structuredContent.startDisposition, "joined");
+        assert.equal(rejoined.structuredContent.scanId, scan.scanId);
+        const feedbackPath = path.join(
+          scan.scanDir,
+          "artifacts",
+          "01_context",
+          "false_positive_feedback.json",
+        );
+        for (const response of [usageScan, rejoined]) {
+          assert.equal(
+            response.structuredContent.reviewerFeedbackPath,
+            feedbackPath,
+          );
+          assert.ok(response.content[0].text.includes(feedbackPath));
+        }
+        assert.equal(
+          (await readJson(feedbackPath))[0].sourceScanId,
+          result.scanId,
+        );
       }
       await writeCompletedContract(
         scan.scanDir,
@@ -722,6 +753,16 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
           completed.structuredContent.scan.usage.completion,
           undefined,
         );
+        await headlessServer.callSuccessfulTool(84, {
+          name: "set_codex_security_finding_triage",
+          arguments: {
+            occurrenceId:
+              completed.structuredContent.scan.findings[0].occurrenceId,
+            status: "closed",
+            closeReason: "false_positive",
+            note: "The fixture checks the path before the write.",
+          },
+        });
       }
     }
   } finally {
