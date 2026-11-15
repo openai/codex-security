@@ -1,4 +1,11 @@
-import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join } from "node:path";
 import { PluginBootstrapError } from "./errors.js";
@@ -81,4 +88,26 @@ export function resolveBundledCodexExecutable(
     );
   }
   return command;
+}
+
+/** Resolve only the executable shipped with the installed Codex package. */
+export function resolveBundledCodexRipgrep(
+  codexPackageJson?: string,
+): { codexCommand: string; executable: string } | undefined {
+  try {
+    const codexCommand = realpathSync.native(
+      resolveBundledCodexExecutable(codexPackageJson),
+    );
+    const tool = process.platform === "win32" ? "rg.exe" : "rg";
+    const executable = join(dirname(dirname(codexCommand)), "codex-path", tool);
+    if (
+      realpathSync.native(executable) !== executable ||
+      !statSync(executable).isFile()
+    )
+      return undefined;
+    accessSync(executable, constants.X_OK);
+    return { codexCommand, executable };
+  } catch {
+    return undefined;
+  }
 }

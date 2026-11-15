@@ -119,6 +119,10 @@ import {
   readCodexHomeConfig,
 } from "./auth.js";
 import { loadContract, sha256Text } from "./contract.js";
+import {
+  bundledCodexSdkEnvironment,
+  resolveBundledCodexRipgrep,
+} from "./codex-sdk-environment.js";
 import type { DeepScanDiagnostic } from "./deep-scan.js";
 import {
   formatDeepScanReviews,
@@ -2013,7 +2017,7 @@ async function runCodexSkillProcess(
       process.platform === "win32"
         ? environmentValue(processEnvironment, "CODEX_HOME")
         : processEnvironment["CODEX_HOME"];
-    const environment = { ...processEnvironment };
+    let environment = { ...processEnvironment };
     for (const name of Object.keys(environment)) {
       if (name.toUpperCase() === "CODEX_HOME") delete environment[name];
     }
@@ -2028,11 +2032,25 @@ async function runCodexSkillProcess(
       output.directory !== undefined
     ) {
       const skillRoot = output.readOnlySkillRoot;
+      const bundledRipgrep = dependencyCheck
+        ? resolveBundledCodexRipgrep()
+        : undefined;
+      if (bundledRipgrep) {
+        environment = bundledCodexSdkEnvironment(
+          bundledRipgrep.codexCommand,
+          Object.fromEntries(
+            Object.entries(environment).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          ),
+        );
+      }
       const readPaths = [
         await realpath(output.directory),
         skillRoot,
         join(dirname(dirname(skillRoot)), "references"),
         ...(await codexExecutableReadPaths(command.command)),
+        ...(bundledRipgrep ? [bundledRipgrep.executable] : []),
       ];
       const profile = {
         filesystem: {

@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { delimiter, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
@@ -22,6 +22,10 @@ import {
   restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
+import {
+  bundledCodexSdkEnvironment,
+  resolveBundledCodexRipgrep,
+} from "../src/codex-sdk-environment.js";
 import { mergeCodexOverrides, structuredCodexConfig } from "../src/config.js";
 import {
   bundledPluginRoot,
@@ -566,6 +570,56 @@ test("API fixture cleanup retries a transient busy directory", async () => {
     removal.mockRestore();
     await remove(root, { recursive: true, force: true });
   }
+});
+
+test("dependency shell discovery uses only an executable inside its bundled Codex package", async () => {
+  const root = await temporaryDirectory();
+  const os = process.platform === "android" ? "linux" : process.platform;
+  const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const suffix =
+    os === "darwin"
+      ? "apple-darwin"
+      : os === "win32"
+        ? "pc-windows-msvc"
+        : "unknown-linux-musl";
+  const vendor = join(root, "vendor", arch + "-" + suffix);
+  const bin = join(vendor, "bin");
+  const tools = join(vendor, "codex-path");
+  const packageJson = join(root, "package.json");
+  await writeFile(packageJson, "{}");
+  await mkdir(bin, { recursive: true });
+  await mkdir(tools);
+  const native = join(bin, os === "win32" ? "codex.exe" : "codex");
+  const ripgrep = join(tools, os === "win32" ? "rg.exe" : "rg");
+  await copyFile(Bun.which("node")!, native);
+
+  expect(resolveBundledCodexRipgrep(packageJson)).toBeUndefined();
+  if (os !== "win32") {
+    // A sidecar symlink cannot extend the audited read-only sandbox.
+    await symlink(native, ripgrep);
+    expect(resolveBundledCodexRipgrep(packageJson)).toBeUndefined();
+    await fsPromises.unlink(ripgrep);
+  }
+  await copyFile(Bun.which("node")!, ripgrep);
+  if (os !== "win32") {
+    await chmod(ripgrep, 0o644);
+    expect(resolveBundledCodexRipgrep(packageJson)).toBeUndefined();
+    await chmod(ripgrep, 0o755);
+  }
+  const resolved = resolveBundledCodexRipgrep(packageJson);
+  expect(resolved).toEqual({
+    codexCommand: await fsPromises.realpath(native),
+    executable: await fsPromises.realpath(ripgrep),
+  });
+  const path = join(root, "previous tools");
+  const environment = { PATH: path, HOME: root };
+  expect(
+    bundledCodexSdkEnvironment(resolved!.codexCommand, environment),
+  ).toEqual({
+    PATH: [await fsPromises.realpath(tools), path].join(delimiter),
+    HOME: root,
+  });
+  expect(environment["PATH"]).toBe(path);
 });
 
 test("native profile launches retain bundled tools through executable path aliases", async () => {
