@@ -52,6 +52,10 @@ def capture_standard_stop(scan_dir: Path, scan_id: str, warnings: list[str]) -> 
                 raise ContractError(
                     "Standard return disagrees with the acknowledged candidate count."
                 )
+            if not all(
+                isinstance(receipt.get(k), list) for k in ("reviewed_files", "resolved_questions")
+            ):
+                raise ContractError("Invalid Standard worker return evidence.")
         except (ContractError, OSError, ValueError) as exc:
             warnings.append(
                 f"Could not retain Standard return starting at candidate {start}: {exc}"
@@ -118,14 +122,38 @@ def add_unfinished_standard_work(rows, coverage, findings):
             and isinstance(surface.get("candidateId"), str)
         ):
             represented.add(surface["candidateId"])
-    for field in ("deferred", "resolvedDeferred"):
-        for row in coverage.get(field, []):
-            if isinstance(row, dict):
-                represented.update(
-                    row[k] for k in ("candidateId", "id") if isinstance(row.get(k), str)
-                )
-    coverage["deferred"].extend(
-        row
-        for row in rows
-        if row["id"] not in represented and row.get("duplicateOf") not in reported
+    represented.update(
+        row[key]
+        for row in coverage.get("resolvedDeferred", [])
+        if isinstance(row, dict)
+        for key in ("candidateId", "id")
+        if isinstance(row.get(key), str)
     )
+    pending = {
+        row[key]: row
+        for row in coverage["deferred"]
+        if isinstance(row, dict)
+        for key in ("candidateId", "id")
+        if isinstance(row.get(key), str)
+    }
+    for row in rows:
+        key = row["id"]
+        if key in represented or row.get("duplicateOf") in reported:
+            continue
+        existing = pending.get(key)
+        if existing is None:
+            coverage["deferred"].append(row)
+        elif key == "standard-unreviewed-files":
+            # The stop-time queue records which assigned files are still unread.
+            existing["paths"] = row["paths"]
+        else:
+            # A pending checkpoint owns its explanation. Add the acknowledged
+            # worker evidence even when the parent has already deferred this ID.
+            for field in ("candidateId", "workerReturn", "workerCandidate", "duplicateOf"):
+                if field in row:
+                    existing[field] = row[field]
+            for field in ("paths", "counterevidence"):
+                saved = existing.get(field, [])
+                if not isinstance(saved, list):
+                    saved = [saved]
+                existing[field] = saved + [item for item in row[field] if item not in saved]

@@ -37,12 +37,32 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
         findings = json.loads(path.read_text())
         findings["findings"][0]["provenance"]["candidateId"] = "standard-2.1"
         path.write_text(json.dumps(findings))
+        path = scan / "coverage.json"
+        coverage = json.loads(path.read_text())
+        coverage["deferred"] = [
+            {
+                "id": "standard-3",
+                "candidateId": "standard-3",
+                "reason": "Later validation required.",
+                "paths": ["src/caller.py"],
+                "counterevidence": ["A synthetic guard."],
+            },
+            {
+                "id": "standard-unreviewed-files",
+                "reason": "Unfinished files.",
+                "paths": ["src/extract.py", "unread.py"],
+            },
+        ]
+        coverage["resolvedDeferred"] = [{"id": "standard-5", "reason": "Confirmed safe."}]
+        path.write_text(json.dumps(coverage))
     missing = write_receipt(scan, "unavailable")
     (scan / missing["file"]).unlink()
-    returned = write_receipt(scan, "checkpointed claim", "pending worker claim", "matching claim")
+    returned = write_receipt(
+        scan, "checkpointed claim", "pending worker claim", "matching claim", "closed"
+    )
     orphan = write_receipt(scan, "unacknowledged result")
     queue = {
-        "batches": [["src/extract.py", "unread.py"]],
+        "batches": [["src/extract.py", "unread.py", "second-unread.py"]],
         "reviewed": ["src/extract.py"],
         "returns": [missing, returned],
     }
@@ -77,11 +97,19 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
     assert ("standard-4.1" in {row["id"] for row in rows}) == (stop == "cancel-scan")
     pending = next(row for row in rows if row["id"] == "standard-3")
     assert pending["workerCandidate"] == {"title": "pending worker claim"}
-    assert pending["counterevidence"] == ["A caller checks the input."]
+    assert pending["counterevidence"] == (
+        (["A synthetic guard."] if stop == "fail-scan" else []) + ["A caller checks the input."]
+    )
     assert pending["workerReturn"] == returned["file"]
-    assert next(row for row in rows if row["id"] == "standard-unreviewed-files")["paths"] == [
-        "unread.py"
-    ]
+    assert pending["paths"] == (
+        (["src/caller.py"] if stop == "fail-scan" else []) + ["src/extract.py"]
+    )
+    unread = next(row for row in rows if row["id"] == "standard-unreviewed-files")
+    assert unread["paths"] == ["unread.py", "second-unread.py"]
+    if stop == "fail-scan":
+        assert pending["reason"] == "Later validation required."
+        assert unread["reason"] == "Unfinished files."
+    assert ("standard-5" in {row["id"] for row in rows}) == (stop == "cancel-scan")
     assert "pending worker claim" not in (scan / "findings.json").read_text()
 
     report = (scan / "report.md").read_bytes()
