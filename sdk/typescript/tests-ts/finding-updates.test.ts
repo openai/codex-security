@@ -1,4 +1,4 @@
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import {
   FindingUpdateTracker,
   type FindingUpdate,
@@ -64,27 +64,74 @@ test("streams a committed update during the scan and drains later pages after se
   expect(onError).not.toHaveBeenCalled();
 });
 
-test("final read starts after an older in-flight poll and never drops committed withdrawals", async () => {
-  const read = mock(async (_after: number, signal: AbortSignal) => {
-    if (read.mock.calls.length === 1) {
+test("resamples progress during a long finding backlog", async () => {
+  let elapsed = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => elapsed);
+  const drained = Promise.withResolvers<void>();
+  const reads: string[] = [];
+  const read = (kind: "feed" | "combined", after: number) => {
+    reads.push(`${kind} ${after}`);
+    if (after === 1) elapsed += 5_001;
+    return page([row(after + 1, "updated")], after < 3);
+  };
+  const tracker = new FindingUpdateTracker({
+    scanId,
+    read: async (after) => read("feed", after),
+    onUpdate(update) {
+      if (update.cursor === 4) drained.resolve();
+    },
+    onError: drained.reject,
+  });
+  try {
+    tracker.start(async (after) => read("combined", after));
+    await drained.promise;
+  } finally {
+    elapsed += 5_001;
+    await tracker
+      .finish(new AbortController().signal)
+      .finally(() => clock.mockRestore());
+  }
+  expect(reads).toEqual([
+    "combined 0",
+    "feed 1",
+    "combined 2",
+    "feed 3",
+    "feed 4",
+  ]);
+});
+
+test.each(["separate", "combined"])(
+  "final read discards a stale %s poll and delivers committed withdrawals",
+  async (mode) => {
+    const stale = async (_after: number, signal: AbortSignal) => {
       await new Promise<void>((resolve) =>
         signal.addEventListener("abort", () => resolve(), { once: true }),
       );
-      return page([], false);
-    }
-    return page([row(1, "reviewed"), row(2, "withdrawn")], false);
-  });
-  const onUpdate = mock();
-  const onError = mock();
-  const tracker = new FindingUpdateTracker({ scanId, read, onUpdate, onError });
-  tracker.start();
-  await tracker.finish(new AbortController().signal);
-  expect(onUpdate.mock.calls.map(([update]) => update.kind)).toEqual([
-    "reviewed",
-    "withdrawn",
-  ]);
-  expect(onError).not.toHaveBeenCalled();
-});
+      return page([row(1, "updated")], false);
+    };
+    const read = mock(async (after: number, signal: AbortSignal) => {
+      if (mode === "separate" && read.mock.calls.length === 1)
+        return await stale(after, signal);
+      return page([row(1, "reviewed"), row(2, "withdrawn")], false);
+    });
+    const onUpdate = mock();
+    const onError = mock();
+    const tracker = new FindingUpdateTracker({
+      scanId,
+      read,
+      onUpdate,
+      onError,
+    });
+    tracker.start(mode === "combined" ? stale : undefined);
+    await tracker.finish(new AbortController().signal);
+    expect(read.mock.calls).toHaveLength(mode === "combined" ? 1 : 2);
+    expect(onUpdate.mock.calls.map(([update]) => update.kind)).toEqual([
+      "reviewed",
+      "withdrawn",
+    ]);
+    expect(onError).not.toHaveBeenCalled();
+  },
+);
 
 test("a failed read keeps its cursor for the next read", async () => {
   const failed = Promise.withResolvers<void>();

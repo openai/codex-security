@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
+import { PROGRESS_POLL_INTERVAL_MS } from "./scan-progress.js";
 
 const findingUpdateSchema = z.object({
   cursor: z.int().positive(),
@@ -26,6 +27,7 @@ const pageSchema = z.object({
 
 interface FindingUpdateOptions {
   scanId: string;
+  supportsProgressRead?: boolean;
   read: (cursor: number, signal: AbortSignal) => Promise<unknown>;
   onUpdate: (update: FindingUpdate) => void;
   onError: (error: unknown) => void;
@@ -41,30 +43,50 @@ export class FindingUpdateTracker {
     this.#options = options;
   }
 
-  start(): void {
-    this.#polling ??= this.#poll();
+  start(readWithProgress?: FindingUpdateOptions["read"]): void {
+    this.#polling ??= this.#poll(readWithProgress);
   }
 
-  async #poll(): Promise<void> {
+  async #poll(readWithProgress?: FindingUpdateOptions["read"]): Promise<void> {
     const signal = this.#pollController.signal;
+    let nextProgressRead = 0;
+    const readLivePage: FindingUpdateOptions["read"] = async (
+      cursor,
+      signal,
+    ) => {
+      // A long journal replay can span several progress polling intervals.
+      if (readWithProgress && performance.now() >= nextProgressRead) {
+        nextProgressRead = performance.now() + PROGRESS_POLL_INTERVAL_MS;
+        const page = await readWithProgress(cursor, signal);
+        if (page !== undefined || signal.aborted) return page;
+      }
+      return this.#options.read(cursor, signal);
+    };
     let warned = false;
     while (!signal.aborted) {
       try {
-        await this.#readPages(signal);
+        await this.#readPages(signal, readLivePage);
         warned = false;
       } catch (error) {
         if (!signal.aborted && !warned) this.#options.onError(error);
         warned = true;
       }
-      await delay(5000, undefined, { signal, ref: false }).catch(() => {});
+      const wait = readWithProgress
+        ? Math.max(0, Math.ceil(nextProgressRead - performance.now()))
+        : PROGRESS_POLL_INTERVAL_MS;
+      await delay(wait, undefined, { signal, ref: false }).catch(() => {});
     }
   }
 
-  async #readPages(signal: AbortSignal, retryRead = false): Promise<void> {
+  async #readPages(
+    signal: AbortSignal,
+    read = this.#options.read,
+    retryRead = false,
+  ): Promise<void> {
     while (!signal.aborted) {
       let result: unknown;
       try {
-        result = await this.#options.read(this.#cursor, signal);
+        result = await read(this.#cursor, signal);
       } catch (error) {
         if (!retryRead || signal.aborted) throw error;
         retryRead = false;
@@ -99,8 +121,14 @@ export class FindingUpdateTracker {
     this.#pollController.abort();
     await this.#polling;
     // A transient read failure has no next poll after sealing.
-    await this.#readPages(signal, true).catch((error: unknown) => {
-      if (!signal.aborted) this.#options.onError(error);
-    });
+    await this.#readPages(signal, this.#options.read, true).catch(
+      (error: unknown) => {
+        if (!signal.aborted) this.#options.onError(error);
+      },
+    );
+  }
+
+  get supportsProgressRead(): boolean {
+    return this.#options.supportsProgressRead === true;
   }
 }

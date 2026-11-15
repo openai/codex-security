@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_workbench import independent_review_progress, require_current_coordinator
 from finalize_scan_contract import open_scan_local_file_descriptor
 from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
-from workbench_constants import PHASES
+from workbench_constants import FINDINGS_PAGE_MAX, PHASES
+from workbench_finding_updates import finding_update_page
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 
@@ -70,6 +71,43 @@ def update_context(
                 (timestamp, workspace["id"]),
             )
     return wb.scan_context(connection, scan_id)
+
+
+def read_scan_progress(
+    wb: Any, connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    after = getattr(args, "after_cursor", None)
+    if after is None:
+        return _progress_page(connection, wb.resolve_scan_id(connection, args.scan_id))
+    # A checkpoint may commit between the progress query and the journal query.
+    connection.execute("BEGIN")
+    with connection:
+        scan = wb.require_scan(connection, args.scan_id)
+        result = _progress_page(connection, scan["id"])
+        try:
+            result["findingUpdates"] = finding_update_page(
+                wb, connection, scan, after, FINDINGS_PAGE_MAX
+            )
+        except (Exception, SystemExit) as exc:
+            # Feed reads are optional. Progress subscribers can still use this snapshot.
+            result["findingUpdatesError"] = str(exc)
+        return result
+
+
+def _progress_page(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
+    scan = connection.execute(
+        """
+        SELECT scans.id, scans.mode, scans.phase, scans.status, scans.canceled_at,
+               progress.*, progress.updated_at AS progress_updated_at
+        FROM scans JOIN scan_progress AS progress ON progress.scan_id = scans.id
+        WHERE scans.id = ?
+        """,
+        (scan_id,),
+    ).fetchone()
+    if scan is None:
+        raise SystemExit("Codex Security scan not found.")
+    progress_result, _ = scan_progress_result(connection, scan)
+    return {"scan": {"progress": progress_result}}
 
 
 def scan_progress_result(

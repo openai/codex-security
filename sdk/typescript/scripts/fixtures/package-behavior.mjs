@@ -85,12 +85,22 @@ async function writeCompletedScan(env) {
 
 const turns = [];
 const finished = new Set();
+let observedTogether = false;
 // Replace model output and runtime installation only. The installed SDK still
 // prepares output, registers scans, validates artifacts, and updates real SQLite.
 const client = new sdk.CodexSecurity(
   { pythonPath: process.env.PYTHON },
   {
     environment,
+    runWorkbench(options, args, ...rest) {
+      if (
+        args[0] === "get-scan" &&
+        args.includes("--progress-only") &&
+        args.includes("--after-cursor")
+      )
+        observedTogether = true;
+      return runWorkbench(options, args, ...rest);
+    },
     prepareRuntime: async () => ({
       codexHome,
       bootstrapWorkspace,
@@ -165,12 +175,23 @@ async function savedScan(index) {
 
 let completed;
 try {
+  const findingUpdates = [];
   completed = await client.run(repository, {
     outputDir: join(consumer, "behavior-complete"),
+    onProgress() {},
+    onFindingUpdate: (update) => findingUpdates.push(update),
   });
   assert.equal(completed.manifest.scan.status, "completed");
   assert.equal(completed.threadId, "fixture-0");
   assert.equal(completed.findings.findings.length, 1);
+  assert.ok(
+    observedTogether,
+    "the installed SDK should poll progress and findings together",
+  );
+  assert.deepEqual(
+    findingUpdates.map(({ findingId, kind }) => [findingId, kind]),
+    [[completed.findings.findings[0].findingId, "finalized"]],
+  );
   assert.equal((await savedScan(0)).progress.status, "complete");
   assert.equal(finished.has(0), true);
 

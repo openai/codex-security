@@ -3294,7 +3294,6 @@ export class CodexSecurity {
           skillName,
           standardCapabilities,
         );
-        findingUpdateTracker?.start();
       }
       latestPhase =
         scanPhaseSchema.safeParse(registration["phase"]).data ?? latestPhase;
@@ -3335,6 +3334,7 @@ export class CodexSecurity {
             ),
         });
       }
+      let readWithProgress: ScanProgressTracker["readWithFindings"] | undefined;
       if (
         this.#dependencies.hostedScan === undefined &&
         ((mode !== "deep" &&
@@ -3344,7 +3344,7 @@ export class CodexSecurity {
         let progressWarningReported = false;
         let lastScopeReceipt: string | undefined;
         scanProgressTracker = new ScanProgressTracker({
-          read: async (progressSignal) => {
+          read: async (progressSignal, afterCursor) => {
             const progressOptions = {
               ...workbenchOptions,
               signal: AbortSignal.any([signal, progressSignal]),
@@ -3373,7 +3373,10 @@ export class CodexSecurity {
               progressOptions,
               workbenchArgs("get-scan", {
                 scanId,
-                progressOnly: this.config.pluginPath === undefined,
+                progressOnly:
+                  afterCursor !== undefined ||
+                  this.config.pluginPath === undefined,
+                afterCursor,
               }),
             );
           },
@@ -3409,8 +3412,15 @@ export class CodexSecurity {
             );
           },
         });
-        scanProgressTracker.start();
+        if (
+          findingUpdateTracker?.supportsProgressRead &&
+          (mode === "deep" || options.onProgress)
+        )
+          readWithProgress =
+            scanProgressTracker.readWithFindings.bind(scanProgressTracker);
+        else scanProgressTracker.start();
       }
+      findingUpdateTracker?.start(readWithProgress);
       if (options.validationPrompt !== undefined) {
         await writeCustomValidationStatus(
           scanDir,
@@ -7163,6 +7173,7 @@ async function findingUpdatesForScan(
     return;
   return new FindingUpdateTracker({
     scanId: scan.id,
+    supportsProgressRead: capabilities["progressFindingUpdates"] === 1,
     read: (afterCursor, signal) =>
       workbench(
         { ...scan.options, signal },

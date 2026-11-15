@@ -24,13 +24,13 @@ export function formatDeepScanReviews(progress: DeepScanProgress): string {
 }
 
 interface ScanProgressTrackerOptions {
-  read: (signal: AbortSignal) => Promise<unknown>;
+  read: (signal: AbortSignal, afterCursor?: number) => Promise<unknown>;
   onProgress?: (progress: SavedScanProgress) => void;
   onDeepProgress?: (progress: DeepScanProgress) => void;
   onError?: (error: unknown) => void;
 }
 
-const PROGRESS_POLL_INTERVAL_MS = 5_000;
+export const PROGRESS_POLL_INTERVAL_MS = 5_000;
 
 export class ScanProgressTracker {
   readonly #options: ScanProgressTrackerOptions;
@@ -65,30 +65,7 @@ export class ScanProgressTracker {
       try {
         const result = await this.#options.read(abortController.signal);
         if (abortController.signal.aborted) return;
-        if (this.#options.onProgress !== undefined) {
-          const progress = scanProgressFromWorkbench(result);
-          if (progress !== null) {
-            const key = JSON.stringify(progress);
-            if (key !== this.#lastScanProgress) {
-              this.#lastScanProgress = key;
-              this.#options.onProgress(progress);
-            }
-          }
-        }
-        if (this.#options.onDeepProgress === undefined) return;
-        const progress = deepScanProgressFromWorkbench(result);
-        if (
-          abortController.signal.aborted ||
-          progress === null ||
-          (progress.completed === this.#lastDeepProgress?.completed &&
-            progress.active === this.#lastDeepProgress?.active &&
-            progress.maximum === this.#lastDeepProgress?.maximum &&
-            progress.consolidating === this.#lastDeepProgress?.consolidating)
-        ) {
-          return;
-        }
-        this.#lastDeepProgress = progress;
-        this.#options.onDeepProgress(progress);
+        this.#report(result);
       } catch (error) {
         if (abortController.signal.aborted) return;
         throw error;
@@ -98,6 +75,59 @@ export class ScanProgressTracker {
     })();
     this.#pending = update;
     await update;
+  }
+
+  /** The findings poll owns this read and handles pagination and terminal delivery. */
+  public async readWithFindings(
+    afterCursor: number,
+    signal: AbortSignal,
+  ): Promise<unknown> {
+    if (this.#abortController.signal.aborted) return undefined;
+    const combined = AbortSignal.any([signal, this.#abortController.signal]);
+    let result: unknown;
+    try {
+      result = await this.#options.read(combined, afterCursor);
+    } catch (error) {
+      if (!combined.aborted) this.#options.onError?.(error);
+      return undefined;
+    }
+    if (combined.aborted) return undefined;
+    try {
+      this.#report(result);
+    } catch (error) {
+      this.#options.onError?.(error);
+    }
+    if (!isRecord(result)) return undefined;
+    if (typeof result["findingUpdatesError"] === "string")
+      throw new Error(result["findingUpdatesError"]);
+    return result["findingUpdates"];
+  }
+
+  #report(result: unknown): void {
+    if (this.#options.onProgress !== undefined) {
+      const progress = scanProgressFromWorkbench(result);
+      if (progress !== null) {
+        const key = JSON.stringify(progress);
+        if (key !== this.#lastScanProgress) {
+          this.#lastScanProgress = key;
+          this.#options.onProgress(progress);
+        }
+      }
+    }
+    if (this.#options.onDeepProgress === undefined) return;
+    const progress = deepScanProgressFromWorkbench(result);
+    if (
+      this.#abortController.signal.aborted ||
+      progress === null ||
+      (progress.completed === this.#lastDeepProgress?.completed &&
+        progress.active === this.#lastDeepProgress?.active &&
+        progress.maximum === this.#lastDeepProgress?.maximum &&
+        progress.consolidating === this.#lastDeepProgress?.consolidating)
+    ) {
+      return;
+    }
+    this.#lastDeepProgress = progress;
+    this.#options.onDeepProgress(progress);
   }
 
   public stop(): void {
