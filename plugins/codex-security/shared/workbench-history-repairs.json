@@ -98,6 +98,15 @@
     "WHERE version IN (43, 50) AND schema_migrations.name != history.name;"
   ],
   [
+    "-- Preserve the preview receipt when adding the stopped-phase column alongside its schema.",
+    "SELECT 'column' AS operation, json_extract(migration.value, '$.statements[0]') AS value",
+    "FROM schema_migrations AS receipt JOIN json_each(:history) AS migration",
+    "    ON receipt.version = json_extract(migration.value, '$.version')",
+    "WHERE receipt.version = 74 AND receipt.name IN (",
+    "    'bind new finding decisions to admitted scans', 'persist selected deep scan finalization input'",
+    ") AND json_extract(migration.value, '$.name') = 'retain the last observed phase of stopped Standard scans';"
+  ],
+  [
     "-- A released reader can add its columns while a repository preview still owns the version.",
     "WITH released(version, table_name, column_name) AS (",
     "    VALUES (54, 'workspaces', 'deep_scan_config_json'),",

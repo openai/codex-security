@@ -2126,6 +2126,35 @@ def read_migrated_workspace_twice(state_dir: Path, workspace_id: str) -> dict[st
     return first
 
 
+@pytest.mark.parametrize(
+    ("name", "statement"),
+    [
+        (
+            "bind new finding decisions to admitted scans",
+            "ALTER TABLE finding_decisions ADD COLUMN scan_sequence INTEGER;",
+        ),
+        (
+            "persist selected deep scan finalization input",
+            "ALTER TABLE deep_scan_runs ADD COLUMN finalization_input_json TEXT;",
+        ),
+    ],
+)
+def test_saved_phase_on_another_version_74_preview(tmp_path, name, statement):
+    state_dir, _, scan_id, database = start_migration_scan(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE scan_progress DROP COLUMN last_observed_phase_json")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 74")
+        apply_historical_migrations(connection, ((74, name, statement),), "preview-time")
+
+    for _ in range(2):
+        scan = get_scan(state_dir, scan_id, "--progress-only")["scan"]
+        assert "lastObservedPhase" not in scan["progress"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name, applied_at FROM schema_migrations WHERE version = 74"
+        ).fetchone() == (name, "preview-time")
+
+
 def test_workbench_repairs_recorded_scan_scope_file_count_migration(tmp_path: Path) -> None:
     state_dir, workspace_id, scan_id, database = start_migration_scan(tmp_path)
 
