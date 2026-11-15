@@ -8,6 +8,7 @@ const STALE_COORDINATOR_GENERATION_MESSAGE =
 // terminal messages exactly so repository output embedded in another error
 // cannot be mistaken for a permanent failure.
 const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
+  "This content was flagged for possible biological risk.",
   "Request blocked by cyberPolicy.",
   "Request blocked by a safety policy violation.",
   "This content was flagged for possible cybersecurity risk.",
