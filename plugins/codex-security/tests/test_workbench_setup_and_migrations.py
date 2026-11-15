@@ -1910,6 +1910,10 @@ def test_workbench_repairs_recorded_deep_scan_migration(
             "persist deep scan consecutive discovery failures",
         )
         assert migration_name_row(connection, 28) == ("persist deep scan discovery time limit",)
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+            "AND name = 'retain_unverified_deep_scan_worker_attempt'"
+        ).fetchone() == (1,)
         assert {"max_time_hours", "terminal_reviewed_surface_count"} <= {
             row[1] for row in connection.execute("PRAGMA table_info(deep_scan_runs)")
         }

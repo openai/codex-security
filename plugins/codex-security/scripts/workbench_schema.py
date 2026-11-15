@@ -127,7 +127,9 @@ def apply_migrations(
                     # Recreated Deep tables need the recorded extensions too.
                     # Do not replay data updates from an already applied migration.
                     for statement in _STATEMENTS[version]:
-                        if statement.startswith(("ALTER TABLE ", "CREATE TABLE ")):
+                        if statement.startswith(
+                            ("ALTER TABLE ", "CREATE TABLE ", "CREATE TRIGGER ")
+                        ):
                             apply_repair_statement(connection, statement)
             else:
                 if version in (38, 39):
@@ -419,7 +421,7 @@ def apply_repair_statement(connection: sqlite3.Connection, statement: str) -> No
     if statement.startswith("ALTER TABLE "):
         add_migration_column(connection, statement)
         return
-    for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TABLE "):
+    for prefix in ("CREATE UNIQUE INDEX ", "CREATE INDEX ", "CREATE TABLE ", "CREATE TRIGGER "):
         if statement.startswith(prefix):
             statement = statement.replace(prefix, f"{prefix}IF NOT EXISTS ", 1)
             break

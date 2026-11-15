@@ -1104,6 +1104,11 @@ test("recorded additive migrations restore missing columns and configured error 
       execution_settings_json FROM deep_scan_runs;
     SELECT result_manifest_path, result_manifest_sha256, attempt FROM deep_scan_dedup_inputs;
     SELECT 1 FROM deep_scan_attempts, deep_scan_attempt_sessions, deep_scan_merge_claims;`);
+  database.exec(`INSERT INTO deep_scan_workers (
+    id, scan_id, kind, status, prompt_path, artifact_dir, started_at, created_at, updated_at
+  ) VALUES ('worker', 'scan', 'discovery', 'running', 'prompt', 'artifacts', 'started', 'created', 'updated');
+  UPDATE deep_scan_workers SET attempt = attempt + 1 WHERE id = 'worker'`);
+  assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
   database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
     discovery_user_context_json = '"Original discovery context"'`);
   applyMigrations(database);

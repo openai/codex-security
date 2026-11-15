@@ -44,7 +44,7 @@ function applyRepairStatement(database: DatabaseSync, statement: string): void {
   else
     database.exec(
       statement.replace(
-        /^CREATE (UNIQUE INDEX|INDEX|TABLE) /u,
+        /^CREATE (UNIQUE INDEX|INDEX|TABLE|TRIGGER) /u,
         "CREATE $1 IF NOT EXISTS ",
       ),
     );
@@ -245,7 +245,8 @@ export function applyMigrations(
           for (const statement of item.statements) {
             if (
               statement.startsWith("ALTER TABLE ") ||
-              statement.startsWith("CREATE TABLE ")
+              statement.startsWith("CREATE TABLE ") ||
+              statement.startsWith("CREATE TRIGGER ")
             )
               applyRepairStatement(database, statement);
           }
