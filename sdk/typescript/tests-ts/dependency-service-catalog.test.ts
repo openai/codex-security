@@ -1,5 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import type { McpToolCallItem } from "@openai/codex-sdk";
+import { createDependencyInventory } from "../src/dependency-inventory.js";
 import { resolveDependencyServices } from "../src/dependency-service-catalog.js";
 import { runReadOnlyCodex } from "../src/scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
@@ -134,6 +135,78 @@ test("reports unverifiable mappings as unresolved", async () => {
       },
     ]);
   }
+});
+
+test("a failed refresh blocks both mappings and absence claims from its superseded receipt", async () => {
+  const { services: _services, ...query } = lookup;
+  const failed = receipt({
+    id: "call-2",
+    status: "failed",
+    error: { message: "Catalog temporarily unavailable" },
+  });
+  for (const run of [
+    runReturning([lookup], [receipt(), failed]),
+    runReturning(
+      [],
+      [
+        receipt({ result: { structured_content: { rows: [] }, content: [] } }),
+        failed,
+      ],
+      repository,
+      [],
+      [{ ...query, coverageField: ["rows"] }],
+    ),
+  ]) {
+    const inventory = createDependencyInventory();
+    const result = await resolveDependencyServices({
+      ...options,
+      run,
+      recordInventory: inventory.record,
+    });
+    expect(result[0]).toMatchObject({
+      path: request.path,
+      status: "unresolved",
+    });
+    expect(inventory.snapshot()).toMatchObject([
+      { id: "inventory-1", current: false },
+      { id: "inventory-2", current: true, outcome: "failed" },
+    ]);
+  }
+});
+
+test("a later successful catalog receipt restores the exact mapping", async () => {
+  const inventory = createDependencyInventory();
+  const results = await resolveDependencyServices({
+    ...options,
+    recordInventory: inventory.record,
+    run: runReturning(
+      [lookup],
+      [
+        receipt(),
+        receipt({ id: "call-2", status: "failed" }),
+        receipt({
+          id: "call-3",
+          result: {
+            structured_content: { rows: [catalogRecord], complete: true },
+            content: [],
+          },
+        }),
+      ],
+    ),
+  });
+  expect(results[0]).toMatchObject({
+    services: [
+      {
+        name: "catalog-worker",
+        receiptSelections: [{ receiptId: "inventory-3" }],
+      },
+    ],
+  });
+  expect(inventory.snapshot()).toMatchObject([
+    { id: "inventory-1", current: false },
+    { id: "inventory-2", current: false, outcome: "failed" },
+    { id: "inventory-3", current: true },
+  ]);
 });
 
 test("distinguishes a scoped no-service conclusion from an unresolved search", async () => {

@@ -132,6 +132,43 @@ test("refreshes a superseded runtime receipt and shares the refresh across calle
   }
 });
 
+test.each(["isError", "is_error"])(
+  "preserves the original %s response as a failed runtime receipt",
+  async (errorField) => {
+    const inventory = createDependencyInventory();
+    const lookup = createDependencyRuntimeInventory({
+      servers: { inventory: {} },
+      plan: async () =>
+        JSON.stringify({ bindings: [binding("running_build")] }),
+      record: inventory.record,
+      signal: new AbortController().signal,
+    });
+    const response = {
+      [errorField]: true,
+      structuredContent: { message: "No reliable inventory result" },
+    };
+    const [outcome] = await lookup(paths.slice(0, 1), {
+      list: async () => ({
+        data: [
+          {
+            name: "inventory",
+            tools: { running_build: tool("running_build") },
+          },
+        ],
+      }),
+      call: async () => response,
+    });
+    expect(outcome).toMatchObject({
+      outcome: "failed",
+      receiptId: "inventory-1",
+      result: response,
+    });
+    expect(inventory.bind(["inventory"], ["inventory-1"])).toMatchObject([
+      { receiptId: "inventory-1", outcome: "failed", result: response },
+    ]);
+  },
+);
+
 test("a plan cannot dispatch a disabled inventory tool", async () => {
   const lookup = createDependencyRuntimeInventory({
     servers: { inventory: { disabled_tools: ["caller_access"] } },

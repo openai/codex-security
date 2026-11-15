@@ -198,7 +198,10 @@ export function createDependencyRuntimeInventory(options: {
               let outcome: "failed" | undefined;
               try {
                 result = (await rpc.call(server, tool, args)) as JsonValue;
-                if (isRecord(result) && result["isError"] === true)
+                if (
+                  isRecord(result) &&
+                  (result["isError"] === true || result["is_error"] === true)
+                )
                   outcome = "failed";
               } catch (error) {
                 options.signal.throwIfAborted();
