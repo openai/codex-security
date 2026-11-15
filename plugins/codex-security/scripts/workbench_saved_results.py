@@ -1055,6 +1055,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             draft["findings"],
             draft.get("reviewState", draft.get("coverage")),
         )
+        if manifest["scan"].get("complete") is not False:
+            require_standard_decisions(scan, manifest, findings, coverage)
         manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
         manifest["scan"].pop("coverageRef", None)
         binding = db.workbench_completion_binding(scan, db.now())
@@ -1132,8 +1134,6 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit(
                 "scan_draft_conflict: canonical scan results changed; reconcile the saved checkpoint again."
             )
-        if manifest["scan"].get("complete") is not False:
-            require_standard_decisions(scan, findings, coverage)
         if checkpoint_contents is not None:
             checkpoint_digest = hashlib.sha256(checkpoint_contents).hexdigest()
             if scan["mode"] == "deep":

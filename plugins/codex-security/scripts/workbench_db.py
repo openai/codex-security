@@ -1379,6 +1379,7 @@ def complete_scan_locked(
             )
             prepared = _prepare_scan_finalization(
                 scan_dir,
+                reconcile_review=partial(require_standard_decisions, scan, sealing=True),
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
                 recover_unsealed=scan["mode"] != "deep",
@@ -1386,8 +1387,6 @@ def complete_scan_locked(
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
-            if not already_sealed:
-                require_standard_decisions(scan, prepared.findings, prepared.coverage)
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
         with connection:

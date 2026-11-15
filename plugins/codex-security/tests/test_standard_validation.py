@@ -186,3 +186,211 @@ def test_standard_cannot_publish_a_shortlist(tmp_path):
     scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(stage))
     completed = scan_command(state, "complete-scan", scan_id)
     assert completed["scan"]["findingCount"] == 3
+
+
+def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_path):
+    from test_workbench_completion_binding import register_cli_scan
+    from workbench_test_support import read_review_state
+
+    state, target, scan = (tmp_path / name for name in ("state", "target", "scan"))
+    target.mkdir()
+    receipt = register_cli_scan(state, target, scan, recipe_fields={"maxTimeMinutes": 1})
+    scan_id = receipt["scanId"]
+    assert receipt["canSaveTimeBudgetStart"]
+    write_completed_contract(scan, scan_id, target)
+    manifest_path = scan / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    findings = json.loads((scan / "findings.json").read_text())
+    coverage = json.loads((scan / "coverage.json").read_text())
+    finding = findings["findings"][0]
+    finding["provenance"]["candidateId"] = "standard-1.1"
+    pending = {"title": "Unverified boundary", "source": "src/read.py:2"}
+    source = {
+        "reviewed_files": ["src/read.py"],
+        "findings": [{"title": finding["title"]}, pending],
+        "resolved_questions": ["A guard is active on the first route."],
+    }
+    returned = "artifacts/02_discovery/worker.json"
+    (scan / returned).parent.mkdir(parents=True, exist_ok=True)
+    (scan / returned).write_text(json.dumps(source))
+    queue = scan / "artifacts/01_context/standard-queue.json"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(
+        json.dumps(
+            {
+                "batches": [["src/read.py", "src/z.py", "src/b.py", "src/a.py"]],
+                "reviewed": ["src/read.py"],
+                "returns": [{"file": returned, "count": 2}],
+            }
+        )
+    )
+    subprocess.run(
+        [sys.executable, SCRIPT, "record", scan],
+        input=json.dumps(
+            [
+                {
+                    "candidateId": "standard-1",
+                    "parts": [
+                        {
+                            "disposition": "reportable",
+                            "reason": "The entry point reaches the operation.",
+                        }
+                    ],
+                }
+            ]
+        ),
+        text=True,
+        check=True,
+    )
+    manifest["scan"].pop("coverageRef")
+    manifest["scan"]["mode"] = "repository"
+    (scan / "coverage.json").unlink()
+    stage = scan / "drafts" / f"{uuid.uuid4()}.json"
+    stage.parent.mkdir(exist_ok=True)
+    unread = {
+        "id": "unread",
+        "paths": ["src/z.py", "src/a.py"],
+        "reason": "Time expired before reading these files.",
+    }
+    coverage["deferred"] = [unread]
+
+    def publish(*, check=True):
+        manifest["scan"]["reviewState"] = {
+            k: coverage[k] for k in ("surfaces", "explicitExclusions", "deferred")
+        }
+        manifest_path.write_text(json.dumps(manifest))
+        (scan / "findings.json").write_text(json.dumps(findings))
+        stage.write_text(
+            json.dumps({"manifest": manifest, "reviewState": coverage, "findings": findings})
+        )
+        return scan_command(
+            state, "write-scan-draft", scan_id, "--draft-path", str(stage), check=check
+        )
+
+    # An allowance without its registered start cannot waive unfinished files.
+    assert "3 Standard target files still need review" in publish(check=False)["stderr"]
+    assert (
+        "still need review" in scan_command(state, "complete-scan", scan_id, check=False)["stderr"]
+    )
+    scan_command(
+        state,
+        "set-scan-thread",
+        scan_id,
+        "--thread-id",
+        "fixture",
+        "--time-budget-started-at",
+        "2000-01-01T00:00:00Z",
+    )
+    assert "Name every unread" in publish(check=False)["stderr"]
+    coverage["deferred"].append(
+        {"id": "another", "paths": ["src/b.py"], "reason": "Unopened batch."}
+    )
+    assert "standard-2 has no decision" in publish(check=False)["stderr"]
+    proof_gap = {
+        "id": "caller-proof-gap",
+        "candidateId": "standard-2",
+        "reason": "The second route still needs a reachability check.",
+        "paths": ["src/read.py"],
+    }
+    coverage["deferred"].append(proof_gap)
+    finding["provenance"]["duplicateCandidateIds"] = ["standard-2"]
+    assert "standard-2 has no recorded claim decision" in publish(check=False)["stderr"]
+    assert (
+        "standard-2 has no recorded claim decision"
+        in scan_command(state, "complete-scan", scan_id, check=False)["stderr"]
+    )
+    del finding["provenance"]["duplicateCandidateIds"]
+    publish()
+    result = scan_command(state, "complete-scan", scan_id)
+    assert result["scan"]["findingCount"] == 1
+    assert json.loads(queue.read_text())["reviewed"] == ["src/read.py"]
+    deferred = read_review_state(state, scan)["deferred"]
+    saved = next(row for row in deferred if row.get("candidateId") == "standard-2")
+    assert saved["candidate"] == pending
+    assert saved["counterevidence"] == source["resolved_questions"]
+    assert saved["reviewed_files"] == source["reviewed_files"]
+    assert unread in deferred
+    report = (scan / "report.md").read_text()
+    assert "## Deferred Requested Work" in report
+    for label in ("src/a.py", "src/b.py", "src/z.py", proof_gap["reason"], finding["title"]):
+        assert label in report
+    assert [
+        f["provenance"]["candidateId"]
+        for f in json.loads((scan / "findings.json").read_text())["findings"]
+    ] == ["standard-1.1"]
+    queue.write_text(json.dumps({"batches": [["src/changed.py"]], "reviewed": [], "returns": []}))
+    scan_command(state, "complete-scan", scan_id)
+    assert (scan / "report.md").read_text() == report
+
+
+def test_deadline_file_handoff_waits_for_custom_validation(tmp_path):
+    from test_workbench_completion_binding import register_cli_scan
+
+    state, target, scan = (tmp_path / name for name in ("state", "target", "scan"))
+    target.mkdir()
+    scan_id = register_cli_scan(
+        state, target, scan, recipe_fields={"maxTimeMinutes": 1, "validationMode": "custom"}
+    )["scanId"]
+    scan_command(
+        state,
+        "set-scan-thread",
+        scan_id,
+        "--thread-id",
+        "fixture",
+        "--time-budget-started-at",
+        "2000-01-01T00:00:00Z",
+    )
+    write_completed_contract(scan, scan_id, target)
+    queue = scan / "artifacts/01_context/standard-queue.json"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text(json.dumps({"batches": [["src/unread.py"]], "reviewed": [], "returns": []}))
+    manifest_path = scan / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    coverage = json.loads((scan / "coverage.json").read_text())
+    coverage["deferred"] = [
+        {
+            "id": "unread",
+            "paths": ["src/unread.py"],
+            "reason": "The investigation allowance elapsed before opening the file.",
+        }
+    ]
+    manifest["scan"].pop("coverageRef")
+    manifest["scan"]["mode"] = "repository"
+    manifest["scan"]["reviewState"] = {
+        k: coverage[k] for k in ("surfaces", "explicitExclusions", "deferred")
+    }
+    (scan / "coverage.json").unlink()
+    manifest["scan"]["scope"]["validationMode"] = "custom_pending"
+    manifest_path.write_text(json.dumps(manifest))
+    assert (
+        "awaiting custom validation"
+        in scan_command(state, "complete-scan", scan_id, check=False)["stderr"]
+    )
+    assert get_scan(state, scan_id)["scan"]["progress"]["status"] == "running"
+    # The SDK now owns the separate validation turn; simulate its accepted file handoff.
+    manifest["scan"]["scope"]["validationMode"] = "custom"
+    manifest_path.write_text(json.dumps(manifest))
+    assert scan_command(state, "complete-scan", scan_id)["scan"]["findingCount"] == 1
+    assert "src/unread.py" in (scan / "report.md").read_text()
+    assert (
+        json.loads(manifest_path.read_text())["scan"]["reviewState"]["deferred"]
+        == coverage["deferred"]
+    )
+
+
+def test_deadline_checks_require_original_elapsed_allowance():
+    from workbench_test_support import load_script
+
+    elapsed = load_script("standard_validation").investigation_deadline_elapsed
+    past = "2000-01-01T00:00:00Z"
+    assert elapsed({"timeBudgetStartedAt": past, "maxTimeMinutes": 0.5})
+    for recipe in [
+        {},
+        {"timeBudgetStartedAt": past},
+        {"maxTimeMinutes": 0.5},
+        {"timeBudgetStartedAt": "2999-01-01T00:00:00Z", "maxTimeMinutes": 0.5},
+        {"timeBudgetStartedAt": "2000-01-01", "maxTimeMinutes": 0.5},
+        {"timeBudgetStartedAt": past, "maxTimeMinutes": True},
+        {"timeBudgetStartedAt": past, "maxTimeMinutes": -1},
+    ]:
+        assert not elapsed(recipe)

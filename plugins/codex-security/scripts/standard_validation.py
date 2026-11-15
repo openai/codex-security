@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
+from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,8 +32,7 @@ def read_optional(scan_dir: Path, name: str) -> dict:
         return {}
 
 
-def pending_batch(scan_dir: Path, queue: dict, decisions: dict, after: int) -> list:
-    pending = []
+def pending_candidates(scan_dir: Path, queue: dict, decisions: dict, after: int):
     offset = 0
     for ref in queue.get("returns", []):
         result = None
@@ -40,19 +42,18 @@ def pending_batch(scan_dir: Path, queue: dict, decisions: dict, after: int) -> l
                 continue
             if result is None:
                 result = _read_scan_local_json(scan_dir, ref["file"], "Standard worker return")
-            pending.append(
-                {
-                    "candidateId": key,
-                    "cursor": number,
-                    "candidate": result["findings"][number - offset - 1],
-                    "reviewed_files": result["reviewed_files"],
-                    "counterevidence": result["resolved_questions"],
-                }
-            )
-            if len(pending) == 5:
-                return pending
+            yield {
+                "candidateId": key,
+                "cursor": number,
+                "candidate": result["findings"][number - offset - 1],
+                "reviewed_files": result["reviewed_files"],
+                "counterevidence": result["resolved_questions"],
+            }
         offset += ref["count"]
-    return pending
+
+
+def pending_batch(scan_dir: Path, queue: dict, decisions: dict, after: int) -> list:
+    return list(islice(pending_candidates(scan_dir, queue, decisions, after), 5))
 
 
 def candidate_ids(queue: dict):
@@ -105,26 +106,88 @@ def record(scan_dir: Path, queue: dict, decisions: dict, rows: list) -> None:
     write_scan_local_bytes(scan_dir, DECISIONS, json.dumps(decisions).encode())
 
 
-def require_standard_decisions(scan, findings: dict, coverage: dict) -> None:
+def investigation_deadline_elapsed(recipe: dict) -> bool:
+    minutes = recipe.get("maxTimeMinutes")
+    start = recipe.get("timeBudgetStartedAt")
+    if (
+        isinstance(minutes, bool)
+        or not isinstance(minutes, (int, float))
+        or minutes <= 0
+        or not isinstance(start, str)
+    ):
+        return False
+    try:
+        started_at = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+        return math.isfinite(minutes) and elapsed / 60 >= minutes
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def require_standard_decisions(
+    scan, manifest: dict, findings: dict, coverage: dict, *, sealing=False
+) -> bool:
+    """Check the draft and return whether its unfinished work must accompany the seal."""
     if scan["mode"] != "standard":
-        return
+        return False
     scan_dir = Path(scan["scan_dir"])
     queue = read_optional(scan_dir, QUEUE)
     if not queue:
-        return
+        return False
     remaining = {path for batch in queue["batches"] for path in batch} - set(queue["reviewed"])
+    recipe = json.loads(scan["recipe_json"] or "{}")
+    elapsed = investigation_deadline_elapsed(recipe)
+    deferred_rows = [
+        row
+        for row in coverage.get("deferred", [])
+        if isinstance(row, dict) and isinstance(row.get("reason"), str) and row["reason"].strip()
+    ]
     if remaining:
-        raise RecoverableContractError(f"{len(remaining)} Standard target files still need review.")
-    if json.loads(scan["recipe_json"] or "{}").get("validationMode") == "custom":
-        return
+        if not elapsed:
+            raise RecoverableContractError(
+                f"{len(remaining)} Standard target files still need review."
+            )
+        declared = {
+            path
+            for row in deferred_rows
+            if isinstance(row.get("paths"), list)
+            for path in row["paths"]
+            if isinstance(path, str)
+        }
+        if remaining - declared:
+            raise RecoverableContractError(
+                "The Standard investigation deadline elapsed. Name every unread target path "
+                "in deferred work and explain why it remains unfinished."
+            )
+    if recipe.get("validationMode") == "custom":
+        if (
+            remaining
+            and sealing
+            and manifest["scan"].get("scope", {}).get("validationMode") == "custom_pending"
+        ):
+            raise RecoverableContractError(
+                "The partial discovery draft is awaiting custom validation."
+            )
+        return bool(remaining)
 
     decisions = read_optional(scan_dir, DECISIONS)
+    deferred_candidates = {
+        row["candidateId"]: row for row in deferred_rows if isinstance(row.get("candidateId"), str)
+    }
+    partial = bool(remaining)
     for key in candidate_ids(queue):
-        if key not in decisions:
+        if key not in decisions and (not elapsed or key not in deferred_candidates):
             raise RecoverableContractError(
                 f"Standard candidate {key} has no decision. "
                 "Resume with standard_validation.py pending."
             )
+    if elapsed:
+        for pending in pending_candidates(scan_dir, queue, decisions, 0):
+            # Retain the acknowledged source record, including counterevidence, with its proof gap.
+            row = deferred_candidates[pending["candidateId"]]
+            for field in ("candidate", "counterevidence", "reviewed_files"):
+                row[field] = pending[field]
+            partial = True
 
     outcomes = claim_outcomes(decisions)
     reported = set()
@@ -164,6 +227,7 @@ def require_standard_decisions(scan, findings: dict, coverage: dict) -> None:
             raise RecoverableContractError(
                 f"Standard claim {claim} is {disposition}. The report does not match its decision."
             )
+    return partial
 
 
 def main() -> None:
