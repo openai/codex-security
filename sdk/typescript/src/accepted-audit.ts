@@ -1,3 +1,4 @@
+/* Generated from plugin accepted-audit.ts. Run `pnpm generate:models`. */
 export interface ScanDraftInput {
   scanId: string;
   complete?: boolean;

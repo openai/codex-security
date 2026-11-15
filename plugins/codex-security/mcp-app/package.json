@@ -16,12 +16,10 @@
     "fzstd": "0.1.1",
     "smol-toml": "1.9.1",
     "zod": "^4.6.7",
-    "yauzl": "3.4.0",
     "yaml": "2.9.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
-    "@types/yauzl": "3.4.0",
     "esbuild": "^0.28.2",
     "prettier": "3.9.10",
     "typescript": "^7.0.2"

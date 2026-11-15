@@ -1,3 +1,8 @@
+import {
+  bedrockProviderConfig,
+  safeConfigString as safeString,
+  workerModelSelection,
+} from "./codex-profile.js";
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
 import { isRecord } from "./record.js";
 import { isAbsolute } from "node:path";
@@ -11,10 +16,6 @@ import {
 } from "./config.js";
 
 export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
-  const safeString = (value: unknown): value is string =>
-    typeof value === "string" &&
-    value.length > 0 &&
-    !/[\u0000-\u001f\u007f]/u.test(value);
   const safeProfileName = (value: unknown): value is string =>
     safeString(value) && /^[A-Za-z0-9_-]+$/u.test(value);
   const capabilityFeatures = (value: unknown): JsonObject => {
@@ -75,16 +76,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     if (typeof source["daybreak"] === "boolean") {
       result["daybreak"] = source["daybreak"];
     }
-    for (const key of [
-      "model",
-      "model_reasoning_effort",
-      "model_reasoning_summary",
-      "model_provider",
-      "service_tier",
-    ]) {
-      const value = source[key];
-      if (safeString(value)) result[key] = value;
-    }
+    Object.assign(result, workerModelSelection(source));
     copyWorkerSettings(result, source);
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
@@ -178,21 +170,8 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
     };
   } else if (modelProvider === "amazon-bedrock") {
-    const providers = resolved["model_providers"];
-    const provider = isRecord(providers) ? providers[modelProvider] : undefined;
-    const aws = isRecord(provider) ? provider["aws"] : undefined;
-    if (isRecord(aws)) {
-      const sanitized: JsonObject = {};
-      for (const key of ["region", "profile"]) {
-        const value = aws[key];
-        if (safeString(value)) sanitized[key] = value;
-      }
-      if (Object.keys(sanitized).length > 0) {
-        result["model_providers"] = {
-          [modelProvider]: { aws: sanitized },
-        };
-      }
-    }
+    const provider = bedrockProviderConfig(resolved);
+    if (provider !== undefined) result["model_providers"] = provider;
   }
   const rootMarkers = config["project_root_markers"];
   if (Array.isArray(rootMarkers)) {

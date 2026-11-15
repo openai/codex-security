@@ -11,14 +11,19 @@ import {
   realpath,
   stat,
 } from "node:fs/promises";
-import { basename, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { createReadStream } from "node:fs";
 import { pipeline } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { isRecord } from "./record.js";
 import { errorMessage } from "./errors.js";
-import { sessionLines, sessionDecompressor } from "./session-lines.js";
+import {
+  compressedSessionThreadId,
+  sessionFiles,
+  sessionLines,
+} from "./session-lines.js";
+import { createZstdDecompress } from "./session-decompression.js";
 import {
   estimateScanCost,
   estimateScanCostLowerBound,
@@ -3727,14 +3732,6 @@ export class ScanCostTracker {
   }
 }
 
-export function compressedSessionThreadId(path: string): string | null {
-  return (
-    /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})(?:_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})?\.jsonl\.zst$/u.exec(
-      basename(path),
-    )?.[1] ?? null
-  );
-}
-
 async function readWorkerReceipts(
   store: ScanCostTrackerOptions["workerReceipts"],
   retained: Map<string, WorkerReceipt>,
@@ -3824,31 +3821,6 @@ async function readWorkerReceipts(
   return result;
 }
 
-export async function* sessionFiles(
-  directory: string,
-  compressed = false,
-): AsyncGenerator<string> {
-  let entries;
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch (error) {
-    if (isMissingFile(error)) return;
-    throw error;
-  }
-  for (const entry of entries) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      yield* sessionFiles(path, compressed);
-    } else if (
-      entry.isFile() &&
-      (entry.name.endsWith(".jsonl") ||
-        (compressed && entry.name.endsWith(".jsonl.zst")))
-    ) {
-      yield path;
-    }
-  }
-}
-
 async function readSessionUsage(
   path: string,
   session: SessionUsage,
@@ -3888,7 +3860,7 @@ async function readSessionUsage(
       session,
       createSessionUsage(session.accountRateLimits !== null),
     );
-    const decoder = await sessionDecompressor();
+    const decoder = await createZstdDecompress();
     const stream = pipeline(createReadStream(path), decoder, () => {});
     try {
       for await (const chunk of stream) {

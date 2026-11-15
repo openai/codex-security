@@ -1,3 +1,4 @@
+/* Generated from plugin codex-session.ts. Run `pnpm generate:models`. */
 import {
   Codex,
   type CodexOptions,

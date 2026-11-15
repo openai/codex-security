@@ -3,13 +3,15 @@ import { homedir } from "node:os";
 import { isAbsolute, join, relative, sep, win32 } from "node:path";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse as parseToml } from "smol-toml";
-import { scanPreflightCodexConfig } from "../../../../../sdk/typescript/src/preflight-config.js";
 import {
+  bedrockProviderConfig,
   resolveCodexProfile,
-  writeCodexConfig,
+  workerModelSelection,
   type JsonObject,
-} from "../../../../../sdk/typescript/src/config.js";
-import { readScanLogs } from "../../../../../sdk/typescript/src/scan-logs.js";
+} from "../codex-profile.js";
+import { writeCodexConfig } from "../private-config.js";
+import { requirePrivateWindowsDirectory } from "../windows-credential-acl.js";
+import { parentSessionEvents } from "./parent-session.js";
 import {
   resolveCodexPath,
   workerRuntimeConfiguration,
@@ -48,6 +50,17 @@ export interface DeepScanLegacySettingsContext {
 export interface DeepScanExecutionSettingsSnapshot {
   version: number;
   settings: DeepScanExecutionSettings;
+}
+
+/** Only Bedrock selectors are persisted. Other provider metadata stays in the native home. */
+function recoveryModelConfig(config: JsonObject): JsonObject {
+  const resolved = resolveCodexProfile(config);
+  const selected = workerModelSelection(resolved);
+  if (selected.model_provider === "amazon-bedrock") {
+    const provider = bedrockProviderConfig(resolved);
+    if (provider) selected.model_providers = provider;
+  }
+  return selected;
 }
 
 /** Existing runs can be joined without capturing a usable current runtime. */
@@ -105,9 +118,8 @@ export async function captureDeepScanExecutionSettings(
     config = {};
     originalConfigPath = undefined;
   }
-  // Reuse the SDK projection: custom provider credentials belong in the native home.
   const resolved = resolveCodexProfile(config);
-  const selected = scanPreflightCodexConfig(resolved);
+  const selected = recoveryModelConfig(resolved);
   // A recovered scan can have a different continuation. Only its recorded owner
   // establishes original history; null means that historical binding is missing.
   const owner =
@@ -157,11 +169,9 @@ export async function captureDeepScanExecutionSettings(
         );
       }
       if (process.platform === "win32") {
-        const { requirePrivateCredentialHome } =
-          await import("../../../../../sdk/typescript/src/runtime.js");
-        await requirePrivateCredentialHome(
-          await fs.lstat(canonicalRuntimeDirectory),
+        await requirePrivateWindowsDirectory(
           canonicalRuntimeDirectory,
+          "credential home",
         );
       }
       runtimeConfigPath = join(canonicalRuntimeDirectory, `${digest}.toml`);
@@ -246,20 +256,16 @@ async function originalParentSettings(
   // selections from the original parent; some native records omit the summary.
   // Missing historical sessions are allowed; a failed read cannot establish the original selection.
   try {
-    const log = await readScanLogs({
-      scanId: parent.threadId,
-      threadId: parent.threadId,
-      onlyRequestedThread: true,
-      codexHome: await fs.realpath(codexHome),
-      allowMissingRoot: true,
-    });
+    const events = parentSessionEvents(
+      await fs.realpath(codexHome),
+      parent.threadId,
+    );
     const settings: Partial<DeepScanExecutionSettings> = {};
     let applied: Partial<DeepScanExecutionSettings> | undefined;
     let summaryIsCompatibilityOnly = false;
     const cutoff =
       parent.startedAt === undefined ? Infinity : Date.parse(parent.startedAt);
-    for (const entry of log.events) {
-      const event = entry.event as Record<string, unknown>;
+    for await (const event of events) {
       const timestamp =
         typeof event.timestamp === "string"
           ? Date.parse(event.timestamp)
@@ -379,7 +385,7 @@ export async function loadDeepScanExecutionSettings(
       // can recover selections, but cannot establish an original executable or
       // home. Leave those unknown and retain the existing native launch behavior.
       const context = await readLegacyContext?.();
-      const selected = scanPreflightCodexConfig(
+      const selected = recoveryModelConfig(
         resolveCodexProfile(context?.config ?? {}),
       );
       const owner = original.usageOwner ?? context?.usageOwner;
@@ -488,7 +494,7 @@ export function restoredDeepScanWorkerSettings(
         ["*", "?", "[", "]"].some((character) => path.includes(character)),
       ),
   );
-  const config = scanPreflightCodexConfig({
+  const config = recoveryModelConfig({
     ...(settings.model === undefined ? {} : { model: settings.model }),
     ...(settings.reasoningEffort === undefined
       ? {}
@@ -506,10 +512,6 @@ export function restoredDeepScanWorkerSettings(
       ? {}
       : { model_providers: settings.providerConfig }),
   });
-  // Other provider definitions remain in the bound native home. Catalog
-  // defaults would override its customized endpoint or authentication key.
-  if (settings.modelProvider !== "amazon-bedrock")
-    delete config.model_providers;
   return {
     protectedCredentialHome: (home) =>
       protectedRuntimeHome(home, currentParentSandbox),
@@ -587,7 +589,7 @@ function executionSettings(
   // definitions remain in the original native home.
   const provider =
     value.modelProvider === "amazon-bedrock"
-      ? (scanPreflightCodexConfig({
+      ? (recoveryModelConfig({
           ...(value.modelProvider === undefined
             ? {}
             : { model_provider: value.modelProvider }),

@@ -89,6 +89,13 @@ async function generate() {
 generate().then((models) => {
   const pluginSource = "../../plugins/codex-security/mcp-app/src";
   const shared = [
+    "accepted-audit",
+    "codex-session",
+    "codex-profile",
+    "config-errors",
+    "private-config",
+    "session-lines",
+    "windows-credential-acl",
     "workbench-arguments",
     "executable-path",
     "contract-values",

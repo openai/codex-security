@@ -1,3 +1,9 @@
+import { CodexSecurityError, OutputDirectoryError } from "./config-errors.js";
+export {
+  CodexSecurityError,
+  ConfigurationError,
+  OutputDirectoryError,
+} from "./config-errors.js";
 import { formatScanCost, formatUsd, type ScanCost } from "./cost-model.js";
 
 /** Returns the original error message without altering its contents. */
@@ -10,14 +16,6 @@ export function abortReason(signal: AbortSignal): unknown {
     signal.reason ??
     new DOMException("The operation was aborted.", "AbortError")
   );
-}
-
-/** Base error for Codex Security SDK failures. */
-export class CodexSecurityError extends Error {
-  public constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = new.target.name;
-  }
 }
 
 export type DeduplicationReviewStage = "screening" | "pair-review";
@@ -44,14 +42,12 @@ export class DeduplicationReviewError extends CodexSecurityError {
 }
 
 export class CodexConnectionError extends CodexSecurityError {}
-export class ConfigurationError extends CodexSecurityError {}
 export class AuthenticationRequiredError extends CodexSecurityError {}
 export class PluginBootstrapError extends CodexSecurityError {}
 export class LocalPluginBootstrapError extends PluginBootstrapError {}
 export class PluginPythonUnavailableError extends PluginBootstrapError {}
 export class SandboxUnavailableError extends CodexSecurityError {}
 export class InvalidTargetError extends CodexSecurityError {}
-export class OutputDirectoryError extends CodexSecurityError {}
 export class OutputDirectoryNotEmptyError extends OutputDirectoryError {
   public constructor(
     public readonly directory: string,

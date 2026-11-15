@@ -14,36 +14,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
-import { importModule } from "./import-module.ts";
+import { importSource } from "./import-module.ts";
 
 const root = await mkdtemp(join(tmpdir(), "deep-settings-"));
-const pluginMcp = join(root, "installed-plugin", "mcp");
-await build({
-  entryPoints: [
-    fileURLToPath(new URL("../src/session-decompression.ts", import.meta.url)),
-  ],
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outfile: join(pluginMcp, "session-decompression.mjs"),
-});
-
-const module = await importModule({
-  banner: {
-    js: `import { createRequire as recoveryRequire } from "node:module"; const require = recoveryRequire(${JSON.stringify(import.meta.url)});`,
-  },
-  nodePaths: [fileURLToPath(new URL("../node_modules", import.meta.url))],
-  define: {
-    // Standalone MCP bundles compile import.meta.url as the loader filename.
-    "import.meta.url": JSON.stringify(join(pluginMcp, "server.mjs")),
-  },
-  entryPoints: [
-    fileURLToPath(
-      new URL("../src/deep-scan/recovery-settings.ts", import.meta.url),
-    ),
-  ],
-});
+const module = await importSource(
+  fileURLToPath(
+    new URL("../src/deep-scan/recovery-settings.ts", import.meta.url),
+  ),
+);
 const {
   beginDeepScanWithCapturedSettings: beginWithCapturedSettings,
   captureDeepScanExecutionSettings: captureSettings,
@@ -83,6 +61,56 @@ try {
   await assert.rejects(captureOwner, /unexpected EOF/i);
   await rename(archivePath(ownerId), join(archives, "unknown.jsonl.zst"));
   await assert.rejects(captureOwner, /unexpected EOF/i);
+  await rm(join(archives, "unknown.jsonl.zst"));
+  const meta = {
+    type: "session_meta",
+    payload: { id: ownerId, timestamp: "2026-01-01T00:00:00Z" },
+  };
+  const context = (model) => ({ type: "turn_context", payload: { model } });
+  const marker = (text) => ({ type: "response_item", payload: { text } });
+  const writeHistory = (path, events) =>
+    writeFile(
+      path,
+      events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+    );
+  const liveEvents = [meta, marker("original"), context("live-model")];
+  await writeHistory(join(ownerHistory, "owner.jsonl"), liveEvents);
+  const sibling = join(archives, "owner.jsonl");
+  await writeHistory(sibling, [
+    meta,
+    marker("divergent"),
+    context("live-model"),
+    context("archive-model"),
+  ]);
+  assert.equal(
+    (await captureOwner()).model,
+    "live-model",
+    "a divergent archive must not displace live history",
+  );
+  const extended = [
+    ...liveEvents,
+    context("archive-model"),
+    { type: "session_meta", payload: { id: otherId } },
+    context("replayed-model"),
+  ];
+  await writeHistory(sibling, extended);
+  assert.equal(
+    (await captureOwner()).model,
+    "archive-model",
+    "a strict extension contributes owned events only",
+  );
+  await writeHistory(sibling, [
+    ...extended,
+    {
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        started_at: Date.parse(meta.payload.timestamp) / 1000,
+      },
+    },
+    context("resumed-model"),
+  ]);
+  assert.equal((await captureOwner()).model, "resumed-model");
   const settings = {
     codexPath: "/fixture/runtime/codex",
     codexHome: "/fixture/account",

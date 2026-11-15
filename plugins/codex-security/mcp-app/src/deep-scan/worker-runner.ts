@@ -1,7 +1,4 @@
-import {
-  auditEvidence,
-  runAcceptedAudit,
-} from "../../../../../sdk/typescript/src/accepted-audit.js";
+import { auditEvidence, runAcceptedAudit } from "../accepted-audit.js";
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { ScanDraftInput } from "../artifact-scan-draft.js";

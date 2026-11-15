@@ -1,16 +1,28 @@
 import type { ScanPricingContext } from "./cost-model.js";
-import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
+import {
+  deepMerge,
+  isObject,
+  resolveCodexProfile,
+  selectedScanProfile,
+  type JsonObject,
+  type JsonValue,
+} from "./codex-profile.js";
+/** @internal */
+export { deepMerge } from "./codex-profile.js";
+export {
+  resolveCodexProfile,
+  type JsonObject,
+  type JsonValue,
+  type JsonPrimitive,
+} from "./codex-profile.js";
+export { writeCodexConfig } from "./private-config.js";
+/** @internal */
+export { writePrivateConfig } from "./private-config.js";
 import { ConfigurationError } from "./errors.js";
-
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
-export interface JsonObject {
-  [key: string]: JsonValue;
-}
 
 export interface CodexSecurityConfig {
   pluginPath?: string;
@@ -332,28 +344,6 @@ export function scanApprovalPolicy(
   return configured === "never" ? "never" : "on-request";
 }
 
-function selectedScanProfile(
-  config: Readonly<JsonObject>,
-): Record<string, JsonValue> | undefined {
-  const profileName = config["profile"];
-  const profiles = config["profiles"];
-  const configuredProfile =
-    typeof profileName === "string" &&
-    isObject(profiles) &&
-    Object.hasOwn(profiles, profileName)
-      ? profiles[profileName]
-      : undefined;
-  return isObject(configuredProfile) ? configuredProfile : undefined;
-}
-
-export function resolveCodexProfile(config: JsonObject): JsonObject {
-  const normalized = parse(stringify(config)) as JsonObject;
-  const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
-  delete resolved["profile"];
-  delete resolved["profiles"];
-  return resolved;
-}
-
 /** @internal */
 export function scanCyberAccessConfig(
   config: JsonObject,
@@ -533,49 +523,6 @@ export function normalizeLegacyWindowsSandboxOverride(
   };
 }
 
-export async function writeCodexConfig(
-  path: string,
-  config: JsonObject,
-): Promise<void> {
-  let contents: string;
-  try {
-    contents = stringify(config);
-  } catch (error) {
-    throw new ConfigurationError("Invalid Codex configuration.", {
-      cause: error,
-    });
-  }
-  await writePrivateConfig(path, contents);
-}
-
-/** @internal Write private configuration without changing its serialized contents. */
-export async function writePrivateConfig(
-  path: string,
-  contents: string,
-): Promise<void> {
-  const parent = dirname(path);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
-  const temporary = join(parent, `.${randomUUID()}.config.toml.tmp`);
-  let created = false;
-  try {
-    const handle = await open(temporary, "wx", 0o600);
-    created = true;
-    try {
-      await handle.chmod(0o600);
-      await handle.writeFile(contents, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, path);
-    created = false;
-  } finally {
-    if (created) {
-      await unlink(temporary).catch(() => undefined);
-    }
-  }
-}
-
 function validateOverrideKeys(value: JsonValue): void {
   if (Array.isArray(value)) {
     for (const item of value) validateOverrideKeys(item);
@@ -674,24 +621,4 @@ export function mergeCodexOverrides(
   validateOverrideKeys(base);
   validateOverrideKeys(overrides);
   return deepMerge(structuredClone(base), overrides);
-}
-
-/** @internal */
-export function deepMerge(base: JsonObject, overrides: JsonObject): JsonObject {
-  for (const [key, value] of Object.entries(overrides)) {
-    const existing = Object.hasOwn(base, key) ? base[key] : undefined;
-    base[key] =
-      isObject(value) && isObject(existing)
-        ? deepMerge({ ...existing }, value)
-        : structuredClone(value);
-  }
-  return base;
-}
-
-function isObject(value: unknown): value is Record<string, JsonValue> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
 }

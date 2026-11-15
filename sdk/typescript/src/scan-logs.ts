@@ -1,9 +1,12 @@
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
-import { isDeepStrictEqual } from "node:util";
-import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
-import { parseJson } from "./value.js";
+import {
+  extendsSessionLog,
+  firstSessionEvent,
+  replayingSessionEvent,
+  sessionEvents,
+  sessionFiles,
+} from "./session-lines.js";
 import { isRecord } from "./record.js";
-import { compressedSessionThreadId, sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -11,7 +14,6 @@ import {
   isAttributedScanEvent,
   isScanArtifactDirectory,
   recordedScanCodexHome,
-  sessionOwnsTurn,
   sessionParentThreadId,
   sessionStartedAt,
   type ScanExecutionAttribution,
@@ -22,7 +24,6 @@ import { shortArchivePrefix } from "./scan-archive-path.js";
 interface ScanLogOptions {
   scanId: string;
   threadId?: string;
-  onlyRequestedThread?: boolean;
   threadIds?: readonly string[];
   executionThreadIds?: readonly string[];
   codexHome: string | readonly string[];
@@ -91,32 +92,14 @@ export function readSavedScanLogs(
 
 type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
-async function* scanSessions(
-  codexHome: string,
-  directory = "sessions",
-  onlyThreadId?: string,
-) {
+async function* scanSessions(codexHome: string, directory = "sessions") {
   for await (const path of sessionFiles(join(codexHome, directory), true)) {
-    let first;
-    try {
-      first = await firstSessionEvent(path);
-    } catch (error) {
-      // During an owner-only lookup, a damaged native archive for a different
-      // thread cannot supply the requested settings. Unknown archives still fail.
-      const archiveThread = compressedSessionThreadId(path);
-      if (onlyThreadId && archiveThread && archiveThread !== onlyThreadId)
-        continue;
-      throw error;
-    }
+    const first = await firstSessionEvent(path);
     if (first?.["type"] !== "session_meta" || !isRecord(first["payload"]))
       continue;
     const metadata = first["payload"];
     const threadId = metadata["id"];
-    if (
-      typeof threadId !== "string" ||
-      (onlyThreadId && onlyThreadId !== threadId)
-    )
-      continue;
+    if (typeof threadId !== "string") continue;
     yield {
       threadId,
       parentThreadId: sessionParentThreadId(metadata),
@@ -156,11 +139,7 @@ export async function readScanLogs(options: ScanLogOptions) {
   // Recovered workers retain their original home; the parent can use the current home.
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
-      for await (const session of scanSessions(
-        home,
-        directory,
-        options.onlyRequestedThread ? options.threadId : undefined,
-      )) {
+      for await (const session of scanSessions(home, directory)) {
         const copies = logs.get(session.threadId);
         if (copies === undefined) logs.set(session.threadId, [session]);
         else copies.push(session);
@@ -284,7 +263,13 @@ export async function readScanLogs(options: ScanLogOptions) {
     let session = copies[0];
     for (const copy of copies.slice(1)) {
       if (
-        await extendsSessionLog(session.path, copy.path, session, attribution)
+        await extendsSessionLog(
+          session.path,
+          copy.path,
+          attribution
+            ? (path) => attributedSessionEvents(path, session, attribution)
+            : sessionEvents,
+        )
       )
         session = copy;
     }
@@ -342,21 +327,10 @@ async function* attributedSessionEvents(
       typeof payload["turn_id"] === "string"
     )
       turnId = payload["turn_id"];
-    if (event["type"] === "session_meta" && isRecord(payload)) {
-      replaying = payload["id"] !== session.threadId;
+    if (event["type"] === "session_meta" && isRecord(payload))
       finishingOwnerTurn = false;
-    }
-    if (replaying) {
-      if (
-        event["type"] !== "event_msg" ||
-        !isRecord(payload) ||
-        payload["type"] !== "task_started" ||
-        !sessionOwnsTurn(session, payload)
-      ) {
-        continue;
-      }
-      replaying = false;
-    }
+    replaying = replayingSessionEvent(event, session, replaying);
+    if (replaying) continue;
     const time = sessionStartedAt(event["timestamp"]);
     if (turnMarker) {
       finishingOwnerTurn =
@@ -430,56 +404,4 @@ function belongsToScan(
     }
   }
   return false;
-}
-
-// Prefer a longer copy only when it preserves every event in the earlier copy.
-// Identical or divergent copies keep the existing home/archive precedence.
-async function extendsSessionLog(
-  previousPath: string,
-  path: string,
-  session: SessionLog,
-  attribution: ScanExecutionAttribution | null | undefined,
-): Promise<boolean> {
-  const selectedEvents = (source: string) =>
-    attribution
-      ? attributedSessionEvents(source, session, attribution)
-      : sessionEvents(source);
-  const events = selectedEvents(path);
-  try {
-    for await (const previous of selectedEvents(previousPath)) {
-      const next = await events.next();
-      if (next.done || !isDeepStrictEqual(previous, next.value)) return false;
-    }
-    return !(await events.next()).done;
-  } finally {
-    await events.return(undefined);
-  }
-}
-
-async function firstSessionEvent(path: string) {
-  const line = await firstNativeSessionLine(path);
-  if (line !== undefined) {
-    const event = parseJson(() => line);
-    if (isRecord(event)) return event;
-  }
-  // Also handles metadata split across frames and malformed prefix lines.
-  for await (const event of sessionEvents(path)) return event;
-}
-
-async function* sessionEvents(
-  path: string,
-): AsyncGenerator<Record<string, unknown>> {
-  try {
-    for await (const line of sessionLines(path)) {
-      if (line.trim() === "") continue;
-      try {
-        const event: unknown = JSON.parse(line);
-        if (isRecord(event)) yield event;
-      } catch {
-        continue;
-      }
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
 }

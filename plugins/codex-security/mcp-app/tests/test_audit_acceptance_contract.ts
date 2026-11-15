@@ -19,7 +19,7 @@ const module = await importModule({
     contents: `export * from "./src/artifact-scan-draft.ts";
       export * from "./src/deep-scan/artifact-validation.ts";
       export * from "./src/deep-scan/artifacts.ts";
-      export * from "../../../sdk/typescript/src/accepted-audit.ts";`,
+      export * from "./src/accepted-audit.ts";`,
     resolveDir: path.resolve(import.meta.dirname, ".."),
   },
 
