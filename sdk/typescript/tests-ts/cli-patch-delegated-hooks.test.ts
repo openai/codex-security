@@ -319,8 +319,9 @@ for (const linked of [false, true]) {
                 `node -e 'const fs = require("node:fs"); const message = process.argv[1]; fs.linkSync(message, message + ".link"); fs.appendFileSync(message, "Reviewed-by: synthetic\\n");' "$1"`,
               ]
             : [
-                'git interpret-trailers --in-place --trailer "Reviewed-by: synthetic" -- "$1"',
-                'echo "Synthetic commit-message veto" >&2',
+                'printf "entered\\n" > veto-progress',
+                'git interpret-trailers --in-place --trailer "Reviewed-by: synthetic" -- "$1" 2>>veto-progress || { code=$?; printf "interpret-trailers exited %s\\n" "$code" >>veto-progress; exit "$code"; }',
+                'cat "$1" >>veto-progress',
                 "exit 7",
               ]),
         ].join("\n") + "\n",
@@ -361,8 +362,19 @@ for (const linked of [false, true]) {
             ? /regular, unlinked COMMIT_EDITMSG|EPERM: operation not permitted, link .*COMMIT_EDITMSG' -> '.*COMMIT_EDITMSG\.link'/u
             : "regular, unlinked COMMIT_EDITMSG",
         );
-      else
-        await expect(result).rejects.toThrow("Synthetic commit-message veto");
+      else {
+        const failure = await result.then(
+          () => undefined,
+          (error: Error) => error,
+        );
+        expect(failure).toBeInstanceOf(Error);
+        // Record the bytes before vetoing, independently of Git's diagnostic.
+        const edited = await readFile(
+          join(directory, "veto-progress"),
+          "utf8",
+        ).catch((error: NodeJS.ErrnoException) => error.code);
+        expect(edited, failure?.message).toContain("Reviewed-by: synthetic");
+      }
       expect(git("rev-parse", "HEAD")).toBe(head);
       const retained = await readFile(message, "utf8");
       expect(retained).toContain("Synthetic candidate");
