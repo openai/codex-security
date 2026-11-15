@@ -11925,12 +11925,16 @@ async function patchRepositoryRoot(
 async function hashPatchFile(
   stream: Readable,
   signal?: AbortSignal,
+  objectHash?: ReturnType<typeof createHash>,
 ): Promise<string> {
   const closed = finished(stream).catch(() => undefined);
   try {
     if (signal !== undefined) addAbortSignal(signal, stream);
     const digest = createHash("sha256");
-    for await (const chunk of stream) digest.update(chunk);
+    for await (const chunk of stream) {
+      digest.update(chunk);
+      objectHash?.update(chunk);
+    }
     signal?.throwIfAborted();
     return digest.digest("hex");
   } finally {
@@ -11943,6 +11947,7 @@ async function hashPublicationFile(
   root: string,
   pathKey: string,
   signal?: AbortSignal,
+  unchangedBlob?: string,
 ): Promise<string | undefined> {
   signal?.throwIfAborted();
   const path = patchFilePath(root, pathKey);
@@ -11975,10 +11980,20 @@ async function hashPublicationFile(
         "Patch publication content must remain the selected regular file.",
       );
     signal?.throwIfAborted();
-    return await hashPatchFile(
+    const objectHash =
+      unchangedBlob === undefined
+        ? undefined
+        : createHash(unchangedBlob.length === 40 ? "sha1" : "sha256").update(
+            `blob ${opened.size}\0`,
+          );
+    const digest = await hashPatchFile(
       file.createReadStream({ autoClose: false }),
       signal,
+      objectHash,
     );
+    return objectHash && objectHash.digest("hex") === unchangedBlob
+      ? undefined
+      : digest;
   } finally {
     await file.close();
   }
@@ -12049,6 +12064,76 @@ async function publicationContentDigests(
     }
   }
   return digests;
+}
+
+async function captureHiddenPatchContent(
+  root: string,
+  checkout: string,
+  dependencies: CliDependencies,
+  environment: NodeJS.ProcessEnv,
+  digests: Set<string>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const source = ["-C", checkout, "-c", "core.fsmonitor=false"];
+  const tracked = await patchGitRecords(
+    root,
+    [...source, "ls-files", "-v", "--stage", "-z"],
+    dependencies,
+    { environment, patchSnapshot: [] },
+  );
+  const materialized = new Map<string, string>();
+  for (const entry of tracked) {
+    // Lowercase tags mean assume-unchanged and S means skip-worktree.
+    const header = /^[a-zS] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
+      entry,
+    );
+    if (!header) continue;
+    const path = entry.slice(header[0].length);
+    const digest = await hashPublicationFile(
+      checkout,
+      path,
+      signal,
+      header[1]!,
+    ).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+      throw error;
+    });
+    if (digest !== undefined) materialized.set(path, digest);
+  }
+  if (!materialized.size) return;
+  const directory = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-patch-checkout-"),
+  );
+  try {
+    // Compare raw bytes with what Git would check out. A clean filter can
+    // discard a local change, and a smudge filter can legitimately add bytes.
+    await dependencies.runRepositoryCommand(
+      "git",
+      [
+        ...source,
+        "checkout-index",
+        "--ignore-skip-worktree-bits",
+        `--prefix=${directory.split(sep).join("/")}/`,
+        "-z",
+        "--stdin",
+      ],
+      root,
+      {
+        patchSnapshot: [directory],
+        environment,
+        input: Buffer.from(
+          [...materialized.keys()].join("\0") + "\0",
+          "latin1",
+        ),
+      },
+    );
+    for (const [path, digest] of materialized) {
+      if (digest !== (await hashPublicationFile(directory, path, signal)))
+        digests.add(digest);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 async function preparePatchPublication(
@@ -12278,6 +12363,11 @@ async function preparePatchPublication(
     for (const checkout of gitControls.nestedCheckouts) {
       signal?.throwIfAborted();
       const prefix = patchPathKey(relative(canonicalRoot, checkout));
+      const environment = {
+        ...NESTED_PATCH_GIT_ENVIRONMENT,
+        GIT_INDEX_FILE: undefined,
+        GIT_OPTIONAL_LOCKS: "0",
+      };
       const entries = await patchGitRecords(
         root,
         [
@@ -12294,17 +12384,18 @@ async function preparePatchPublication(
           "-z",
         ],
         dependencies,
-        {
-          patchSnapshot: [],
-          environment: {
-            ...NESTED_PATCH_GIT_ENVIRONMENT,
-            GIT_INDEX_FILE: undefined,
-            GIT_OPTIONAL_LOCKS: "0",
-          },
-        },
+        { patchSnapshot: [], environment },
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
+      await captureHiddenPatchContent(
+        root,
+        checkout,
+        dependencies,
+        environment,
+        nestedRepositoryDigests,
+        signal,
+      );
       // A conflict can also be reported as DD (both sides deleted).
       if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);

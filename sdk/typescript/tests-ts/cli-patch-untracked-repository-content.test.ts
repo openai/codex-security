@@ -121,6 +121,8 @@ for (const kind of [
   "initialized submodule",
   "untracked file in initialized submodule",
   "tracked edit in initialized submodule",
+  "assume-unchanged edit in initialized submodule",
+  "skip-worktree edit in initialized submodule",
   "staged-only edit in initialized submodule",
   "sha256 staged-only edit in initialized submodule",
   "sha256 unmerged edit in initialized submodule",
@@ -159,20 +161,41 @@ for (const kind of [
         );
         const unmergedEdit =
           kind === "sha256 unmerged edit in initialized submodule";
+        const hiddenFlag = kind.startsWith("assume-unchanged")
+          ? "--assume-unchanged"
+          : kind.startsWith("skip-worktree")
+            ? "--skip-worktree"
+            : undefined;
         const trackedEdit =
+          hiddenFlag !== undefined ||
           stagedEdit ||
           unmergedEdit ||
           kind === "tracked edit in initialized submodule";
-        const committedContent = "Committed fixture baseline\n";
+        // Git's ident conversion can hide changes inside an expanded $Id$.
+        const ident = hiddenFlag === "--assume-unchanged";
+        const committedContent = ident
+          ? "$Id$\n"
+          : "Committed fixture baseline\n";
+        if (ident) {
+          await writeFile(
+            join(nested, ".gitattributes"),
+            "local.txt ident -text\n.gitignore ident -text\n",
+          );
+          nestedGit("add", ".gitattributes");
+        }
         const ordinarySubmoduleFile =
           kind === "untracked file in initialized submodule";
         await writeFile(
           join(nested, ".gitignore"),
-          ordinarySubmoduleFile ? "different.txt\n" : "local.txt\n",
+          ordinarySubmoduleFile
+            ? "different.txt\n"
+            : (ident ? "# $Id$\n" : "") + "local.txt\n",
         );
         nestedGit("add", ".gitignore");
         nestedGit("commit", "-m", "Synthetic nested baseline");
-        let content = "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
+        let content = ident
+          ? "$Id: SYNTHETIC_LOCAL_ONLY_CONTENT $\n"
+          : "SYNTHETIC_LOCAL_ONLY_CONTENT\n";
         let source: string | Buffer = join(nested, "local.txt");
         if (kind === "Subversion working copy") {
           await mkdir(join(nested, ".svn"));
@@ -211,7 +234,30 @@ for (const kind of [
           if (trackedEdit) await writeFile(source, committedContent);
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
+          if (hiddenFlag)
+            nestedGit(
+              "update-index",
+              hiddenFlag,
+              "--",
+              "local.txt",
+              ".gitignore",
+            );
           if (trackedEdit) await writeFile(source, content);
+          if (ident) {
+            expect(nestedGit("hash-object", "--", "local.txt")).toBe(
+              nestedGit("rev-parse", ":local.txt"),
+            );
+            const rendered = await runGitRepositoryCommand(
+              "git",
+              ["cat-file", "--filters", "HEAD:.gitignore"],
+              nested,
+              { trim: false },
+            );
+            expect(rendered).toContain(
+              `$Id: ${nestedGit("rev-parse", ":.gitignore")} $`,
+            );
+            await writeFile(join(nested, ".gitignore"), rendered);
+          }
           if (unmergedEdit) {
             // A DD conflict has only stage 1, with no stage-0 worktree match.
             const object = nestedGit("hash-object", "-w", "--", "local.txt");
@@ -257,12 +303,18 @@ for (const kind of [
             ).toBe("local.txt");
           }
         }
+        // A flagged file with unchanged, committed content remains publishable.
+        const independentContent = hiddenFlag
+          ? await readFile(join(nested, ".gitignore"), "utf8")
+          : "New independent content\n";
         const copiedPrivateContent = copied && kind !== "directory link";
         const blocked = copiedPrivateContent || kind === "scrubbed";
         const assessed =
           kind === "scrubbed" || (kind === "untracked" && !copied);
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
-          kind.startsWith("ignored") || kind === "initialized submodule"
+          hiddenFlag ||
+            kind.startsWith("ignored") ||
+            kind === "initialized submodule"
             ? ""
             : ordinarySubmoduleFile || trackedEdit
               ? "M nested"
@@ -274,7 +326,7 @@ for (const kind of [
         const configuration = await readFile(join(nestedStorage, "config"));
         const originalGitlink = git("ls-tree", "HEAD", "nested");
         let index: Buffer<ArrayBuffer> | undefined;
-        let nestedIndex: Buffer<ArrayBuffer> | undefined;
+        const nestedIndex = await readFile(join(nestedStorage, "index"));
         let pushes = 0;
         let creations = 0;
         let assessments = 0;
@@ -319,7 +371,6 @@ for (const kind of [
                 return 0;
               }
               index = await readFile(join(directory, ".git", "index"));
-              nestedIndex = await readFile(join(nestedStorage, "index"));
               await writeFile(
                 join(directory, "selected.txt"),
                 copied
@@ -329,7 +380,7 @@ for (const kind of [
                         unmergedEdit ? ":1:local.txt" : ":local.txt",
                       ) + "\n"
                     : await readFile(source)
-                  : "New independent content\n",
+                  : independentContent,
               );
               output?.stdout.write(
                 JSON.stringify({
@@ -377,13 +428,13 @@ for (const kind of [
           expect(repositoryGit(remote)("for-each-ref")).toBe("");
         } else {
           expect(git("show", "HEAD:selected.txt")).toBe(
-            copied ? content.trim() : "New independent content",
+            copied ? content.trim() : independentContent.trim(),
           );
           expect(git("ls-tree", "HEAD", "nested")).toBe(originalGitlink);
         }
         expect(nestedGit("rev-parse", "HEAD")).toBe(nestedHead);
         expect(await readFile(join(nestedStorage, "index"))).toEqual(
-          nestedIndex!,
+          nestedIndex,
         );
         expect(await readFile(join(nestedStorage, "config"))).toEqual(
           configuration,
@@ -399,7 +450,7 @@ for (const kind of [
             ? "Synthetic scrubbed working copy\n"
             : copied
               ? content
-              : "New independent content\n",
+              : independentContent,
         );
       },
     );
