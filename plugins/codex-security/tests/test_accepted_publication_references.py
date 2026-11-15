@@ -198,11 +198,14 @@ def test_stopped_discovery_retains_only_bound_attempt_output(
     scan.preserve()
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
 
-    if source == "both":
+    if source in {"both", "alias"}:
         sources = json.loads(manifest)["scan"]["preservedSources"]
-        assert frozen.relative_to(scan.scan_dir).as_posix() in sources
-        assert result.relative_to(scan.scan_dir).as_posix() not in sources
-        result.write_text(json.dumps(draft("changed-after-stop")))
+        assert (frozen.relative_to(scan.scan_dir).as_posix() in sources) == (source == "both")
+        assert (result.relative_to(scan.scan_dir).as_posix() in sources) == (source == "alias")
+        if source == "both":
+            result.write_text(json.dumps(draft("changed-after-stop")))
+        else:
+            frozen.write_bytes(contents)
         write_checkpoint(partial / "checkpoints", draft("new-partial"))
         scan.recover()
         recovered = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]

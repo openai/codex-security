@@ -967,20 +967,27 @@ def _saved_workers(connection: Any, scan: Any) -> list[dict[str, Any]]:
         for row in rows
     ]
     workers = archived_worker_paths(workers, scan_dir)
+    retained = _retained_source_state(scan["retained_source_digests_json"]).get("sources", {})
     for worker in workers:
         if not _has_accepted_discovery_result(worker):
             continue
         accepted = worker["accepted_result_path"]
+        alias = Path(worker["artifact_dir"]) / "result.json"
         try:
+            relative = Path(accepted).relative_to(scan_dir).as_posix()
+            if relative not in retained and alias.relative_to(scan_dir).as_posix() in retained:
+                # Recovery keeps using the copy selected at the original stop.
+                worker["result_manifest_path"] = str(alias)
+                continue
             _read_saved_result(
                 scan_dir,
-                Path(accepted).relative_to(scan_dir).as_posix(),
+                relative,
                 scan["id"],
                 accepted_source_digests={accepted: worker["accepted_result_sha256"]},
             )
         except (ContractError, OSError, ValueError):
             # Reads of this alternative must still verify the same acceptance digest.
-            worker["result_manifest_path"] = str(Path(worker["artifact_dir"]) / "result.json")
+            worker["result_manifest_path"] = str(alias)
     return workers
 
 
