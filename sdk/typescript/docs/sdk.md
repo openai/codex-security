@@ -729,8 +729,8 @@ the original review IDs. Report a terminal partial result with its exclusions
 and errors. If the approved ID was lost or the preview changed, show the new
 preview for review.
 `listLocalFindingPublications({ repository, id })` returns receipts for a
-stored version, including completed private inbox job IDs. Custom provider
-names and Tenable can be used locally. Cloud eligibility follows its provider
+stored version, including completed private inbox job IDs. Promptfoo, CrowdStrike,
+Tenable and custom provider names support local storage. Cloud eligibility follows its provider
 contract and the selected destination.
 
 For a saved scanner report, call `prepareLocalExternalImport` for a checkout
@@ -738,6 +738,10 @@ or `prepareExternalPublication` for a connected Cloud repository. Review the
 returned `preview`, then call `import()` to save locally or `publish()` to
 upload. The [scanner import guides](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/README.md)
 list the supported report formats and destinations for each provider.
+
+For a Promptfoo red-team evaluation JSON export, use `readPromptfooFindings(path)`
+to inspect the failed probes and numbered exclusions, or pass `provider: "promptfoo"`
+to `prepareLocalExternalImport` to preview and save them. [Promptfoo evidence mapping](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/promptfoo.md)
 
 For normalized evidence, use `prepareNormalizedLocalImport(findings, options)`
 or `prepareNormalizedExternalPublication(findings, options)` and review the

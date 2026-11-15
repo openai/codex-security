@@ -61,6 +61,7 @@ import {
   crowdstrikeCheckout,
   crowdstrikeReportFormat,
 } from "./crowdstrike-findings.js";
+import { promptfooReportFormat } from "./promptfoo-findings.js";
 import {
   guardianFindingRepository,
   guardianSelectionFormat,
@@ -853,13 +854,51 @@ export async function prepareNormalizedLocalImport(
       dependencies,
     );
 
-  const references = snapshotSourceRepositories(
-    dependencies.sourceRepositories,
+  return prepareUnboundLocalImport(
+    input,
+    settings,
+    dependencies,
+    snapshotSourceRepositories(dependencies.sourceRepositories),
   );
+}
+
+// These sources have no native SCM binding. Check any operator-supplied URL against the checkout.
+async function prepareUnboundLocalImport(
+  input: ExternalFindings,
+  settings: NormalizedLocalImportOptions,
+  dependencies: LocalExternalImportDependencies,
+  references: readonly ExternalSourceRepository[],
+) {
+  const { signal } = dependencies;
   requireIdentity(settings.provider, "Provider");
   requireIdentity(settings.sourceKey, "Source key");
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
   validateFindingIds(current);
+  checkLocalOnlyProvider(settings.provider, current);
+  if (settings.provider === "promptfoo") {
+    if (current.report?.["format"] !== promptfooReportFormat)
+      throw new CodexSecurityError(
+        "Promptfoo imports require a red-team evaluation report.",
+      );
+    const evalId = current.report["evalId"];
+    requireIdentity(evalId, "Promptfoo evaluation ID");
+    for (const { source_finding_id, evidence } of current.findings) {
+      const data = evidence.source_data;
+      const result = data?.["result"];
+      if (
+        data?.["format"] !== promptfooReportFormat ||
+        !isRecord(result) ||
+        result["id"] !== source_finding_id
+      )
+        throw new CodexSecurityError(
+          "Promptfoo evidence must retain its native result ID.",
+        );
+      if (evidence.source_scan_id !== evalId)
+        throw new CodexSecurityError(
+          "Promptfoo evidence must belong to the selected evaluation.",
+        );
+    }
+  }
   if (current.report !== undefined && !isRecord(current.report))
     throw new CodexSecurityError("Report metadata must be an object.");
   if (current.read !== current.findings.length + current.excluded.length)
@@ -956,6 +995,24 @@ export function distinctSourceRepositories(
   });
 }
 
+function checkLocalOnlyProvider(selected: string, current: ExternalFindings) {
+  for (const [provider, format] of [
+    ["tenable", tenableReportFormat],
+    ["crowdstrike", crowdstrikeReportFormat],
+    ["promptfoo", promptfooReportFormat],
+  ] as const)
+    if (
+      selected !== provider &&
+      (current.report?.["format"] === format ||
+        current.findings.some(
+          (row) => row.evidence?.source_data?.["format"] === format,
+        ))
+    )
+      throw new CodexSecurityError(
+        `Retained ${LOCAL_ONLY_PROVIDERS[provider]} evidence requires the ${provider} provider.`,
+      );
+}
+
 /** @internal Prepare evidence using settings captured by either local import entrypoint. */
 export async function prepareLocalImport(
   input: ExternalFindings & Partial<SnykIssuesFindings>,
@@ -963,6 +1020,7 @@ export async function prepareLocalImport(
     (
       | { provider: "tenable" }
       | { provider: "crowdstrike" }
+      | { provider: "promptfoo" }
       | { provider: Provider }
     ),
   dependencies: LocalExternalImportDependencies,
@@ -974,6 +1032,11 @@ export async function prepareLocalImport(
 ): Promise<PreparedLocalExternalImport> {
   requireIdentity(options.sourceKey, "Source key");
   const parsedSources = distinctSourceRepositories(parsedInput ?? []);
+  if (options.provider === "promptfoo")
+    return prepareUnboundLocalImport(input, options, dependencies, [
+      ...readerSources,
+      ...parsedSources,
+    ]);
   // File readers interpret their source option while parsing. For normalized
   // input the caller declares one repository for the whole selection.
   const normalizedSource =
@@ -990,20 +1053,7 @@ export async function prepareLocalImport(
     "local",
     options.provider,
   );
-  for (const [provider, format] of [
-    ["tenable", tenableReportFormat],
-    ["crowdstrike", crowdstrikeReportFormat],
-  ] as const)
-    if (
-      options.provider !== provider &&
-      (current.report?.["format"] === format ||
-        current.findings.some(
-          (row) => row.evidence?.source_data?.["format"] === format,
-        ))
-    )
-      throw new CodexSecurityError(
-        `Retained ${LOCAL_ONLY_PROVIDERS[provider]} evidence requires the ${provider} provider.`,
-      );
+  checkLocalOnlyProvider(options.provider, current);
   checkTrivyReportProvider(options.provider, current.report);
   let dependabotSource: string | undefined;
   validateFindingIds(current);

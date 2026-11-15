@@ -8,6 +8,7 @@ import type { Provider } from "./external-import-models.js";
 import { CodexSecurityError } from "./errors.js";
 import { readTenableFindings } from "./tenable-findings.js";
 import { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
+import { readPromptfooFindings } from "./promptfoo-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -42,6 +43,7 @@ import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 export const LOCAL_ONLY_PROVIDERS = {
   tenable: "Tenable",
   crowdstrike: "CrowdStrike",
+  promptfoo: "Promptfoo",
 } as const;
 type LocalOnlyProvider = keyof typeof LOCAL_ONLY_PROVIDERS;
 
@@ -66,6 +68,7 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   checkmarx: "checkmarx",
   tenable: "tenable",
   crowdstrike: "crowdstrike",
+  promptfoo: "promptfoo",
 } as const satisfies Record<string, LocalFindingProvider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
@@ -195,6 +198,10 @@ export async function readExternalFindings(
 ): Promise<ReadExternalFindings> {
   const { provider } = options;
   const url = options.sourceRepositoryUrl ?? "";
+  if (provider === "promptfoo") {
+    if (target === "cloud") requireCloudReader(options);
+    return { findings: await readPromptfooFindings(path) };
+  }
   if (provider === "tenable") {
     if (target === "cloud") requireCloudReader(options);
     return { findings: await readTenableFindings(path, url) };

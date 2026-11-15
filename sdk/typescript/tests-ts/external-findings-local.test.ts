@@ -72,6 +72,59 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
+  test("binds retained Promptfoo evidence to its provider, evaluation and native result ID", async () => {
+    const { repository, stateDirectory, environment } = await fixture();
+    const format = "promptfoo-redteam/v3";
+    const selection = {
+      read: 1,
+      report: { format, evalId: "eval-qa" },
+      findings: [
+        {
+          source_finding_id: "result-1",
+          evidence: {
+            title: "Prompt extraction",
+            severity: "medium" as const,
+            source_scan_id: "eval-qa",
+            source_data: { format, result: { id: "result-1" } },
+          },
+        },
+      ],
+      excluded: [],
+    };
+    const prepare = (input: ExternalFindings, provider: string) =>
+      prepareNormalizedLocalImport(
+        input,
+        { repository, provider, sourceKey: "qa" },
+        { environment },
+      );
+    for (const provider of ["example-scanner", "wiz"]) {
+      await expect(
+        prepare({ ...selection, report: undefined }, provider),
+      ).rejects.toThrow(/promptfoo provider/i);
+      await expect(
+        prepare({ ...selection, read: 0, findings: [] }, provider),
+      ).rejects.toThrow(/promptfoo provider/i);
+    }
+    const wrongId = structuredClone(selection);
+    wrongId.findings[0]!.source_finding_id = "another-result";
+    await expect(prepare(wrongId, "promptfoo")).rejects.toThrow(/result ID/i);
+    const wrongEval = structuredClone(selection);
+    wrongEval.report.evalId = "another-eval";
+    await expect(prepare(wrongEval, "promptfoo")).rejects.toThrow(
+      /evaluation/i,
+    );
+    const wrongRow = structuredClone(selection);
+    wrongRow.findings[0]!.evidence.source_data.format =
+      "tenable-one-code-repository/v1";
+    await expect(prepare(wrongRow, "promptfoo")).rejects.toThrow(
+      /tenable provider/i,
+    );
+    await expect(
+      prepare({ ...selection, report: undefined }, "promptfoo"),
+    ).rejects.toThrow(/promptfoo/i);
+    expect(existsSync(stateDirectory)).toBe(false);
+  });
+
   test("reports empty and excluded selections without storage and preserves failed scanner diagnostics", async () => {
     const { repository, stateDirectory, environment } = await fixture();
     const options = { repository, ...source };
