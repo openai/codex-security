@@ -223,6 +223,7 @@ def cli_scan_resume(
     # Active coordinators may still be writing drafts. Validate sealed results
     # before attaching to a coordinator that has finished.
     if run is not None and run["status"] == "succeeded":
+        intent = wb.saved_results.pending_budget_stop(wb, scan, scan_dir)
         manifest_path = wb.artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
         if manifest_path is not None:
             manifest = wb.read_json_object(manifest_path)
@@ -230,6 +231,8 @@ def cli_scan_resume(
             if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
                 try:
                     binding = wb.workbench_completion_binding(scan, scan["started_at"], manifest)
+                    if intent is not None:
+                        binding["status"] = "failed"
                     _prepare_scan_finalization(
                         scan_dir,
                         expected_coverage_mode=binding["coverageMode"],

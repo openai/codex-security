@@ -3279,7 +3279,7 @@ def _write_prepared_scan_finalization(
     source_root: Path | None = None,
     *,
     projection_warnings: list[str] | None = None,
-    replace_review_checkpoint: bool = False,
+    before_cost_stop_seal: Callable[[bytes, str], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write a previously validated scan finalization result."""
 
@@ -3307,8 +3307,10 @@ def _write_prepared_scan_finalization(
         _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
         if "coverageRef" in scan:
             _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
-        elif "preservedSources" not in scan and (
-            replace_review_checkpoint or not (scan_dir / "checkpoint-head.json").exists()
+        if before_cost_stop_seal is not None or (
+            "coverageRef" not in scan
+            and "preservedSources" not in scan
+            and not (scan_dir / "checkpoint-head.json").exists()
         ):
             checkpoint = {
                 "scanId": scan["id"],
@@ -3332,7 +3334,10 @@ def _write_prepared_scan_finalization(
     if not _is_sealed_artifact(scan_dir, "report.html", sealed_paths):
         _remove_scan_local_file_if_exists(scan_dir, "report.html")
     if not prepared.was_sealed:
-        _write_scan_local_json(scan_dir, "scan-manifest.json", prepared.manifest)
+        manifest_bytes = _contract_json_bytes("scan-manifest.json", prepared.manifest)
+        if before_cost_stop_seal is not None:
+            before_cost_stop_seal(manifest_bytes, name)
+        write_scan_local_bytes(scan_dir, "scan-manifest.json", manifest_bytes)
         _validate_existing_seal(scan_dir, scan)
     _write_sarif_projection_if_possible(
         scan_dir, source_root, prepared.schema_dir, sealed_paths=sealed_paths

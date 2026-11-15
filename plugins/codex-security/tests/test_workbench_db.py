@@ -14,6 +14,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 import pytest
@@ -273,7 +274,10 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert "Validation was deferred because the scan reached its cost limit." in report
 
 
-def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
+@pytest.mark.parametrize("partial", [False, True], ids=["authored", "explicitly-incomplete"])
+def test_budget_exhaustion_preserves_authored_validated_findings(
+    tmp_path: Path, partial: bool
+) -> None:
     state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
     write_completed_contract(
         scan_dir,
@@ -285,6 +289,8 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
 
     manifest_path = scan_dir / "scan-manifest.json"
     draft = json.loads(manifest_path.read_text())
+    if partial:
+        draft["scan"]["complete"] = False
     draft["scan"]["scope"]["limitations"] = ["The deployment configuration was unavailable."]
     manifest_path.write_text(json.dumps(draft))
 
@@ -314,6 +320,159 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
     sealed = manifest_path.read_bytes()
     scan_command(state_dir, "preserve-scan-results", scan_id)
     assert manifest_path.read_bytes() == sealed
+
+
+@pytest.fixture
+def authored_budget_scan(tmp_path: Path) -> tuple[Path, Path, str]:
+    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "sdk-thread")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    return state_dir, scan_dir, scan_id
+
+
+@pytest.fixture
+def interrupted_budget_stop(authored_budget_scan: tuple[Path, Path, str]) -> tuple[Path, Path, str]:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_terminal_write BEFORE UPDATE OF status ON scans
+            WHEN NEW.status = 'failed'
+            BEGIN SELECT RAISE(ABORT, 'synthetic terminal write failure'); END
+            """
+        )
+    rejected = complete_budget_scan(state_dir, scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "synthetic terminal write failure" in rejected["stderr"]
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER reject_terminal_write")
+
+    assert json.loads((scan_dir / "scan-manifest.json").read_bytes())["scan"]["sealedAt"]
+    return state_dir, scan_dir, scan_id
+
+
+def test_budget_exhaustion_recovers_only_the_prepared_seal_after_process_exit(
+    authored_budget_scan: tuple[Path, Path, str], tmp_path: Path
+) -> None:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    expected = tmp_path / "prepared-seal.json"
+    # Exit the actual workbench process at its final canonical output write.
+    hook = dedent(
+        """
+        import os
+        import finalize_scan_contract as writer
+        import workbench_db
+
+        publish = writer.write_scan_local_bytes
+        def interrupt(scan_dir, path, data, **options):
+            if path == "scan-manifest.json":
+                (scan_dir.parent / "prepared-seal.json").write_bytes(data)
+                os._exit(91)
+            return publish(scan_dir, path, data, **options)
+        writer.write_scan_local_bytes = interrupt
+        workbench_db.main()
+        """
+    )
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            hook,
+            "complete-budget-exhausted-scan",
+            "--scan-id",
+            scan_id,
+            "--cost-json",
+            json.dumps(BUDGET_COST),
+            "--message",
+            BUDGET_WARNING,
+        ],
+        cwd=SCRIPT.parent,
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
+        capture_output=True,
+    )
+    assert interrupted.returncode == 91, interrupted.stderr
+    manifest = scan_dir / "scan-manifest.json"
+    draft = manifest.read_bytes()
+    assert not json.loads(draft)["scan"].get("sealedAt")
+    assert json.loads(expected.read_bytes())["scan"]["sealedAt"]
+
+    substituted = json.loads(draft)
+    substituted["scan"]["scope"]["limitations"].append("Substituted draft")
+    changed = json.dumps(substituted).encode()
+    manifest.write_bytes(changed)
+    rejected = complete_budget_scan(state_dir, scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "manifest changed" in rejected["stderr"]
+    assert manifest.read_bytes() == changed
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+
+    manifest.write_bytes(draft)
+    assert scan_command(state_dir, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+    result = complete_budget_scan(state_dir, scan_id)["scan"]
+    assert result["progress"]["status"] == "failed"
+    assert result["findingCount"] == 1
+    assert manifest.read_bytes() == expected.read_bytes()
+
+
+@pytest.mark.parametrize("fresh", [True, False], ids=["fresh-fallback", "resumed-retry"])
+def test_budget_exhaustion_recovers_after_terminal_database_error(
+    interrupted_budget_stop: tuple[Path, Path, str], fresh: bool
+) -> None:
+    state_dir, scan_dir, scan_id = interrupted_budget_stop
+    manifest = scan_dir / "scan-manifest.json"
+    sarif = scan_dir / "exports" / "results.sarif"
+    sealed_artifacts = {
+        path: path.read_bytes()
+        for path in (manifest, scan_dir / "findings.json", scan_dir / "report.md", sarif)
+    }
+
+    if fresh:
+        fail_scan(state_dir, scan_id, BUDGET_WARNING, "--cost-json", json.dumps(BUDGET_COST))
+    else:
+        assert scan_command(state_dir, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+        complete_budget_scan(state_dir, scan_id)
+
+    saved = get_scan(state_dir, scan_id)["scan"]
+    assert saved["progress"]["status"] == "failed"
+    assert saved["findingCount"] == 1
+    finding = json.loads((scan_dir / "findings.json").read_bytes())["findings"][0]
+    assert saved["findings"][0]["occurrenceId"] == finding["occurrenceId"]
+    assert saved["cost"] == BUDGET_COST
+    assert json.loads(manifest.read_bytes())["scan"]["status"] == "failed"
+    run = json.loads(sarif.read_bytes())["runs"][0]
+    assert run["invocations"][0]["executionSuccessful"] is False
+    assert len(run["results"]) == 1
+    assert "candidate-1" in {
+        item["id"] for item in read_review_state(state_dir, scan_dir)["deferred"]
+    }
+    for path, original in sealed_artifacts.items():
+        assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("artifact", ["manifest", "checkpoint"])
+def test_budget_exhaustion_rejects_changed_results_after_terminal_database_error(
+    interrupted_budget_stop: tuple[Path, Path, str], artifact: str
+) -> None:
+    state_dir, scan_dir, scan_id = interrupted_budget_stop
+    if artifact == "manifest":
+        path = scan_dir / "scan-manifest.json"
+    else:
+        head = json.loads((scan_dir / "checkpoint-head.json").read_bytes())
+        path = scan_dir / "checkpoints" / head["checkpoint"]
+    altered = path.read_bytes() + b"\n"
+    path.write_bytes(altered)
+
+    retry = complete_budget_scan(state_dir, scan_id, check=False)
+
+    assert retry["returncode"] != 0
+    assert artifact in retry["stderr"]
+    assert path.read_bytes() == altered
+    saved = get_scan(state_dir, scan_id)["scan"]
+    assert saved["progress"]["status"] == "running"
+    assert saved["findingCount"] == 0
 
 
 @pytest.mark.parametrize(
