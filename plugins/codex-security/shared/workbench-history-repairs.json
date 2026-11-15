@@ -321,5 +321,15 @@
     "        quote((SELECT name FROM history WHERE version = 2)) || ', ?)'",
     "    FROM legacy WHERE present",
     "ORDER BY position;"
+  ],
+  [
+    "-- Validate Deep Scan receipts after relocating known preview versions.",
+    "WITH history AS (SELECT json_extract(value, '$.version') AS version,",
+    "    json_extract(value, '$.name') AS name FROM json_each(:history))",
+    "SELECT 'error' AS operation,",
+    "    'Unsupported workbench migration receipt at version ' || receipt.version || '.' AS value",
+    "FROM schema_migrations AS receipt JOIN history USING (version)",
+    "WHERE receipt.version BETWEEN 73 AND 77 AND receipt.name != history.name",
+    "ORDER BY receipt.version LIMIT 1;"
   ]
 ]

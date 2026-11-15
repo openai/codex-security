@@ -877,6 +877,21 @@ test("legacy execution profiles retain values while allowing independent model s
   }
 });
 
+test("refuses a conflicting Deep Scan receipt before applying schema changes", (t) => {
+  const database = memory(t, 72);
+  database.exec(
+    "INSERT INTO schema_migrations VALUES (73, 'other preview', 'original')",
+  );
+  const before = schema(database);
+  const history = migrationHistory(database);
+  assert.throws(
+    () => applyMigrations(database),
+    /Unsupported workbench migration receipt at version 73/u,
+  );
+  assert.deepEqual(schema(database), before);
+  assert.deepEqual(migrationHistory(database), history);
+});
+
 test("rejects unsupported history without partially changing its schema or rows", (t) => {
   const database = memory(t, 24);
   database.exec(

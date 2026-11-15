@@ -8,6 +8,7 @@ from test_workbench_setup_and_migrations import (
     EXPECTED_MIGRATIONS,
     SCHEMA,
     apply_historical_migrations,
+    create_historical_database,
     create_migration_history,
 )
 from workbench_test_support import SCRIPT
@@ -146,3 +147,21 @@ def test_original_deep_scan_history_upgrades_without_skipping_local_embeddings(
         )
     ] == recorded
     connection.close()
+
+
+@pytest.mark.parametrize("version", range(73, 78))
+def test_conflicting_deep_scan_receipt_preserves_database(version: int) -> None:
+    connection, migrate = create_historical_database(73)
+    try:
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (?, 'other preview', 'original')", (version,)
+        )
+        connection.commit()
+        before = list(connection.iterdump())
+        with pytest.raises(
+            SystemExit, match=f"Unsupported workbench migration receipt at version {version}"
+        ):
+            migrate(connection)
+        assert list(connection.iterdump()) == before
+    finally:
+        connection.close()
