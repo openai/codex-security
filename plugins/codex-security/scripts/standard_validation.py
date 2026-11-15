@@ -282,6 +282,10 @@ def require_standard_decisions(
     }
     for claim, part in outcomes.items():
         disposition = part["disposition"]
+        if claim in deferred and not can_revisit(part, outcomes):
+            raise RecoverableContractError(
+                f"Standard claim {claim} is {disposition} and cannot remain deferred."
+            )
         if disposition == "reportable":
             saved = claim in reported
         elif disposition == "duplicate":

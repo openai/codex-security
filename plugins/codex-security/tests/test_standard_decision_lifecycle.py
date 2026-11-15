@@ -172,3 +172,39 @@ def test_resume_deferred_parts_under_their_original_claim_ids(tmp_path):
     scan_command(state, "write-scan-draft", scan_id, "--draft-path", stage_draft(scan, draft))
     assert scan_command(state, "complete-scan", scan_id)["scan"]["findingCount"] == 1
     assert read_review_state(state, scan)["deferred"] == []
+
+
+def test_settled_claim_cannot_remain_in_active_deferred_rows(tmp_path):
+    state, scan_id, scan, draft = decision_scan(tmp_path, 1)
+    parts = [
+        {"disposition": "deferred", "reason": "The write path needs review."},
+        {"disposition": "deferred", "reason": "The guard still needs verification."},
+    ]
+    record(scan, {"candidateId": "standard-1", "parts": parts})
+    review = draft["reviewState"]
+    first, second = [
+        {"id": f"task-{i}", "candidateId": f"standard-1.{i}", "reason": part["reason"]}
+        for i, part in enumerate(parts, 1)
+    ]
+    review["deferred"] = [first, second]
+    review["resolvedDeferred"] = [{"id": "prior-task", "reason": "Source review complete."}]
+    reported = {"disposition": "reportable", "reason": "The source confirms the write."}
+    record(scan, {"candidateId": "standard-1", "parts": [reported, parts[1]]})
+    draft["findings"]["findings"][0]["provenance"]["candidateId"] = "standard-1.1"
+    draft["manifest"]["scan"]["complete"] = True
+    (scan / "scan-manifest.json").write_text(json.dumps(draft["manifest"]))
+    (scan / "findings.json").write_text(json.dumps(draft["findings"]))
+    stage = stage_draft(scan, draft)
+    for command in [("write-scan-draft", "--draft-path", stage), ("complete-scan",)]:
+        result = scan_command(state, command[0], scan_id, *command[1:], check=False)
+        assert result["returncode"] != 0
+        assert "standard-1.1 is reportable and cannot remain deferred" in result["stderr"]
+
+    review["deferred"] = [second]
+    scan_command(state, "write-scan-draft", scan_id, "--draft-path", stage_draft(scan, draft))
+    assert scan_command(state, "complete-scan", scan_id)["scan"]["findingCount"] == 1
+    sealed = read_review_state(state, scan)
+    assert sealed["deferred"] == [second]
+    head = json.loads((scan / "checkpoint-head.json").read_text())
+    checkpoint = json.loads((scan / "checkpoints" / head["checkpoint"]).read_text())
+    assert checkpoint["reviewState"]["resolvedDeferred"] == review["resolvedDeferred"]
