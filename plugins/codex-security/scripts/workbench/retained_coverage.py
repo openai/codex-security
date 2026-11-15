@@ -79,7 +79,11 @@ from workbench.saved_sources import (
     _unselected_root_order,
     _worker_outputs,
 )
-from workbench.standard_stop import STANDARD_STOP_SNAPSHOT, add_unfinished_standard_work
+from workbench.standard_stop import (
+    STANDARD_STOP_SNAPSHOT,
+    STANDARD_UNREAD_FILES,
+    add_unfinished_standard_work,
+)
 from workbench_coverage_receipts import (
     _deferred_candidate_id,
     _generic_surface_updates,
@@ -261,6 +265,7 @@ def merge_saved_results(
                 source_times.update(_frozen_source_times(scan_dir, scan_id, recorded))
     paths: dict[str, str | None] = {}
     standard_deferred = []
+    all_standard_files_reviewed = False
     if stopped and scan_mode == "standard" and (scan_dir / STANDARD_STOP_SNAPSHOT).is_file():
         paths[STANDARD_STOP_SNAPSHOT] = None
     reducer_paths: set[str] = set()
@@ -370,6 +375,7 @@ def merge_saved_results(
             source_order[relative] = (0, source_times[relative])
             if relative == STANDARD_STOP_SNAPSHOT:
                 standard_deferred = draft["reviewState"]["deferred"]
+                all_standard_files_reviewed = draft.get("allAssignedFilesReviewed") is True
                 continue
             directory = Path(relative).parent
             if directory.name in {"checkpoints", "checkpoint-heads"}:
@@ -3157,6 +3163,12 @@ def merge_saved_results(
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
+        if all_standard_files_reviewed:
+            coverage["deferred"] = [
+                row
+                for row in coverage["deferred"]
+                if not isinstance(row, dict) or row.get("id") != STANDARD_UNREAD_FILES
+            ]
         if standard_deferred:
             add_unfinished_standard_work(
                 standard_deferred, coverage, (f for f in findings if valid_finding(f))

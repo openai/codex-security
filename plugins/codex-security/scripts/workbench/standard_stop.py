@@ -16,6 +16,23 @@ from standard_validation import DECISIONS, QUEUE, read_optional
 
 RETURNS = "artifacts/02_discovery/standard-returns"
 STANDARD_STOP_SNAPSHOT = f"{RETURNS}/stopped.json"
+STANDARD_UNREAD_FILES = "standard-unreviewed-files"
+
+
+def unread_standard_paths(queue: dict) -> list[str] | None:
+    batches = queue.get("batches")
+    reviewed = queue.get("reviewed")
+    if not isinstance(batches, list) or not all(isinstance(batch, list) for batch in batches):
+        return None
+    assigned = [path for batch in batches for path in batch]
+    if not isinstance(reviewed, list) or not all(
+        isinstance(path, str) and path for paths in (assigned, reviewed) for path in paths
+    ):
+        return None
+    reviewed = set(reviewed)
+    if not reviewed.issubset(assigned):
+        return None
+    return [path for path in assigned if path not in reviewed]
 
 
 def capture_standard_stop(scan_dir: Path, scan_id: str, warnings: list[str]) -> None:
@@ -90,18 +107,19 @@ def capture_standard_stop(scan_dir: Path, scan_id: str, warnings: list[str]) -> 
                         **({"duplicateOf": duplicate} if isinstance(duplicate, str) else {}),
                     }
                 )
-    reviewed = set(queue.get("reviewed", []))
-    unread = [path for batch in queue.get("batches", []) for path in batch if path not in reviewed]
+    unread = unread_standard_paths(queue)
     if unread:
         rows.append(
             {
-                "id": "standard-unreviewed-files",
+                "id": STANDARD_UNREAD_FILES,
                 "reason": "The scan stopped before the assigned files were reviewed.",
                 "paths": unread,
             }
         )
-    if rows:
+    if rows or unread is not None:
         snapshot = {"scanId": scan_id, "findings": [], "reviewState": {"deferred": rows}}
+        if unread == []:
+            snapshot["allAssignedFilesReviewed"] = True
         write_scan_local_bytes(scan_dir, STANDARD_STOP_SNAPSHOT, json.dumps(snapshot).encode())
 
 
@@ -143,7 +161,7 @@ def add_unfinished_standard_work(rows, coverage, findings):
         existing = pending.get(key)
         if existing is None:
             coverage["deferred"].append(row)
-        elif key == "standard-unreviewed-files":
+        elif key == STANDARD_UNREAD_FILES:
             # The stop-time queue records which assigned files are still unread.
             existing["paths"] = row["paths"]
         else:

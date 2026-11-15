@@ -125,3 +125,40 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
         scan_command(state, "recover-scan-results", scan_id)
     assert read_review_state(state, scan)["deferred"] == rows
     assert (scan / "report.md").read_bytes() == report
+
+
+@pytest.mark.parametrize(
+    ("queue", "exhausted"),
+    [
+        ({"batches": [["a.py"]], "reviewed": ["a.py"], "returns": []}, True),
+        ({"returns": []}, False),
+        ({"batches": [["a.py"]], "reviewed": ["a.py", "b.py"], "returns": []}, False),
+        (None, False),
+    ],
+    ids=["exhausted", "missing-inventory", "inconsistent-inventory", "no-queue"],
+)
+def test_stopped_scan_clears_only_confirmed_exhausted_files(tmp_path, queue, exhausted):
+    state, target, scan_id, scan = empty_target_scan(tmp_path)
+    write_completed_contract(scan, scan_id, target)
+    path = scan / "coverage.json"
+    coverage = json.loads(path.read_text())
+    unread = {
+        "id": "standard-unreviewed-files",
+        "reason": "Review remaining files.",
+        "paths": ["a.py"],
+    }
+    caller = {"id": "caller-review", "reason": "Review another claim.", "paths": ["a.py"]}
+    coverage["deferred"] = [unread, caller]
+    path.write_text(json.dumps(coverage))
+    queue_path = scan / "artifacts/01_context/standard-queue.json"
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    if queue is not None:
+        queue_path.write_text(json.dumps(queue))
+
+    scan_command(state, "fail-scan", scan_id, "--message", "Synthetic interruption.")
+    rows = read_review_state(state, scan)["deferred"]
+    assert caller in rows
+    assert [row for row in rows if row["id"] == unread["id"]] == ([] if exhausted else [unread])
+    queue_path.write_text(json.dumps({"batches": [["b.py"]], "reviewed": [], "returns": []}))
+    scan_command(state, "recover-scan-results", scan_id)
+    assert read_review_state(state, scan)["deferred"] == rows
