@@ -622,6 +622,39 @@ lines.on("line", (line) => {
     expect(outcome.stderr).toContain("No patch was applied; 0 files changed.");
   });
 
+  test("reports one changed file when a saved-finding patch fails", async () => {
+    await using fixture = await repositoryFixture();
+    const finding = {
+      occurrenceId: "occ_1",
+      findingId: "csf_1",
+      title: "Synthetic finding",
+      severity: { level: "high" },
+      locations: [{ path: "app.ts", startLine: 1 }],
+    };
+    const outcome = await fixture.patch(["--scan", "scan-1"], {
+      readSavedFindings: async () => [finding as Finding],
+      onWorkbench: () => ({
+        scan: {
+          scanId: "scan-1",
+          targetPath: fixture.directory,
+          findings: [finding],
+        },
+      }),
+      onCodex: async () => {
+        await writeFile(join(fixture.directory, "app.ts"), "fixed\n");
+        return 1;
+      },
+    });
+    expect(outcome.status).toBe(2);
+    expect(outcome.result).toMatchObject({
+      ok: false,
+      error: { code: "PATCH_FAILED" },
+    });
+    expect(outcome.stderr).toContain(
+      "Patch did not complete successfully; 1 file changed.",
+    );
+  });
+
   test.each(["exit", "rpc", "stdout", "empty"])(
     "fails before starting a model turn when sandbox preflight returns %s failure",
     async (failure) => {

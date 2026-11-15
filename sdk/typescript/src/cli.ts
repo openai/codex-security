@@ -7629,7 +7629,7 @@ export async function main(
             if (exitCode !== 0 || files.length === 0) {
               throw new PatchCommandError(
                 exitCode === 0 ? "NO_PATCH_APPLIED" : "PATCH_FAILED",
-                `Patch did not complete successfully; ${files.length} files changed. Review the patch results before retrying.`,
+                `Patch did not complete successfully; ${formatItemCount(files.length, "file")} changed. Review the patch results before retrying.`,
               );
             }
             errorOutput.write(
