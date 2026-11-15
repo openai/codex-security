@@ -30,7 +30,7 @@ export function removePatchCredentials(
 
 // HTTP credentials can be a username alone. SSH usernames select the remote
 // account and remain available to validators unless a password is present.
-function withoutUrlCredentials(value: string): string {
+export function withoutUrlCredentials(value: string): string {
   return value.replace(
     /((?:https?|ftps?|ssh(?:\+git)?|git(?:\+ssh)?|socks(?:4a?|5h?)?):\/\/)([^/?#\s]+@)/gi,
     (authority, scheme, userinfo) =>

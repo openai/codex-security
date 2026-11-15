@@ -91,6 +91,7 @@ import {
   activePatchPublicationHooks,
   capturePatchGitControls,
   PATCH_LOCAL_GIT_ENVIRONMENT,
+  type PatchGitControlMode,
   type PatchGitControls,
   type PatchPublicationHooks,
   ensureWindowsSnapshotConfigReadable,
@@ -8605,6 +8606,16 @@ export async function main(
                   });
                 publicationHooks = await activePatchPublicationHooks(read);
                 if (!publicationHooks.events.size) return;
+                if (
+                  publicationHooks.events.has("pre-push") ||
+                  publicationHooks.events.has("reference-transaction")
+                )
+                  await readPatchGitControls(
+                    directory,
+                    dependencies,
+                    false,
+                    "resumed-hook",
+                  );
                 const gitDirectories = (
                   await read([
                     "rev-parse",
@@ -15013,6 +15024,73 @@ function captureOutput() {
   };
 }
 
+async function readPatchGitControls(
+  directory: string,
+  dependencies: CliDependencies,
+  automaticPublication: boolean | undefined,
+  mode: PatchGitControlMode,
+) {
+  const selectedGitDirectory = environmentValue(
+    dependencies.environment,
+    "GIT_DIR",
+  );
+  return capturePatchGitControls(
+    directory,
+    (root, checkout, args, commandOptions) =>
+      dependencies.runRepositoryCommand(
+        "git",
+        root === checkout ? args : ["-C", checkout, ...args],
+        root,
+        {
+          trim: false,
+          encoding: commandOptions?.encoding,
+          input: commandOptions?.input,
+          maxBuffer: Infinity,
+          environment: {
+            LC_ALL: "C",
+            ...(root === checkout && !commandOptions?.nestedProbe
+              ? {}
+              : {
+                  ...NESTED_PATCH_GIT_ENVIRONMENT,
+                  GIT_INDEX_FILE: undefined,
+                }),
+            ...(commandOptions?.indexFile === undefined
+              ? {}
+              : { GIT_INDEX_FILE: commandOptions.indexFile }),
+            ...commandOptions?.environment,
+          },
+        },
+      ),
+    selectedGitDirectory === undefined,
+    environmentValue(dependencies.environment, "GIT_COMMON_DIR") === undefined,
+    selectedGitDirectory === undefined || isAbsolute(selectedGitDirectory)
+      ? selectedGitDirectory
+      : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
+    {
+      global: environmentEntry(dependencies.environment, "GIT_CONFIG_GLOBAL"),
+      system: environmentEntry(dependencies.environment, "GIT_CONFIG_SYSTEM"),
+      noSystem: environmentEntry(
+        dependencies.environment,
+        "GIT_CONFIG_NOSYSTEM",
+      ),
+      xdgConfigHome: environmentEntry(
+        dependencies.environment,
+        "XDG_CONFIG_HOME",
+      ),
+      objectDirectory: environmentEntry(
+        dependencies.environment,
+        "GIT_OBJECT_DIRECTORY",
+      ),
+      alternateObjectDirectories: environmentEntry(
+        dependencies.environment,
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+      ),
+    },
+    automaticPublication,
+    mode,
+  );
+}
+
 async function runSkill(
   skill: "validation" | "fix-finding" | "verify-fix" | "assess-patch-risk",
   inputs: readonly (string | ImportedIssue)[],
@@ -15279,71 +15357,12 @@ async function runSkill(
   );
   try {
     const { prompt } = preparedPrompt;
-    const selectedGitDirectory = environmentValue(
-      dependencies.environment,
-      "GIT_DIR",
-    );
     const gitControls = patch
-      ? await capturePatchGitControls(
+      ? await readPatchGitControls(
           directory,
-          (root, checkout, args, commandOptions) =>
-            dependencies.runRepositoryCommand(
-              "git",
-              root === checkout ? args : ["-C", checkout, ...args],
-              root,
-              {
-                trim: false,
-                encoding: commandOptions?.encoding,
-                input: commandOptions?.input,
-                maxBuffer: Infinity,
-                environment: {
-                  LC_ALL: "C",
-                  ...(root === checkout && !commandOptions?.nestedProbe
-                    ? {}
-                    : {
-                        ...NESTED_PATCH_GIT_ENVIRONMENT,
-                        GIT_INDEX_FILE: undefined,
-                      }),
-                  ...(commandOptions?.indexFile === undefined
-                    ? {}
-                    : { GIT_INDEX_FILE: commandOptions.indexFile }),
-                  ...commandOptions?.environment,
-                },
-              },
-            ),
-          selectedGitDirectory === undefined,
-          environmentValue(dependencies.environment, "GIT_COMMON_DIR") ===
-            undefined,
-          selectedGitDirectory === undefined || isAbsolute(selectedGitDirectory)
-            ? selectedGitDirectory
-            : `${resolve(directory, parse(selectedGitDirectory).root)}${sep}${selectedGitDirectory.slice(parse(selectedGitDirectory).root.length)}`,
-          {
-            global: environmentEntry(
-              dependencies.environment,
-              "GIT_CONFIG_GLOBAL",
-            ),
-            system: environmentEntry(
-              dependencies.environment,
-              "GIT_CONFIG_SYSTEM",
-            ),
-            noSystem: environmentEntry(
-              dependencies.environment,
-              "GIT_CONFIG_NOSYSTEM",
-            ),
-            xdgConfigHome: environmentEntry(
-              dependencies.environment,
-              "XDG_CONFIG_HOME",
-            ),
-            objectDirectory: environmentEntry(
-              dependencies.environment,
-              "GIT_OBJECT_DIRECTORY",
-            ),
-            alternateObjectDirectories: environmentEntry(
-              dependencies.environment,
-              "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            ),
-          },
+          dependencies,
           options.automaticPublication,
+          options.externalSandbox ? "external" : "sandbox",
         )
       : undefined;
     const patchPermissions =
