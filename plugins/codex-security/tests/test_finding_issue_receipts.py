@@ -97,6 +97,46 @@ def test_inspection_native_windows_filename_boundary(tmp_path: Path, extended: b
     assert list(native_path.parent.iterdir()) == [native_path]
 
 
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows SQLite")
+def test_inspection_native_windows_sqlite_byte_limit(tmp_path: Path) -> None:
+    scan_dir, validated = source(tmp_path)
+    seed = tmp_path / "seed" / "workbench.sqlite3"
+    legacy_database(seed, validated, LINEAR)
+    original = seed.read_bytes()
+
+    # Use multiple components so only the complete SQLite filename reaches the byte limit.
+    directory = tmp_path
+    while 1030 - len(str(directory / seed.name).encode("utf-8")) > 180:
+        directory /= "界" * 40
+    padding = 1030 - len(str(directory / seed.name).encode("utf-8")) - 1
+    path = directory / ("s" * padding) / seed.name
+    assert len(str(path).encode("utf-8")) == 1030
+    native_path = Path(load_script("windows_scan_local_files")._extended_path(path))
+    native_path.parent.mkdir(parents=True)
+    native_path.write_bytes(original)
+
+    # The compatibility case requires SQLite to support the ordinary name on this host.
+    try:
+        connection = sqlite3.connect(
+            load_script("snapshot_sqlite").readonly_sqlite_uri(path), uri=True
+        )
+    except sqlite3.OperationalError as exc:
+        if str(exc) == "unable to open database file":
+            pytest.skip("native SQLite cannot open the ordinary 1,030-byte control filename")
+        raise
+    with closing(connection):
+        assert connection.execute("SELECT external_id FROM finding_publications").fetchone() == (
+            "SEC-101",
+        )
+
+    result = issues(path.parent, scan_dir, "inspect")
+    assert result["storeExists"] is True
+    assert result["receipts"][0]["issueIdentifier"] == "SEC-101"
+    assert native_path.read_bytes() == original
+    assert list(native_path.parent.iterdir()) == [native_path]
+
+
 def source(tmp_path: Path) -> tuple[Path, dict]:
     scan_dir = tmp_path / "scan"
     shutil.copytree(PLUGIN_ROOT / "examples" / "completed-scan", scan_dir)
