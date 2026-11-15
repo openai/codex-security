@@ -1,6 +1,6 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { readFile, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 import {
@@ -15,6 +15,96 @@ import {
 
 const fixtures = createTemporaryDirectories(true);
 afterEach(fixtures.cleanup);
+
+test("later patch grants remove writable directories from SSH's command search path", async () => {
+  const { directory, git } = await publicationRepository(fixtures);
+  const external = await fixtures.create("patch-ssh-search-");
+  const writable = await fixtures.create("patch-ssh-later-grant-");
+  const global = join(external, "gitconfig");
+  const config = join(external, "ssh_config");
+  const marker = join(external, "invoked");
+  const helper = "synthetic-ssh-later-helper";
+  await writeFile(
+    config,
+    "Host *\n  BatchMode yes\n  ProxyCommand " + helper + "\n",
+  );
+  git(
+    "config",
+    "--file",
+    global,
+    "core.sshCommand",
+    `ssh -F "${config.replaceAll("\\", "/")}"`,
+  );
+  git(
+    "remote",
+    "set-url",
+    "origin",
+    "ssh://git@127.0.0.1:1/example/repository.git",
+  );
+  const environment = {
+    PATH: [writable, process.env["PATH"]].join(delimiter),
+    GIT_CONFIG_GLOBAL: global,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GITLAB_HOST: "127.0.0.1",
+    PATCH_SSH_MARKER: marker,
+  };
+  let turns = 0;
+  let preflightPath: string | undefined;
+  let pushPath: string | undefined;
+  const outcome = await runWorkflow(
+    ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+    {
+      currentDirectory: directory,
+      environment,
+      manualCodexPreparation: true,
+      onWorkbench: () =>
+        savedScan(resultWithFindings(["high", "high"]), "scan-1", directory),
+      async onCodex(args, output) {
+        turns++;
+        output!.appServer!.onPermissions!({
+          directory,
+          environment,
+          profile: {
+            extends: ":workspace",
+            network: { enabled: false },
+            workspace_roots: turns === 1 ? {} : { [writable]: true },
+            filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
+          },
+        });
+        await output!.appServer!.onBeforeTurn?.();
+        if (turns === 2)
+          await writeFile(
+            join(writable, helper),
+            '#!/bin/sh\necho invoked > "$PATCH_SSH_MARKER"\nexit 1\n',
+            { mode: 0o755 },
+          );
+        await writeFile(join(directory, `src/finding-${turns}.ts`), "fixed\n");
+        completePatches(args, output);
+        return 0;
+      },
+      onRepositoryCommand(tool, args, cwd, options) {
+        if (tool !== "git") return "";
+        if (args.includes("ls-remote")) {
+          preflightPath = options?.environment?.["PATH"];
+          return "";
+        }
+        if (options?.patchTransport && args.includes("push"))
+          pushPath = options.environment?.["PATH"];
+        return runGitRepositoryCommand(tool, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+    },
+    { localHosting: false },
+  );
+  expect(turns).toBe(2);
+  expect(preflightPath?.split(delimiter), outcome.stderr).toContain(writable);
+  expect(pushPath, outcome.stderr).toBeDefined();
+  expect(pushPath!.split(delimiter)).not.toContain(writable);
+  expect(outcome.exitCode, outcome.stderr).toBe(2);
+  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 test.each([
   "initial",

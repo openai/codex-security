@@ -11315,7 +11315,7 @@ async function withPatchIndex<T>(
 
 interface PatchSshTransport {
   command: string;
-  environment: NodeJS.ProcessEnv;
+  environment(): Promise<NodeJS.ProcessEnv>;
   automaticVariant?: string;
 }
 
@@ -12288,21 +12288,6 @@ async function pinPublicationSshCommand(
   const volume = parse(executable).root;
   const cwd =
     process.platform === "win32" ? volume.replaceAll("\\", "/") : volume;
-  const writers = [...(dependencies.patchTransportAccess?.writable ?? [])];
-  const resolveHostPath = await trustedHostPathResolver(directory, [
-    ...protectedRoots,
-    ...writers,
-  ]);
-  const path = (environment["PATH"] ?? "")
-    .split(delimiter)
-    .filter((entry) => entry && resolveHostPath(entry))
-    .join(delimiter);
-  const execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
-  const pinnedExec =
-    execPath &&
-    resolveHostPath(
-      isAbsolute(execPath) ? execPath : `${directory}${sep}${execPath}`,
-    );
   const original = basename(program)
     .toLowerCase()
     .replace(/\.exe$/u, "");
@@ -12312,10 +12297,34 @@ async function pinPublicationSshCommand(
       quote(cwd) +
       " && exec " +
       [executable, ...args].map(quote).join(" "),
-    // Git for Windows converts the child's native PATH for its POSIX shell.
-    environment: {
-      PATH: path || (process.platform === "win32" ? "" : "/dev/null"),
-      ...(execPath !== undefined && { GIT_EXEC_PATH: pinnedExec || undefined }),
+    async environment() {
+      // Later patch turns can grant writes to a previously safe search
+      // directory. Resolve the SSH child's PATH with the current grants.
+      const writers = [...(dependencies.patchTransportAccess?.writable ?? [])];
+      const resolveHostPath = await trustedHostPathResolver(directory, [
+        ...protectedRoots,
+        ...writers,
+      ]);
+      const path = (environment["PATH"] ?? "")
+        .split(delimiter)
+        .filter((entry) => entry && resolveHostPath(entry))
+        .join(delimiter);
+      const execPath = environmentEntry(
+        dependencies.environment,
+        "GIT_EXEC_PATH",
+      );
+      const pinnedExec =
+        execPath &&
+        resolveHostPath(
+          isAbsolute(execPath) ? execPath : `${directory}${sep}${execPath}`,
+        );
+      // Git for Windows converts the native PATH for its POSIX shell.
+      return {
+        PATH: path || (process.platform === "win32" ? "" : "/dev/null"),
+        ...(execPath !== undefined && {
+          GIT_EXEC_PATH: pinnedExec || undefined,
+        }),
+      };
     },
     ...(["ssh", "plink", "tortoiseplink"].includes(original)
       ? { automaticVariant: original }
@@ -12436,7 +12445,7 @@ async function patchSshEnvironment(
   dependencies: CliDependencies,
 ): Promise<NodeJS.ProcessEnv> {
   const environment = {
-    ...transport.environment,
+    ...(await transport.environment()),
     GIT_SSH_COMMAND: transport.command,
   };
   if (!transport.automaticVariant) return environment;
@@ -12482,7 +12491,7 @@ async function patchSshHostname(
       ...(url.port ? ["-p", url.port] : []),
       hostArgument,
     ],
-    ssh.environment,
+    await ssh.environment(),
   ).catch((error: unknown) => {
     if (isJsonObject(error) && typeof error["code"] === "number") return "";
     throw error;
