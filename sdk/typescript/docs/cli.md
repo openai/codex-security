@@ -2833,7 +2833,18 @@ Patch results are `verified`, `no_change`, `blocked`, or
 ### Create or resume a draft pull request
 
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
-Publication checks the source of `core.sshCommand` before it runs SSH.
+Publication checks the source of `core.sshCommand` and binds its executable
+before Git probes a host or examines remote branches. Keep SSH launchers,
+identity files and explicit configuration files outside directories the patch
+can write. Use existing files and absolute paths for explicit file operands such
+as `-i` and `-F`. SSH and its configuration probes run from the filesystem
+volume root, with checkout directories excluded from their command search path. For a
+command that needs shell expansion, use an operator-owned wrapper on a trusted
+PATH. Virtualenv interpreters need a protected launcher path to retain their
+environment. Publication rechecks the selected files before running SSH.
+If they change, inspect them before retrying. A resumed publication selects
+the current operator settings. With `--external-sandbox`, the operator supplies
+the filesystem isolation.
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
 HTTP fetch and push URLs before contacting the hosting service.
 

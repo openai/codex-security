@@ -451,6 +451,7 @@ import {
   relativePathIsOutside as isOutsidePath,
 } from "./targets.js";
 import {
+  trustedHostPathResolver,
   inspectTrustedExecutable,
   resolveTrustedExecutable,
 } from "./trusted-executable.js";
@@ -1452,12 +1453,10 @@ type PatchSnapshotProfiles = Map<
   }
 >;
 
-// A profile may span the Git commands of one private-index snapshot only when
-// none of their workspace or temporary write grants can reach its directory.
-async function reusableWindowsSnapshotHome(
-  home: string,
+async function patchSandboxWritableRoots(
   sandbox: PatchSnapshotSandbox,
-): Promise<boolean> {
+  volume: string,
+): Promise<string[] | undefined> {
   const policy = sandbox.profile;
   if (
     policy["extends"] !== ":workspace" ||
@@ -1472,44 +1471,61 @@ async function reusableWindowsSnapshotHome(
         ].includes(key),
     )
   )
-    return false;
+    return undefined;
   const filesystem = policy["filesystem"];
   const workspaces = policy["workspace_roots"];
-  if (!isJsonObject(filesystem) || !isJsonObject(workspaces)) return false;
+  if (!isJsonObject(filesystem) || !isJsonObject(workspaces)) return undefined;
   const writable = [sandbox.directory, ...Object.keys(workspaces)];
   for (const [path, access] of Object.entries(filesystem)) {
     if (access === "deny" && isAbsolute(path)) continue;
-    if (!isJsonObject(access)) return false;
+    if (!isJsonObject(access)) return undefined;
     if (
       (path === ":tmpdir" || path === ":slash_tmp") &&
       !Object.keys(access).length
     )
       continue;
-    if (!isAbsolute(path) || Object.keys(access).length !== 1) return false;
+    if (!isAbsolute(path) || Object.keys(access).length !== 1) return undefined;
     if (access["."] === "write") writable.push(path);
-    else if (access["."] !== "read" && access["."] !== "deny") return false;
+    else if (access["."] !== "read" && access["."] !== "deny") return undefined;
   }
   if (!Object.hasOwn(filesystem, ":tmpdir")) {
     writable.push(tmpdir());
-    for (const key of ["TMP", "TEMP", "TMPDIR"]) {
+    for (const key of process.platform === "win32"
+      ? ["TMP", "TEMP", "TMPDIR"]
+      : ["TMPDIR"]) {
       const value = environmentEntry(sandbox.environment, key);
       if (value) writable.push(value);
     }
   }
   if (!Object.hasOwn(filesystem, ":slash_tmp"))
-    writable.push(join(parse(home).root, "tmp"));
-  if (relative(home, await realpath(home)) !== "") return false;
+    writable.push(join(parse(volume).root, "tmp"));
+  const roots = new Set<string>();
   for (const path of new Set(writable)) {
-    if (!isAbsolute(path) || path.split(/[\\/]/u).includes("..")) return false;
+    if (!isAbsolute(path) || path.split(/[\\/]/u).includes(".."))
+      return undefined;
     const physical = await canonicalConfigPath(path).catch(() => undefined);
-    if (
-      physical === undefined ||
-      !isOutsidePath(relative(physical, home)) ||
-      !isOutsidePath(relative(home, physical))
-    )
-      return false;
+    if (physical === undefined) return undefined;
+    roots.add(physical);
   }
-  return true;
+  return [...roots];
+}
+
+// A profile may span the Git commands of one private-index snapshot only when
+// none of their workspace or temporary write grants can reach its directory.
+async function reusableWindowsSnapshotHome(
+  home: string,
+  sandbox: PatchSnapshotSandbox,
+): Promise<boolean> {
+  if (relative(home, await realpath(home)) !== "") return false;
+  const writable = await patchSandboxWritableRoots(sandbox, home);
+  return (
+    writable !== undefined &&
+    writable.every(
+      (root) =>
+        isOutsidePath(relative(root, home)) &&
+        isOutsidePath(relative(home, root)),
+    )
+  );
 }
 
 async function removeSnapshotProfiles(profiles: PatchSnapshotProfiles) {
@@ -1763,7 +1779,23 @@ interface PatchRiskAssessment extends PatchRiskReport {
   tree?: string;
 }
 
+type PatchTransportFile = {
+  target: string;
+  stamp: string;
+  digest?: string;
+  kind: "executable" | "file" | "known-hosts";
+};
+
+interface PatchTransportAccess {
+  readonly writable: Set<string>;
+  readonly invocations: Map<string, string>;
+  external: boolean;
+  unknownWriters?: boolean;
+}
+
 interface CliDependencies {
+  patchTransportFiles?: Map<string, PatchTransportFile>;
+  patchTransportAccess?: PatchTransportAccess;
   sparsePatchSnapshots?: Map<
     string,
     {
@@ -3303,6 +3335,13 @@ export async function main(
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
   const parentDependencies = dependencies;
+  const patchTransportFiles = new Map<string, PatchTransportFile>();
+  const patchTransportAccess: PatchTransportAccess = {
+    writable: new Set(),
+    invocations: new Map(),
+    external: false,
+  };
+
   let gitEnvironment: NodeJS.ProcessEnv | undefined;
   let gitRepository: string | undefined;
   let patchSandbox: PatchSnapshotSandbox | undefined;
@@ -3313,10 +3352,13 @@ export async function main(
   let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
+    patchTransportFiles,
+    patchTransportAccess,
     sparsePatchSnapshots: new Map(),
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
         const appServer = output.appServer;
+        if (appServer.externalSandbox) patchTransportAccess.external = true;
         if (appServer.permissions)
           unavailableFilters = appServer.permissions.unavailableFilters ?? [];
         if (appServer.publicationHooks)
@@ -3340,6 +3382,11 @@ export async function main(
               const previous = patchPreparationSignal;
               patchPreparationSignal = signal;
               try {
+                if (appServer.permissions && patchSandbox && publicationHooks)
+                  await addPatchTransportWriters(
+                    patchTransportAccess,
+                    patchSandbox,
+                  );
                 await appServer.onBeforeTurn?.(signal);
               } finally {
                 patchPreparationSignal = previous;
@@ -3540,6 +3587,16 @@ export async function main(
             },
           },
         };
+      }
+      // The local SSH hostname probe also executes the previously selected launcher.
+      if (
+        options.patchTransport ||
+        (args[0] === "-c" &&
+          args[1]?.startsWith("alias.codex-security-ssh-config=!") &&
+          args[2] === "codex-security-ssh-config")
+      ) {
+        for (const [path, selected] of patchTransportFiles)
+          await patchTransportIdentity(path, selected.kind, selected);
       }
       return parentDependencies.runRepositoryCommand(
         command,
@@ -8683,6 +8740,10 @@ export async function main(
                     [...credentialStorePaths],
                     controller.signal,
                   );
+                  await addPatchTransportWriters(
+                    patchTransportAccess,
+                    patchSandbox,
+                  );
                 } finally {
                   removeSignals();
                 }
@@ -11252,12 +11313,18 @@ async function withPatchIndex<T>(
   }
 }
 
+interface PatchSshTransport {
+  command: string;
+  environment: NodeJS.ProcessEnv;
+  automaticVariant?: string;
+}
+
 interface PatchPublication {
   verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   branch: string;
   parent: string;
-  sshCommand?: string;
+  sshCommand?: PatchSshTransport;
   proxyBindings: Map<string, string | null>;
   // Opaque Git path keys, using Latin-1 to preserve filename bytes.
   dirtyFiles: Set<string>;
@@ -11314,10 +11381,19 @@ async function patchPublicationDestination(
   repository: string,
   branch: string,
   dependencies: CliDependencies,
-  approvedSshCommand?: string,
+  approvedSshCommand?: PatchSshTransport,
 ) {
-  const run = (command: "git" | "gh" | "glab", args: string[]) =>
-    dependencies.runRepositoryCommand(command, args, repository);
+  const run = (
+    command: "git" | "gh" | "glab",
+    args: string[],
+    environment?: NodeJS.ProcessEnv,
+  ) =>
+    dependencies.runRepositoryCommand(
+      command,
+      args,
+      repository,
+      environment && { environment },
+    );
   const remoteUrl = async (args: string[]) =>
     (
       await dependencies.runRepositoryCommand("git", args, repository, {
@@ -11587,6 +11663,187 @@ async function patchTransportDirectories(
   };
 }
 
+async function patchTransportIdentity(
+  path: string,
+  kind: PatchTransportFile["kind"],
+  selected?: PatchTransportFile,
+  updatedHostKeys = false,
+): Promise<PatchTransportFile> {
+  const changed = () =>
+    new CodexSecurityError(
+      "Patch transport " +
+        (kind === "executable" ? "executable" : "file") +
+        " changed before publication. Inspect the selected transport settings and files before resuming.",
+    );
+  const target = await realpath(path);
+  if (selected && target !== selected.target) throw changed();
+  const entry = await stat(target, { bigint: true });
+  const stamp = [entry.dev, entry.ino, entry.ctimeNs].join(":");
+  if (selected && !updatedHostKeys && selected.stamp !== stamp) throw changed();
+  if (
+    kind === "executable" ||
+    (target === "/dev/null" && entry.isCharacterDevice())
+  )
+    return { target, stamp, kind };
+  // A pipe or device can supply different bytes without changing metadata.
+  // Open nonblocking so a replaced operand cannot leave publication waiting on a FIFO.
+  const file = await open(target, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!(await file.stat()).isFile())
+      throw new CodexSecurityError(
+        "Patch publication requires regular files for SSH transport operands.",
+      );
+    const digest = await hashPatchFile(
+      file.createReadStream({ autoClose: false }),
+    );
+    if (
+      selected?.digest !== undefined &&
+      !updatedHostKeys &&
+      selected.digest !== digest
+    )
+      throw changed();
+    return { target, stamp, kind, digest };
+  } finally {
+    await file.close();
+  }
+}
+
+async function bindPatchTransportFile(
+  path: string,
+  kind: PatchTransportFile["kind"],
+  dependencies: CliDependencies,
+): Promise<void> {
+  const files = dependencies.patchTransportFiles;
+  if (!files) return;
+  const selected = files.get(path);
+  if (!selected) {
+    files.set(path, await patchTransportIdentity(path, kind));
+  } else if (selected.kind !== kind && selected.kind !== "file") {
+    // A path that is also used as a launcher, config or script must stay fixed.
+    files.set(path, await patchTransportIdentity(path, "file", selected));
+  }
+}
+
+function writablePatchTransportError(path: string) {
+  return new CodexSecurityError(
+    `Patch publication requires transport executables and input files outside patch-writable directories. Move ${path} or narrow the patch's writable roots.`,
+  );
+}
+
+async function addPatchTransportWriters(
+  access: PatchTransportAccess,
+  sandbox: PatchSnapshotSandbox,
+) {
+  const roots = await patchSandboxWritableRoots(sandbox, sandbox.directory);
+  if (!roots) {
+    access.unknownWriters = true;
+    if (access.invocations.size)
+      throw new CodexSecurityError(
+        "Cannot determine writable directories for the selected SSH transport.",
+      );
+    return;
+  }
+  // Snapshot filters and publication hooks can also write the selected storage.
+  roots.push(...(sandbox.snapshotStoragePaths ?? []));
+  if (roots.every((root) => access.writable.has(root))) return;
+  for (const root of roots) access.writable.add(root);
+  // A later remediation turn or delegated hook can receive different write grants.
+  if (access.invocations.size) {
+    const resolveHostPath = await trustedHostPathResolver(sandbox.directory, [
+      ...access.writable,
+    ]);
+    for (const [path, target] of access.invocations)
+      if (resolveHostPath(path) !== target)
+        throw writablePatchTransportError(path);
+  }
+}
+
+function requireStablePatchTransportTarget(
+  path: string,
+  access?: PatchTransportAccess,
+) {
+  if (access?.unknownWriters)
+    throw new CodexSecurityError(
+      "Cannot determine writable directories for the selected SSH transport.",
+    );
+  if (access)
+    for (const root of access.writable)
+      if (!isOutsidePath(relative(root, path)))
+        throw writablePatchTransportError(path);
+}
+
+async function inspectPatchGitExecutable(
+  command: string,
+  repository: string,
+  dependencies: CliDependencies,
+  protectedRoots: string[],
+  transportDirectory: string,
+) {
+  let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
+  const hostPath =
+    environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
+  if (
+    !execPath &&
+    !command.includes("/") &&
+    !command.includes("\\") &&
+    !parse(command).root
+  )
+    execPath = (
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["--exec-path"],
+        repository,
+        { trim: false },
+      )
+    ).replace(/\n$/u, "");
+  const path = [execPath, hostPath].filter(Boolean).join(delimiter);
+  const result = await inspectTrustedExecutable(
+    command,
+    { PATH: path },
+    protectedRoots,
+    {
+      gitTransportDirectory: transportDirectory,
+    },
+  );
+  if (!result.executable || !result.gitTransport) return result;
+  const { launcher, target } = result.gitTransport;
+  await bindPatchTransportFile(launcher, "executable", dependencies);
+  const selected = dependencies.patchTransportFiles?.get(launcher);
+  if (selected && selected.target !== target)
+    throw new CodexSecurityError(
+      "Patch transport executable changed before publication. Inspect the selected transport settings and files before resuming.",
+    );
+  const access = dependencies.patchTransportAccess;
+  requireStablePatchTransportTarget(target, access);
+  if (
+    launcher !== target &&
+    access &&
+    (access.external || access.writable.size)
+  ) {
+    const resolveHostPath = await trustedHostPathResolver(transportDirectory, [
+      ...access.writable,
+    ]);
+    if (
+      result.executable === target ||
+      access.external ||
+      resolveHostPath(launcher) !== target
+    ) {
+      const bin = dirname(launcher);
+      if (
+        [bin, dirname(bin)].some((path) => existsSync(join(path, "pyvenv.cfg")))
+      )
+        throw new CodexSecurityError(
+          "Patch publication cannot preserve this virtualenv interpreter through a writable or unverified launcher. Select a virtualenv outside the patch's writable roots.",
+        );
+      // Git looks up this name after our last identity check. Keep the original
+      // link for retarget diagnostics, but give Git only the approved target.
+      result.executable = target;
+    }
+  }
+  access?.invocations.set(result.executable, target);
+  return result;
+}
+
 async function runPatchTransport(
   args: string[],
   remotes: readonly string[],
@@ -11616,12 +11873,34 @@ async function runPatchTransport(
         ...args,
       ]
     : args;
-  const run = (overrides: NodeJS.ProcessEnv = {}) =>
-    dependencies.runRepositoryCommand("git", transportArgs, repository, {
-      ...options,
-      patchTransport: true,
-      environment: { ...environment, ...overrides },
-    });
+  const run = async (overrides: NodeJS.ProcessEnv = {}) => {
+    const result = await dependencies.runRepositoryCommand(
+      "git",
+      transportArgs,
+      repository,
+      {
+        ...options,
+        patchTransport: true,
+        environment: { ...environment, ...overrides },
+      },
+    );
+    if (
+      transportEnvironment["GIT_SSH_COMMAND"] &&
+      remotes.some(isSshPatchRemote)
+    ) {
+      // The authorized SSH connection can itself add or rotate host keys.
+      const files = dependencies.patchTransportFiles;
+      if (files)
+        for (const [path, selected] of files) {
+          if (selected.kind !== "known-hosts") continue;
+          files.set(
+            path,
+            await patchTransportIdentity(path, selected.kind, selected, true),
+          );
+        }
+    }
+    return result;
+  };
   if (!remotes.some((remote) => remote.startsWith("git://"))) return run();
   const override = environmentEntry(
     dependencies.environment,
@@ -11664,7 +11943,10 @@ async function runPatchTransport(
         [root, caller],
         { gitTransportDirectory: directory },
       );
-      proxyBindings.set(command, result.executable);
+      proxyBindings.set(
+        command,
+        result.gitTransport?.target ?? result.executable,
+      );
     }
     return proxyBindings.get(command)!;
   };
@@ -11887,15 +12169,229 @@ async function patchTransportEnvironment(
   return pinned;
 }
 
+// Git treats GIT_SSH as one executable path, but GIT_SSH_COMMAND and
+// core.sshCommand as shell commands. Bind a small literal subset without
+// evaluating the operator's command in a checkout the patch can change.
+async function pinPublicationSshCommand(
+  command: string | [string],
+  protectedRoots: string[],
+  directory: string,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<PatchSshTransport> {
+  const unsupported = () =>
+    new CodexSecurityError(
+      "Cannot bind the SSH transport for patch publication. Use an executable wrapper outside the repository on a trusted PATH, with absolute external paths for SSH configuration and identity files.",
+    );
+  let words: string[];
+  if (Array.isArray(command)) {
+    words = command;
+  } else {
+    const literal =
+      /(?:[a-zA-Z0-9_./:@%+,=~-]+|'[^'\r\n]*'|"(?:[^"$\x60\\\r\n]|\\[^"$\x60\\\r\n])*")(?=[ \t]|$)/gy;
+    words = [];
+    const text = command.trim();
+    for (let offset = 0; offset < text.length;) {
+      literal.lastIndex = offset;
+      const word = literal.exec(text)?.[0];
+      if (!word) throw unsupported();
+      words.push(/^['"]/u.test(word) ? word.slice(1, -1) : word);
+      offset = literal.lastIndex;
+      while (text[offset] === " " || text[offset] === "\t") offset++;
+    }
+  }
+  const [program, ...args] = words;
+  if (!program) throw unsupported();
+  const { executable, environment } = await inspectPatchGitExecutable(
+    program,
+    repository,
+    dependencies,
+    protectedRoots,
+    directory,
+  );
+  if (!executable) throw unsupported();
+  const bindFile = async (file: string | undefined, knownHosts = false) => {
+    if (!file || !isAbsolute(file)) throw unsupported();
+    const physical = await realpath(file).catch(() => undefined);
+    if (
+      !physical ||
+      protectedRoots.some(
+        (protectedRoot) => !isOutsidePath(relative(protectedRoot, physical)),
+      )
+    )
+      throw unsupported();
+    requireStablePatchTransportTarget(
+      physical,
+      dependencies.patchTransportAccess,
+    );
+    await bindPatchTransportFile(
+      physical,
+      knownHosts ? "known-hosts" : "file",
+      dependencies,
+    );
+    dependencies.patchTransportAccess?.invocations.set(physical, physical);
+    return physical;
+  };
+  if (/^ssh(?:\.exe)?$/iu.test(basename(program))) {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (/^-[46AaCqTtv]+$/u.test(arg)) continue;
+      const option = arg.slice(0, 2);
+      if (!["-F", "-i", "-o", "-p", "-l"].includes(option)) throw unsupported();
+      const value = arg.length > 2 ? arg.slice(2) : args[++i];
+      if (!value) throw unsupported();
+      let bound = value;
+      if (option === "-F" && value.toLowerCase() === "none") continue;
+      if (option === "-F" || option === "-i") {
+        bound = await bindFile(value);
+      } else if (option === "-o") {
+        const pathSetting = /^(IdentityFile|UserKnownHostsFile)=(.+)$/iu.exec(
+          value,
+        );
+        if (pathSetting) {
+          if (pathSetting[2]!.toLowerCase() === "none") continue;
+          // OpenSSH parses -o as another configuration line. A path with
+          // whitespace could name more than one known-hosts file there.
+          const physical = await bindFile(
+            pathSetting[2],
+            pathSetting[1]!.toLowerCase() === "userknownhostsfile",
+          );
+          const literal =
+            process.platform === "win32"
+              ? physical.replaceAll("\\", "/")
+              : physical;
+          if (/[\s"'\\]/u.test(literal)) throw unsupported();
+          bound = pathSetting[1] + "=" + literal;
+        } else if (
+          !/^(?:BatchMode|IdentitiesOnly|StrictHostKeyChecking|HostKeyAlias|ConnectTimeout|ServerAliveInterval|LogLevel|AddressFamily)=[a-zA-Z0-9._-]+$/iu.test(
+            value,
+          )
+        ) {
+          throw unsupported();
+        }
+      } else if (!/^[a-zA-Z0-9._-]+$/u.test(value)) throw unsupported();
+      // Identity and known-hosts paths can also expand OpenSSH tokens.
+      if (bound.includes("%") || bound.includes("${")) throw unsupported();
+      args[i] = arg.length > 2 ? option + bound : bound;
+    }
+  } else if (args.length) {
+    // Support an external interpreter with an explicit external script. Other
+    // command forms can put their options in an operator-owned wrapper.
+    args[0] = await bindFile(args[0]);
+    if (args.slice(1).some((arg) => !/^[a-zA-Z0-9_-]+$/u.test(arg)))
+      throw unsupported();
+  }
+  // Git for Windows interprets shell-command values with its POSIX shell too.
+  const quote = (word: string) => "'" + word.replaceAll("'", "'\\''") + "'";
+  // OpenSSH evaluates ProxyCommand and Match exec even for external config.
+  // Only its child leaves the checkout; Git keeps its normal repository cwd.
+  const volume = parse(executable).root;
+  const cwd =
+    process.platform === "win32" ? volume.replaceAll("\\", "/") : volume;
+  const writers = [...(dependencies.patchTransportAccess?.writable ?? [])];
+  const resolveHostPath = await trustedHostPathResolver(directory, [
+    ...protectedRoots,
+    ...writers,
+  ]);
+  const path = (environment["PATH"] ?? "")
+    .split(delimiter)
+    .filter((entry) => entry && resolveHostPath(entry))
+    .join(delimiter);
+  const execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
+  const pinnedExec =
+    execPath &&
+    resolveHostPath(
+      isAbsolute(execPath) ? execPath : `${directory}${sep}${execPath}`,
+    );
+  const original = basename(program)
+    .toLowerCase()
+    .replace(/\.exe$/u, "");
+  return {
+    command:
+      "cd " +
+      quote(cwd) +
+      " && exec " +
+      [executable, ...args].map(quote).join(" "),
+    // Git for Windows converts the child's native PATH for its POSIX shell.
+    environment: {
+      PATH: path || (process.platform === "win32" ? "" : "/dev/null"),
+      ...(execPath !== undefined && { GIT_EXEC_PATH: pinnedExec || undefined }),
+    },
+    ...(["ssh", "plink", "tortoiseplink"].includes(original)
+      ? { automaticVariant: original }
+      : {}),
+  };
+}
+
 async function publicationSshCommand(
   repository: string,
   dependencies: CliDependencies,
-): Promise<string> {
+): Promise<PatchSshTransport> {
   const environmentCommand = environmentEntry(
     dependencies.environment,
     "GIT_SSH_COMMAND",
   );
-  if (environmentCommand !== undefined) return environmentCommand;
+  let directory: string;
+  let protectedRoots: string[];
+  try {
+    const location = await patchTransportDirectories(repository, dependencies);
+    directory = location.directory;
+    protectedRoots = [location.root, location.caller];
+  } catch (error) {
+    // An existing PR can be returned from inside Git administration without a
+    // worktree. Git invokes an explicit SSH command from that directory.
+    if (environmentCommand === undefined) throw error;
+    const read = (args: string[]) =>
+      dependencies.runRepositoryCommand("git", args, repository, {
+        trim: false,
+      });
+    if (
+      (
+        await read(["rev-parse", "--is-inside-git-dir"]).catch(() => "")
+      ).trim() !== "true"
+    )
+      throw error;
+    directory = await realpath(repository);
+    const admin = await realpath(
+      (await read(["rev-parse", "--absolute-git-dir"])).replace(/\n$/u, ""),
+    );
+    if (isOutsidePath(relative(admin, directory))) throw error;
+    const common = await realpath(
+      (
+        await read(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+      ).replace(/\n$/u, ""),
+    );
+    protectedRoots = [directory, admin, common];
+    if (basename(common) === ".git") protectedRoots.push(dirname(common));
+    // Linked worktrees may reside elsewhere. Protect all registered checkouts.
+    const records = await dependencies.runRepositoryCommand(
+      "git",
+      ["worktree", "list", "--porcelain", "-z"],
+      repository,
+      { trim: false, encoding: "base64" },
+    );
+    for (const entry of new TextDecoder("utf-8", { fatal: true })
+      .decode(Buffer.from(records, "base64"))
+      .split("\0")) {
+      if (!entry.startsWith("worktree ")) continue;
+      const checkout = await realpath(entry.slice(9)).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined;
+          throw error;
+        },
+      );
+      if (checkout) protectedRoots.push(checkout);
+    }
+  }
+  const pin = (command: string | [string]) =>
+    pinPublicationSshCommand(
+      command,
+      protectedRoots,
+      directory,
+      repository,
+      dependencies,
+    );
+  if (environmentCommand !== undefined) return pin(environmentCommand);
   const fallback =
     environmentEntry(dependencies.environment, "GIT_SSH") === undefined
       ? "ssh"
@@ -11920,22 +12416,55 @@ async function publicationSshCommand(
   if (
     !scope ||
     !origin ||
-    !(await operatorPatchConfig(
-      scope,
-      origin,
-      await patchTransportDirectories(repository, dependencies),
-    ))
+    !(await operatorPatchConfig(scope, origin, {
+      root: protectedRoots[0]!,
+      caller: protectedRoots[1]!,
+    }))
   )
     throw new CodexSecurityError(
       "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
     );
-  return command!;
+  const legacy = environmentEntry(dependencies.environment, "GIT_SSH");
+  return pin(
+    command === '"$GIT_SSH"' && legacy !== undefined ? [legacy] : command!,
+  );
+}
+
+async function patchSshEnvironment(
+  transport: PatchSshTransport,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<NodeJS.ProcessEnv> {
+  const environment = {
+    ...transport.environment,
+    GIT_SSH_COMMAND: transport.command,
+  };
+  if (!transport.automaticVariant) return environment;
+  // Git normally recognizes these launchers by basename. The fixed-directory
+  // shell prefix hides that basename. Honor a user-selected SSH dialect first.
+  const variant =
+    environmentEntry(dependencies.environment, "GIT_SSH_VARIANT") ??
+    (
+      await dependencies.runRepositoryCommand(
+        "git",
+        ["config", "--default", "auto", "--get", "ssh.variant"],
+        repository,
+        { environment: { GIT_CONFIG: undefined } },
+      )
+    ).trim();
+  return variant.toLowerCase() === "auto"
+    ? { ...environment, GIT_SSH_VARIANT: transport.automaticVariant }
+    : environment;
 }
 
 async function patchSshHostname(
   remote: string,
-  run: (command: "git" | "gh" | "glab", args: string[]) => Promise<string>,
-  getSshCommand: () => Promise<string>,
+  run: (
+    command: "git" | "gh" | "glab",
+    args: string[],
+    environment?: NodeJS.ProcessEnv,
+  ) => Promise<string>,
+  getSshCommand: () => Promise<PatchSshTransport>,
 ): Promise<string> {
   const uri = remote.includes("://");
   const url = uri ? new URL(remote) : patchScpRemote(remote)!;
@@ -11943,14 +12472,18 @@ async function patchSshHostname(
   const username = uri ? decodeURIComponent(url.username) : url.username;
   const hostArgument = username ? `${username}@${sshHost}` : sshHost;
   if (hostArgument.startsWith("-")) return url.hostname;
-  const sshCommand = await getSshCommand();
-  const settings = await run("git", [
-    "-c",
-    `alias.codex-security-ssh-config=!${sshCommand} -G`,
-    "codex-security-ssh-config",
-    ...(url.port ? ["-p", url.port] : []),
-    hostArgument,
-  ]).catch((error: unknown) => {
+  const ssh = await getSshCommand();
+  const settings = await run(
+    "git",
+    [
+      "-c",
+      `alias.codex-security-ssh-config=!${ssh.command} -G`,
+      "codex-security-ssh-config",
+      ...(url.port ? ["-p", url.port] : []),
+      hostArgument,
+    ],
+    ssh.environment,
+  ).catch((error: unknown) => {
     if (isJsonObject(error) && typeof error["code"] === "number") return "";
     throw error;
   });
@@ -11961,8 +12494,12 @@ async function githubPatchRepository(
   remote: string,
   apiHost: string,
   apiEndpoint: string,
-  run: (command: "git" | "gh" | "glab", args: string[]) => Promise<string>,
-  getSshCommand: () => Promise<string>,
+  run: (
+    command: "git" | "gh" | "glab",
+    args: string[],
+    environment?: NodeJS.ProcessEnv,
+  ) => Promise<string>,
+  getSshCommand: () => Promise<PatchSshTransport>,
 ): Promise<string | undefined> {
   const uri = remote.includes("://");
   const url = uri ? new URL(remote) : patchScpRemote(remote)!;
@@ -12252,7 +12789,7 @@ async function preparePatchPublication(
       );
     });
   }
-  let sshCommand: string | undefined;
+  let sshCommand: PatchSshTransport | undefined;
   const proxyBindings = new Map<string, string | null>();
   if (!existing) {
     const destination = await patchPublicationDestination(
@@ -12288,7 +12825,9 @@ async function preparePatchPublication(
           dependencies,
           proxyBindings,
           {
-            ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
+            ...(sshCommand && ssh
+              ? await patchSshEnvironment(sshCommand, repository, dependencies)
+              : {}),
             GIT_CONFIG_COUNT: String(configurationCount + 1),
             [`GIT_CONFIG_KEY_${configurationCount}`]: `url.${remote}.insteadOf`,
             [`GIT_CONFIG_VALUE_${configurationCount}`]: name,
@@ -12683,7 +13222,7 @@ async function publishPatchBranch(
   body: string,
   stderr: Writable,
   dependencies: CliDependencies,
-  approvedSshCommand?: string,
+  approvedSshCommand?: PatchSshTransport,
   proxyBindings = new Map<string, string | null>(),
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
@@ -12811,7 +13350,11 @@ async function publishPatchBranch(
         dependencies,
         proxyBindings,
         pushRemotes.some(isSshPatchRemote)
-          ? { GIT_SSH_COMMAND: await getSshCommand() }
+          ? await patchSshEnvironment(
+              await getSshCommand(),
+              repository,
+              dependencies,
+            )
           : {},
       );
       await run("git", [

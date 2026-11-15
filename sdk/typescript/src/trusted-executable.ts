@@ -22,6 +22,7 @@ export interface TrustedExecutable {
 
 export interface InspectedExecutable {
   executable: string | null;
+  gitTransport?: { launcher: string; target: string };
   environment: Record<string, string | undefined>;
 }
 
@@ -267,6 +268,7 @@ export async function inspectTrustedExecutable(
   });
   const unsafeEntries = new Set<string>();
   let executable: string | null = null;
+  let gitTransport: InspectedExecutable["gitTransport"];
   for (const current of candidates) {
     const crossesSource = view !== undefined && !view.allows(current.path);
     if (!pathLike && crossesSource) {
@@ -296,16 +298,23 @@ export async function inspectTrustedExecutable(
         process.platform === "win32" ? constants.F_OK : constants.X_OK,
       );
       if (!(await stat(canonical)).isFile()) continue;
-      if (options) {
-        // Authentication can happen after a patch replaces an intermediate link.
-        executable ??= canonical;
-        continue;
+      // Keep the launcher's name for virtualenvs and other argv[0]-sensitive tools.
+      const launcher =
+        pathLike || options
+          ? join(await realpath(dirname(current.path)), basename(current.path))
+          : current.path;
+      let invocationPath = launcher;
+      if (options && invocationPath !== canonical) {
+        // Authentication can run after the patch replaces a link in the checkout.
+        const resolveHostPath = await trustedHostPathResolver(
+          options.gitTransportDirectory,
+          roots,
+        ).catch(() => undefined);
+        if (resolveHostPath?.(invocationPath) !== canonical)
+          invocationPath = canonical;
       }
-      // Keep explicit virtualenv launchers, but resolve repository-local aliases
-      // to the trusted target instead of invoking them from the repository.
-      const invocationPath = pathLike
-        ? join(await realpath(dirname(current.path)), basename(current.path))
-        : current.path;
+      if (!executable && options)
+        gitTransport = { launcher, target: canonical };
       executable ??=
         pathLike &&
         (crossesSource ||
@@ -330,7 +339,11 @@ export async function inspectTrustedExecutable(
     campaign && process.platform !== "win32" && !filteredPath
       ? "/dev/null"
       : filteredPath;
-  return { executable, environment: sanitizedEnvironment };
+  return {
+    executable,
+    environment: sanitizedEnvironment,
+    ...(gitTransport && { gitTransport }),
+  };
 }
 
 /** @internal */
