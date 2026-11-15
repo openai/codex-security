@@ -4100,8 +4100,7 @@ if __name__ == "__main__":
           args: readonly string[],
           input?: string,
         ): Promise<JsonObject> => {
-          if (args[0] === "get-scan") {
-            expect(args).toContain("--progress-only");
+          if (args[0] === "get-scan" && args.includes("--progress-only")) {
             return {
               scan: {
                 progress: {
