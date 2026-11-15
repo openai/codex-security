@@ -1374,15 +1374,9 @@ def complete_scan_locked(
                 if merge_parent_draft
                 else None
             )
-            completion_manifest = draft_documents[0] if draft_documents else current_manifest
-            if (
-                completion_manifest is not None
-                and isinstance(completion_manifest.get("scan"), dict)
-                and completion_manifest["scan"].get("complete") is False
-            ):
-                raise RecoverableContractError(
-                    "The latest saved scan draft is incomplete; continue the scan before completing it."
-                )
+            saved_results.require_complete_draft(
+                draft_documents[0] if draft_documents else current_manifest
+            )
             prepared = _prepare_scan_finalization(
                 scan_dir,
                 expected_coverage_mode=expected_coverage_mode(scan),

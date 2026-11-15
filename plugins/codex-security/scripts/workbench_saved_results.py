@@ -19,6 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    RecoverableContractError,
     ScanLocalIOError,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -1003,6 +1004,17 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             raise SystemExit("Use the typed scan tools for canonical artifacts and checkpoints.")
         write_scan_local_bytes(scan_dir, output, sys.stdin.buffer.read())
     return {"scanId": scan_id, "path": str(scan_dir / output)}
+
+
+def require_complete_draft(completion_manifest: dict[str, Any] | None) -> None:
+    if (
+        completion_manifest is not None
+        and isinstance(completion_manifest.get("scan"), dict)
+        and completion_manifest["scan"].get("complete") is False
+    ):
+        raise RecoverableContractError(
+            "The latest saved scan draft is incomplete; continue the scan before completing it."
+        )
 
 
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
