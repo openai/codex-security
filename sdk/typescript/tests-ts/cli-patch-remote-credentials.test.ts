@@ -1,5 +1,12 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { readFile, symlink, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import {
+  readFile,
+  realpath,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -530,6 +537,7 @@ async function runSshPreflight(
     PATCH_SSH_MARKER: marker,
     ...(inspectHostname ? { GITLAB_HOST: "gitlab.example.invalid" } : {}),
   };
+  let hostnameCommand: string | undefined;
   const model = mock(async () => 0);
   const outcome = await runWorkflow(
     ["patch", "--scan", "scan-1", "--create-pr", "--json"],
@@ -546,6 +554,7 @@ async function runSshPreflight(
           : args.includes("ls-remote")
             ? "preflight"
             : undefined;
+        if (phase === "hostname") hostnameCommand = args[1];
         return runGitRepositoryCommand(command, args, cwd, {
           ...options,
           environment: {
@@ -566,7 +575,7 @@ async function runSshPreflight(
     },
   );
   expect(model).not.toHaveBeenCalled();
-  return { invoked: invoked.trim(), stderr: outcome.stderr };
+  return { invoked: invoked.trim(), stderr: outcome.stderr, hostnameCommand };
 }
 
 test.each(["worktree", "operator", "linked directory"] as const)(
@@ -685,20 +694,67 @@ test.each(["checkout-relative", "operator-absolute"] as const)(
         "",
       ].join("\n"),
     );
-    git(
-      "config",
-      "--file",
-      global,
-      "core.sshCommand",
-      `ssh -F "${config.replaceAll("\\", "/")}"`,
-    );
+    const sshCommand = `ssh -F "${config.replaceAll("\\", "/")}"`;
+    git("config", "--file", global, "core.sshCommand", sshCommand);
 
-    const { invoked } = await runSshPreflight(directory, global, marker, true);
+    // Raw Git selects the SSH client and invokes Match exec from this checkout.
+    // Prove the fixture command runs there before testing publication's safe cwd.
+    const control = spawnSync(
+      "git",
+      [
+        "-c",
+        `alias.test-ssh-config=!${sshCommand} -G`,
+        "test-ssh-config",
+        "127.0.0.1",
+      ],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATCH_SSH_MARKER: marker,
+          PATCH_SSH_PHASE: "control",
+        },
+      },
+    );
+    expect(control.status, control.stderr).toBe(0);
+    expect(control.stdout, control.stderr).toContain("hostname 127.0.0.1");
+    const rawMarker = await readFile(marker, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+        return "";
+      },
+    );
+    expect(rawMarker, control.stderr).toContain("control:match");
+    await unlink(marker);
+
+    // Git's POSIX shell may find its bundled OpenSSH before the Windows client.
+    // Its argument conversion supplies the native spelling to the test process.
+    const runtime = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
+    const selected = git(
+      "-c",
+      `alias.test-ssh-path=!${runtime} -p 'process.argv[1]' "$(command -v ssh)"`,
+      "test-ssh-path",
+    );
+    const executable = await realpath(
+      process.platform === "win32" && !selected.toLowerCase().endsWith(".exe")
+        ? selected + ".exe"
+        : selected,
+    );
+    const { invoked, stderr, hostnameCommand } = await runSshPreflight(
+      directory,
+      global,
+      marker,
+      true,
+    );
+    expect(hostnameCommand, stderr).toContain(
+      executable.replaceAll("'", "'\\''"),
+    );
     if (location === "operator-absolute") {
       const records = invoked.split(/\r?\n/u);
-      expect(records).toContain("hostname:match");
-      expect(records).toContain("preflight:match");
-      expect(records).toContain("preflight:proxy");
+      expect(records, stderr).toContain("hostname:match");
+      expect(records, stderr).toContain("preflight:match");
+      expect(records, stderr).toContain("preflight:proxy");
     } else {
       expect(invoked).toBe("");
     }

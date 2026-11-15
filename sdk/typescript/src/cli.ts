@@ -11816,21 +11816,57 @@ async function inspectPatchGitExecutable(
   let execPath = environmentEntry(dependencies.environment, "GIT_EXEC_PATH");
   const hostPath =
     environmentEntry(dependencies.environment, "PATH") ?? process.env["PATH"];
-  if (
-    !execPath &&
-    !command.includes("/") &&
-    !command.includes("\\") &&
-    !parse(command).root
-  )
-    execPath = (
+  const bare =
+    !command.includes("/") && !command.includes("\\") && !parse(command).root;
+  let path: string | undefined;
+  if (process.platform === "win32" && bare) {
+    // Git for Windows adds its own tool directories before the parent PATH.
+    // Read its shell's actual search order, including an explicit GIT_EXEC_PATH.
+    // A fresh alias name prevents a checkout-supplied git-<name> command from
+    // taking precedence over the alias. Native children receive a Windows PATH.
+    const runtime = await realpath(process.execPath);
+    if (protectedRoots.some((root) => !isOutsidePath(relative(root, runtime))))
+      throw writablePatchTransportError(runtime);
+    requireStablePatchTransportTarget(
+      runtime,
+      dependencies.patchTransportAccess,
+    );
+    const volume = parse(runtime).root.replaceAll("\\", "/");
+    const alias = "codex-security-transport-path-" + randomUUID();
+    path = (
       await dependencies.runRepositoryCommand(
         "git",
-        ["--exec-path"],
+        [
+          "-c",
+          `alias.${alias}=!cd ${quoteGitArgument(volume)} && exec ${quoteGitArgument(runtime)} -p 'process.env.PATH'`,
+          alias,
+        ],
         repository,
-        { trim: false },
+        {
+          trim: false,
+          environment: {
+            PATH: hostPath,
+            GIT_EXEC_PATH: execPath,
+            BASH_ENV: undefined,
+            ENV: undefined,
+            NODE_OPTIONS: undefined,
+            BUN_OPTIONS: undefined,
+          },
+        },
       )
-    ).replace(/\n$/u, "");
-  const path = [execPath, hostPath].filter(Boolean).join(delimiter);
+    ).replace(/\r?\n$/u, "");
+  } else {
+    if (!execPath && bare)
+      execPath = (
+        await dependencies.runRepositoryCommand(
+          "git",
+          ["--exec-path"],
+          repository,
+          { trim: false },
+        )
+      ).replace(/\n$/u, "");
+    path = [execPath, hostPath].filter(Boolean).join(delimiter);
+  }
   const result = await inspectTrustedExecutable(
     command,
     { PATH: path },
