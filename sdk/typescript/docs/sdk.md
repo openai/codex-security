@@ -309,6 +309,8 @@ console.log(plan);
 The optional `configuredParentSessionThreadLimit` counts the parent Codex
 session's root and delegated threads. Each Deep Scan discovery worker runs in
 its own session with a separate limit derived from `subagents`.
+Use nested objects in `codexOverrides` for this setting. Preflight omits the
+field when literal dotted SDK keys overlap the nested thread limit.
 Preflight does not verify credentials, model access, Python, or the plugin. The CLI
 equivalent is `scan --dry-run`.
 Neither preflight starts a Deep Scan worker or executes a command under its

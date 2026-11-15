@@ -153,8 +153,20 @@ export function scanModelConfiguration(
 export function configuredParentSessionThreadLimit(
   config: JsonObject,
 ): number | undefined {
-  const features = resolveCodexProfile(config)["features"];
+  const resolved = resolveCodexProfile(config);
+  const features = resolved["features"];
   if (!isObject(features)) return undefined;
+  // The SDK flattens config keys for native overrides. A literal dotted key
+  // can target the same limit as the nested table with different precedence.
+  if (
+    Object.hasOwn(resolved, "features.multi_agent_v2") ||
+    Object.hasOwn(
+      resolved,
+      "features.multi_agent_v2.max_concurrent_threads_per_session",
+    ) ||
+    Object.hasOwn(features, "multi_agent_v2.max_concurrent_threads_per_session")
+  )
+    return undefined;
   const multiAgent = features["multi_agent_v2"];
   if (!isObject(multiAgent)) return undefined;
   const capacity = multiAgent["max_concurrent_threads_per_session"];

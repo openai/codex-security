@@ -531,6 +531,9 @@ The dry-run field `configuredParentSessionThreadLimit` reports the native
 limit includes the parent session's root thread. Deep Scan runs discovery
 workers in separate sessions, each with up to `subagents` children. Direct
 Deep Scan can start workers without launching a parent Codex session.
+In project files, use nested `codex` keys for the thread limit. Dry-run omits
+the field when a literal dotted key overlaps it. On the command line,
+`--codex KEY=VALUE` accepts the usual dotted path.
 
 Whole-codebase and path scans also accept ordinary directories, including SVN
 working copies. Their source inventories exclude `.git` and `.svn` metadata.

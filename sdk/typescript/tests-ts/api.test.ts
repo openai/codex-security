@@ -1046,6 +1046,30 @@ describe("CodexSecurity orchestration", () => {
     }
   });
 
+  test("omits a parent thread limit supplied through literal dotted SDK keys", async () => {
+    const { repository } = await repositoryDirectories();
+    const overrides: JsonObject[] = [
+      { "features.multi_agent_v2": { max_concurrent_threads_per_session: 4 } },
+      { "features.multi_agent_v2.max_concurrent_threads_per_session": 0 },
+      {
+        profile: "review",
+        profiles: {
+          review: {
+            features: {
+              "multi_agent_v2.max_concurrent_threads_per_session": 4,
+            },
+          },
+        },
+      },
+    ];
+    for (const codexOverrides of overrides) {
+      await using client = new TestClient({ codexOverrides }, {});
+      expect(await client.preflight(repository)).not.toHaveProperty(
+        "configuredParentSessionThreadLimit",
+      );
+    }
+  });
+
   test("rejects an invalid configured thread limit during scan preflight", async () => {
     const { repository } = await repositoryDirectories();
     for (const limit of [0, -1, 1.5]) {
