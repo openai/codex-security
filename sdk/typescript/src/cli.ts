@@ -1736,6 +1736,7 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
             )
           : undefined,
       allowPathLookup: boundaries?.complete,
+      excludeCheckoutPython: boundaries?.missingProfileSources,
     });
     if (
       checkingTarget &&

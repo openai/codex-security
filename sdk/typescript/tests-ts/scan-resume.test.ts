@@ -83,6 +83,7 @@ async function interruptedScan(
     target?: { kind: "paths"; paths: string[] };
     sealedPricing?: JsonObject;
     knowledgeBaseProtectedRoots?: string[];
+    scanInputs?: JsonObject;
   } = {},
   resolvedDeep = false,
   modelProvider?: string,
@@ -1845,23 +1846,94 @@ test
   },
 );
 
-test.skipIf(process.platform === "win32").each([
-  { bulk: false, explicitPython: false },
-  { bulk: true, explicitPython: false },
-  { bulk: true, explicitPython: true },
-])(
-  "CLI sealed recovery excludes Python in its saved instruction checkout (%j)",
-  async ({ bulk, explicitPython }) => {
-    const { source, bin, python } = await modelInputCheckout();
-    const f = await interruptedScan("deep", bulk, {
-      config: { model_instructions_file: source },
+function legacyNativeProfileRecipe(): {
+  config: JsonObject;
+  scanInputs: JsonObject;
+} {
+  return {
+    config: { profile: "review", approval_policy: "never" },
+    scanInputs: scanInputIdentity("Keep the original scan instructions."),
+  };
+}
+
+test
+  .skipIf(process.platform === "win32")
+  .each(["legacy native", "recorded native", "selected inline"] as const)(
+  "sealed SDK recovery chooses Python for a %s profile",
+  async (kind) => {
+    const { bin, python } = await modelInputCheckout();
+    const recipe = legacyNativeProfileRecipe();
+    if (kind === "recorded native")
+      recipe.scanInputs["modelFileInputs"] = { model_instructions_file: null };
+    if (kind === "selected inline")
+      recipe.config["profiles"] = { review: { model: "gpt-5.6-sol" } };
+    const f = await interruptedScan("deep", false, recipe);
+    await sealWithOriginalPlugin(f);
+    await rm(f.repository, { recursive: true });
+    const clients = resumeDependencies(f, () =>
+      fail("Unexpected model launch"),
+    );
+    const options = {
+      mode: "deep" as const,
+      outputDir: f.scanDir,
+      resumeScanId: f.scanId,
+      requireSealedResume: true,
+    };
+    if (kind === "legacy native") {
+      // The missing profile and this receipt cannot recover the original model-file paths.
+      f.environment.PATH = [bin, f.environment.PATH].join(delimiter);
+      await using named = clients.createSecurity({ pythonPath: "python3" });
+      await expect(named.run(f.repository, options)).rejects.toThrow(
+        /absolute trusted interpreter/i,
+      );
+      await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+    await using client = clients.createSecurity({
+      pythonPath: kind === "legacy native" ? f.python : "python3",
     });
+    const result = await client.run(f.repository, options);
+    expect(result.manifest.scan.id).toBe(f.scanId);
+  },
+);
+
+test.skipIf(process.platform === "win32").each([
+  ["single", "config", "named"],
+  ["bulk", "config", "named"],
+  ["bulk", "config", "absolute"],
+  ["single", "legacy native profile", "named"],
+  ["single", "legacy native profile", "trusted absolute"],
+  ["bulk", "legacy native profile", "ambient"],
+  ["bulk", "legacy native profile", "checkout symlink"],
+] as const)(
+  "CLI %s sealed recovery with %s and %s Python excludes the instruction checkout",
+  async (command, source, selection) => {
+    const { source: instructions, bin, python } = await modelInputCheckout();
+    const bulk = command === "bulk";
+    const legacyProfile = source === "legacy native profile";
+    const f = await interruptedScan(
+      "deep",
+      bulk,
+      legacyProfile
+        ? legacyNativeProfileRecipe()
+        : { config: { model_instructions_file: instructions } },
+    );
     await sealWithOriginalPlugin(f);
     if (bulk) await rm(join(f.root, "results.jsonl"));
     else await rm(f.repository, { recursive: true });
     const args = bulk
       ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover"]
       : ["scans", "resume", f.scanId];
+    const alias = join(f.root, "linked-tools");
+    if (selection === "checkout symlink") await symlink(bin, alias, "dir");
+    const configuredPython = {
+      named: "python3",
+      absolute: python,
+      "trusted absolute": f.python,
+      ambient: undefined,
+      "checkout symlink": join(alias, "python3"),
+    }[selection];
     const cli = join(import.meta.dirname, "../src/cli.ts");
     const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], {
       cwd: f.root,
@@ -1869,21 +1941,23 @@ test.skipIf(process.platform === "win32").each([
         ...f.environment,
         HOME: f.root,
         TMPDIR: f.root,
+        XDG_CACHE_HOME: join(f.root, "cache"),
         PATH: [bin, f.environment.PATH].join(delimiter),
-        PYTHON: explicitPython ? python : "python3",
+        PYTHON: configuredPython,
         CODEX_CLI_PATH: join(f.root, "absent-codex"),
       },
     });
     await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
-    expect(result.exitCode, result.stderr.toString()).toBe(
-      explicitPython ? 2 : 0,
-    );
+    const refused =
+      selection === "absolute" ||
+      (legacyProfile && selection !== "trusted absolute");
+    expect(result.exitCode, result.stderr.toString()).toBe(refused ? 2 : 0);
     expect(
       (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
     ).toMatchObject({
-      progress: { status: explicitPython ? "running" : "complete" },
+      progress: { status: refused ? "running" : "complete" },
     });
   },
 );

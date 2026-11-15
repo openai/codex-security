@@ -228,6 +228,8 @@ export interface PluginPythonOptions {
   discoveryProtectedRoots?: readonly string[];
   /** @internal Ambient PATH lookup requires a known boundary for saved Git targets. */
   allowPathLookup?: boolean;
+  /** @internal A historical native profile did not record its source checkouts. */
+  excludeCheckoutPython?: boolean;
   currentDirectory?: string;
   signal?: AbortSignal;
 }
@@ -4145,13 +4147,12 @@ export async function resolvePluginPython(
     )
       discoveryRoots.push(directory);
   }
+  const allowPathLookup =
+    options.allowPathLookup !== false && !options.excludeCheckoutPython;
   const missingBoundaryMessage =
     "Could not establish the saved checkout boundary for Python discovery. Set PYTHON to an absolute trusted interpreter.";
   if (options.configuredPath !== undefined) {
-    if (
-      !isPythonPathCandidate(options.configuredPath) &&
-      options.allowPathLookup === false
-    )
+    if (!isPythonPathCandidate(options.configuredPath) && !allowPathLookup)
       throw new PluginPythonUnavailableError(missingBoundaryMessage);
     return await requirePython(
       options.configuredPath,
@@ -4160,12 +4161,12 @@ export async function resolvePluginPython(
       isPythonPathCandidate(options.configuredPath)
         ? protectedRoot
         : discoveryRoots,
-      options.signal,
+      options,
     );
   }
   const inherited = environmentValue(environment, "PYTHON", true);
   if (inherited) {
-    if (!isPythonPathCandidate(inherited) && options.allowPathLookup === false)
+    if (!isPythonPathCandidate(inherited) && !allowPathLookup)
       throw new PluginPythonUnavailableError(missingBoundaryMessage);
     const roots = isPythonPathCandidate(inherited)
       ? protectedRoot
@@ -4185,7 +4186,7 @@ export async function resolvePluginPython(
       "PYTHON",
       environment,
       roots,
-      options.signal,
+      options,
     );
   }
 
@@ -4224,13 +4225,13 @@ export async function resolvePluginPython(
         candidate,
         environment,
         protectedRoot,
-        options.signal,
+        options,
       );
       if (resolved !== null) return resolved;
     }
   }
 
-  if (options.allowPathLookup === false)
+  if (!allowPathLookup)
     throw new PluginPythonUnavailableError(missingBoundaryMessage);
   for (const candidate of process.platform === "win32"
     ? ["python", "python3", "py"]
@@ -4239,7 +4240,7 @@ export async function resolvePluginPython(
       candidate,
       environment,
       discoveryRoots,
-      options.signal,
+      options,
     );
     if (resolved !== null) return resolved;
   }
@@ -4642,14 +4643,14 @@ async function requirePython(
   candidate: string,
   source: string,
   environment: ProcessEnvironment,
-  protectedRoot: string | readonly string[],
-  signal?: AbortSignal,
+  protectedRoot: readonly string[],
+  options: Pick<PluginPythonOptions, "signal" | "excludeCheckoutPython">,
 ): Promise<string> {
   const resolved = await usablePython(
     candidate,
     environment,
     protectedRoot,
-    signal,
+    options,
   );
   if (resolved !== null) return resolved;
   throw new PluginPythonUnavailableError(
@@ -4660,17 +4661,31 @@ async function requirePython(
 
 async function usablePython(
   candidate: string,
-  environment: ProcessEnvironment = process.env,
-  protectedRoot: string | readonly string[] = process.cwd(),
-  signal?: AbortSignal,
+  environment: ProcessEnvironment,
+  protectedRoot: readonly string[],
+  options: Pick<PluginPythonOptions, "signal" | "excludeCheckoutPython">,
 ): Promise<string | null> {
-  const command = await resolveTrustedExecutable(
-    isPythonPathCandidate(candidate)
-      ? expandHomeForLookup(candidate, environment)
-      : candidate,
+  const { signal } = options;
+  const path = isPythonPathCandidate(candidate)
+    ? expandHomeForLookup(candidate, environment)
+    : candidate;
+  if (options.excludeCheckoutPython && !isAbsolute(path)) return null;
+  let command = await resolveTrustedExecutable(
+    path,
     environment,
     protectedRoot,
   );
+  if (command && options.excludeCheckoutPython) {
+    // The original profile could have read from this checkout. Check the
+    // resolved launcher, including managed-runtime links, before its first probe.
+    const checkouts = await gitProtectionRoots(command.executable, signal);
+    if (checkouts.length)
+      command = await resolveTrustedExecutable(
+        command.executable,
+        environment,
+        [...protectedRoot, ...checkouts],
+      );
+  }
   if (command === null) return null;
   try {
     const { stdout } = await execFile(

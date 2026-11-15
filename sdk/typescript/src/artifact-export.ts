@@ -87,6 +87,7 @@ export interface ArtifactExportResult {
 interface HelperOptions {
   pythonPath?: string;
   protectedRoot?: PluginPythonOptions["protectedRoot"];
+  excludeCheckoutPython?: boolean;
   pluginRoot?: string;
   signal?: AbortSignal;
   output?: ArtifactOutput;
@@ -149,6 +150,7 @@ export async function runArtifactHelper(
     configuredPath: options.pythonPath,
     environment,
     protectedRoot: options.protectedRoot,
+    excludeCheckoutPython: options.excludeCheckoutPython,
     signal: options.signal,
   });
   const plugin = options.pluginRoot ?? (await bundledPluginRoot());
