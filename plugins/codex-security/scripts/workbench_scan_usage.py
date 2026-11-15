@@ -1334,6 +1334,7 @@ def _read_rollout_usage_with_extent(
     counter_total = _empty_token_usage()
     warnings = result.warnings
     previous = _empty_token_usage()
+    after_compaction = False
     previous_cache_writes_reported = True
     prefix_unclassified = 0
     prefix_missing_cache: set[str] = set()
@@ -1560,6 +1561,7 @@ def _read_rollout_usage_with_extent(
             ):
                 break
             if event.get("type") == "compacted":
+                after_compaction = True
                 timestamp = _timestamp(event.get("timestamp"))
                 if (
                     timestamp is not None
@@ -1688,6 +1690,7 @@ def _read_rollout_usage_with_extent(
             reset = snapshot["totalTokens"] < previous["totalTokens"]
             if (
                 reset
+                and not after_compaction
                 and current_turn_id is not None
                 and in_window
                 and (owner_turn_id is None or current_turn_id == owner_turn_id)
@@ -1703,6 +1706,9 @@ def _read_rollout_usage_with_extent(
                 if not past_scan_end(timestamp, current_turn_id):
                     warnings.add("token_breakdown_unavailable")
                 continue
+            # A compaction may reset counters or leave their cumulative baseline intact.
+            # Only the first valid counter can start a new epoch.
+            after_compaction = False
             if baseline is previous:
                 cache_writes_reported = previous_cache_writes_reported and cache_writes_reported
             refines_classification = (

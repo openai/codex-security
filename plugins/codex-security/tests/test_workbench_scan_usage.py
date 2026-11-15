@@ -438,6 +438,46 @@ def test_completion_preserves_usage_record_warnings(
     assert usage.get("warnings", []) == (["token_record_invalid"] if coverage == "partial" else [])
 
 
+@pytest.mark.parametrize(
+    ("counters", "stale"),
+    [
+        pytest.param([(30, None), (60, 10)], False, id="reset"),
+        pytest.param([(130, None), (160, 90)], False, id="still-cumulative"),
+        pytest.param([(100, None), (30, 10), (160, 90)], True, id="replayed-then-stale"),
+    ],
+)
+def test_completion_counts_legacy_counters_after_compaction(
+    tmp_path: Path, counters: list[tuple[int, int | None]], stale: bool
+) -> None:
+    fixture = _start_scan(tmp_path)
+    at = fixture.started_at + timedelta(microseconds=1)
+    events = [
+        _event(at, "event_msg", {"type": "task_started", "turn_id": "turn-scan-parent"}),
+        _token_event(at, 100, 10, cached_input_tokens=80),
+        _event(at, "compacted", {"message": "Synthetic summary"}),
+        _event(at, "event_msg", {"type": "token_count", "info": None}),
+    ]
+    for count, cached in counters:
+        event = _token_event(at, count, count // 10, cached_input_tokens=cached or 0)
+        if cached is None:
+            del event["payload"]["info"]["total_token_usage"]["cached_input_tokens"]
+        events.append(event)
+    events.append(_event(at, "event_msg", {"type": "task_complete", "turn_id": "turn-scan-parent"}))
+    fixture.write_parent_rollout(events)
+
+    usage = _complete_scan(fixture)["scan"]["usage"]
+
+    assert (usage["inputTokens"], usage["outputTokens"], usage["cachedInputTokens"]) == (
+        160,
+        16,
+        90,
+    )
+    expected_warnings = ["compaction_usage_unavailable"]
+    if stale:
+        expected_warnings.append("token_counter_regressed")
+    assert usage["warnings"] == expected_warnings
+
+
 def test_completion_counts_native_responses_and_compaction_without_legacy_duplicates(
     tmp_path: Path,
 ) -> None:
