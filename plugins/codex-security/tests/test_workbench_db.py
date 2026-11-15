@@ -102,6 +102,7 @@ EXPECTED_TABLES = {
     "schema_migrations",
     "security_targets",
     "setup_preferences",
+    "standard_reviewed_files",
     "triage_results",
     "workspaces",
 }

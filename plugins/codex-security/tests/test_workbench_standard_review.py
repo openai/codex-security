@@ -104,30 +104,28 @@ def test_reviewed_file_rejects_a_symlink_to_matching_bytes(tmp_path: Path) -> No
 
 
 @pytest.mark.cross_platform
-@pytest.mark.parametrize("names", [("left", "right"), ("Foo", "fOO")], ids=["distinct", "case"])
-def test_exact_reviewed_paths_below_a_subdirectory_target(
-    tmp_path: Path, names: tuple[str, str]
-) -> None:
+def test_exact_reviewed_paths_below_a_subdirectory_target(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     initialize_git_repository(repo)
     target = repo / "component"
     src = target / "src"
     src.mkdir(parents=True)
-    first, second = names
-    (src / first).write_bytes(b"first")
-    if (src / second).exists():
-        pytest.skip("This case requires distinct case-sensitive paths.")
-    (src / second).write_bytes(b"second")
+    (src / "Foo").write_bytes(b"first")
+    alias = (src / "fOO").exists()
+    if not alias:
+        (src / "fOO").write_bytes(b"second")
     # A root-relative lookup would read a different blob from the registered one.
     (repo / "src").mkdir()
-    (repo / "src" / first).write_bytes(b"outer")
+    (repo / "src" / "Foo").write_bytes(b"outer")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "Add nested paths"], cwd=repo, check=True)
     scan = registered_scan(tmp_path, target)
     review = load_script("workbench_standard_review").review_file_digests
 
-    expected = {
-        f"src/{first}": hashlib.sha256(b"first").hexdigest(),
-        f"src/{second}": hashlib.sha256(b"second").hexdigest(),
-    }
+    expected = {"src/Foo": hashlib.sha256(b"first").hexdigest()}
+    if alias:
+        with pytest.raises(SystemExit, match="not a regular file in the registered Git tree"):
+            review(scan, ["src/fOO"])
+    else:
+        expected["src/fOO"] = hashlib.sha256(b"second").hexdigest()
     assert review(scan, list(expected)) == expected
