@@ -17,6 +17,7 @@ import {
   type ScanActivity,
   type ScanProgress,
   type ScanTrustedAccessStatus,
+  type ScanWorkerSpawnEvent,
   type ScanWorkerStatus,
 } from "../src/index.js";
 import {
@@ -861,6 +862,71 @@ describe("one-shot scan events", () => {
     expect(statuses).toEqual([
       { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
     ]);
+  });
+
+  test("reports native spawn attempts and failures without a status marker", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const events: ScanWorkerSpawnEvent[] = [];
+    const observerErrors: ScanObserverName[] = [];
+    const statuses: ScanWorkerStatus[] = [];
+    // The exec stream includes collab_tool_call items that the pinned SDK
+    // parses at runtime but omits from its ThreadItem declaration.
+    const thread = new Codex({
+      codexPathOverride: process.execPath,
+    }).startThread();
+    const executable = thread as unknown as {
+      _exec: { run(): AsyncGenerator<string> };
+    };
+    executable._exec.run = async function* () {
+      const item = {
+        id: "spawn-1",
+        type: "collab_tool_call",
+        tool: "spawn_agent",
+        sender_thread_id: "parent",
+        receiver_thread_ids: [],
+        agents_states: {},
+        prompt: "Review a fixture.",
+      };
+      yield JSON.stringify({
+        type: "item.started",
+        item: { ...item, status: "in_progress" },
+      });
+      yield JSON.stringify({
+        type: "item.completed",
+        item: {
+          ...item,
+          id: "spawn-2",
+          receiver_thread_ids: ["child"],
+          agents_states: { child: { status: "pending_init", message: null } },
+          status: "completed",
+        },
+      });
+      yield JSON.stringify({
+        type: "item.completed",
+        item: { ...item, status: "failed" },
+      });
+    };
+    const stream = await thread.runStreamed("Scan the repository.");
+    await runEvents(scanDir, completedEvents("parent", stream.events), {
+      onWorkerSpawn(event) {
+        events.push(event);
+        if (event.kind === "failed")
+          throw new Error("optional observer failed");
+      },
+      onObserverError: (observer) => observerErrors.push(observer),
+      onWorkerStatus: (status) => statuses.push(status),
+    });
+    expect(events).toEqual([
+      { kind: "dispatch", attempt: 1 },
+      { kind: "dispatch", attempt: 2 },
+      {
+        kind: "failed",
+        attempt: 1,
+        reason: "Delegated worker failed to start.",
+      },
+    ]);
+    expect(observerErrors).toEqual(["onWorkerSpawn"]);
+    expect(statuses).toEqual([]);
   });
 
   test("forwards real file activity as commands start and complete", async () => {

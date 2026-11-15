@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createWorkerDispatchMonitor,
   scanProgressUpdatesFromEvent,
   workerStatusFromEvent,
 } from "../src/worker-progress.js";
@@ -304,5 +305,129 @@ describe("worker progress events", () => {
     ]) {
       expect(workerStatusFromEvent(event)).toBeNull();
     }
+  });
+});
+
+function spawnEvent(
+  type: "item.started" | "item.completed",
+  id: string,
+  options: { tool?: string; status?: string; error?: unknown } = {},
+): Record<string, unknown> {
+  const status =
+    options.status ?? (type === "item.started" ? "in_progress" : "completed");
+  return {
+    type,
+    item: {
+      id,
+      type: "collab_tool_call",
+      sender_thread_id: "parent",
+      receiver_thread_ids: status === "completed" ? ["child"] : [],
+      agents_states:
+        status === "completed"
+          ? { child: { status: "pending_init", message: null } }
+          : {},
+      tool: options.tool ?? "spawn_agent",
+      prompt: "Review routes/login.ts",
+      status,
+      ...(options.error === undefined ? {} : { error: options.error }),
+    },
+  };
+}
+
+describe("runtime worker dispatch monitor", () => {
+  test("counts live spawn_agent starts without model status markers", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(
+      monitor.observe(
+        messageEvent(
+          'CODEX_SECURITY_WORKER_STATUS {"phase":"file_review","planned":6,"started":3}',
+        ),
+      ),
+    ).toBeNull();
+    expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toEqual({
+      kind: "dispatch",
+      attempt: 1,
+    });
+    expect(monitor.observe(spawnEvent("item.started", "spawn-2"))).toEqual({
+      kind: "dispatch",
+      attempt: 2,
+    });
+    expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toBeNull();
+    expect(monitor.observe(spawnEvent("item.completed", "spawn-1"))).toBeNull();
+    expect(
+      monitor.observe(
+        spawnEvent("item.started", "wait-1", { tool: "wait_agent" }),
+      ),
+    ).toBeNull();
+  });
+
+  test("ignores same-named tools on an MCP server", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(
+      monitor.observe({
+        type: "item.started",
+        item: {
+          id: "item-1",
+          type: "mcp_tool_call",
+          server: "synthetic",
+          tool: "spawn_agent",
+          arguments: {},
+          status: "in_progress",
+        },
+      }),
+    ).toBeNull();
+  });
+
+  test("reports a failed spawn and counts an unseen failed item as an attempt", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(
+      monitor.observe(
+        spawnEvent("item.completed", "spawn-fail", {
+          status: "failed",
+          error: "capacity exhausted",
+        }),
+      ),
+    ).toEqual({
+      kind: "failed",
+      attempt: 1,
+      reason: "capacity exhausted",
+    });
+    expect(
+      monitor.observe(
+        spawnEvent("item.completed", "spawn-fail", {
+          status: "failed",
+          error: "capacity exhausted",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("emits dispatch then failed when a started spawn later fails", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(monitor.observe(spawnEvent("item.started", "spawn-1"))).toEqual({
+      kind: "dispatch",
+      attempt: 1,
+    });
+    expect(
+      monitor.observe(
+        spawnEvent("item.completed", "spawn-1", {
+          status: "failed",
+          error: { message: "thread spawn rejected" },
+        }),
+      ),
+    ).toEqual({
+      kind: "failed",
+      attempt: 1,
+      reason: "thread spawn rejected",
+    });
+  });
+
+  test("reports a successful spawn when its start item was not observed", () => {
+    const monitor = createWorkerDispatchMonitor();
+    expect(monitor.observe(spawnEvent("item.completed", "spawn-1"))).toEqual({
+      kind: "dispatch",
+      attempt: 1,
+    });
+    expect(monitor.observe(spawnEvent("item.completed", "spawn-1"))).toBeNull();
   });
 });

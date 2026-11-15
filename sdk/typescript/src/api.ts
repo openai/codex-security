@@ -232,10 +232,12 @@ import {
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
 import {
+  createWorkerDispatchMonitor,
   scanProgressUpdatesFromEvent,
   scanPhaseSchema,
   workerStatusFromEvent,
   type ScanProgress,
+  type ScanWorkerSpawnEvent,
   type ScanWorkerStatus,
 } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
@@ -469,6 +471,13 @@ export interface ScanOptions extends ScanSettings {
    * cannot gate dispatch; use maxCostUsd or signal for cancellation.
    */
   onWorkerEvent?: (event: ScanWorkerEvent) => void;
+  /**
+   * Observes spawn_agent attempts visible on the live parent event stream.
+   * Dispatch can come from a start or a previously unseen completion. Failed
+   * attempts can be the first event for an ordinal. Delivery is best effort
+   * and asynchronous. The runtime does not wait for this callback.
+   */
+  onWorkerSpawn?: (event: ScanWorkerSpawnEvent) => void;
   onWarning?: (warning: string, details?: ScanWarningDetails) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
   signal?: AbortSignal;
@@ -704,6 +713,7 @@ type ScanObserverName =
   | "onDeepProgress"
   | "onWorkerStatus"
   | "onWorkerEvent"
+  | "onWorkerSpawn"
   | "onStage"
   | "onWarning";
 
@@ -3897,6 +3907,7 @@ export class CodexSecurity {
             : (event) => tracker.recordParentItem(event),
         onProgress: reportProgress,
         onWorkerStatus: reportWorkerStatus,
+        onWorkerSpawn: options.onWorkerSpawn,
         onWarning: options.onWarning,
         onObserverError: options.onObserverError,
       });
@@ -6097,6 +6108,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   onProgressItem?: (event: Readonly<Record<string, unknown>>) => void;
   onProgress?: (progress: ScanProgress, source: ParentProgressSource) => void;
   onWorkerStatus?: (status: ScanWorkerStatus) => void;
+  onWorkerSpawn?: ScanOptions["onWorkerSpawn"];
   onWarning?: (warning: string) => void;
   onObserverError?: (observer: ScanObserverName, error: unknown) => void;
 }
@@ -6109,6 +6121,8 @@ export async function runScanEvents(
   let tacStatusReported = false;
   try {
     options.signal.throwIfAborted();
+    const workerDispatch =
+      options.onWorkerSpawn && createWorkerDispatchMonitor();
     const turn = await readCodexTurn({
       thread: options.thread,
       events: options.events,
@@ -6153,6 +6167,10 @@ export async function runScanEvents(
         const workerStatus = workerStatusFromEvent(event);
         if (workerStatus !== null) {
           notifyObserver(options, "onWorkerStatus")(workerStatus);
+        }
+        const spawn = workerDispatch?.observe(event);
+        if (spawn) {
+          notifyObserver(options, "onWorkerSpawn")(spawn);
         }
         if (event.type === "thread.started") {
           const startedThreadId = event["thread_id"];

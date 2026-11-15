@@ -126,6 +126,7 @@ export type {
   ScanPhase,
   ScanProgress,
   ScanWorkerPhase,
+  ScanWorkerSpawnEvent,
   ScanWorkerStatus,
 } from "./worker-progress.js";
 export { CodexLoginHandle } from "./auth.js";

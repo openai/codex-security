@@ -151,3 +151,53 @@ function dispatchStatus(
   );
   return parsed.success ? { kind: "dispatch", ...parsed.data } : null;
 }
+
+/** An attempt on the parent stream, numbered by first observation in this run. */
+export type ScanWorkerSpawnEvent =
+  | { kind: "dispatch"; attempt: number }
+  | { kind: "failed"; attempt: number; reason: string };
+
+export function createWorkerDispatchMonitor() {
+  const attempts = new Map<string, { attempt: number; failed: boolean }>();
+  return {
+    observe(
+      event: Readonly<Record<string, unknown>>,
+    ): ScanWorkerSpawnEvent | null {
+      const item = event["item"];
+      if (
+        !isRecord(item) ||
+        item["type"] !== "collab_tool_call" ||
+        item["tool"] !== "spawn_agent" ||
+        typeof item["id"] !== "string"
+      ) {
+        return null;
+      }
+      const failed =
+        event["type"] === "item.completed" && item["status"] === "failed";
+      if (
+        !failed &&
+        event["type"] !== "item.started" &&
+        !(event["type"] === "item.completed" && item["status"] === "completed")
+      ) {
+        return null;
+      }
+      const previous = attempts.get(item["id"]);
+      if (previous && (!failed || previous.failed)) return null;
+      const attempt = previous?.attempt ?? attempts.size + 1;
+      attempts.set(item["id"], { attempt, failed });
+      return failed
+        ? { kind: "failed", attempt, reason: spawnFailureReason(item) }
+        : { kind: "dispatch", attempt };
+    },
+  };
+}
+
+function spawnFailureReason(item: Readonly<Record<string, unknown>>): string {
+  const error = item["error"];
+  if (typeof error === "string" && error.trim() !== "") return error;
+  if (isRecord(error) && typeof error["message"] === "string") {
+    const message = error["message"].trim();
+    if (message !== "") return message;
+  }
+  return "Delegated worker failed to start.";
+}
