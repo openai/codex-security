@@ -3114,6 +3114,24 @@ describe("CLI", () => {
     }
   });
 
+  test("dependency capacity passthrough does not change validation overrides", async () => {
+    const onCodex = mock(() => 0);
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    expect(
+      await runCli(
+        [
+          "validate",
+          "synthetic finding",
+          "--codex",
+          "features.multi_agent_v2.max_concurrent_threads_per_session=49",
+        ],
+        dependencies({ onCodex }),
+      ),
+    ).toBe(2);
+    expect(onCodex).not.toHaveBeenCalled();
+    expect(stderr.text()).toContain("Skill commands only support");
+  });
+
   test("rejects CSV stdout when JSON output is requested", async () => {
     for (const flags of [
       ["--export-format", "csv", "--output", "-", "--json"],
@@ -3218,6 +3236,17 @@ describe("CLI", () => {
       [
         ["--model", "gpt-5.6-terra", "--codex", "features.goals=true"],
         { model: "gpt-5.6-terra", features: { goals: true } },
+      ],
+      [
+        [
+          "--codex",
+          "features.multi_agent_v2.max_concurrent_threads_per_session=49",
+        ],
+        {
+          features: {
+            multi_agent_v2: { max_concurrent_threads_per_session: 49 },
+          },
+        },
       ],
     ] as const) {
       let config: CodexSecurityConfig | undefined;

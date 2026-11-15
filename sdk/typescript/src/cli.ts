@@ -138,13 +138,24 @@ import {
 import {
   createDependencyReportSubmission,
   dependencyReportInputSchema,
+  dependencyReviewQueueDescription,
   dependencyReviewQueueSchema,
 } from "./dependency-report-submission.js";
 import {
   createDependencyCandidates,
   type DependencyCandidates,
 } from "./dependency-candidates.js";
-import type { DependencyInventoryReceiptMetadata } from "./dependency-inventory.js";
+import { dependencyNativeCoordinatorPrompt } from "./dependency-native-prompt.js";
+import {
+  createDependencyInvestigationTools,
+  type DependencyProfileTransport,
+} from "./dependency-investigation-tools.js";
+import { createDependencyNativeSession } from "./dependency-native-session.js";
+import {
+  inventoryResultPayload,
+  type DependencyInventoryRpc,
+} from "./dependency-inventory.js";
+import { createDependencyRuntimeInventory } from "./dependency-runtime-inventory.js";
 import { dependencyReviewStatusInputSchema } from "./dependency-review-status.js";
 import { suggestOwnersInternal } from "./suggest-owners.js";
 import { parseImportedFindings } from "./findings-import.js";
@@ -228,6 +239,7 @@ import {
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   resolveCodexProfile,
+  structuredCodexConfig,
   mergedCodexConfig,
   readCodexFileProfile,
   scanModel,
@@ -430,7 +442,7 @@ import {
 } from "./version.js";
 
 import {
-  exploitabilityMcpServers,
+  exploitabilityMcpConfiguration,
   readProjectConfig,
   resolveScanSettings,
   projectScopeTarget,
@@ -1232,17 +1244,21 @@ type SkillThreadSource = Extract<
 
 type DependencyReportTool = Pick<
   ReturnType<typeof createDependencyReportSubmission>,
-  "submit" | "continuationPrompt" | "recordGraphEvent"
+  "continuationPrompt" | "recordGraphEvent"
 > &
   Partial<
-    Pick<ReturnType<typeof createDependencyReportSubmission>, "queue">
+    Pick<
+      ReturnType<typeof createDependencyReportSubmission>,
+      "submit" | "queue" | "recordInventoryStartup"
+    >
   > & {
-    status?: (value?: unknown) => Record<string, unknown>;
-    recordInventory: (
-      ...args: Parameters<
-        ReturnType<typeof createDependencyReportSubmission>["recordInventory"]
-      >
-    ) => void;
+    status?: (
+      value?: unknown,
+      inventoryRpc?: DependencyInventoryRpc,
+    ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+    recordInventory: ReturnType<
+      typeof createDependencyReportSubmission
+    >["recordInventory"];
     observeGraph?: DependencyCandidates["observeGraph"];
     bindReviewer?: (
       environment: Record<string, string>,
@@ -1296,7 +1312,11 @@ interface SkillRunOptions {
   onUsage?: (usage: ScanTokenUsage) => void;
   dependencyReport?: DependencyReportTool;
   dependencyGraph?: DependencyGraphTools;
-  serviceCatalogServers?: JsonObject;
+  dependencyCallerScope?: string;
+  dependencyCodexConfig?: JsonObject;
+  inventoryServers?: JsonObject;
+  inventoryInstructions?: Record<string, string>;
+  catalogServerNames?: readonly string[];
   shellEnvironmentPolicy?: JsonValue;
   context?: string;
   contextFile?: string;
@@ -1377,6 +1397,7 @@ interface CliDependencies {
   classifyScanSeverity?: typeof classifyScanSeverityInternal;
   classifyScanDirectorySeverity?: typeof classifyScanDirectorySeverityInternal;
   lookupDependencyAdvisory?: typeof lookupDependencyAdvisory;
+  fetchDependencySource?: typeof fetch;
   lookupPackageAdvisories?: typeof lookupPackageAdvisories;
   reviewDependencyReport?: typeof runReadOnlyCodex;
   resolveDependencyServices?: typeof resolveDependencyServices;
@@ -1737,6 +1758,17 @@ async function runCodexSkillProcess(
           : resolveCodexProfile(
               await readCodexHomeConfig(processEnvironment, signal),
             );
+      if (dependencyCheck) {
+        const capacity = dependencyCapacityOverride(
+          mergeCodexOverrides(ambientConfig, output.codexOverrides ?? {}),
+        );
+        args = [
+          ...args,
+          "--config",
+          capacity ??
+            "features.multi_agent_v2.max_concurrent_threads_per_session=16",
+        ];
+      }
       const resolved = resolveSkillAuthentication(
         { ...output, auth: output.auth },
         processEnvironment,
@@ -2014,211 +2046,248 @@ async function runCodexSkillProcess(
           .flatMap((value) => ["--config", value]),
       ];
     }
-    signal.throwIfAborted();
-    const invocation = spawn(
-      executablePathForSpawn(command.command),
-      [...args],
-      {
-        env: environment,
-        cwd: output?.appServer?.directory ?? parse(process.execPath).root,
-        stdio:
-          output === undefined
-            ? input === undefined
-              ? "inherit"
-              : ["pipe", "inherit", "inherit"]
-            : [
-                output.appServer !== undefined || input !== undefined
-                  ? "pipe"
-                  : "ignore",
-                "pipe",
-                "pipe",
-              ],
-        windowsHide: true,
-      },
-    );
-    if (input !== undefined) {
-      invocation.stdin?.on("error", () => {});
-      invocation.stdin?.end(input);
-    }
-    let requestedSignal: SignalName | null = null;
-    let forcedTermination: ReturnType<typeof setTimeout> | undefined;
-    let forceStatusCompletion: (() => void) | null = null;
-    let forceCaptureCompletion: (() => void) | null = null;
-    let invocationStatus: Promise<number> | undefined;
-    const requestTermination = (signal: SignalName): void => {
-      requestedSignal = signal;
-      invocation.kill(signal);
-      if (forcedTermination !== undefined) return;
-      forcedTermination = setTimeout(() => {
-        forcedTermination = undefined;
-        if (invocation.exitCode === null && invocation.signalCode === null) {
-          invocation.kill("SIGKILL");
-        } else {
-          forceStatusCompletion?.();
+    const recovery: DependencyNativeRecovery | undefined =
+      dependencyCheck && output?.appServer
+        ? {
+            session: createDependencyNativeSession(),
+            usage: new Map(),
+            finishedTurns: new Set(),
+            completedTurnNotifications: new Set(),
+          }
+        : undefined;
+    let recoveryAttempted = false;
+    for (;;) {
+      signal.throwIfAborted();
+      const invocation = spawn(
+        executablePathForSpawn(command.command),
+        [...args],
+        {
+          env: environment,
+          cwd: output?.appServer?.directory ?? parse(process.execPath).root,
+          stdio:
+            output === undefined
+              ? input === undefined
+                ? "inherit"
+                : ["pipe", "inherit", "inherit"]
+              : [
+                  output.appServer !== undefined || input !== undefined
+                    ? "pipe"
+                    : "ignore",
+                  "pipe",
+                  "pipe",
+                ],
+          windowsHide: true,
+        },
+      );
+      if (input !== undefined) {
+        invocation.stdin?.on("error", () => {});
+        invocation.stdin?.end(input);
+      }
+      let requestedSignal: SignalName | null = null;
+      let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+      let forceStatusCompletion: (() => void) | null = null;
+      let forceCaptureCompletion: (() => void) | null = null;
+      let invocationStatus: Promise<number> | undefined;
+      const requestTermination = (signal: SignalName): void => {
+        requestedSignal = signal;
+        invocation.kill(signal);
+        if (forcedTermination !== undefined) return;
+        forcedTermination = setTimeout(() => {
+          forcedTermination = undefined;
+          if (invocation.exitCode === null && invocation.signalCode === null) {
+            invocation.kill("SIGKILL");
+          } else {
+            forceStatusCompletion?.();
+          }
+          forceCaptureCompletion?.();
+          invocation.stdout?.destroy();
+          invocation.stderr?.destroy();
+        }, CHILD_TERMINATION_GRACE_MS);
+      };
+      const onInterrupt = (): void => {
+        requestTermination("SIGINT");
+      };
+      const onTerminate = (): void => {
+        requestTermination("SIGTERM");
+      };
+      const onAbort = (): void => {
+        // A process signal also invokes the handlers below in the same turn.
+        queueMicrotask(() => {
+          if (requestedSignal === null && forceStatusCompletion !== null) {
+            requestTermination(
+              signal.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
+            );
+          }
+        });
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      process.on("SIGINT", onInterrupt);
+      process.on("SIGTERM", onTerminate);
+      try {
+        let diagnostic = "";
+        invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+          diagnostic += chunk;
+        });
+        const captured =
+          output === undefined || invocation.stdout === null
+            ? Promise.resolve(undefined)
+            : Promise.race([
+                readSkillCommandOutput(
+                  invocation.stdout,
+                  output.appServer === undefined
+                    ? undefined
+                    : {
+                        ...output.appServer,
+                        recovery,
+                        allowedMcpServers: output.allowedMcpServers,
+                        permissionProfile,
+                        apiKey,
+                        modelProvider,
+                        onThreadStarted: async (provider) => {
+                          await releaseCredentialHome?.();
+                          if (
+                            output.appServer?.dependencyReport?.bindReviewer &&
+                            (!provider ||
+                              (modelProvider && provider !== modelProvider))
+                          )
+                            throw new CodexSecurityError(
+                              "Codex did not confirm the selected provider for report verification.",
+                            );
+                        },
+                        bindReviewer: (provider, daybreakConfig, program) => {
+                          output.appServer?.dependencyReport?.bindReviewer?.(
+                            Object.fromEntries(
+                              Object.entries(environment).filter(
+                                (entry): entry is [string, string] =>
+                                  entry[1] !== undefined,
+                              ),
+                            ),
+                            {
+                              model_provider: provider,
+                              ...daybreakConfig,
+                              ...(selectedProviderDefinition
+                                ? {
+                                    model_providers: {
+                                      [provider]: selectedProviderDefinition,
+                                    },
+                                  }
+                                : {}),
+                            },
+                            program,
+                          );
+                        },
+                        input: invocation.stdin!,
+                      },
+                  output.onUsage,
+                ),
+                new Promise<undefined>((resolve) => {
+                  forceCaptureCompletion = () => resolve(undefined);
+                }),
+              ]);
+        invocationStatus = new Promise<number>((resolve, reject) => {
+          const complete = (
+            code: number | null,
+            signal: NodeJS.Signals | null,
+          ): void => {
+            resolve(
+              requestedSignal === "SIGINT" || signal === "SIGINT"
+                ? 130
+                : requestedSignal === "SIGTERM" || signal === "SIGTERM"
+                  ? 143
+                  : (code ?? 1),
+            );
+          };
+          forceStatusCompletion = () => complete(null, null);
+          invocation.once("error", reject);
+          invocation.once(output === undefined ? "exit" : "close", complete);
+        });
+        let [status, events] = await Promise.all([invocationStatus, captured]);
+        if (
+          recovery?.threadId &&
+          !recoveryAttempted &&
+          !signal.aborted &&
+          requestedSignal === null &&
+          events?.completed !== true &&
+          events?.error === undefined &&
+          !events?.sandboxUnavailable
+        ) {
+          recoveryAttempted = true;
+          recovery.session.resetTurns();
+          await writeCliOutput(
+            output!.stderr,
+            "codex-security: Resuming the investigation after the Codex connection closed.\n",
+          );
+          continue;
         }
-        forceCaptureCompletion?.();
+        if (events?.sandboxUnavailable && requestedSignal === null) {
+          throw new PatchCommandError(
+            "SANDBOX_UNAVAILABLE",
+            `${SANDBOX_UNAVAILABLE_MESSAGE}${events.error ? `\n${events.error}` : ""}`,
+          );
+        }
+        if (
+          status === 0 &&
+          output?.appServer !== undefined &&
+          (events?.error || events?.connectionError)
+        ) {
+          status = 1;
+        }
+        if (output === undefined || status === 130 || status === 143)
+          return status;
+        if (status !== 0) {
+          const failure = skillCommandFailure(
+            output.command,
+            status,
+            events?.error ?? (diagnostic || events?.connectionError || ""),
+            authentication,
+          );
+          await writeCliOutput(
+            output.stderr,
+            `codex-security: ${diagnosticLines(failure)}\n`,
+          );
+          return status;
+        }
+        if (output.appServer?.dependencyReport && events?.completed) {
+          // The caller publishes the accepted tool submission from host memory.
+          return status;
+        }
+        if (
+          (output.appServer !== undefined && events?.completed !== true) ||
+          events?.message === undefined ||
+          events.message.trim().length === 0
+        ) {
+          await writeCliOutput(
+            output.stderr,
+            `codex-security: Codex did not return a completed ${output.command} response.\n`,
+          );
+          return 2;
+        }
+        let message = events.message.trimEnd();
+        if (output.responseSchema !== undefined) {
+          const result: unknown = JSON.parse(message);
+          if (output.responseSchema(result) !== true) {
+            throw new CodexSecurityError(
+              `Validation output does not match the requested schema: ${new Ajv2020().errorsText(output.responseSchema.errors)}`,
+            );
+          }
+          message = JSON.stringify(result, null, 2);
+        }
+        await writeCliOutput(output.stdout, `${message}\n`);
+        return status;
+      } catch (error) {
         invocation.stdout?.destroy();
         invocation.stderr?.destroy();
-      }, CHILD_TERMINATION_GRACE_MS);
-    };
-    const onInterrupt = (): void => {
-      requestTermination("SIGINT");
-    };
-    const onTerminate = (): void => {
-      requestTermination("SIGTERM");
-    };
-    const onAbort = (): void => {
-      // A process signal also invokes the handlers below in the same turn.
-      queueMicrotask(() => {
-        if (requestedSignal === null && forceStatusCompletion !== null) {
-          requestTermination(signal.reason === "SIGINT" ? "SIGINT" : "SIGTERM");
-        }
-      });
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    process.on("SIGINT", onInterrupt);
-    process.on("SIGTERM", onTerminate);
-    try {
-      let diagnostic = "";
-      invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-        diagnostic += chunk;
-      });
-      const captured =
-        output === undefined || invocation.stdout === null
-          ? Promise.resolve(undefined)
-          : Promise.race([
-              readSkillCommandOutput(
-                invocation.stdout,
-                output.appServer === undefined
-                  ? undefined
-                  : {
-                      ...output.appServer,
-                      permissionProfile,
-                      apiKey,
-                      modelProvider,
-                      onThreadStarted: async (provider) => {
-                        await releaseCredentialHome?.();
-                        if (
-                          output.appServer?.dependencyReport?.bindReviewer &&
-                          (!provider ||
-                            (modelProvider && provider !== modelProvider))
-                        )
-                          throw new CodexSecurityError(
-                            "Codex did not confirm the selected provider for report verification.",
-                          );
-                      },
-                      bindReviewer: (provider, daybreakConfig, program) => {
-                        output.appServer?.dependencyReport?.bindReviewer?.(
-                          Object.fromEntries(
-                            Object.entries(environment).filter(
-                              (entry): entry is [string, string] =>
-                                entry[1] !== undefined,
-                            ),
-                          ),
-                          {
-                            model_provider: provider,
-                            ...daybreakConfig,
-                            ...(selectedProviderDefinition
-                              ? {
-                                  model_providers: {
-                                    [provider]: selectedProviderDefinition,
-                                  },
-                                }
-                              : {}),
-                          },
-                          program,
-                        );
-                      },
-                      input: invocation.stdin!,
-                    },
-                output.onUsage,
-              ),
-              new Promise<undefined>((resolve) => {
-                forceCaptureCompletion = () => resolve(undefined);
-              }),
-            ]);
-      invocationStatus = new Promise<number>((resolve, reject) => {
-        const complete = (
-          code: number | null,
-          signal: NodeJS.Signals | null,
-        ): void => {
-          resolve(
-            requestedSignal === "SIGINT" || signal === "SIGINT"
-              ? 130
-              : requestedSignal === "SIGTERM" || signal === "SIGTERM"
-                ? 143
-                : (code ?? 1),
-          );
-        };
-        forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", reject);
-        invocation.once(output === undefined ? "exit" : "close", complete);
-      });
-      let [status, events] = await Promise.all([invocationStatus, captured]);
-      if (events?.sandboxUnavailable && requestedSignal === null) {
-        throw new PatchCommandError(
-          "SANDBOX_UNAVAILABLE",
-          `${SANDBOX_UNAVAILABLE_MESSAGE}${events.error ? `\n${events.error}` : ""}`,
-        );
+        requestTermination("SIGTERM");
+        await invocationStatus?.catch(() => undefined);
+        throw error;
+      } finally {
+        if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+        forceStatusCompletion = null;
+        forceCaptureCompletion = null;
+        signal.removeEventListener("abort", onAbort);
+        process.off("SIGINT", onInterrupt);
+        process.off("SIGTERM", onTerminate);
       }
-      if (status === 0 && output?.appServer !== undefined && events?.error) {
-        status = 1;
-      }
-      if (output === undefined || status === 130 || status === 143)
-        return status;
-      if (status !== 0) {
-        const failure = skillCommandFailure(
-          output.command,
-          status,
-          events?.error ?? diagnostic,
-          authentication,
-        );
-        await writeCliOutput(
-          output.stderr,
-          `codex-security: ${diagnosticLines(failure)}\n`,
-        );
-        return status;
-      }
-      if (output.appServer?.dependencyReport && events?.completed) {
-        // The caller publishes the accepted tool submission from host memory.
-        return status;
-      }
-      if (
-        (output.appServer !== undefined && events?.completed !== true) ||
-        events?.message === undefined ||
-        events.message.trim().length === 0
-      ) {
-        await writeCliOutput(
-          output.stderr,
-          `codex-security: Codex did not return a completed ${output.command} response.\n`,
-        );
-        return 2;
-      }
-      let message = events.message.trimEnd();
-      if (output.responseSchema !== undefined) {
-        const result: unknown = JSON.parse(message);
-        if (output.responseSchema(result) !== true) {
-          throw new CodexSecurityError(
-            `Validation output does not match the requested schema: ${new Ajv2020().errorsText(output.responseSchema.errors)}`,
-          );
-        }
-        message = JSON.stringify(result, null, 2);
-      }
-      await writeCliOutput(output.stdout, `${message}\n`);
-      return status;
-    } catch (error) {
-      invocation.stdout?.destroy();
-      invocation.stderr?.destroy();
-      requestTermination("SIGTERM");
-      await invocationStatus?.catch(() => undefined);
-      throw error;
-    } finally {
-      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
-      forceStatusCompletion = null;
-      forceCaptureCompletion = null;
-      signal.removeEventListener("abort", onAbort);
-      process.off("SIGINT", onInterrupt);
-      process.off("SIGTERM", onTerminate);
     }
   } catch (error) {
     const status = interruptedExitCode(signal);
@@ -2410,11 +2479,15 @@ function handleDisconnectedResize(error: NodeJS.ErrnoException): void {
   }
 }
 
+// The eval adapter checks this before running a caller-scoped fixture.
+export const supportsDependencyCallerScope = true;
+
 export async function main(
   argv: readonly string[] = process.argv.slice(2),
   output: Writable = process.stdout,
   errorOutput: Writable = process.stderr,
   dependencies: CliDependencies = DEFAULT_DEPENDENCIES,
+  invocation: { dependencyCallerScope?: string } = {},
 ): Promise<number> {
   const importsEnabled = externalImportsEnabled(dependencies.environment);
   const remediationOperation =
@@ -2914,7 +2987,7 @@ export async function main(
     description: "Assess dependency vulnerabilities in the current checkout.",
   }).command("check", {
     description:
-      "Check a CVE or an ecosystem-qualified package against this checkout. Requires OpenGrep on PATH.",
+      "Check a CVE or an ecosystem-qualified package and report reviewed results for each place. Requires OpenGrep on PATH.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
@@ -2927,9 +3000,12 @@ export async function main(
     }),
     options: modelOptions(
       "Model for dependency assessment.",
-      "Reasoning effort for dependency assessment.",
+      "Reasoning effort for dependency investigators.",
     ).extend({
       config: PROJECT_CONFIG_OPTION,
+      codex: SKILL_CONFIG_OPTIONS.shape.codex.describe(
+        `${SKILL_CODEX_OVERRIDE_DESCRIPTION} Dependency checks also support features.multi_agent_v2.max_concurrent_threads_per_session=49 for 48 investigators plus the coordinator.`,
+      ),
       vulnDescription: z
         .string()
         .trim()
@@ -2944,6 +3020,7 @@ export async function main(
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       let temporary: string | undefined;
+      const callerScope = invocation.dependencyCallerScope;
       try {
         const pkg = /^CVE-/iu.test(args.subject)
           ? undefined
@@ -2957,7 +3034,17 @@ export async function main(
           options.config,
           dependencies,
         );
-        const serviceCatalogServers = exploitabilityMcpServers(project?.input);
+        const {
+          servers: inventoryServers,
+          catalogServers,
+          instructions: inventoryInstructions,
+        } = exploitabilityMcpConfiguration(project?.input);
+        const catalogServerNames = Object.keys(catalogServers);
+        const catalogInstructions = Object.fromEntries(
+          Object.entries(inventoryInstructions).filter(([name]) =>
+            Object.hasOwn(catalogServers, name),
+          ),
+        );
         const directory = await normalizeRepository(
           dependencies.currentDirectory(),
           controller.signal,
@@ -2987,8 +3074,15 @@ export async function main(
           );
         } catch (error) {
           controller.signal.throwIfAborted();
+          const details = isJsonObject(error)
+            ? ["code", "signal", "killed", "stdout", "stderr"].flatMap((key) =>
+                error[key] === undefined
+                  ? []
+                  : [`${key}: ${String(error[key])}`],
+              )
+            : [];
           throw new CodexSecurityError(
-            `Dependency checks require a working OpenGrep on PATH outside the checkout. ${errorMessage(error)}`,
+            `Dependency checks require a working OpenGrep on PATH outside the checkout. ${[errorMessage(error), ...details].join("\n")}`,
             { cause: error },
           );
         }
@@ -3017,62 +3111,221 @@ export async function main(
                 "selectedEnvironment" | "config" | "cyberAccessProgram"
               >
             | undefined;
+          function runHelper(
+            run: typeof runReadOnlyCodex,
+            prompt: string,
+            schema: unknown,
+            helperSignal: AbortSignal,
+            reasoningEffort = "low",
+          ) {
+            if (!selectedRuntime && run === runReadOnlyCodex)
+              throw new CodexSecurityError(
+                "Codex did not select a runtime for dependency investigation helpers.",
+              );
+            return run(
+              prompt,
+              schema,
+              {
+                ...selectedRuntime,
+                model: options.model,
+                reasoningEffort,
+                workingDirectory: reviewDirectory,
+                signal: helperSignal,
+                onUsage: recordHelperUsage,
+              },
+              {
+                surface: "cli",
+                command: "exploitability check",
+                threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
+              },
+            );
+          }
           const candidates = await createDependencyCandidates(repository);
+          let evidenceTools: ReturnType<
+            typeof createDependencyInvestigationTools
+          >;
           const submission = createDependencyReportSubmission({
             repository,
             advisory,
+            callerScope,
             candidates,
+            profileCoverage: (findings) =>
+              evidenceTools?.profileCoverage(findings),
+            catalogServerNames,
+            inventoryServers: Object.fromEntries(
+              Object.entries(inventoryServers).map(([name, server]) => {
+                const tools = isJsonObject(server)
+                  ? server["enabled_tools"]
+                  : undefined;
+                return [
+                  name,
+                  Array.isArray(tools)
+                    ? tools.filter((tool) => typeof tool === "string")
+                    : null,
+                ];
+              }),
+            ),
             signal,
-            review: (prompt, schema, reviewSignal) => {
-              if (!selectedRuntime && !dependencies.reviewDependencyReport)
-                throw new CodexSecurityError(
-                  "Codex did not select a runtime for report verification.",
-                );
-              return (dependencies.reviewDependencyReport ?? runReadOnlyCodex)(
+            review: (prompt, schema, reviewSignal) =>
+              runHelper(
+                dependencies.reviewDependencyReport ?? runReadOnlyCodex,
                 prompt,
                 schema,
-                {
-                  ...selectedRuntime,
-                  model: options.model,
-                  reasoningEffort: "low",
-                  workingDirectory: reviewDirectory,
-                  signal: reviewSignal ?? signal,
-                  onUsage: recordHelperUsage,
-                },
-                {
-                  surface: "cli",
-                  command: "exploitability check",
-                  threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
-                },
+                reviewSignal ?? signal,
+              ),
+          });
+          const profileTool = "profiles.stacks";
+          const profileServers = Object.entries(inventoryServers).filter(
+            ([, config]) => {
+              if (!isJsonObject(config)) return false;
+              const enabled = config["enabled_tools"];
+              const disabled = config["disabled_tools"];
+              return (
+                Array.isArray(enabled) &&
+                enabled.includes(profileTool) &&
+                !(Array.isArray(disabled) && disabled.includes(profileTool))
               );
             },
+          );
+          const profileServer =
+            profileServers.length === 1 ? profileServers[0]![0] : undefined;
+          evidenceTools = createDependencyInvestigationTools({
+            directory: join(
+              reviewDirectory,
+              randomUUID(),
+              "dependency-evidence",
+            ),
+            repository,
+            signal,
+            source: { fetcher: dependencies.fetchDependencySource ?? fetch },
+            recordSourceExcerpt: submission.recordSourceExcerpt,
+            ...(profileServer && {
+              profiles: {
+                // The directory belongs to this check's authenticated session.
+                providerKey: JSON.stringify([profileServer, profileTool, 1]),
+                authorize: () => signal.throwIfAborted(),
+                recordCollection(capture) {
+                  const receiptId = submission.recordProfileCollection({
+                    ...capture,
+                    provider: profileServer,
+                  });
+                  dependencyGraph?.ingestProfileCollection?.(
+                    capture.resource,
+                    receiptId,
+                  );
+                  return receiptId;
+                },
+              },
+            }),
+            advisory: {
+              record: advisory,
+              evidence: ("advisories" in advisory
+                ? advisory.advisories
+                : []
+              ).map((entry, index) => ({
+                id: `advisory-${index + 1}`,
+                origin: entry.url,
+                excerpt: JSON.stringify(entry),
+              })),
+              review: (prompt, schema) =>
+                runHelper(
+                  dependencies.reviewDependencyReport ?? runReadOnlyCodex,
+                  prompt,
+                  schema,
+                  signal,
+                  "medium",
+                ),
+            },
           });
+          function profileTransport(
+            rpc: DependencyInventoryRpc,
+          ): DependencyProfileTransport {
+            return {
+              async lookup(query) {
+                const inventory = await rpc.list();
+                const servers = isJsonObject(inventory)
+                  ? inventory["data"]
+                  : undefined;
+                const server = Array.isArray(servers)
+                  ? servers.find(
+                      (entry) =>
+                        isJsonObject(entry) && entry["name"] === profileServer,
+                    )
+                  : undefined;
+                const tools = isJsonObject(server)
+                  ? server["tools"]
+                  : undefined;
+                const tool = isJsonObject(tools)
+                  ? tools[profileTool]
+                  : undefined;
+                const annotations = isJsonObject(tool)
+                  ? tool["annotations"]
+                  : undefined;
+                if (
+                  !profileServer ||
+                  !isJsonObject(tool) ||
+                  (isJsonObject(annotations) &&
+                    annotations["readOnlyHint"] === false)
+                )
+                  throw new Error(
+                    "The configured read-only profiling tool is unavailable.",
+                  );
+                const result = await rpc.call(
+                  profileServer,
+                  profileTool,
+                  query,
+                );
+                if (
+                  isJsonObject(result) &&
+                  (result["isError"] === true || result["is_error"] === true)
+                )
+                  throw new Error(
+                    `Profile lookup failed: ${JSON.stringify(result)}`,
+                  );
+                return (
+                  inventoryResultPayload(result, null) ??
+                  inventoryResultPayload(result, 0)
+                );
+              },
+              async readResource(uri) {
+                if (!profileServer || !rpc.read)
+                  throw new Error("MCP profile resources are unavailable.");
+                const result = await rpc.read(profileServer, uri);
+                const contents = isJsonObject(result)
+                  ? result["contents"]
+                  : undefined;
+                const content =
+                  Array.isArray(contents) && contents.length === 1
+                    ? contents[0]
+                    : undefined;
+                if (
+                  !isJsonObject(content) ||
+                  content["uri"] !== uri ||
+                  typeof content["text"] !== "string"
+                )
+                  throw new Error(
+                    "MCP profile resource did not return complete JSON text.",
+                  );
+                return content["text"];
+              },
+            };
+          }
           try {
             signal.throwIfAborted();
             dependencyGraph = await openDependencyGraph(
               await bundledPluginRoot(),
               repository,
-              Object.keys(serviceCatalogServers).length
+              catalogServerNames.length
                 ? (requests) => {
                     if (!selectedRuntime)
                       throw new CodexSecurityError(
                         "Codex did not select a runtime for service catalog lookups.",
                       );
                     const catalogOptions = {
-                      servers: serviceCatalogServers,
+                      servers: catalogServers,
+                      instructions: catalogInstructions,
                       repository,
-                      recordInventory: (
-                        server: string,
-                        result: unknown,
-                        metadata?: DependencyInventoryReceiptMetadata,
-                      ) => {
-                        if (Object.hasOwn(serviceCatalogServers, server))
-                          return submission.recordInventory(
-                            server,
-                            result,
-                            metadata,
-                          );
-                      },
+                      recordInventory: submission.recordInventory,
                       runtime: {
                         ...selectedRuntime,
                         model: options.model,
@@ -3093,11 +3346,31 @@ export async function main(
                   }
                 : undefined,
               signal,
+              createDependencyRuntimeInventory({
+                servers: inventoryServers,
+                instructions: inventoryInstructions,
+                plan: (prompt, schema) =>
+                  runHelper(runReadOnlyCodex, prompt, schema, signal),
+                record: submission.recordInventory,
+                isReceiptCurrent: submission.isInventoryReceiptCurrent,
+                signal,
+              }),
+              submission.recordInventory,
+              submission.isInventoryReceiptCurrent,
+              {
+                tools: evidenceTools.tools,
+                call: (name, args, rpc) =>
+                  evidenceTools.call(
+                    name,
+                    args,
+                    rpc && profileServer ? profileTransport(rpc) : undefined,
+                  ),
+              },
             );
             exitCode = await runSkill(
               "dependency-exploitability",
               [],
-              { ...options, codex: [] },
+              options,
               { write: () => true },
               errorOutput,
               dependencies,
@@ -3105,8 +3378,12 @@ export async function main(
                 directory: repository,
                 signal,
                 context: JSON.stringify(advisory),
+                dependencyCallerScope: callerScope,
+                dependencyCodexConfig: project?.input.codex,
                 dependencyGraph,
-                serviceCatalogServers,
+                inventoryServers,
+                inventoryInstructions,
+                catalogServerNames,
                 shellEnvironmentPolicy:
                   project?.input.codex?.["shell_environment_policy"],
                 dependencyReport: {
@@ -3125,18 +3402,12 @@ export async function main(
                   },
                   submit: submission.submit,
                   queue: submission.queue,
-                  status: submission.readStatus,
+                  status: (value) => submission.readStatus(value),
                   continuationPrompt: submission.continuationPrompt,
                   recordGraphEvent: submission.recordGraphEvent,
                   observeGraph: candidates.observeGraph,
-                  recordInventory: (server, result, metadata) => {
-                    if (Object.hasOwn(serviceCatalogServers, server))
-                      return submission.recordInventory(
-                        server,
-                        result,
-                        metadata,
-                      );
-                  },
+                  recordInventory: submission.recordInventory,
+                  recordInventoryStartup: submission.recordInventoryStartup,
                 },
                 onUsage: (observed) => {
                   investigatorUsage = observed;
@@ -3147,12 +3418,12 @@ export async function main(
               throw new CodexSecurityError(
                 `Dependency assessment exited with status ${exitCode}.`,
               );
+            const advisoryDetails =
+              "advisories" in advisory ? advisory.advisories : undefined;
             return reviewedDependencyCheckSchema.parse({
-              ...submission.acceptedReport(),
-              advisories:
-                "advisories" in advisory
-                  ? advisory.advisories.map((entry) => entry.url)
-                  : [],
+              ...submission.publicReport(),
+              advisories: advisoryDetails?.map((entry) => entry.url) ?? [],
+              ...(advisoryDetails && { advisoryDetails }),
               usage: investigatorUsage
                 ? addTokenUsage(helperUsage, investigatorUsage)
                 : helperUsage,
@@ -9798,9 +10069,57 @@ function captureOutput() {
   };
 }
 
+const investigationPlanSchema = z.array(
+  z.object({
+    step: z.string(),
+    status: z.enum(["pending", "inProgress", "completed"]),
+  }),
+);
+
+interface DependencyNativeRecovery {
+  readonly session: ReturnType<typeof createDependencyNativeSession>;
+  readonly usage: Map<string, ScanTokenUsage>;
+  readonly finishedTurns: Set<string>;
+  readonly completedTurnNotifications: Set<string>;
+  threadId?: string;
+  plan?: z.infer<typeof investigationPlanSchema>;
+}
+
+function isDependencyCapacityOverride(key: string, value: JsonValue): boolean {
+  if (key !== "features" || !isJsonObject(value)) return false;
+  const native = value["multi_agent_v2"];
+  return (
+    Object.keys(value).length === 1 &&
+    isJsonObject(native) &&
+    Object.keys(native).length === 1 &&
+    Object.hasOwn(native, "max_concurrent_threads_per_session")
+  );
+}
+
+function dependencyCapacityOverride(config: JsonObject): string | undefined {
+  const features = config["features"];
+  const native = isJsonObject(features)
+    ? features["multi_agent_v2"]
+    : undefined;
+  if (
+    isJsonObject(native) &&
+    native["max_concurrent_threads_per_session"] !== undefined
+  )
+    return `features.multi_agent_v2.max_concurrent_threads_per_session=${inlineToml(native["max_concurrent_threads_per_session"])}`;
+  const agents = config["agents"];
+  if (
+    isJsonObject(agents) &&
+    agents["max_concurrent_threads_per_session"] !== undefined
+  )
+    return `agents.max_concurrent_threads_per_session=${inlineToml(agents["max_concurrent_threads_per_session"])}`;
+  return undefined;
+}
+
 function dependencyCheckOverrides(
   repository: string,
-  serviceCatalogServers: JsonObject,
+  inventoryServers: JsonObject,
+  investigatorReasoningEffort: string,
+  capacity: string | undefined,
 ): string[] {
   return [
     ...untrustedProjectConfigOverrides(repository),
@@ -9809,10 +10128,14 @@ function dependencyCheckOverrides(
     "project_doc_max_bytes=0",
     "features.memories=false",
     "features.multi_agent=false",
-    "features.multi_agent_v2=false",
+    "features.multi_agent_v2=true",
+    "features.multi_agent_v2_dynamic_tools=true",
+    ...(capacity === undefined ? [] : [capacity]),
+    `agents.default_subagent_reasoning_effort=${quoteTomlString(investigatorReasoningEffort)}`,
     "features.apps=false",
+    "tools.update_plan.enabled=true",
     'web_search="disabled"',
-    `mcp_servers=${inlineToml(serviceCatalogServers)}`,
+    `mcp_servers=${inlineToml(inventoryServers)}`,
   ];
 }
 
@@ -9841,6 +10164,10 @@ async function runSkill(
         key !== "model_providers" &&
         key !== "daybreak" &&
         !(
+          skill === "dependency-exploitability" &&
+          isDependencyCapacityOverride(key, value)
+        ) &&
+        !(
           key === "analytics" &&
           isJsonObject(value) &&
           Object.keys(value).every((key) => key === "enabled")
@@ -9848,29 +10175,45 @@ async function runSkill(
     )
   ) {
     throw new CodexSecurityError(
-      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, daybreak, and analytics.enabled overrides.",
+      "Skill commands only support model, model_reasoning_effort, model_provider, model_providers, daybreak, and analytics.enabled overrides." +
+        (skill === "dependency-exploitability"
+          ? " Dependency checks also support features.multi_agent_v2.max_concurrent_threads_per_session."
+          : ""),
     );
   }
   if (options.serviceTier !== undefined)
     overrides["service_tier"] = options.serviceTier;
-  const { model, reasoningEffort } = scanModelConfiguration(
-    await mergedCodexConfig({ codexOverrides: overrides }),
+  const selectedConfig = mergeCodexOverrides(
+    resolveCodexProfile(options.dependencyCodexConfig ?? {}),
+    overrides,
   );
+  const mergedConfig = await mergedCodexConfig({
+    codexOverrides: selectedConfig,
+  });
+  const { model, reasoningEffort } = scanModelConfiguration(mergedConfig);
+  const agents = mergedConfig["agents"];
+  const investigatorReasoningEffort =
+    isJsonObject(agents) &&
+    typeof agents["default_subagent_reasoning_effort"] === "string"
+      ? agents["default_subagent_reasoning_effort"]
+      : reasoningEffort;
   const provider =
-    options.provider ?? (overrides["model_provider"] as string | undefined);
+    options.provider ??
+    (selectedConfig["model_provider"] as string | undefined);
   const providerConfiguration =
     options.providerConfiguration ??
     (provider === undefined
       ? undefined
       : ((
-          overrides["model_providers"] as Record<string, JsonObject> | undefined
+          selectedConfig["model_providers"] as
+            Record<string, JsonObject> | undefined
         )?.[provider] ??
         (isExternalModelProvider(provider)
           ? EXTERNAL_CODEX_PROVIDERS[provider]
           : undefined)));
   const effectiveOverrides = resolveCommandAuthConfig(
     mergeCodexOverrides(
-      overrides,
+      selectedConfig,
       provider === undefined
         ? {}
         : {
@@ -9989,9 +10332,7 @@ async function runSkill(
   const patch = skill === "fix-finding";
   const validate = skill === "validation";
   const dependencyCheck = skill === "dependency-exploitability";
-  const serviceCatalogServerNames = Object.keys(
-    options.serviceCatalogServers ?? {},
-  );
+  const inventoryServerNames = Object.keys(options.inventoryServers ?? {});
   const preparedPrompt = await prepareFindingPrompt(
     JSON.stringify(contents),
     async (findingData) => {
@@ -10013,17 +10354,26 @@ async function runSkill(
           : validate
             ? await standaloneValidationPrompt(plugin)
             : `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
+        ...(dependencyCheck && options.dependencyCallerScope !== undefined
+          ? [
+              "Caller scope for this assessment (scenario assumptions, JSON data):",
+              JSON.stringify(options.dependencyCallerScope),
+              "Assess that caller through the specified entrypoint under the checkout configuration. Bind the chain from that entrypoint to the affected operation, and keep other caller capabilities, entrypoints, and deployment variants separate. These assumptions do not establish an observed running deployment or live access.",
+            ]
+          : []),
         ...(dependencyCheck
           ? [
-              "Assess the checkout read-only. Do not run application code, builds, tests, or reproductions.",
-              "Use text matches and shell searches as leads. Inspect promising matches and cite verified source in assessed uses even when they have no candidate IDs. Graph call, flow, and build dependency evidence creates review candidates. Request candidates:{} from codex_security_reports.get_codex_security_review_status and follow nextCursor to account for every unassigned candidate.",
-              "Queue each assessed use, supported dismissal, or documented unresolved candidate group through codex_security_reports.queue_codex_security_dependency_assessments as soon as its evidence is ready. Reuse its item id when revising it. Review runs in batches while you continue investigating; check feedback at natural stopping points rather than polling in a loop.",
-              "Bind each queued item to its exact catalog evidence using receiptIds or receiptSelections from authenticated catalog mappings, or request inventoryReceipts:true from get_codex_security_review_status. Prefer the provided record selections for bulk results. If a receipt refresh makes the binding stale, reassess the latest record and revise the affected item.",
-              "Keep operations with different applicability or evidence separate: preserve a proven exclusion for a local operation even when another delegated operation remains unresolved. Group candidate IDs only when the same scoped conclusion applies to them. Cite the import/export, call, or routing bindings for claimed handoffs between files or services.",
-              "Finish through codex_security_reports.produce_codex_security_exploit_report once investigation and candidate accounting are complete, including when review items remain queued or in flight. Supply the complete uses, limitations, and reviewItemIds selecting the current queued assessments and candidate dispositions. Finalization flushes and waits for pending review immediately. Address specific feedback and update only the affected items. End the turn after acceptance.",
-              ...(serviceCatalogServerNames.length
+              dependencyNativeCoordinatorPrompt,
+              ...(inventoryServerNames.length
                 ? [
-                    `Configured service catalog MCP servers (names only): ${JSON.stringify(serviceCatalogServerNames)}. Use their read-only lookups for service identity, running revisions, and relevant caller access when available. A service identity alone does not establish deployment or access.`,
+                    `Configured inventory MCP server names: ${JSON.stringify(inventoryServerNames)}. Servers selected for source-to-service catalog lookup: ${JSON.stringify(options.catalogServerNames ?? [])}.`,
+                    ...(options.inventoryInstructions &&
+                    Object.keys(options.inventoryInstructions).length
+                      ? [
+                          "Operator guidance for the configured inventory servers:",
+                          JSON.stringify(options.inventoryInstructions),
+                        ]
+                      : []),
                   ]
                 : []),
             ]
@@ -10099,6 +10449,17 @@ async function runSkill(
         providerResolved: provider !== undefined || validate,
       },
     );
+    const commandConfig = structuredCodexConfig(effectiveOverrides);
+    commandConfig["model"] = model;
+    commandConfig["model_reasoning_effort"] = dependencyCheck
+      ? "high"
+      : reasoningEffort;
+    if (options.otel !== undefined) commandConfig["otel"] = options.otel;
+    if (dependencyCheck) {
+      // These are supplied by the isolated dependency boundary below.
+      delete commandConfig["shell_environment_policy"];
+      delete commandConfig["mcp_servers"];
+    } else delete commandConfig["analytics"];
     options.signal?.throwIfAborted();
     return await dependencies.runCodex(
       [
@@ -10108,37 +10469,25 @@ async function runSkill(
         "--disable",
         "plugins",
         ...(appServer ? [] : ["--ephemeral", "--color", "never", "--json"]),
-        "--config",
-        `model=${quoteTomlString(model)}`,
-        "--config",
-        `model_reasoning_effort=${quoteTomlString(reasoningEffort)}`,
-        ...(options.serviceTier === undefined
-          ? []
-          : [
-              "--config",
-              `service_tier=${JSON.stringify(options.serviceTier)}`,
-            ]),
-        ...(overrides["daybreak"] === undefined
-          ? []
-          : ["--config", `daybreak=${inlineToml(overrides["daybreak"])}`]),
+        ...Object.entries(commandConfig).flatMap(([key, value]) => [
+          "--config",
+          `${key}=${inlineToml(value)}`,
+        ]),
         ...Object.entries(options.daybreakFeatures ?? {}).flatMap(
           ([key, value]) => [
             "--config",
             `features.${key}=${inlineToml(value)}`,
           ],
         ),
-        ...codex
-          .filter(
-            (value) =>
-              value.startsWith("analytics.") || value.startsWith("analytics="),
-          )
-          .flatMap((value) => ["--config", value]),
-        ...(options.otel === undefined
-          ? []
-          : ["--config", `otel=${inlineToml(options.otel)}`]),
-        ...(provider === undefined
-          ? []
-          : ["--config", `model_provider=${JSON.stringify(provider)}`]),
+        ...(!dependencyCheck
+          ? codex
+              .filter(
+                (value) =>
+                  value.startsWith("analytics.") ||
+                  value.startsWith("analytics="),
+              )
+              .flatMap((value) => ["--config", value])
+          : []),
         ...modelProviderConfigOverride(effectiveOverrides).flatMap((value) => [
           "--config",
           value,
@@ -10170,7 +10519,9 @@ async function runSkill(
         ...(dependencyCheck
           ? dependencyCheckOverrides(
               directory,
-              options.serviceCatalogServers ?? {},
+              options.inventoryServers ?? {},
+              investigatorReasoningEffort,
+              dependencyCapacityOverride(selectedConfig),
             ).flatMap((value) => ["--config", value])
           : []),
         ...(appServer
@@ -10199,7 +10550,7 @@ async function runSkill(
         ...(dependencyCheck
           ? {
               readOnlySkillRoot: join(plugin, "skills", skill),
-              allowedMcpServers: serviceCatalogServerNames,
+              allowedMcpServers: inventoryServerNames,
             }
           : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
@@ -10261,9 +10612,11 @@ export async function readSkillCommandOutput(
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
     readonly input: NodeJS.WritableStream;
+    readonly allowedMcpServers?: readonly string[];
     readonly permissionProfile?: string;
     readonly dependencyReport?: DependencyReportTool;
     readonly dependencyGraph?: DependencyGraphTools;
+    readonly recovery?: DependencyNativeRecovery;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
@@ -10275,13 +10628,40 @@ export async function readSkillCommandOutput(
   error?: string;
   completed?: boolean;
   sandboxUnavailable?: boolean;
+  connectionError?: string;
 }> {
+  const recovery = appServer?.recovery;
+  const resuming = recovery?.threadId !== undefined;
+  let connectionFailure: unknown;
   let message: string | undefined;
   let error: string | undefined;
-  let threadId: string | undefined;
+  let threadId = recovery?.threadId;
   let turnId: string | undefined;
+  const nativeSession = recovery?.session ?? createDependencyNativeSession();
+  const nativeUsage = recovery?.usage ?? new Map<string, ScanTokenUsage>();
   let turnRequestId: string | number = 3;
-  const finishedTurns = new Set<string>();
+  const finishedTurns = recovery?.finishedTurns ?? new Set<string>();
+  const completedTurnNotifications =
+    recovery?.completedTurnNotifications ?? new Set<string>();
+  const pendingClientWork = new Set<Promise<void>>();
+  let pendingReportCalls = Promise.resolve();
+  let pendingInventoryCaptures = Promise.resolve();
+  let investigationPlan = recovery?.plan;
+  function pendingResearchPrompt(): string | undefined {
+    const leads = new Map<string, string>();
+    for (const item of investigationPlan ?? []) {
+      const marker = /^\[research(?:\s+([^\]]+))?\]/iu.exec(item.step);
+      if (marker && item.status !== "completed")
+        leads.set(marker[1]?.trim() || item.step, item.step);
+    }
+    if (!leads.size) return undefined;
+    return [
+      "Material research remains open in the coordinator's native plan:",
+      ...[...leads.values()].map((step) => `- ${step}`),
+      "Follow the deciding check or reconcile a stale lead against current assessment feedback and evidence. Update the native plan when answered, excluded, or concretely blocked, recording the checks and specific gap. Preserve justified unknowns and submit the exact current reviewed packets.",
+    ].join("\n");
+  }
+  let clientFailure: unknown;
   let completed = false;
   let sandboxUnavailable = false;
   let config: JsonObject = {};
@@ -10295,12 +10675,381 @@ export async function readSkillCommandOutput(
         reject: (error: Error) => void;
       }
     | undefined;
+  let nextInventoryRequest = 0;
+  let inventoryRpcClosed = false;
+  const inventoryRequests = new Map<
+    string,
+    { resolve: (result: unknown) => void; reject: (error: Error) => void }
+  >();
   const externalSandbox = appServer?.externalSandbox
     ? { type: "externalSandbox", networkAccess: "enabled" }
     : undefined;
   const send = (request: JsonObject): void => {
-    appServer?.input.write(`${JSON.stringify(request)}\n`);
+    if (
+      appServer?.input.writable &&
+      clientFailure === undefined &&
+      connectionFailure === undefined
+    )
+      appServer.input.write(`${JSON.stringify(request)}\n`);
   };
+  function requestInventory(
+    method:
+      | "mcpServerStatus/list"
+      | "mcpServer/tool/call"
+      | "mcpServer/resource/read",
+    params: JsonObject,
+  ) {
+    return new Promise<unknown>((resolve, reject) => {
+      if (!threadId || !appServer?.input.writable || inventoryRpcClosed) {
+        reject(new CodexSecurityError("The inventory connection is closed."));
+        return;
+      }
+      const id = `dependency-inventory-${nextInventoryRequest++}`;
+      inventoryRequests.set(id, { resolve, reject });
+      send({ id, method, params: { ...params, threadId } });
+    });
+  }
+  const inventoryRpc: DependencyInventoryRpc = {
+    list: () => requestInventory("mcpServerStatus/list", { detail: "full" }),
+    call: (server, tool, args) =>
+      requestInventory("mcpServer/tool/call", {
+        server,
+        tool,
+        arguments: args,
+      }),
+    read: (server, uri) =>
+      requestInventory("mcpServer/resource/read", { server, uri }),
+  };
+  function runClientWork(operation: Promise<void>) {
+    const pending = operation
+      .catch((failure: unknown) => {
+        clientFailure ??= failure;
+        lines.close();
+      })
+      .finally(() => pendingClientWork.delete(pending));
+    pendingClientWork.add(pending);
+  }
+  async function callReportTool(
+    id: string | number,
+    tool: string,
+    args: unknown,
+  ) {
+    await pendingInventoryCaptures;
+    if (clientFailure !== undefined) return;
+    if (
+      tool === "produce_codex_security_exploit_report" &&
+      appServer?.dependencyReport?.submit
+    ) {
+      await appServer.dependencyGraph?.flush?.();
+      if (
+        nativeThreadReads.size === 0 &&
+        !nativeSession.hasActiveInvestigators()
+      ) {
+        try {
+          await Promise.all(
+            nativeSession.investigatorIds().map(readNativeThread),
+          );
+        } catch (failure) {
+          send({
+            id,
+            result: {
+              success: false,
+              contentItems: [
+                {
+                  type: "inputText",
+                  text: `Could not verify investigator completion: ${errorMessage(failure)}`,
+                },
+              ],
+            },
+          });
+          return;
+        }
+      }
+      const research = pendingResearchPrompt();
+      const result =
+        nativeThreadReads.size > 0 || nativeSession.hasActiveInvestigators()
+          ? {
+              accepted: false,
+              feedback:
+                "Wait for the active native investigators, reconcile their saved evidence, then submit the complete report.",
+            }
+          : research !== undefined
+            ? { accepted: false, feedback: research }
+            : await appServer.dependencyReport.submit(args);
+      send({
+        id,
+        result: {
+          success: result.accepted,
+          contentItems: [{ type: "inputText", text: result.feedback }],
+        },
+      });
+      return;
+    }
+    try {
+      await appServer?.dependencyGraph?.flush?.();
+      const result =
+        tool === "queue_codex_security_dependency_assessments"
+          ? await appServer!.dependencyReport!.queue!(args)
+          : await appServer!.dependencyReport!.status!(
+              args ?? {},
+              appServer?.allowedMcpServers?.length ? inventoryRpc : undefined,
+            );
+      send({
+        id,
+        result: {
+          success: !("queued" in result && result.queued === false),
+          contentItems: [{ type: "inputText", text: JSON.stringify(result) }],
+        },
+      });
+    } catch (failure) {
+      send({
+        id,
+        result: {
+          success: false,
+          contentItems: [{ type: "inputText", text: errorMessage(failure) }],
+        },
+      });
+    }
+  }
+  const nativeThreadReads = new Map<string, Promise<Record<string, unknown>>>();
+  async function readNativeThread(
+    id: string,
+  ): Promise<Record<string, unknown>> {
+    const existing = nativeThreadReads.get(id);
+    if (existing) return existing;
+    const lookup = (async () => {
+      const response = await new Promise<unknown>((resolve, reject) => {
+        if (inventoryRpcClosed || !appServer?.input.writable) {
+          reject(
+            new CodexSecurityError("The native thread connection is closed."),
+          );
+          return;
+        }
+        const requestId = `dependency-thread-${nextInventoryRequest++}`;
+        inventoryRequests.set(requestId, { resolve, reject });
+        send({
+          id: requestId,
+          method: "thread/read",
+          params: { threadId: id, includeTurns: false },
+        });
+      });
+      if (!isJsonObject(response) || !isJsonObject(response["thread"]))
+        throw new CodexSecurityError(
+          "Codex did not return native thread metadata.",
+        );
+      const metadata = response["thread"];
+      if (metadata["id"] !== id)
+        throw new CodexSecurityError(
+          "Codex returned a different native thread.",
+        );
+      nativeSession.registerThread(metadata);
+      const parent = metadata["parentThreadId"];
+      if (typeof parent === "string" && !nativeSession.ownsThread(parent))
+        await readNativeThread(parent);
+      return metadata;
+    })();
+    nativeThreadReads.set(id, lookup);
+    try {
+      return await lookup;
+    } finally {
+      nativeThreadReads.delete(id);
+    }
+  }
+  async function captureInventoryItem(
+    params: Record<string, unknown>,
+    rootTurn: boolean,
+    finishedAt: string,
+  ) {
+    const item = params["item"];
+    const caller = params["threadId"];
+    if (
+      !isJsonObject(item) ||
+      typeof item["server"] !== "string" ||
+      typeof item["tool"] !== "string" ||
+      typeof caller !== "string" ||
+      typeof params["turnId"] !== "string"
+    )
+      return;
+    if (!rootTurn) {
+      if (nativeSession.isRoot(caller)) return;
+      try {
+        if (!nativeSession.ownsThread(caller)) await readNativeThread(caller);
+      } catch (failure) {
+        // A closed metadata connection must follow the ordinary incomplete-run
+        // recovery path, rather than replacing it with a client-work failure.
+        if (!inventoryRpcClosed) throw failure;
+        connectionFailure ??= failure;
+      }
+      if (!nativeSession.ownsThread(caller)) return;
+    }
+    const result = item["result"];
+    const payload = isJsonObject(result) ? result : undefined;
+    const failed =
+      item["status"] !== "completed" ||
+      item["error"] != null ||
+      payload?.["isError"] === true ||
+      payload?.["is_error"] === true;
+    const hasContent =
+      payload?.["structuredContent"] != null ||
+      (Array.isArray(payload?.["content"]) && payload["content"].length > 0);
+    const outcome = failed ? "failed" : hasContent ? undefined : "empty";
+    const receiptId = appServer!.dependencyReport!.recordInventory(
+      item["server"],
+      item["error"] == null
+        ? (result ?? null)
+        : { result, error: item["error"] },
+      {
+        tool: item["tool"],
+        arguments: item["arguments"],
+        finishedAt,
+        ...(typeof item["id"] === "string" ? { itemId: item["id"] } : {}),
+        ...(outcome === undefined ? {} : { outcome }),
+      },
+    );
+    if (outcome === undefined && receiptId)
+      appServer?.dependencyGraph?.observeInventory?.(
+        item["server"],
+        result,
+        receiptId,
+        inventoryRpc,
+      );
+  }
+  async function routeToolCall(
+    value: Record<string, unknown>,
+    params: Record<string, unknown>,
+  ) {
+    if (!appServer) return;
+    const caller = params["threadId"];
+    if (
+      appServer?.dependencyReport &&
+      typeof caller === "string" &&
+      (!nativeSession.ownsThread(caller) ||
+        (nativeSession.ownsThread(caller) &&
+          !nativeSession.isRoot(caller) &&
+          !nativeSession.isCurrentTurn(params)))
+    ) {
+      try {
+        const metadata = await readNativeThread(caller);
+        const status = metadata["status"];
+        if (
+          nativeSession.ownsThread(caller) &&
+          isJsonObject(status) &&
+          status["type"] === "active" &&
+          typeof params["turnId"] === "string"
+        )
+          nativeSession.setTurn(caller, params["turnId"]);
+      } catch (failure) {
+        send({
+          id: value["id"] as string | number,
+          error: {
+            code: -32601,
+            message: `Could not verify native investigator: ${errorMessage(failure)}`,
+          },
+        });
+        return;
+      }
+    }
+    const rootTurn = caller === threadId && params["turnId"] === turnId;
+    const investigatorTurn =
+      appServer?.dependencyReport && nativeSession.isCurrentTurn(params);
+    if (!rootTurn && !investigatorTurn) {
+      send({
+        id: value["id"] as string | number,
+        error: { code: -32601, message: "Unsupported client request" },
+      });
+      return;
+    }
+    if (
+      params["namespace"] === dependencyGraphNamespace &&
+      typeof params["tool"] === "string" &&
+      appServer.dependencyGraph
+    ) {
+      await callGraphTool(
+        appServer.dependencyGraph,
+        value["id"] as string | number,
+        params["tool"],
+        params["arguments"],
+      );
+    } else if (
+      params["namespace"] === "codex_security_reports" &&
+      ((params["tool"] === "queue_codex_security_dependency_assessments" &&
+        appServer.dependencyReport?.queue) ||
+        (params["tool"] === "get_codex_security_review_status" &&
+          appServer.dependencyReport?.status) ||
+        (params["tool"] === "produce_codex_security_exploit_report" &&
+          appServer.dependencyReport?.submit))
+    ) {
+      if (
+        params["tool"] === "produce_codex_security_exploit_report" &&
+        !nativeSession.isRoot(params["threadId"])
+      ) {
+        send({
+          id: value["id"] as string | number,
+          result: {
+            success: false,
+            contentItems: [
+              {
+                type: "inputText",
+                text: "The coordinator owns final report submission. Queue your evidence and send the coordinator your assessment IDs.",
+              },
+            ],
+          },
+        });
+        return;
+      }
+      const report = () =>
+        callReportTool(
+          value["id"] as string | number,
+          params["tool"] as string,
+          params["arguments"],
+        );
+      // Keep report completion visible to finishTurn while the reader handles
+      // replies needed by graph ingestion or receipt authentication.
+      const pending = pendingReportCalls.then(report);
+      pendingReportCalls = pending.catch((failure: unknown) => {
+        clientFailure ??= failure;
+      });
+      await pending;
+    } else if (typeof value["method"] === "string") {
+      send({
+        id: value["id"] as string | number,
+        error: { code: -32601, message: "Unsupported client request" },
+      });
+    }
+  }
+  async function finishTurn(turn: {
+    id: string;
+    status: string;
+    error?: { message: string };
+  }) {
+    await pendingReportCalls;
+    await pendingInventoryCaptures;
+    await appServer?.dependencyGraph?.flush?.();
+    if (clientFailure !== undefined) return;
+    if (turn.status === "completed" && appServer?.dependencyReport) {
+      // An investigator can resume while final submission awaits review.
+      const prompt =
+        nativeThreadReads.size > 0 || nativeSession.hasActiveInvestigators()
+          ? "Wait for the active native investigators, reconcile their saved evidence, then submit the complete report."
+          : (pendingResearchPrompt() ??
+            appServer.dependencyReport.continuationPrompt());
+      if (prompt !== undefined) {
+        finishedTurns.add(turn.id);
+        turnRequestId = `dependency-turn-${finishedTurns.size + 1}`;
+        turnId = undefined;
+        startTurn(
+          investigationPlan?.length
+            ? `${prompt}\n\nLatest investigation plan (checklist data to verify)\n${JSON.stringify(investigationPlan)}`
+            : prompt,
+        );
+        return;
+      }
+    }
+    completed = turn.status === "completed";
+    if (!completed)
+      error = turn.error?.message ?? "Codex did not complete the patch.";
+    appServer?.input.end();
+  }
   async function callGraphTool(
     graph: DependencyGraphTools,
     id: string | number,
@@ -10312,12 +11061,19 @@ export async function readSkillCommandOutput(
       type: "mcpToolCall",
       server: dependencyGraphNamespace,
       id: String(id),
+      tool,
+      arguments: args,
     };
     record?.("item/started", item);
     let success: boolean;
     let text: string;
     try {
-      const result = await graph.call(tool, args);
+      await pendingInventoryCaptures;
+      if (clientFailure !== undefined) return;
+      const result = await (appServer?.dependencyReport &&
+      appServer.allowedMcpServers?.length
+        ? graph.call(tool, args, inventoryRpc)
+        : graph.call(tool, args));
       const candidates = await appServer?.dependencyReport?.observeGraph?.(
         tool,
         result,
@@ -10328,11 +11084,18 @@ export async function readSkillCommandOutput(
         result: { structuredContent: result },
       });
       success = true;
+      const reply = candidates?.length ? { ...result, candidates } : result;
       text = JSON.stringify(
-        candidates?.length ? { ...result, candidates } : result,
+        tool === "trace_codex_security_code" && graph.boundTraceResponse
+          ? graph.boundTraceResponse(reply)
+          : reply,
       );
     } catch (error) {
-      record?.("item/completed", { ...item, status: "failed" });
+      record?.("item/completed", {
+        ...item,
+        status: "failed",
+        error: errorMessage(error),
+      });
       success = false;
       text = errorMessage(error);
     }
@@ -10395,7 +11158,31 @@ export async function readSkillCommandOutput(
                 : "daybreak_red",
             );
           } else {
-            appServer.bindReviewer?.(provider);
+            const features = isJsonObject(config["features"])
+              ? config["features"]
+              : {};
+            const selectedFeatures = Object.fromEntries(
+              [
+                "cli_daybreak",
+                "api_key_cyber_access_programs",
+                "api_key_model_discovery",
+              ]
+                .filter((key) => features[key] !== undefined)
+                .map((key) => [key, features[key]!]),
+            );
+            appServer.bindReviewer?.(
+              provider,
+              {
+                model,
+                ...(config["daybreak"] === undefined
+                  ? {}
+                  : { daybreak: config["daybreak"] }),
+                ...(Object.keys(selectedFeatures).length
+                  ? { features: selectedFeatures }
+                  : {}),
+              },
+              appServer.cyberAccessProgram,
+            );
           }
         }
         send({
@@ -10424,6 +11211,26 @@ export async function readSkillCommandOutput(
         "Dependency check requires its read-only permission profile.",
       );
     }
+    if (resuming) {
+      send({
+        id: 2,
+        method: "thread/resume",
+        params: {
+          threadId: recovery!.threadId!,
+          excludeTurns: true,
+          ...(appServer.directory === undefined
+            ? {}
+            : { cwd: appServer.directory }),
+          ...(appServer.modelProvider === undefined
+            ? {}
+            : { modelProvider: appServer.modelProvider }),
+          approvalPolicy: "never",
+          permissions: appServer.permissionProfile!,
+          ...(threadConfig === undefined ? {} : { config: threadConfig }),
+        },
+      });
+      return;
+    }
     send({
       id: 2,
       method: "thread/start",
@@ -10443,8 +11250,8 @@ export async function readSkillCommandOutput(
           : { sandbox: appServer.sandbox ?? "workspace-write" }),
         ...(submission || graph
           ? {
-              // Daybreak requires a persistent thread. Each check still starts a fresh one.
-              ephemeral: config["daybreak"] !== true,
+              // Persist native plans and worker history for this investigation.
+              ephemeral: submission ? false : config["daybreak"] !== true,
               dynamicTools: [
                 ...(graph
                   ? [
@@ -10473,8 +11280,7 @@ export async function readSkillCommandOutput(
                                 {
                                   type: "function",
                                   name: "queue_codex_security_dependency_assessments",
-                                  description:
-                                    "Queue assessed uses or candidate dispositions for background evidence review. Group related candidateIds, use a stable item id, and revise that same id when its claim or evidence changes. Review starts after one minute or 100 ready items; continue investigating while it runs. Dismissals and unresolved candidates need specific reasons and supporting evidence.",
+                                  description: dependencyReviewQueueDescription,
                                   inputSchema: z.toJSONSchema(
                                     dependencyReviewQueueSchema,
                                   ) as JsonObject,
@@ -10487,22 +11293,26 @@ export async function readSkillCommandOutput(
                                   type: "function",
                                   name: "get_codex_security_review_status",
                                   description:
-                                    "Read concise review progress and actionable feedback. Request candidates:{} only to retrieve unassigned locations, then follow nextCursor. Set inventoryReceipts:true only when selecting evidence bindings. Do not poll for acceptance; finalize once investigation and candidate accounting are complete, even with pending reviews.",
+                                    "Read review feedback and shared candidate pages with candidates:{}. Follow nextCursor. Read assessments:{} for compact use summaries or assessmentIds for full items. Set inventoryReceipts:true when selecting original evidence. Track research questions in your native Codex plan. Finalize once investigation and candidate accounting are complete, even with pending reviews.",
                                   inputSchema: z.toJSONSchema(
                                     dependencyReviewStatusInputSchema,
                                   ) as JsonObject,
                                 },
                               ]
                             : []),
-                          {
-                            type: "function",
-                            name: "produce_codex_security_exploit_report",
-                            description:
-                              "Finalize the complete assessment and select its queued reviewItemIds, including candidate dispositions. The tool flushes pending batches immediately, checks known-candidate accounting, and derives the overall verdict from validated findings. Unchanged approvals are reused. On rejection investigate the specific gap, revise affected items, and resubmit. End the turn after acceptance.",
-                            inputSchema: z.toJSONSchema(
-                              dependencyReportInputSchema,
-                            ) as JsonObject,
-                          },
+                          ...(appServer.dependencyReport?.submit
+                            ? [
+                                {
+                                  type: "function",
+                                  name: "produce_codex_security_exploit_report",
+                                  description:
+                                    "Finalize the complete assessment and select its queued reviewItemIds, including candidate dispositions. The tool flushes pending batches immediately, checks known-candidate accounting, and derives the overall verdict from validated findings. Unchanged approvals are reused. On rejection investigate the specific gap, revise affected items, and resubmit. End the turn after acceptance.",
+                                  inputSchema: z.toJSONSchema(
+                                    dependencyReportInputSchema,
+                                  ) as JsonObject,
+                                },
+                              ]
+                            : []),
                         ],
                       },
                     ]
@@ -10515,7 +11325,29 @@ export async function readSkillCommandOutput(
       },
     });
   };
+  // Use child stdout directly so terminating the child after a rejection does
+  // not leave an async iterator reading its closed pipe.
+  const input = stream instanceof Readable ? stream : Readable.from(stream);
+  const lines = createInterface({ input });
+  lines.once("close", () => {
+    inventoryRpcClosed = true;
+    const failure = new CodexSecurityError("The inventory connection closed.");
+    for (const request of inventoryRequests.values()) request.reject(failure);
+    inventoryRequests.clear();
+    daybreakRequest?.reject(
+      new CodexSecurityError("The app-server connection closed."),
+    );
+    daybreakRequest = undefined;
+  });
   if (appServer !== undefined) {
+    const onInputError = (failure: Error) => {
+      connectionFailure ??= failure;
+      lines.close();
+    };
+    appServer.input.on("error", onInputError);
+    appServer.input.once("close", () =>
+      appServer.input.off("error", onInputError),
+    );
     send({
       id: 1,
       method: "initialize",
@@ -10525,11 +11357,7 @@ export async function readSkillCommandOutput(
       },
     });
   }
-
-  // Use child stdout directly so terminating the child after a rejection does
-  // not leave an async iterator reading its closed pipe.
-  const input = stream instanceof Readable ? stream : Readable.from(stream);
-  for await (const line of createInterface({ input })) {
+  for await (const line of lines) {
     if (line.trim().length === 0) continue;
     const event = parseJson(() => line);
     if (typeof event !== "object" || event === null) {
@@ -10537,7 +11365,11 @@ export async function readSkillCommandOutput(
     }
     const value = event as Record<string, unknown>;
     if (appServer !== undefined) {
-      const params = value["params"];
+      const params = isJsonObject(value["params"]) ? value["params"] : {};
+      nativeSession.observe(value);
+      const investigationTurn =
+        appServer.dependencyReport !== undefined &&
+        nativeSession.isCurrentTurn(params);
       const currentTurn =
         isJsonObject(params) &&
         threadId !== undefined &&
@@ -10550,6 +11382,25 @@ export async function readSkillCommandOutput(
         } catch {}
       }
       if (value["id"] !== undefined) {
+        const requestId = value["id"];
+        if (typeof requestId === "string") {
+          const pending = inventoryRequests.get(requestId);
+          if (pending) {
+            inventoryRequests.delete(requestId);
+            const failure = value["error"];
+            if (failure === undefined) pending.resolve(value["result"]);
+            else
+              pending.reject(
+                new CodexSecurityError(
+                  isJsonObject(failure) &&
+                    typeof failure["message"] === "string"
+                    ? failure["message"]
+                    : "The inventory request failed.",
+                ),
+              );
+            continue;
+          }
+        }
         if (value["id"] === daybreakRequest?.id) {
           const pending = daybreakRequest;
           daybreakRequest = undefined;
@@ -10562,72 +11413,18 @@ export async function readSkillCommandOutput(
           }
           continue;
         }
-        if (
-          value["method"] === "item/tool/call" &&
-          currentTurn &&
-          params["namespace"] === dependencyGraphNamespace &&
-          typeof params["tool"] === "string" &&
-          appServer.dependencyGraph
-        ) {
-          void callGraphTool(
-            appServer.dependencyGraph,
-            value["id"] as string | number,
-            params["tool"],
-            params["arguments"],
-          );
-        } else if (
-          value["method"] === "item/tool/call" &&
-          currentTurn &&
-          params["namespace"] === "codex_security_reports" &&
-          ((params["tool"] === "queue_codex_security_dependency_assessments" &&
-            appServer.dependencyReport?.queue) ||
-            (params["tool"] === "get_codex_security_review_status" &&
-              appServer.dependencyReport?.status))
-        ) {
-          try {
-            const result =
-              params["tool"] === "queue_codex_security_dependency_assessments"
-                ? await appServer.dependencyReport!.queue!(params["arguments"])
-                : appServer.dependencyReport!.status!(
-                    params["arguments"] ?? {},
-                  );
-            send({
-              id: value["id"] as string | number,
-              result: {
-                success: result.queued !== false,
-                contentItems: [
-                  { type: "inputText", text: JSON.stringify(result) },
-                ],
-              },
-            });
-          } catch (error) {
-            send({
-              id: value["id"] as string | number,
-              result: {
-                success: false,
-                contentItems: [
-                  { type: "inputText", text: errorMessage(error) },
-                ],
-              },
-            });
-          }
-        } else if (
-          value["method"] === "item/tool/call" &&
-          currentTurn &&
-          params["namespace"] === "codex_security_reports" &&
-          params["tool"] === "produce_codex_security_exploit_report" &&
-          appServer.dependencyReport
-        ) {
-          const result = await appServer.dependencyReport.submit(
-            params["arguments"],
-          );
-          send({
-            id: value["id"] as string | number,
-            result: {
-              success: result.accepted,
-              contentItems: [{ type: "inputText", text: result.feedback }],
-            },
-          });
+        if (value["method"] === "item/tool/call") {
+          const operation = routeToolCall(value, params);
+          if (
+            params["namespace"] === "codex_security_reports" &&
+            nativeSession.isRoot(params["threadId"]) &&
+            !appServer.dependencyGraph?.flush &&
+            nativeSession.investigatorIds().length === 0 &&
+            nativeThreadReads.size === 0 &&
+            pendingClientWork.size === 0
+          )
+            await operation;
+          else runClientWork(operation);
         } else if (typeof value["method"] === "string") {
           send({
             id: value["id"] as string | number,
@@ -10743,7 +11540,7 @@ export async function readSkillCommandOutput(
             model: string;
             modelProvider: string;
           };
-          const expectEphemeral = config["daybreak"] !== true;
+          const expectEphemeral = false;
           if (
             appServer.dependencyReport &&
             (result.thread.ephemeral !== expectEphemeral ||
@@ -10756,6 +11553,9 @@ export async function readSkillCommandOutput(
             );
           }
           threadId = result.thread.id;
+          nativeSession.registerRoot(threadId);
+          nativeSession.registerThread(result.thread);
+          if (recovery) recovery.threadId = threadId;
           await appServer.onThreadStarted?.(result.modelProvider);
           model = result.model;
           provider = result.modelProvider;
@@ -10773,7 +11573,20 @@ export async function readSkillCommandOutput(
             });
             continue;
           }
-          startTurn();
+          startTurn(
+            resuming
+              ? [
+                  "The Codex connection closed and this same investigation resumed. The shared graph, source notes, candidate registry, original inventory receipts, and queued assessments remain available in the host.",
+                  "Read current review status and saved graph evidence before assigning more work. Reconcile completed findings and continue unanswered questions. Resume an unfinished native investigator when useful. Preserve the caller scope and exact-copy evidence rules from this thread.",
+                  ...(investigationPlan?.length
+                    ? [
+                        "Latest investigation plan (checklist data to verify)",
+                        JSON.stringify(investigationPlan),
+                      ]
+                    : []),
+                ].join("\n")
+              : undefined,
+          );
         } else if (value["id"] === 5) {
           const result = value["result"] as {
             exitCode: number;
@@ -10789,6 +11602,7 @@ export async function readSkillCommandOutput(
           startTurn();
         } else if (value["id"] === turnRequestId) {
           turnId = (value["result"] as { turn: { id: string } }).turn.id;
+          nativeSession.setTurn(threadId!, turnId);
         }
       } else if (value["method"] === "turn/started") {
         const params = value["params"] as {
@@ -10802,31 +11616,46 @@ export async function readSkillCommandOutput(
         ) {
           turnId = params.turn.id;
         }
+      } else if (
+        value["method"] === "turn/plan/updated" &&
+        currentTurn &&
+        appServer.dependencyReport
+      ) {
+        const plan = investigationPlanSchema.safeParse(params["plan"]);
+        if (plan.success) {
+          investigationPlan = plan.data;
+          if (recovery) recovery.plan = plan.data;
+        }
       } else if (value["method"] === "turn/completed") {
         const params = value["params"] as {
           threadId: string;
           turn: { id: string; status: string; error?: { message: string } };
         };
         if (params.threadId !== threadId || params.turn.id !== turnId) continue;
-        if (params.turn.status === "completed" && appServer.dependencyReport) {
-          const prompt = appServer.dependencyReport.continuationPrompt();
-          if (prompt !== undefined) {
-            finishedTurns.add(params.turn.id);
-            turnRequestId = `dependency-turn-${finishedTurns.size + 1}`;
-            turnId = undefined;
-            startTurn(prompt);
-            continue;
-          }
-        }
-        completed = params.turn.status === "completed";
-        if (!completed) {
-          error =
-            params.turn.error?.message ?? "Codex did not complete the patch.";
-        }
-        appServer.input.end();
+        if (completedTurnNotifications.has(params.turn.id)) continue;
+        completedTurnNotifications.add(params.turn.id);
+        if (appServer.dependencyGraph?.flush || pendingClientWork.size > 0)
+          runClientWork(finishTurn(params.turn));
+        else await finishTurn(params.turn);
+      } else if (
+        value["method"] === "mcpServer/startupStatus/updated" &&
+        appServer.dependencyReport?.recordInventoryStartup &&
+        isJsonObject(params) &&
+        (params["threadId"] == null ||
+          nativeSession.ownsThread(params["threadId"])) &&
+        typeof params["name"] === "string" &&
+        (params["status"] === "ready" ||
+          params["status"] === "failed" ||
+          params["status"] === "cancelled")
+      ) {
+        appServer.dependencyReport.recordInventoryStartup(
+          params["name"],
+          params["status"],
+          params["error"],
+        );
       } else if (
         value["method"] === "thread/tokenUsage/updated" &&
-        currentTurn &&
+        (currentTurn || investigationTurn) &&
         onUsage
       ) {
         const usage = params["tokenUsage"];
@@ -10839,31 +11668,38 @@ export async function readSkillCommandOutput(
             output_tokens: total["outputTokens"],
             reasoning_output_tokens: total["reasoningOutputTokens"],
           });
-          if (observed) notify(() => onUsage(observed));
+          if (observed) {
+            nativeUsage.set(String(params["threadId"]), observed);
+            const totalUsage = [...nativeUsage.values()].reduce((total, next) =>
+              addTokenUsage(total, next),
+            );
+            notify(() => onUsage(totalUsage));
+          }
         }
-      } else if (value["method"] === "item/completed" && currentTurn) {
+      } else if (
+        value["method"] === "item/completed" &&
+        appServer.dependencyReport &&
+        isJsonObject(params["item"]) &&
+        params["item"]["type"] === "mcpToolCall"
+      ) {
+        // Authenticate and ingest live completions in arrival order. Metadata
+        // can already say idle by the time it authenticates this earlier event;
+        // receipt capture does not authorize a new dynamic-tool turn.
+        const finishedAt = new Date().toISOString();
+        const pending = pendingInventoryCaptures.then(() =>
+          captureInventoryItem(params, currentTurn, finishedAt),
+        );
+        pendingInventoryCaptures = pending.catch((failure: unknown) => {
+          clientFailure ??= failure;
+        });
+        runClientWork(pending);
+      } else if (
+        value["method"] === "item/completed" &&
+        (currentTurn || investigationTurn)
+      ) {
         const item = params["item"];
-        if (!isJsonObject(item)) continue;
-        const result = item["result"];
         if (
-          appServer.dependencyReport &&
-          item["type"] === "mcpToolCall" &&
-          item["status"] === "completed" &&
-          typeof item["server"] === "string" &&
-          typeof item["tool"] === "string" &&
-          item["error"] == null &&
-          isJsonObject(result) &&
-          result["isError"] !== true &&
-          result["is_error"] !== true &&
-          (result["structuredContent"] != null ||
-            (Array.isArray(result["content"]) && result["content"].length > 0))
-        ) {
-          appServer.dependencyReport.recordInventory(item["server"], result, {
-            tool: item["tool"],
-            arguments: item["arguments"],
-            ...(typeof item["id"] === "string" ? { itemId: item["id"] } : {}),
-          });
-        } else if (
+          isJsonObject(item) &&
           !appServer.dependencyReport &&
           item["type"] === "agentMessage" &&
           item["phase"] !== "commentary" &&
@@ -10898,11 +11734,18 @@ export async function readSkillCommandOutput(
       error = value["message"];
     }
   }
+  await Promise.all([...pendingClientWork]);
+  if (clientFailure !== undefined) throw clientFailure;
+  if (connectionFailure !== undefined && !recovery?.threadId)
+    throw connectionFailure;
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
     ...(appServer === undefined ? {} : { completed }),
     ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
+    ...(connectionFailure === undefined
+      ? {}
+      : { connectionError: errorMessage(connectionFailure) }),
   };
 }
 

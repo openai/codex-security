@@ -19,6 +19,26 @@ export const dependencyReviewStatusInputSchema = z.strictObject({
     .describe(
       "Request a page of candidate locations only when needed. Defaults to 500 unassigned candidates, with a maximum requested page size of 1000. Follow nextCursor; new discovery invalidates a cursor. Queueing a page does not skip subsequent candidates.",
     ),
+  assessments: z
+    .strictObject({
+      after: z.string().trim().min(1).optional(),
+      limit: z.number().int().positive().optional(),
+    })
+    .optional()
+    .describe(
+      "Page compact active assessment summaries, including accepted worker items. Defaults to 50 items. Pass nextAfter as after to read the next page.",
+    ),
+  assessmentIds: z
+    .array(z.string().trim().min(1))
+    .min(1)
+    .refine(
+      (ids) => new Set(ids).size === ids.length,
+      "Assessment IDs must be unique.",
+    )
+    .optional()
+    .describe(
+      "Read exact queued items by ID before repairing their evidence. The returned item can be requeued under the same ID. Native investigators share the assessment queue.",
+    ),
   inventoryReceipts: z
     .boolean()
     .optional()
@@ -99,6 +119,7 @@ export function summarizeDependencyReviewStatus(
         path: candidate.path,
         line: candidate.line,
         ...(candidate.package && { package: candidate.package }),
+        ...(candidate.testCandidate && { testCandidate: true }),
         sourceBytes: candidate.sourceBytes,
         assessmentIds: bindings.get(candidate.id) ?? [],
       })),

@@ -1,8 +1,11 @@
+import { nativeRules, sourceStep } from "./support/native-trace-rules.ts";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { traceResponse } from "../src/dependency-trace/response.ts";
@@ -12,6 +15,227 @@ import type {
 } from "../src/dependency-trace/types.ts";
 import { applicationRoot, buildServer } from "./build-server.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
+
+test("filtered directory discovery registers OpenGrep hits without selecting files", async (t) => {
+  for (const command of ["rg", "opengrep"]) {
+    try {
+      await promisify(execFile)(command, ["--version"]);
+    } catch {
+      return t.skip(command + " required");
+    }
+  }
+  const temps = createTemporaryDirectories(true);
+  t.after(() => temps.cleanup());
+  const checkout = await temps.create("dependency-batch-checkout-");
+  const runtime = await temps.create("dependency-batch-session-");
+  const bundle = join(runtime, "session.cjs");
+  await buildServer(bundle, {
+    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
+  });
+  const { createDependencyGraphSession } = (
+    (await import(pathToFileURL(bundle).href)) as {
+      default: typeof import("../src/dependency-trace/session.ts");
+    }
+  ).default;
+  const session = await createDependencyGraphSession(checkout, true);
+  t.after(() => session.close());
+
+  await mkdir(join(checkout, "src"));
+  await Promise.all(
+    Array.from({ length: 70 }, (_, index) =>
+      writeFile(
+        join(
+          checkout,
+          "src",
+          "noise-" + String(index).padStart(2, "0") + ".py",
+        ),
+        "def unrelated(record):\n    return record.save()\n",
+      ),
+    ),
+  );
+  await writeFile(join(checkout, "src/import-only.py"), "import image_lib\n");
+  const targets = Array.from({ length: 18 }, (_, index) => {
+    const suffix = String(index).padStart(2, "0");
+    return { path: "src/target-" + suffix + ".py", caller: "write_" + suffix };
+  });
+  for (const { path, caller } of targets) {
+    // Equal-length caller names put both calls at the same native byte offset.
+    await writeFile(
+      join(checkout, path),
+      "from image_lib import Image\n\ndef " +
+        caller +
+        '(image: Image):\n    return image.save("result.png", format="PNG")\n',
+    );
+  }
+
+  const result = await session.call("trace_codex_security_code", {
+    package: "image-package",
+    source_terms: ["image_lib"],
+    symbol: "save",
+    rules: nativeRules("save"),
+    paths: ["src"],
+    source_only: true,
+    max_hops: 0,
+    time_budget_ms: 15000,
+  });
+  const trace = result.trace as {
+    from: { kind: string; name: string; scope?: string };
+    relation: string;
+    calleeText?: string;
+    evidence: { source: string; lines?: number[] }[];
+  }[];
+  assert.deepEqual(
+    trace
+      .filter(({ relation }) => relation === "candidate_call")
+      .sort((left, right) => left.from.name.localeCompare(right.from.name))
+      .map(sourceStep),
+    targets.map(({ path, caller }) => ({
+      from: { kind: "symbol", name: caller, scope: path },
+      relation: "candidate_call",
+      calleeText: "save",
+      evidence: [{ source: path, lines: [4] }],
+    })),
+  );
+  assert.deepEqual(
+    (result.coverage as { source_batches: unknown }).source_batches,
+    { scheduled: 2, completed: 2, files: 18 },
+  );
+  assert.equal(result.service_resolution.pending, 0);
+  assert.deepEqual(session.pendingCatalogRequests(), []);
+  const graph = await session.call("query_codex_security_graph", {});
+  assert.equal(graph.code_paths_found, 18);
+
+  await mkdir(join(checkout, "overflow"));
+  const dense =
+    "from image_lib import Image\n\ndef render_many(image: Image):\n" +
+    `    image.save("${"x".repeat(2000)}.png", format="PNG")\n`.repeat(500);
+  assert.ok(Buffer.byteLength(dense) < 1024 * 1024);
+  await writeFile(join(checkout, "overflow/dense.py"), dense);
+  await writeFile(
+    join(checkout, "overflow/sparse.py"),
+    "from image_lib import Image\n\ndef render_one(image: Image):\n" +
+      '    image.save("result.png", format="PNG")\n',
+  );
+  const overflow = await session.call("trace_codex_security_code", {
+    package: "image-package",
+    source_terms: ["image_lib"],
+    symbol: "save",
+    // Two distinct authored rule IDs deliberately exceed the native output budget.
+    rules: [
+      ...nativeRules("save"),
+      ...nativeRules("save").map((rule) => ({
+        ...rule,
+        id: String(rule.id) + "-second",
+      })),
+    ],
+    paths: ["overflow"],
+    source_only: true,
+    max_hops: 0,
+    time_budget_ms: 60000,
+  });
+  const overflowCoverage = overflow.coverage as {
+    complete: boolean;
+    partial: { reason: string }[];
+    source_batches: { scheduled: number; completed: number; files: number };
+  };
+  assert.equal(overflowCoverage.complete, false);
+  assert.deepEqual(overflowCoverage.source_batches, {
+    scheduled: 1,
+    completed: 0,
+    files: 2,
+  });
+  assert.match(
+    overflowCoverage.partial.map(({ reason }) => reason).join("\n"),
+    /OpenGrep response exceeded the byte limit/u,
+  );
+  assert.deepEqual(
+    sourceStep(
+      (overflow.trace as typeof trace).find(
+        ({ from }) => from.scope === "overflow/sparse.py",
+      )!,
+    ),
+    {
+      from: {
+        kind: "symbol",
+        name: "render_one",
+        scope: "overflow/sparse.py",
+      },
+      relation: "candidate_call",
+      calleeText: "save",
+      evidence: [{ source: "overflow/sparse.py", lines: [4] }],
+    },
+  );
+  assert.deepEqual(session.pendingCatalogRequests(), []);
+
+  // Append inside the existing real-session source batch test.
+  await mkdir(join(checkout, "wide"));
+  const files = 12;
+  const callsPerFile = 14;
+  const totalCalls = files * callsPerFile;
+  for (let index = 0; index < files; index++) {
+    const name = "consumer-" + index + "-" + "source".repeat(18) + ".py";
+    const callers = Array.from(
+      { length: callsPerFile },
+      (_, caller) =>
+        "def render_" +
+        caller +
+        '(image: Image):\n    return image.save("result.png", format="PNG")\n\n',
+    ).join("");
+    await writeFile(
+      join(checkout, "wide", name),
+      "from image_lib import Image\n\n" + callers,
+    );
+  }
+
+  const wideRequest = {
+    package: "image-package",
+    source_terms: ["image_lib"],
+    symbol: "save",
+    rules: nativeRules("save"),
+    paths: ["wide"],
+    source_only: true,
+    max_hops: 0,
+    time_budget_ms: 600_000,
+  };
+  const host = await createDependencyGraphSession(checkout, true, {
+    fullTraceReply: true,
+  });
+  t.after(() => host.close());
+  const raw = await host.call("trace_codex_security_code", wideRequest);
+  const rawTrace = raw.trace as typeof trace;
+  assert.equal(rawTrace.length, totalCalls);
+  assert.equal((raw.coverage as { complete: boolean }).complete, true);
+  assert.equal(
+    (await host.call("query_codex_security_graph", {})).code_paths_found,
+    totalCalls,
+  );
+
+  // Include the extra candidate list that the SDK adds after observing raw.
+  const candidates = rawTrace.map(({ evidence }, index) => ({
+    id: "candidate-" + (index + 1),
+    path: evidence[0].source,
+    line: evidence[0].lines?.[0],
+  }));
+  const model = host.boundTraceResponse({ ...raw, candidates });
+  assert.ok(Buffer.byteLength(JSON.stringify(model)) <= 32 * 1024);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(model)) <
+      Buffer.byteLength(JSON.stringify(raw)),
+  );
+
+  const summaryBefore = await session.call("query_codex_security_graph", {});
+  const standalone = await session.call(
+    "trace_codex_security_code",
+    wideRequest,
+  );
+  assert.ok(Buffer.byteLength(JSON.stringify(standalone)) <= 32 * 1024);
+  assert.ok((standalone.trace as typeof trace).length < totalCalls);
+  assert.equal((standalone.coverage as { complete: boolean }).complete, true);
+  assert.equal(
+    (await session.call("query_codex_security_graph", {})).code_paths_found,
+    Number(summaryBefore.code_paths_found) + totalCalls,
+  );
+});
 
 test("standalone dependency tools preserve source evidence with no service catalog", async (t) => {
   const temps = createTemporaryDirectories(true);
@@ -276,6 +500,27 @@ test("only host catalog results settle requested service lookups", async (t) => 
     (await session.call(query, { node: "package.json" })).service_lookup,
     "pending",
   );
+  await mkdir(join(checkout, "discovery"));
+  await writeFile(
+    join(checkout, "discovery/package.json"),
+    '{"dependencies":{"example":"1.0.0"}}',
+  );
+  const source = await session.call("trace_codex_security_code", {
+    ...search,
+    files: ["discovery/package.json"],
+    source_only: true,
+    max_hops: 0,
+  });
+  assert.equal(source.service_resolution.pending, 1);
+  assert.deepEqual(source.service_resolution.paths, ["package.json"]);
+  assert.deepEqual(source.trace, [
+    {
+      from: { kind: "file", name: "discovery/package.json" },
+      relation: "depends_on",
+      to: { kind: "package", name: "example", scope: "discovery/package.json" },
+      evidence: [{ source: "discovery/package.json", lines: [1] }],
+    },
+  ]);
   const reason = "No catalog record for this manifest.";
   session.recordCatalogResolutions([
     { path: "package.json", status: "unresolved", reason },
@@ -297,6 +542,10 @@ test("only host catalog results settle requested service lookups", async (t) => 
     "lib/standalone.js",
   ]);
   assert.deepEqual(session.pendingCatalogRequests(args), [
+    { path: "src/main.js", project: "." },
+    { path: "lib/standalone.js", project: "." },
+  ]);
+  assert.deepEqual(session.pendingCatalogRequests(), [
     { path: "src/main.js", project: "." },
     { path: "lib/standalone.js", project: "." },
   ]);
@@ -327,6 +576,7 @@ test("only host catalog results settle requested service lookups", async (t) => 
   assert.equal(resolved.service_resolution.pending, 0);
   assert.equal(resolved.service_resolution.checked, 2);
   assert.deepEqual(session.pendingCatalogRequests(args), []);
+  assert.deepEqual(session.pendingCatalogRequests(), []);
   const file = await session.call(query, { node: "src/main.js" });
   assert.deepEqual(
     (file.evidence as { source: string; relation?: string }[])

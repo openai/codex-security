@@ -65,6 +65,11 @@ function rolloutCase(
     repository: "python-pillow/Pillow",
     revision: "6e28ed1f36d0eb74053af54e1eddc9c29db698cd",
     question,
+    callerScope:
+      "An anonymous caller supplies the image bytes in the next POST /thumbnail. " +
+      "Assess the supplied captured deployment, assuming it stays in effect. " +
+      "The application uses Alpine's py3-pillow built from this checkout. " +
+      "Report the upstream libwebp version used for that request.",
     version: "1.3.1",
     versionAliases: missing ? [] : [revision],
     verdict,

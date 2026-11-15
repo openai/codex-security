@@ -9,6 +9,7 @@ import {
   rm,
   stat,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import {
@@ -18,6 +19,7 @@ import {
   isAbsolute,
   join,
   matchesGlob,
+  normalize,
   relative,
   resolve,
   sep,
@@ -28,27 +30,34 @@ import {
   type TrustedExecutable,
 } from "../trusted-executable.ts";
 import { catalogEvidence, catalogNames, maxCatalogBytes } from "./catalog.ts";
+import { configIdentity } from "./rule-config.ts";
 import {
   dependencyEvidence,
   dependencyManifestGlob,
   isDependencyManifest,
 } from "./dependencies.ts";
 import type {
+  TextMatch,
   TraceEvidence,
   TraceProvider,
   TraceScope,
   ScopeResult,
+  RuleExecution,
 } from "./types.js";
 
-const MAX_RESPONSE_BYTES = 256 * 1024;
+// Native tool output is processed before the separate model response pages.
+const MAX_RESPONSE_BYTES = 2560 * 1024;
 const MAX_SOURCE_BYTES = 1024 * 1024;
-const MAX_RECORDS = 64;
+const SOURCE_BATCH_SIZE = 16;
+
+class OpenGrepOutputLimitError extends Error {}
 const PROJECT_CONFIG_GLOB =
   "{*.yaml,*.yml,*.json,*.toml,*.tf,*.hcl,BUILD,BUILD.bazel,*.bzl,Dockerfile,Dockerfile.*,*.Dockerfile,Containerfile,Containerfile.*}";
 const MANIFEST_GLOB =
   "{package.json,package-lock.json,npm-shrinkwrap.json,pnpm-lock.yaml,yarn.lock,bun.lock,Cargo.toml,Cargo.lock,go.mod,go.sum,pyproject.toml,uv.lock,poetry.lock,Pipfile,Pipfile.lock,requirements*.txt,setup.cfg,setup.py,Dockerfile,*.Dockerfile,Containerfile,*.Containerfile,BUILD,BUILD.bazel,MODULE.bazel,MODULE.bazel.lock,WORKSPACE,WORKSPACE.bazel,*.bzl,Gemfile,Gemfile.lock,pom.xml,build.gradle,build.gradle.kts,gradle.lockfile}";
 const identifier = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const languages: Record<string, string> = {
+  ".go": "go",
   ".py": "python",
   ".js": "javascript",
   ".jsx": "javascript",
@@ -72,20 +81,39 @@ function empty(reason: string): ScopeResult {
   return { evidence: [], next: [], complete: false, reason };
 }
 
+function nativeDiagnostics(stdout: string): string {
+  try {
+    const parsed = JSON.parse(stdout);
+    if (Array.isArray(parsed?.errors) && parsed.errors.length > 0)
+      return JSON.stringify(parsed.errors);
+  } catch {
+    /* Preserve non-JSON native diagnostics verbatim. */
+  }
+  return stdout;
+}
+
 async function invoke(
   tool: TrustedExecutable,
   args: string[],
   cwd: string,
   signal: AbortSignal,
-  mode?: "grep" | "list",
-  input?: number,
-): Promise<{ stdout: string; truncated: boolean }> {
+  mode?: "grep" | "list" | "files",
+  input?: number | number[] | FileHandle,
+): Promise<{ stdout: string; truncated: boolean; stderr?: string }> {
   signal.throwIfAborted();
   const windows = process.platform === "win32";
+  const fromStart =
+    typeof input === "object" && !Array.isArray(input) ? input : undefined;
   const child = spawn(tool.executable, args, {
     cwd,
     detached: !windows,
-    stdio: [input ?? "ignore", "pipe", "pipe"],
+    stdio: Array.isArray(input)
+      ? ["ignore", "pipe", "pipe", ...input]
+      : [
+          fromStart ? "pipe" : typeof input === "number" ? input : "ignore",
+          "pipe",
+          "pipe",
+        ],
     env: {
       ...tool.environment,
       SEMGREP_SEND_METRICS: "off",
@@ -127,6 +155,12 @@ async function invoke(
     truncated = false;
   function collect(chunks: Buffer[], chunk: Buffer) {
     if (truncated) return;
+    // Filename discovery feeds bounded source batches, not a model response.
+    // Applying the diagnostic budget here would lose the rest of the files.
+    if (chunks === output && (mode === "list" || mode === "files")) {
+      chunks.push(chunk);
+      return;
+    }
     const remaining = MAX_RESPONSE_BYTES - size;
     chunks.push(chunk.subarray(0, remaining));
     size += chunk.length;
@@ -138,21 +172,57 @@ async function invoke(
   child.stdout!.on("data", (chunk: Buffer) => collect(output, chunk));
   child.stderr!.on("data", (chunk: Buffer) => collect(errors, chunk));
   signal.addEventListener("abort", stop, { once: true });
+  let source: ReturnType<FileHandle["createReadStream"]> | undefined;
+  let inputError: Error | undefined;
   try {
+    if (fromStart) {
+      source = fromStart.createReadStream({ start: 0, autoClose: false });
+      source.once("error", (error) => {
+        inputError = error;
+        stop();
+      });
+      child.stdin!.on("error", (error: NodeJS.ErrnoException) => {
+        source?.destroy();
+        // rg stops reading as soon as its first requested match is found.
+        if (error.code !== "EPIPE") {
+          inputError = error;
+          stop();
+        }
+      });
+      source.pipe(child.stdin!);
+    }
     const code = await new Promise<number | null>((resolve, reject) => {
       child.once("error", reject);
       child.once("close", resolve);
     });
     signal.throwIfAborted();
+    if (inputError) throw inputError;
     if (truncated && !mode)
-      throw new Error("OpenGrep response exceeded the byte limit.");
-    if (!truncated && code !== 0 && !(mode === "grep" && code === 1))
-      throw new Error(
-        Buffer.concat(errors).toString().trim() ||
-          `Tool exited with status ${code}.`,
+      throw new OpenGrepOutputLimitError(
+        "OpenGrep response exceeded the byte limit.",
       );
-    return { stdout: Buffer.concat(output).toString(), truncated };
+    if (
+      !truncated &&
+      code !== 0 &&
+      !((mode === "grep" || mode === "files") && code === 1)
+    )
+      throw new Error(
+        [
+          Buffer.concat(errors).toString().trim(),
+          ...(!mode
+            ? [nativeDiagnostics(Buffer.concat(output).toString()).trim()]
+            : []),
+        ]
+          .filter(Boolean)
+          .join("\n") || `Tool exited with status ${code}.`,
+      );
+    return {
+      stdout: Buffer.concat(output).toString(),
+      truncated,
+      ...(!mode ? { stderr: Buffer.concat(errors).toString() } : {}),
+    };
   } finally {
+    source?.destroy();
     signal.removeEventListener("abort", stop);
   }
 }
@@ -161,10 +231,118 @@ function leaf(scope: TraceScope) {
   return scope.symbol?.split(/::|\./u).at(-1) || scope.package;
 }
 
+// Match both literals within the same file before scheduling source batches.
+function sourceSearchPattern(symbol: string, terms: readonly string[]) {
+  const operation = "\\b" + symbol + "\\b";
+  const symbolPattern = new RegExp(operation, "u");
+  const alternatives = terms.map((term) => {
+    const literal = term.replace(/[.*+?^$(){}|[\]\\]/gu, "\\$&");
+    if (symbol.includes(term)) return operation;
+    if (symbolPattern.test(term)) return literal;
+    return literal + ".*" + operation + "|" + operation + ".*" + literal;
+  });
+  return "(?s)(?:" + alternatives.join("|") + ")";
+}
+
+// An interpreter's static inline program is text to the outer parser.
+function inlinePythonOperationLeads(
+  file: string,
+  contents: Buffer,
+  symbol: string,
+  terms: readonly string[],
+  structuralLines: ReadonlySet<number>,
+): TextMatch[] {
+  if (!contents.includes("-c")) return [];
+  const source = contents.toString("utf8");
+  const literalStarts = new Set<number>();
+  const scriptNames = new Set<string>();
+  const launch =
+    /(?:\bsys\.executable|(["'])python(?:3(?:\.\d+)?)?\1)\s*,\s*(["'])-c\2\s*,\s*/gu;
+  const reference = /[A-Za-z_]\w*(?=\s*[,)\]])/uy;
+  for (const match of source.matchAll(launch)) {
+    const start = match.index + match[0].length;
+    reference.lastIndex = start;
+    const name = reference.exec(source)?.[0];
+    if (name) scriptNames.add(name);
+    else literalStarts.add(start);
+  }
+  if (scriptNames.size > 0) {
+    const assignment = /^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*/gmu;
+    for (const match of source.matchAll(assignment)) {
+      if (scriptNames.has(match[1]))
+        literalStarts.add(match.index + match[0].length);
+    }
+  }
+
+  const literal = /[rRuU]?("""|''')(.*?)\1/suy;
+  const operation = new RegExp("\\b" + symbol + "[ \\t]*\\(", "u");
+  const lines = new Set<number>();
+  for (const start of literalStarts) {
+    literal.lastIndex = start;
+    const match = literal.exec(source);
+    const body = match?.[2];
+    if (!match || !body || !terms.some((term) => body.includes(term))) continue;
+    const bodyStart = start + match[0].length - body.length - match[1].length;
+    const firstLine = source.slice(0, bodyStart).split("\n").length;
+    for (const [offset, line] of body.split("\n").entries()) {
+      const originalLine = firstLine + offset;
+      if (
+        !structuralLines.has(originalLine) &&
+        !line.trimStart().startsWith("#") &&
+        operation.test(line)
+      ) {
+        lines.add(originalLine);
+      }
+    }
+  }
+  return [...lines].map((line) => ({ source: file, line, text: symbol }));
+}
+
 function fileAnalyzer(scope: TraceScope, path: string) {
   if (isDependencyManifest(path)) return "manifest";
-  if (scope.symbol && isTraceSourceFile(path) && identifier.test(leaf(scope)))
-    return "opengrep";
+  if (scope.rules !== undefined) return "opengrep";
+  if (isTraceSourceFile(path)) return "opengrep";
+}
+
+function sourceBatches(
+  scope: TraceScope,
+  files: readonly string[],
+): TraceScope[] {
+  const groups = new Map<string, string[]>();
+  for (const file of [...new Set(files)].sort()) {
+    const language = languages[extname(file)] ?? extname(file);
+    let group = groups.get(language);
+    if (!group) {
+      group = [];
+      groups.set(language, group);
+    }
+    group.push(file);
+  }
+  const scopes: TraceScope[] = [];
+  for (const group of groups.values()) {
+    for (let offset = 0; offset < group.length; offset += SOURCE_BATCH_SIZE) {
+      scopes.push({
+        ...scope,
+        kind: "source_batch",
+        files: group.slice(offset, offset + SOURCE_BATCH_SIZE),
+      });
+    }
+  }
+  return scopes;
+}
+
+export function sourceFileScopes(
+  scope: TraceScope,
+  files: readonly string[],
+): TraceScope[] {
+  const direct: TraceScope[] = [];
+  const source: string[] = [];
+  for (const file of files) {
+    if (fileAnalyzer(scope, file) === "opengrep")
+      source.push(normalize(file).split(sep).join("/"));
+    else direct.push({ ...scope, kind: "file", path: file });
+  }
+  return [...direct, ...sourceBatches(scope, source)];
 }
 
 async function checkoutTarget(root: string, requested: string) {
@@ -244,10 +422,6 @@ export async function findProjectReferences(
         continue;
       }
       if (!component.test(data.lines.text)) continue;
-      if (references.length === MAX_RECORDS) {
-        reason = "Project reference limit reached.";
-        break;
-      }
       references.push({
         path: relative(canonicalRoot, data.path.text).split(sep).join("/"),
         line: data.line_number,
@@ -294,94 +468,25 @@ async function snapshot(path: string, maxBytes = MAX_SOURCE_BYTES) {
   }
 }
 
-// A finding is a syntactic candidate. A bare or member call can have a
-// different binding; the report must establish package identity separately.
-function rules(scope: TraceScope, language: string) {
-  const name = leaf(scope);
-  const pkg = scope.package;
-  const calls: object[] = [
-    { pattern: `${name}(...)` },
-    { pattern: `$RECEIVER.${name}(...)` },
-  ];
-  if (
-    language === "python" &&
-    pkg.split(".").every((part) => identifier.test(part))
-  ) {
-    calls.push({ pattern: `${pkg}.${name}(...)` });
-  } else if (language !== "python" && /^[@A-Za-z0-9._/-]+$/u.test(pkg)) {
-    calls.push({
-      patterns: [
-        {
-          "pattern-inside": `import {${name} as $ALIAS} from ${JSON.stringify(pkg)};\n...`,
-        },
-        { pattern: "$ALIAS(...)" },
-      ],
-    });
-  }
-  const match = { "pattern-either": calls };
-  const context =
-    language === "python"
-      ? ["def $CALLER(...):\n  ..."]
-      : [
-          "function $CALLER(...) { ... }",
-          "const $CALLER = (...) => ...",
-          "class $CLASS { ... $CALLER(...) { ... } ... }",
-        ];
-  const base = {
-    languages: [language],
-    severity: "INFO",
-    message: "Candidate call",
-  };
-  const withCaller = {
-    patterns: [
-      match,
-      {
-        "pattern-either": context.map((pattern) => ({
-          "pattern-inside": pattern,
-        })),
-      },
-    ],
-  };
-  if (scope.source_symbol) {
-    return {
-      rules: [
-        {
-          ...base,
-          id: "flow",
-          mode: "taint",
-          message: "Candidate same-file flow",
-          "pattern-sources": [
-            { pattern: `${scope.source_symbol}(...)`, exact: true },
-          ],
-          // Disjoint sinks keep the enclosing caller when it is known, without
-          // emitting a caller finding for every untainted call in the file.
-          "pattern-sinks": [
-            withCaller,
-            {
-              patterns: [
-                match,
-                ...context.map((pattern) => ({
-                  "pattern-not-inside": pattern,
-                })),
-              ],
-            },
-          ],
-        },
-      ],
-    };
-  }
-  return {
-    rules: [
-      { ...base, id: "call", ...match },
-      { ...base, id: "caller", ...withCaller },
-    ],
-  };
+const MISSING_RULES =
+  "OpenGrep call and flow analysis requires model-authored rules in the trace request.";
+
+function executedConfig(scope: TraceScope) {
+  if (!scope.rules?.length) throw new Error(MISSING_RULES);
+  return { rules: scope.rules };
+}
+
+function taintIntrafile(scope: TraceScope) {
+  return Boolean(
+    scope.source_symbol || scope.rules?.some((rule) => rule.mode === "taint"),
+  );
 }
 
 // Keep repository configuration, filenames and ignore rules out of the native
 // parser. The temporary input is exactly the bytes whose fingerprint we cache.
 export function localProvider(root: string): TraceProvider {
   const tools = new Map<string, Promise<TrustedExecutable | null>>();
+  let inheritedDescriptors = true;
   function tool(name: string) {
     const existing = tools.get(name);
     if (existing) return existing;
@@ -396,7 +501,8 @@ export function localProvider(root: string): TraceProvider {
     args: string[],
     cwd: string,
     signal: AbortSignal,
-    input?: number,
+    input?: number | number[] | FileHandle,
+    mode: "grep" | "files" = "grep",
   ) {
     const rg = await tool("rg");
     if (!rg) throw new Error("ripgrep is unavailable.");
@@ -405,7 +511,7 @@ export function localProvider(root: string): TraceProvider {
       ["--no-config", "--threads", "1", "--fixed-strings", ...args],
       cwd,
       signal,
-      "grep",
+      mode,
       input,
     );
   }
@@ -541,7 +647,7 @@ export function localProvider(root: string): TraceProvider {
     dir: string,
     checkout: string,
     include: (filename: string) => boolean,
-    needle: string,
+    searchArgs: string[],
     files: Set<string>,
     signal: AbortSignal,
   ) {
@@ -550,43 +656,90 @@ export function localProvider(root: string): TraceProvider {
       .split("\0")
       .slice(0, -1)
       .filter((name) => include(basename(name)));
-    let reason =
-      truncated || paths.length > MAX_RECORDS
-        ? "Tracked ignored file limit reached; narrow the directory."
-        : undefined;
-    for (const name of paths.slice(0, MAX_RECORDS)) {
-      signal.throwIfAborted();
-      const path = resolve(checkout, name);
-      if (files.has(path) || !isWithin(dir, path)) continue;
+    let reason = truncated
+      ? "Tracked ignored file listing did not finish."
+      : undefined;
+    for (let offset = 0; offset < paths.length; offset += SOURCE_BATCH_SIZE) {
+      const inputs: { path: string; handle: FileHandle }[] = [];
       try {
-        if ((await realpath(path)) !== path) continue;
-        const handle = await open(
-          path,
-          constants.O_RDONLY |
-            (constants.O_NOFOLLOW ?? 0) |
-            (constants.O_NONBLOCK ?? 0),
-        );
-        try {
-          if (!(await handle.stat()).isFile()) continue;
-          // Passing an open descriptor keeps ripgrep from following a replacement symlink.
-          const match = await grep(
-            ["--count", "--max-count", "1", "-e", needle, "--", "-"],
-            tmpdir(),
-            signal,
-            handle.fd,
-          );
-          if (match.stdout.trim() === "1") files.add(path);
-        } finally {
-          await handle.close();
+        for (const name of paths.slice(offset, offset + SOURCE_BATCH_SIZE)) {
+          signal.throwIfAborted();
+          const path = resolve(checkout, name);
+          if (files.has(path) || !isWithin(dir, path)) continue;
+          let handle: FileHandle | undefined;
+          try {
+            if ((await realpath(path)) !== path) continue;
+            handle = await open(
+              path,
+              constants.O_RDONLY |
+                (constants.O_NOFOLLOW ?? 0) |
+                (constants.O_NONBLOCK ?? 0),
+            );
+            if (!(await handle.stat()).isFile()) continue;
+            inputs.push({ path, handle });
+            handle = undefined;
+          } catch (error) {
+            signal.throwIfAborted();
+            // Tracked files can be deleted locally before the index is updated.
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+              reason = "Could not check every tracked ignored file.";
+          } finally {
+            await handle?.close();
+          }
         }
-      } catch (error) {
-        signal.throwIfAborted();
-        // Tracked files can be deleted locally before the index is updated.
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-          reason = "Could not check every tracked ignored file.";
+        if (!inputs.length) continue;
+        // Reuse the opened source: a launcher can consume its descriptor first.
+        async function searchStdin(fromStart: boolean) {
+          for (const { path, handle } of inputs) {
+            const match = await grep(
+              ["--count-matches", "--max-count", "1", ...searchArgs, "--", "-"],
+              tmpdir(),
+              signal,
+              fromStart ? handle : handle.fd,
+            );
+            if (match.truncated)
+              reason ??= "Tracked ignored file search did not finish.";
+            if (Number(match.stdout.trim()) > 0) files.add(path);
+          }
+        }
+        if (process.platform === "win32" || !inheritedDescriptors) {
+          await searchStdin(process.platform !== "win32");
+        } else {
+          const names = inputs.map((_, index) => "/dev/fd/" + (index + 3));
+          try {
+            const match = await grep(
+              ["--files-with-matches", "--null", ...searchArgs, "--", ...names],
+              tmpdir(),
+              signal,
+              inputs.map(({ handle }) => handle.fd),
+              "files",
+            );
+            if (match.truncated)
+              reason ??= "Tracked ignored file search did not finish.";
+            const found = new Set(match.stdout.split("\0").slice(0, -1));
+            for (const [index, { path }] of inputs.entries())
+              if (found.has(names[index])) files.add(path);
+          } catch (error) {
+            signal.throwIfAborted();
+            if (
+              !(error instanceof Error) ||
+              !error.message
+                .split("\n")
+                .some(
+                  (line) =>
+                    line.includes("Bad file descriptor (os error 9)") &&
+                    names.some((name) => line.includes(name + ":")),
+                )
+            )
+              throw error;
+            // Some trusted launchers close additional inherited descriptors.
+            inheritedDescriptors = false;
+            await searchStdin(true);
+          }
+        }
+      } finally {
+        await Promise.all(inputs.map(({ handle }) => handle.close()));
       }
-      if (files.size > MAX_RECORDS)
-        return "Candidate file limit reached; narrow the directory.";
     }
     return reason;
   }
@@ -618,7 +771,9 @@ export function localProvider(root: string): TraceProvider {
     analyzer: "manifest" | "opengrep",
     contents: Uint8Array<ArrayBuffer>,
     signal: AbortSignal,
+    scope?: TraceScope,
   ) {
+    if (analyzer === "opengrep" && !scope?.rules?.length) return undefined;
     const versionKey =
       analyzer === "manifest"
         ? "manifest-declarations-v1"
@@ -630,17 +785,271 @@ export function localProvider(root: string): TraceProvider {
     return JSON.stringify([
       "intrafile-rules-v3",
       versionKey,
+      ...(analyzer === "opengrep"
+        ? [
+            configIdentity(executedConfig(scope!)).sha256,
+            taintIntrafile(scope!),
+          ]
+        : []),
       Buffer.from(digest).toString("hex"),
     ]);
   }
 
+  async function batchFingerprint(
+    inputs: readonly { file: string; contents: Buffer<ArrayBuffer> }[],
+    signal: AbortSignal,
+    scope: TraceScope,
+  ) {
+    const fingerprints = await Promise.all(
+      inputs.map(({ contents }) =>
+        snapshotFingerprint("opengrep", contents, signal, scope),
+      ),
+    );
+    return fingerprints.every((fingerprint) => fingerprint !== undefined)
+      ? JSON.stringify(fingerprints)
+      : undefined;
+  }
+
+  async function sourceSnapshot(file: string) {
+    const { path } = await checkoutTarget(root, file);
+    return snapshot(path);
+  }
+
+  async function scanCalls(
+    scope: TraceScope,
+    inputs: readonly { file: string; contents: Buffer<ArrayBuffer> }[],
+    signal: AbortSignal,
+  ): Promise<ScopeResult[]> {
+    if (!scope.rules?.length) return inputs.map(() => empty(MISSING_RULES));
+    const opengrep = await tool("opengrep");
+    if (!opengrep)
+      return inputs.map(() =>
+        empty("OpenGrep is required for call and flow matching."),
+      );
+    const directory = await mkdtemp(join(tmpdir(), "codex-security-trace-"));
+    let ruleExecution: RuleExecution | undefined;
+    try {
+      const language = languages[extname(inputs[0].file)];
+      const config = executedConfig(scope);
+      const identity = configIdentity(config);
+      if (scope.rules !== undefined) {
+        const engine = await opengrepVersion(signal);
+        const taint = taintIntrafile(scope);
+        ruleExecution = {
+          id: configIdentity([identity.sha256, engine, taint]).sha256,
+          configSha256: identity.sha256,
+          config: JSON.parse(identity.text),
+          engine: engine!,
+          taintIntrafile: taint,
+        };
+      }
+      const filenames = inputs.map(({ file }, index) => {
+        const extension = extname(file);
+        return (
+          "input-" +
+          index +
+          (extension === ".mts" || extension === ".cts" ? ".ts" : extension)
+        );
+      });
+      await Promise.all(
+        inputs.map(({ contents }, index) =>
+          writeFile(join(directory, filenames[index]), contents),
+        ),
+      );
+      await writeFile(join(directory, "rules.json"), identity.text);
+      const { stdout, stderr } = await invoke(
+        opengrep,
+        [
+          "scan",
+          "--disable-version-check",
+          "--jobs",
+          "1",
+          "--no-git-ignore",
+          // Per-rule engine limit. Process RSS also includes the runtime.
+          "--max-memory",
+          "256",
+          ...(taintIntrafile(scope) ? ["--taint-intrafile"] : []),
+          "--json",
+          "-c",
+          "rules.json",
+          ...filenames,
+        ],
+        directory,
+        signal,
+      );
+      const output = JSON.parse(stdout) as {
+        results: {
+          path: string;
+          check_id: string;
+          start: { line: number; col: number; offset: number };
+          end: { line: number; col: number; offset: number };
+          extra: {
+            metadata?: Record<string, unknown>;
+            metavars?: Record<string, { abstract_content: string }>;
+          };
+        }[];
+        errors: unknown[];
+        paths?: { scanned?: string[] };
+      };
+      const byFile = new Map<string, typeof output.results>();
+      for (const finding of output.results) {
+        const path = resolve(directory, finding.path);
+        const previous = byFile.get(path);
+        if (previous) previous.push(finding);
+        else byFile.set(path, [finding]);
+      }
+      const scanned = new Set(
+        output.paths?.scanned?.map((file) => resolve(directory, file)),
+      );
+      const needle = leaf(scope);
+      return inputs.map(({ file, contents }, index) => {
+        const path = join(directory, filenames[index]);
+        const findings = byFile.get(path) ?? [];
+        const fileEntity = { kind: "file", name: file };
+        const callers = new Map<number, string>();
+        for (const finding of findings) {
+          const name = finding.extra.metavars?.["$CALLER"]?.abstract_content;
+          if (name && identifier.test(name))
+            callers.set(finding.start.offset, name);
+        }
+        const matches = findings;
+        const evidence: TraceEvidence[] = [];
+        const callerNames = new Set<string>();
+        const ruleLeads: TextMatch[] = [];
+        for (const { start, end, extra, check_id } of matches) {
+          const provenance = ruleExecution
+            ? { ruleExecutionId: ruleExecution.id, nativeRuleId: check_id }
+            : {};
+          if (
+            scope.rules !== undefined &&
+            extra.metadata?.evidence_kind === "unresolved_lead"
+          ) {
+            ruleLeads.push({
+              source: file,
+              line: start.line,
+              text: contents.toString("utf8", start.offset, end.offset),
+              ...provenance,
+            });
+            continue;
+          }
+          const caller = callers.get(start.offset);
+          const from = caller
+            ? { kind: "symbol", name: caller, scope: file }
+            : fileEntity;
+          if (!scope.source_symbol && caller && caller !== needle)
+            callerNames.add(caller);
+          let calleeText = extra.metavars?.["$ALIAS"]?.abstract_content;
+          if (calleeText === undefined && !extra.metavars?.["$RECEIVER"]) {
+            // OpenGrep can match a bare Python import alias by its original
+            // name. Read the identifier at the native match's byte offset.
+            const paren = contents.indexOf("(", start.offset);
+            if (paren !== -1) {
+              const name = contents
+                .toString("utf8", start.offset, paren)
+                .trim();
+              if (identifier.test(name)) calleeText = name;
+            }
+          }
+          evidence.push({
+            source: file,
+            line: start.line,
+            match: { start, end, ...provenance },
+            step: {
+              ...provenance,
+              from,
+              relation: scope.source_symbol
+                ? "candidate_flow"
+                : "candidate_call",
+              calleeText: calleeText ?? needle,
+              ...(scope.source_symbol && { sourceText: scope.source_symbol }),
+            },
+          });
+        }
+        const next = [...callerNames].map((symbol) => ({
+          ...scope,
+          symbol,
+          ...(scope.rules === undefined ? {} : { rules: undefined }),
+        }));
+        const reason =
+          [
+            ...(!scanned.has(path) ? ["OpenGrep skipped a file."] : []),
+            ...(output.errors.length
+              ? [
+                  "OpenGrep reported incomplete analysis: " +
+                    JSON.stringify(output.errors),
+                ]
+              : []),
+            ...((!scanned.has(path) || output.errors.length > 0) &&
+            stderr?.trim()
+              ? [stderr.trim()]
+              : []),
+          ].join(" ") || undefined;
+        const textMatches = [
+          ...ruleLeads,
+          ...(language === "python" &&
+          scope.source_terms &&
+          !scope.source_symbol
+            ? inlinePythonOperationLeads(
+                file,
+                contents,
+                needle,
+                scope.source_terms,
+                new Set(matches.map(({ start }) => start.line)),
+              )
+            : []),
+        ];
+        return {
+          ...(ruleExecution && { ruleExecution }),
+          evidence,
+          next,
+          complete: !reason,
+          ...(textMatches.length > 0 && { textMatches }),
+          ...(reason && { reason }),
+        };
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!(error instanceof OpenGrepOutputLimitError)) {
+        if (!ruleExecution) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        return inputs.map(() => ({
+          ...empty(message),
+          ruleExecution,
+        }));
+      }
+      if (inputs.length === 1)
+        return [
+          { ...empty(error.message), ...(ruleExecution && { ruleExecution }) },
+        ];
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+    // A dense file can exhaust the shared process output budget. Retain the
+    // other files' results by splitting only the batch that overflowed.
+    const midpoint = Math.floor(inputs.length / 2);
+    return [
+      ...(await scanCalls(scope, inputs.slice(0, midpoint), signal)),
+      ...(await scanCalls(scope, inputs.slice(midpoint), signal)),
+    ];
+  }
+
   return {
     async fingerprint(scope, signal) {
+      if (scope.kind === "source_batch") {
+        if (!scope.rules?.length) return undefined;
+        const inputs = await Promise.all(
+          scope.files!.map(async (file) => ({
+            file,
+            contents: await sourceSnapshot(file),
+          })),
+        );
+        return batchFingerprint(inputs, signal, scope);
+      }
       if (scope.kind !== "file") return undefined;
       const { path } = await target(scope);
       const analyzer = fileAnalyzer(scope, path);
       if (!analyzer) return undefined;
-      return snapshotFingerprint(analyzer, await snapshot(path), signal);
+      return snapshotFingerprint(analyzer, await snapshot(path), signal, scope);
     },
     async run(scope, signal): Promise<ScopeResult> {
       try {
@@ -652,6 +1061,75 @@ export function localProvider(root: string): TraceProvider {
           return empty(
             "Same-file flow requires a source identifier and a sink symbol.",
           );
+        }
+        if (scope.kind === "source_batch") {
+          const snapshots = await Promise.allSettled(
+            scope.files!.map(async (file) => ({
+              file,
+              contents: await sourceSnapshot(file),
+            })),
+          );
+          signal.throwIfAborted();
+          const inputs = snapshots.flatMap((item) =>
+            item.status === "fulfilled" ? [item.value] : [],
+          );
+          const unreadable = snapshots.flatMap((result) =>
+            result.status === "rejected"
+              ? [
+                  result.reason instanceof Error
+                    ? result.reason.message
+                    : String(result.reason),
+                ]
+              : [],
+          );
+          if (!inputs.length)
+            return empty(
+              unreadable.join(" ") || "No source files could be read.",
+            );
+          const scanned = await scanCalls(scope, inputs, signal);
+          const results = await Promise.all(
+            inputs.map(async ({ file, contents }, index) => {
+              const current = await sourceSnapshot(file).catch(() => undefined);
+              return current?.equals(contents)
+                ? scanned[index]
+                : empty("Source changed during analysis.");
+            }),
+          );
+          signal.throwIfAborted();
+          const complete =
+            inputs.length === snapshots.length &&
+            results.every((result) => result.complete);
+          const reasons = new Set(
+            results.flatMap((result) => (result.reason ? [result.reason] : [])),
+          );
+          for (const reason of unreadable) reasons.add(reason);
+          const textMatches = results.flatMap(
+            (result) => result.textMatches ?? [],
+          );
+          return {
+            ...(complete && {
+              fingerprint: await batchFingerprint(inputs, signal, scope),
+            }),
+            ...(scanned.find((result) => result.ruleExecution)
+              ?.ruleExecution && {
+              ruleExecution: scanned.find((result) => result.ruleExecution)!
+                .ruleExecution,
+            }),
+            evidence: results.flatMap((result) => result.evidence),
+            ...(textMatches.length > 0 && { textMatches }),
+            next: scope.source_terms
+              ? []
+              : results.flatMap((result, index) =>
+                  result.next.map((next) => ({
+                    ...next,
+                    kind: "file" as const,
+                    files: undefined,
+                    path: inputs[index].file,
+                  })),
+                ),
+            complete,
+            ...(!complete && { reason: [...reasons].join(" ") }),
+          };
         }
         const { path, canonicalRoot } = await target(scope);
         if (scope.kind === "catalog") {
@@ -708,7 +1186,22 @@ export function localProvider(root: string): TraceProvider {
           // reads known manifests and can point to imports in source files.
           const manifests = scope.kind === "manifests";
           const symbolSearch = !manifests && !!scope.symbol;
-          const supported = !symbolSearch || identifier.test(needle);
+          const supported =
+            !symbolSearch ||
+            scope.rules !== undefined ||
+            identifier.test(needle);
+          const terms =
+            scope.kind === "search" && supported
+              ? scope.source_terms
+              : undefined;
+          const searchArgs = terms
+            ? [
+                "--no-fixed-strings",
+                "--multiline",
+                "-e",
+                sourceSearchPattern(needle, terms),
+              ]
+            : ["-e", needle];
           const structuralGlob = symbolSearch
             ? sourceGlob
             : dependencyManifestGlob;
@@ -746,20 +1239,18 @@ export function localProvider(root: string): TraceProvider {
                     ...types,
                     "--glob",
                     "!.git",
-                    "-e",
-                    needle,
+                    ...(terms ? ["--sort", "path"] : []),
+                    ...searchArgs,
                     "--",
                     path,
                   ],
                   tmpdir(),
                   signal,
+                  undefined,
+                  "files",
                 );
             const matched = new Set(stdout.split("\0").slice(0, -1));
-            const limit = structural
-              ? "Candidate file limit reached; narrow the directory."
-              : "Text match sample truncated.";
-            let reason =
-              truncated || matched.size > MAX_RECORDS ? limit : gitGap;
+            let reason = truncated ? "File discovery did not finish." : gitGap;
             if (git && !reason) {
               ignoredFiles ??= trackedIgnoredFiles(
                 git,
@@ -776,7 +1267,7 @@ export function localProvider(root: string): TraceProvider {
                   (structural ||
                     matchesGlob(name, MANIFEST_GLOB) ||
                     (!manifests && isTraceSourceFile(name))),
-                needle,
+                searchArgs,
                 matched,
                 signal,
               ).catch((error: Error) => {
@@ -788,7 +1279,7 @@ export function localProvider(root: string): TraceProvider {
               });
             }
             return {
-              files: new Set([...matched].slice(0, MAX_RECORDS)),
+              files: matched,
               reason,
             };
           }
@@ -808,6 +1299,15 @@ export function localProvider(root: string): TraceProvider {
             .join(" ");
           const checkoutPath = (file: string) =>
             relative(canonicalRoot, file).split(sep).join("/");
+          if (terms) {
+            const next = sourceBatches(scope, [...files].map(checkoutPath));
+            return {
+              evidence: [],
+              next,
+              complete: !reason,
+              ...(reason && { reason }),
+            };
+          }
           const next = (supported ? [...files] : []).map(
             (file): TraceScope => ({
               ...scope,
@@ -818,7 +1318,7 @@ export function localProvider(root: string): TraceProvider {
               path: checkoutPath(file),
             }),
           );
-          if (next.length && next.length < MAX_RECORDS && !gitGap) {
+          if (next.length && !gitGap) {
             const catalogs = await adjacentCatalogs(
               files,
               canonicalRoot,
@@ -829,11 +1329,6 @@ export function localProvider(root: string): TraceProvider {
               return [];
             });
             for (const catalog of catalogs) {
-              if (next.length === MAX_RECORDS) {
-                reason ||=
-                  "Candidate file limit reached; narrow the directory.";
-                break;
-              }
               next.push({
                 kind: "catalog",
                 package: scope.package,
@@ -870,146 +1365,30 @@ export function localProvider(root: string): TraceProvider {
             file,
             scope.package,
           );
-          const complete = evidence.length <= MAX_RECORDS;
-          return {
-            evidence: evidence.slice(0, MAX_RECORDS),
-            next: [],
-            complete,
-            ...(complete
-              ? {
-                  fingerprint: await snapshotFingerprint(
-                    analyzer,
-                    contents,
-                    signal,
-                  ),
-                }
-              : { reason: "Dependency declaration limit reached." }),
-          };
-        }
-        const opengrep = await tool("opengrep");
-        if (!opengrep)
-          return empty("OpenGrep is required for call and flow matching.");
-        const directory = await mkdtemp(
-          join(tmpdir(), "codex-security-trace-"),
-        );
-        try {
-          const extension = extname(path);
-          const language = languages[extension];
-          const filename =
-            extension === ".mts" || extension === ".cts"
-              ? "input.ts"
-              : `input${extension}`;
-          await writeFile(join(directory, filename), contents);
-          const fileEntity = { kind: "file", name: file };
-          await writeFile(
-            join(directory, "rules.json"),
-            JSON.stringify(rules(scope, language)),
-          );
-          const { stdout } = await invoke(
-            opengrep,
-            [
-              "scan",
-              "--disable-version-check",
-              "--jobs",
-              "1",
-              "--no-git-ignore",
-              // Per-rule engine limit. Process RSS also includes the runtime.
-              "--max-memory",
-              "256",
-              ...(scope.source_symbol ? ["--taint-intrafile"] : []),
-              "--json",
-              "-c",
-              "rules.json",
-              filename,
-            ],
-            directory,
-            signal,
-          );
-          const output = JSON.parse(stdout) as {
-            results: {
-              check_id: string;
-              start: { line: number; offset: number };
-              extra: {
-                metavars?: Record<string, { abstract_content: string }>;
-              };
-            }[];
-            errors: unknown[];
-            paths?: { scanned?: string[] };
-          };
-          const callers = new Map<number, string>();
-          for (const finding of output.results) {
-            const name = finding.extra.metavars?.["$CALLER"]?.abstract_content;
-            if (name && identifier.test(name))
-              callers.set(finding.start.offset, name);
-          }
-          const matches = output.results.filter(
-            (finding) =>
-              finding.check_id.split(".").at(-1) ===
-              (scope.source_symbol ? "flow" : "call"),
-          );
-          const evidence: TraceEvidence[] = [];
-          const callerNames = new Set<string>();
-          for (const { start, extra } of matches.slice(0, MAX_RECORDS)) {
-            const caller = callers.get(start.offset);
-            const from = caller
-              ? { kind: "symbol", name: caller, scope: file }
-              : fileEntity;
-            if (!scope.source_symbol && caller && caller !== needle)
-              callerNames.add(caller);
-            let calleeText = extra.metavars?.["$ALIAS"]?.abstract_content;
-            if (calleeText === undefined && !extra.metavars?.["$RECEIVER"]) {
-              // OpenGrep can match a bare Python import alias by its original
-              // name. Read the identifier at the native match's byte offset.
-              const paren = contents.indexOf("(", start.offset);
-              if (paren !== -1) {
-                const name = contents
-                  .toString("utf8", start.offset, paren)
-                  .trim();
-                if (identifier.test(name)) calleeText = name;
-              }
-            }
-            evidence.push({
-              source: file,
-              line: start.line,
-              step: {
-                from,
-                relation: scope.source_symbol
-                  ? "candidate_flow"
-                  : "candidate_call",
-                calleeText: calleeText ?? needle,
-                ...(scope.source_symbol && { sourceText: scope.source_symbol }),
-              },
-            });
-          }
-          const next = [...callerNames].map((symbol) => ({ ...scope, symbol }));
-          const scanned = output.paths?.scanned?.some(
-            (scanned) =>
-              resolve(directory, scanned) === join(directory, filename),
-          );
-          const reason = !scanned
-            ? "OpenGrep skipped the file."
-            : output.errors.length
-              ? "OpenGrep reported incomplete analysis."
-              : matches.length > MAX_RECORDS
-                ? "Call-site limit reached."
-                : undefined;
           return {
             evidence,
-            next,
-            complete: !reason,
-            ...(reason
-              ? { reason }
-              : {
-                  fingerprint: await snapshotFingerprint(
-                    "opengrep",
-                    contents,
-                    signal,
-                  ),
-                }),
+            next: [],
+            complete: true,
+            fingerprint: await snapshotFingerprint(
+              analyzer,
+              contents,
+              signal,
+              scope,
+            ),
           };
-        } finally {
-          await rm(directory, { recursive: true, force: true });
         }
+        const [result] = await scanCalls(scope, [{ file, contents }], signal);
+        return result.complete
+          ? {
+              ...result,
+              fingerprint: await snapshotFingerprint(
+                analyzer,
+                contents,
+                signal,
+                scope,
+              ),
+            }
+          : result;
       } catch (error) {
         signal.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);

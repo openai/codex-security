@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { gradeAnswer, type ReachabilityAnswer } from "./grade.mts";
+import { gradeCommandCase } from "./grade-command-case.mts";
 
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), "reachability-grader-"));
@@ -68,6 +69,24 @@ test("an authentic citation from the right file must identify the deciding opera
   assert.equal(grade.evidenceCorrect, false);
   assert.equal(grade.pass, false);
   assert.match(grade.errors.join("\n"), /depth > limit/u);
+});
+
+test("whole-file absence evidence still requires every line across citations", async (t) => {
+  const { root, expected, answer } = await fixture(t);
+  const bounded = {
+    ...expected,
+    evidenceGroups: [
+      [{ path: "worker.js", contains: "depth > limit", completeFile: true }],
+    ],
+  };
+  assert.equal((await gradeAnswer(answer, bounded, root)).pass, false);
+  answer.evidence.push({
+    path: "worker.js",
+    startLine: 3,
+    endLine: 3,
+    code: "parse(input);",
+  });
+  assert.equal((await gradeAnswer(answer, bounded, root)).pass, true);
 });
 
 test("rejects a fabricated quote, an invented file, and a correct quote at the wrong lines", async (t) => {
@@ -135,4 +154,99 @@ test("the grader never follows a citation outside the staged checkout", async (t
     );
     assert.equal(result.evidenceCorrect, false, path);
   }
+});
+
+test("command grading recognizes GNU libc names as the assessed component", async (t) => {
+  const { root, expected, answer } = await fixture(t);
+  const required = { ...expected, cve: "CVE-2099-12345", component: "glibc" };
+  for (const component of [
+    "glibc",
+    "glibc iconv",
+    "GNU libc iconv (configured through a native binding)",
+    "GNU C Library (glibc)",
+    "gnu libc",
+    "libc6",
+    "libc6.so.6",
+  ]) {
+    const use = {
+      component,
+      version: expected.version,
+      verdict: expected.verdict,
+      location: "worker.js:3",
+      reason: answer.reason,
+      evidence: answer.evidence,
+    };
+    const grade = await gradeCommandCase(
+      { cve: required.cve, status: use.verdict, uses: [use] },
+      required,
+      root,
+    );
+    assert.equal(grade.pass, true, component);
+  }
+});
+
+test("other C libraries and comparisons do not name a GNU libc use", async (t) => {
+  const { root, expected, answer } = await fixture(t);
+  const required = { ...expected, cve: "CVE-2099-12345", component: "glibc" };
+  for (const component of [
+    "musl libc",
+    "musl libc (not glibc)",
+    "GNU libiconv",
+    "libiconv (an alternative to GNU libc)",
+    "iconv-lite (does not use GNU C Library)",
+    "another parser compared with GNU libc",
+    "not glibc",
+    "glibc-compatible replacement",
+  ]) {
+    const use = {
+      component,
+      version: expected.version,
+      verdict: expected.verdict,
+      location: "worker.js:3",
+      reason: answer.reason,
+      evidence: answer.evidence,
+    };
+    const grade = await gradeCommandCase(
+      { cve: required.cve, status: use.verdict, uses: [use] },
+      required,
+      root,
+    );
+    assert.equal(grade.componentCorrect, false, component);
+    assert.equal(grade.pass, false, component);
+  }
+});
+
+test("GNU libc aliases retain exact version and same-use evidence requirements", async (t) => {
+  const { root, expected, answer } = await fixture(t);
+  const required = { ...expected, cve: "CVE-2099-12345", component: "glibc" };
+  const use = {
+    component: "GNU libc iconv",
+    version: expected.version,
+    verdict: expected.verdict,
+    location: "worker.js:3",
+    reason: answer.reason,
+    evidence: answer.evidence,
+  };
+  for (const version of [null, "1.2.4"]) {
+    const grade = await gradeCommandCase(
+      { cve: required.cve, status: use.verdict, uses: [{ ...use, version }] },
+      required,
+      root,
+    );
+    assert.equal(grade.componentCorrect, true);
+    assert.equal(grade.evidenceCorrect, true);
+    assert.equal(grade.versionCorrect, false);
+    assert.equal(grade.pass, false);
+  }
+  const primary = { ...use, evidence: [use.evidence[0]] };
+  const sibling = { ...use, evidence: [use.evidence[1]] };
+  const grade = await gradeCommandCase(
+    { cve: required.cve, status: use.verdict, uses: [primary, sibling] },
+    required,
+    root,
+  );
+  assert.equal(grade.componentCorrect, true);
+  assert.equal(grade.versionCorrect, true);
+  assert.equal(grade.evidenceCorrect, false);
+  assert.equal(grade.pass, false);
 });

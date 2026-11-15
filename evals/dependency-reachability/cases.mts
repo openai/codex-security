@@ -41,10 +41,15 @@ export interface ReachabilityCase {
   repository: Repository;
   revision: string;
   question: string;
+  callerScope?: string;
   verdict: CommandVerdict;
   version: string;
-  // CLI-only copy override; null explicitly requires an unresolved version.
-  commandVersion?: string | null;
+  // CLI-only copy override; an array supplies explicit accepted alternatives.
+  commandVersion?: string | null | readonly (string | null)[];
+  // Optional report-level expectation, separate from the matched use's verdict.
+  commandStatus?: CommandVerdict;
+  // Match an assessment of the required operation, not nearby setup or data calls.
+  commandCallSite?: { path: string; line: number };
   versionAliases?: readonly string[];
   evidenceGroups: readonly EvidenceGroup[];
   stage: readonly StageFile[];
@@ -96,6 +101,11 @@ function pillowCase(
     revision,
     verdict,
     version,
+    callerScope:
+      "An unauthenticated caller can supply the request-body bytes in POST /thumbnail. " +
+      "Assess that request in the supplied configured deployment, using the official Linux CPython 3.12 x86_64 " +
+      "manylinux_2_28 wheel declared there. Include all image formats and native backends reachable from that request. " +
+      "Report the bundled libwebp version where the selected artifact establishes it.",
     question:
       "Assess CVE-2023-4863 in libwebp for this Pillow checkout. The flaw is a heap overflow " +
       "when decoding Huffman tables in a crafted lossless WebP. Upstream fixed it in 1.3.2. Assume the official Linux " +
@@ -176,6 +186,9 @@ const nodemailer7011 = "3d17dbec49ab3e3f0e13e62871e5534be5b99994";
 const addressSource = "lib/addressparser/index.js";
 const installedAddress = "node_modules/nodemailer/" + addressSource;
 
+const inboxCallerScope =
+  "An unauthenticated caller can attempt POST /inbox with raw email they control. " +
+  "Assess that request in the configured deployment supplied in the checkout.";
 const surface =
   "An unauthenticated caller controls the raw email submitted to POST /inbox. " +
   "Can this caller trigger the advisory through that endpoint as deployed? " +
@@ -286,6 +299,7 @@ function mailFiles(
 const mailSource = {
   suite: "mailparser",
   repository: "nodemailer/mailparser",
+  callerScope: inboxCallerScope,
 } as const;
 const linkCase = {
   ...mailSource,
@@ -305,9 +319,56 @@ const addressCase = {
 };
 const scaffolder = "plugins/scaffolder-backend/src/";
 
+function archiveCopyEvidence(item: ReachabilityCase): ReachabilityCase {
+  if (
+    ![
+      "archive-worker-mime-parts",
+      "archive-worker-pinned-original",
+      "archive-worker-pinned-normalized",
+    ].includes(item.id)
+  )
+    return item;
+  const selectedRelease = excerpts(
+    "package-lock.json",
+    '"node_modules/nodemailer": {\n' +
+      '            "version": "7.0.10",\n' +
+      '            "resolved": "https://registry.npmjs.org/nodemailer/-/nodemailer-7.0.10.tgz",\n' +
+      '            "integrity": "sha512-Us/Se1WtT0ylXgNFfyFSx4LElllVLJXQjWi2Xz17xWw7amDKO2MLtFnVp1WACy7GkVGs+oBlRopVNUzlrGSw1w=="',
+  );
+  const selectedImports = [
+    excerpts(
+      "index.js",
+      "const simpleParser = require('./lib/simple-parser');",
+    ),
+    excerpts(
+      "lib/simple-parser.js",
+      "const MailParser = require('./mail-parser.js');",
+    ),
+    excerpts("lib/simple-parser.js", "let parser = new MailParser(options);"),
+    excerpts("lib/mail-parser.js", "require('nodemailer/lib/addressparser')"),
+  ];
+  return {
+    ...item,
+    // Groups are ANDed, anchors within each group are ORed. Thus the installed
+    // manifest OR (exact locked release AND every import link) is required.
+    // Existing install recipe, worker selection and recursive-source groups stay.
+    evidenceGroups: [
+      ...item.evidenceGroups.map((group) =>
+        group === installedNodemailerVersion
+          ? [...group, ...selectedRelease]
+          : group,
+      ),
+      ...selectedImports.map((group) => [
+        ...installedNodemailerVersion,
+        ...group,
+      ]),
+    ],
+  };
+}
+
 export const challengeCases: readonly ReachabilityCase[] = [
   ...sanitizerCases,
-  ...serviceCases,
+  ...serviceCases.map(archiveCopyEvidence),
   ...rolloutCases,
   ...zipCases,
 ];
@@ -372,6 +433,8 @@ export const cases: readonly ReachabilityCase[] = [
     ...linkCase,
     id: "unmounted-route",
     verdict: "ruled_out",
+    // The route guard excludes this caller before any dependency copy is used.
+    commandVersion: [null, "5.0.0"],
     stage: mailFiles({ routes: {} }),
     evidenceGroups: [
       excerpts(deployment, '"routes": {}'),
@@ -380,7 +443,6 @@ export const cases: readonly ReachabilityCase[] = [
         server,
         "if (req.method !== 'POST' || !delivery) {\n    res.writeHead(404).end();\n    return;",
       ),
-      linkVersion,
     ],
   },
   {
@@ -403,7 +465,6 @@ export const cases: readonly ReachabilityCase[] = [
         server,
         "fetch(config.workerUrl, { method: 'POST', body: raw })",
       ),
-      excerpts("service/worker.cjs", "process.on('message'"),
     ],
   },
   {
@@ -423,6 +484,7 @@ export const cases: readonly ReachabilityCase[] = [
     ...addressCase,
     id: "address-backport",
     verdict: "ruled_out",
+    commandStatus: "ruled_out",
     stage: mailFiles(direct, nodemailer7011),
     evidenceGroups: [
       ...directParsing,
@@ -479,12 +541,13 @@ export const cases: readonly ReachabilityCase[] = [
     question: charset,
     verdict: "ruled_out",
     version: "2.39",
+    // The runtime declaration is not bound to a selected native implementation.
+    commandVersion: null,
     stage: mailFiles({ ...direct, nativeCharset: true }),
     evidenceGroups: [
       excerpts(deployment, '"nativeCharset": true'),
       excerpts(parse, "options.Iconv = require('iconv').Iconv"),
       excerpts(mail, "new Iconv(charset, 'UTF-8"),
-      excerpts("service/runtime.json", '"version": "2.39"'),
     ],
   },
   {
@@ -496,6 +559,10 @@ export const cases: readonly ReachabilityCase[] = [
     revision: "99d7a6f42d71e86578c89c0669a3d962088ed8ae",
     verdict: "ruled_out",
     version: "3.9.19",
+    commandCallSite: {
+      path: "plugins/scaffolder-backend/src/lib/templating/SecureTemplater.ts",
+      line: 170,
+    },
     stage: [
       "compose.yaml",
       "app-config.yaml",
@@ -506,6 +573,12 @@ export const cases: readonly ReachabilityCase[] = [
       source: `fixtures/backstage/${name}`,
       destination: `portal/${name}`,
     })),
+    callerScope:
+      "An authenticated user may submit a normal POST /v2/tasks request for the starter app's example-nodejs-template " +
+      "and controls the name parameter. The user cannot choose the repository destination or edit the registered template or its skeleton. " +
+      "Assess server-side task execution in the configured deployment supplied in the checkout. " +
+      "Assume the backend and its dependencies are built from this checkout and its lockfile. " +
+      "Report the resolved vm2 version.",
     question:
       "Assess CVE-2023-37466 in vm2 for the starter app's example-nodejs-template. " +
       "Assume the backend and its dependencies are built from this checkout and its lockfile. " +
@@ -520,16 +593,15 @@ export const cases: readonly ReachabilityCase[] = [
         "vm2@npm:3.9.19",
         '"vm2@npm:^3.9.18":\n  version: 3.9.19',
       ),
-      excerpts("portal/portal.conf", "location = /api/scaffolder/v2/tasks"),
-      excerpts("portal/portal.conf", "limit_except POST { deny all; }"),
-      excerpts("portal/portal.conf", "location / { return 404; }"),
-      [
-        {
-          path: "portal/app-config.yaml",
-          contains: "readonly: true",
-          completeFile: true,
-        },
-      ],
+      ...[
+        "catalog:",
+        "  readonly: true",
+        "  locations:",
+        "    - type: file",
+        "      target: /app/catalog/template.yaml",
+        "      rules:",
+        "        - allow: [Template]",
+      ].map((line) => excerpts("portal/app-config.yaml", line)),
       excerpts("portal/compose.yaml", "/app/catalog/template.yaml:ro"),
       excerpts("portal/compose.yaml", "/app/catalog/content:ro"),
       excerpts(
@@ -552,7 +624,6 @@ export const cases: readonly ReachabilityCase[] = [
         "packages/backend/Dockerfile",
         "packages/backend/dist/bundle.tar.gz",
       ),
-      excerpts("app-config.yaml", "connection: ':memory:'"),
       excerpts("portal/template.yaml", "additionalProperties: false"),
       excerpts("portal/template.yaml", "parameters.name"),
       excerpts("portal/template.yaml", "url: ./content"),
@@ -596,7 +667,7 @@ export const cases: readonly ReachabilityCase[] = [
       ),
       excerpts(
         scaffolder + "lib/templating/SecureTemplater.ts",
-        "vm.setGlobal('templateValues'",
+        "vm.setGlobal('templateValues', JSON.stringify(values))",
       ),
       excerpts(
         scaffolder + "lib/templating/SecureTemplater.ts",

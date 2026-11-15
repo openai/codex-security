@@ -4,9 +4,33 @@ import { join } from "node:path";
 import { z } from "zod";
 import {
   dependencyAssessmentSchema,
+  dependencyCheckOutputSchema,
+  readDependencyCheckOutput,
   validateDependencyAssessment,
 } from "../src/dependency-reachability.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
+
+test("keeps saved reports without advisory details valid and exposes the optional field", () => {
+  const saved = {
+    cve: "CVE-2000-1234",
+    status: "unknown",
+    uses: [],
+    limitations: [],
+    advisories: [],
+    usage: null,
+  };
+  expect(dependencyCheckOutputSchema.safeParse(saved).success).toBe(false);
+  const { status: _status, ...report } = saved;
+  expect(readDependencyCheckOutput(saved)).toEqual({
+    ...report,
+    schemaVersion: 2,
+    assumptions: [],
+    searches: [],
+  });
+  expect(JSON.stringify(z.toJSONSchema(dependencyCheckOutputSchema))).toContain(
+    '"advisoryDetails"',
+  );
+});
 
 type Assessment = z.output<typeof dependencyAssessmentSchema>;
 type Verdict = Assessment["status"];
@@ -38,6 +62,96 @@ function assessment(status: Verdict, verdicts: Verdict[]): Assessment {
     limitations: [],
   };
 }
+
+test("preserves structured sink and condition evidence through validation and saved reports", async () => {
+  await using repo = await scopedTemporaryDirectory("cve-use-proof-");
+  await writeFile(
+    join(repo.path, citation.path),
+    "import codec\ncodec.decode(input)",
+  );
+  const report = assessment("unknown", ["unknown"]);
+  const proof = {
+    sink: {
+      function: "codec.decode",
+      callSite: { path: citation.path, line: 2 },
+    },
+    conditions: [
+      {
+        label: "The caller invokes the decoder",
+        status: "met" as const,
+        explanation: "The cited source invokes codec.decode.",
+        citations: [{ path: citation.path, line: 2 }],
+      },
+      {
+        label: "The caller controls the input",
+        status: "unknown" as const,
+        explanation: "No caller access record was obtained.",
+        citations: [],
+      },
+    ],
+  };
+  report.uses[0]!.proof = proof;
+  const checked = await validateDependencyAssessment(report, repo.path);
+  expect(checked.uses[0]!.proof).toEqual(proof);
+  const saved = readDependencyCheckOutput({
+    ...checked,
+    cve: "CVE-2000-1234",
+    advisories: [],
+    usage: null,
+  });
+  expect("uses" in saved && saved.uses[0]!.proof).toEqual(proof);
+});
+
+test("binds structured proof to its own use citations, not another use or uncited lines", () => {
+  const report = assessment("unknown", ["unknown", "unknown"]);
+  report.uses[1]!.evidence = [
+    { path: "other.ts", startLine: 1, endLine: 3, supports: [] },
+  ];
+  for (const callSite of [
+    { path: citation.path, line: 3 },
+    { path: "other.ts", line: 2 },
+  ]) {
+    report.uses[0]!.proof = {
+      sink: { function: "codec.decode", callSite },
+      conditions: [],
+    };
+    expect(() => dependencyAssessmentSchema.parse(report)).toThrow(
+      "outside the citations for this use",
+    );
+  }
+  report.uses[0]!.proof = {
+    conditions: [
+      {
+        label: "Decoder is excluded",
+        status: "ruled_out",
+        explanation: "This claim cites another use's source.",
+        citations: [{ path: "other.ts", line: 2 }],
+      },
+    ],
+  };
+  expect(() => dependencyAssessmentSchema.parse(report)).toThrow(
+    "outside the citations for this use",
+  );
+});
+
+test("requires a citation for a structured met or excluded condition", () => {
+  const report = assessment("unknown", ["unknown"]);
+  for (const status of ["met", "ruled_out"] as const) {
+    report.uses[0]!.proof = {
+      conditions: [
+        {
+          label: "Input mode",
+          status,
+          explanation: "An asserted condition needs its own evidence.",
+          citations: [],
+        },
+      ],
+    };
+    expect(() => dependencyAssessmentSchema.parse(report)).toThrow(
+      "requires at least one cited line",
+    );
+  }
+});
 
 test("reconciles the checkout verdict with cited service verdicts and preserves incomplete coverage", async () => {
   await using repo = await scopedTemporaryDirectory("cve-verdict-");

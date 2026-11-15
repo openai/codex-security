@@ -1,6 +1,7 @@
 import { availableParallelism } from "node:os";
 import { createTraceCache } from "./cache.ts";
-import { localProvider } from "./provider.ts";
+import { scopeSummary } from "./rule-config.ts";
+import { localProvider, sourceFileScopes } from "./provider.ts";
 import type {
   ScopeResult,
   TraceProvider,
@@ -8,12 +9,6 @@ import type {
   TraceResult,
   TraceScope,
 } from "./types.ts";
-
-// Bound both the scheduler's working set and the model-visible response.
-const MAX_SCOPES = 96;
-const MAX_EVIDENCE = 128;
-const MAX_TEXT_MATCHES = 128;
-const MAX_EXPANSIONS = 256;
 
 // A native scan runs one job with a 256 MiB rule limit, plus process overhead.
 // Leave headroom when many CPU threads share a small memory allocation.
@@ -36,7 +31,12 @@ function scopeKey(scope: TraceScope) {
     scope.version,
     scope.symbol,
     scope.source_symbol,
+    scope.source_terms,
+    scope.files,
     scope.path,
+    ...(scope.rules === undefined
+      ? []
+      : [scopeSummary(scope).ruleConfigSha256]),
   ]);
 }
 
@@ -65,8 +65,6 @@ export async function processTrace(
   const edges = new Map<string, TraceResult["expansions"][number]>();
   const limits = new Set<string>();
   const atHopLimit = new Set<number>();
-  let evidenceCount = 0;
-  let textMatchCount = 0;
 
   function schedule(scope: TraceScope, hops: number) {
     const key = scopeKey(scope);
@@ -79,10 +77,6 @@ export async function processTrace(
       }
       return existing;
     }
-    if (scopes.length >= MAX_SCOPES) {
-      limits.add("scope limit");
-      return;
-    }
     const id = scopes.length;
     ids.set(key, id);
     scopes.push({ id, scope, hops, evidence: [], complete: false });
@@ -93,19 +87,18 @@ export async function processTrace(
   function expand(id: number) {
     const next = results.get(id);
     if (!next?.length) return;
-    const depth = scopes[id].hops;
-    if (depth >= request.max_hops) {
+    const { hops: depth, scope } = scopes[id];
+    // The file batches are the structural half of this discovery step.
+    const discovery = scope.kind === "search" && !!scope.source_terms;
+    if (!discovery && depth >= request.max_hops) {
       atHopLimit.add(id);
       return;
     }
     atHopLimit.delete(id);
     for (const scope of next) {
-      const to = schedule(scope, depth + 1);
-      if (to === undefined) continue;
+      const to = schedule(scope, discovery ? depth : depth + 1);
       const key = id + "/" + to;
-      if (edges.size < MAX_EXPANSIONS || edges.has(key))
-        edges.set(key, { from: id, to });
-      else limits.add("expansion limit");
+      edges.set(key, { from: id, to });
     }
   }
 
@@ -114,23 +107,33 @@ export async function processTrace(
     Promise<{ id: number; result: ScopeResult }>
   >();
   try {
-    for (const path of request.paths) {
-      const base = {
-        kind: "search" as const,
-        package: request.package,
-        version: request.version,
-        path,
-      };
+    const base = { package: request.package, version: request.version };
+    const operation = {
+      symbol: request.symbol,
+      source_symbol: request.source_symbol,
+      ...(request.rules === undefined
+        ? {}
+        : { rules: JSON.parse(JSON.stringify(request.rules)) }),
+    };
+    for (const path of request.paths ?? (request.files ? [] : ["."])) {
       schedule(
         {
           ...base,
-          symbol: request.symbol,
-          source_symbol: request.source_symbol,
+          ...operation,
+          source_terms: request.source_terms,
+          kind: "search",
+          path,
         },
         0,
       );
-      if (request.symbol) schedule({ ...base, kind: "manifests" }, 0);
+      if (request.symbol && !request.source_terms)
+        schedule({ ...base, kind: "manifests", path }, 0);
     }
+    for (const scope of sourceFileScopes(
+      { ...base, ...operation, kind: "file" },
+      request.files ?? [],
+    ))
+      schedule(scope, 0);
     while (!stopped.aborted && (queue.length || running.size)) {
       while (queue.length && running.size < concurrency) {
         const id = queue.shift()!;
@@ -155,31 +158,31 @@ export async function processTrace(
       const { id, result } = done;
       running.delete(id);
       const node = scopes[id];
-      node.evidence = result.evidence.slice(0, MAX_EVIDENCE - evidenceCount);
-      evidenceCount += node.evidence.length;
       node.complete = result.complete;
       node.reason = result.reason;
-      if (node.evidence.length < result.evidence.length) {
-        limits.add("evidence limit");
-        node.complete = false;
-        node.reason ??= "Evidence limit reached.";
-      }
-      if (result.textMatches?.length) {
-        node.textMatches = result.textMatches.slice(
-          0,
-          MAX_TEXT_MATCHES - textMatchCount,
-        );
-        textMatchCount += node.textMatches.length;
-        if (node.textMatches.length < result.textMatches.length) {
-          limits.add("text match limit");
-          node.complete = false;
-          node.reason ??= "Text match limit reached.";
-        }
-      }
+      node.evidence = result.evidence;
+      if (result.ruleExecution) node.ruleExecution = result.ruleExecution;
+      if (result.textMatches?.length) node.textMatches = result.textMatches;
       results.set(id, result.next);
       expand(id);
     }
     signal?.throwIfAborted();
+    if (request.source_terms) {
+      // Deduplicate overlapping directories without depending on scan timing.
+      // Process completed batches in scope order, independently of scan timing.
+      const seen = new Set<string>();
+      const ordered = scopes
+        .map((node) => ({ node, key: scopeKey(node.scope) }))
+        .sort((a, b) => (a.key < b.key ? -1 : a.key === b.key ? 0 : 1));
+      for (const { node } of ordered) {
+        node.evidence = node.evidence.filter((item) => {
+          const key = JSON.stringify(item);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
+    }
     if (stopped.aborted) limits.add("time budget");
     const frontier = new Map<string, TraceScope>();
     for (const id of atHopLimit) {

@@ -21,6 +21,8 @@ export interface DependencyCandidate {
   sourceSha256?: string;
   /** UTF-8 byte length of that source line, excluding its newline terminator. */
   sourceBytes?: number;
+  /** Filename convention only. Callers and build selection decide scope. */
+  testCandidate?: true;
   observations: DependencyCandidateObservation[];
 }
 
@@ -42,6 +44,19 @@ type Location = Pick<DependencyCandidate, "path" | "line" | "package">;
 
 const discoveryScope =
   "Candidates are verified repository locations for graph relations candidate_call, candidate_flow, and depends_on. Search matches are leads for investigation and may be cited in assessments. Candidate accounting covers the observed structural evidence. Discovery completeness and applicability require separate assessment.";
+
+export function hasDependencyTestPathConvention(path: string): boolean {
+  const parts = path.split("/");
+  const name = parts.pop()!;
+  return (
+    parts.some(
+      (part) => part === "test" || part === "tests" || part === "__tests__",
+    ) ||
+    /^(?:test_.*\.py|conftest\.py)$|_test\.(?:py|go)$|\.(?:test|spec)\.[^.]+$/u.test(
+      name,
+    )
+  );
+}
 
 function sourceLines(source: string): string[] {
   // A trailing newline terminates the last line; it does not add a line.
@@ -170,6 +185,7 @@ export async function createDependencyCandidates(
     for (const [path, matches] of byPath) {
       const file = await source(path);
       if (!file) continue;
+      const testCandidate = hasDependencyTestPathConvention(file.path);
       for (const location of matches) {
         if (location.line !== undefined && location.line > file.lines.length)
           continue;
@@ -199,6 +215,7 @@ export async function createDependencyCandidates(
             ...(sourceSha256 === undefined
               ? {}
               : { sourceSha256, sourceBytes }),
+            ...(testCandidate && { testCandidate: true }),
             observations: [],
           };
           candidates.set(key, candidate);

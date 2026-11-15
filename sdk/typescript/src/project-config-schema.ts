@@ -79,7 +79,7 @@ export const ProjectConfigInputSchema = z.strictObject({
     .catchall(z.json())
     .optional()
     .describe(
-      "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply.",
+      "Native Codex overrides. Common key types are checked here; existing native and wrapper restrictions still apply. mcp_servers.<name>.instructions supplies string guidance for exploitability checks and is removed before passing server configuration to Codex.",
     ),
   exploitability: z
     .strictObject({
@@ -88,6 +88,12 @@ export const ProjectConfigInputSchema = z.strictObject({
         .optional()
         .describe(
           "Read-only service catalog servers selected from codex.mcp_servers for service identities, running revisions and access observations in exploitability checks. Defaults to none.",
+        ),
+      runtime_mcps: z
+        .array(nonempty)
+        .optional()
+        .describe(
+          "Read-only runtime evidence servers selected from codex.mcp_servers. These servers are available to the investigator and runtime lookups without serving as source-to-service catalogs. Defaults to none.",
         ),
     })
     .optional(),

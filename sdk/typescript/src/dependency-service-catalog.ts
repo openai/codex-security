@@ -268,6 +268,7 @@ function checkedNotFound(
 
 interface CatalogOptions {
   servers: JsonObject;
+  instructions?: Record<string, string>;
   repository: string;
   runtime: Parameters<typeof runReadOnlyCodex>[2];
   createSession?: typeof createReadOnlyCodexSession;
@@ -325,16 +326,20 @@ export function createDependencyServiceCatalog(options: CatalogOptions): {
           catalogLookup: {
             servers,
             onResult: (item) => {
-              if (successful(item)) {
-                const inventoryReceiptId = options.recordInventory?.(
-                  item.server,
-                  item.result,
-                  {
-                    tool: item.tool,
-                    arguments: item.arguments,
-                    itemId: item.id,
-                  },
-                );
+              const success = successful(item);
+              const inventoryReceiptId = options.recordInventory?.(
+                item.server,
+                success
+                  ? item.result
+                  : { result: item.result, error: item.error },
+                {
+                  tool: item.tool,
+                  arguments: item.arguments,
+                  itemId: item.id,
+                  ...(success ? {} : { outcome: "failed" }),
+                },
+              );
+              if (success) {
                 receipts.push({
                   ...item,
                   ...(inventoryReceiptId === undefined
@@ -357,7 +362,13 @@ export function createDependencyServiceCatalog(options: CatalogOptions): {
       const output = await (
         await session
       ).run(
-        `${instructions}\n${JSON.stringify({
+        `${instructions}\n${
+          options.instructions && Object.keys(options.instructions).length
+            ? "Follow these operator instructions for the named catalog servers:\n" +
+              JSON.stringify(options.instructions) +
+              "\n"
+            : ""
+        }${JSON.stringify({
           requests: [...requested].map(([requestId, request]) => ({
             requestId,
             ...request,
@@ -491,6 +502,7 @@ export function createDependencyServiceCatalog(options: CatalogOptions): {
 
 export async function resolveDependencyServices(options: {
   servers: JsonObject;
+  instructions?: Record<string, string>;
   repository: string;
   requests: readonly ServiceRequest[];
   runtime: Parameters<typeof runReadOnlyCodex>[2];

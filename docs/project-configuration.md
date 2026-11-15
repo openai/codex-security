@@ -87,11 +87,15 @@ An `exploitability check` uses checkout evidence by default. Optionally set
 `exploitability.service_catalog_mcps` to select native Codex MCP servers for
 service identity, running revision and caller access lookups. The list accepts
 several servers, and the same server can supply both identity and runtime
-observations.
+observations. Select a server that looks up known runtime artifacts or native
+resources, but has no source-to-service catalog, in `exploitability.runtime_mcps`.
+This keeps its tools and receipts available without sending it catalog requests.
+A server listed in both settings is connected once and participates in both roles.
 
 ```yaml
 exploitability:
   service_catalog_mcps: [inventory]
+  runtime_mcps: [artifacts]
 codex:
   mcp_servers:
     inventory:
@@ -99,14 +103,19 @@ codex:
       enabled_tools:
         [find_service, get_running_revision, get_access_observations]
       bearer_token_env_var: INVENTORY_READ_TOKEN
+    artifacts:
+      url: https://artifacts.example/mcp
+      enabled_tools: [get_image_provenance]
 ```
 
 Pass the file to `codex-security exploitability check CVE-2023-4863 --config FILE`.
-The catalog resolver uses the selected servers to identify services. A matching
-catalog record supplies the service name and identity in the graph. The
-investigator uses those same servers for read-only deployment and access
-lookups. With no servers selected, source tracing continues without catalog service
-mappings.
+After a trace, the CLI looks up queued paths in the selected catalogs. A matching
+record supplies the service name and identity in the graph. For each resolved
+service, the CLI runs available read-only lookups for the running build and
+caller access and retains their original results for review. Automatic lookups
+use tools marked read-only or explicitly selected in `enabled_tools`. The
+investigator can follow up when a tool needs additional scope. With no servers
+selected, the CLI uses checkout evidence.
 If a selected server also exposes mutating tools, set its native
 `enabled_tools` allowlist to the read-only lookup tools as in the `inventory`
 example. Use credentials scoped to reading
@@ -115,17 +124,83 @@ in MCP server settings would be passed to the Codex process on its command line.
 The resolver reads each catalog tool's schema and response directly, so the
 project file needs no field mappings.
 
+To guide inventory calls, add an optional `instructions` string to the existing
+server entry in your JSON or YAML file:
+
+```json
+{
+  "exploitability": { "service_catalog_mcps": ["inventory"] },
+  "codex": {
+    "mcp_servers": {
+      "inventory": {
+        "url": "https://inventory.example/mcp",
+        "enabled_tools": ["find_service", "get_running_revision"],
+        "instructions": "For get_running_revision, set include_partial to true and preserve coverage metadata."
+      }
+    }
+  }
+}
+```
+
+Codex Security supplies this guidance to the dependency investigator, service
+catalog resolver and automatic runtime lookup planner for that selected,
+enabled server. The planner validates its final arguments against the tool's
+input schema. Use the argument names and values supported by your server;
+`include_partial` above is an example. Returned records still need to establish
+each claimed fact, and partial coverage remains partial.
+
+This `instructions` field is a Codex Security extension for exploitability
+checks, not a native Codex MCP setting. The wrapper removes it before passing
+server configuration to Codex, including ordinary scans and Deep Scan workers.
+It does not alter the server or its initialization instructions. Omit it to
+preserve existing behavior.
+
 A service identity or desired configuration alone does not establish a running
 revision or caller access. An inventory can establish the running revision
 without saying who can access it. If the source establishes an affected use
 but either runtime fact is missing, the check reports
-`potentially_exploitable`. If a deciding source-level fact is missing, the use
+`potentially_exploitable`. With inventory servers selected, the report must show
+what the check tried for that use and which runtime facts remain open. A scoped
+lookup that returns no result or fails can support that explanation. If a
+deciding source-level fact is missing, the use
 remains `unknown`. Public access requires evidence about the live route to that
 same service.
 
 Codex ignores user configuration for this command. If an active machine-wide
 configuration would attach another MCP server or change a selected server,
 the check exits before starting the assessment and identifies the conflict.
+
+Selected profiling providers can keep full results outside model context by
+returning a `graph_evidence` object in their tool result:
+
+```json
+{
+  "graph_evidence": {
+    "format": "codex-security-graph-evidence/v1",
+    "uri": "evidence://profiles/collection-id",
+    "sha256": "<SHA-256 of the exact UTF-8 resource text>"
+  }
+}
+```
+
+The same MCP server must expose that URI as one JSON text resource. Its body
+uses `format: "codex-security-graph-evidence/v1"`, `frame_order: "root_first"`,
+and `observations`. Each observation has `id`, `kind: "sampled_stack"`, a JSON
+`scope`, and ordered `frames` containing `kind`, `name`, and optional `scope`.
+Use frame scopes to distinguish workload/build identities; retain additional
+native frame fields in the resource. Keep collection coverage and query
+provenance in `metadata`. A sampled stack establishes sampled execution only.
+
+The host reads and hash-checks the resource, retains the original receipt,
+and ingests it into the existing source evidence graph. The model receives
+the collection summary and bounded graph queries. It does not receive the full
+resource. `query_codex_security_graph` supports node-name searches and witness
+filters; exact frame and witness-scope selections bind the deciding evidence
+to review. Whole resource receipts and oversized review projections are
+rejected with instructions to select narrower graph evidence. Refreshing the
+producing tool receipt invalidates its older resource proof for current claims.
+Resource import failures and graph retention limits remain explicit gaps.
+No additional CLI flag or server configuration field is required.
 
 ## Desktop and conversational Deep Scans
 

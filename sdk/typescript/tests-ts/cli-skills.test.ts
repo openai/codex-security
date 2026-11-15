@@ -1247,6 +1247,11 @@ describe("CLI skill commands", () => {
             )!,
           ),
         ).toEqual({ model_reasoning_effort: effort });
+        expect(
+          invocation.some((value) =>
+            value.startsWith("agents.default_subagent_reasoning_effort="),
+          ),
+        ).toBe(false);
       }
 
       for (const [options, message] of [

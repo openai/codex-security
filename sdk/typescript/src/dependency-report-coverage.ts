@@ -10,6 +10,7 @@ export class DependencyReportCoverage {
   private pending = 0;
   private unresolved = 0;
   private truncated = false;
+  private sourceEvidenceCount = 0;
   generation = 0;
 
   observe(
@@ -52,6 +53,16 @@ export class DependencyReportCoverage {
       this.generation++;
       return;
     }
+    const evidenceCount = isRecord(payload)
+      ? payload["source_evidence_count"]
+      : undefined;
+    if (
+      isSafeNonNegativeInteger(evidenceCount) &&
+      evidenceCount > this.sourceEvidenceCount
+    ) {
+      this.sourceEvidenceCount = evidenceCount;
+      this.generation++;
+    }
     if (status["revision"] < this.revision) return;
     if (status["revision"] > this.revision) {
       this.revision = status["revision"];
@@ -82,6 +93,11 @@ export class DependencyReportCoverage {
 
   get outstanding() {
     return this.unreadable || this.pending > 0;
+  }
+
+  /** Catalog nonmatches are limitations; pending or lost coverage is incomplete. */
+  get incomplete() {
+    return this.outstanding || this.truncated;
   }
 
   limitation() {

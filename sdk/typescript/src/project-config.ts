@@ -46,12 +46,21 @@ export interface ProjectConfigSource {
   input: ProjectConfigInput;
 }
 
-export function exploitabilityMcpServers(
+export function exploitabilityMcpConfiguration(
   input: ProjectConfigInput | undefined,
-): JsonObject {
-  const names = input?.exploitability?.service_catalog_mcps ?? [];
+): {
+  servers: JsonObject;
+  catalogServers: JsonObject;
+  instructions: Record<string, string>;
+} {
+  const catalogNames = new Set(input?.exploitability?.service_catalog_mcps);
+  const names = new Set([
+    ...catalogNames,
+    ...(input?.exploitability?.runtime_mcps ?? []),
+  ]);
   const servers = input?.codex?.["mcp_servers"];
   const selected = new Map<string, JsonObject>();
+  const instructions = new Map<string, string>();
   for (const name of names) {
     if (name.replace(/[-.:@/]/gu, "_") === "codex_security_dependency")
       throw new ConfigurationError(
@@ -63,11 +72,49 @@ export function exploitabilityMcpServers(
         : undefined;
     if (!isRecord(server))
       throw new ConfigurationError(
-        `MCP server ${JSON.stringify(name)} selected by exploitability.service_catalog_mcps must be defined in codex.mcp_servers.`,
+        `MCP server ${JSON.stringify(name)} selected by exploitability.${catalogNames.has(name) ? "service_catalog_mcps" : "runtime_mcps"} must be defined in codex.mcp_servers.`,
       );
-    if (server["enabled"] !== false) selected.set(name, server);
+    const tools = server["enabled_tools"];
+    if (
+      server["enabled"] !== false &&
+      !(Array.isArray(tools) && tools.length === 0)
+    ) {
+      const guidance = server["instructions"];
+      if (guidance !== undefined && typeof guidance !== "string")
+        throw new ConfigurationError(
+          `codex.mcp_servers.${name}.instructions must be a string.`,
+        );
+      if (guidance !== undefined) instructions.set(name, guidance);
+      selected.set(name, nativeMcpServer(server));
+    }
   }
-  return Object.fromEntries(selected);
+  return {
+    servers: Object.fromEntries(selected),
+    catalogServers: Object.fromEntries(
+      [...selected].filter(([name]) => catalogNames.has(name)),
+    ),
+    instructions: Object.fromEntries(instructions),
+  };
+}
+
+function nativeMcpServer(server: JsonObject): JsonObject {
+  return Object.fromEntries(
+    Object.entries(server).filter(([key]) => key !== "instructions"),
+  );
+}
+
+function nativeMcpConfiguration(config: JsonObject): JsonObject {
+  const servers = config["mcp_servers"];
+  if (!isRecord(servers)) return config;
+  return {
+    ...config,
+    mcp_servers: Object.fromEntries(
+      Object.entries(servers).map(([name, server]) => [
+        name,
+        isRecord(server) ? nativeMcpServer(server) : server,
+      ]),
+    ),
+  };
 }
 
 export interface ResolvedProjectConfig {
@@ -336,9 +383,8 @@ export function resolveScanSettings(
     }
   }
 
-  const codexOverrides = mergeCodexOverrides(
-    file?.codex ?? {},
-    overrides.codexOverrides ?? {},
+  const codexOverrides = nativeMcpConfiguration(
+    mergeCodexOverrides(file?.codex ?? {}, overrides.codexOverrides ?? {}),
   );
   const nativeSourceTree = (
     value: JsonObject,
@@ -367,11 +413,13 @@ export function resolveScanSettings(
     }
   };
   // Match the value merge: defaults beneath the combined project/CLI overrides.
-  const nativeSources = mergeCodexOverrides(
-    nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
+  const nativeSources = nativeMcpConfiguration(
     mergeCodexOverrides(
-      nativeSourceTree(file?.codex ?? {}, "project"),
-      nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
+      nativeSourceTree(DEFAULT_CODEX_CONFIG, "default"),
+      mergeCodexOverrides(
+        nativeSourceTree(file?.codex ?? {}, "project"),
+        nativeSourceTree(overrides.codexOverrides ?? {}, "cli"),
+      ),
     ),
   );
   // Literal dotted keys can share a flattened name; retain layer precedence.

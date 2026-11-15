@@ -1,20 +1,25 @@
 import * as z from "zod/v4";
 import { canonicalDirectory } from "../artifact-context.js";
 import { safeRelativePath } from "../contract-values.js";
-import { EvidenceGraph, type CatalogReceiptSelection } from "./graph.js";
+import {
+  EvidenceGraph,
+  boundGraphResponse,
+  type CatalogReceiptSelection,
+} from "./graph.js";
 import { findProjectReferences } from "./provider.js";
-import { traceResponse } from "./response.js";
+import { boundTraceResponse, traceResponse } from "./response.js";
 import {
   graphQuerySchema,
   serviceInputSchema,
   traceInputSchema,
 } from "./schema.js";
 import { createDependencyTracer } from "./trace.js";
+import type { TraceObservation } from "./types.ts";
 
 export const dependencyGraphTools = {
   trace_codex_security_code: {
     description:
-      "Search supported source files and dependency manifests in this checkout. Text matches locate files to inspect. The graph retains cited dependency declarations, candidate calls, and same-file flows.",
+      "Search source files and dependency manifests in this checkout. With source_terms, symbol and directories, the tool feeds the matching files directly into OpenGrep in batches. The graph retains cited dependency declarations, candidate calls, and same-file flows.",
     schema: traceInputSchema,
   },
   resolve_codex_security_services: {
@@ -24,7 +29,7 @@ export const dependencyGraphTools = {
   },
   query_codex_security_graph: {
     description:
-      "Read the graph and service lookup status. Give a node name or ID to see its paths and citations.",
+      "Read the graph and service lookup status. Search names or give a node ID for static paths and citations. Sampled stacks are separate witnesses: select a witness to inspect ordered frames, or node plus witness for its adjacent observed calls. Calls from different witnesses do not form an observed path; missing sampled calls do not prove absence.",
     schema: graphQuerySchema,
   },
 };
@@ -61,12 +66,13 @@ function catalogInput(args: unknown) {
 export async function createDependencyGraphSession(
   checkout: string,
   catalogConfigured: boolean,
+  { fullTraceReply = false }: { fullTraceReply?: boolean } = {},
 ) {
   const root = await canonicalDirectory(checkout, "Dependency trace checkout");
   const tracer = createDependencyTracer(root);
   const graph = new EvidenceGraph();
 
-  function reply(result: Record<string, unknown>): Record<string, unknown> & {
+  function reply(result: object): Record<string, unknown> & {
     service_resolution: ReturnType<EvidenceGraph["serviceResolution"]> & {
       catalog_configured: boolean;
     };
@@ -81,6 +87,7 @@ export async function createDependencyGraphSession(
   }
 
   return {
+    boundTraceResponse,
     tools: Object.entries(dependencyGraphTools).map(
       ([name, { description, schema }]) => ({
         name,
@@ -92,18 +99,25 @@ export async function createDependencyGraphSession(
       switch (name) {
         case "trace_codex_security_code": {
           const request = traceInputSchema.parse(args);
-          const paths = request.paths.map((path) =>
+          const paths = request.paths?.map((path) =>
             safeRelativePath(path, "Trace scope", true),
           );
-          const result = await tracer.trace({ ...request, paths }, signal);
-          graph.addTrace(result, catalogConfigured);
-          return reply(traceResponse(result));
+          const files = request.files?.map((path) =>
+            safeRelativePath(path, "Trace file"),
+          );
+          const result = await tracer.trace(
+            { ...request, paths, files },
+            signal,
+          );
+          graph.addTrace(result, catalogConfigured && !request.source_only);
+          const response = reply(traceResponse(result));
+          return fullTraceReply ? response : boundTraceResponse(response);
         }
         case "resolve_codex_security_services": {
           const { paths, project } = catalogInput(args);
           if (paths !== undefined) {
             if (catalogConfigured) graph.requestServices(paths, project, true);
-            return reply(graph.query());
+            return boundGraphResponse(reply(graph.query()));
           }
           return reply({
             project,
@@ -111,22 +125,27 @@ export async function createDependencyGraphSession(
           });
         }
         case "query_codex_security_graph": {
-          const { node } = graphQuerySchema.parse(args);
-          return reply(graph.query(node));
+          const { node, witness, search } = graphQuerySchema.parse(args);
+          return boundGraphResponse(
+            reply(graph.query(node, { witness, search })),
+          );
         }
         default:
           throw new Error(`Unknown dependency graph tool ${name}.`);
       }
     },
-    pendingCatalogRequests(args: unknown) {
+    pendingCatalogRequests(args?: unknown) {
       if (!catalogConfigured) return [];
-      const { paths, project: suppliedProject } = catalogInput(args);
-      return [...new Set(paths)]
-        .filter((path) => graph.isServicePending(path))
-        .map((path) => {
-          const project = suppliedProject ?? graph.serviceProject(path);
-          return { path, ...(project === undefined ? {} : { project }) };
-        });
+      const input = args === undefined ? undefined : catalogInput(args);
+      const pending = input
+        ? [...new Set(input.paths)].filter((path) =>
+            graph.isServicePending(path),
+          )
+        : graph.pendingServicePaths();
+      return pending.map((path) => {
+        const project = input?.project ?? graph.serviceProject(path);
+        return { path, ...(project === undefined ? {} : { project }) };
+      });
     },
     // The CLI's catalog resolver owns this entry point. The model sees only call().
     recordCatalogResolutions(
@@ -155,7 +174,16 @@ export async function createDependencyGraphSession(
           };
         }),
       );
-      return reply(graph.query());
+      return boundGraphResponse(reply(graph.query()));
+    },
+    // The host reads observation receipts off-model and owns graph ingestion.
+    // This method is deliberately absent from the model-visible tool list.
+    recordObservations(
+      observations: readonly TraceObservation[],
+      receiptId: string,
+      recordPrefix: readonly (string | number)[] = ["observations"],
+    ) {
+      return graph.recordObservations(observations, receiptId, recordPrefix);
     },
     close: () => tracer.close(),
   };

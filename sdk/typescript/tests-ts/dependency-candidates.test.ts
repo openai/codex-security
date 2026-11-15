@@ -1,12 +1,63 @@
 import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createDependencyCandidates } from "../src/dependency-candidates.js";
+import {
+  createDependencyCandidates,
+  hasDependencyTestPathConvention,
+} from "../src/dependency-candidates.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const trace = "trace_codex_security_code";
 const query = "query_codex_security_graph";
 
+test("labels conventional test paths and keeps test and production graph evidence", async () => {
+  const files = [
+    "dir/test/a.py",
+    "dir/tests/helper.py",
+    "dir/__tests__/helper.ts",
+    "dir/test_run.py",
+    "dir/run_test.py",
+    "dir/run_test.go",
+    "dir/conftest.py",
+    "dir/run.test.ts",
+    "dir/run.spec.ts",
+  ];
+  const production = [
+    "dir/testing/helper.py",
+    "dir/contest.py",
+    "dir/test_runner.ts",
+  ];
+  for (const path of files)
+    expect(hasDependencyTestPathConvention(path)).toBe(true);
+  for (const path of production)
+    expect(hasDependencyTestPathConvention(path)).toBe(false);
+  await using repo = await scopedTemporaryDirectory(
+    "dependency-test-candidates-",
+  );
+  const runtime = production[0]!;
+  const importedHelper = files[1]!;
+  for (const [file, body] of [
+    [runtime, "from tests.helper import decode\ndecode()\n"],
+    [importedHelper, "def decode():\n    sink()\n"],
+  ] as const) {
+    await mkdir(join(repo.path, file, ".."), { recursive: true });
+    await writeFile(join(repo.path, file), body);
+  }
+  const registry = await createDependencyCandidates(repo.path);
+  const observed = await registry.observeGraph(trace, {
+    trace: [runtime, importedHelper].map((source) => ({
+      relation: "candidate_call",
+      evidence: [{ source, lines: [2] }],
+    })),
+  });
+  expect(observed).toHaveLength(2);
+  expect(observed[0]?.testCandidate).toBeUndefined();
+  expect(observed[1]).toMatchObject({
+    path: importedHelper,
+    testCandidate: true,
+  });
+  expect(registry.snapshot().candidates).toHaveLength(2);
+});
 test("retains structural call, flow, and dependency locations across trace and graph queries", async () => {
   await using repo = await scopedTemporaryDirectory("dependency-candidates-");
   const path = "worker.ts";

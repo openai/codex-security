@@ -1,11 +1,23 @@
 import { createHash } from "node:crypto";
+import type { JsonObject } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { canonicalJson, cloneWithoutGetters, isRecord } from "./record.js";
+
+export interface DependencyInventoryRpc {
+  list(): Promise<unknown>;
+  call(server: string, tool: string, args: JsonObject): Promise<unknown>;
+  read?(server: string, uri: string): Promise<unknown>;
+}
 
 export interface DependencyInventoryReceiptMetadata {
   tool?: string;
   arguments?: unknown;
   itemId?: string;
+  outcome?: "failed" | "empty" | "unavailable";
+  startedAt?: string;
+  finishedAt?: string;
+  /** Tool receipt that supplied this immutable evidence resource. */
+  parentReceiptId?: string;
 }
 export interface DependencyInventoryReceiptSelection {
   receiptId: string;
@@ -17,9 +29,13 @@ export interface BoundDependencyInventoryReceipt {
   receiptId: string;
   server: string;
   originalPayloadSha256: string;
-  origin: Pick<DependencyInventoryReceiptMetadata, "tool" | "arguments">;
+  origin: Pick<
+    DependencyInventoryReceiptMetadata,
+    "tool" | "arguments" | "parentReceiptId"
+  >;
   selection?: Omit<DependencyInventoryReceiptSelection, "receiptId">;
   result: unknown;
+  outcome?: DependencyInventoryReceiptMetadata["outcome"];
   historical?: boolean;
 }
 interface Receipt {
@@ -29,8 +45,12 @@ interface Receipt {
   payloadSha256: string;
   payloadCharacters: number;
   originKey: string;
-  origin: Pick<DependencyInventoryReceiptMetadata, "tool" | "arguments">;
+  origin: Pick<
+    DependencyInventoryReceiptMetadata,
+    "tool" | "arguments" | "parentReceiptId"
+  >;
   itemId?: string;
+  outcome?: DependencyInventoryReceiptMetadata["outcome"];
 }
 
 function digest(value: unknown): string {
@@ -63,11 +83,14 @@ export function inventoryResultPayload(
     return (
       result["structured_content"] ?? result["structuredContent"] ?? undefined
     );
-  if (!Array.isArray(result["content"])) return undefined;
-  const block: unknown = result["content"][textBlock];
+  const resource =
+    !Array.isArray(result["content"]) && Array.isArray(result["contents"]);
+  const blocks = resource ? result["contents"] : result["content"];
+  if (!Array.isArray(blocks)) return undefined;
+  const block: unknown = blocks[textBlock];
   if (
     !isRecord(block) ||
-    block["type"] !== "text" ||
+    (!resource && block["type"] !== "text") ||
     typeof block["text"] !== "string"
   )
     return undefined;
@@ -83,14 +106,25 @@ export function createDependencyInventory() {
   const receipts = new Map<string, Receipt>();
   const byMaterial = new Map<string, string>();
   const latestByOrigin = new Map<string, string>();
+  let generation = 0;
+
+  function superseded(id: string): string | undefined {
+    const original = receipts.get(id);
+    if (!original) return `Inventory receipt ${id} is unavailable.`;
+    const latest = latestByOrigin.get(original.originKey);
+    if (latest !== id)
+      return `Inventory receipt ${id} was superseded by ${latest ?? "unavailable evidence"} from the same server/tool/arguments.`;
+    return original.origin.parentReceiptId === undefined
+      ? undefined
+      : superseded(original.origin.parentReceiptId);
+  }
 
   function staleReason(bound: readonly BoundDependencyInventoryReceipt[]) {
     for (const item of bound) {
       if (item.historical) continue;
-      const original = receipts.get(item.receiptId);
-      const latest = original && latestByOrigin.get(original.originKey);
-      if (!original || latest !== item.receiptId)
-        return `Inventory receipt ${item.receiptId} was superseded by ${latest ?? "unavailable evidence"} from the same server/tool/arguments. Reassess against the current original result and queue its receipt ID or exact record selection. The older proof cannot establish the refreshed state.`;
+      const reason = superseded(item.receiptId);
+      if (reason)
+        return `${reason} Reassess against the current original result and queue its receipt ID or exact record selection. The older proof cannot establish the refreshed state.`;
     }
     return undefined;
   }
@@ -100,10 +134,10 @@ export function createDependencyInventory() {
       throw new CodexSecurityError(
         `Unknown inventory receipt ID: ${id}. Check review status for available original receipts.`,
       );
-    const latest = latestByOrigin.get(value.originKey);
-    if (latest !== id)
+    const reason = superseded(id);
+    if (reason)
       throw new CodexSecurityError(
-        `Inventory receipt ${id} was superseded by ${latest} from the same server/tool/arguments. Reassess using the current receipt and update the queued receipt IDs or record selections.`,
+        `${reason} Reassess using the current receipt and update the queued receipt IDs or record selections.`,
       );
     return value;
   }
@@ -111,6 +145,10 @@ export function createDependencyInventory() {
     value: Receipt,
     selection?: DependencyInventoryReceiptSelection,
   ): BoundDependencyInventoryReceipt {
+    if (value.origin.parentReceiptId !== undefined && selection === undefined)
+      throw new CodexSecurityError(
+        `Select exact receiptSelections from the graph for resource receipt ${value.id}. Its bulk collection stays outside model context; a whole-resource receiptId is not a review projection.`,
+      );
     const pointer = selection && {
       textBlock: selection.textBlock,
       record: selection.record,
@@ -131,6 +169,7 @@ export function createDependencyInventory() {
         origin: value.origin,
         payloadSha256: value.payloadSha256,
         selection: pointer,
+        outcome: value.outcome,
       }),
       receiptId: value.id,
       server: value.server,
@@ -138,9 +177,26 @@ export function createDependencyInventory() {
       origin: value.origin,
       ...(pointer ? { selection: pointer } : {}),
       result,
+      ...(value.outcome ? { outcome: value.outcome } : {}),
     };
   }
   return {
+    isReceiptCurrent(id: string) {
+      return superseded(id) === undefined;
+    },
+    generation: () => generation,
+    clearUnavailable(server: string) {
+      const originKey = digest({
+        server,
+        tool: undefined,
+        arguments: undefined,
+      });
+      const current = latestByOrigin.get(originKey);
+      if (current && receipts.get(current)?.outcome === "unavailable") {
+        latestByOrigin.delete(originKey);
+        generation++;
+      }
+    },
     record(
       server: string,
       result: unknown,
@@ -152,11 +208,18 @@ export function createDependencyInventory() {
       const origin = {
         tool: metadata.tool,
         arguments: cloneWithoutGetters(metadata.arguments),
+        ...(metadata.parentReceiptId === undefined
+          ? {}
+          : { parentReceiptId: metadata.parentReceiptId }),
       };
       const payload = canonicalJson(captured);
       const payloadSha256 = createHash("sha256").update(payload).digest("hex");
       const originKey = digest({ server, ...origin });
-      const material = digest({ originKey, payloadSha256 });
+      const material = digest({
+        originKey,
+        payloadSha256,
+        outcome: metadata.outcome,
+      });
       let id = byMaterial.get(material);
       if (!id) {
         id = `inventory-${receipts.size + 1}`;
@@ -169,10 +232,14 @@ export function createDependencyInventory() {
           originKey,
           origin,
           ...(metadata.itemId ? { itemId: metadata.itemId } : {}),
+          ...(metadata.outcome ? { outcome: metadata.outcome } : {}),
         });
         byMaterial.set(material, id);
       }
-      latestByOrigin.set(originKey, id);
+      if (latestByOrigin.get(originKey) !== id) {
+        latestByOrigin.set(originKey, id);
+        generation++;
+      }
       return id;
     },
     servers: () => [
@@ -184,9 +251,10 @@ export function createDependencyInventory() {
         server: value.server,
         ...value.origin,
         ...(value.itemId ? { itemId: value.itemId } : {}),
+        ...(value.outcome ? { outcome: value.outcome } : {}),
         originalPayloadSha256: value.payloadSha256,
         payloadCharacters: value.payloadCharacters,
-        current: latestByOrigin.get(value.originKey) === value.id,
+        current: superseded(value.id) === undefined,
       })),
     bind(
       servers: readonly string[],
@@ -205,8 +273,7 @@ export function createDependencyInventory() {
         for (const server of named) {
           const available = [...receipts.values()].filter(
             (value) =>
-              value.server === server &&
-              latestByOrigin.get(value.originKey) === value.id,
+              value.server === server && superseded(value.id) === undefined,
           );
           if (available.length !== 1)
             throw new CodexSecurityError(
@@ -225,9 +292,17 @@ export function createDependencyInventory() {
           throw new CodexSecurityError(
             `No selected original receipt supports the observations from ${server}. Choose its receiptIds or exact receiptSelections in this queued item.`,
           );
-      return [
+      const selected = [
         ...new Map(bound.map((value) => [value.key, value])).values(),
       ].sort((a, b) => a.key.localeCompare(b.key));
+      const resourceProof = selected.filter(
+        (value) => value.origin.parentReceiptId !== undefined,
+      );
+      if (Buffer.byteLength(canonicalJson(resourceProof), "utf8") > 32 * 1024)
+        throw new CodexSecurityError(
+          "The selected resource evidence exceeds the review context budget. Use the graph's exact frame and witness-scope receiptSelections for the deciding path; the complete collection remains retained outside model context.",
+        );
+      return selected;
     },
     staleReason,
   };

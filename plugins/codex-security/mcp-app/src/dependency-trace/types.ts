@@ -1,10 +1,13 @@
 export type { TraceRequest } from "./schema.ts";
 
 export interface TraceScope {
-  kind: "search" | "manifests" | "file" | "catalog";
+  kind: "search" | "manifests" | "file" | "source_batch" | "catalog";
   package: string;
   symbol?: string;
   source_symbol?: string;
+  source_terms?: string[];
+  rules?: Record<string, unknown>[];
+  files?: string[];
   version?: string;
   path?: string;
 }
@@ -16,7 +19,25 @@ export interface TraceEntity {
   scope?: string;
 }
 
+/** One normalized sampled execution witness. Frames are ordered root first. */
+export interface TraceObservation {
+  id: string;
+  kind: "sampled_stack";
+  scope: Record<string, unknown>;
+  frames: TraceEntity[];
+}
+
+export interface RuleExecution {
+  id: string;
+  configSha256: string;
+  config: { rules: Record<string, unknown>[] };
+  engine: string;
+  taintIntrafile: boolean;
+}
+
 export interface TraceStep {
+  ruleExecutionId?: string;
+  nativeRuleId?: string;
   from: TraceEntity;
   relation: string;
   /** Only present when the provider identifies a target entity. */
@@ -30,16 +51,28 @@ export interface TraceEvidence {
   step: TraceStep;
   source: string;
   line?: number;
+  match?: NativeMatch;
+}
+
+/** The native match range, without widening a focused match to its call. */
+export interface NativeMatch {
+  start: { line: number; col: number; offset: number };
+  end: { line: number; col: number; offset: number };
+  ruleExecutionId?: string;
+  nativeRuleId?: string;
 }
 
 /** A literal search hit. Directory discovery may only know its path. */
 export interface TextMatch {
+  ruleExecutionId?: string;
+  nativeRuleId?: string;
   source: string;
   text: string;
   line?: number;
 }
 
 export interface ScopeResult {
+  ruleExecution?: RuleExecution;
   /** Identity of the exact input analyzed, for reuse within this check. */
   fingerprint?: string;
   evidence: TraceEvidence[];
@@ -75,6 +108,7 @@ export interface TraceResult {
     reason?: string;
     evidence: TraceEvidence[];
     textMatches?: TextMatch[];
+    ruleExecution?: RuleExecution;
   }[];
   /** Sample of the next lookups that did not fit the hop budget. */
   frontier: TraceScope[];

@@ -13,18 +13,24 @@ function entryBytes(key: string, result: ScopeResult): number {
     256 +
     stringBytes(key) +
     stringBytes(result.fingerprint) +
-    stringBytes(result.reason);
+    stringBytes(result.reason) +
+    (result.ruleExecution
+      ? stringBytes(JSON.stringify(result.ruleExecution))
+      : 0);
   for (const scope of result.next) {
     bytes += 128;
     for (const value of Object.values(scope)) bytes += stringBytes(value);
   }
-  for (const { step, source } of result.evidence) {
+  for (const { step, source, match } of result.evidence) {
     bytes +=
       256 +
       stringBytes(source) +
       stringBytes(step.relation) +
       stringBytes(step.calleeText) +
-      stringBytes(step.sourceText);
+      stringBytes(step.sourceText) +
+      stringBytes(step.ruleExecutionId) +
+      stringBytes(step.nativeRuleId);
+    if (match) bytes += stringBytes(JSON.stringify(match));
     for (const endpoint of [step.from, step.to]) {
       if (!endpoint) continue;
       bytes +=
@@ -34,8 +40,18 @@ function entryBytes(key: string, result: ScopeResult): number {
         stringBytes(endpoint.scope);
     }
   }
-  for (const { source, text } of result.textMatches ?? []) {
-    bytes += 128 + stringBytes(source) + stringBytes(text);
+  for (const {
+    source,
+    text,
+    ruleExecutionId,
+    nativeRuleId,
+  } of result.textMatches ?? []) {
+    bytes +=
+      128 +
+      stringBytes(source) +
+      stringBytes(text) +
+      stringBytes(ruleExecutionId) +
+      stringBytes(nativeRuleId);
   }
   return bytes;
 }

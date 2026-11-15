@@ -92,6 +92,20 @@ test("maps a graph input to the catalog's actual identity using the agent's asso
   ]);
 });
 
+test("passes server-specific operator guidance to the catalog resolver", async () => {
+  const instructions = { catalog: "Search aliases before choosing a service." };
+  const run = runReturning([lookup], [receipt()]);
+  const results = await resolveDependencyServices({
+    ...options,
+    instructions,
+    run: async (prompt, ...args) => {
+      expect(prompt).toContain(JSON.stringify(instructions));
+      return run(prompt, ...args);
+    },
+  });
+  expect(results[0]).toMatchObject({ services: [{ name: "catalog-worker" }] });
+});
+
 test("reports unverifiable mappings as unresolved", async () => {
   const otherTarget = { target: "other/project", namespace: "ops" };
   for (const [lookups, receipts] of [
@@ -175,9 +189,10 @@ test("distinguishes a scoped no-service conclusion from an unresolved search", a
   ]);
 });
 
-test("the read-only runtime forwards only completed selected catalog items", async () => {
+test("the read-only runtime forwards terminal selected catalog items for search auditing", async () => {
   const onResult = mock((_item: McpToolCallItem) => {});
   const valid = receipt();
+  const failed = receipt({ status: "failed" });
   expect(
     await runReadOnlyCodex(
       "Resolve the source path.",
@@ -191,7 +206,8 @@ test("the read-only runtime forwards only completed selected catalog items", asy
                 return {
                   finalResponse: "{}",
                   items: [
-                    receipt({ status: "failed" }),
+                    failed,
+                    receipt({ status: "in_progress" }),
                     receipt({ server: "unconfigured" }),
                     valid,
                   ],
@@ -208,5 +224,5 @@ test("the read-only runtime forwards only completed selected catalog items", asy
       },
     ),
   ).toBe("{}");
-  expect(onResult.mock.calls).toEqual([[valid]]);
+  expect(onResult.mock.calls).toEqual([[failed], [valid]]);
 });

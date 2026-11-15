@@ -94,8 +94,18 @@ type CaseGrade = { pass: boolean; errors: string[] };
 
 async function runCase(c: ReachabilityCase | typeof smoke) {
   let root: string | undefined;
-  const argv = [binary, "exploitability", "check", c.cve, "--json"];
-  if (values.model !== undefined) argv.push("--model", values.model);
+  const cliArgs = ["exploitability", "check", c.cve, "--json"];
+  if (values.model !== undefined) cliArgs.push("--model", values.model);
+  const callerScope = "stage" in c ? c.callerScope : undefined;
+  const argv =
+    callerScope === undefined
+      ? [binary, ...cliArgs]
+      : [
+          join(import.meta.dirname, "scoped-cli.mts"),
+          binary,
+          callerScope,
+          ...cliArgs,
+        ];
   let snapshotSha256: string | undefined;
   let answer: unknown;
   let grade: CaseGrade | undefined;
@@ -189,6 +199,7 @@ async function runCase(c: ReachabilityCase | typeof smoke) {
     cve: c.cve,
     revision: "stage" in c ? c.revision : null,
     argv: [process.execPath, ...argv],
+    callerScope,
     snapshotSha256,
     analysisMs,
     commandExitCode,

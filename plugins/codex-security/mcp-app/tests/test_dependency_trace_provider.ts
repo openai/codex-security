@@ -1,3 +1,8 @@
+import {
+  nativeRules,
+  sourceEvidence,
+  sourceStep,
+} from "./support/native-trace-rules.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
@@ -9,6 +14,7 @@ import {
   findProjectReferences,
   localProvider,
 } from "../src/dependency-trace/provider.ts";
+import { traceResponse } from "../src/dependency-trace/response.ts";
 import { createDependencyTracer } from "../src/dependency-trace/trace.ts";
 import type { TraceScope } from "../src/dependency-trace/types.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
@@ -18,6 +24,7 @@ const file: TraceScope = {
   kind: "file",
   package: "image_lib",
   symbol: "decode",
+  rules: nativeRules("decode"),
   path: "example.py",
 };
 const search: TraceScope = { ...file, kind: "search", path: "." };
@@ -70,12 +77,16 @@ test("project references cite launch and CI records without assigning ownership"
   );
   await writeFile(
     join(root, "runtime", "launch.yaml"),
-    "# modules/render\n".repeat(100),
+    ("# modules/render " + "x".repeat(512) + "\n").repeat(700),
   );
-  const bounded = await findProjectReferences(root, "modules/render");
-  assert.equal(bounded.complete, false);
-  assert.equal(bounded.references.length, 64);
-  assert.ok(bounded.reason);
+  const all = await findProjectReferences(root, "modules/render");
+  assert.equal(all.complete, true, all.reason ?? "incomplete references");
+  assert.equal(all.references.length, 701);
+  const launchReferences = all.references.filter(
+    ({ path }) => path === "runtime/launch.yaml",
+  );
+  assert.equal(launchReferences.length, 700);
+  assert.equal(launchReferences.at(-1)?.line, 700);
   await assert.rejects(
     findProjectReferences(root, "modules/render", AbortSignal.abort()),
   );
@@ -180,12 +191,17 @@ test("manifest fingerprints and declarations need no external tool", async (t) =
     ["example.py", undefined],
   ] as const) {
     await writeFile(join(root, path), "image_lib\n");
-    const scope = { ...file, path, symbol };
+    const scope = { ...file, path, symbol, rules: undefined };
     assert.equal(await provider.fingerprint!(scope, signal), undefined);
     const skipped = await provider.run(scope, signal);
     assert.deepEqual(skipped.evidence, []);
     assert.equal(skipped.textMatches, undefined);
-    assert.match(skipped.reason ?? "", /supported source file and sink symbol/);
+    assert.match(
+      skipped.reason ?? "",
+      path.endsWith(".py")
+        ? /model-authored rules/
+        : /supported source file and sink symbol/,
+    );
   }
 });
 
@@ -207,9 +223,19 @@ test("OpenGrep follows a same-file caller and records an imported alias as a can
     ["example.mts", typescript, 2],
   ] as const) {
     await writeFile(join(root, path), contents);
-    const result = await provider.run({ ...file, path }, signal);
+    const result = await provider.run(
+      {
+        ...file,
+        path,
+        rules: nativeRules(
+          "decode",
+          path.endsWith(".py") ? "python" : "typescript",
+        ),
+      },
+      signal,
+    );
     assert.equal(result.complete, true, result.reason ?? "incomplete scope");
-    assert.deepEqual(result.evidence, [
+    assert.deepEqual(sourceEvidence(result.evidence), [
       {
         source: path,
         line: callerLine,
@@ -221,9 +247,185 @@ test("OpenGrep follows a same-file caller and records an imported alias as a can
       },
     ]);
     assert.equal(result.next[0]?.symbol, "wrapper");
-    const upstream = await provider.run(result.next[0]!, signal);
+    const upstream = await provider.run(
+      {
+        ...result.next[0]!,
+        rules: nativeRules(
+          result.next[0]!.symbol!,
+          path.endsWith(".py") ? "python" : "typescript",
+        ),
+      },
+      signal,
+    );
     assert.equal(upstream.evidence[0]?.step.from.name, "outer");
   }
+});
+
+test("Go source batches find bare and package-qualified calls", async (t) => {
+  for (const command of ["rg", "opengrep"]) {
+    if (!(await available(command))) return t.skip(command + " required");
+  }
+  const dirs = createTemporaryDirectories(true);
+  t.after(() => dirs.cleanup());
+  const root = await dirs.create("trace-go-calls-");
+  await writeFile(
+    join(root, "consumer.go"),
+    [
+      "package consumer",
+      'import decoder "example.com/codec"',
+      "type Worker struct{}",
+      "func helper(data []byte) []byte { return decoder.Decode(data) }",
+      "func ordinary() { Decode(nil) }",
+      "func (w *Worker) Read() ([]byte, error) { return decoder.Decode(nil), nil }",
+      'func example() { _ = "decoder.Decode(nil)" }',
+      "// decoder.Decode(nil)",
+    ].join("\n"),
+  );
+  const tracer = createDependencyTracer(root);
+  t.after(() => tracer.close());
+
+  const response = traceResponse(
+    await tracer.trace({
+      package: "example.com/codec",
+      source_terms: ["example.com/codec"],
+      symbol: "decoder.Decode",
+      rules: nativeRules("Decode", "go", undefined, "example.com/codec"),
+      paths: ["."],
+      source_only: true,
+      max_hops: 0,
+      time_budget_ms: 15000,
+    }),
+  );
+  assert.equal(response.coverage.complete, true);
+  assert.deepEqual(
+    response.trace
+      .flatMap(({ from, relation, evidence }) =>
+        evidence.flatMap(({ source, lines = [] }) =>
+          lines.map((line) => [line, source, from.name, relation] as const),
+        ),
+      )
+      .sort(([a], [b]) => a - b),
+    [
+      [4, "consumer.go", "helper", "candidate_call"],
+      [5, "consumer.go", "ordinary", "candidate_call"],
+      [6, "consumer.go", "Read", "candidate_call"],
+    ],
+  );
+});
+
+test("dense source files retain every call beyond the old processing cap", async (t) => {
+  if (!(await available("opengrep"))) return t.skip("OpenGrep required");
+  const dirs = createTemporaryDirectories(true);
+  t.after(() => dirs.cleanup());
+  const root = await dirs.create("trace-dense-calls-");
+  const provider = localProvider(root);
+  const path = "consumer.py";
+  await writeFile(
+    join(root, path),
+    "from image_lib import decode\n" +
+      Array.from(
+        { length: 96 },
+        (_, i) => `def wrapper_${i}(data):\n    return decode(data)\n`,
+      ).join("\n"),
+  );
+  const result = await provider.run(
+    {
+      ...file,
+      path,
+      rules: nativeRules(
+        "decode",
+        path.endsWith(".py") ? "python" : "typescript",
+      ),
+    },
+    signal,
+  );
+  assert.equal(result.complete, true, result.reason ?? "incomplete scope");
+  assert.equal(result.evidence.length, 96);
+  assert.equal(result.evidence.at(-1)?.step.from.name, "wrapper_95");
+  assert.ok(result.next.some(({ symbol }) => symbol === "wrapper_95"));
+
+  await writeFile(
+    join(root, path),
+    "from image_lib import decode\ndef wrapper(data):\n" +
+      "    decode(data)\n".repeat(641),
+  );
+  const all = await provider.run(
+    {
+      ...file,
+      path,
+      rules: nativeRules(
+        "decode",
+        path.endsWith(".py") ? "python" : "typescript",
+      ),
+    },
+    signal,
+  );
+  assert.equal(all.complete, true, all.reason ?? "incomplete native scan");
+  assert.equal(all.evidence.length, 641);
+  assert.equal(all.evidence.at(-1)?.line, 643);
+});
+
+test("source batches return inline Python worker operations as original-line text leads", async (t) => {
+  for (const command of ["rg", "opengrep"]) {
+    if (!(await available(command))) return t.skip(command + " required");
+  }
+  const dirs = createTemporaryDirectories(true);
+  t.after(() => dirs.cleanup());
+  const root = await dirs.create("trace-inline-worker-");
+  await writeFile(
+    join(root, "example.py"),
+    [
+      "import subprocess",
+      "import sys",
+      "from image_lib import Image",
+      "def ordinary(image):",
+      '    image.save("normal.png")',
+      'EXAMPLE = """',
+      "from image_lib import Image",
+      'image.save("only-prose.png")',
+      '"""',
+      'WORKER = r"""',
+      "from image_lib import Image",
+      '# image.save("only-comment.png")',
+      'image.save("named.png")',
+      '"""',
+      'subprocess.run([sys.executable, "-c", WORKER])',
+      'subprocess.run(["python3", "-c", """',
+      "from image_lib import Image",
+      'image.save("inline.png")',
+      '"""])',
+      'subprocess.run(["python3", "-c", """',
+      'something.save("unrelated.png")',
+      '"""])',
+    ].join("\n"),
+  );
+
+  const tracer = createDependencyTracer(root);
+  t.after(() => tracer.close());
+  const response = traceResponse(
+    await tracer.trace({
+      package: "image-package",
+      source_terms: ["image_lib"],
+      symbol: "save",
+      rules: nativeRules("save"),
+      paths: ["."],
+      source_only: true,
+      max_hops: 0,
+      time_budget_ms: 15000,
+    }),
+  );
+  assert.equal(response.coverage.complete, true);
+  assert.deepEqual(response.textMatches, [
+    { source: "example.py", text: "save", lines: [13, 18] },
+  ]);
+  assert.deepEqual(response.trace.map(sourceStep), [
+    {
+      from: { kind: "symbol", name: "ordinary", scope: "example.py" },
+      relation: "candidate_call",
+      calleeText: "save",
+      evidence: [{ source: "example.py", lines: [5] }],
+    },
+  ]);
 });
 
 test("optional intrafile taint follows a helper argument and excludes a constant control", async (t) => {
@@ -236,6 +438,7 @@ test("optional intrafile taint follows a helper argument and excludes a constant
     ...file,
     symbol: "log_item",
     source_symbol: "read_input",
+    rules: nativeRules("log_item", "python", "read_input"),
   };
   const py =
     "def format_value(x):\n    log_item(x)\n\ndef process():\n    format_value(read_input())\n    log_item('constant')\n" +
@@ -248,13 +451,13 @@ test("optional intrafile taint follows a helper argument and excludes a constant
     flow.evidence.map((hit) => hit.line),
     [2, 7],
   );
-  assert.deepEqual(flow.evidence[0]?.step, {
+  assert.deepEqual(sourceStep(flow.evidence[0]!.step), {
     from: { kind: "symbol", name: "format_value", scope: "example.py" },
     relation: "candidate_flow",
     calleeText: "log_item",
     sourceText: "read_input",
   });
-  assert.deepEqual(flow.evidence[1]?.step, {
+  assert.deepEqual(sourceStep(flow.evidence[1]!.step), {
     from: { kind: "file", name: "example.py" },
     relation: "candidate_flow",
     calleeText: "log_item",
@@ -315,7 +518,7 @@ test("an unsupported symbol returns source leads and incomplete call coverage", 
   const root = await dirs.create("trace-symbol-");
   await writeFile(join(root, "consumer.js"), "fs$rename();\n");
   const result = await localProvider(root).run(
-    { ...search, symbol: "fs$rename" },
+    { ...search, symbol: "fs$rename", rules: undefined },
     signal,
   );
   assert.equal(result.complete, false);
@@ -356,7 +559,7 @@ test("Git discovery includes the worktree copy of force-tracked ignored files", 
     join(root, "vendor", "catalog-info.yaml"),
     "kind: Component\n",
   );
-  await writeFile(join(root, "vendor", "lib.py"), "image_lib\n");
+  await writeFile(join(root, "vendor", "lib.py"), "image_lib image_lib\n");
   await writeFile(join(root, "vendor", "package.json"), "image_lib\n");
   await writeFile(join(root, "new.txt"), "image_lib\n");
   await writeFile(join(external, "untrusted"), "image_lib\n");

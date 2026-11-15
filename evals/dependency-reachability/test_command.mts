@@ -1,5 +1,18 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { cases } from "./cases.mts";
 import { cve, gradeCommand, readFixture } from "./command.mts";
 
 const { files } = await readFixture();
@@ -41,6 +54,119 @@ const result = {
   status: "potentially_exploitable",
   uses: [reviews, notes],
 };
+
+test("the scoped adapter passes context separately from CLI arguments", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scoped-cli-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = join(root, "bin");
+  const dist = join(root, "dist");
+  await Promise.all([mkdir(bin), mkdir(dist)]);
+  const binary = join(bin, "codex-security.mjs");
+  await Promise.all([
+    writeFile(join(root, "package.json"), '{"type":"module"}'),
+    writeFile(
+      binary,
+      'throw new Error("The package launcher should not run");',
+    ),
+    writeFile(
+      join(dist, "cli.js"),
+      "export const supportsDependencyCallerScope = true; " +
+        "export function main(...args) { console.log(JSON.stringify(args)); return 17; }",
+    ),
+  ]);
+  const adapter = fileURLToPath(new URL("./scoped-cli.mts", import.meta.url));
+  const scope = "An unauthenticated sender can access only POST /messages.";
+  const argv = ["exploitability", "check", cve, "--json", "--model", "fixture"];
+  const invoke = () =>
+    spawnSync(process.execPath, [adapter, binary, scope, ...argv], {
+      encoding: "utf8",
+    });
+  const result = invoke();
+  assert.equal(result.status, 17, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), [
+    argv,
+    null,
+    null,
+    null,
+    { dependencyCallerScope: scope },
+  ]);
+
+  await writeFile(
+    join(dist, "cli.js"),
+    "export function main() { throw new Error('Old CLI unexpectedly invoked'); }",
+  );
+  const oldBuild = invoke();
+  assert.equal(oldBuild.status, 1);
+  assert.match(
+    oldBuild.stderr,
+    /The selected CLI build does not support caller scope/u,
+  );
+});
+
+test("scoped image cases retain their configured artifact and capture files", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "scoped-image-files-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const id of ["fixed-decode", "thumbnail-blue"]) {
+    const item = cases.find((entry) => entry.id === id);
+    assert.ok(item?.callerScope);
+    const home = join(root, id);
+    const snapshot = join(home, "snapshot");
+    const binary = join(home, "bin", "codex-security.mjs");
+    const cli = join(home, "dist", "cli.js");
+    await Promise.all([
+      mkdir(snapshot, { recursive: true }),
+      mkdir(join(home, "bin"), { recursive: true }),
+      mkdir(join(home, "dist"), { recursive: true }),
+    ]);
+    const files: Record<string, string> = {};
+    for (const file of item.stage) {
+      if (file.kind === "git") continue;
+      const contents =
+        file.kind === "fixture"
+          ? await readFile(new URL(file.source, import.meta.url), "utf8")
+          : JSON.stringify(file.value, null, 2) + "\n";
+      const destination = join(snapshot, file.destination);
+      await mkdir(join(destination, ".."), { recursive: true });
+      await writeFile(destination, contents);
+      files[file.destination] = contents;
+    }
+    await Promise.all([
+      writeFile(join(home, "package.json"), '{"type":"module"}'),
+      writeFile(binary, 'throw new Error("Package launcher should not run");'),
+      writeFile(
+        cli,
+        `import { readFile } from 'node:fs/promises';
+export const supportsDependencyCallerScope = true;
+export async function main(...args) {
+  const files = Object.fromEntries(await Promise.all(
+    ${JSON.stringify(Object.keys(files))}.map(async path => [path, await readFile(path, 'utf8')])
+  ));
+  console.log(JSON.stringify({ args, cwd: process.cwd(), files }));
+  return 0;
+}`,
+      ),
+    ]);
+    const adapter = fileURLToPath(new URL("./scoped-cli.mts", import.meta.url));
+    const argv = ["exploitability", "check", item.cve, "--json"];
+    const result = spawnSync(
+      process.execPath,
+      [adapter, binary, item.callerScope, ...argv],
+      { cwd: snapshot, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      args: [
+        argv,
+        null,
+        null,
+        null,
+        { dependencyCallerScope: item.callerScope },
+      ],
+      cwd: await realpath(snapshot),
+      files,
+    });
+  }
+});
 
 test("requires an independent grounded verdict for both configured services", () => {
   assert.equal(gradeCommand(result, files).pass, true);

@@ -133,7 +133,7 @@ test("zero hops returns unresolved candidate scopes and deadline retains complet
   assert.equal(result.scopes[1].complete, false);
 });
 
-test("a full text sample leaves room for structural evidence", async () => {
+test("all text matches and structural evidence survive collection", async () => {
   const textMatches = Array.from({ length: 200 }, (_, index) => ({
     source: "registry.ts",
     text: "dependency",
@@ -148,9 +148,10 @@ test("a full text sample leaves room for structural evidence", async () => {
         : { ...finished(), evidence: [dependency] },
     1,
   );
-  assert.deepEqual(result.limits, ["text match limit"]);
-  assert.equal(result.scopes[0].textMatches?.length, 128);
-  assert.equal(result.scopes[0].complete, false);
+  assert.deepEqual(result.limits, []);
+  assert.equal(result.complete, true);
+  assert.equal(result.scopes[0].textMatches?.length, 200);
+  assert.equal(result.scopes[0].complete, true);
   assert.deepEqual(result.scopes[1].evidence, [dependency]);
   assert.equal(result.scopes[1].complete, true);
 });

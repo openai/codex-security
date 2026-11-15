@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createDependencyCandidates } from "../src/dependency-candidates.js";
+import type { DependencyUseProof } from "../src/dependency-report-proof.js";
 import type { DependencyAssessment } from "../src/dependency-reachability.js";
+import { reviewedDependencyCheckSchema } from "../src/dependency-reachability.js";
 import { createDependencyReportSubmission } from "../src/dependency-report-submission.js";
 import { runReadOnlyCodex } from "../src/scan-comparison.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "../src/thread-source.js";
@@ -16,16 +18,28 @@ const approved = {
 const gap = { accepted: false, reason: "No cited loop covers every entry." };
 
 interface ReviewPacket {
+  callerScope?: string;
   items: {
     id: string;
     revision: number;
     kind: string;
-    use?: { location: string; version?: unknown };
+    classification?: string;
+    candidates?: { path: string; line?: number; testCandidate?: true }[];
+    use?: {
+      location: string;
+      version?: unknown;
+      proof?: DependencyUseProof;
+    };
     excerptIds: string[];
     receiptIds: string[];
   }[];
   excerpts: Record<string, { text: string }>;
-  receipts: Record<string, { result: unknown }>;
+  receipts: Record<
+    string,
+    { result: unknown; origin: { tool?: string }; outcome?: string }
+  >;
+  inventoryServers?: Record<string, string[]>;
+  catalogServerNames?: string[];
 }
 
 function reviewPacket(prompt: string): ReviewPacket {
@@ -92,6 +106,534 @@ function draft(): DependencyAssessment {
   };
 }
 
+test("starts queued review promptly, coalesces items and preserves reviewer concurrency without finalization", async () => {
+  await using repo = await scopedTemporaryDirectory("review-dispatch-");
+  await writeFile(join(repo.path, "worker.ts"), "const value = 1;\n");
+  const release = Promise.withResolvers<void>();
+  const batches: string[][] = [];
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    review: async (prompt) => {
+      batches.push(reviewPacket(prompt).items.map(({ id }) => id));
+      await release.promise;
+      return reviewDecision(prompt, approved, null);
+    },
+  });
+  const item = (id: string) => ({
+    id,
+    kind: "unresolved",
+    candidateIds: [],
+    reason: "The selected source does not establish the runtime choice.",
+    evidence: [{ path: "worker.ts", startLine: 1, endLine: 1, supports: [] }],
+    observations: [],
+  });
+  const dispatched = () =>
+    new Promise<void>((resolve) => setImmediate(resolve));
+  try {
+    await submission.queue({ items: [item("first")] });
+    await dispatched();
+    expect(batches).toEqual([["first"]]);
+
+    await submission.queue({ items: [item("second"), item("third")] });
+    await dispatched();
+    expect(batches).toEqual([["first"], ["second", "third"]]);
+
+    await submission.queue({ items: [item("fourth")] });
+    await dispatched();
+    expect(batches).toHaveLength(2);
+
+    release.resolve();
+    await dispatched();
+    expect(batches).toEqual([["first"], ["second", "third"], ["fourth"]]);
+  } finally {
+    release.resolve();
+    await submission.close();
+  }
+});
+
+test("keeps reviewed source exclusions in the final report", async () => {
+  await using repo = await scopedTemporaryDirectory("reported-exclusion-");
+  await writeFile(
+    join(repo.path, "worker.ts"),
+    "export const output = 'png';\n",
+  );
+  const candidates = await createDependencyCandidates(repo.path);
+  const [candidate] = await candidates.observeGraph("trace", {
+    trace: [
+      {
+        relation: "candidate_call",
+        evidence: [{ source: "worker.ts", lines: [1, 1] }],
+      },
+    ],
+  });
+  const exclusion = {
+    kind: "dismissed" as const,
+    reason: "The selected output operation does not use the affected format.",
+    evidence: [{ path: "worker.ts", startLine: 1, endLine: 1, supports: [] }],
+    observations: [],
+  };
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    candidates,
+    review: async (prompt) => reviewDecision(prompt, approved, null),
+  });
+  try {
+    expect(
+      await submission.queue({
+        items: [
+          { id: "output-scope", candidateIds: [candidate!.id], ...exclusion },
+        ],
+      }),
+    ).toMatchObject({ queued: true });
+    expect(
+      await submission.submit({
+        status: "unknown",
+        uses: [],
+        limitations: ["The assessment covers the selected output operation."],
+        reviewItemIds: ["output-scope"],
+      }),
+    ).toMatchObject({ accepted: true });
+    expect(submission.acceptedReport()).toHaveProperty("coverage", [exclusion]);
+    expect(submission.acceptedReport().uses).toEqual([]);
+    expect(submission.acceptedReport().status).toBe("unknown");
+  } finally {
+    await submission.close();
+  }
+});
+
+test("accounts for exact test-only candidates in one reviewed production-scope dismissal", async () => {
+  await using repo = await scopedTemporaryDirectory("review-test-scope-");
+  const testOne = "tests/test_one.py";
+  const testTwo = "tests/test_two.py";
+  const mixed = "tests/helper.py";
+  await mkdir(join(repo.path, "tests"));
+  for (const file of [testOne, testTwo, mixed])
+    await writeFile(join(repo.path, file), "def run():\n    sink()\n");
+  await writeFile(
+    join(repo.path, "app.py"),
+    "from tests.helper import run\nrun()\n",
+  );
+  await writeFile(
+    join(repo.path, "BUILD"),
+    'testonly_targets = ["tests/test_one.py", "tests/test_two.py"]\nselected_image_files = ["app.py", "tests/helper.py"]\n',
+  );
+  const candidates = await createDependencyCandidates(repo.path);
+  const [one, two, helper] = await candidates.observeGraph("trace", {
+    trace: [testOne, testTwo, mixed].map((source) => ({
+      relation: "candidate_call",
+      evidence: [{ source, lines: [2] }],
+    })),
+  });
+  const [manifest] = await candidates.observeGraph("trace", {
+    trace: [{ relation: "depends_on", evidence: [{ source: "BUILD" }] }],
+  });
+  const classification = "test_only_outside_scope";
+  const callerScope =
+    "Configured production image listed by selected_image_files in BUILD.";
+  const grouped = {
+    id: "test-fixtures",
+    kind: "dismissed",
+    classification,
+    reason: `${callerScope} The selected production image includes app.py and tests/helper.py. The cited calls belong to test targets.`,
+    candidateIds: [one!.id, two!.id],
+    evidence: [testOne, testTwo, "BUILD"].map((path) => ({
+      path,
+      startLine: 1,
+      endLine: 2,
+      supports: [],
+    })),
+    observations: [],
+  };
+  const withoutScope = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    candidates,
+    review: async () => {
+      throw new Error("No out-of-scope review should be started.");
+    },
+  });
+  try {
+    expect(await withoutScope.queue({ items: [grouped] })).toMatchObject({
+      queued: false,
+      feedback: expect.stringContaining("explicit caller scope"),
+    });
+  } finally {
+    await withoutScope.close();
+  }
+  let groupReviews = 0;
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    candidates,
+    callerScope,
+    review: async (prompt) => {
+      expect(reviewPacket(prompt).callerScope).toBe(callerScope);
+      return JSON.stringify({
+        items: reviewPacket(prompt).items.map((item) => {
+          if (item.classification === classification) {
+            groupReviews++;
+            expect(
+              item.candidates?.every((candidate) => candidate.testCandidate),
+            ).toBe(true);
+            expect(item.candidates?.map((candidate) => candidate.path)).toEqual(
+              [testOne, testTwo],
+            );
+            expect(
+              item.excerptIds
+                .map((id) => reviewPacket(prompt).excerpts[id]!.text)
+                .join("\n"),
+            ).toContain("selected_image_files");
+          }
+          return {
+            id: item.id,
+            revision: item.revision,
+            ...approved,
+            citedVersion: null,
+            evidenceIds: item.excerptIds,
+          };
+        }),
+      });
+    },
+  });
+  try {
+    expect(
+      await submission.queue({
+        items: [{ ...grouped, candidateIds: [manifest!.id] }],
+      }),
+    ).toMatchObject({
+      queued: false,
+      feedback: expect.stringContaining("source line"),
+    });
+    expect(
+      await submission.queue({
+        items: [
+          {
+            ...grouped,
+            evidence: grouped.evidence.filter(({ path }) => path !== testTwo),
+          },
+        ],
+      }),
+    ).toMatchObject({
+      queued: false,
+      feedback: expect.stringContaining(testTwo),
+    });
+    await submission.queue({ items: [grouped] });
+    expect(
+      submission.readStatus({ candidates: {} }).candidatePage?.candidates,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: helper!.id,
+          path: mixed,
+          testCandidate: true,
+        }),
+      ]),
+    );
+    const unresolved = {
+      id: "mixed",
+      kind: "unresolved",
+      candidateIds: [helper!.id],
+      reason:
+        "The production launcher calls this helper; the selected dependency instance remains unknown.",
+      evidence: [{ path: "app.py", startLine: 1, endLine: 2, supports: [] }],
+      observations: [],
+    };
+    await submission.queue({
+      items: [
+        {
+          ...unresolved,
+          id: "build",
+          candidateIds: [manifest!.id],
+          reason: "Retain the manifest for ordinary dependency analysis.",
+        },
+        unresolved,
+      ],
+    });
+    const report = {
+      status: "unknown",
+      uses: [],
+      limitations: ["The selected production image scope is explicit."],
+      reviewItemIds: [grouped.id, "build", unresolved.id],
+    };
+    expect(await submission.submit(report)).toMatchObject({ accepted: true });
+    expect(groupReviews).toBe(1);
+    expect(submission.acceptedReport().coverage?.[0]).toMatchObject({
+      classification,
+      reason: grouped.reason,
+      locations: [
+        { candidateId: one!.id, path: testOne, line: 2 },
+        { candidateId: two!.id, path: testTwo, line: 2 },
+      ],
+    });
+    const renderedInput = reviewedDependencyCheckSchema.parse({
+      ...submission.publicReport(),
+      advisories: [],
+      usage: null,
+    });
+    expect(renderedInput.coverage?.[0]).toEqual(
+      submission.acceptedReport().coverage?.[0],
+    );
+    expect(submission.acceptedReport().status).toBe("unknown");
+  } finally {
+    await submission.close();
+  }
+});
+
+test("a scoped reviewer can reject a test dismissal for an explicitly included CI caller", async () => {
+  await using repo = await scopedTemporaryDirectory("review-ci-test-scope-");
+  const path = "test_connector.py";
+  await writeFile(join(repo.path, path), "def run_ci_probe():\n    sink()\n");
+  const candidates = await createDependencyCandidates(repo.path);
+  const [source] = await candidates.observeGraph("trace", {
+    trace: [
+      { relation: "candidate_call", evidence: [{ source: path, lines: [2] }] },
+    ],
+  });
+  const callerScope =
+    "Assess the deployment and its CI connector including test_connector.py.";
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    candidates,
+    callerScope,
+    review: async (prompt) => {
+      const { items } = reviewPacket(prompt);
+      expect(reviewPacket(prompt).callerScope).toBe(callerScope);
+      expect(items[0]?.classification).toBe("test_only_outside_scope");
+      return reviewDecision(
+        prompt,
+        {
+          accepted: false,
+          reason: "The supplied caller scope includes this CI connector.",
+        },
+        null,
+      );
+    },
+  });
+  try {
+    const item = {
+      id: "ci",
+      kind: "dismissed",
+      classification: "test_only_outside_scope",
+      reason: "This is a test.",
+      candidateIds: [source!.id],
+      evidence: [{ path, startLine: 1, endLine: 2, supports: [] }],
+      observations: [],
+    };
+    expect(await submission.queue({ items: [item] })).toMatchObject({
+      queued: true,
+    });
+    expect(
+      await submission.submit({
+        status: "unknown",
+        uses: [],
+        limitations: ["The requested caller scope includes CI."],
+        reviewItemIds: [item.id],
+      }),
+    ).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("includes this CI connector"),
+    });
+  } finally {
+    await submission.close();
+  }
+});
+
+test.each(["dismissed", "use"] as const)(
+  "passes the test-only scope rule to the reviewer for a generic %s",
+  async (kind) => {
+    await using repo = await scopedTemporaryDirectory(
+      "review-generic-test-scope-",
+    );
+    const path = "test_image.py";
+    await writeFile(
+      join(repo.path, path),
+      'def test_image():\n    image.save("out.png", format="PNG")\n',
+    );
+    const candidates = await createDependencyCandidates(repo.path);
+    const [source] = await candidates.observeGraph("trace", {
+      trace: [
+        {
+          relation: "candidate_call",
+          evidence: [{ source: path, lines: [2] }],
+        },
+      ],
+    });
+    const evidence = [{ path, startLine: 2, endLine: 2, supports: [] }];
+    const makeUse = (reason: string) => ({
+      ...draft().uses[0]!,
+      reason,
+      evidence,
+    });
+    const testOnly =
+      "The call is outside the investigation because the file is a test.";
+    const ordinaryExclusion =
+      "The selected PNG format does not invoke the TIFF writer.";
+    const callerScope =
+      "Assess this checkout including its CI jobs and test sources.";
+    const state = createDependencyReportSubmission({
+      repository: repo.path,
+      advisory,
+      candidates,
+      callerScope,
+      review: async (prompt) => {
+        expect(prompt).toContain(
+          "Reject an unclassified dismissal or a ruled_out use that relies on that claim.",
+        );
+        expect(prompt).toContain(
+          "Independently proved operation, mode, copy or control exclusions still stand for test sources.",
+        );
+        const packet = reviewPacket(prompt);
+        expect(packet.callerScope).toBe(callerScope);
+        const [item] = packet.items;
+        expect(item?.classification).toBeUndefined();
+        expect(packet.excerpts[item!.excerptIds[0]!]!.text).toContain(
+          'format="PNG"',
+        );
+        return item!.revision === 1
+          ? reviewDecision(
+              prompt,
+              {
+                accepted: false,
+                reason: "Test status cannot exclude this requested scope.",
+              },
+              kind === "use" ? "1.0" : null,
+            )
+          : reviewDecision(prompt, approved);
+      },
+    });
+    const identity = { id: "image", candidateIds: [source!.id] };
+    const first =
+      kind === "use"
+        ? { ...identity, kind, use: makeUse(testOnly) }
+        : { ...identity, kind, reason: testOnly, evidence, observations: [] };
+    const submit = (reason?: string, found = true) =>
+      state.submit({
+        status: found ? "ruled_out" : "unknown",
+        uses: found ? [makeUse(reason!)] : [],
+        limitations: found
+          ? []
+          : ["The implicated test call is within requested scope."],
+        reviewItemIds: [identity.id],
+      });
+    try {
+      expect(await state.queue({ items: [first] })).toMatchObject({
+        queued: true,
+      });
+      expect(await submit(testOnly, kind === "use")).toMatchObject({
+        accepted: false,
+        feedback: expect.stringContaining("Test status cannot exclude"),
+      });
+      const use = makeUse(ordinaryExclusion);
+      expect(
+        await state.queue({ items: [{ ...identity, kind: "use", use }] }),
+      ).toMatchObject({ queued: true });
+      expect(await submit(ordinaryExclusion)).toMatchObject({ accepted: true });
+    } finally {
+      await state.close();
+    }
+  },
+);
+
+test("reviews structured sink and condition claims and preserves only the approved proof", async () => {
+  await using repo = await scopedTemporaryDirectory("review-use-proof-");
+  await writeFile(
+    join(repo.path, "worker.ts"),
+    "import library;\nlibrary.decode(input, {mode: 'safe'});\n",
+  );
+  const report = draft();
+  const use = report.uses[0]!;
+  use.reason = "This call selects safe mode, excluding the affected operation.";
+  use.proof = {
+    sink: {
+      function: "library.decode",
+      callSite: { path: "worker.ts", line: 2 },
+    },
+    conditions: [
+      {
+        label: "Unsafe mode is selected",
+        status: "ruled_out",
+        explanation: "The caller explicitly selects safe mode.",
+        citations: [{ path: "worker.ts", line: 2 }],
+      },
+    ],
+  };
+  let reviews = 0;
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    review: async (prompt) => {
+      reviews++;
+      expect(prompt).toContain("When use.proof is supplied, validate");
+      const packet = reviewPacket(prompt);
+      const item = packet.items[0]!;
+      expect(item.use!.proof!.sink).toEqual(use.proof!.sink);
+      expect(packet.excerpts[item.excerptIds[0]!]!.text).toContain(
+        "mode: 'safe'",
+      );
+      return reviewDecision(
+        prompt,
+        item.use!.proof!.conditions[0]!.status === "ruled_out"
+          ? approved
+          : {
+              accepted: false,
+              reason:
+                "worker.ts selects safe mode, contradicting the met condition.",
+            },
+      );
+    },
+  });
+  const queue = (value: typeof use) =>
+    submission.queue({
+      items: [{ id: "decoder", kind: "use", candidateIds: [], use: value }],
+    });
+  const final = (value: typeof use) =>
+    submission.submit({
+      ...report,
+      uses: [value],
+      reviewItemIds: ["decoder"],
+    });
+  try {
+    expect(await queue(use)).toMatchObject({ queued: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(submission.status().items[0]).toMatchObject({
+      revision: 1,
+      status: "accepted",
+    });
+    expect(reviews).toBe(1);
+
+    const changed = structuredClone(use);
+    changed.proof!.conditions[0]!.status = "met";
+    changed.proof!.conditions[0]!.explanation =
+      "The caller selects unsafe mode.";
+    expect(await final(changed)).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("must exactly match"),
+    });
+    expect(reviews).toBe(1);
+
+    expect(await queue(changed)).toMatchObject({ queued: true });
+    expect(await final(changed)).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("contradicting the met condition"),
+    });
+    expect(submission.status().items[0]).toMatchObject({
+      revision: 2,
+      status: "rejected",
+    });
+    expect(reviews).toBe(2);
+
+    expect(await queue(use)).toMatchObject({ queued: true });
+    expect(await final(use)).toMatchObject({ accepted: true });
+    expect(reviews).toBe(2);
+    expect(submission.acceptedReport().uses[0]!.proof).toEqual(use.proof);
+  } finally {
+    await submission.close();
+  }
+});
+
 function graphItem(
   id: string,
   revision: number,
@@ -142,10 +684,270 @@ test("an unconfirmed graph requires a fresh query and reopens changed accepted c
   );
 });
 
+test("a sibling source finding reopens the report while duplicate note reads preserve acceptance", async () => {
+  const state = createDependencyReportSubmission({
+    advisory,
+    repository: "/synthetic",
+    review: async () => JSON.stringify({ items: [] }),
+  });
+  const report: DependencyAssessment = {
+    status: "unknown",
+    uses: [],
+    limitations: ["Dependency copy unresolved."],
+  };
+  function sourceNotes(count: number) {
+    const item = graphItem(`notes-${count}`, 1, 0);
+    return {
+      ...item,
+      result: {
+        structuredContent: {
+          ...item.result.structuredContent,
+          source_evidence_count: count,
+        },
+      },
+    };
+  }
+  try {
+    state.recordGraphEvent("item/completed", sourceNotes(0));
+    expect((await state.submit(report)).accepted).toBe(true);
+    state.recordGraphEvent("item/completed", sourceNotes(1));
+    expect(() => state.acceptedReport()).toThrow(
+      "evidence changed after finalization",
+    );
+    expect((await state.submit(report)).accepted).toBe(true);
+    state.recordGraphEvent("item/completed", sourceNotes(1));
+    expect(state.acceptedReport()).toEqual(report);
+  } finally {
+    await state.close();
+  }
+});
+
+test.each(["native", "resource", "failed resource", "empty resource"])(
+  "late unbound %s evidence reopens an accepted report",
+  async (kind) => {
+    const state = createDependencyReportSubmission({
+      advisory,
+      repository: "/synthetic",
+      review: async () => JSON.stringify({ items: [] }),
+    });
+    const uri = "fixture://collections/sample-1";
+    const parentReceiptId = state.recordInventory(
+      "inventory",
+      { structuredContent: { graph_evidence: { uri } } },
+      { tool: "profiles.stacks", arguments: { service: "worker" } },
+    );
+    const report: DependencyAssessment = {
+      status: "unknown",
+      uses: [],
+      limitations: ["Runtime evidence is incomplete."],
+    };
+    try {
+      expect((await state.submit(report)).accepted).toBe(true);
+      if (kind === "native") {
+        state.recordInventory(
+          "inventory",
+          { structuredContent: { samples: 1 } },
+          { tool: "profiles.stacks", arguments: { service: "another-worker" } },
+        );
+      } else {
+        state.recordInventory(
+          "inventory",
+          kind === "failed resource"
+            ? { error: "Fixture resource read failed" }
+            : {
+                contents:
+                  kind === "empty resource"
+                    ? []
+                    : [{ uri, text: JSON.stringify({ observations: [] }) }],
+              },
+          {
+            tool: "mcpServer/resource/read",
+            arguments: { uri },
+            parentReceiptId,
+            ...(kind === "failed resource"
+              ? { outcome: "failed" as const }
+              : kind === "empty resource"
+                ? { outcome: "empty" as const }
+                : {}),
+          },
+        );
+      }
+      expect(() => state.acceptedReport()).toThrow(
+        "evidence changed after finalization",
+      );
+      expect(state.continuationPrompt()).toContain(
+        "evidence changed after finalization",
+      );
+      expect((await state.submit(report)).accepted).toBe(true);
+      expect(state.acceptedReport()).toEqual(report);
+    } finally {
+      await state.close();
+    }
+  },
+);
+
+test("duplicate inventory preserves acceptance and new evidence preserves unchanged item approvals", async () => {
+  await using repo = await scopedTemporaryDirectory(
+    "review-inventory-generation-",
+  );
+  await writeFile(join(repo.path, "worker.ts"), "manifest\nchecked entry\n");
+  let reviews = 0;
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    review: async (prompt) => {
+      reviews++;
+      return reviewDecision(prompt, approved);
+    },
+  });
+  const original = { structuredContent: { samples: 1 } };
+  const metadata = {
+    tool: "profiles.stacks",
+    arguments: { service: "worker" },
+  };
+  const receiptId = state.recordInventory("inventory", original, metadata);
+  const report = draft();
+  try {
+    expect((await state.submit(report)).accepted).toBe(true);
+    expect(
+      state.recordInventory("inventory", structuredClone(original), metadata),
+    ).toBe(receiptId);
+    expect(state.acceptedReport()).toEqual(report);
+    expect(state.continuationPrompt()).toBeUndefined();
+    state.recordInventory(
+      "inventory",
+      { structuredContent: { samples: 2 } },
+      metadata,
+    );
+    expect(() => state.acceptedReport()).toThrow(
+      "evidence changed after finalization",
+    );
+    expect((await state.submit(report)).accepted).toBe(true);
+    expect(state.acceptedReport()).toEqual(report);
+    expect(reviews).toBe(1);
+  } finally {
+    await state.close();
+  }
+});
+
+test("inventory arriving during final review rejects the stale report without repeating unchanged review", async () => {
+  await using repo = await scopedTemporaryDirectory(
+    "review-inventory-arrival-",
+  );
+  await writeFile(join(repo.path, "worker.ts"), "manifest\nchecked entry\n");
+  const reviewStarted = Promise.withResolvers<void>();
+  const releaseReview = Promise.withResolvers<void>();
+  let reviews = 0;
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    review: async (prompt) => {
+      reviews++;
+      reviewStarted.resolve();
+      await releaseReview.promise;
+      return reviewDecision(prompt, approved);
+    },
+  });
+  try {
+    const report = draft();
+    const finalizing = state.submit(report);
+    await reviewStarted.promise;
+    state.recordInventory(
+      "inventory",
+      { contents: [{ uri: "fixture://late", text: '{"observations":[]}' }] },
+      { tool: "mcpServer/resource/read", arguments: { uri: "fixture://late" } },
+    );
+    releaseReview.resolve();
+    expect(await finalizing).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining(
+        "inventory, or selected assessments changed during finalization",
+      ),
+    });
+    expect(() => state.acceptedReport()).toThrow("changed during finalization");
+    expect((await state.submit(report)).accepted).toBe(true);
+    expect(state.acceptedReport()).toEqual(report);
+    expect(reviews).toBe(1);
+  } finally {
+    releaseReview.resolve();
+    await state.close();
+  }
+});
+
+test.each(["exclusion", "unknown use", "scope gap"])(
+  "a catalog nonmapping preserves the reviewed %s verdict",
+  async (kind) => {
+    await using repo = await scopedTemporaryDirectory("review-nonmapping-");
+    await writeFile(
+      join(repo.path, "worker.ts"),
+      "read(input);\ncheck(input);\n",
+    );
+    let reviews = 0;
+    const state = createDependencyReportSubmission({
+      advisory,
+      repository: repo.path,
+      callerScope: "The selected historical job and its recorded artifact.",
+      review: async (prompt) => {
+        reviews++;
+        const packet = reviewPacket(prompt);
+        expect(packet.callerScope).toBe(
+          "The selected historical job and its recorded artifact.",
+        );
+        return JSON.stringify({
+          items: packet.items.map((item) => ({
+            id: item.id,
+            revision: item.revision,
+            ...approved,
+            citedVersion: item.kind === "use" ? "1.0" : null,
+            evidenceIds: [...item.excerptIds, ...item.receiptIds],
+          })),
+        });
+      },
+    });
+    try {
+      const item = graphItem("trace", 1, 0);
+      state.recordGraphEvent("item/completed", {
+        ...item,
+        result: {
+          structuredContent: {
+            service_resolution: { revision: 1, pending: 0, unresolved: 1 },
+          },
+        },
+      });
+      const report = draft();
+      if (kind === "unknown use") {
+        report.status = report.uses[0]!.verdict = "unknown";
+        report.uses[0]!.reason =
+          "The selected artifact's patch state is unknown.";
+      } else if (kind === "scope gap") {
+        report.status = "unknown";
+        await queueScopeGap(state, "A selected caller handoff is unverified.");
+      }
+      expect(await state.submit(report)).toMatchObject({ accepted: true });
+      expect(reviews).toBeGreaterThan(0);
+      expect(state.acceptedReport()).toMatchObject({
+        status: kind === "exclusion" ? "ruled_out" : "unknown",
+        uses: report.uses,
+        limitations: [
+          expect.stringContaining("1 service lookup remains unresolved"),
+          ...(kind === "scope gap" ? [expect.any(String)] : []),
+        ],
+      });
+    } finally {
+      await state.close();
+    }
+  },
+);
+
 test("uncompleted service work can only yield a reviewed, explicitly partial assessment", async () => {
   await using repo = await scopedTemporaryDirectory("review-partial-");
   await writeFile(join(repo.path, "worker.ts"), "one\ntwo\n");
-  for (const pending of [0, 2]) {
+  for (const [pending, truncated, failed] of [
+    [0, true, false],
+    [2, true, false],
+    [2, false, false],
+    [0, false, true],
+  ] as const) {
     let reviews = 0;
     const state = createDependencyReportSubmission({
       advisory,
@@ -156,13 +958,13 @@ test("uncompleted service work can only yield a reviewed, explicitly partial ass
         return reviewDecision(prompt, approved);
       },
     });
-    state.recordGraphEvent(
-      "item/completed",
-      graphItem("trace", 1, pending, true),
-    );
+    state.recordGraphEvent("item/completed", {
+      ...graphItem("trace", 1, pending, truncated),
+      ...(failed ? { status: "failed" } : {}),
+    });
     const report = draft();
     report.status = "unknown";
-    if (pending) {
+    if (pending || failed) {
       for (let i = 0; i < 9; i++)
         expect((await state.submit(report)).accepted).toBe(false);
     }
@@ -170,10 +972,17 @@ test("uncompleted service work can only yield a reviewed, explicitly partial ass
     expect(reviews).toBe(1);
     const partial = state.acceptedReport();
     expect(partial.status).toBe("unknown");
-    expect(partial.limitations.join(" ")).toContain("graph reached its limit");
+    if (truncated)
+      expect(partial.limitations.join(" ")).toContain(
+        "graph reached its limit",
+      );
     if (pending)
       expect(partial.limitations.join(" ")).toContain(
         "2 pending service lookups",
+      );
+    if (failed)
+      expect(partial.limitations.join(" ")).toContain(
+        "graph did not return current service resolution coverage",
       );
   }
 });
@@ -466,6 +1275,151 @@ test("each use needs its own deciding citation, even when both appear in the sam
   expect(reviewedLocations).toEqual([["one", "two"], ["one"]]);
 });
 
+test("reads the exact shared item for an in-place citation repair", async () => {
+  await using repo = await scopedTemporaryDirectory("review-citation-repair-");
+  const path = "worker.ts";
+  await writeFile(
+    join(repo.path, path),
+    "route\nwrapper\nsibling\nversion 1.0\npatched body\n",
+  );
+  const candidates = await createDependencyCandidates(repo.path);
+  const [route, wrapper, sibling] = await candidates.observeGraph("trace", {
+    paths: [1, 2, 3].map((line) => ({
+      relation: "candidate_call",
+      source: path,
+      line,
+    })),
+  });
+  const first = draft().uses[0]!;
+  const other = draft().uses[0]!;
+  other.location = "sibling";
+  other.evidence = [{ path, startLine: 3, endLine: 5, supports: [] }];
+  const routeIds = [route!.id, wrapper!.id];
+  const callerScope = "Inspect the configured route and its selected decoder.";
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    callerScope,
+    candidates,
+    review: async (prompt) => {
+      const packet = reviewPacket(prompt);
+      expect(packet.callerScope).toBe(callerScope);
+      return JSON.stringify({
+        items: packet.items.map((item) => {
+          const hasPatch = item.excerptIds.some((id) =>
+            packet.excerpts[id]!.text.includes("patched body"),
+          );
+          return {
+            id: item.id,
+            revision: item.revision,
+            ...(hasPatch
+              ? approved
+              : {
+                  accepted: false,
+                  reason:
+                    "The selected use needs its own installed version and patch evidence.",
+                }),
+            citedVersion: "1.0",
+            evidenceIds: item.excerptIds,
+          };
+        }),
+      });
+    },
+  });
+  const item = {
+    id: "route",
+    kind: "use" as const,
+    candidateIds: routeIds,
+    use: first,
+  };
+  expect(await state.queue({ items: [item] })).toMatchObject({
+    queued: true,
+  });
+  expect(
+    await state.queue({
+      items: [
+        { id: "sibling", kind: "use", candidateIds: [sibling!.id], use: other },
+      ],
+    }),
+  ).toMatchObject({ queued: true });
+  const id = "route";
+  const report = {
+    status: "ruled_out",
+    uses: [other, first],
+    limitations: [],
+    reviewItemIds: [id, "sibling"],
+  };
+  expect(await state.submit(report)).toMatchObject({
+    accepted: false,
+    feedback: expect.stringContaining(
+      "needs its own installed version and patch evidence",
+    ),
+  });
+  expect(state.readStatus()).not.toHaveProperty("assessmentItems");
+  expect(state.readStatus({ assessmentIds: [id] }).assessmentItems).toEqual([
+    {
+      revision: 1,
+      item: { ...item, id },
+    },
+  ]);
+  expect(() => state.readStatus({ assessmentIds: ["missing"] })).toThrow(
+    "Unknown assessment ID",
+  );
+  const target = state.readStatus({ assessmentIds: [id] }).assessmentItems![0]!
+    .item;
+  if (target.kind !== "use") throw new Error("Expected a use");
+  target.use.evidence.push({
+    path,
+    startLine: 4,
+    endLine: 5,
+    supports: ["affected_copy"],
+  });
+  expect(
+    state.readStatus({ assessmentIds: [id] }).assessmentItems![0]!.item,
+  ).toEqual({ ...item, id });
+  expect(await state.queue({ items: [target] })).toMatchObject({
+    queued: true,
+  });
+  expect(
+    await state.submit({ ...report, uses: [other, target.use] }),
+  ).toMatchObject({ accepted: true });
+  expect(state.acceptedReport().uses).toEqual([other, target.use]);
+  const compact = state.readStatus();
+  expect(compact.items.map((entry) => entry.id)).toEqual([id, "sibling"]);
+  expect(compact).not.toHaveProperty("assessmentPage");
+  const page = state.readStatus({ assessments: { limit: 1 } }).assessmentPage!;
+  expect(page).toEqual({
+    items: [
+      {
+        id,
+        revision: 2,
+        kind: "use",
+        status: "accepted",
+        location: first.location,
+        component: first.component,
+        version: first.version,
+        verdict: first.verdict,
+        deployment: first.deployment,
+      },
+    ],
+    nextAfter: id,
+  });
+  expect(
+    state.readStatus({ assessments: { after: page.nextAfter! } })
+      .assessmentPage,
+  ).toMatchObject({
+    items: [{ id: "sibling" }],
+    nextAfter: null,
+  });
+  expect(state.readStatus({ assessments: {} }).assessmentPage).toMatchObject({
+    items: [{ id }, { id: "sibling" }],
+    nextAfter: null,
+  });
+  expect(() => state.readStatus({ assessments: { after: "missing" } })).toThrow(
+    "Unknown or out-of-scope assessment cursor",
+  );
+});
+
 test("verifies the inventory claim against actual results from cited inventory servers", async () => {
   await using repo = await scopedTemporaryDirectory("review-inventory-");
   await writeFile(join(repo.path, "worker.ts"), "one\ntwo\n");
@@ -576,6 +1530,16 @@ test("a turn without a submission costs one attempt and the final attempt can st
   expect(submission.continuationPrompt()).toBeUndefined();
   expect(submission.acceptedReport()).toEqual({
     ...report,
+    coverage: [
+      {
+        kind: "unresolved",
+        reason: report.limitations[0]!,
+        evidence: [
+          { path: "worker.ts", startLine: 2, endLine: 3, supports: [] },
+        ],
+        observations: [],
+      },
+    ],
     limitations: [
       ...report.limitations,
       expect.stringContaining("worker.ts:2-3"),
@@ -679,6 +1643,364 @@ test("returns an unsupported positive for correction before invoking the reviewe
   expect((await submission.submit(report)).accepted).toBe(true);
   expect(submission.acceptedReport()).toEqual(report);
   expect(calls).toBe(1);
+});
+
+test("reviews a release recipe with the bound source and provenance receipts", async () => {
+  await using repo = await scopedTemporaryDirectory("review-release-recipe-");
+  await writeFile(
+    join(repo.path, "worker.ts"),
+    'import { read } from "library";\nread(input);\n',
+  );
+  await writeFile(
+    join(repo.path, "release.build"),
+    'image("worker", "worker.ts")\nlink("worker", "library", "1.0", "fix.diff")\n',
+  );
+  await writeFile(join(repo.path, "fix.diff"), "+check(input);\n");
+  const imageDigest = `sha256:${"1".repeat(64)}`;
+  const running = { imageDigest, platform: "linux/amd64" };
+  const provenance = { ...running, sourceRevision: "a".repeat(40) };
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    inventoryServers: { inventory: ["running_image", "provenance"] },
+    review: async (prompt) => {
+      expect(prompt).toContain(
+        "A release recipe can also establish the packaged copy",
+      );
+      const packet = reviewPacket(prompt);
+      const item = packet.items[0]!;
+      expect(item.receiptIds.map((id) => packet.receipts[id]?.result)).toEqual(
+        expect.arrayContaining([running, provenance]),
+      );
+      expect(item.excerptIds.map((id) => packet.excerpts[id]?.text)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'link("worker", "library", "1.0", "fix.diff")',
+          ),
+          "+check(input);",
+        ]),
+      );
+      return reviewDecision(prompt, approved);
+    },
+  });
+  try {
+    const runtimeReceipt = submission.recordInventory("inventory", running, {
+      tool: "running_image",
+    });
+    const provenanceReceipt = submission.recordInventory(
+      "inventory",
+      provenance,
+      { tool: "provenance" },
+    );
+    const report = draft();
+    const use = report.uses[0]!;
+    use.deployment = "confirmed";
+    use.reason = "The running image's release recipe links the fixed library.";
+    use.evidence.push(
+      {
+        path: "release.build",
+        startLine: 1,
+        endLine: 2,
+        supports: ["affected_copy"],
+      },
+      {
+        path: "fix.diff",
+        startLine: 1,
+        endLine: 1,
+        supports: ["affected_copy"],
+      },
+    );
+    use.observations = [
+      {
+        server: "inventory",
+        record: "running image and its verified release source",
+        supports: ["running", "affected_copy"],
+      },
+    ];
+    expect(
+      await submission.queue({
+        items: [
+          {
+            id: "worker",
+            kind: "use",
+            use,
+            candidateIds: [],
+            receiptIds: [runtimeReceipt, provenanceReceipt],
+          },
+        ],
+      }),
+    ).toMatchObject({ queued: true });
+    expect(
+      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+    ).toMatchObject({ accepted: true });
+    expect(submission.acceptedReport()).toEqual(report);
+  } finally {
+    await submission.close();
+  }
+});
+
+test("requires the reviewer to cite the receipt that identifies the affected deployed copy", async () => {
+  await using repo = await scopedTemporaryDirectory("review-shipped-copy-");
+  await writeFile(
+    join(repo.path, "worker.ts"),
+    "import library\nlibrary.read(input)\n",
+  );
+  for (const citeBuild of [false, true]) {
+    const submission = createDependencyReportSubmission({
+      repository: repo.path,
+      advisory,
+      inventoryServers: {
+        builds: ["running_build"],
+        access: ["caller_access"],
+      },
+      review: async (prompt) => {
+        const packet = reviewPacket(prompt);
+        const decision = JSON.parse(reviewDecision(prompt, approved));
+        if (!citeBuild)
+          decision.items[0].evidenceIds = decision.items[0].evidenceIds.filter(
+            (id: string) =>
+              packet.receipts[id]?.origin.tool !== "running_build",
+          );
+        return JSON.stringify(decision);
+      },
+    });
+    try {
+      const build = submission.recordInventory(
+        "builds",
+        {
+          service: "worker",
+          revision: "rev1",
+          package: "library",
+          version: "1.0",
+          patches: [],
+        },
+        { tool: "running_build", arguments: { service: "worker" } },
+      );
+      const access = submission.recordInventory(
+        "access",
+        {
+          service: "worker",
+          revision: "rev1",
+          caller: "fixture-client",
+          allowed: true,
+        },
+        { tool: "caller_access", arguments: { service: "worker" } },
+      );
+      const report = draft();
+      const use = report.uses[0]!;
+      report.status = use.verdict = "exploitable";
+      use.deployment = "confirmed";
+      use.reason =
+        "The fixture caller reaches worker rev1, which shipped library 1.0 without patches.";
+      use.evidence[0]!.supports = ["affected_use"];
+      use.observations = [
+        {
+          server: "builds",
+          record: "worker rev1 build",
+          supports: ["affected_copy", "running"],
+        },
+        {
+          server: "access",
+          record: "fixture-client access to worker rev1",
+          supports: ["access"],
+        },
+      ];
+      expect(
+        await submission.queue({
+          items: [
+            {
+              id: "worker",
+              kind: "use",
+              candidateIds: [],
+              use,
+              receiptIds: [build, access],
+            },
+          ],
+        }),
+      ).toMatchObject({ queued: true });
+      const result = await submission.submit({
+        ...report,
+        reviewItemIds: ["worker"],
+      });
+      expect(result.accepted).toBe(citeBuild);
+      if (citeBuild) expect(submission.acceptedReport()).toEqual(report);
+      else
+        expect(result.feedback).toContain(
+          "cite a successful inventory receipt from builds",
+        );
+    } finally {
+      await submission.close();
+    }
+  }
+});
+
+test("a runtime-only provider does not force a receipt for a source-backed use without a native target", async () => {
+  await using repo = await scopedTemporaryDirectory("review-runtime-only-");
+  await writeFile(
+    join(repo.path, "worker.ts"),
+    "import library\nlibrary.read(input)\n",
+  );
+  const inventoryServers = { artifacts: ["read_artifact"] };
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    inventoryServers,
+    catalogServerNames: [],
+    review: async (prompt) => {
+      expect(reviewPacket(prompt)).toMatchObject({
+        inventoryServers,
+        catalogServerNames: [],
+        receipts: {},
+      });
+      return reviewDecision(prompt, approved);
+    },
+  });
+  try {
+    const report = draft();
+    const use = report.uses[0]!;
+    report.status = use.verdict = "potentially_exploitable";
+    use.evidence[0]!.supports = ["affected_copy", "affected_use"];
+    use.reason =
+      "Source selects the affected copy. There is no observed artifact ID to check.";
+    const item = { id: "worker", kind: "use", candidateIds: [], use };
+    expect(await submission.queue({ items: [item] })).toMatchObject({
+      queued: true,
+    });
+    expect(
+      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+    ).toMatchObject({ accepted: true });
+  } finally {
+    await submission.close();
+  }
+});
+
+test("requires inventory lookups for each potentially exploitable use when a catalog is configured", async () => {
+  await using repo = await scopedTemporaryDirectory("review-runtime-attempt-");
+  await writeFile(join(repo.path, "worker.ts"), "one\ntwo\n");
+  const inventoryServers = {
+    inventory: ["find_service", "running_build", "caller_access"],
+  };
+  const submission = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    inventoryServers,
+    catalogServerNames: ["inventory"],
+    review: async (prompt) => {
+      const packet = reviewPacket(prompt);
+      expect(packet.inventoryServers).toEqual(inventoryServers);
+      expect(packet.catalogServerNames).toEqual(["inventory"]);
+      const receipts = Object.values(packet.receipts);
+      if (receipts.every((receipt) => receipt.origin.tool === "find_service")) {
+        return reviewDecision(prompt, {
+          accepted: false,
+          reason: "Check the running build and caller access for worker.",
+        });
+      }
+      expect(receipts).toContainEqual(
+        expect.objectContaining({
+          outcome: "failed",
+          origin: { tool: "running_build", arguments: { service: "worker" } },
+        }),
+      );
+      return reviewDecision(prompt, approved);
+    },
+  });
+  try {
+    const report = draft();
+    const use = report.uses[0]!;
+    report.status = use.verdict = "potentially_exploitable";
+    use.evidence[0]!.supports = ["affected_copy", "affected_use"];
+    use.reason = "The deployed build and caller access are unresolved.";
+    const item = { id: "worker", kind: "use", candidateIds: [], use };
+    expect(await submission.submit(report)).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("Use the configured inventory tools"),
+    });
+    expect(await submission.queue({ items: [item] })).toMatchObject({
+      queued: false,
+    });
+    expect(
+      submission.recordInventory(
+        "other",
+        { build: "a" },
+        { tool: "running_build" },
+      ),
+    ).toBeUndefined();
+
+    const identity = submission.recordInventory(
+      "inventory",
+      { name: "worker" },
+      { tool: "find_service" },
+    );
+    use.observations = [
+      { server: "inventory", record: "worker catalog entry", supports: [] },
+    ];
+    expect(
+      await submission.queue({ items: [{ ...item, receiptIds: [identity] }] }),
+    ).toMatchObject({ queued: true });
+    expect(
+      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+    ).toMatchObject({
+      accepted: false,
+      feedback: expect.stringContaining("caller access for worker"),
+    });
+
+    const lookup = submission.recordInventory(
+      "inventory",
+      { error: "build lookup timed out" },
+      {
+        tool: "running_build",
+        arguments: { service: "worker" },
+        outcome: "failed",
+      },
+    );
+    expect(
+      submission.readStatus({ inventoryReceipts: true }).inventoryReceipts,
+    ).toContainEqual(
+      expect.objectContaining({ id: lookup, outcome: "failed" }),
+    );
+    use.reason =
+      "The running build lookup for worker timed out. Without a deployment to scope caller access to, access remains unresolved.";
+    use.observations = [
+      {
+        server: "inventory",
+        record: "worker running_build timed out",
+        supports: ["running"],
+      },
+    ];
+    use.deployment = "confirmed";
+    expect(
+      await submission.queue({ items: [{ ...item, receiptIds: [lookup] }] }),
+    ).toMatchObject({
+      queued: false,
+      feedback: expect.stringContaining("require a successful result"),
+    });
+
+    use.observations[0]!.supports = [];
+    use.deployment = "unknown";
+    expect(
+      await submission.queue({ items: [{ ...item, receiptIds: [lookup] }] }),
+    ).toMatchObject({ queued: true });
+    expect(
+      await submission.submit({ ...report, reviewItemIds: ["worker"] }),
+    ).toMatchObject({ accepted: true });
+    expect(submission.acceptedReport().status).toBe("potentially_exploitable");
+    submission.recordInventoryStartup(
+      "inventory",
+      "failed",
+      "connection failed",
+    );
+    const unavailable = submission
+      .readStatus({ inventoryReceipts: true })
+      .inventoryReceipts?.find((receipt) => receipt.outcome === "unavailable");
+    expect(unavailable).toBeDefined();
+    submission.recordInventoryStartup("inventory", "ready", null);
+    expect(
+      submission.readStatus({ inventoryReceipts: true }).inventoryReceipts,
+    ).not.toContainEqual(unavailable);
+  } finally {
+    await submission.close();
+  }
 });
 
 test("accounts for the independent review turn even when it rejects a draft", async () => {

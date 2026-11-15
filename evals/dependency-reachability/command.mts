@@ -84,10 +84,13 @@ export function gradeCommand(
 ) {
   const result = isRecord(answer) ? answer : {};
   const errors: string[] = [];
-  if (result.cve !== cve || result.status !== "potentially_exploitable")
-    errors.push(
-      `Expected ${cve} with aggregate status potentially_exploitable`,
-    );
+  if (result.cve !== cve) errors.push(`Expected ${cve}`);
+  if (result.schemaVersion === 2) {
+    if (Object.hasOwn(result, "status"))
+      errors.push("Version 2 has an aggregate status");
+  } else if (result.status !== "potentially_exploitable") {
+    errors.push("Expected legacy aggregate status potentially_exploitable");
+  }
   const uses: unknown[] = Array.isArray(result.uses) ? result.uses : [];
   if (uses.length !== expectedUses.length)
     errors.push(`Expected two uses, received ${uses.length}`);

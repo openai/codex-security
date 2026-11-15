@@ -63,6 +63,16 @@ export async function readRegularInputFile(
   repository: string | readonly string[],
   metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
 ): Promise<string> {
+  return (await readRegularInputFileBytes(path, repository, metadata)).toString(
+    "utf8",
+  );
+}
+
+export async function readRegularInputFileBytes(
+  path: string,
+  repository: string | readonly string[],
+  metadata?: Pick<BigIntStats, "isFile" | "dev" | "ino">,
+): Promise<Buffer> {
   const selected = metadata ?? (await lstat(path, { bigint: true }));
   if (!selected.isFile()) {
     throw new CodexSecurityError("Input files must be regular files.");
@@ -102,7 +112,7 @@ export async function readRegularInputFile(
     ) {
       throw new CodexSecurityError("Input files must remain regular files.");
     }
-    return await file.readFile({ encoding: "utf8" });
+    return await file.readFile();
   } finally {
     await file.close();
   }

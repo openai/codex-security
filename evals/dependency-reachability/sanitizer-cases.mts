@@ -12,6 +12,8 @@ import {
 } from "./receiver-data.mts";
 const installed = "node_modules/nodemailer/";
 const qp = installed + "lib/qp/index.js";
+const archiveCaller =
+  "An unauthenticated caller controls the bytes of an uploaded file in POST /archive.";
 function archiveCase(
   id: string,
   boundary: string,
@@ -26,10 +28,11 @@ function archiveCase(
     revision: mail390,
     version: "7.0.10",
     verdict,
+    callerScope: archiveCaller,
     question:
       "Assess CVE-2025-14874 in Nodemailer. " +
-      "An unauthenticated caller controls the bytes of an uploaded file in POST /archive. " +
-      "The finding concerns unbounded recursion on nested groups in an address header in " +
+      archiveCaller +
+      " The finding concerns unbounded recursion on nested groups in an address header in " +
       "Nodemailer 3.0.0 through 7.0.10. Determine whether this caller can reach the vulnerable " +
       "operation through the service as deployed, and report the installed Nodemailer version.",
     stage: [

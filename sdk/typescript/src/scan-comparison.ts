@@ -841,7 +841,7 @@ export async function createReadOnlyCodexSession(
         for (const item of turn.items ?? []) {
           if (
             item.type === "mcp_tool_call" &&
-            item.status === "completed" &&
+            item.status !== "in_progress" &&
             Object.hasOwn(lookup.servers, item.server)
           )
             lookup.onResult(item);

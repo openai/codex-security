@@ -7,6 +7,9 @@ import {
 import type { ReachabilityCase, StageFile } from "./cases.mts";
 import { mimeReceiverSources } from "./receiver-data.mts";
 
+const bundleCaller =
+  "An external caller can submit a ZIP mail bundle and controls only its contents.";
+
 function bundleCase(id: string, byName: boolean): ReachabilityCase {
   const source = (file: string, name = file): StageFile => ({
     kind: "fixture",
@@ -34,9 +37,10 @@ function bundleCase(id: string, byName: boolean): ReachabilityCase {
     suite: "mailparser",
     repository: "nodemailer/mailparser",
     revision: mail390,
+    callerScope: bundleCaller,
     question:
-      "An external caller can submit a ZIP mail bundle and controls only its contents. " +
-      "CVE-2025-14874 in Nodemailer requires a sender-controlled address header to reach the parser. " +
+      bundleCaller +
+      " CVE-2025-14874 in Nodemailer requires a sender-controlled address header to reach the parser. " +
       "Can an arbitrary To address chosen by this caller reach the installed address parser through this feature? " +
       "Assess this input prerequisite and report the installed Nodemailer version.",
     verdict: byName ? "potentially_exploitable" : "ruled_out",

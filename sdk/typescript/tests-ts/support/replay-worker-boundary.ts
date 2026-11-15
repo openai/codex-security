@@ -98,8 +98,11 @@ async function assertWorkerReplay(
     });
     let verifiedLaunches = 0;
     async function checkLaunchSettings(resumed: boolean) {
-      const { argv } = JSON.parse(await readFile(marker, "utf8")) as {
+      const { argv, deepConfig } = JSON.parse(
+        await readFile(marker, "utf8"),
+      ) as {
         argv: string[];
+        deepConfig: string;
       };
       let selected: JsonObject = {};
       for (let index = 0; index < argv.length; index++)
@@ -107,18 +110,47 @@ async function assertWorkerReplay(
           selected = deepMerge(selected, parse(argv[++index]!) as JsonObject);
       for (const key of [
         "analytics",
+        "daybreak",
         "shell_environment_policy",
         "otel",
         "skills",
         "model_catalog_json",
       ])
         assert.deepEqual(selected[key], config[key]);
+      if (config["mcp_servers"] !== undefined) {
+        const snapshot = parse(deepConfig)["worker_runtime"] as JsonObject;
+        for (const servers of [
+          selected["mcp_servers"],
+          snapshot["mcp_servers"],
+        ])
+          for (const server of Object.values((servers ?? {}) as JsonObject))
+            assert.equal(
+              Object.hasOwn(server as JsonObject, "instructions"),
+              false,
+            );
+        // Workers register their own tools rather than copying parent transports.
+        for (const name of Object.keys(config["mcp_servers"] as JsonObject))
+          assert.equal(
+            Object.hasOwn(selected["mcp_servers"] as JsonObject, name),
+            false,
+          );
+      }
       assert.deepEqual(
         (selected["agents"] as JsonObject)["reviewer"],
         (config["agents"] as JsonObject)["reviewer"],
       );
       assert.equal((selected["features"] as JsonObject)["view_image"], false);
       assert.equal((selected["features"] as JsonObject)["shell_tool"], false);
+      for (const key of [
+        "cli_daybreak",
+        "api_key_cyber_access_programs",
+        "api_key_model_discovery",
+      ])
+        if (Object.hasOwn((config["features"] as JsonObject) ?? {}, key))
+          assert.equal(
+            (selected["features"] as JsonObject)[key],
+            (config["features"] as JsonObject)[key],
+          );
       assert.equal(selected["approval_policy"], "never");
       assert.deepEqual(
         (selected["permissions"] as JsonObject)[

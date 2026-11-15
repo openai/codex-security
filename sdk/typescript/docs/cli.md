@@ -158,6 +158,11 @@ Threads created by these commands retain the setting when resumed in Codex.
 Scans use isolated configuration, so set it on the CLI, SDK client, or project
 file even if it is enabled in your personal Codex configuration.
 
+Exploitability checks also use these trusted project settings. Explicit
+`--codex` values override project values. The coordinator, catalog lookups, and
+report reviewer retain the selected access setting, including after an automatic
+native session recovery.
+
 For the plugin inside Codex, use the desktop Daybreak toggle or `/daybreak` in
 an interactive CLI session. For headless Codex, use `codex exec -c daybreak=true`
 or set top-level `daybreak = true` in the configuration loaded by the runner.
@@ -2333,6 +2338,107 @@ codex-security exploitability check npm:example-package \
   --vuln-description "Version 2.3.1 may skip signature verification when reading a manifest"
 ```
 
+From a source checkout with the SDK built, render a saved `--json` result as a
+self-contained HTML report. The renderer works offline for CVE, package, and
+user-described checks.
+
+```bash
+node sdk/typescript/scripts/render-exploitability-report.mjs assessment.json > assessment.html
+```
+
+Use `-` as the input path to read JSON from stdin. Open the HTML file in a browser.
+
+New OSV-backed checks include advisory metadata in their JSON. For an older
+saved report that contains only advisory URLs, pass `--advisory FILE` with a saved raw OSV
+JSON response. Repeat the option to supply multiple advisories. The renderer
+reads these local files and matches them to the advisory URLs in the report.
+
+```bash
+node sdk/typescript/scripts/render-exploitability-report.mjs assessment.json \
+  --advisory saved-cve.json --advisory saved-alias.json > assessment.html
+```
+
+Pass `--checkout DIR` to include the cited source lines from a local checkout.
+Use the source snapshot that produced the report so its line ranges still apply.
+Pass `--production-calls FILE` to include saved production call counts. The
+renderer reads the file locally.
+
+```bash
+node sdk/typescript/scripts/render-exploitability-report.mjs assessment.json \
+  --checkout ./source --production-calls production-calls.json > assessment.html
+```
+
+The production call file is a JSON array. Each record binds one observed
+`source`, `path`, or `sink` step to the exact assessed use.
+
+```json
+[
+  {
+    "useId": "use-1-1",
+    "location": "service/server.js:24",
+    "step": "sink",
+    "environment": "prod",
+    "count": 28,
+    "from": "2026-01-15T12:00:00Z",
+    "until": "2026-01-15T12:15:00Z",
+    "target": "example-service production revision 42",
+    "record": "saved trace query result example-123"
+  }
+]
+```
+
+Use the exact HTML use anchor (such as `use-1-1`) and location from the same
+report. Use a nonnegative integer count, the exact production target, and
+timestamp bounds for the recorded interval. The `record` field names the saved observation or query result
+that produced it. Counts from different targets or windows stay separate.
+A missing step has no count, and counts for individual steps do not establish
+that the same calls passed through the entire chain.
+
+New assessments can save the reviewed sink and advisory-condition checks in
+`uses[].proof`. The normal renderer uses that data for call-site highlights and
+condition rows. Each proof reference must fall within that use's own source
+citations. Unknown conditions stay explicit; the renderer does not infer them
+from the verdict. All supplied source snippets remain available under each
+use's citations, including unknown uses and producer code.
+
+For an older report without `proof`, pass `--use-evidence FILE` to add a saved
+call site and prerequisite checks to the walkthrough. A saved use's reviewed
+`proof` takes precedence over this legacy sidecar.
+
+```bash
+node sdk/typescript/scripts/render-exploitability-report.mjs assessment.json \
+  --use-evidence use-evidence.json > assessment.html
+```
+
+The file is a JSON array. Each entry uses the exact HTML use anchor and
+location from the report. The `sink` field is optional.
+
+```json
+[
+  {
+    "useId": "use-1-1",
+    "location": "service/server.js:24",
+    "sink": {
+      "function": "decodeFrame",
+      "callSite": { "path": "service/server.js", "line": 24 }
+    },
+    "conditions": [
+      {
+        "label": "Uses the affected frame mode",
+        "status": "ruled_out",
+        "explanation": "The call selects the safe frame mode.",
+        "citations": [{ "path": "service/server.js", "line": 24 }]
+      }
+    ]
+  }
+]
+```
+
+A condition's status is `met`, `unknown`, or `ruled_out`. Each call site and
+citation must fall within a saved source citation for that same use. Conditions
+marked `met` or `ruled_out` require at least one citation. Conditions marked
+`unknown` may have an empty citation list.
+
 For a CVE, the command looks up its advisory in the Open Source Vulnerabilities
 (OSV) database. For a package alone, it queries OSV by ecosystem and package
 name and assesses each published vulnerability separately. To check a newly
@@ -2340,17 +2446,26 @@ reported issue, pass the package and describe the suspected behavior with
 `--vuln-description`. This form skips OSV and passes the description to the
 investigator and reviewer.
 
+JSON reports keep assessed dependency uses in `uses`. An optional `coverage`
+array preserves other reviewed decisions, including source exclusions and
+unresolved scope gaps, with their reasons, source citations and inventory
+observations. It is omitted when there are no such decisions. The HTML report
+shows these under **Other checked code**; they are not counted as dependency uses.
+
 The bundled `dependency-exploitability` skill checks the resolved dependency,
 applicable patches and the prerequisites for each use. It can request a local
 dependency trace with a time budget and hop limit. The tracer uses ripgrep
 to find files and reads package and build
-manifests for dependency declarations. The built-in parser recognizes npm
+manifests for dependency declarations. The manifest parser recognizes npm
 dependency maps and literal system package installs in standard Dockerfiles
 and Containerfiles. Matches in other recognized dependency manifests are
-search leads. Automatic traces skip documentation. For a known symbol in
-Python, JavaScript, or TypeScript the tracer uses OpenGrep to identify
-candidate calls. When both endpoints are known, it can also check for a
-value flowing between two calls in the same file. The
+search leads. Automatic traces skip documentation. Every OpenGrep scan requires
+native rules authored by the investigator and supplied in `rules`; the tracer
+does not generate fallback patterns. It runs those rules in source batches to
+identify candidate calls or possible flows between two calls in the same file.
+The graph retains the executed rule identity with the source evidence. Native
+compilation and matches do not establish coverage, dependency binding or
+execution. Explicit unresolved matches remain source leads to inspect. The
 trace adds cited relationships to an in-memory graph and reports unfinished
 searches separately. Within the same check the skill can ask how many candidate
 code paths and which services it has found, or look up the evidence for one
@@ -2358,6 +2473,75 @@ node by name or ID. The count includes distinct call and same-file flow
 observations. Repeating a trace preserves the count. Unresolved calls carry
 the matched name as `calleeText` on the call site. Use the cited source to
 identify the implementation.
+
+The coordinator uses Codex's native plan to track deciding questions and assigns
+independent work to native investigator subagents. The coordinator uses high
+reasoning effort. Investigators use the selected project or CLI effort, with
+Codex's `agents.default_subagent_reasoning_effort` taking precedence when set.
+Review and lookup helpers use the same selected model and provider. The coordinator groups
+work by service or application component when the checkout spans several components. Investigators
+share the check's graph, tracer, and configured read-only MCP tools. They send
+follow-up questions to the coordinator, which records and assigns them in the
+plan. A question closes with checked evidence or a specific missing fact.
+
+Without a narrower caller scope, the coordinator checks the checkout's runnable
+consumers and build environments, including tools, CI and fuzzing harnesses.
+An explicit caller scope also bounds leads, the final coverage check and the
+overall answer. Unrelated APIs or future installation recipes do not add an
+unknown to that answer; unresolved handoffs or selections on the requested
+chain remain in scope.
+It checks that coverage once before submission. For dispatching or delegating
+entrypoints, an investigator independent of the original assessors performs
+this check. Supplied references are starting points; it can search the checkout
+and shared graph for missing caller, operation and copy bindings. Observed
+dispatch and optional dependency links create follow-up leads even when a
+primary implementation is fixed. Related test/helper candidates can share a
+disposition when the same context and evidence apply; distinct consumers,
+builds, copies and controls remain separate. Unknown selection stays bound to
+the relevant caller; a proved exclusion closes only its own path. Investigators
+inspect custom input transformations when their output decides an advisory condition
+or exclusion, and keep access permissions separate from input influence.
+
+A configured potential finding can use a bound original affected release and
+the applicable operation and prerequisites. Available source and build evidence
+are checked for fixes or overrides. A hypothetical backport or missing binary
+fixing hunk alone does not negate that finding; verified fixes and genuine
+operation, copy or input-control gaps retain their own conclusions.
+
+Dependency checks retain a default capacity of 16 native threads, including the
+coordinator: up to 15 investigators. `exploitability check` now also exposes the
+shared `--codex` option for its supported native overrides, including this capacity
+setting. Capacity in the native Codex home is preserved before runtime isolation;
+trusted project configuration and CLI settings override the same native key. For 48
+investigators plus the coordinator:
+
+```bash
+codex-security exploitability check CVE-2023-4863 \
+  --codex features.multi_agent_v2.max_concurrent_threads_per_session=49
+```
+
+An explicit v2 capacity takes precedence over the legacy
+`agents.max_concurrent_threads_per_session` setting, whose count excludes the
+coordinator. Codex validates the value. Capacity is fixed when a native session
+starts; changing configuration does not resize an active investigation.
+
+Investigators can save a source finding with
+`record_codex_security_evidence`. The tool reads the cited checkout lines and
+returns an immutable evidence ID with the note count and resolution coverage.
+The save reply does not repeat the graph, rule executions, or source excerpts.
+The claim and its proposed scope remain the investigator's assertions. Other
+workers retrieve the source finding by ID through
+`query_codex_security_graph` and verify how it binds to their selected dependency
+copy. Targeted note queries return the requested findings without the rest of
+the graph. Workers queue assessed uses before returning their summaries. The
+coordinator reconciles their evidence and submits the complete report for
+independent review. Only its native thread can finalize the report.
+
+After an unexpected Codex process exit during an investigation, the CLI makes
+one attempt to resume the same persistent thread. The active CLI retains the
+graph, source notes, original inventory receipts, queued assessments, and review
+results. The resumed coordinator reads that state before continuing its plan.
+Cancellation and reported model errors return their existing diagnostics.
 
 When a service catalog is configured, the graph keeps one service lookup per
 relevant file. The skill requests batches of paths and can supply their shared
@@ -2370,14 +2554,16 @@ against actual tool results, and the agent's mapping explanation is retained.
 The agent can conclude that no service matches within the catalog scope it has
 investigated, with cited results and an explanation of coverage. An empty
 exploratory search alone does not support that conclusion. An investigated but
-unresolved mapping remains a coverage limitation. The skill can
-explicitly retry it, and new project hints trigger further investigation.
+unresolved mapping remains a report limitation; it does not by itself override
+a reviewed exclusion. Missing facts that decide a use or its scope must remain
+explicitly unresolved in the assessment. The skill can retry the mapping, and
+new project hints trigger further investigation.
 Querying a queued file shows its
 `service_lookup` state and catalog citations. Without a catalog, the check can
 still assess the source and configuration.
 If the graph reaches its memory limit, or service questions remain on the
 last submission attempt, an accepted report includes a partial-coverage
-limitation. A checkout-wide negative then becomes `unknown`.
+limitation. Each reviewed exclusion still applies to its own scope.
 
 Trace calls in the same check can reuse completed file lookups while their
 inputs are unchanged. The in-memory cache evicts the least recently used
@@ -2386,7 +2572,11 @@ The graph separately retains up to an estimated 4 MiB of cited observations
 for the check. Graph queries indicate when observations or list entries were
 omitted. Each new CLI check starts with an empty graph and cache.
 
-Each use includes a version when known, a verdict and repository citations.
+Each use includes its selected version when known, a verdict and repository
+citations. An import, package resolution, build rule, artifact reference or
+scoped record must connect the version to that use. A bound configured selection
+does not require a live observation. An unbound declaration stays in the reason,
+with `version: null`. A separate source exclusion can still rule out the operation.
 
 | Verdict                   | What the evidence establishes for this use                                                                                                                                                                 |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -2404,21 +2594,25 @@ lookup in this check. Automation that used `exploitable` for
 code-level findings should also handle `potentially_exploitable`.
 
 The skill queues completed assessments for background review while it continues
-investigating. A review batch starts after one minute or 100 queued items, with
-at most two batches in flight. Final submission flushes pending work immediately.
+investigating. Ready items are batched on the next event-loop turn, with at most
+two batches in flight. Small batches do not wait a fixed minute. Final submission
+flushes pending work immediately.
 One model call checks a batch against the advisory and each item's cited source
 and inventory records. It independently reads the dependency version from those
 records. Changes trigger review of the affected items; unchanged approvals are
 reused.
+
+The reviewer can use a release recipe when bound inventory receipts connect the
+running artifact to an exact source revision and cited source at that revision
+shows which dependency version and patch the release target uses.
 
 The report tracks candidate IDs for dependency declarations, candidate calls,
 and same-file flows observed by the tracer. Each needs an assessment, an
 evidence-backed dismissal, or a specific unresolved question. Plain text
 matches and shell searches provide leads and can supply citations. The
 investigator can group candidates when the same build, dependency copy, and
-controls apply. The host checks the report's structure and evidence, accounts
-for known candidates, and derives its overall verdict. A positive report requires a positive finding. Neutral inventory
-observations can use `supports: []` without asserting deployment or access.
+controls apply. The host checks report structure and evidence and accounts for
+known candidates. Neutral inventory observations can use `supports: []`.
 
 Queue acknowledgments and review status return concise progress and actionable
 feedback. Candidate locations are available on request in pages, defaulting to
@@ -2437,22 +2631,52 @@ are surfaced rather than treated as accepted assessments.
 A deployment manifest establishes what is configured. To supply inventory
 evidence, select a trusted config file with `--config FILE`. Set
 `exploitability.service_catalog_mcps` to select servers for service identity,
-running revision and caller access lookups. The same MCP can supply all three;
-an identity or desired configuration alone proves neither runtime fact.
+running revision and caller access lookups. Use `exploitability.runtime_mcps`
+for evidence servers that need a known artifact or native resource identifier
+and do not resolve source consumers to service identities. The same MCP can
+supply both roles. A service identity or desired configuration alone proves
+neither runtime fact.
 Missing runtime evidence leaves an affected source-level use
 `potentially_exploitable`; a missing deciding source fact leaves it `unknown`.
 The setting is optional. The local provider reads Backstage component catalogs
 beside dependency matches as source evidence.
 See [inventory lookup configuration](https://github.com/openai/codex-security/blob/main/docs/project-configuration.md#inventory-lookups-for-dependency-checks).
 
+Profiling providers can return a compact, hash-bound MCP resource reference.
+The CLI reads the full resource outside model context and adds its observations
+to the same evidence graph used by the source tracer. Graph queries expose
+bounded, cited stack witnesses; reviews receive only selected frames and scope.
+Observed calls remain distinct from static candidates, and separate sampled
+stacks do not establish one observed path. Missing samples or truncated graph
+coverage do not establish absence of execution.
+
 The assessment consumes model usage. Use `--model` and `--effort` to select
 model settings. For sign-in errors, run `cs login status` with the same
 environment as the check. See [authentication](#authentication).
 
 A completed report exits with status zero for any verdict. Use `--json` in
-automation. A CVE report has a top-level `status`. A package report identifies
-the package and returns a `checks` array with a verdict, evidence and usage for
-each vulnerability. Each published vulnerability has an `advisoryId` and its
+automation. For a CVE or each entry of a package's `checks` array, schema version
+2 returns independent results in `uses`. Read `uses[i].verdict` for that place.
+The `place` object carries known environment, revision, artifact and observation
+window, as well as the deployment basis, dependency selection, patch and open
+questions. `decidingEvidence` identifies the precise source ranges and original
+receipt selections cited by the independent reviewer. `proof` captures the known
+sink and individual advisory conditions with citations. A null scope field means
+the fact is unverified or did not decide the assessment.
+
+`searches` records captured host trace and inventory lookups, including source,
+tool, scope, UTC timestamps, result, completeness and evidence references. A
+complete search is complete for its recorded scope. `no_match` records a negative
+observation within that scope. A partial result can still contain an exact match.
+`place.deploymentBasis: "assumed_not_deployed"` requires an explicit caller
+assumption. Review `assumptions`, `coverage`, and `limitations` for source or
+runtime questions that remain open. For example, a configured decoder can have
+`uses[0].verdict: "ruled_out"` because its selected mode cannot invoke the affected
+callback, while a separate job has `uses[1].verdict: "unknown"` with an unresolved
+deployment or writer question.
+
+The HTML renderer also accepts older saved reports. Each published vulnerability
+in a package check has an `advisoryId` and its
 OSV URLs in `advisories`. An empty `checks` array means OSV returned no active
 advisories for this package and no assessment ran. A check with
 `--vuln-description` has a single entry with `advisoryId: null` and records

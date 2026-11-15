@@ -13,6 +13,8 @@ import {
 const api = "archive/ingest.py";
 const worker = "archive/importer.py";
 const compose = "deploy/compose.yaml";
+const intakeCaller =
+  "An unauthenticated sender can submit an RFC 5322 message to POST /messages and has no other access.";
 
 function archiveCase(
   id: string,
@@ -73,9 +75,12 @@ function archiveCase(
     suite: "mailparser",
     repository: "nodemailer/mailparser",
     revision: mail390,
+    callerScope:
+      intakeCaller +
+      " Assess jobs produced by this endpoint under the deployment configuration supplied in the checkout.",
     question:
-      "An unauthenticated sender can submit an RFC 5322 message to POST /messages and has no other access. " +
-      "Can that sender trigger CVE-2025-14874 in this deployment? The advisory concerns unbounded " +
+      intakeCaller +
+      " Can that sender trigger CVE-2025-14874 in this deployment? The advisory concerns unbounded " +
       "recursion on nested address groups in a message header in Nodemailer through 7.0.10. " +
       "Report the installed Nodemailer version.",
     verdict:

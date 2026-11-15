@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import Ajv from "ajv";
 import {
-  exploitabilityMcpServers,
+  exploitabilityMcpConfiguration,
   readProjectConfig,
   resolveScanSettings,
 } from "../src/project-config.js";
@@ -37,6 +39,16 @@ const cases: [string, unknown, boolean][] = [
   [
     "catalog servers must be a list",
     { exploitability: { service_catalog_mcps: "catalog" } },
+    false,
+  ],
+  [
+    "runtime evidence servers",
+    { exploitability: { runtime_mcps: ["artifacts"] } },
+    true,
+  ],
+  [
+    "runtime evidence servers must be a list",
+    { exploitability: { runtime_mcps: "artifacts" } },
     false,
   ],
   ["owner artifact enabled", { scan: { owner_suggestions: true } }, true],
@@ -167,7 +179,7 @@ const cases: [string, unknown, boolean][] = [
   ["incorrect native model type", { codex: { model: 42 } }, false],
 ];
 
-test("dependency checks use only explicitly selected service catalog servers", () => {
+test("dependency checks separate instructions for selected enabled service catalog servers", () => {
   const releases = {
     url: "https://releases.example/mcp",
     enabled_tools: ["lookup"],
@@ -176,21 +188,69 @@ test("dependency checks use only explicitly selected service catalog servers", (
   const codex = {
     mcp_servers: {
       releases,
-      jobs,
-      removed: { enabled: false },
-      unrelated: { command: "other" },
+      jobs: { ...jobs, instructions: "Use the preview environment." },
+      removed: { enabled: false, instructions: "Disabled guidance." },
+      empty: {
+        command: "service-catalog",
+        enabled_tools: [],
+        instructions: "Empty guidance.",
+      },
+      unrelated: { command: "other", instructions: "Unselected guidance." },
     },
   };
-  expect(exploitabilityMcpServers(undefined)).toEqual({});
-  expect(exploitabilityMcpServers({ codex })).toEqual({});
+  const original = structuredClone(codex);
+  expect(exploitabilityMcpConfiguration(undefined)).toEqual({
+    servers: {},
+    catalogServers: {},
+    instructions: {},
+  });
+  expect(exploitabilityMcpConfiguration({ codex })).toEqual({
+    servers: {},
+    catalogServers: {},
+    instructions: {},
+  });
   expect(
-    exploitabilityMcpServers({
+    exploitabilityMcpConfiguration({
       codex,
       exploitability: {
-        service_catalog_mcps: ["jobs", "releases", "removed"],
+        service_catalog_mcps: ["jobs", "releases", "removed", "empty"],
       },
     }),
-  ).toEqual({ jobs, releases });
+  ).toEqual({
+    servers: { jobs, releases },
+    catalogServers: { jobs, releases },
+    instructions: { jobs: "Use the preview environment." },
+  });
+  expect(
+    exploitabilityMcpConfiguration({
+      codex,
+      exploitability: { runtime_mcps: ["jobs", "removed", "empty"] },
+    }),
+  ).toEqual({
+    servers: { jobs },
+    catalogServers: {},
+    instructions: { jobs: "Use the preview environment." },
+  });
+  expect(
+    exploitabilityMcpConfiguration({
+      codex,
+      exploitability: {
+        service_catalog_mcps: ["jobs"],
+        runtime_mcps: ["jobs", "releases"],
+      },
+    }),
+  ).toEqual({
+    servers: { jobs, releases },
+    catalogServers: { jobs },
+    instructions: { jobs: "Use the preview environment." },
+  });
+  expect(() =>
+    exploitabilityMcpConfiguration({
+      codex,
+      exploitability: { runtime_mcps: ["missing"] },
+    }),
+  ).toThrow("selected by exploitability.runtime_mcps");
+  expect(codex).toEqual(original);
   for (const name of [
     "missing",
     "toString",
@@ -198,19 +258,99 @@ test("dependency checks use only explicitly selected service catalog servers", (
     "codex-security-dependency",
   ]) {
     expect(() =>
-      exploitabilityMcpServers({
+      exploitabilityMcpConfiguration({
         codex,
         exploitability: { service_catalog_mcps: [name] },
       }),
     ).toThrow(ConfigurationError);
   }
   expect(() =>
-    exploitabilityMcpServers({
+    exploitabilityMcpConfiguration({
       codex: { mcp_servers: { releases: "invalid" } },
       exploitability: { service_catalog_mcps: ["releases"] },
     }),
   ).toThrow(ConfigurationError);
 });
+
+test.each(
+  [true, null, ["Use preview."], { text: "Use preview." }].map(
+    (instructions) => ({
+      instructions,
+    }),
+  ),
+)(
+  "dependency checks reject non-string server instructions: %j",
+  ({ instructions }) => {
+    expect(() =>
+      exploitabilityMcpConfiguration({
+        codex: {
+          mcp_servers: { inventory: { command: "catalog", instructions } },
+        },
+        exploitability: { service_catalog_mcps: ["inventory"] },
+      }),
+    ).toThrow("codex.mcp_servers.inventory.instructions must be a string.");
+  },
+);
+
+test.each([true, false])(
+  "keeps project access settings and excludes exploitability instructions in Deep Scan workers (%p)",
+  async (daybreak) => {
+    const root = await temporaryDirectory();
+    const input = {
+      scan: { mode: "deep" },
+      codex: {
+        daybreak,
+        mcp_servers: {
+          inventory: {
+            command: "synthetic-catalog",
+            enabled_tools: ["get_running_revision"],
+            instructions: "Preserve inventory coverage metadata.",
+          },
+        },
+        analytics: { enabled: false },
+        shell_environment_policy: { inherit: "core" },
+        otel: { exporter: "none" },
+        skills: { config: [] },
+        agents: { reviewer: { description: "Synthetic reviewer." } },
+        features: {
+          view_image: false,
+          shell_tool: false,
+          cli_daybreak: daybreak,
+          api_key_cyber_access_programs: true,
+          api_key_model_discovery: false,
+        },
+      },
+    } satisfies ProjectConfigInput;
+    const original = structuredClone(input);
+    const { config, sources } = resolveScanSettings(
+      { input, directory: root },
+      {},
+      root,
+    );
+    expect(config.codexOverrides["mcp_servers"]).toEqual({
+      inventory: {
+        command: "synthetic-catalog",
+        enabled_tools: ["get_running_revision"],
+      },
+    });
+    expect(sources).not.toHaveProperty(
+      "codex.mcp_servers.inventory.instructions",
+    );
+    expect(input).toEqual(original);
+    const workerResult = execFileSync(
+      Bun.which("node")!,
+      [
+        "--experimental-strip-types",
+        fileURLToPath(
+          new URL("./support/replay-worker-boundary.ts", import.meta.url),
+        ),
+        root,
+      ],
+      { input: JSON.stringify(config.codexOverrides), encoding: "utf8" },
+    );
+    expect(JSON.parse(workerResult)).toEqual({ launches: 3 });
+  },
+);
 
 test("minute and deprecated hour settings follow source precedence", () => {
   const directory = process.cwd();
