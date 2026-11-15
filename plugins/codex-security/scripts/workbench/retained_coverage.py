@@ -321,9 +321,11 @@ def merge_saved_results(
         if head is not None:
             paths[head] = worker["id"]
             current_results.add(head)
-        if not has_accepted_result:
-            paths[f"{output}/result.json"] = worker["id"]
-            registered_heads[f"{output}/result.json"] = head
+        alias = f"{output}/result.json"
+        if not has_accepted_result or alias in (frozen_source_digests or {}):
+            # Older stopped publications can bind both names for the same accepted bytes.
+            paths[alias] = worker["id"]
+            registered_heads[alias] = head
         for archived, archived_attempt in outputs[1:]:
             archived_head = (checkpoint_heads or {}).get(archived)
             if archived_head is not None and _checkpoint_head_directory(archived_head) is None:

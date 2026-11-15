@@ -210,3 +210,49 @@ def test_stopped_discovery_retains_only_bound_attempt_output(
         scan.recover()
         recovered = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
         assert {finding["title"] for finding in recovered} == expected | {"new-partial"}
+
+
+@pytest.mark.parametrize("source", ["matching", "changed", "unselected-checkpoint"])
+def test_recover_previously_frozen_discovery_alias(workbench_db, publication_scan, source):
+    scan = publication_scan()
+    result = scan.add_worker()
+    contents = json.dumps(scan.worker_draft(scan.findings)).encode()
+    digest = hashlib.sha256(contents).hexdigest()
+    frozen = result.with_name(f"accepted-{digest}.json")
+    frozen.write_bytes(contents)
+    result.write_bytes(contents)
+    # Older stopped reports selected the replaceable name alongside the registered result.
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET result_manifest_path = ? WHERE id = ?",
+            (str(frozen), result.parent.name),
+        )
+    if source == "unselected-checkpoint":
+        write_checkpoint(
+            result.parent / "checkpoints", scan.worker_draft([worker_finding(scan, "unselected")])
+        )
+    scan.fail()
+    manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
+    sources = json.loads(manifest)["scan"]["preservedSources"]
+    assert all(path.relative_to(scan.scan_dir).as_posix() in sources for path in (result, frozen))
+    with workbench_db:
+        workbench_db.execute(
+            "INSERT INTO deep_scan_attempts (scan_id, worker_id, attempt, status, started_at, "
+            "completed_at, accepted_result_path, accepted_result_sha256) "
+            "VALUES (?, ?, 1, 'succeeded', ?, ?, ?, ?)",
+            (scan.scan_id, result.parent.name, scan.timestamp, scan.timestamp, str(frozen), digest),
+        )
+    if source == "changed":
+        result.write_bytes(contents + b" ")
+    _, independent = scan.canceled_discovery_output()
+    write_checkpoint(
+        independent / "checkpoints", scan.worker_draft([worker_finding(scan, "late-partial")])
+    )
+    if source == "matching":
+        scan.recover()
+        findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+        assert "late-partial" in {finding["title"] for finding in findings}
+    else:
+        with pytest.raises(scan.api["ContractError"], match="checkpoint set is incomplete"):
+            scan.recover()
+        assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
