@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { artifactDestination, replaceArtifactJson } from "../artifact-io.js";
 import { normalizedScanRelativePath } from "../contract-values.js";
+import { canonicalJson, isRecord } from "../record.js";
 import { sqliteFilename } from "../windows-path";
 import { loadScopes, scopedSourceFiles } from "./generate-inventory";
 import { environmentValue, readFile, resolvedPathText } from "./helper-files";
@@ -171,14 +172,14 @@ export async function standardQueue(args: string[], home?: string) {
     // Original receipts were identified by these fields alone. Keep that ID
     // for queue accounting even when an extended receipt has different bytes.
     const original = { batch, reviewed_files, findings, resolved_questions };
-    const result = { ...original, ...details };
+    let result: Record<string, unknown> = { ...original, ...details };
     const digest = (receipt: object) =>
       createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
     const id = digest(original);
     const receiptFile = (hash: string) =>
       `artifacts/02_discovery/standard-returns/${hash}.json`;
     const originalFile = receiptFile(id);
-    const returned = Object.keys(details).length
+    let returned = Object.keys(details).length
       ? receiptFile(digest(result))
       : originalFile;
     await withQueueWriteLock(await lockFile(), async () => {
@@ -188,12 +189,37 @@ export async function standardQueue(args: string[], home?: string) {
         (row) => row.id === id || row.file === originalFile,
       );
       if (
-        !saved ||
-        (saved.file === originalFile && returned !== originalFile)
+        saved &&
+        saved.file !== originalFile &&
+        returned !== originalFile &&
+        saved.file !== returned
       ) {
+        if (
+          !/^artifacts\/02_discovery\/standard-returns\/[a-f0-9]{64}\.json$/u.test(
+            saved.file,
+          )
+        )
+          throw new Error("Invalid saved Standard worker receipt path.");
+        const previous = readJson(await destination(saved.file));
+        if (!isRecord(previous) || receiptFile(digest(previous)) !== saved.file)
+          throw new Error(
+            "Saved Standard worker receipt does not match its digest.",
+          );
+        const additions = Object.entries(result).filter(([field, value]) => {
+          if (!Object.hasOwn(previous, field)) return true;
+          if (canonicalJson(previous[field]) !== canonicalJson(value))
+            throw new Error(
+              `Standard worker receipt has a conflicting value for ${JSON.stringify(field)}.`,
+            );
+          return false;
+        });
+        result = { ...previous, ...Object.fromEntries(additions) };
+        returned = receiptFile(digest(result));
+      }
+      if (!saved || (returned !== originalFile && returned !== saved.file)) {
         await replaceArtifactJson(await destination(returned), result);
         if (saved) {
-          // Enrich the old receipt without changing its candidate offsets.
+          // Keep earlier receipt bytes and candidate offsets intact.
           saved.file = returned;
           saved.id = id;
         } else {

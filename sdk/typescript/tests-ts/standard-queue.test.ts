@@ -270,7 +270,7 @@ test("Standard retries retain candidate IDs across original and extended receipt
       returns: [{ file: originalFile, count: 1 }],
     }),
   );
-  const submit = (batch: number, payload: object) => {
+  const submit = (batch: number, payload: object, conflict?: string) => {
     const result = spawnSync(
       nodeCommand().command,
       [
@@ -282,7 +282,8 @@ test("Standard retries retain candidate IDs across original and extended receipt
       ],
       { encoding: "utf8", input: JSON.stringify(payload) },
     );
-    expect(result.status, result.stderr).toBe(0);
+    expect(result.status, result.stderr).toBe(conflict ? 1 : 0);
+    if (conflict) expect(result.stderr).toContain(conflict);
   };
   // Add a second candidate before enriching the existing acknowledgement.
   for (const worker of [next, original]) {
@@ -313,5 +314,32 @@ test("Standard retries retain candidate IDs across original and extended receipt
       JSON.parse(readFileSync(join(scan, queue.returns[index].file), "utf8")),
     ).toEqual(extended);
   }
+  const firstExtended = queue.returns[0].file;
+  const previousBytes = readFileSync(join(scan, firstExtended), "utf8");
+  const supportingObservation = { path: "guard.py", line: 2 };
+  submit(1, { ...original, supportingObservation });
+  const enriched = JSON.parse(readFileSync(queuePath, "utf8"));
+  expect(enriched.returns.map((row: { count: number }) => row.count)).toEqual([
+    1, 1,
+  ]);
+  expect(enriched.returns[1]).toEqual(queue.returns[1]);
+  const full = { ...JSON.parse(previousBytes), supportingObservation };
+  expect(enriched.returns[0].file).toBe(fileFor(full));
+  expect(
+    JSON.parse(readFileSync(join(scan, enriched.returns[0].file), "utf8")),
+  ).toEqual(full);
+  submit(1, {
+    ...original,
+    supportingObservation: { line: 2, path: "guard.py" },
+  });
+  submit(1, { ...original, notes: "Initial notes" });
+  submit(1, original);
+  submit(
+    1,
+    { ...original, extra: "Unaccepted", notes: "Changed notes" },
+    'conflicting value for "notes"',
+  );
+  expect(JSON.parse(readFileSync(queuePath, "utf8"))).toEqual(enriched);
+  expect(readFileSync(join(scan, firstExtended), "utf8")).toBe(previousBytes);
   expect(readFileSync(join(scan, originalFile), "utf8")).toBe(originalBytes);
 });
