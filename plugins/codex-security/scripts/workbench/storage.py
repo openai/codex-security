@@ -53,7 +53,7 @@ def relocate_scan_path(scan_dir: Path, archive_dir: Path, value: str | None) -> 
         return None
     path = Path(value)
     try:
-        relative = portable_relative_path(path, scan_dir)
+        relative = portable_relative_path(path, portable_path(scan_dir))
     except ValueError:
         return value
     if uses_windows_namespace(path):
@@ -66,7 +66,7 @@ def archived_deep_path(scan_dir: Path, value: str | None) -> str | None:
     if value is None or ".previous-" not in scan_dir.name:
         return value
     try:
-        parts = portable_relative_path(Path(value), scan_dir.parent).parts
+        parts = portable_relative_path(Path(value), portable_path(scan_dir.parent)).parts
     except ValueError:
         return value
     if not parts or ".." in parts or not scan_dir.name.startswith(f"{parts[0]}.previous-"):

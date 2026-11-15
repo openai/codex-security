@@ -151,6 +151,32 @@ def test_archive_relocation_preserves_verbatim_artifact_names(windows_paths, mon
         assert storage.relocate_scan_path(scan_dir, archive, str(stored)) == str(expected)
 
 
+@pytest.mark.parametrize("root", ["C:/", "//server/share/"])
+def test_archive_relocation_respects_ordinary_and_literal_parent_spellings(
+    windows_paths, monkeypatch, root
+):
+    monkeypatch.setitem(sys.modules, "windows_paths", windows_paths)
+    storage = load_script("workbench/storage")
+    monkeypatch.setattr(storage, "Path", PureWindowsPath)
+
+    parent = PureWindowsPath(root) / "scans"
+    source = windows_paths.extended_path(parent) / "run"
+    archive = source.with_name("run.previous-old")
+    stored = parent / "run" / "worker" / "result.json."
+    expected = parent / archive.name / "worker" / stored.name
+    assert storage.relocate_scan_path(source, archive, str(stored)) == str(expected)
+    assert storage.archived_deep_path(archive, str(stored)) == str(expected)
+
+    literal_parent = windows_paths.extended_path(parent.parent) / "scans."
+    source = literal_parent / "run"
+    archive = source.with_name("run.previous-old")
+    ordinary = parent.with_name("scans.") / "run" / "worker" / "result.json"
+    literal = source / "worker" / "result.json"
+    for path, expected in ((ordinary, ordinary), (literal, archive / "worker" / literal.name)):
+        assert storage.relocate_scan_path(source, archive, str(path)) == str(expected)
+        assert storage.archived_deep_path(archive, str(path)) == str(expected)
+
+
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="exercise native Win32 files and SQLite paths")
 def test_long_scan_archive_and_history_accept_legacy_extended_paths(tmp_path: Path, request):
