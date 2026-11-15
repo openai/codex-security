@@ -303,6 +303,8 @@ for (const linked of [false, true]) {
       const environment = patchSnapshotEnvironment(tmp, {
         ...process.env,
         CODEX_HOME: home,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
       });
       const admin = join(directory, ".git");
       const message = join(admin, "COMMIT_EDITMSG");
@@ -318,6 +320,7 @@ for (const linked of [false, true]) {
               ]
             : [
                 'git interpret-trailers --in-place --trailer "Reviewed-by: synthetic" -- "$1"',
+                'echo "Synthetic commit-message veto" >&2',
                 "exit 7",
               ]),
         ].join("\n") + "\n",
@@ -358,7 +361,8 @@ for (const linked of [false, true]) {
             ? /regular, unlinked COMMIT_EDITMSG|EPERM: operation not permitted, link .*COMMIT_EDITMSG' -> '.*COMMIT_EDITMSG\.link'/u
             : "regular, unlinked COMMIT_EDITMSG",
         );
-      else await expect(result).rejects.toThrow();
+      else
+        await expect(result).rejects.toThrow("Synthetic commit-message veto");
       expect(git("rev-parse", "HEAD")).toBe(head);
       const retained = await readFile(message, "utf8");
       expect(retained).toContain("Synthetic candidate");
