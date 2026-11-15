@@ -14267,25 +14267,17 @@ if __name__ == "__main__":
     const repositoryQueries = commands.filter(
       ([command]) => command === "list-global-findings",
     );
-    expect(repositoryQueries.map((args) => args.at(-1))).toEqual([
+    const targetQuery = [
+      "list-global-findings",
+      "--target-id",
       "target_sha256_example",
-      "1",
-      "open",
-      "1",
+    ];
+    expect(repositoryQueries).toEqual([
+      targetQuery,
+      [...targetQuery, "--offset", "1"],
+      [...targetQuery, "--status", "open"],
+      [...targetQuery, "--status", "open", "--offset", "1"],
     ]);
-    expect(
-      repositoryQueries.every((args) => args.includes("target_sha256_example")),
-    ).toBe(true);
-    expect(
-      repositoryQueries
-        .slice(0, 2)
-        .every((args) => args.includes("--include-resolved")),
-    ).toBe(true);
-    expect(
-      repositoryQueries
-        .slice(2)
-        .every((args) => !args.includes("--include-resolved")),
-    ).toBe(true);
     expect(commands[1]).toEqual([
       "get-scan-feedback",
       "--scan-id",

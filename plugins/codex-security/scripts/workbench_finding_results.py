@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -303,6 +304,22 @@ def scan_finding_triage(
             "SELECT id FROM finding_occurrences WHERE scan_id = ?", (scan["id"],)
         )
     }
+
+
+def triage_occurrences(
+    connection: sqlite3.Connection, reviewed: sqlite3.Row, indexed_finding: dict[str, Any] | None
+) -> list[sqlite3.Row]:
+    if indexed_finding is None:
+        return [reviewed]
+    return connection.execute(
+        """
+        SELECT occurrences.* FROM finding_occurrences AS occurrences
+        JOIN scans ON scans.id = occurrences.scan_id
+        WHERE occurrences.id IN (SELECT value FROM json_each(?))
+        ORDER BY occurrences.id = ?, scans.rowid, occurrences.id
+        """,
+        (json.dumps(sorted(indexed_finding["occurrence_ids"])), reviewed["id"]),
+    ).fetchall()
 
 
 def finding_triage_result(

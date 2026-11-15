@@ -8,8 +8,13 @@ import uuid
 from pathlib import Path
 
 import pytest
-from test_workbench_scan_history import compare_scan_pair, create_cli_scan
-from workbench_test_support import initialize_git_repository, run_workbench
+from test_workbench_scan_history import (
+    compare_scan_pair,
+    confirmed_match,
+    create_cli_scan,
+    save_scan_matches,
+)
+from workbench_test_support import initialize_git_repository, run_workbench, set_triage
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "workbench_db.py"
 
@@ -48,6 +53,49 @@ def test_previous_owner_cannot_mutate_or_replay_finding_actions(tmp_path, comman
     assert "checkout owner" in result["stderr"]
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT * FROM finding_triage").fetchall() == before
+
+
+def test_feedback_cites_the_selected_occurrence_of_an_existing_match(tmp_path):
+    state, root, repository = tmp_path / "state", tmp_path / "scans", tmp_path / "repository"
+    repository.mkdir()
+    scans = [
+        create_cli_scan(
+            state, root, repository, identity_anchor=name, relative_path=f"src/{name}.py"
+        )
+        for name in ("first", "second")
+    ]
+    findings = [finding(state, scan) for scan in scans]
+    save_scan_matches(state, *scans, confirmed_match(*(row["occurrenceId"] for row in findings)))
+    current = create_cli_scan(state, root, repository, complete=False)
+    note = "Reviewed this synthetic occurrence."
+    for index, expected_decisions in ((0, 2), (1, 3), (1, 3)):
+        reviewed = findings[index]
+        set_triage(
+            state,
+            reviewed["occurrenceId"],
+            "closed",
+            "--close-reason",
+            "false_positive",
+            "--note",
+            note,
+        )
+        (feedback,) = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])[
+            "falsePositives"
+        ]
+        assert feedback["sourceScanId"] == scans[index]["scanId"]
+        assert feedback["findingId"] == reviewed["findingId"]
+        assert feedback["locations"][0]["path"] == reviewed["locations"][0]["path"]
+        with sqlite3.connect(state / "workbench.sqlite3") as connection:
+            assert (
+                connection.execute("SELECT COUNT(*) FROM finding_decisions").fetchone()[0]
+                == expected_decisions
+            )
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM finding_triage WHERE status = 'closed'"
+                ).fetchone()[0]
+                == 2
+            )
 
 
 def test_replacement_checkout_does_not_receive_previous_owner_feedback(tmp_path):
