@@ -1302,7 +1302,11 @@ and replacements, cancels active siblings, and preserves accepted reviews and
 checkpoints. The coordinator reports `interrupted` with `resumeAvailable: true`;
 the saved scan remains `running` and no final report is sealed. After the usage
 allowance becomes available, use `scans resume SCAN_ID` to continue the same scan.
-Completed reviews are reused, and the original scan and time limits still apply.
+Resume reuses accepted reviews and starts replacement reviews within the original
+scan limits. A finding saved by an unfinished worker may remain only in that
+worker’s draft checkpoint. The original discovery deadline continues during the
+pause. After it expires, resume publishes available evidence without starting
+another review.
 
 A known cybersecurity policy refusal remains a terminal failure. A capability
 check can succeed before a later request is refused. Use `scans show SCAN_ID` to

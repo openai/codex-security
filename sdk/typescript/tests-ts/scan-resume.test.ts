@@ -372,6 +372,61 @@ test("usage-limit pauses retain the original CLI resume context", async () => {
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
 
+test.each([false, true])(
+  "Deep resume reports the current owner failure while discovery is paused (quota repeated: %p)",
+  async (repeatQuota) => {
+    const f = await interruptedScan("deep");
+    const quota = "You’ve hit your usage limit. Try again later.";
+    const pause = (generation?: number) =>
+      f.command([
+        "fail-deep-scan",
+        "--scan-id",
+        f.scanId,
+        "--deep-status",
+        "usage_limit",
+        "--message",
+        quota,
+        ...(generation === undefined
+          ? []
+          : ["--coordinator-generation", String(generation)]),
+      ]);
+    await pause();
+    const ownerError = repeatQuota
+      ? quota
+      : "Could not connect to the provider.";
+    const { stdout, runCli } = createCliTest(main);
+    const code = await runCli(
+      ["scans", "resume", f.scanId, "--json"],
+      resumeDependencies(f, () => ({
+        startThread: () => fail("Expected the saved owner session."),
+        resumeThread: (threadId) => ({
+          id: threadId,
+          async runStreamed() {
+            if (repeatQuota) {
+              const joined = await f.command([
+                "begin-deep-scan",
+                "--scan-id",
+                f.scanId,
+                "--thread-id",
+                threadId,
+              ]);
+              const run = joined["deepScan"] as JsonObject;
+              await pause(run["coordinatorGeneration"] as number);
+            }
+            return { events: failedEvents(ownerError) };
+          },
+        }),
+      })),
+    );
+    expect(code).toBe(2);
+    const error = JSON.parse(stdout.text());
+    expect(error.status).toBe("failed");
+    expect(error.message).toContain(ownerError);
+    expect(error.message.split(quota)).toHaveLength(2);
+    expect(error.message).toContain(`scans resume ${f.scanId}`);
+  },
+);
+
 test.skipIf(process.platform !== "win32").each(["deep", "standard"] as const)(
   "CLI resumes the original Windows %s session before its first output checkpoint",
   async (mode) => {

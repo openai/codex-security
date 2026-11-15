@@ -4302,10 +4302,19 @@ export class CodexSecurity {
               deepScan["status"] === "interrupted" &&
               deepScan["resumeAvailable"] === true
             ) {
+              const turnError = errorMessage(failure);
+              const savedError = deepScan["error"];
+              let diagnostic =
+                typeof savedError === "string" ? savedError : turnError;
+              // A resumed owner turn can fail before it reactivates the paused coordinator.
+              if (
+                options.resumeScanId !== undefined &&
+                diagnostic !== turnError
+              ) {
+                diagnostic = `${turnError}\nSaved Deep Scan interruption: ${diagnostic}`;
+              }
               failure = new DeepScanInterruptedError(
-                typeof deepScan["error"] === "string"
-                  ? deepScan["error"]
-                  : errorMessage(failure),
+                diagnostic,
                 activeScan.id,
                 scanDir,
               );

@@ -2247,8 +2247,9 @@ function deepScanTerminalResult(
     if (run.resumeAvailable) {
       const instructions = [
         run.error ?? "Deep Scan was interrupted.",
-        `Deep Scan ${run.scanId} is paused. Accepted reviews and unfinished work remain saved; the scan is not complete.`,
-        `After usage allowance is available, resume start_codex_security_deep_scan with the same scanId and handoffClaimToken. For a CLI-owned scan, use codex-security scans resume ${run.scanId}. Existing scan limits still apply.`,
+        `Deep Scan ${run.scanId} is paused. Resume reuses accepted reviews. An unfinished worker's draft may remain only in its saved artifacts. A replacement starts a new review.`,
+        `After usage allowance is available, resume start_codex_security_deep_scan with the same scanId and the original handoffClaimToken if one was supplied. For a CLI-owned scan, use codex-security scans resume ${run.scanId}.`,
+        "The original discovery deadline continues during the pause. After it expires, resume publishes available evidence without starting another review.",
         "Do not retry in this response, start a replacement scan, or call complete_codex_security_scan.",
       ].join("\n");
       return {
