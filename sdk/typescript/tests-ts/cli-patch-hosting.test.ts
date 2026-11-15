@@ -1265,12 +1265,19 @@ exit 1
     },
   );
 
-  test("resumes publication with SSH available only in Git's subprocess PATH", async () => {
+  test.each([
+    "available only in Git's subprocess PATH",
+    "selected explicitly from the Git metadata directory",
+  ] as const)("resumes publication with SSH %s", async (mode) => {
+    const metadata =
+      mode === "selected explicitly from the Git metadata directory";
     const { directory, git } = await publicationRepository();
     const sshDirectory = await fixtures.create("patch-git-ssh-");
+    const ssh = join(sshDirectory, "ssh");
+    const marker = join(sshDirectory, "probe");
     await writeFile(
-      join(sshDirectory, "ssh"),
-      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n',
+      ssh,
+      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf called > "$PATCH_SSH_PROBE"\nprintf "hostname github.com\\n"\n',
       { mode: 0o755 },
     );
     const emptyPath = await fixtures.create("patch-no-ssh-");
@@ -1280,7 +1287,10 @@ exit 1
       PATH: emptyPath,
       GIT_EXEC_PATH: sshDirectory,
       GIT_SSH: undefined,
-      GIT_SSH_COMMAND: undefined,
+      GIT_SSH_COMMAND: metadata
+        ? JSON.stringify(ssh.replaceAll("\\", "/"))
+        : undefined,
+      PATCH_SSH_PROBE: marker,
     };
     git(
       "remote",
@@ -1304,7 +1314,7 @@ exit 1
     const outcome = await runWorkflow(
       ["patch", "--resume-pr", branch, "--json"],
       {
-        currentDirectory: directory,
+        currentDirectory: metadata ? join(directory, ".git") : directory,
         environment,
         onRepositoryCommand: async (command, args, cwd, options) => {
           if (command === "gh") {
@@ -1346,6 +1356,7 @@ exit 1
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
     expect(repositoryLookups).toBe(1);
+    expect(await readFile(marker, "utf8")).toBe("called");
   });
 
   test.each(
