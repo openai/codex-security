@@ -1237,13 +1237,15 @@ directory creation, run this once in PowerShell as the account that will use
 Codex Security:
 
 ```powershell
-$sid = (whoami /user /fo csv /nh | ConvertFrom-Csv -Header Name, Sid).Sid
-$state = Join-Path $env:ProgramData "codex-security-$sid"
-New-Item -ItemType Directory -Path $state -ErrorAction Stop | Out-Null
-icacls $state /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'
-if ($LASTEXITCODE -ne 0) { throw 'Could not secure the new state directory' }
-$env:CODEX_SECURITY_STATE_DIR = $state
-codex-security login status
+& {
+    $sid = (whoami /user /fo csv /nh | ConvertFrom-Csv -Header Name, Sid).Sid
+    $state = Join-Path $env:ProgramData "codex-security-$sid"
+    New-Item -ItemType Directory -Path $state -ErrorAction Stop | Out-Null
+    icacls $state /inheritance:r /grant:r "*${sid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'
+    if ($LASTEXITCODE -ne 0) { throw 'Could not secure the new state directory' }
+    $env:CODEX_SECURITY_STATE_DIR = $state
+    codex-security login status
+}
 ```
 
 Creation stops if the destination already exists. If creation is denied or the
