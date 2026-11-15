@@ -1,10 +1,10 @@
 import { executableSourceRoots } from "./deep-config.js";
 import { isRecord } from "./record.js";
-import type { JsonValue } from "./config.js";
+import { MODEL_FILE_SETTINGS, type JsonValue } from "./config.js";
 import { environmentEntry } from "./auth.js";
 import { inspectTrustedExecutable } from "./trusted-executable.js";
 import { access } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   gitHistoryIdentity,
   gitMarkerRoot,
@@ -13,6 +13,7 @@ import {
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { SavedScanDependencies } from "./saved-scan.js";
 import {
+  canonicalConfigPath,
   codexSecurityStateDirectory,
   resolvePluginPython,
   runWorkbench,
@@ -86,10 +87,6 @@ export async function savedScanWorkbench(
           ? "No completed saved scan was found for this repository."
           : "Codex Security scan not found.",
     );
-  if (!latest && targets.length > 1)
-    throw new CodexSecurityError(
-      `Scan ID prefix "${requestedId}" matches multiple scans; use a longer prefix.`,
-    );
   if (
     targets.some(
       (target) =>
@@ -108,19 +105,11 @@ export async function savedScanWorkbench(
   const liveTargets = targets.filter(
     (target) => target.protectPython !== false,
   );
-  const configPaths = new Set([
-    ...(options.executableSourcePaths ?? []),
-    ...targets.flatMap((target) => target.executableSourcePaths ?? []),
-  ]);
-  const configRoots = await Promise.all(
-    Array.from(configPaths, (path) =>
-      executableSourceRoots(path, options.signal),
-    ),
+  const inputRoots = await savedInputRoots(
+    targets,
+    options.executableSourcePaths ?? [],
+    options.signal,
   );
-  const inputRoots = [
-    ...configRoots.flat(),
-    ...targets.flatMap((target) => target.knowledgeRoots ?? []),
-  ];
   const protectedRoots = [
     ...inputRoots,
     ...callerRoots,
@@ -278,40 +267,7 @@ async function readTargets(
         const targets = latest
           ? completedScans(database)
           : exactTargets(database, requestedId);
-        if (
-          targets.length === 1 &&
-          tableColumns(database, "scans").has("recipe_json")
-        ) {
-          const target = targets[0]!;
-          const [row] = readRows<{ recipe_json: string | null }>(
-            database,
-            "SELECT recipe_json FROM scans WHERE id = ?",
-            target.id,
-          );
-          if (row?.recipe_json) {
-            const recipe: unknown = JSON.parse(row.recipe_json);
-            const paths = (key: string): string[] => {
-              const value = isRecord(recipe) ? recipe[key] : null;
-              if (value === undefined) return [];
-              if (
-                Array.isArray(value) &&
-                value.every(
-                  (path): path is string =>
-                    typeof path === "string" && isAbsolute(path),
-                )
-              )
-                return value;
-              throw new CodexSecurityError(
-                "Invalid executable source paths in saved scan history.",
-              );
-            };
-            target.executableSourcePaths = paths("executableSourcePaths");
-            target.knowledgeRoots = [
-              ...paths("knowledgeBasePaths"),
-              ...paths("knowledgeBaseProtectedRoots"),
-            ];
-          }
-        }
+        if (targets.length === 1) loadRecipeSources(database, targets[0]!);
         const checkouts = savedCheckouts(database);
         return { targets, checkouts };
       },
@@ -335,6 +291,66 @@ async function readTargets(
   }
 }
 
+function loadRecipeSources(
+  database: RuntimeDatabase,
+  target: ScanTarget,
+): void {
+  if (!tableColumns(database, "scans").has("recipe_json")) return;
+  const [row] = readRows<{ recipe_json: string | null }>(
+    database,
+    "SELECT recipe_json FROM scans WHERE id = ?",
+    target.id,
+  );
+  if (!row?.recipe_json) return;
+  const recipe: unknown = JSON.parse(row.recipe_json);
+  const invalidPaths = "Invalid executable source paths in saved scan history.";
+  if (!isRecord(recipe)) throw new CodexSecurityError(invalidPaths);
+  const paths = (key: string): string[] => {
+    const value = recipe[key];
+    if (value === undefined) return [];
+    if (
+      Array.isArray(value) &&
+      value.every(
+        (path): path is string => typeof path === "string" && isAbsolute(path),
+      )
+    )
+      return value;
+    throw new CodexSecurityError(invalidPaths);
+  };
+  target.executableSourcePaths = paths("executableSourcePaths");
+  // Older recipes stored the effective model file paths only in config.
+  const config = recipe["config"];
+  if (isRecord(config)) {
+    for (const key of MODEL_FILE_SETTINGS) {
+      const path = config[key];
+      if (typeof path === "string" && isAbsolute(path))
+        target.executableSourcePaths.push(path);
+    }
+  }
+  target.knowledgeRoots = [
+    ...paths("knowledgeBasePaths"),
+    ...paths("knowledgeBaseProtectedRoots"),
+  ];
+}
+
+async function savedInputRoots(
+  targets: ScanTarget[],
+  additionalPaths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const configPaths = new Set([
+    ...additionalPaths,
+    ...targets.flatMap((target) => target.executableSourcePaths ?? []),
+  ]);
+  const configRoots = await Promise.all(
+    Array.from(configPaths, (path) => executableSourceRoots(path, signal)),
+  );
+  return [
+    ...configRoots.flat(),
+    ...targets.flatMap((target) => target.knowledgeRoots ?? []),
+  ];
+}
+
 function workbenchDatabasePath(environment: ProcessEnvironment): string {
   return join(codexSecurityStateDirectory(environment), "workbench.sqlite3");
 }
@@ -342,7 +358,9 @@ function workbenchDatabasePath(environment: ProcessEnvironment): string {
 /** @internal Read executable exclusions before launching an ordinary history command. */
 export async function savedCheckoutBoundaries(
   environment: ProcessEnvironment,
-): Promise<SavedBoundaries | undefined> {
+  scan?: string | { scanDir: string },
+  signal?: AbortSignal,
+): Promise<(SavedBoundaries & { inputRoots: string[] }) | undefined> {
   const path = workbenchDatabasePath(environment);
   try {
     await access(path);
@@ -350,7 +368,23 @@ export async function savedCheckoutBoundaries(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
     throw error;
   }
-  return readSnapshot(path, (database) => savedCheckouts(database));
+  const selected =
+    typeof scan === "object"
+      ? { scanDir: await canonicalConfigPath(scan.scanDir) }
+      : scan;
+  const { checkouts, targets } = readSnapshot(path, (database) => {
+    const targets =
+      selected !== undefined &&
+      tableColumns(database, "scans").has("recipe_json")
+        ? exactTargets(database, selected)
+        : [];
+    for (const target of targets) loadRecipeSources(database, target);
+    return { checkouts: savedCheckouts(database), targets };
+  });
+  return {
+    ...checkouts,
+    inputRoots: await savedInputRoots(targets, [], signal),
+  };
 }
 
 /** @internal Exclude both recorded checkout roots and the currently visible checkouts. */
@@ -403,9 +437,24 @@ function readSnapshot<T>(
 
 function exactTargets(
   database: RuntimeDatabase,
-  requestedId: string | { workflowId: string },
+  requestedId: string | { workflowId: string } | { scanDir: string },
 ): ScanTarget[] {
   if (typeof requestedId !== "string") {
+    if ("scanDir" in requestedId) {
+      // Bulk recovery selects the scan registered at this exact output directory.
+      if (!tableColumns(database, "scans").has("scan_dir")) return [];
+      const targets = readRows<ScanTarget>(
+        database,
+        "SELECT id, target_path FROM scans WHERE scan_dir = ?",
+        requestedId.scanDir,
+      );
+      if (targets.length || process.platform !== "win32") return targets;
+      // A case-only rename can leave a different spelling in an older receipt.
+      return readRows<ScanTarget & { scan_dir: string }>(
+        database,
+        "SELECT id, target_path, scan_dir FROM scans",
+      ).filter((row) => relative(row.scan_dir, requestedId.scanDir) === "");
+    }
     const scanId = tableColumns(database, "finding_workflows").has("scan_id")
       ? "workflow.scan_id"
       : "json_extract(workflow.state_json, '$.scanId')";
@@ -436,12 +485,17 @@ function exactTargets(
     throw new CodexSecurityError(
       "Scan ID prefixes must be at least eight characters.",
     );
-  return readRows<ScanTarget>(
+  const matches = readRows<ScanTarget>(
     database,
     "SELECT id, target_path FROM scans WHERE substr(id, 1, ?) = ? LIMIT 2",
     requestedId.length,
     requestedId.toLowerCase(),
   );
+  if (matches.length > 1)
+    throw new CodexSecurityError(
+      `Scan ID prefix "${requestedId}" matches multiple scans; use a longer prefix.`,
+    );
+  return matches;
 }
 
 function tableColumns(database: RuntimeDatabase, table: string): Set<string> {
