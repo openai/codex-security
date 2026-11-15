@@ -4437,44 +4437,62 @@ if __name__ == "__main__":
     await client.close();
   });
 
-  test("records the observed Standard phase and stops further turns after a refusal", async () => {
-    const { repository, codexHome, scanDir } = await scanDirectories();
-    const message = "This content was flagged for possible cybersecurity risk.";
-    async function* events(): AsyncGenerator<ThreadEvent> {
-      yield { type: "thread.started", thread_id: "thread-1" };
-      yield { type: "turn.started" };
-      yield {
-        type: "item.completed",
-        item: {
-          id: "worker-1",
-          type: "agent_message",
-          text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}',
+  test.each([
+    {
+      message: "This content was flagged for possible cybersecurity risk.",
+      errorFirst: false,
+    },
+    {
+      message:
+        "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
+      errorFirst: true,
+    },
+    {
+      message:
+        "This request was blocked due to a misalignment policy violation.",
+      errorFirst: true,
+    },
+  ])(
+    "records the Standard phase and stops on refusal: $message",
+    async ({ message, errorFirst }) => {
+      const { repository, codexHome, scanDir } = await scanDirectories();
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        yield { type: "thread.started", thread_id: "thread-1" };
+        yield { type: "turn.started" };
+        yield {
+          type: "item.completed",
+          item: {
+            id: "worker-1",
+            type: "agent_message",
+            text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}',
+          },
+        };
+        if (errorFirst) yield { type: "error", message };
+        yield { type: "turn.failed", error: { message } };
+      }
+      const runStreamed = mock(async () => ({ events: events() }));
+      const calls: (readonly string[])[] = [];
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        createCodex: codexFactory(runStreamed),
+        runWorkbench: async (_options, args, input) => {
+          if (args[0] === "update-progress" || args[0] === "fail-scan")
+            calls.push(args);
+          return mockWorkbench(args, input);
         },
-      };
-      yield { type: "turn.failed", error: { message } };
-    }
-    const runStreamed = mock(async () => ({ events: events() }));
-    const calls: (readonly string[])[] = [];
-    await using client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      createCodex: codexFactory(runStreamed),
-      runWorkbench: async (_options, args, input) => {
-        if (args[0] === "update-progress" || args[0] === "fail-scan")
-          calls.push(args);
-        return mockWorkbench(args, input);
-      },
-    });
-    await expect(
-      client.run(repository, { postScanPrompt: "Summarize the scan." }),
-    ).rejects.toThrow(message);
-    expect(runStreamed).toHaveBeenCalledTimes(1);
-    expect(calls.map(([command]) => command)).toEqual([
-      "update-progress",
-      "fail-scan",
-    ]);
-    expect(calls[0]).toContain("validation");
-    expect(calls[1]).toContain(`--message=${message}`);
-  });
+      });
+      await expect(
+        client.run(repository, { postScanPrompt: "Summarize the scan." }),
+      ).rejects.toThrow(message);
+      expect(runStreamed).toHaveBeenCalledTimes(1);
+      expect(calls.map(([command]) => command)).toEqual([
+        "update-progress",
+        "fail-scan",
+      ]);
+      expect(calls[0]).toContain("validation");
+      expect(calls[1]).toContain(`--message=${message}`);
+    },
+  );
 
   test.each([true, false])(
     "records a native failure only when its terminal event preceded cancellation (failure first: %p)",

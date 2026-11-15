@@ -5535,7 +5535,7 @@ export async function main(
             ),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
-            .describe("Run FILE after each scan, including failures."),
+            .describe("Run FILE after completion or an ordinary scan failure."),
           diff: optionValue("--diff")
             .optional()
             .describe("Scan committed Git changes from BASE to --head."),
@@ -6359,7 +6359,7 @@ export async function main(
             .describe("Append instructions from FILE to every scan."),
           postScanPromptFile: optionValue("--post-scan-prompt-file")
             .optional()
-            .describe("Run FILE after each scan, including failures."),
+            .describe("Run FILE after completion or an ordinary scan failure."),
           ...modelOptions("Model for planning and component scans.").shape,
           provider: PROVIDER_OPTION,
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
@@ -6675,7 +6675,7 @@ export async function main(
           ),
         postScanPromptFile: optionValue("--post-scan-prompt-file")
           .optional()
-          .describe("Run FILE after each scan, including failures."),
+          .describe("Run FILE after completion or an ordinary scan failure."),
         ...modelOptions(
           `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
         ).shape,

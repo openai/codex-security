@@ -868,7 +868,7 @@ test("Standard resume preserves checkpoints through another disconnect and compl
           if (attempts === 1)
             return {
               events: failedEvents(
-                "Connection failed: error sending request for url (https://cyber-policy.example.invalid/responses)",
+                "getaddrinfo ENOTFOUND cyber-policy.example.invalid",
               ),
             };
           await saveDraft(true);

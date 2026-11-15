@@ -199,7 +199,6 @@ import {
   workflowDigest,
 } from "./finding-workflow.js";
 import { reviewSqliteHome } from "./deduplication/codex-review.js";
-import { isReviewRefusal } from "./deduplication/refusal.js";
 import {
   ScanResult,
   type RepositoryFinding,
@@ -3710,6 +3709,7 @@ export class CodexSecurity {
         workbenchValidated: true,
         model,
         pricingContext,
+        localStandard: releaseStandardScan !== undefined,
         onTurnStatus: (status, message) => {
           scanTurnStatus = status;
           // A later caller abort during iterator cleanup cannot undo a reported failure.
@@ -4294,8 +4294,7 @@ export class CodexSecurity {
       }
       if (
         releaseStandardScan !== undefined &&
-        nativeTurnFailure !== undefined &&
-        isReviewRefusal(connectionAdviceDetail(nativeTurnFailure))
+        isNativePolicyRefusal(nativeTurnFailure)
       ) {
         runPostScan = null;
         if (activeScan !== null && latestPhase !== "preflight") {
@@ -6112,6 +6111,7 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   model?: string;
   pricingContext?: ScanPricingContext;
   onFinalize?: (usage: unknown) => Promise<unknown>;
+  localStandard?: boolean;
   onTurnStatus?: (status: "completed" | "failed", message?: string) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
@@ -6140,6 +6140,14 @@ export async function runScanEvents(
           options.onTurnStatus?.("completed");
         if (event.type === "turn.failed")
           options.onTurnStatus?.("failed", turnFailureMessage(event["error"]));
+        // Native Codex emits the refusal as an error before turn.failed.
+        // readCodexTurn throws on that first error and closes the stream.
+        if (
+          options.localStandard &&
+          event.type === "error" &&
+          isNativePolicyRefusal(event["message"])
+        )
+          options.onTurnStatus?.("failed", event["message"]);
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
@@ -7220,6 +7228,23 @@ function reconnectDetails(message: string): ScanReconnectDetails | undefined {
       ? { retryAfterSeconds }
       : {}),
   };
+}
+
+// A failed native turn exposes only its message. A longer transport diagnostic
+// can quote these words and still be resumable.
+const NATIVE_POLICY_REFUSALS = new Set([
+  "Request blocked by cyberPolicy.",
+  "Request blocked by a safety policy violation.",
+  "This content was flagged for possible cybersecurity risk.",
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
+  "This content was flagged for potentially high-risk cyber activity.",
+  "This request has been flagged for possible cybersecurity risk.",
+  "This request has been flagged for potentially high-risk cyber activity.",
+  "This request was blocked due to a misalignment policy violation.",
+]);
+
+function isNativePolicyRefusal(message: unknown): message is string {
+  return typeof message === "string" && NATIVE_POLICY_REFUSALS.has(message);
 }
 
 // A failed turn must fail the scan whatever its error payload looks like.
