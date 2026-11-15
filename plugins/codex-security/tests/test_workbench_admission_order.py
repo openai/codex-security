@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import json
 import runpy
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 from test_workbench_scan_history import compare_scan_pair
 from test_workbench_setup_and_migrations import (
+    EXPECTED_MIGRATIONS,
+    SCHEMA,
     apply_historical_migrations,
+    create_historical_database,
     create_migration_history,
+    insert_historical_row,
+    insert_legacy_scan,
+    record_migration,
 )
 from workbench_test_support import (
     SCRIPT,
@@ -378,3 +386,115 @@ def test_decision_history_upgrade_preserves_published_sequences(
         assert {row[0] for row in connection.execute("SELECT version FROM schema_migrations")} == {
             version for version, _, _ in namespace["MIGRATIONS"]
         }
+
+
+@pytest.mark.parametrize(
+    ("receipt", "compact_history"),
+    [
+        ("retain the last observed phase of stopped Standard scans", False),
+        ("retain the last observed phase of stopped Standard scans", True),
+        ("unknown preview", False),
+    ],
+    ids=["phase-first", "compact-history-first", "unknown"],
+)
+def test_stopped_phase_receipt_preserves_progress_and_decision_history(
+    tmp_path, receipt, compact_history
+):
+    state = tmp_path / "state"
+    state.mkdir()
+    database = state / "workbench.sqlite3"
+    timestamp = "2026-08-01T00:00:00Z"
+    phase = json.dumps({"phase": "discovery", "observedAt": timestamp})
+    compact_timestamp = "2026-07-01T00:00:00Z"
+    source, _ = create_historical_database(67 if compact_history else 73)
+    with closing(source), source:
+        insert_historical_row(source, "workspaces", timestamp, id="legacy-workspace")
+        insert_legacy_scan(
+            source, timestamp, status="failed", phase="reporting", seal_manifest_digest="saved"
+        )
+        insert_historical_row(
+            source,
+            "findings",
+            timestamp,
+            id="finding",
+            fingerprint="fingerprint",
+            rule_id="rule",
+            identity_anchor="anchor",
+        )
+        source.execute(
+            """INSERT INTO finding_occurrences
+               (id, finding_id, scan_id, title, summary, severity, confidence, remediation, created_at)
+               VALUES ('occurrence', 'finding', 'legacy-scan', 'Title', 'Summary', 'low', 'low', 'Fix', ?)""",
+            (timestamp,),
+        )
+        source.execute(
+            """INSERT INTO finding_decisions (id, occurrence_id, status, note, created_at)
+               VALUES ('decision', 'occurrence', 'open', 'Review pending', ?)""",
+            (timestamp,),
+        )
+        if compact_history:
+            # The compact reader used 67–69 for the three finding history migrations.
+            compact = ((version - 6, name, sql) for version, name, sql in SCHEMA.MIGRATIONS[72:75])
+            apply_historical_migrations(source, compact, compact_timestamp)
+            # The phase reader repairs released columns at occupied slots and records 70–72.
+            for _, _, sql in SCHEMA.MIGRATIONS[66:69]:
+                for statement in SCHEMA.sql_statements(sql):
+                    source.execute(statement)
+            apply_historical_migrations(source, SCHEMA.MIGRATIONS[69:72], timestamp)
+            source.execute("UPDATE workspaces SET target_path_unvalidated = 1")
+            source.execute("UPDATE scans SET repository_generation = 'saved-generation'")
+        source.execute("ALTER TABLE scan_progress ADD COLUMN last_observed_phase_json TEXT")
+        source.execute(
+            "INSERT INTO scan_progress (scan_id, updated_at, last_observed_phase_json) VALUES (?, ?, ?)",
+            ("legacy-scan", timestamp, phase),
+        )
+        record_migration(source, 74, receipt, timestamp)
+        source.commit()
+        with closing(sqlite3.connect(database)) as destination:
+            source.backup(destination)
+
+    for _ in range(2):
+        result = run_workbench(state, "database-info", check=False)
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT name, applied_at FROM schema_migrations WHERE version = 74"
+            ).fetchone() == (receipt, timestamp)
+            assert connection.execute(
+                "SELECT last_observed_phase_json FROM scan_progress WHERE scan_id = 'legacy-scan'"
+            ).fetchone() == (phase,)
+            if receipt == "unknown preview":
+                assert result["returncode"] != 0
+                assert "Unsupported" in result["stderr"]
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version IN (73,75)"
+                ).fetchone() == (0,)
+            else:
+                assert result["returncode"] == 0, result["stderr"]
+                assert connection.execute("SELECT scan_id FROM scan_admissions").fetchall() == [
+                    ("legacy-scan",)
+                ]
+                assert connection.execute(
+                    "SELECT id, note, decision_sequence, scan_sequence, admission_sequence FROM finding_decisions"
+                ).fetchone() == ("decision", "Review pending", 1, None, None)
+                assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+            if compact_history:
+                assert (
+                    connection.execute(
+                        "SELECT version, name FROM schema_migrations WHERE version BETWEEN 67 AND 69 ORDER BY version"
+                    ).fetchall()
+                    == EXPECTED_MIGRATIONS[66:69]
+                )
+                assert connection.execute(
+                    "SELECT version, applied_at FROM schema_migrations WHERE version IN (73, 75) ORDER BY version"
+                ).fetchall() == [(73, compact_timestamp), (75, compact_timestamp)]
+                assert connection.execute(
+                    "SELECT version, name, applied_at FROM schema_migration_archive"
+                ).fetchall() == [
+                    (68, "bind new finding decisions to admitted scans", compact_timestamp)
+                ]
+                assert connection.execute(
+                    "SELECT target_path_unvalidated FROM workspaces WHERE id = 'legacy-workspace'"
+                ).fetchone() == (1,)
+                assert connection.execute(
+                    "SELECT repository_generation FROM scans WHERE id = 'legacy-scan'"
+                ).fetchone() == ("saved-generation",)
