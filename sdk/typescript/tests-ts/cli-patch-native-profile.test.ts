@@ -124,7 +124,7 @@ async function resolvePatchProfile(
           ...options,
           environment: {
             ...(optionalStorage === "selected"
-              ? { GIT_CONFIG_GLOBAL: selectedConfig }
+              ? { GIT_CONFIG_GLOBAL: selectedConfig, GIT_CONFIG_NOSYSTEM: "1" }
               : {}),
             ...options?.environment,
           },
@@ -500,10 +500,14 @@ if (git.stdout) process.stdout.write(git.stdout);`,
       );
       expect(reads).not.toContain("Synthetic fixture");
       expect(reads).not.toContain("Included fixture");
+      const gitEnvironment = {
+        GIT_CONFIG_GLOBAL: selected,
+        GIT_CONFIG_NOSYSTEM: "1",
+      };
       const environment = patchSnapshotEnvironment(temporary, {
         ...process.env,
         CODEX_HOME: context.home,
-        GIT_CONFIG_GLOBAL: selected,
+        ...gitEnvironment,
       });
       expect(
         await runRepositoryCommand(
@@ -515,7 +519,7 @@ if (git.stdout) process.stdout.write(git.stdout);`,
               directory: context.repository,
               environment,
               profile: context.snapshotProfile,
-              gitEnvironment: { GIT_CONFIG_GLOBAL: selected },
+              gitEnvironment,
             },
           },
         ),
