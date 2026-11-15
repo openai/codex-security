@@ -81,12 +81,12 @@ def git_output(
     completed = git_command(
         target, *args, text=False, git_dir=git_dir, work_tree=work_tree, offline=offline
     )
-    output = os.fsdecode(completed.stdout)
-    if sys.platform == "win32" and output.endswith("\r\n"):
-        output = output[:-2]
-    else:
-        output = output.removesuffix("\n")
-    return output if completed.returncode == 0 and output else None
+    return _git_output_line(completed.stdout) if completed.returncode == 0 else None
+
+
+def _git_output_line(data: bytes) -> str | None:
+    ending = b"\r\n" if sys.platform == "win32" and data.endswith(b"\r\n") else b"\n"
+    return os.fsdecode(data.removesuffix(ending)) or None
 
 
 def git_bytes(
@@ -1045,8 +1045,8 @@ def _git_content_digest(
     return f"codex-security-snapshot/v1:sha256:{digest.hexdigest()}"
 
 
-def git_worktree_context(target: Path) -> tuple[Path, str]:
-    root = git_output(target, "rev-parse", "--show-toplevel")
+def git_worktree_context(target: Path, *, root: str | None = None) -> tuple[Path, str]:
+    root = root or git_output(target, "rev-parse", "--show-toplevel")
     if root is None:
         raise SystemExit("Could not inspect the selected Git working tree.")
     repository = Path(root).resolve()
@@ -1197,6 +1197,23 @@ def _windows_inventory_query(
     return result
 
 
+def _nested_worktree_error(path: Path) -> OSError | None:
+    """Diagnose a nested marker when Git failed to identify this directory as its worktree."""
+    marker = path / ".git"
+    try:
+        marker.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return exc
+    # A missing nested HEAD can make Git report the enclosing checkout.
+    probe = git_command(
+        path, "rev-parse", "--show-toplevel", git_dir=marker, work_tree=path, text=False
+    )
+    detail = _git_diagnostic(probe.stderr).rstrip() if probe.returncode else ""
+    return OSError(detail or f"Could not inspect the nested Git working tree: {path}")
+
+
 def git_directory_snapshot_paths(
     target: Path,
     *,
@@ -1205,7 +1222,8 @@ def git_directory_snapshot_paths(
 ) -> list[Path] | None:
     if replay_git_dir is None:
         probe = git_command(target, "rev-parse", "--show-toplevel", text=False)
-        if probe.returncode or not probe.stdout:
+        root = _git_output_line(probe.stdout) if probe.returncode == 0 else None
+        if root is None:
             # A broken worktree must not turn into an unfiltered directory scan.
             if (
                 onerror
@@ -1219,10 +1237,16 @@ def git_directory_snapshot_paths(
                 onerror(OSError(_git_diagnostic(probe.stderr).rstrip()))
                 return []
             return None
-        repository, pathspec = git_worktree_context(target)
+        repository, pathspec = git_worktree_context(target, root=root)
     else:
         # The temporary copy of an unborn repository uses the selected Git config and index.
         repository, pathspec = target, "."
+
+    def query_error(message: str, stderr: bytes) -> None:
+        if onerror is None:
+            raise SystemExit(message)
+        onerror(OSError(_git_diagnostic(stderr).rstrip() or message))
+
     scope = repository / pathspec
     scope_depth = len(Path(pathspec).parts)
     matching_prefixes: dict[str, bool] = {}
@@ -1258,11 +1282,8 @@ def git_directory_snapshot_paths(
     )
     # ls-files can succeed with a partial listing and a permission diagnostic.
     if listing.returncode:
-        message = "Could not inspect files in the selected Git working tree."
-        if onerror:
-            onerror(OSError(_git_diagnostic(listing.stderr).rstrip() or message))
-            return []
-        raise SystemExit(message)
+        query_error("Could not inspect files in the selected Git working tree.", listing.stderr)
+        return []
     if onerror:
         # Git trace output also goes to stderr. Only diagnostics imply a partial inventory.
         if any(line.startswith((b"warning: ", b"error: ")) for line in listing.stderr.splitlines()):
@@ -1270,6 +1291,13 @@ def git_directory_snapshot_paths(
     paths: list[Path] = []
     junctions: dict[tuple[int, int], Path] = {}
     nested_worktrees: set[tuple[int, int]] = set()
+
+    def entry_error(error: OSError, *, ignore_permission: bool = False) -> None:
+        if onerror is not None:
+            onerror(error)
+        elif not (ignore_permission and isinstance(error, PermissionError)):
+            raise error
+
     for entry in (entry for entry in listing.stdout.split(b"\0") if entry):
         relative = Path(os.fsdecode(entry[2:]))
         if not SOURCE_METADATA_DIRECTORIES.isdisjoint(relative.parts):
@@ -1287,9 +1315,7 @@ def git_directory_snapshot_paths(
                 except (FileNotFoundError, NotADirectoryError):
                     matching_prefixes[key] = False
                 except OSError as exc:
-                    if onerror is None:
-                        raise
-                    onerror(exc)
+                    entry_error(exc)
                     matching_prefixes[key] = False
             # realpath spelling is not a filesystem identity on case-insensitive
             # POSIX volumes; WindowsPath equality also folds distinct names.
@@ -1303,9 +1329,7 @@ def git_directory_snapshot_paths(
             # The index can retain deleted paths, including directory-to-file replacements.
             continue
         except OSError as exc:
-            if onerror is None:
-                raise
-            onerror(exc)
+            entry_error(exc)
             continue
         if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
             # Case aliases share the link's identity. Prefer the stable index
@@ -1315,10 +1339,7 @@ def git_directory_snapshot_paths(
                 junctions[identity] = path
             continue
         paths.append(path)
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or getattr(metadata, "st_reparse_tag", 0) & 0x20000000
-        ):
+        if not stat.S_ISDIR(metadata.st_mode):
             continue
         nested_repository_root = git_output(path, "rev-parse", "--show-toplevel")
         if nested_repository_root is not None and Path(nested_repository_root).samefile(path):
@@ -1327,30 +1348,10 @@ def git_directory_snapshot_paths(
                 nested_worktrees.add((metadata.st_dev, metadata.st_ino))
                 paths.extend(nested_paths)
                 continue
-        if onerror is not None:
-            try:
-                (path / ".git").lstat()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                onerror(exc)
-                nested_worktrees.add((metadata.st_dev, metadata.st_ino))
-                continue
-            else:
-                # Git can discover the outer checkout when the nested HEAD is missing.
-                # Probe the marker directly before considering an unfiltered walk.
-                probe = git_command(
-                    path,
-                    "rev-parse",
-                    "--show-toplevel",
-                    git_dir=path / ".git",
-                    work_tree=path,
-                    text=False,
-                )
-                detail = _git_diagnostic(probe.stderr).rstrip() if probe.returncode else ""
-                onerror(OSError(detail or f"Could not inspect the nested Git working tree: {path}"))
-                nested_worktrees.add((metadata.st_dev, metadata.st_ino))
-                continue
+        if onerror is not None and (error := _nested_worktree_error(path)) is not None:
+            onerror(error)
+            nested_worktrees.add((metadata.st_dev, metadata.st_ino))
+            continue
         paths.extend(source_directory_snapshot_paths(path, onerror=onerror))
 
     if _WINDOWS:
@@ -1360,12 +1361,7 @@ def git_directory_snapshot_paths(
         if git_directory is None:
             raise SystemExit("Could not inspect the selected Git working tree.")
 
-        def directory_query_error(stderr: bytes) -> None:
-            message = "Could not inspect directories in the selected Git working tree."
-            if onerror is None:
-                raise SystemExit(message)
-            onerror(OSError(_git_diagnostic(stderr).rstrip() or message))
-
+        directory_error = "Could not inspect directories in the selected Git working tree."
         directories = _windows_inventory_query(
             target,
             "--no-literal-pathspecs",
@@ -1383,7 +1379,7 @@ def git_directory_snapshot_paths(
 
         pending: list[Path] = []
         if directories.returncode:
-            directory_query_error(directories.stderr)
+            query_error(directory_error, directories.stderr)
         else:
             pending = [
                 target / os.fsdecode(path) for path in directories.stdout.split(b"\0") if path
@@ -1399,9 +1395,7 @@ def git_directory_snapshot_paths(
                 except (FileNotFoundError, NotADirectoryError):
                     continue
                 except OSError as exc:
-                    if onerror is None:
-                        raise
-                    onerror(exc)
+                    entry_error(exc)
                     continue
                 if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
                     junctions.setdefault((metadata.st_dev, metadata.st_ino), path)
@@ -1414,10 +1408,7 @@ def git_directory_snapshot_paths(
                     try:
                         children.extend(path.iterdir())
                     except OSError as exc:
-                        if onerror is not None:
-                            onerror(exc)
-                        elif not isinstance(exc, PermissionError):
-                            raise
+                        entry_error(exc, ignore_permission=True)
                         continue
             candidates: dict[bytes, Path] = {}
             for path in children:
@@ -1428,10 +1419,7 @@ def git_directory_snapshot_paths(
                 except (FileNotFoundError, NotADirectoryError):
                     continue
                 except OSError as exc:
-                    if onerror is not None:
-                        onerror(exc)
-                    elif not isinstance(exc, PermissionError):
-                        raise
+                    entry_error(exc, ignore_permission=True)
                     continue
                 if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
                     continue
@@ -1454,7 +1442,7 @@ def git_directory_snapshot_paths(
                 },
             )
             if ignored.returncode not in (0, 1):
-                directory_query_error(ignored.stderr)
+                query_error(directory_error, ignored.stderr)
                 break
             excluded = set(ignored.stdout.split(b"\0"))
             pending = [path for raw, path in candidates.items() if raw not in excluded]

@@ -52,12 +52,18 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
     for selection in selections:
         check_path(selection)
 
+    failure = None
+
+    def record_error(exc: OSError) -> None:
+        nonlocal failure
+        if failure is None:
+            failure = exc
+
     def has_content(selection: str) -> bool:
         target, regular = check_path(selection)
         if regular:
             return True
-        errors: list[OSError] = []
-        paths = git_directory_snapshot_paths(target, onerror=errors.append)
+        paths = git_directory_snapshot_paths(target, onerror=record_error)
         if paths is not None:
             for path in paths:
                 try:
@@ -65,19 +71,16 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
                 except (FileNotFoundError, NotADirectoryError):
                     continue
                 except OSError as exc:
-                    errors.append(exc)
+                    record_error(exc)
                     continue
                 if (
                     not stat.S_ISDIR(info.st_mode)
                     or getattr(info, "st_reparse_tag", 0) & 0x20000000
                 ):
                     return True
-            if errors:
-                raise errors[0]
             return False
 
         pending = [selection]
-        failure = None
         while pending:
             current = pending.pop()
             try:
@@ -96,13 +99,9 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
                             return True
                         pending.append(str(Path(entry.path).relative_to(root)))
             except OSError as exc:
-                if failure is None:
-                    failure = exc
-        if failure is not None:
-            raise failure
+                record_error(exc)
         return False
 
-    failure = None
     for selection in selections:
         try:
             if has_content(selection):
@@ -110,8 +109,7 @@ def check_selected_targets(root: Path, selections: list[str], file_paths: list[s
         except OSError as exc:
             if selection in files:
                 raise
-            if failure is None:
-                failure = exc
+            record_error(exc)
     if failure is not None:
         raise failure
     raise ValueError("Deep Scan target is empty; no security audit was performed.")
