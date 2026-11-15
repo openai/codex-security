@@ -455,8 +455,13 @@ test.each(["worktree", "operator", "linked directory"] as const)(
           ? checkoutConfig
           : operatorConfig;
     git("config", "--file", global, "include.path", included);
+    const helper = join(external, "ssh helper.cjs");
+    await writeFile(
+      helper,
+      'require("node:fs").writeFileSync(process.env.PATCH_SSH_MARKER, process.argv[2]); process.exit(1);\n',
+    );
     const command = (location: string) =>
-      "echo " + location + ' > "$PATCH_SSH_MARKER"; exit 1';
+      `node "${helper.replaceAll("\\", "/")}" ${location}`;
     for (const [file, owner] of [
       [checkoutConfig, "worktree"],
       [operatorConfig, "operator"],
@@ -510,7 +515,7 @@ test.each(["worktree", "operator", "linked directory"] as const)(
         return "";
       },
     );
-    expect(invoked.trim()).toBe(fromCheckout ? "" : "operator");
+    expect(invoked.trim(), outcome.stderr).toBe(fromCheckout ? "" : "operator");
     if (fromCheckout)
       expect(outcome.stderr).toContain("checkout-selected core.sshCommand");
     expect(model).not.toHaveBeenCalled();
