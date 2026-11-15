@@ -4323,6 +4323,115 @@ describe("live scan cost tracking", () => {
     expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });
 
+  test("saves only current owned drive aliases and replays the originating call", async () => {
+    const { home, parent, worker, usage } = await workerSessionFixture();
+    const unrelated = await writeSession(home, "other-thread", usage);
+    const archive = join(home, "archived_sessions");
+    await filesystem.mkdir(archive);
+    const archivedWorker = await writeSession(home, "archived-worker", usage, {
+      parent: "scan-thread",
+    });
+    const archived = join(archive, basename(archivedWorker));
+    await filesystem.rename(archivedWorker, archived);
+    const options = {
+      repository: "C:/Work/Repo",
+      activityObservations: { scanId: "scan-example" },
+    };
+    const checked: string[] = [];
+    const tracker = costTracker(home, {
+      ...options,
+      verifyActivityDirectory: (_repository, candidate) => {
+        checked.push(candidate);
+        return candidate === "c:/WORK/Repo";
+      },
+    });
+    // Resume replays existing rows before the new local turn is launched.
+    await appendFile(
+      worker,
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "read_file",
+          call_id: "previous-turn",
+          arguments: JSON.stringify({ path: "c:/WORK/Repo/Src/previous.ts" }),
+        },
+      }) + "\n",
+    );
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    expect(checked).toBeEmpty();
+    tracker.beginParentTurn();
+    const timestamp = new Date().toISOString();
+    for (const [file, id, prefix, time] of [
+      [parent, "parent", "c:/WORK/Repo", timestamp],
+      [worker, "owned", "c:/WORK/Repo", timestamp],
+      [worker, "sibling", "c:/Work/repo", timestamp],
+      [worker, "stale", "c:/WORK/Repo", "2020-01-01T00:00:00Z"],
+      [worker, "undated", "c:/WORK/Repo", undefined],
+      [archived, "archived", "c:/WORK/Repo", timestamp],
+      [unrelated, "unrelated", "c:/WORK/Repo", timestamp],
+    ] as const) {
+      const payload = {
+        type: "function_call",
+        name: "read_file",
+        call_id: id,
+        arguments: JSON.stringify({ path: prefix + "/Src/" + id + ".ts" }),
+      };
+      await appendFile(
+        file,
+        JSON.stringify({ timestamp: time, type: "response_item", payload }) +
+          "\n",
+      );
+      await appendSessionItem(file, {
+        type: "function_call_output",
+        call_id: id,
+      });
+    }
+    await tracker.stop();
+    expect(checked.sort()).toEqual(["c:/WORK/Repo", "c:/Work/repo"]);
+
+    const logs = await readScanLogs({
+      codexHome: home,
+      scanId: "scan-example",
+      threadId: "scan-thread",
+    });
+    expect(
+      logs.events
+        .flatMap((row) => (Array.isArray(row["paths"]) ? row["paths"] : []))
+        .sort(),
+    ).toEqual(["Src/owned.ts"]);
+    // Same call ID, different native row. A receipt must not bleed into it.
+    await appendSessionItem(worker, {
+      type: "function_call",
+      name: "read_file",
+      call_id: "owned",
+      arguments: JSON.stringify({ path: "c:/WORK/Repo/unobserved.ts" }),
+    });
+    const replayed: ScanActivity[] = [];
+    const replay = costTracker(home, {
+      ...options,
+      onActivity: (activity) => replayed.push(activity),
+    });
+    replay.start("scan-thread");
+    await replay.stop();
+    expect(
+      replayed
+        .filter((activity) => activity.id === "worker-thread:owned")
+        .map((activity) => [activity.status, activity.paths]),
+    ).toEqual([
+      ["running", ["Src/owned.ts"]],
+      ["completed", ["Src/owned.ts"]],
+      ["running", []],
+    ]);
+    expect(
+      replayed
+        .filter((activity) => activity.id !== "worker-thread:owned")
+        .flatMap((activity) => activity.paths),
+    ).toEqual([]);
+  });
+
   test("forwards actions from this scan's delegated workers only", async () => {
     const {
       home,

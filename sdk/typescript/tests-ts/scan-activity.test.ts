@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { shellEnvironmentReference } from "../src/codex-prompt.js";
 import {
   scanActivitiesFromEvent,
@@ -82,6 +82,55 @@ function commandActivityCase(
     scanActivityFromEvent(commandEvent("item.started", command), repository),
   ).toMatchObject(expected);
 }
+
+describe("source-host Windows activity", () => {
+  test("checks only drive-directory case aliases and keeps verified suffix spelling", () => {
+    const repository = "C:/Work/Repo";
+    const verify = mock(
+      (_repository: string, alias: string) => alias === "c:/WORK/REPO",
+    );
+    const paths = [
+      "c:/WORK/REPO/Src/App.ts",
+      "c:/Work/repo/Other.ts",
+      "c:/Work/Repo/Src/Exact.ts",
+      "c:/Work/Repo-other/Foreign.ts",
+      "D:/WORK/REPO/Foreign.ts",
+    ];
+    expect(
+      scanActivityFromEvent(
+        toolEvent("read_file", { paths }),
+        repository,
+        verify,
+      )?.paths,
+    ).toEqual(["Src/App.ts", "Src/Exact.ts"]);
+    expect(
+      scanActivityFromEvent(
+        toolEvent("read_file", { path: "//server/share/File.ts" }),
+        "//Server/Share",
+        verify,
+      )?.paths,
+    ).toEqual([]);
+    expect(verify.mock.calls).toEqual([
+      [repository, "c:/WORK/REPO"],
+      [repository, "c:/Work/repo"],
+    ]);
+
+    const cmd = 'type "c:/WORK/REPO/Src/App.ts"';
+    const live = commandEvent("item.started", cmd);
+    const saved = sessionEvent({
+      type: "local_shell_call",
+      call_id: "worker",
+      action: { type: "exec", command: ["type", paths[0]] },
+    });
+    expect(scanActivityFromEvent(live, repository, verify)?.paths).toEqual([
+      "Src/App.ts",
+    ]);
+    expect(
+      scanActivityFromSessionEvent(saved, repository, verify)?.paths,
+    ).toEqual(["Src/App.ts"]);
+    expect(scanActivityFromSessionEvent(saved, repository)?.paths).toEqual([]);
+  });
+});
 
 describe("scan activity", () => {
   test.each([

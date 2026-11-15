@@ -1,5 +1,11 @@
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import {
+  type LiveActivityPaths,
+  observedEventKey,
+  readLiveActivityPaths,
+  readObservedActivities,
+} from "./observed-activities.js";
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
 import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
@@ -232,6 +238,26 @@ export async function readScanLogs(options: ScanLogOptions) {
     }
     sessions.push(session);
   }
+  const observedPaths = new Map<string, string[]>();
+  const live = new Map<string, Map<string, LiveActivityPaths>>();
+  for (const home of homes) {
+    for (const {
+      threadId,
+      occurrenceKey,
+      activity,
+    } of await readLiveActivityPaths(home, options.scanId)) {
+      const recorded =
+        live.get(threadId) ?? new Map<string, LiveActivityPaths>();
+      if (!recorded.has(occurrenceKey)) recorded.set(occurrenceKey, activity);
+      live.set(threadId, recorded);
+    }
+    for (const { eventKey, paths } of await readObservedActivities(
+      home,
+      options.scanId,
+    )) {
+      if (!observedPaths.has(eventKey)) observedPaths.set(eventKey, paths);
+    }
+  }
   const events: Record<string, unknown>[] = [];
   // Recorded completion can precede the scan turn's final response. Keep that
   // turn's remaining events, then stop before a post-completion turn starts.
@@ -251,7 +277,22 @@ export async function readScanLogs(options: ScanLogOptions) {
         replaying = false;
       }
       if (taskStarted && startsAfterCompletion(event["timestamp"])) break;
-      events.push({ threadId: session.threadId, event });
+      const eventKey =
+        observedPaths.size > 0 &&
+        event["type"] === "response_item" &&
+        isRecord(payload) &&
+        (payload["type"] === "function_call" ||
+          payload["type"] === "custom_tool_call" ||
+          payload["type"] === "local_shell_call")
+          ? observedEventKey(session.threadId, event)
+          : undefined;
+      const paths =
+        eventKey === undefined ? undefined : observedPaths.get(eventKey);
+      events.push({
+        threadId: session.threadId,
+        event,
+        ...(paths && { paths }),
+      });
     }
   }
 
@@ -262,6 +303,9 @@ export async function readScanLogs(options: ScanLogOptions) {
       threadId,
       parentThreadId,
       path,
+      ...(live.has(threadId) && {
+        observedActivities: [...live.get(threadId)!.values()],
+      }),
     })),
     events,
   };

@@ -11,12 +11,17 @@ import {
   realpath,
   stat,
 } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { isRecord } from "./record.js";
 import { errorMessage } from "./errors.js";
+import {
+  observedEventKey,
+  readObservedActivities,
+  saveObservedActivity,
+} from "./observed-activities.js";
 import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
@@ -26,6 +31,7 @@ import {
   type ScanTokenUsage,
 } from "./cost-model.js";
 import {
+  isWindowsActivityDrive,
   scanActivityFromSessionEvent,
   sessionContentText,
   type ScanActivity,
@@ -168,6 +174,11 @@ function createSessionReasoning(id: string, text = "") {
 }
 
 type SessionObservation<T> = { position: number; value: T };
+
+type SessionActivity = SessionObservation<ScanActivity> & {
+  // A call and its completion share the decision made for the originating row.
+  source?: { event: Record<string, unknown>; paths?: string[] };
+};
 
 interface SessionProgress {
   update: ScanProgress;
@@ -337,6 +348,11 @@ interface ScanCostTrackerOptions {
   pricingContext?: ScanPricingContext;
   model: string;
   repository?: string;
+  activityObservations?: { scanId: string };
+  verifyActivityDirectory?: (
+    repository: string,
+    candidateRoot: string,
+  ) => boolean;
   scanDirectory?: string;
   /** Host-bound store outside model-writable scan artifacts, for Deep scans only. */
   workerReceipts?: { directory: string; scanId: string };
@@ -380,8 +396,12 @@ export interface ScanCostSnapshot {
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
-function createSessionUsage(observeUsage: boolean) {
+function createSessionUsage(
+  observeUsage: boolean,
+  observeActivityPaths = false,
+) {
   return {
+    observeActivityPaths,
     offset: 0,
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
@@ -401,8 +421,8 @@ function createSessionUsage(observeUsage: boolean) {
     responseUsage: null as ScanTokenUsage | null,
     responseIds: new Set<string>(),
     eventPosition: 0,
-    calls: new Map<string, ScanActivity>(),
-    activities: [] as SessionObservation<ScanActivity>[],
+    calls: new Map<string, SessionActivity>(),
+    activities: [] as SessionActivity[],
     progress: [] as SessionProgress[],
     position: 0,
     completions: [] as SessionCompletion[],
@@ -434,6 +454,8 @@ function createSessionUsage(observeUsage: boolean) {
 
 export class ScanCostTracker {
   readonly #options: ScanCostTrackerOptions;
+  #observingSince?: number;
+  #observedPaths?: Map<string, string[]>;
   #lastBudgetPoll = -Infinity;
   readonly #sessions = new Map<string, SessionUsage>();
   readonly #receipts = new Map<string, ScanTokenUsage | null>();
@@ -542,6 +564,7 @@ export class ScanCostTracker {
 
   /** Called before launching a turn, after loading any resumed history. */
   public beginParentTurn(resumed = false): void {
+    this.#observingSince = Date.now();
     this.#parentTurnFilesTotal = this.#expectedFilesTotal;
     this.#parentTurnStartKnown = this.#parentSession !== null || !resumed;
     for (const live of this.#liveParentItems) {
@@ -2349,6 +2372,7 @@ export class ScanCostTracker {
       this.#options.onMeasurement === undefined &&
       this.#options.onUsageObservation === undefined &&
       this.#options.onActivity === undefined &&
+      this.#options.verifyActivityDirectory === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
       this.#options.onWorkerEvent === undefined
@@ -2408,6 +2432,7 @@ export class ScanCostTracker {
     if (this.#threadId === null) return;
     if (
       this.#options.onActivity ||
+      this.#options.verifyActivityDirectory ||
       this.#options.onProgress ||
       this.#options.onWorkerEvent ||
       this.#options.onSessionEvent ||
@@ -2464,15 +2489,22 @@ export class ScanCostTracker {
     if (this.#threadId === null) return;
     const observeUsage = this.#options.onUsageObservation !== undefined;
     const repository =
-      this.#options.onActivity === undefined
+      this.#options.onActivity === undefined &&
+      !this.#options.verifyActivityDirectory
         ? undefined
         : this.#options.repository;
+    // Only admitted worker sessions can supply source-host file observations.
+    const deferActivities =
+      repository !== undefined &&
+      this.#options.activityObservations !== undefined &&
+      isWindowsActivityDrive(repository);
     const collectionErrors: unknown[] = [];
     const progressThread =
       this.#options.onProgress === undefined ? undefined : this.#threadId;
     const observeHealthySessions =
       this.#options.maxCostUsd === undefined &&
       (this.#options.onActivity !== undefined ||
+        this.#options.verifyActivityDirectory !== undefined ||
         this.#options.onProgress !== undefined ||
         this.#options.onSessionEvent !== undefined ||
         this.#options.onWorkerEvent !== undefined);
@@ -2486,14 +2518,14 @@ export class ScanCostTracker {
         )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
-            session = createSessionUsage(observeUsage);
+            session = createSessionUsage(observeUsage, deferActivities);
             this.#sessions.set(path, session);
           }
           try {
             await readSessionUsage(
               path,
               session,
-              repository,
+              deferActivities ? undefined : repository,
               progressThread,
               undefined,
               true,
@@ -2569,6 +2601,27 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
+    if (deferActivities) {
+      for (const [path, session] of this.#sessions) {
+        if (
+          path.endsWith(".zst") ||
+          session.threadId === null ||
+          !included.has(session.threadId) ||
+          unreadable.has(session)
+        )
+          continue;
+        try {
+          await readSessionUsage(
+            path,
+            session,
+            session.threadId === this.#threadId ? undefined : repository,
+            progressThread,
+          );
+        } catch (error) {
+          unreadable.set(session, error);
+        }
+      }
+    }
     for (const [session, error] of unreadable) {
       if (session.threadId !== null && included.has(session.threadId)) {
         if (isBlockedLogRead(error)) blockingReadError ??= error;
@@ -2599,16 +2652,26 @@ export class ScanCostTracker {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
       let session = tracked;
+      const activityRepository =
+        threadId === this.#threadId ? undefined : repository;
       const observe =
         !unreadable.has(tracked) &&
         (blockingReadError === undefined || observeHealthySessions);
       if (observe && path.endsWith(".zst") && !tracked.compressedRead) {
         // The metadata pass associates this archive with the scan. A full read
         // starts at the beginning, including when retrying a partial decode.
-        const archive: SessionUsage = createSessionUsage(observeUsage);
+        const archive: SessionUsage = createSessionUsage(
+          observeUsage,
+          deferActivities,
+        );
         if (this.#options.onSessionEvent !== undefined) archive.events = [];
         try {
-          await readSessionUsage(path, archive, repository, progressThread);
+          await readSessionUsage(
+            path,
+            archive,
+            activityRepository,
+            progressThread,
+          );
         } catch (error) {
           collectionErrors.push(error);
         }
@@ -2642,7 +2705,7 @@ export class ScanCostTracker {
               await readSessionUsage(
                 path,
                 session,
-                repository,
+                activityRepository,
                 progressThread,
                 "file-size",
               );
@@ -2706,12 +2769,18 @@ export class ScanCostTracker {
       if (session.events !== undefined)
         reported.events = Math.max(reported.events, session.eventPosition);
       if (worker !== undefined) {
-        for (const { position, value: activity } of session.activities.splice(
-          0,
-        )) {
+        for (const {
+          position,
+          value: activity,
+          source,
+        } of session.activities.splice(0)) {
           if (position <= reported.activities) continue;
+          const paths = source
+            ? await this.#savedActivityPaths(threadId, path, activity, source)
+            : activity.paths;
           this.#options.onActivity?.({
             ...activity,
+            paths,
             id: `${threadId}:${activity.id}`,
             worker,
           });
@@ -3226,6 +3295,59 @@ export class ScanCostTracker {
     }
   }
 
+  async #savedActivityPaths(
+    threadId: string,
+    path: string,
+    activity: ScanActivity,
+    source: NonNullable<SessionActivity["source"]>,
+  ): Promise<string[]> {
+    if (source.paths !== undefined) return source.paths;
+    const {
+      activityObservations,
+      codexHome,
+      repository,
+      verifyActivityDirectory,
+    } = this.#options;
+    if (!activityObservations || !repository) return activity.paths;
+    const { scanId } = activityObservations;
+    this.#observedPaths ??= new Map(
+      (await readObservedActivities(codexHome, scanId)).map(
+        ({ eventKey, paths }) => [eventKey, paths],
+      ),
+    );
+    const key = observedEventKey(threadId, source.event);
+    if (key === undefined) return activity.paths;
+    const saved = this.#observedPaths.get(key);
+    if (saved !== undefined) return (source.paths = saved);
+    const time = sessionStartedAt(source.event["timestamp"]);
+    // Historical, compressed, and archived rows can originate on another host.
+    if (
+      verifyActivityDirectory &&
+      activity.status === "running" &&
+      time !== null &&
+      this.#observingSince !== undefined &&
+      time >= this.#observingSince &&
+      time <= Date.now() &&
+      path.startsWith(join(codexHome, "sessions") + sep) &&
+      path.endsWith(".jsonl")
+    ) {
+      const verified = scanActivityFromSessionEvent(
+        source.event,
+        repository,
+        verifyActivityDirectory,
+      );
+      if (verified && !isDeepStrictEqual(verified.paths, activity.paths)) {
+        await saveObservedActivity(codexHome, scanId, {
+          eventKey: key,
+          paths: verified.paths,
+        });
+        this.#observedPaths.set(key, verified.paths);
+        return (source.paths = verified.paths);
+      }
+    }
+    return (source.paths = activity.paths);
+  }
+
   #reportCost(cost: ScanCost | null, complete = true): void {
     if (cost === null) return;
     const signature = JSON.stringify([cost, complete]);
@@ -3362,6 +3484,8 @@ async function readSessionUsage(
   metadataOnly = false,
 ): Promise<void> {
   if (session.unreadable) return;
+  const readHeaderOnly = metadataOnly && session.observeActivityPaths;
+  if (readHeaderOnly && session.threadId !== null) return;
   if (path.endsWith(".zst")) {
     if (session.compressedRead) return;
     if (metadataOnly && session.threadId !== null) return;
@@ -3399,11 +3523,15 @@ async function readSessionUsage(
         session.offset,
       );
       if (bytesRead === 0) return;
-      session.offset += bytesRead;
+      let chunk = buffer.subarray(0, bytesRead);
+      if (readHeaderOnly) {
+        // Leave every byte after the header for the owned session's first full read.
+        const newline = chunk.indexOf(0x0a);
+        if (newline >= 0) chunk = chunk.subarray(0, newline + 1);
+      }
+      session.offset += chunk.length;
       try {
-        const lines = session.decoder
-          .write(buffer.subarray(0, bytesRead))
-          .split("\n");
+        const lines = session.decoder.write(chunk).split("\n");
         session.pendingLine.push(lines[0]!);
         for (const line of lines.slice(1)) {
           readSessionEvent(
@@ -3413,6 +3541,7 @@ async function readSessionUsage(
             progressThread,
           );
           session.pendingLine = [line];
+          if (readHeaderOnly && session.threadId !== null) return;
         }
       } catch (error) {
         session.unreadable = true;
@@ -3569,7 +3698,18 @@ function readSessionEvent(
       }
       return;
     }
-    const activity = scanActivityFromSessionEvent(event, repository);
+    // Delay host filesystem access until the tracker has established session ownership.
+    let ambiguous = false;
+    const activity = scanActivityFromSessionEvent(
+      event,
+      repository,
+      session.observeActivityPaths
+        ? () => {
+            ambiguous = true;
+            return false;
+          }
+        : undefined,
+    );
     if (activity !== null) {
       if (activity.kind === "reasoning") {
         const reasoning = (session.reasoning ??= createSessionReasoning(
@@ -3596,10 +3736,15 @@ function readSessionEvent(
       if (activity.kind === "message") {
         session.prose.add(`${activity.kind}:${activity.description}`);
       }
+      const observation: SessionActivity = sessionObservation(
+        session,
+        activity,
+      );
+      if (ambiguous) observation.source = { event };
       if (activity.status === "running") {
-        session.calls.set(activity.id, activity);
+        session.calls.set(activity.id, observation);
       }
-      session.activities.push(sessionObservation(session, activity));
+      session.activities.push(observation);
       return;
     }
     if (
@@ -3609,13 +3754,15 @@ function readSessionEvent(
     ) {
       const call = session.calls.get(payload["call_id"]);
       if (call !== undefined) {
-        session.activities.push(
-          sessionObservation(session, {
-            ...call,
+        session.activities.push({
+          position: session.eventPosition,
+          value: {
+            ...call.value,
             status: payload["status"] === "failed" ? "failed" : "completed",
-          }),
-        );
-        session.calls.delete(call.id);
+          },
+          source: call.source,
+        });
+        session.calls.delete(call.value.id);
       }
     }
     return;

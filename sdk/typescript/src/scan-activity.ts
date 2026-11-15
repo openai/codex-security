@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { isRecord } from "./record.js";
 import { parseJson } from "./value.js";
 
@@ -7,6 +8,8 @@ const SHELL_TOKEN = /"(?:\\.|[^"\\])*"|'[^']*'|[^\s|;&<>]+/gu;
 const POSIX_TOKEN =
   /(?:"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\\[\s\S]|[^\s|;&<>'"\\])+/gu;
 const POSIX_SHELL = /(?:^|\/)(?:sh|bash|zsh)$/u;
+
+type SameDirectory = (repository: string, candidate: string) => boolean;
 
 export type ScanActivityStatus = "running" | "completed" | "failed";
 
@@ -22,8 +25,9 @@ export interface ScanActivity {
 export function scanActivitiesFromEvent(
   event: Readonly<Record<string, unknown>>,
   repository: string,
+  sameDirectory?: SameDirectory,
 ): ScanActivity[] {
-  const activity = scanActivityFromEvent(event, repository);
+  const activity = scanActivityFromEvent(event, repository, sameDirectory);
   if (activity === null) return [];
 
   const item = event["item"];
@@ -53,6 +57,7 @@ export function scanActivitiesFromEvent(
 export function scanActivityFromEvent(
   event: Readonly<Record<string, unknown>>,
   repository: string,
+  sameDirectory?: SameDirectory,
 ): ScanActivity | null {
   if (
     (event["type"] !== "item.started" &&
@@ -79,7 +84,7 @@ export function scanActivityFromEvent(
       id: item["id"],
       kind: "command",
       status,
-      ...commandDetails(command, repository, item["shell"]),
+      ...commandDetails(command, repository, item["shell"], sameDirectory),
     };
   }
 
@@ -92,6 +97,7 @@ export function scanActivityFromEvent(
             value,
             repository,
             arguments_["shell"] ?? item["shell"],
+            sameDirectory,
           )
         : {
             description: toolDescription(
@@ -99,7 +105,11 @@ export function scanActivityFromEvent(
               arguments_,
               item["arguments"],
             ),
-            paths: argumentRepositoryPaths(arguments_, repository),
+            paths: argumentRepositoryPaths(
+              arguments_,
+              repository,
+              sameDirectory,
+            ),
           };
     return { id: item["id"], kind: "tool", status, ...details };
   }
@@ -130,6 +140,7 @@ function commandDetails(
   value: string | string[],
   repository: string,
   shell: unknown,
+  sameDirectory?: SameDirectory,
 ) {
   let text: string;
   let paths: string[];
@@ -140,10 +151,11 @@ function commandDetails(
       command.script ?? text,
       repository,
       shell ?? command.recordedShell,
+      sameDirectory,
     );
   } else {
     text = value.join(" ");
-    paths = literalRepositoryPaths(value, repository);
+    paths = literalRepositoryPaths(value, repository, sameDirectory);
   }
   return { description: text.replaceAll(/\s+/gu, " "), paths };
 }
@@ -198,6 +210,7 @@ function unwrapCommand(command: string) {
 export function scanActivityFromSessionEvent(
   event: Readonly<Record<string, unknown>>,
   repository: string,
+  sameDirectory?: SameDirectory,
 ): ScanActivity | null {
   if (!isRecord(event["payload"])) {
     return null;
@@ -268,7 +281,7 @@ export function scanActivityFromSessionEvent(
       id,
       kind: "command",
       status: "running",
-      ...commandDetails(value, repository, arguments_["shell"]),
+      ...commandDetails(value, repository, arguments_["shell"], sameDirectory),
     };
   }
 
@@ -277,7 +290,7 @@ export function scanActivityFromSessionEvent(
     kind: "tool",
     status: "running",
     description: toolDescription(name, arguments_, payload["input"]),
-    paths: argumentRepositoryPaths(arguments_, repository),
+    paths: argumentRepositoryPaths(arguments_, repository, sameDirectory),
   };
 }
 
@@ -418,6 +431,10 @@ function sessionCallArguments(
 const WINDOWS_DRIVE = /^(?:(?:\\\\|\/\/)[?.][\\/])?[a-z]:(?=[\\/])/i;
 const UNC_SERVER = /^(?:\\\\|\/\/)(?:[?.][\\/]UNC[\\/])?[^\\/]+/i;
 
+export function isWindowsActivityDrive(path: string): boolean {
+  return WINDOWS_DRIVE.test(path);
+}
+
 function windowsActivityRoot(path: string): string {
   // Inspect the original separators: a POSIX directory name can begin with a backslash.
   const root =
@@ -427,12 +444,45 @@ function windowsActivityRoot(path: string): string {
     .replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
 }
 
-function repositoryPathMatcher(repository: string, literal: boolean) {
+/** Check a case alias while observing its source host. Replays lack this evidence. */
+export function sameWindowsActivityDirectory(
+  repository: string,
+  candidate: string,
+): boolean {
+  if (process.platform !== "win32") return false;
+  try {
+    const directory = statSync(repository.replaceAll("/", "\\"), {
+      bigint: true,
+    });
+    const alias = statSync(candidate.replaceAll("/", "\\"), { bigint: true });
+    return (
+      directory.isDirectory() &&
+      alias.isDirectory() &&
+      directory.dev !== 0n &&
+      directory.ino !== 0n &&
+      directory.dev === alias.dev &&
+      directory.ino === alias.ino
+    );
+  } catch {
+    // Missing or inaccessible directories cannot establish checkout identity.
+    return false;
+  }
+}
+
+function repositoryPathMatcher(
+  repository: string,
+  literal: boolean,
+  sameDirectory?: SameDirectory,
+) {
   const root = windowsActivityRoot(repository);
   const normalize = (path: string) =>
     literal && !root ? path : path.replaceAll("\\", "/");
   const prefix = `${normalize(repository).replace(/\/$/u, "")}/`;
   const directory = prefix.slice(root.length);
+  const checkAlias =
+    sameDirectory && isWindowsActivityDrive(repository)
+      ? sameDirectory
+      : undefined;
 
   // A recorded UNC path can refer to either an SMB share or a case-sensitive
   // WebDAV collection. Keep every component after the server exact.
@@ -445,11 +495,25 @@ function repositoryPathMatcher(repository: string, literal: boolean) {
     ) {
       return value.slice(prefix.length);
     }
+    if (checkAlias && windowsActivityRoot(raw) === root) {
+      const candidate = value.slice(0, prefix.length);
+      if (
+        candidate.endsWith("/") &&
+        candidate.toUpperCase() === prefix.toUpperCase() &&
+        checkAlias(repository, candidate.slice(0, -1))
+      ) {
+        return value.slice(prefix.length);
+      }
+    }
     return null;
   };
 }
 
-function literalRepositoryPaths(argv: string[], repository: string): string[] {
+function literalRepositoryPaths(
+  argv: string[],
+  repository: string,
+  sameDirectory?: SameDirectory,
+): string[] {
   // The shell's -c argument is source text. Its positional arguments are literal.
   const executable = argv[0] ?? "";
   const posix = POSIX_SHELL.test(executable);
@@ -477,13 +541,14 @@ function literalRepositoryPaths(argv: string[], repository: string): string[] {
       }
     }
   }
-  return operandRepositoryPaths(operands, repository, true);
+  return operandRepositoryPaths(operands, repository, sameDirectory, true);
 }
 
 function commandRepositoryPaths(
   command: string,
   repository: string,
   shell: unknown,
+  sameDirectory?: SameDirectory,
 ): string[] {
   const posixShell = typeof shell === "string" && POSIX_SHELL.test(shell);
   const posixPaths = posixShell && windowsActivityRoot(repository) === "";
@@ -492,7 +557,7 @@ function commandRepositoryPaths(
     "$CODEX_SECURITY_REPOSITORY",
     "${CODEX_SECURITY_REPOSITORY}",
     repository,
-  ].map((root) => repositoryPathMatcher(root, posixPaths));
+  ].map((root) => repositoryPathMatcher(root, posixPaths, sameDirectory));
   for (const token of command.match(posixShell ? POSIX_TOKEN : SHELL_TOKEN) ??
     []) {
     let value = token;
@@ -547,19 +612,24 @@ function commandRepositoryPaths(
   return [...paths];
 }
 
-function argumentRepositoryPaths(value: unknown, repository: string): string[] {
+function argumentRepositoryPaths(
+  value: unknown,
+  repository: string,
+  sameDirectory?: SameDirectory,
+): string[] {
   if (!isRecord(value)) return [];
   const candidates = [value["path"], value["file_path"], value["paths"]].flat();
-  return operandRepositoryPaths(candidates, repository);
+  return operandRepositoryPaths(candidates, repository, sameDirectory);
 }
 
 function operandRepositoryPaths(
   candidates: unknown[],
   repository: string,
+  sameDirectory?: SameDirectory,
   skipRoot = false,
 ): string[] {
   const paths = new Set<string>();
-  const relativeTo = repositoryPathMatcher(repository, true);
+  const relativeTo = repositoryPathMatcher(repository, true, sameDirectory);
   for (const candidate of candidates) {
     if (typeof candidate !== "string") continue;
     const path = relativeTo(candidate);
