@@ -853,7 +853,10 @@ for (const path of ${JSON.stringify(paths)}) {
       ).toBe("[]");
     },
     (repository) => {
-      const scopedCookie = relative(repository, paths[2]!).replaceAll("\\", "/");
+      const scopedCookie = relative(repository, paths[2]!).replaceAll(
+        "\\",
+        "/",
+      );
       expect(scopedCookie.startsWith("../")).toBe(true);
       const values = [paths[0]!, "~/auth 1.txt", scopedCookie, paths[3]!];
       if (drive !== undefined) {
