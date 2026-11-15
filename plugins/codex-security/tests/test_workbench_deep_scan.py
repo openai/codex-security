@@ -374,6 +374,76 @@ class DeepScan:
         )["deepScan"]
 
 
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Win32 directory and result aliases")
+def test_record_worker_and_iteration_require_readable_mixed_namespace_paths(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    prompt, output, result = worker_paths(deep.directory, "worker")
+    result.write_text("{}")
+    extended = Path(load_script("windows_scan_local_files")._extended_path(output))
+    literal_dir = extended.with_name("worker.")
+    literal_result = extended / "result.json."
+    literal_dir.mkdir()
+    try:
+        literal_result.write_text("{}")
+        worker = str(uuid.uuid4())
+        fields = {"worker_id": worker, "prompt_path": prompt}
+        rejected = deep.upsert_worker(**fields, artifact_dir=literal_dir, check=False)
+        assert "Verbatim-only" in rejected["stderr"]
+        deep.upsert_worker(**fields, artifact_dir=extended)
+        rejected = deep.upsert_worker(
+            **fields,
+            artifact_dir=extended,
+            result_path=literal_result,
+            status="succeeded",
+            check=False,
+        )
+        assert "Verbatim-only" in rejected["stderr"]
+        deep.upsert_worker(
+            **fields, artifact_dir=extended, result_path=extended / result.name, status="succeeded"
+        )
+
+        iteration = str(uuid.uuid4())
+        args = (
+            "--worker-id",
+            iteration,
+            "--input-worker-id",
+            worker,
+            "--no-new-streak",
+            "1",
+            "--consecutive-errors",
+            "0",
+            "--result-manifest-path",
+        )
+        rejected = deep.command(
+            "record-deep-scan-iteration", *args, str(literal_result), check=False
+        )
+        assert "Verbatim-only" in rejected["stderr"]
+        deep.command("record-deep-scan-iteration", *args, str(extended / result.name))
+        with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+            rows = connection.execute(
+                "SELECT id, result_manifest_path FROM deep_scan_workers WHERE scan_id = ?",
+                (deep.id,),
+            )
+            assert {identifier: Path(path) for identifier, path in rows} == {
+                worker: extended / result.name,
+                iteration: extended / result.name,
+            }
+            connection.execute(
+                "UPDATE deep_scan_runs SET max_discovery_runs = discovery_runs_dispatched WHERE scan_id = ?",
+                (deep.id,),
+            )
+        manifest = deep.directory / "scan-manifest.json"
+        for path in (manifest, deep.directory / "findings.json"):
+            path.touch()
+        alias_manifest = Path(load_script("windows_scan_local_files")._extended_path(manifest))
+        assert deep.finish("capped", alias_manifest)["deepScan"]["manifestPath"] == str(manifest)
+        assert deep.finish("capped", manifest)["deepScan"]["status"] == "succeeded"
+    finally:
+        literal_result.unlink(missing_ok=True)
+        literal_dir.rmdir()
+
+
 def test_iteration_commits_all_sources_once_in_launch_order(tmp_path: Path) -> None:
     deep = start_empty_target_scan(tmp_path)
     sources = [deep.dispatch_discovery_worker(name=name)[0] for name in ("second", "first")]

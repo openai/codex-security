@@ -91,6 +91,7 @@ from workbench_scan_start import (
     restore_cli_scan_archive,
     safe_segment,
     scan_diff_identity,
+    scan_output_overlaps_target,
     scan_target_identity,
     stored_diff_target,
 )
@@ -1564,7 +1565,7 @@ def require_cli_scan_directory(repository: Path, args: argparse.Namespace) -> Pa
     scan_dir = require_canonical_scan_directory(
         Path(args.scan_dir).expanduser(), writable_output=True
     )
-    if scan_dir == repository or repository in scan_dir.parents or scan_dir in repository.parents:
+    if scan_output_overlaps_target(scan_dir, repository):
         raise SystemExit(
             "The scan artifact directory must be outside and not contain the selected target."
         )

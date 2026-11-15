@@ -79,6 +79,7 @@ from workbench.saved_sources import (
     _unselected_root_order,
     _worker_outputs,
 )
+from workbench.storage import worker_contract_relative_path
 from workbench_coverage_receipts import (
     _deferred_candidate_id,
     _generic_surface_updates,
@@ -266,7 +267,9 @@ def merge_saved_results(
     latest_reducer: str | None = None
     if reducer is not None:
         try:
-            latest_reducer = Path(reducer["result_manifest_path"]).relative_to(scan_dir).as_posix()
+            latest_reducer = worker_contract_relative_path(
+                Path(reducer["result_manifest_path"]), scan_dir
+            ).as_posix()
             paths[latest_reducer] = None
             reducer_paths.add(latest_reducer)
         except ValueError:
@@ -312,7 +315,9 @@ def merge_saved_results(
         checkpoints(f"{output}/checkpoints", worker["id"], attempt)
         if worker["result_manifest_path"]:
             try:
-                current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
+                current_path = worker_contract_relative_path(
+                    Path(worker["result_manifest_path"]), scan_dir
+                ).as_posix()
                 paths[current_path] = worker["id"]
                 current_results.add(current_path)
             except ValueError:

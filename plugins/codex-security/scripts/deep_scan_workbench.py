@@ -19,7 +19,10 @@ from workbench.handoff import require_current_continuation, require_tokenless_sc
 from workbench.storage import (
     archived_deep_path,
     create_private_directory,
+    require_worker_path,
     saved_deep_workers,
+    scan_relative_path,
+    worker_contract_relative_path,
     worker_usage_directory,
 )
 from workbench_constants import PHASES
@@ -208,7 +211,7 @@ def deep_scan_path(
     try:
         resolved = supplied.resolve(strict=True)
         scan_dir = dependencies().require_canonical_scan_directory(Path(scan["scan_dir"]))
-        resolved.relative_to(scan_dir)
+        require_worker_path(resolved, scan_dir)
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"{label} must be an existing path inside the scan directory.") from exc
     if os.path.normcase(resolved) != os.path.normcase(supplied.absolute()):
@@ -218,6 +221,15 @@ def deep_scan_path(
     if kind == "directory" and not resolved.is_dir():
         raise SystemExit(f"{label} must be a directory.")
     return str(resolved)
+
+
+def _worker_artifact_path(scan: sqlite3.Row, value: str, label: str, *, kind: str) -> str:
+    path = deep_scan_path(scan, value, label, kind=kind)
+    try:
+        worker_contract_relative_path(Path(path), Path(scan["scan_dir"]))
+    except ValueError as exc:
+        raise SystemExit(f"{label}: {exc}") from exc
+    return path
 
 
 def deep_scan_output_path(scan: sqlite3.Row, value: str, label: str) -> str:
@@ -234,11 +246,34 @@ def deep_scan_output_path(scan: sqlite3.Row, value: str, label: str) -> str:
     return str(output)
 
 
+def _coordinator_manifest_path(scan: sqlite3.Row, value: str, label: str, *, staged: bool) -> str:
+    result = (
+        deep_scan_output_path(scan, value, label)
+        if staged
+        else deep_scan_path(scan, value, label, kind="file")
+    )
+    scan_dir = Path(scan["scan_dir"])
+    path = Path(result)
+    if Path(path.anchor) != Path(scan_dir.anchor):
+        relative = scan_relative_path(path, scan_dir)
+        if relative.parts == ("scan-manifest.json",):
+            # Completion and replay identify the standard manifest by its stored scan-root spelling.
+            return str(scan_dir / relative)
+    return result
+
+
 def promote_staged_file(staged_path: str, output_path: str) -> tuple[Path, Path, Path | None]:
     """Publish the staged file and return the paths needed to finalize or undo the move."""
     staged = Path(staged_path)
     output = Path(output_path)
-    if staged == output:
+    # Across namespaces, distinguish the same canonical directory entry from a separate hard link.
+    if staged == output or (
+        Path(staged.anchor) != Path(output.anchor)
+        and staged.name == output.name
+        and output.exists()
+        and staged.parent.samefile(output.parent)
+        and staged.samefile(output)
+    ):
         raise SystemExit("A staged Deep Scan artifact must not be its published output path.")
     backup = output.with_name(f".{output.name}.{uuid.uuid4()}.backup") if output.exists() else None
     if backup is not None:
@@ -1192,11 +1227,11 @@ def upsert_deep_scan_worker(
         if not cleanup_update and not terminal_repeat:
             require_running_deep_scan(run, scan)
         prompt_path = deep_scan_path(scan, args.prompt_path, "Worker prompt path", kind="file")
-        artifact_dir = deep_scan_path(
+        artifact_dir = _worker_artifact_path(
             scan, args.artifact_dir, "Worker artifact directory", kind="directory"
         )
         result_manifest_path = (
-            deep_scan_path(
+            _worker_artifact_path(
                 scan,
                 args.result_manifest_path,
                 "Worker result manifest path",
@@ -1412,7 +1447,9 @@ def record_deep_scan_iteration(
         scan = dependencies().require_scan(connection, scan_id)
         require_running_deep_scan(run, scan)
         require_current_coordinator(run, args)
-        result = deep_scan_path(scan, args.result_manifest_path, "Iteration result", kind="file")
+        result = _worker_artifact_path(
+            scan, args.result_manifest_path, "Iteration result", kind="file"
+        )
         existing = connection.execute(
             "SELECT scan_id, result_manifest_path FROM deep_scan_workers WHERE id = ?",
             (checkpoint_id,),
@@ -1486,12 +1523,11 @@ def finish_deep_scan_locked(
         run = require_deep_scan_run(connection, scan_id)
         require_current_coordinator(run, args)
         scan = dependencies().require_scan(connection, scan_id)
-        manifest_path = (
-            deep_scan_output_path(scan, args.manifest_path, "Deep Scan coordinator manifest path")
-            if args.staged_manifest_path
-            else deep_scan_path(
-                scan, args.manifest_path, "Deep Scan coordinator manifest path", kind="file"
-            )
+        manifest_path = _coordinator_manifest_path(
+            scan,
+            args.manifest_path,
+            "Deep Scan coordinator manifest path",
+            staged=bool(args.staged_manifest_path),
         )
         standard_scan_manifest = manifest_path == str(Path(scan["scan_dir"]) / "scan-manifest.json")
 
@@ -1659,15 +1695,11 @@ def fail_deep_scan_locked(
         recorded_manifest = archived_deep_path(Path(scan["scan_dir"]), run["manifest_path"])
         manifest_path = None
         if args.manifest_path:
-            manifest_path = (
-                deep_scan_output_path(scan, args.manifest_path, "Deep Scan failure manifest path")
-                if args.staged_manifest_path
-                else deep_scan_path(
-                    scan,
-                    args.manifest_path,
-                    "Deep Scan failure manifest path",
-                    kind="file",
-                )
+            manifest_path = _coordinator_manifest_path(
+                scan,
+                args.manifest_path,
+                "Deep Scan failure manifest path",
+                staged=bool(args.staged_manifest_path),
             )
         elif recorded_manifest == str(Path(scan["scan_dir"]) / "scan-manifest.json"):
             manifest_path = recorded_manifest

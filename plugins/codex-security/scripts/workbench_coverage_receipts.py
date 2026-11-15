@@ -18,6 +18,7 @@ from finalize_scan_contract import (
     path_within_scope,
 )
 from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
+from workbench.storage import worker_contract_relative_path
 
 
 def capture_receipt_checkpoints(
@@ -116,7 +117,7 @@ def resolve_coverage_receipts(
     directory = Path(relative).parent
     if directory.name == "checkpoints":
         directory = directory.parent
-    output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+    output = worker_contract_relative_path(Path(worker["artifact_dir"]), scan_dir)
     worker_prefix = (output.parent if output.name == "output" else output).as_posix() + "/"
     active_prefix = output.as_posix() + "/"
     if directory != output:
