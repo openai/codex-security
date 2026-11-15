@@ -130,3 +130,71 @@ test("the prepared inventory cannot widen an explicitly requested scope", () => 
     "src/visible.ts",
   ]);
 });
+
+test("a managed host's scope file restricts a prepared native inventory", () => {
+  const { repo, discovery, env, scopesFile, run, build } = fixture();
+  writeFileSync(scopesFile, JSON.stringify(["src", "src/explicit.txt"]));
+  env.CODEX_SECURITY_TARGET_PATHS_FILE = scopesFile;
+  run(
+    "generate-in-scope-files",
+    "--repo",
+    repo,
+    "--scope",
+    ".",
+    "--out",
+    join(discovery, "in_scope_files.txt"),
+  );
+  writeFileSync(join(repo, "src", "late.ts"), "source");
+  expect(build(".")).toEqual([
+    "src/explicit.txt",
+    "src/hidden.ts",
+    "src/tracked.ts",
+    "src/visible.ts",
+  ]);
+});
+
+test("read prepared JSONL a row at a time across a split UTF-8 name", () => {
+  const { repo, scan, env, scopesFile, build } = fixture();
+  writeFileSync(scopesFile, JSON.stringify(["src"]));
+  env.CODEX_SECURITY_TARGET_PATHS_FILE = scopesFile;
+  const name = "src/α.ts";
+  writeFileSync(join(repo, name), "source");
+  const prefix = '{"preview":"prepared-';
+  const suffix = '","path":"src/';
+  // The first byte of α is the last byte of the first 64 KiB read.
+  const padding = "x".repeat(65535 - prefix.length - suffix.length);
+  const row = prefix + padding + suffix + 'α.ts"}\r\n';
+  writeFileSync(join(scan, "scoped-source-input.jsonl"), row.repeat(3));
+  const preload = join(scan, "reject-monolithic-decode.cjs");
+  writeFileSync(
+    preload,
+    `const toString = Buffer.prototype.toString;
+const marker = Buffer.from(${JSON.stringify(prefix)});
+Buffer.prototype.toString = function (...args) {
+  if (this.length > 128 * 1024 && this.subarray(0, marker.length).equals(marker)) {
+    throw new Error("The queue decoded the entire prepared inventory.");
+  }
+  return toString.apply(this, args);
+};`,
+  );
+  env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`;
+  expect(build(".")).toEqual([name]);
+});
+
+test.skipIf(process.platform !== "linux")(
+  "native inventory preserves raw Linux source names",
+  () => {
+    const { repo, discovery, build } = fixture();
+    const name = Buffer.concat([
+      Buffer.from("src/"),
+      Buffer.from([255]),
+      Buffer.from(".ts"),
+    ]);
+    writeFileSync(Buffer.concat([Buffer.from(repo + "/"), name]), "source");
+    writeFileSync(
+      join(discovery, "in_scope_files.txt"),
+      Buffer.concat([name, Buffer.from("\n")]),
+    );
+    expect(build("src")).toEqual(["src/\udcff.ts"]);
+  },
+);

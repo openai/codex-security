@@ -93,18 +93,21 @@ export async function standardQueue(args: string[], home?: string) {
       };
     });
     const matches = new Set<string>();
+    const reviewItems = "artifacts/02_discovery/in_scope_files.txt";
+    const preferred = await destination(
+      scopeFile ? "scoped-source-input.jsonl" : reviewItems,
+    );
+    let inventory = { file: preferred, scoped: Boolean(scopeFile) };
+    if (scopeFile && !exists(preferred)) {
+      // A managed host can supply both exact scopes and an already prepared native list.
+      const native = await destination(reviewItems);
+      if (exists(native)) inventory = { file: native, scoped: false };
+    }
     for await (const { name, explicit } of scopedSourceFiles(
       repo,
       scopes,
       home,
-      {
-        file: await destination(
-          scopeFile
-            ? "scoped-source-input.jsonl"
-            : "artifacts/02_discovery/in_scope_files.txt",
-        ),
-        scoped: Boolean(scopeFile),
-      },
+      inventory,
     )) {
       if (explicit) matches.add(name);
       if (matches.has(name)) continue;

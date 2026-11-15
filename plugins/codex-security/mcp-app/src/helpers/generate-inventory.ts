@@ -1,5 +1,6 @@
 import {
   environmentValue,
+  forEachFileLine,
   isMissingPathError,
   normalizePath,
   resolvedPathText as canonical,
@@ -257,13 +258,10 @@ async function* directorySourcePaths(
 ) {
   if (inventory && exists(inventory.file)) {
     // The SDK stores scoped JSONL. The native host stores one review item per line.
-    const contents = readFile(inventory.file);
-    const text =
-      inventory.scoped || windows
-        ? decodeUtf8(contents)
-        : decodePosixBytes(contents);
-    for (const line of text.split(/\r?\n/u)) {
-      if (!line) continue;
+    const paths = new Set<string>();
+    const decode = inventory.scoped || windows ? decodeUtf8 : decodePosixBytes;
+    forEachFileLine(inventory.file, decode, (line) => {
+      if (!line) return;
       const name = inventory.scoped ? JSON.parse(line)?.path : line;
       if (
         typeof name !== "string" ||
@@ -288,8 +286,9 @@ async function* directorySourcePaths(
           );
         })
       )
-        yield path;
-    }
+        paths.add(name);
+    });
+    for (const name of paths) yield append(repo, name);
     return;
   }
   for (const scope of directories) {

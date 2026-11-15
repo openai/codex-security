@@ -128,17 +128,22 @@ export function* readChunks(
   }
 }
 
-export function* readUtf8Lines(path: string, label?: string): Iterable<string> {
+function lineDecoder(decode: (bytes: Buffer) => string) {
   let parts: Buffer[] = [];
   let skipLineFeed = false;
-  for (const chunk of readChunks(path, label)) {
+  return function* lines(chunk?: Buffer): Iterable<string> {
+    if (!chunk) {
+      if (parts.length)
+        yield decode(parts.length === 1 ? parts[0]! : Buffer.concat(parts));
+      return;
+    }
     let start = skipLineFeed && chunk[0] === 10 ? 1 : 0;
     skipLineFeed = false;
     for (let index = start; index < chunk.length; index++) {
       const byte = chunk[index];
       if (byte !== 10 && byte !== 13) continue;
       parts.push(chunk.subarray(start, index));
-      yield decodeUtf8(parts.length === 1 ? parts[0]! : Buffer.concat(parts));
+      yield decode(parts.length === 1 ? parts[0]! : Buffer.concat(parts));
       parts = [];
       if (byte === 13) {
         if (chunk[index + 1] === 10) index++;
@@ -147,9 +152,32 @@ export function* readUtf8Lines(path: string, label?: string): Iterable<string> {
       start = index + 1;
     }
     if (start < chunk.length) parts.push(chunk.subarray(start));
-  }
-  if (parts.length)
-    yield decodeUtf8(parts.length === 1 ? parts[0]! : Buffer.concat(parts));
+  };
+}
+
+export function* readUtf8Lines(path: string, label?: string): Iterable<string> {
+  const lines = lineDecoder(decodeUtf8);
+  for (const chunk of readChunks(path, label)) yield* lines(chunk);
+  yield* lines();
+}
+
+export function forEachFileLine(
+  path: string,
+  decode: (bytes: Buffer) => string,
+  consume: (line: string) => void,
+) {
+  const lines = lineDecoder(decode);
+  const consumeChunk = (chunk: Buffer) => {
+    for (const line of lines(chunk)) consume(line);
+    return true;
+  };
+  if (process.platform === "win32")
+    windowsFileSystem(windowsBinding()).readChunks(
+      widePath(path),
+      consumeChunk,
+    );
+  else for (const chunk of readChunks(path)) consumeChunk(chunk);
+  for (const line of lines()) consume(line);
 }
 
 export function mkdir(path: string): void {
