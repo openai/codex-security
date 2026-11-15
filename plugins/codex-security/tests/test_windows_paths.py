@@ -4,6 +4,7 @@ import ntpath
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
@@ -132,9 +133,27 @@ def test_target_lookup_preserves_both_legacy_ids_after_a_path_spelling_collision
     } == {("original", str(alias)), ("current", str(path))}
 
 
+@pytest.mark.parametrize("root", ["C:/", "//server/share/"])
+def test_archive_relocation_preserves_verbatim_artifact_names(windows_paths, monkeypatch, root):
+    monkeypatch.setitem(sys.modules, "windows_paths", windows_paths)
+    storage = load_script("workbench/storage")
+    monkeypatch.setattr(storage, "Path", PureWindowsPath)
+
+    scan_dir = PureWindowsPath(root) / "scans" / "run"
+    archive = scan_dir.with_name("run.previous-test")
+    for name, archived_root in (
+        ("result.json.", windows_paths.extended_path(archive)),
+        ("result.json", archive),
+    ):
+        stored = windows_paths.extended_path(scan_dir) / "worker" / name
+        expected = archived_root / "worker" / name
+        assert storage.archived_deep_path(archive, str(stored)) == str(expected)
+        assert storage.relocate_scan_path(scan_dir, archive, str(stored)) == str(expected)
+
+
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="exercise native Win32 files and SQLite paths")
-def test_long_scan_archive_and_history_accept_legacy_extended_paths(tmp_path: Path):
+def test_long_scan_archive_and_history_accept_legacy_extended_paths(tmp_path: Path, request):
     paths = load_script("windows_paths")
     root = tmp_path
     while len(str(root)) < 270:
@@ -146,6 +165,13 @@ def test_long_scan_archive_and_history_accept_legacy_extended_paths(tmp_path: Pa
     scan_id = first["scanId"]
     fail_scan(state_dir, scan_id, "Archive the previous run")
     paths.filesystem_path(output / "report.md").write_text("# Previous review\n")
+    archived = root / "output.previous-test"
+    literal = paths.extended_path(output) / "coverage.json."
+    archived_literal = paths.extended_path(archived) / literal.name
+    request.addfinalizer(lambda: literal.unlink(missing_ok=True))
+    request.addfinalizer(lambda: archived_literal.unlink(missing_ok=True))
+    paths.filesystem_path(output / "coverage.json").write_text("ordinary")
+    literal.write_text("verbatim")
     database = paths.filesystem_path(state_dir / "workbench.sqlite3")
     with sqlite3.connect(database) as connection:
         target_id = connection.execute(
@@ -169,11 +195,19 @@ def test_long_scan_archive_and_history_accept_legacy_extended_paths(tmp_path: Pa
                 "2026-08-13T00:00:00Z",
             ),
         )
+        connection.execute(
+            "INSERT INTO scan_artifacts (scan_id, kind, path, created_at) VALUES (?, ?, ?, ?)",
+            (
+                scan_id,
+                "coverage",
+                str(literal),
+                "2026-08-13T00:00:00Z",
+            ),
+        )
     for spelling in [repository, paths.extended_path(repository)]:
         listed = run_workbench(state_dir, "list-scans", "--repository", str(spelling))["scans"]
         assert [scan["scanId"] for scan in listed] == [scan_id]
 
-    archived = root / "output.previous-test"
     paths.filesystem_path(output).rename(paths.filesystem_path(archived))
     paths.filesystem_path(output).mkdir()
     current = register_scan(
@@ -186,9 +220,13 @@ def test_long_scan_archive_and_history_accept_legacy_extended_paths(tmp_path: Pa
         assert connection.execute(
             "SELECT scan_dir FROM scans WHERE id = ?", (scan_id,)
         ).fetchone() == (str(archived),)
-        assert connection.execute(
-            "SELECT path FROM scan_artifacts WHERE scan_id = ?", (scan_id,)
-        ).fetchone() == (str(archived / "report.md"),)
+        artifacts = dict(
+            connection.execute(
+                "SELECT kind, path FROM scan_artifacts WHERE scan_id = ?", (scan_id,)
+            )
+        )
+    assert artifacts["markdownReport"] == str(archived / "report.md")
+    assert Path(artifacts["coverage"]).read_text() == "verbatim"
 
 
 @pytest.mark.native_windows

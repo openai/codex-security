@@ -23,9 +23,8 @@ from windows_paths import (
     extended_path,
     portable_is_relative_to,
     portable_path,
-    portable_relative_path,
 )
-from workbench.storage import state_dir
+from workbench.storage import relocate_scan_path, state_dir
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -230,9 +229,7 @@ def archive_scan(
             )
 
             def archive_path(value: str | None) -> str | None:
-                if value is None or not portable_is_relative_to(Path(value), portable_scan_dir):
-                    return value
-                return str(archive_dir / portable_relative_path(Path(value), scan_dir))
+                return relocate_scan_path(scan_dir, archive_dir, value)
 
             connection.create_function("archive_path", 1, archive_path)
             try:

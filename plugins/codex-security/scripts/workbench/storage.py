@@ -11,7 +11,13 @@ from typing import Any
 # SDK hosts also load this file directly with runpy, outside the workbench package.
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from windows_paths import filesystem_path, portable_path
+from windows_paths import (
+    extended_path,
+    filesystem_path,
+    portable_path,
+    portable_relative_path,
+    uses_windows_namespace,
+)
 
 
 def state_dir(*, canonical: bool = True) -> Path:
@@ -41,19 +47,32 @@ def worker_usage_directory(scan_id: str) -> Path:
     return state_dir() / "codex-home" / "worker-usage" / scan_id
 
 
+def relocate_scan_path(scan_dir: Path, archive_dir: Path, value: str | None) -> str | None:
+    """Move a stored scan-local path to the archive, preserving verbatim-only names."""
+    if value is None:
+        return None
+    path = Path(value)
+    try:
+        relative = portable_relative_path(path, scan_dir)
+    except ValueError:
+        return value
+    if uses_windows_namespace(path):
+        return str(portable_path(extended_path(archive_dir) / relative))
+    return str(portable_path(archive_dir) / relative)
+
+
 def archived_deep_path(scan_dir: Path, value: str | None) -> str | None:
     """Resolve old archive rows that still name the original sibling output."""
     if value is None or ".previous-" not in scan_dir.name:
         return value
-    path = portable_path(Path(value))
-    scan_dir = portable_path(scan_dir)
-    if not path.is_relative_to(scan_dir.parent):
+    try:
+        parts = portable_relative_path(Path(value), scan_dir.parent).parts
+    except ValueError:
         return value
-    parts = path.relative_to(scan_dir.parent).parts
     if not parts or ".." in parts or not scan_dir.name.startswith(f"{parts[0]}.previous-"):
         return value
     # Keep missing files inside the archive too. Never follow the replacement scan's output.
-    return str(scan_dir.joinpath(*parts[1:]))
+    return relocate_scan_path(scan_dir.parent / parts[0], scan_dir, value)
 
 
 def saved_deep_workers(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[Any]:
