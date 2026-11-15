@@ -456,6 +456,7 @@ import {
 import {
   inspectTrustedExecutable,
   resolveTrustedExecutable,
+  trustedHostPathResolver,
 } from "./trusted-executable.js";
 import {
   BUNDLED_PLUGIN_VERSION,
@@ -1453,12 +1454,10 @@ type PatchSnapshotProfiles = Map<
   }
 >;
 
-// A profile may span the Git commands of one private-index snapshot only when
-// none of their workspace or temporary write grants can reach its directory.
-async function reusableWindowsSnapshotHome(
-  home: string,
+async function patchSandboxWritableRoots(
   sandbox: PatchSnapshotSandbox,
-): Promise<boolean> {
+  volume: string,
+): Promise<string[] | undefined> {
   const policy = sandbox.profile;
   if (
     policy["extends"] !== ":workspace" ||
@@ -1473,43 +1472,60 @@ async function reusableWindowsSnapshotHome(
         ].includes(key),
     )
   )
-    return false;
+    return undefined;
   const filesystem = policy["filesystem"];
   const workspaces = policy["workspace_roots"];
-  if (!isJsonObject(filesystem) || !isJsonObject(workspaces)) return false;
+  if (!isJsonObject(filesystem) || !isJsonObject(workspaces)) return undefined;
   const writable = [sandbox.directory, ...Object.keys(workspaces)];
   for (const [path, access] of Object.entries(filesystem)) {
-    if (!isJsonObject(access)) return false;
+    if (!isJsonObject(access)) return undefined;
     if (
       (path === ":tmpdir" || path === ":slash_tmp") &&
       !Object.keys(access).length
     )
       continue;
-    if (!isAbsolute(path) || Object.keys(access).length !== 1) return false;
+    if (!isAbsolute(path) || Object.keys(access).length !== 1) return undefined;
     if (access["."] === "write") writable.push(path);
-    else if (access["."] !== "read" && access["."] !== "deny") return false;
+    else if (access["."] !== "read" && access["."] !== "deny") return undefined;
   }
   if (!Object.hasOwn(filesystem, ":tmpdir")) {
     writable.push(tmpdir());
-    for (const key of ["TMP", "TEMP", "TMPDIR"]) {
+    for (const key of process.platform === "win32"
+      ? ["TMP", "TEMP", "TMPDIR"]
+      : ["TMPDIR"]) {
       const value = environmentEntry(sandbox.environment, key);
       if (value) writable.push(value);
     }
   }
   if (!Object.hasOwn(filesystem, ":slash_tmp"))
-    writable.push(join(parse(home).root, "tmp"));
-  if (relative(home, await realpath(home)) !== "") return false;
+    writable.push(join(parse(volume).root, "tmp"));
+  const roots = new Set<string>();
   for (const path of new Set(writable)) {
-    if (!isAbsolute(path) || path.split(/[\\/]/u).includes("..")) return false;
+    if (!isAbsolute(path) || path.split(/[\\/]/u).includes(".."))
+      return undefined;
     const physical = await canonicalConfigPath(path).catch(() => undefined);
-    if (
-      physical === undefined ||
-      !isOutsidePath(relative(physical, home)) ||
-      !isOutsidePath(relative(home, physical))
-    )
-      return false;
+    if (physical === undefined) return undefined;
+    roots.add(physical);
   }
-  return true;
+  return [...roots];
+}
+
+// A profile may span the Git commands of one private-index snapshot only when
+// none of their workspace or temporary write grants can reach its directory.
+async function reusableWindowsSnapshotHome(
+  home: string,
+  sandbox: PatchSnapshotSandbox,
+): Promise<boolean> {
+  if (relative(home, await realpath(home)) !== "") return false;
+  const writable = await patchSandboxWritableRoots(sandbox, home);
+  return (
+    writable !== undefined &&
+    writable.every(
+      (root) =>
+        isOutsidePath(relative(root, home)) &&
+        isOutsidePath(relative(home, root)),
+    )
+  );
 }
 
 async function removeSnapshotProfiles(profiles: PatchSnapshotProfiles) {
@@ -1747,6 +1763,12 @@ type PatchTransportFile = {
   kind: "executable" | "file" | "known-hosts";
 };
 
+interface PatchTransportAccess {
+  readonly writable: Set<string>;
+  readonly invocations: Map<string, string>;
+  external: boolean;
+}
+
 interface CliDependencies {
   sparsePatchSnapshots?: Map<
     string,
@@ -1763,6 +1785,7 @@ interface CliDependencies {
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
   patchTransportFiles?: Map<string, PatchTransportFile>;
+  patchTransportAccess?: PatchTransportAccess;
   patchCallerDirectory?: string;
   patchTransportContext?: { root: string; caller: string; directory: string };
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
@@ -3298,6 +3321,11 @@ export async function main(
 ): Promise<number> {
   const parentDependencies = dependencies;
   const patchTransportFiles = new Map<string, PatchTransportFile>();
+  const patchTransportAccess: PatchTransportAccess = {
+    writable: new Set(),
+    invocations: new Map(),
+    external: false,
+  };
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let publicationHooks: PatchPublicationHooks | undefined;
   let snapshotConfigPaths: readonly string[] | undefined;
@@ -3306,10 +3334,12 @@ export async function main(
   dependencies = {
     ...parentDependencies,
     patchTransportFiles,
+    patchTransportAccess,
     sparsePatchSnapshots: new Map(),
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
         const appServer = output.appServer;
+        if (appServer.externalSandbox) patchTransportAccess.external = true;
         if (appServer.publicationHooks)
           publicationHooks = appServer.publicationHooks;
         output = {
@@ -3331,6 +3361,11 @@ export async function main(
               const previous = patchPreparationSignal;
               patchPreparationSignal = signal;
               try {
+                if (appServer.permissions && patchSandbox && publicationHooks)
+                  await addPatchTransportWriters(
+                    patchTransportAccess,
+                    patchSandbox,
+                  );
                 await appServer.onBeforeTurn?.(signal);
               } finally {
                 patchPreparationSignal = previous;
@@ -8622,6 +8657,10 @@ export async function main(
                     gitDirectories,
                     controller.signal,
                   );
+                  await addPatchTransportWriters(
+                    patchTransportAccess,
+                    patchSandbox,
+                  );
                 } finally {
                   removeSignals();
                 }
@@ -11762,6 +11801,46 @@ async function bindPatchTransportFile(
   }
 }
 
+function writablePatchTransportError(path: string) {
+  return new CodexSecurityError(
+    `Patch publication requires transport executables and input files outside patch-writable directories. Move ${path} or narrow the patch's writable roots.`,
+  );
+}
+
+async function addPatchTransportWriters(
+  access: PatchTransportAccess,
+  sandbox: PatchSnapshotSandbox,
+) {
+  const roots = await patchSandboxWritableRoots(sandbox, sandbox.directory);
+  if (!roots)
+    throw new CodexSecurityError(
+      "Cannot determine writable directories for patch publication.",
+    );
+  // Snapshot filters and publication hooks can also write the selected storage.
+  roots.push(...(sandbox.snapshotStoragePaths ?? []));
+  if (roots.every((root) => access.writable.has(root))) return;
+  for (const root of roots) access.writable.add(root);
+  // A later remediation turn or delegated hook can receive different write grants.
+  if (access.invocations.size) {
+    const resolveHostPath = await trustedHostPathResolver(sandbox.directory, [
+      ...access.writable,
+    ]);
+    for (const [path, target] of access.invocations)
+      if (resolveHostPath(path) !== target)
+        throw writablePatchTransportError(path);
+  }
+}
+
+function requireStablePatchTransportTarget(
+  path: string,
+  access?: PatchTransportAccess,
+) {
+  if (access)
+    for (const root of access.writable)
+      if (!isOutsidePath(relative(root, path)))
+        throw writablePatchTransportError(path);
+}
+
 async function inspectPatchGitExecutable(
   command: string,
   repository: string,
@@ -11795,8 +11874,42 @@ async function inspectPatchGitExecutable(
       gitTransportDirectory: transportDirectory,
     },
   );
-  if (result.executable)
-    await bindPatchTransportFile(result.executable, "executable", dependencies);
+  if (!result.executable || !result.gitTransport) return result;
+  const { launcher, target } = result.gitTransport;
+  await bindPatchTransportFile(launcher, "executable", dependencies);
+  const selected = dependencies.patchTransportFiles?.get(launcher);
+  if (selected && selected.target !== target)
+    throw new CodexSecurityError(
+      "Patch transport executable changed before publication. Inspect the selected transport settings and files before resuming.",
+    );
+  const access = dependencies.patchTransportAccess;
+  requireStablePatchTransportTarget(target, access);
+  if (
+    launcher !== target &&
+    access &&
+    (access.external || access.writable.size)
+  ) {
+    const resolveHostPath = await trustedHostPathResolver(transportDirectory, [
+      ...access.writable,
+    ]);
+    if (
+      result.executable === target ||
+      access.external ||
+      resolveHostPath(launcher) !== target
+    ) {
+      const bin = dirname(launcher);
+      if (
+        [bin, dirname(bin)].some((path) => existsSync(join(path, "pyvenv.cfg")))
+      )
+        throw new CodexSecurityError(
+          "Patch publication cannot preserve this virtualenv interpreter through a writable or unverified launcher. Select a virtualenv outside the patch's writable roots.",
+        );
+      // Git looks up this name after our last identity check. Keep the original
+      // link for retarget diagnostics, but give Git only the approved target.
+      result.executable = target;
+    }
+  }
+  access?.invocations.set(result.executable, target);
   return result;
 }
 
@@ -12162,11 +12275,16 @@ async function pinPublicationSshCommand(
       )
     )
       throw unsupported();
+    requireStablePatchTransportTarget(
+      physical,
+      dependencies.patchTransportAccess,
+    );
     await bindPatchTransportFile(
       physical,
       knownHosts ? "known-hosts" : "file",
       dependencies,
     );
+    dependencies.patchTransportAccess?.invocations.set(physical, physical);
     return physical;
   };
   if (/^ssh(?:\.exe)?$/iu.test(basename(program))) {

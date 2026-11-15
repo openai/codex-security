@@ -2823,6 +2823,11 @@ Patch results are `verified`, `no_change`, `blocked`, or
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
 Publication checks the source of `core.sshCommand` before it runs SSH and
 rechecks the selected launcher and explicit SSH file operands during publication.
+Keep SSH, askpass and proxy executables, virtual environments and explicit SSH
+input files outside directories the patch can write. If a launcher symlink
+crosses one of those directories, Git uses the approved executable target.
+A virtualenv interpreter needs a protected launcher path to retain its environment.
+With `--external-sandbox`, the operator supplies the filesystem isolation.
 If a transport file changes, inspect the file and your transport settings before
 retrying. `--resume-pr` selects the current operator settings for that invocation.
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
