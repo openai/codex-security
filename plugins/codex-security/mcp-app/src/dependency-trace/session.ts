@@ -72,22 +72,33 @@ export async function createDependencyGraphSession(
   const tracer = createDependencyTracer(root);
   const graph = new EvidenceGraph();
 
-  function reply(result: object): Record<string, unknown> & {
-    service_resolution: ReturnType<EvidenceGraph["serviceResolution"]> & {
-      catalog_configured: boolean;
+  function serviceResolution() {
+    return {
+      catalog_configured: catalogConfigured,
+      ...graph.serviceResolution(),
     };
+  }
+
+  function reply(result: object): Record<string, unknown> & {
+    service_resolution: ReturnType<typeof serviceResolution>;
   } {
     return {
       ...result,
-      service_resolution: {
-        catalog_configured: catalogConfigured,
-        ...graph.serviceResolution(),
-      },
+      service_resolution: serviceResolution(),
     };
   }
 
   return {
     boundTraceResponse,
+    // Used by host replies that only need counts, without querying the graph.
+    serviceResolutionCoverage() {
+      const {
+        paths: _paths,
+        unresolved_paths: _unresolvedPaths,
+        ...coverage
+      } = serviceResolution();
+      return coverage;
+    },
     tools: Object.entries(dependencyGraphTools).map(
       ([name, { description, schema }]) => ({
         name,

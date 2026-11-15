@@ -99,6 +99,7 @@ export async function openDependencyGraph(
       args: unknown,
       signal?: AbortSignal,
     ): Promise<JsonObject & { service_resolution: JsonObject }>;
+    serviceResolutionCoverage?(): JsonObject;
     pendingCatalogRequests(args?: unknown): Parameters<CatalogResolver>[0];
     recordCatalogResolutions(
       answers: Awaited<ReturnType<CatalogResolver>>,
@@ -142,7 +143,10 @@ export async function openDependencyGraph(
       ...(summary ? { graph_evidence: summary } : {}),
     };
   };
-  const focusedReply = async (payload: JsonObject): Promise<JsonObject> => {
+  const readServiceCoverage = async (): Promise<JsonObject> => {
+    if (graph.serviceResolutionCoverage)
+      return graph.serviceResolutionCoverage();
+    // Older plugin bundles only expose graph queries.
     const { service_resolution } = await graph.call(
       "query_codex_security_graph",
       {},
@@ -153,6 +157,10 @@ export async function openDependencyGraph(
       unresolved_paths: _unresolvedPaths,
       ...coverage
     } = service_resolution;
+    return coverage;
+  };
+  const focusedReply = async (payload: JsonObject): Promise<JsonObject> => {
+    const coverage = await readServiceCoverage();
     return {
       ...payload,
       source_evidence_count: sourceEvidence.size,

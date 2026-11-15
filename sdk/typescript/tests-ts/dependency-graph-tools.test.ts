@@ -28,6 +28,7 @@ async function withGraph(
     lookup: Parameters<typeof openDependencyGraph>[4];
     read: ReturnType<typeof createDependencyInventory>["read"];
   },
+  serviceCoverage?: JsonObject,
 ) {
   const root = await mkdtemp(join(tmpdir(), "catalog-cache-test-"));
   try {
@@ -37,7 +38,9 @@ async function withGraph(
       `export default {
         createDependencyGraphSession() {
           let answers = [];
+          let fullQueries = 0;
           return {
+            ${serviceCoverage ? `serviceResolutionCoverage: () => (${JSON.stringify(serviceCoverage)}),` : ""}
             tools: [{
               name: "query_codex_security_graph",
               description: "Query the graph.",
@@ -46,6 +49,7 @@ async function withGraph(
             async close() {},
             async call() {
               return {
+                ${serviceCoverage ? "fixtureFullQueries: ++fullQueries," : ""}
                 ...${JSON.stringify(queryPayload)},
                 service_resolution: ${JSON.stringify(queryPayload["service_resolution"] ?? {})},
                 answers,
@@ -505,6 +509,7 @@ test("source-save acknowledgments stay focused while complete evidence and graph
           },
         ]);
         const full = await graph.call("query_codex_security_graph", {});
+        if (copies > 1) expect(full["fixtureFullQueries"]).toBe(1);
         for (const key of [
           "service_resolution",
           "ruleExecutions",
@@ -515,6 +520,8 @@ test("source-save acknowledgments stay focused while complete evidence and graph
         acknowledgments.push(saved);
       },
       payload,
+      undefined,
+      copies > 1 ? coverage : undefined,
     );
   }
   // Repository provenance can change the content-addressed ID between fixtures.
