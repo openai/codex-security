@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from workbench_test_support import initialize_git_repository
 
 
 @pytest.fixture
@@ -142,3 +143,123 @@ def test_windows_directory_query_errors_preserve_usable_sources(
         check_targets(tmp_path, scopes, [sibling.name])
     (selected / "source.py").touch()
     check_targets(tmp_path, ["selected"], [])
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("operation", "relative", "code"),
+    [
+        ("lstat", "denied", errno.EACCES),
+        ("iterdir", "denied", errno.EIO),
+        ("lstat", "denied/child", errno.EIO),
+    ],
+)
+def test_windows_directory_entry_errors_preserve_partial_inventory(
+    tmp_path, monkeypatch, check_targets, operation, relative, code
+):
+    import workbench_target
+
+    subprocess.run(["git", "-C", tmp_path, "init", "-q"], check=True)
+    (tmp_path / "denied" / "child").mkdir(parents=True)
+    source = tmp_path / "README.md"
+    source.touch()
+    denied = tmp_path / relative
+    failure = OSError(code, "Synthetic inventory failure", str(denied))
+    original = getattr(Path, operation)
+
+    def inspect(path):
+        if path == denied:
+            raise failure
+        return original(path)
+
+    monkeypatch.setattr(workbench_target, "_WINDOWS", True)
+    monkeypatch.setattr(Path, operation, inspect)
+    with pytest.raises(OSError) as caught:
+        workbench_target.git_directory_snapshot_paths(tmp_path)
+    assert caught.value is failure
+    check_targets(tmp_path, ["."], [])
+    source.unlink()
+    with pytest.raises(OSError) as caught:
+        check_targets(tmp_path, ["."], [])
+    assert caught.value is failure
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="requires POSIX permissions")
+def test_unreadable_case_variant_keeps_the_selected_directory_usable(tmp_path, check_targets):
+    selected = tmp_path / "selected" / "dirs"
+    selected.mkdir(parents=True)
+    alias = tmp_path / "SELECTED"
+    if alias.exists():
+        pytest.skip("requires a case-sensitive filesystem")
+    (alias / "dirs").mkdir(parents=True)
+    (alias / "dirs" / "hidden").touch()
+    (selected / "good").touch()
+    subprocess.run(["git", "-C", tmp_path, "init", "-q"], check=True)
+    subprocess.run(["git", "-C", tmp_path, "add", "."], check=True)
+    alias.chmod(0)
+    try:
+        check_targets(tmp_path, ["selected/dirs"], [])
+    finally:
+        alias.chmod(0o700)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    ("damage", "diagnostic"),
+    [
+        ("config", "config"),
+        ("HEAD", "git repository"),
+        pytest.param(
+            "permissions",
+            "git repository|Permission denied",
+            marks=pytest.mark.skipif(
+                os.name == "nt" or os.geteuid() == 0, reason="requires POSIX permissions"
+            ),
+        ),
+    ],
+)
+def test_damaged_nested_checkout_does_not_supply_ignored_content(
+    tmp_path, check_targets, damage, diagnostic
+):
+    from workbench_target import git_directory_snapshot_paths
+
+    root = tmp_path / "repo"
+    initialize_git_repository(root)
+    selected = root / "selected"
+    selected.mkdir()
+    nested = selected / "nested"
+    initialize_git_repository(nested)
+    subprocess.run(["git", "-C", root, "add", "selected/nested"], check=True)
+    metadata = nested / ".git"
+    (metadata / "info" / "exclude").write_text("*.ignored\n")
+    cache = nested / "cache.ignored"
+    cache.touch()
+    check_targets(root, ["selected"], [])
+    (nested / "README.md").unlink()
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(root, ["selected"], [])
+
+    if damage == "config":
+        (metadata / "config").write_text("[invalid")
+    elif damage == "HEAD":
+        (metadata / "HEAD").unlink()
+    else:
+        metadata.chmod(0)
+    try:
+        assert cache in git_directory_snapshot_paths(selected)
+        with pytest.raises(OSError, match=diagnostic):
+            check_targets(root, ["selected"], [])
+        sibling = selected / "usable.py"
+        sibling.touch()
+        check_targets(root, ["selected"], [])
+        sibling.unlink()
+    finally:
+        if damage == "permissions":
+            metadata.chmod(0o700)
+
+    # A deinitialized gitlink can contain ordinary files without its own checkout metadata.
+    metadata.rename(tmp_path / "saved-metadata")
+    check_targets(root, ["selected"], [])
+    cache.unlink()
+    with pytest.raises(ValueError, match="target is empty"):
+        check_targets(root, ["selected"], [])

@@ -1286,6 +1286,11 @@ def git_directory_snapshot_paths(
                     matching_prefixes[key] = prefix.samefile(scope)
                 except (FileNotFoundError, NotADirectoryError):
                     matching_prefixes[key] = False
+                except OSError as exc:
+                    if onerror is None:
+                        raise
+                    onerror(exc)
+                    matching_prefixes[key] = False
             # realpath spelling is not a filesystem identity on case-insensitive
             # POSIX volumes; WindowsPath equality also folds distinct names.
             if not matching_prefixes[key]:
@@ -1321,6 +1326,30 @@ def git_directory_snapshot_paths(
             if nested_paths is not None:
                 nested_worktrees.add((metadata.st_dev, metadata.st_ino))
                 paths.extend(nested_paths)
+                continue
+        if onerror is not None:
+            try:
+                (path / ".git").lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                onerror(exc)
+                nested_worktrees.add((metadata.st_dev, metadata.st_ino))
+                continue
+            else:
+                # Git can discover the outer checkout when the nested HEAD is missing.
+                # Probe the marker directly before considering an unfiltered walk.
+                probe = git_command(
+                    path,
+                    "rev-parse",
+                    "--show-toplevel",
+                    git_dir=path / ".git",
+                    work_tree=path,
+                    text=False,
+                )
+                detail = _git_diagnostic(probe.stderr).rstrip() if probe.returncode else ""
+                onerror(OSError(detail or f"Could not inspect the nested Git working tree: {path}"))
+                nested_worktrees.add((metadata.st_dev, metadata.st_ino))
                 continue
         paths.extend(source_directory_snapshot_paths(path, onerror=onerror))
 
@@ -1369,6 +1398,11 @@ def git_directory_snapshot_paths(
                     metadata = path.lstat()
                 except (FileNotFoundError, NotADirectoryError):
                     continue
+                except OSError as exc:
+                    if onerror is None:
+                        raise
+                    onerror(exc)
+                    continue
                 if getattr(metadata, "st_reparse_tag", 0) & 0x20000000:
                     junctions.setdefault((metadata.st_dev, metadata.st_ino), path)
                 elif stat.S_ISLNK(metadata.st_mode):
@@ -1379,9 +1413,11 @@ def git_directory_snapshot_paths(
                         continue
                     try:
                         children.extend(path.iterdir())
-                    except PermissionError as exc:
-                        if onerror:
+                    except OSError as exc:
+                        if onerror is not None:
                             onerror(exc)
+                        elif not isinstance(exc, PermissionError):
+                            raise
                         continue
             candidates: dict[bytes, Path] = {}
             for path in children:
@@ -1391,9 +1427,11 @@ def git_directory_snapshot_paths(
                     metadata = path.lstat()
                 except (FileNotFoundError, NotADirectoryError):
                     continue
-                except PermissionError as exc:
-                    if onerror:
+                except OSError as exc:
+                    if onerror is not None:
                         onerror(exc)
+                    elif not isinstance(exc, PermissionError):
+                        raise
                     continue
                 if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
                     continue
