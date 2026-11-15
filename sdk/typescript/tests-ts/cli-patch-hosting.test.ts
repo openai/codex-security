@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { connect } from "node:net";
 import { dirname, join, parse, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -22,6 +25,47 @@ describe("patch change tracking", () => {
   const fixtures = createTemporaryDirectories(true);
   afterEach(fixtures.cleanup);
   const publicationRepository = () => createPublicationRepository(fixtures);
+
+  async function loopbackTls(
+    config: string,
+    git: (...args: string[]) => string,
+  ) {
+    const directory = dirname(config);
+    const settings = join(directory, "openssl.cnf");
+    const key = join(directory, "key.pem");
+    const cert = join(directory, "cert.pem");
+    await writeFile(
+      settings,
+      "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=extensions\n" +
+        "[dn]\nCN=Loopback test server\n" +
+        "[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=serverAuth\n" +
+        "subjectAltName=IP:127.0.0.1,IP:127.0.0.2\n",
+    );
+    // Git for Windows supplies OpenSSL on its shell PATH.
+    git(
+      "-C",
+      directory,
+      "-c",
+      "alias.test-openssl=!openssl",
+      "test-openssl",
+      "req",
+      "-newkey",
+      "rsa:2048",
+      "-x509",
+      "-nodes",
+      "-days",
+      "1",
+      "-config",
+      settings,
+      "-keyout",
+      key,
+      "-out",
+      cert,
+    );
+    git("config", "--file", config, "http.sslCAInfo", cert);
+    git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
+    return { key: await readFile(key), cert: await readFile(cert) };
+  }
 
   test.each([
     ["local", false],
@@ -310,12 +354,14 @@ exit 1
   );
 
   test.each(["preflight", "push"] as const)(
-    "HTTP %s uses the operator credential helper without executing checkout helpers",
+    "HTTPS %s uses the operator credential helper without executing checkout helpers",
     async (stage) => {
       const { directory, git } = await publicationRepository();
       const external = await fixtures.create("patch-credentials-");
+      const global = join(external, "global.gitconfig");
       let challenged = false;
       const server = Bun.serve({
+        tls: await loopbackTls(global, git),
         hostname: "127.0.0.1",
         port: 0,
         fetch() {
@@ -330,7 +376,6 @@ exit 1
         const remote = new URL("example/repository.git", server.url).href;
         const marker = join(external, "helper-log");
         const script = join(external, "helper.cjs");
-        const global = join(external, "global.gitconfig");
         await writeFile(
           script,
           `const fs = require("node:fs"); const path = fs.readFileSync(0, "utf8").split("\\n").find(line => line.startsWith("path=")); fs.appendFileSync(${JSON.stringify(marker)}, process.argv[2] + " " + path + "\\n");`,
@@ -946,7 +991,12 @@ exit 1
       const environment = { ...process.env };
       for (const key of Object.keys(environment))
         if (/^(?:https?|all|no)_proxy$/iu.test(key)) delete environment[key];
-      const proxy = Bun.serve({
+      const config = join(
+        await fixtures.create("patch-proxy-config-"),
+        "gitconfig",
+      );
+      const origin = Bun.serve({
+        tls: await loopbackTls(config, git),
         hostname: "127.0.0.1",
         port: 0,
         async fetch(request) {
@@ -993,12 +1043,32 @@ exit 1
           });
         },
       });
+      const proxy = createServer();
+      // Only this tunnel maps the destination address to the loopback Git server.
+      proxy.on("connect", (request, client, head) => {
+        if (request.url !== `127.0.0.2:${origin.port}`) {
+          client.end("HTTP/1.1 403 Forbidden\r\n\r\n");
+          return;
+        }
+        const upstream = connect(origin.port!, "127.0.0.1", () => {
+          client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          if (head.length) upstream.write(head);
+          client.pipe(upstream).pipe(client);
+        });
+        upstream.on("error", () => client.destroy());
+        client.on("error", () => upstream.destroy());
+      });
       try {
+        proxy.listen(0, "127.0.0.1");
+        await once(proxy, "listening");
+        const address = proxy.address();
+        if (!address || typeof address === "string")
+          throw new Error("Missing loopback proxy address");
         git(
           "remote",
           "set-url",
           "origin",
-          `http://127.0.0.2:${proxy.port}/${remote.split(/[\\/]/u).at(-1)!}`,
+          `https://127.0.0.2:${origin.port}/${remote.split(/[\\/]/u).at(-1)!}`,
         );
         for (const destination of [remote, secondary])
           git(
@@ -1007,18 +1077,14 @@ exit 1
             "--add",
             "--push",
             "origin",
-            `http://127.0.0.2:${proxy.port}/${destination.split(/[\\/]/u).at(-1)!}`,
+            `https://127.0.0.2:${origin.port}/${destination.split(/[\\/]/u).at(-1)!}`,
           );
-        const config = join(
-          await fixtures.create("patch-proxy-config-"),
-          "gitconfig",
-        );
         git(
           "config",
           "--file",
           config,
           "remote.origin.proxy",
-          `http://127.0.0.1:${proxy.port}`,
+          `http://127.0.0.1:${address.port}`,
         );
         environment["GIT_CONFIG_GLOBAL"] = config;
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
@@ -1070,7 +1136,8 @@ exit 1
               ),
             ).toBe("fixed");
       } finally {
-        proxy.stop(true);
+        proxy.close();
+        origin.stop(true);
       }
     },
   );

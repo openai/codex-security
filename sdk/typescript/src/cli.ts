@@ -11269,10 +11269,14 @@ async function patchPublicationDestination(
   const fetchRemote = await remoteUrl(["remote", "get-url", "origin"]);
   // Git dispatches helper names literally, including schemes that URL would lowercase.
   for (const url of [fetchRemote, ...pushRemotes]) {
+    if (url.startsWith("http://"))
+      throw new CodexSecurityError(
+        "Patch publication cannot use a plain HTTP origin URL. Use HTTPS or SSH to protect Git credentials.",
+      );
     if (
       /^[A-Za-z0-9+.-]+::/u.test(url) ||
       (/^[A-Za-z0-9+.-]+:\/\//u.test(url) &&
-        !/^(?:https?|ssh|git(?:\+ssh)?|ssh\+git|file):\/\//u.test(url))
+        !/^(?:https|ssh|git(?:\+ssh)?|ssh\+git|file):\/\//u.test(url))
     )
       throw new CodexSecurityError(
         "Patch publication cannot use a Git remote helper selected by the checkout.",
@@ -11536,7 +11540,13 @@ async function runPatchTransport(
     dependencies.environment,
     "GIT_CONFIG_PARAMETERS",
   )
-    ? ["-c", "protocol.file.allow=never", ...args]
+    ? [
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "protocol.http.allow=never",
+        ...args,
+      ]
     : args;
   const run = (overrides: NodeJS.ProcessEnv = {}) =>
     dependencies.runRepositoryCommand("git", transportArgs, repository, {
@@ -11755,6 +11765,7 @@ async function patchTransportEnvironment(
   };
   // Git resolves the remote again when the actual transport starts.
   set("protocol.file.allow", "never");
+  set("protocol.http.allow", "never");
   const protocols = environmentEntry(
     dependencies.environment,
     "GIT_ALLOW_PROTOCOL",
@@ -11762,11 +11773,11 @@ async function patchTransportEnvironment(
   if (protocols !== undefined)
     pinned["GIT_ALLOW_PROTOCOL"] = protocols
       .split(":")
-      .filter((protocol) => protocol !== "file")
+      .filter((protocol) => protocol !== "file" && protocol !== "http")
       .join(":");
   // An empty command-scope value clears every inherited server-side push option.
   if (pushing) set("push.pushOption", "");
-  if (!remotes.some((remote) => /^https?:\/\//u.test(remote))) return pinned;
+  if (!remotes.some((remote) => remote.startsWith("https://"))) return pinned;
   // Git accumulates credential helpers until an empty helper resets them.
   const entries = await patchScopedConfig(
     "^((http|credential)\\..*|core\\.askpass)$",

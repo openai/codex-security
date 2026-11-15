@@ -2810,6 +2810,8 @@ Patch results are `verified`, `no_change`, `blocked`, or
 
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
 Publication checks the source of `core.sshCommand` before it runs SSH.
+Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
+HTTP fetch and push URLs before contacting the hosting service.
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
