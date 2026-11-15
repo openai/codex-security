@@ -34,6 +34,7 @@ The guides cover local and Cloud imports unless a row limits its scope.
 | [GitHub code scanning](github-code-scanning.md)             | `github`      | Alerts selected for one repository and Git ref                                  |
 | [GitHub Dependabot](github-dependabot.md)                   | `github`      | Dependency alerts exported from one repository                                  |
 | [GitHub Security Advisories](github-security-advisories.md) | `github`      | Selected repository or global advisories                                        |
+| [Grype](grype.md)                                           | `grype`       | Native `grype -o json` directory, SBOM or image scan (local only)               |
 | [OpenGrep](opengrep.md)                                     | `opengrep`    | Native scan JSON, optionally gzip-compressed                                    |
 | [Semgrep](semgrep.md)                                       | `semgrep`     | CLI/CI JSON, SARIF, selected Guardian findings, or Platform Web API reports     |
 | [Snyk](snyk.md)                                             | `snyk`        | CLI JSON, plugin exports, SARIF, or monitored Code and Open Source issues       |
@@ -77,7 +78,7 @@ from the preview for your destination](sonar.md#import-and-verify).
 **Save locally.** Remove `--dry-run` and confirm. In automation, use `--yes`
 after reviewing the preview.
 
-**Send to Cloud.** Tenable One and CrowdStrike reports support local import only. For a Cloud-supported report, keep the file, provider,
+**Send to Cloud.** Tenable One, CrowdStrike and Grype reports support local import only. For a Cloud-supported report, keep the file, provider,
 source key, and scanner options from your local preview. Change the destination
 to `--to cloud`, and pass the connected repository URL or Cloud ID to
 `--repository`. Preview again with `--dry-run --format json`. [Cloud setup](../../sdk/typescript/docs/cli.md#preview-and-publish)

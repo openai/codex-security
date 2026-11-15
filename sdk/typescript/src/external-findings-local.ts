@@ -61,6 +61,7 @@ import {
   crowdstrikeCheckout,
   crowdstrikeReportFormat,
 } from "./crowdstrike-findings.js";
+import { grypeReportFormat } from "./grype-findings.js";
 import {
   guardianFindingRepository,
   guardianSelectionFormat,
@@ -963,6 +964,7 @@ export async function prepareLocalImport(
     (
       | { provider: "tenable" }
       | { provider: "crowdstrike" }
+      | { provider: "grype" }
       | { provider: Provider }
     ),
   dependencies: LocalExternalImportDependencies,
@@ -993,6 +995,7 @@ export async function prepareLocalImport(
   for (const [provider, format] of [
     ["tenable", tenableReportFormat],
     ["crowdstrike", crowdstrikeReportFormat],
+    ["grype", grypeReportFormat],
   ] as const)
     if (
       options.provider !== provider &&
@@ -1073,6 +1076,16 @@ export async function prepareLocalImport(
       dependencies,
       bound,
       source ? { sourceRepositories: [source] } : {},
+    );
+  }
+  if (options.provider === "grype") {
+    return preparedLocalStorage(
+      current,
+      options,
+      context,
+      dependencies,
+      false,
+      {},
     );
   }
   const { repository, options: workbenchOptions } = context;

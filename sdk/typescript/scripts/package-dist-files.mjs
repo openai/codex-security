@@ -76,6 +76,7 @@ const distModules = [
   "veracode-findings",
   "tenable-findings",
   "crowdstrike-findings",
+  "grype-findings",
   "wiz-findings",
   "codex-prompt",
   "codex-sdk-environment",
