@@ -4488,6 +4488,85 @@ if __name__ == "__main__":
     },
   );
 
+  test.each(["failure", "cancellation", "tool output only", "legacy plugin"])(
+    "saves only an accepted coordinator phase at its observation time on stop (%s)",
+    async (scenario) => {
+      const { root, repository, codexHome, scanDir } = await scanDirectories();
+      const pluginRoot = await copyCredentialTestPlugin(root);
+      if (scenario === "legacy plugin") {
+        const path = join(pluginRoot, ".codex-plugin", "plugin.json");
+        const manifest = JSON.parse(await readFile(path, "utf8"));
+        delete manifest.codexSecurity.stoppedScanPhaseObservation;
+        await writeFile(path, JSON.stringify(manifest));
+      }
+      const controller = new AbortController();
+      const observedAt = "2026-01-02T12:00:00.000Z";
+      let now = Date.parse(observedAt);
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        if (scenario !== "tool output only") {
+          yield {
+            type: "item.completed",
+            item: {
+              type: "agent_message",
+              id: "phase",
+              text: progressMarker("discovery", 1, 8),
+            },
+          };
+        }
+        now += 60_000;
+        // A source read can quote a valid marker. A coordinator claim beyond
+        // the registered inventory also fails the existing eligibility check.
+        yield completedCommand(
+          "cat example.txt",
+          progressMarker("validation", 2, 8),
+        );
+        yield {
+          type: "item.completed",
+          item: {
+            type: "agent_message",
+            id: "too-large",
+            text: progressMarker("reporting", 3, 9),
+          },
+        };
+        if (scenario === "cancellation") controller.abort();
+        throw new Error("Synthetic scan interruption");
+      }
+      let stopped: readonly string[] | undefined;
+      await using client = TestClient.withDependencies({
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        now: () => now,
+        prepareRuntime: async () => {
+          const runtime = preparedRuntime(codexHome);
+          runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
+          return runtime;
+        },
+        createCodex: codexFactory(async () => ({ events: events() })),
+        runWorkbench: async (options, args, input) => {
+          if (args[0] === "fail-scan" || args[0] === "cancel-scan")
+            stopped = args;
+          return registerEightFileScan(options, args, input);
+        },
+      });
+      await expect(
+        client.run(repository, { signal: controller.signal }),
+      ).rejects.toThrow();
+      expect(stopped?.[0]).toBe(
+        scenario === "cancellation" ? "cancel-scan" : "fail-scan",
+      );
+      if (scenario === "legacy plugin" || scenario === "tool output only") {
+        expect(stopped).not.toContain("--observed-phase");
+        expect(stopped).not.toContain("--phase-observed-at");
+      } else {
+        expect(stopped?.slice(-4)).toEqual([
+          "--observed-phase",
+          "discovery",
+          "--phase-observed-at",
+          observedAt,
+        ]);
+      }
+    },
+  );
+
   test("reports a Deep Scan terminal failure instead of a completion-state error", async () => {
     const { root, repository, codexHome, scanDir } = await scanDirectories();
     const commands: string[] = [];

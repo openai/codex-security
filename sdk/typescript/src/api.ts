@@ -722,6 +722,11 @@ export interface ScanPreflight extends DeepScanOptions, ScanModelConfiguration {
   deepScanSources?: DeepScanSources;
 }
 
+interface ObservedScanPhase {
+  phase: ScanProgress["phase"];
+  observedAt: string;
+}
+
 interface LocalScanInputs extends Omit<
   ScanPreflight,
   "model" | "reasoningEffort" | "authentication"
@@ -2273,6 +2278,7 @@ export class CodexSecurity {
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
+    let observedPhase: ObservedScanPhase | undefined;
     let activeScan: {
       id: string;
       options: WorkbenchCommandOptions;
@@ -2615,6 +2621,11 @@ export class CodexSecurity {
           ? await pluginCapabilities(shellPluginRoot)
           : undefined;
       const standard = standardCapabilities?.["standardScanHandoff"] === 1;
+      const trackStoppedPhase =
+        standard &&
+        !hosted &&
+        options.validationPrompt === undefined &&
+        standardCapabilities?.["stoppedScanPhaseObservation"] === 1;
       const discoveryPrompt =
         options.validationPrompt === undefined
           ? undefined
@@ -2701,8 +2712,24 @@ export class CodexSecurity {
           tracker.setExpectedFilesTotal(filesTotal);
         }
         reviewedFileCount = progress.filesCompleted;
-        if (liveEvent !== undefined)
+        if (liveEvent !== undefined) {
           tracker.acceptParentProgress(progress, liveEvent);
+          // Command output may quote a progress marker from source. Only save
+          // a phase that the coordinator itself reported during this turn.
+          const item = liveEvent["item"];
+          if (
+            trackStoppedPhase &&
+            isRecord(item) &&
+            item["type"] === "agent_message"
+          ) {
+            observedPhase = {
+              phase: progress.phase,
+              observedAt: new Date(
+                (this.#dependencies.now ?? Date.now)(),
+              ).toISOString(),
+            };
+          }
+        }
         if (
           source !== undefined ||
           mode === "deep" ||
@@ -4351,6 +4378,7 @@ export class CodexSecurity {
               (failure instanceof ScanCostLimitExceededError
                 ? failure.cost
                 : snapshot?.cost),
+            observedPhase,
           );
           activeScan = null;
         } catch {}
@@ -7056,9 +7084,18 @@ async function stopRegisteredScan(
   canceled: boolean,
   error: unknown,
   cost?: Readonly<ScanCost> | ReturnType<typeof measuredScanCost>,
+  observedPhase?: ObservedScanPhase,
 ): Promise<void> {
   const cleanupOptions = { ...activeScan.options, signal: undefined };
   const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
+  const phaseArgs = observedPhase
+    ? [
+        "--observed-phase",
+        observedPhase.phase,
+        "--phase-observed-at",
+        observedPhase.observedAt,
+      ]
+    : [];
   if (canceled) {
     try {
       const stopped = await workbench(cleanupOptions, [
@@ -7066,6 +7103,7 @@ async function stopRegisteredScan(
         "--scan-id",
         activeScan.id,
         ...costArgs,
+        ...phaseArgs,
       ]);
       // A workspace can already display a replacement when cancellation returns.
       const results = stopped["results"];
@@ -7088,6 +7126,7 @@ async function stopRegisteredScan(
     activeScan.id,
     `--message=${errorMessage(error)}`,
     ...costArgs,
+    ...phaseArgs,
   ]);
   notifyScanLifecycle(options, failed["scan"], true);
 }

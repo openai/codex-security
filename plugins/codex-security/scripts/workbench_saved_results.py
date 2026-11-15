@@ -75,6 +75,7 @@ from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
 )
+from workbench_scan_usage import _timestamp as parse_observation_time
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
@@ -1252,16 +1253,25 @@ def mark_running_scan_failed(
     return updated.rowcount == 1
 
 
+def stopped_phase_observation(scan: sqlite3.Row, args: argparse.Namespace) -> str | None:
+    phase = getattr(args, "observed_phase", None)
+    observed_at = getattr(args, "phase_observed_at", None)
+    if scan["mode"] == "standard" and phase and parse_observation_time(observed_at) is not None:
+        return json.dumps({"phase": phase, "observedAt": observed_at})
+    return None
+
+
 def touch_scan_progress(
     connection: sqlite3.Connection,
     scan_id: str,
     timestamp: str,
     scope_file_count: int | None = None,
+    last_observed_phase: str | None = None,
 ) -> bool:
     updated = connection.execute(
-        "UPDATE scan_progress SET updated_at = ?, scope_file_count = COALESCE(?, scope_file_count) "
-        "WHERE scan_id = ?",
-        (timestamp, scope_file_count, scan_id),
+        "UPDATE scan_progress SET updated_at = ?, scope_file_count = COALESCE(?, scope_file_count), "
+        "last_observed_phase_json = ? WHERE scan_id = ?",
+        (timestamp, scope_file_count, last_observed_phase, scan_id),
     )
     return updated.rowcount == 1
 
@@ -1313,6 +1323,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             scan_id,
             timestamp,
             scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
+            stopped_phase_observation(scan, args),
         ):
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
@@ -1377,6 +1388,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             scan_id,
             timestamp,
             scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
+            stopped_phase_observation(scan, args),
         ):
             raise SystemExit("Codex Security scan progress not found.")
     record_stopped_scan_usage(db, connection, scan_id, cost_json)

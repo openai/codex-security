@@ -79,7 +79,7 @@ function assertMigrationNames(database: DatabaseSync, ...versions: number[]) {
       database
         .prepare("SELECT name FROM schema_migrations WHERE version = ?")
         .get(version)?.name,
-      workbenchMigrations[version - 1].name,
+      workbenchMigrations.find((item) => item.version === version)!.name,
     );
 }
 

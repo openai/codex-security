@@ -372,6 +372,7 @@ SCAN_SUMMARY_COLUMNS = """
     progress.scope_file_count,
     progress.review_items_completed,
     progress.review_items_total,
+    progress.last_observed_phase_json,
     progress.updated_at AS progress_updated_at,
     (
         SELECT COUNT(*)
@@ -395,7 +396,7 @@ def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.
                progress.review_items_total, progress.review_items_completed, progress.deep_review_pass,
                progress.phase_items_total, progress.phase_items_completed, progress.phase_progress_unit,
                progress.preflight_checks_total, progress.preflight_checks_completed,
-               progress.preflight_issues_json
+               progress.preflight_issues_json, progress.last_observed_phase_json
         FROM scans
         JOIN scan_progress AS progress ON progress.scan_id = scans.id
         JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
@@ -426,6 +427,11 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
                 "worklistRows": row["review_items_total"],
             },
             "phase": row["phase"],
+            **(
+                {"lastObservedPhase": json.loads(row["last_observed_phase_json"])}
+                if row["last_observed_phase_json"] is not None
+                else {}
+            ),
             "status": "canceled" if row["canceled_at"] else row["status"],
             "updatedAt": row["progress_updated_at"],
         },

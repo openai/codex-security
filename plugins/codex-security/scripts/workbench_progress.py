@@ -90,6 +90,11 @@ def scan_progress_result(
             "worklistRows": scan["review_items_total"],
         },
         "phase": scan["phase"],
+        **(
+            {"lastObservedPhase": json.loads(scan["last_observed_phase_json"])}
+            if scan["last_observed_phase_json"] is not None
+            else {}
+        ),
         "phaseProgress": {
             "completed": scan["phase_items_completed"],
             "total": scan["phase_items_total"],

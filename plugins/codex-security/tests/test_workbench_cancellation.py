@@ -13,10 +13,12 @@ from workbench_test_support import (
     cancel_scan,
     create_saved_workspace,
     empty_target_paths,
+    empty_target_scan,
     fail_scan,
     get_scan,
     load_script,
     mark_handoff_delivered,
+    run_workbench,
     scan_claim_command,
     scan_command,
     start_delivered_scan,
@@ -119,6 +121,46 @@ def test_cancellation_identifies_committed_scan_when_workspace_has_replacement(
         assert response["canceledScanId"] == scan_id
         assert response["results"]["scanId"] == (replacement_id if app else scan_id)
         assert response["results"]["progress"]["status"] == ("running" if app else "canceled")
+
+
+@pytest.mark.parametrize("stop", ["fail-scan", "cancel-scan"])
+def test_stop_retains_observation_separately_from_committed_progress(tmp_path: Path, stop: str):
+    state_dir, _, scan_id, _ = empty_target_scan(tmp_path)
+    before = get_scan(state_dir, scan_id)["scan"]["progress"]
+    assert "lastObservedPhase" not in before
+    extra = ["--message", "Fixture interruption"] if stop == "fail-scan" else []
+    observed_at = before["updatedAt"]
+    scan_command(
+        state_dir,
+        stop,
+        scan_id,
+        *extra,
+        "--observed-phase",
+        "discovery",
+        "--phase-observed-at",
+        observed_at,
+    )
+    scan_command(
+        state_dir,
+        stop,
+        scan_id,
+        *extra,
+        "--observed-phase",
+        "reporting",
+        "--phase-observed-at",
+        observed_at,
+    )
+    detail = get_scan(state_dir, scan_id)["scan"]
+    summary = run_workbench(state_dir, "list-scans")["scans"][0]
+    compact = get_scan(state_dir, scan_id, "--progress-only")["scan"]
+    for entry in (detail, summary, compact):
+        progress = entry["progress"]
+        assert progress["lastObservedPhase"] == {"phase": "discovery", "observedAt": observed_at}
+        assert progress["phase"] == before["phase"]
+        assert progress["coverage"] == before["coverage"]
+        assert progress["updatedAt"] == detail["lifecycle"]["finishedAt"]
+    if stop == "fail-scan":
+        assert detail["failureMessage"] == "Fixture interruption"
 
 
 def test_workbench_records_scan_failure(tmp_path: Path) -> None:
