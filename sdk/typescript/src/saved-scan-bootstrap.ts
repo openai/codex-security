@@ -29,6 +29,7 @@ interface ScanTarget {
   target_path: string;
   executableSourcePaths?: string[];
   knowledgeRoots?: string[];
+  missingProfileSources?: boolean;
   repository_generation?: string | null;
   originFallback?: boolean;
   protectPython?: boolean;
@@ -43,6 +44,7 @@ interface SavedBoundaries {
   byTarget: Map<string, string | null>;
   roots: string[];
   complete: boolean;
+  missingProfileSources: boolean;
 }
 
 export interface SavedToolDiscovery {
@@ -161,6 +163,7 @@ export async function savedScanWorkbench(
       protectedRoot: protectedRoots,
       discoveryProtectedRoots,
       allowPathLookup: checkouts.complete,
+      excludeCheckoutPython: checkouts.missingProfileSources,
       currentDirectory: options.currentDirectory,
       signal,
     });
@@ -267,8 +270,10 @@ async function readTargets(
         const targets = latest
           ? completedScans(database)
           : exactTargets(database, requestedId);
-        if (targets.length === 1) loadRecipeSources(database, targets[0]!);
-        const checkouts = savedCheckouts(database);
+        const checkouts = savedCheckouts(
+          database,
+          targets.length === 1 ? targets : [],
+        );
         return { targets, checkouts };
       },
     );
@@ -321,11 +326,28 @@ function loadRecipeSources(
   // Older recipes stored the effective model file paths only in config.
   const config = recipe["config"];
   if (isRecord(config)) {
-    for (const key of MODEL_FILE_SETTINGS) {
+    const modelPaths = MODEL_FILE_SETTINGS.flatMap((key) => {
       const path = config[key];
-      if (typeof path === "string" && isAbsolute(path))
-        target.executableSourcePaths.push(path);
-    }
+      return typeof path === "string" && isAbsolute(path) ? [path] : [];
+    });
+    target.executableSourcePaths.push(...modelPaths);
+    const profile = config["profile"];
+    const profiles = config["profiles"];
+    const nativeProfile =
+      typeof profile === "string" &&
+      !(isRecord(profiles) && isRecord(profiles[profile]));
+    const inputs = recipe["scanInputs"];
+    // Writers with model-file receipts also recorded all effective source paths.
+    // Older native profiles omitted inherited paths; today's profile can differ.
+    const hasModelReceipt =
+      isRecord(inputs) &&
+      isRecord(inputs["modelFileInputs"]) &&
+      Object.hasOwn(inputs["modelFileInputs"], "model_instructions_file");
+    target.missingProfileSources =
+      recipe["mode"] === "deep" &&
+      nativeProfile &&
+      !hasModelReceipt &&
+      modelPaths.length !== MODEL_FILE_SETTINGS.length;
   }
   target.knowledgeRoots = [
     ...paths("knowledgeBasePaths"),
@@ -378,8 +400,7 @@ export async function savedCheckoutBoundaries(
       tableColumns(database, "scans").has("recipe_json")
         ? exactTargets(database, selected)
         : [];
-    for (const target of targets) loadRecipeSources(database, target);
-    return { checkouts: savedCheckouts(database), targets };
+    return { checkouts: savedCheckouts(database, targets), targets };
   });
   return {
     ...checkouts,
@@ -507,7 +528,11 @@ function tableColumns(database: RuntimeDatabase, table: string): Set<string> {
 }
 
 /** Read registered boundaries without assuming an unversioned scan was outside Git. */
-function savedCheckouts(database: RuntimeDatabase): SavedBoundaries {
+function savedCheckouts(
+  database: RuntimeDatabase,
+  targets: ScanTarget[],
+): SavedBoundaries {
+  for (const target of targets) loadRecipeSources(database, target);
   const scan = tableColumns(database, "scans");
   const registry = tableColumns(database, "security_targets");
   const workspace = tableColumns(database, "workspaces");
@@ -546,10 +571,14 @@ function savedCheckouts(database: RuntimeDatabase): SavedBoundaries {
       ).map((row) => row.root)
     : [];
   const roots = [...rows.map((row) => row.checkout_root), ...rejected];
+  const missingProfileSources = targets.some(
+    (target) => target.missingProfileSources,
+  );
   return {
     byTarget: new Map(rows.map((row) => [row.target_path, row.checkout_root])),
     roots: roots.filter((root): root is string => root !== null),
     complete: !roots.includes(null),
+    missingProfileSources,
   };
 }
 

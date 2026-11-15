@@ -779,6 +779,7 @@ async function runCampaign(
               (await savedCheckoutBoundaries(process.env, { scanDir }, signal));
             threatModelPath = await readThreatModelPath(scanDir, {
               pythonPath: options.config.pythonPath,
+              excludeCheckoutPython: saved?.missingProfileSources,
               protectedRoot: saved?.inputRoots.length
                 ? [protectedRoot, ...saved.inputRoots]
                 : protectedRoot,
