@@ -319,9 +319,8 @@ for (const linked of [false, true]) {
                 `node -e 'const fs = require("node:fs"); const message = process.argv[1]; fs.linkSync(message, message + ".link"); fs.appendFileSync(message, "Reviewed-by: synthetic\\n");' "$1"`,
               ]
             : [
-                'printf "entered\\n" > veto-progress',
-                'git interpret-trailers --in-place --trailer "Reviewed-by: synthetic" -- "$1" 2>>veto-progress || { code=$?; printf "interpret-trailers exited %s\\n" "$code" >>veto-progress; exit "$code"; }',
-                'cat "$1" >>veto-progress',
+                'printf "\\nReviewed-by: synthetic\\n" >> "$1"',
+                'cat "$1" > veto-progress',
                 "exit 7",
               ]),
         ].join("\n") + "\n",

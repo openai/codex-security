@@ -793,8 +793,8 @@ exit 1
           if (tool === "glab") return "";
           if (args.includes("ls-remote")) {
             probed = true;
-            expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
-              "'" + helper.replaceAll("'", "'\\''") + "'",
+            expect(options?.environment?.["GIT_SSH_COMMAND"]).toEndWith(
+              " && exec '" + helper.replaceAll("'", "'\\''") + "'",
             );
             // End this preflight after observing the bound command.
             throw new Error("fixture transport inspected");
@@ -1160,8 +1160,8 @@ exit 1
         onRepositoryCommand: (tool, args, cwd, options) => {
           if (tool === "glab") return "";
           if (args.includes("ls-remote")) {
-            expect(options?.environment?.["GIT_SSH_COMMAND"]).toContain(
-              "'approved'",
+            expect(options?.environment?.["GIT_SSH_COMMAND"]).toEndWith(
+              ` '${script}' 'approved'`,
             );
             return "";
           }
@@ -2207,11 +2207,10 @@ process.exit(result.status ?? 1);
               }
               if (args[0] === "-c" && args[2] === "codex-security-ssh-config") {
                 sshLookups++;
-                expect(args.slice(0, 3)).toEqual([
-                  "-c",
-                  `alias.codex-security-ssh-config=!${effectiveCommand} -G`,
-                  "codex-security-ssh-config",
-                ]);
+                expect(args[1]).toStartWith(
+                  "alias.codex-security-ssh-config=!",
+                );
+                expect(args[1]).toEndWith(`${effectiveCommand} -G`);
                 if (
                   mirror?.startsWith("ssh:") &&
                   args.at(-1) === "git@mirror.example.test"
@@ -2255,7 +2254,7 @@ process.exit(result.status ?? 1);
                   transport.startsWith("ssh") ||
                   transport === "www-scp"
                 )
-                  expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
+                  expect(options?.environment?.["GIT_SSH_COMMAND"]).toEndWith(
                     effectiveCommand,
                   );
                 pushes++;
@@ -2436,12 +2435,27 @@ process.exit(result.status ?? 1);
     },
   );
 
-  test("resumes publication with SSH available only in Git's subprocess PATH", async () => {
+  test.each([
+    "available only in Git's subprocess PATH",
+    "selected explicitly from the Git metadata directory",
+    "found through a relative GIT_EXEC_PATH from a subdirectory",
+  ] as const)("resumes publication with SSH %s", async (mode) => {
+    const metadata =
+      mode === "selected explicitly from the Git metadata directory";
     const { directory, git } = await publicationRepository();
+    const nested =
+      mode === "found through a relative GIT_EXEC_PATH from a subdirectory";
+    const caller = metadata
+      ? join(directory, ".git")
+      : nested
+        ? join(directory, "src")
+        : directory;
     const sshDirectory = await fixtures.create("patch-git-ssh-");
+    const ssh = join(sshDirectory, "ssh");
+    const marker = join(sshDirectory, "probe");
     await writeFile(
-      join(sshDirectory, "ssh"),
-      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf "hostname github.com\\n"\n',
+      ssh,
+      '#!/bin/sh\n[ "$1" = "-G" ] && [ "$2" = "git@GitHub-Work" ] || exit 1\nprintf called > "$PATCH_SSH_PROBE"\nprintf "hostname github.com\\n"\n',
       { mode: 0o755 },
     );
     const emptyPath = await fixtures.create("patch-no-ssh-");
@@ -2449,9 +2463,12 @@ process.exit(result.status ?? 1);
     expect(Bun.which("ssh", { PATH: emptyPath })).toBeNull();
     const environment = {
       PATH: emptyPath,
-      GIT_EXEC_PATH: sshDirectory,
+      GIT_EXEC_PATH: nested ? relative(caller, sshDirectory) : sshDirectory,
       GIT_SSH: undefined,
-      GIT_SSH_COMMAND: undefined,
+      GIT_SSH_COMMAND: metadata
+        ? JSON.stringify(ssh.replaceAll("\\", "/"))
+        : undefined,
+      PATCH_SSH_PROBE: marker,
     };
     git(
       "remote",
@@ -2475,7 +2492,7 @@ process.exit(result.status ?? 1);
     const outcome = await runWorkflow(
       ["patch", "--resume-pr", branch, "--json"],
       {
-        currentDirectory: directory,
+        currentDirectory: caller,
         environment,
         onRepositoryCommand: async (command, args, cwd, options) => {
           if (command === "gh") {
@@ -2513,7 +2530,7 @@ process.exit(result.status ?? 1);
             {
               cwd,
               env: { ...process.env, ...environment, ...options?.environment },
-              encoding: "utf8",
+              encoding: options?.encoding ?? "utf8",
             },
           );
           return options?.trim === false ? stdout : stdout.trim();
@@ -2525,5 +2542,6 @@ process.exit(result.status ?? 1);
     expect(outcome.exitCode, outcome.stderr).toBe(0);
     expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(url);
     expect(repositoryLookups).toBe(1);
+    expect(await readFile(marker, "utf8")).toBe("called");
   });
 });

@@ -66,7 +66,8 @@ async function resolvePatchProfile(
   const extra = join(root, "extra-workspace");
   const temporaryDirectory = join(root, "temp");
   for (const path of [
-    home,
+    // Create the parent directory for the default credential-store deny rule.
+    join(home, ".config", "git"),
     repository,
     extra,
     temporaryDirectory,
