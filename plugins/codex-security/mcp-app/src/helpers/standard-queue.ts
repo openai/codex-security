@@ -19,7 +19,7 @@ interface Queue {
   rules: Rule[];
   batches: string[][];
   reviewed: string[];
-  returns?: { file: string; count: number }[];
+  returns?: { file: string; count: number; id?: string }[];
 }
 
 const readJson = (file: string) => JSON.parse(readFile(file).toString("utf8"));
@@ -165,24 +165,37 @@ export async function standardQueue(args: string[], home?: string) {
           "Expected repository-relative paths in reviewed_files.",
         );
     }
-    // Keep the original field order so a retry resolves to its saved receipt.
-    const result = {
-      batch,
-      reviewed_files,
-      findings,
-      resolved_questions,
-      ...details,
-    };
-    const digest = createHash("sha256")
-      .update(JSON.stringify(result))
-      .digest("hex");
-    const returned = `artifacts/02_discovery/standard-returns/${digest}.json`;
+    // Original receipts were identified by these fields alone. Keep that ID
+    // for queue accounting even when an extended receipt has different bytes.
+    const original = { batch, reviewed_files, findings, resolved_questions };
+    const result = { ...original, ...details };
+    const digest = (receipt: object) =>
+      createHash("sha256").update(JSON.stringify(receipt)).digest("hex");
+    const id = digest(original);
+    const receiptFile = (hash: string) =>
+      `artifacts/02_discovery/standard-returns/${hash}.json`;
+    const originalFile = receiptFile(id);
+    const returned = Object.keys(details).length
+      ? receiptFile(digest(result))
+      : originalFile;
     await withQueueWriteLock(await lockFile(), async () => {
       queue = readJson(file);
       queue.returns ??= [];
-      if (!queue.returns.some((saved) => saved.file === returned)) {
+      const saved = queue.returns.find(
+        (row) => row.id === id || row.file === originalFile,
+      );
+      if (
+        !saved ||
+        (saved.file === originalFile && returned !== originalFile)
+      ) {
         await replaceArtifactJson(await destination(returned), result);
-        queue.returns.push({ file: returned, count: findings.length });
+        if (saved) {
+          // Enrich the old receipt without changing its candidate offsets.
+          saved.file = returned;
+          saved.id = id;
+        } else {
+          queue.returns.push({ file: returned, count: findings.length, id });
+        }
       }
       queue.reviewed = [
         ...new Set([

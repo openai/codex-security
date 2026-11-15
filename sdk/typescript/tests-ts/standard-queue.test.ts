@@ -241,3 +241,77 @@ test("overlapping Standard returns keep both batches and candidate offsets", asy
     second.child.kill();
   }
 });
+
+test("Standard retries retain candidate IDs across original and extended receipts", () => {
+  const scan = temporary.create("standard-queue-retry-");
+  const context = join(scan, "artifacts", "01_context");
+  const returns = "artifacts/02_discovery/standard-returns";
+  mkdirSync(context, { recursive: true });
+  mkdirSync(join(scan, returns), { recursive: true });
+  const receipt = (batch: number, path: string) => ({
+    batch,
+    reviewed_files: [path],
+    findings: [{ title: path }],
+    resolved_questions: [],
+  });
+  const original = receipt(1, "old.py");
+  const next = receipt(2, "new.py");
+  const fileFor = (value: object) =>
+    `${returns}/${createHash("sha256").update(JSON.stringify(value)).digest("hex")}.json`;
+  const originalFile = fileFor(original);
+  const originalBytes = JSON.stringify(original);
+  writeFileSync(join(scan, originalFile), originalBytes);
+  const queuePath = join(context, "standard-queue.json");
+  writeFileSync(
+    queuePath,
+    JSON.stringify({
+      batches: [["old.py"], ["new.py"]],
+      reviewed: ["old.py"],
+      returns: [{ file: originalFile, count: 1 }],
+    }),
+  );
+  const submit = (batch: number, payload: object) => {
+    const result = spawnSync(
+      nodeCommand().command,
+      [
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "standard-queue",
+        "reviewed",
+        scan,
+        String(batch),
+      ],
+      { encoding: "utf8", input: JSON.stringify(payload) },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  };
+  // Add a second candidate before enriching the existing acknowledgement.
+  for (const worker of [next, original]) {
+    submit(worker.batch, {
+      ...worker,
+      notes: "Initial notes",
+      evidence: "Supporting source",
+    });
+    submit(worker.batch, worker);
+    submit(worker.batch, {
+      ...worker,
+      evidence: "Supporting source",
+      notes: "Initial notes",
+    });
+  }
+  const queue = JSON.parse(readFileSync(queuePath, "utf8"));
+  expect(queue.returns.map((row: { count: number }) => row.count)).toEqual([
+    1, 1,
+  ]);
+  for (const [index, worker] of [original, next].entries()) {
+    const extended = {
+      ...worker,
+      notes: "Initial notes",
+      evidence: "Supporting source",
+    };
+    expect(queue.returns[index].file).toBe(fileFor(extended));
+    expect(
+      JSON.parse(readFileSync(join(scan, queue.returns[index].file), "utf8")),
+    ).toEqual(extended);
+  }
+  expect(readFileSync(join(scan, originalFile), "utf8")).toBe(originalBytes);
+});
