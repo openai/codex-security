@@ -1356,6 +1356,94 @@ with sqlite3.connect(sys.argv[2]) as database:
   assert.equal(result.status, 0, result.stderr || String(result.error));
 }
 
+for (const opener of ["Python", "Node"]) {
+  test(`${opener} preserves the stopped-phase preview when adding Deep Scan finalization`, async (t) => {
+    const directory = await temporary.create("workbench-stopped-phase-");
+    const databasePath = join(directory, "workbench.sqlite3");
+    // 787f3741 applied released migrations through 72, then its own 74.
+    pythonMigrations(databasePath, 72);
+    const database = new DatabaseSync(databasePath);
+    t.after(() => database.close());
+    const timestamp = "2026-10-01T00:00:00Z";
+    const stoppedPhase = JSON.stringify({
+      phase: "discovery",
+      observedAt: timestamp,
+    });
+    applyMigrations(database, [
+      {
+        version: 74,
+        name: "retain the last observed phase of stopped Standard scans",
+        statements: [
+          "ALTER TABLE scan_progress ADD COLUMN last_observed_phase_json TEXT;",
+        ],
+      },
+    ]);
+    insertRunningWorker(database);
+    database.exec(`UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v1';
+      INSERT INTO scans (id, workspace_id, target_path, target_revision, scope, mode,
+        scan_dir, status, phase, started_at, completed_at, created_at, updated_at)
+      SELECT 'stopped', workspace_id, target_path, target_revision, scope, 'standard',
+        '/synthetic/stopped', 'failed', 'preflight', started_at, updated_at, created_at, updated_at
+      FROM scans WHERE id = 'scan'`);
+    database
+      .prepare(
+        "INSERT INTO scan_progress (scan_id, last_observed_phase_json, updated_at) VALUES ('stopped', ?, ?)",
+      )
+      .run(stoppedPhase, timestamp);
+    const precursorReceipts = database.prepare(
+      "SELECT * FROM schema_migrations WHERE version <= 72 OR version = 74 ORDER BY version",
+    );
+    const receipts = precursorReceipts.all();
+    const open = () =>
+      opener === "Node"
+        ? databaseInfo(directory)
+        : pythonMigrations(databasePath);
+    await open();
+    assert.equal(
+      storedValue(database, "deep_scan_runs", "finalization_input_json"),
+      null,
+    );
+    const selected = JSON.stringify({
+      version: 1,
+      resultPath: null,
+      resultSha256: null,
+      terminalReason: "capped",
+      omittedWorkerIds: [],
+      selectedAt: timestamp,
+    });
+    // The compatible reader consumes selections persisted by a v2 writer.
+    database
+      .prepare(
+        `UPDATE deep_scan_runs SET workflow_version = 'deep-security-scan/v2',
+      phase = 'reducing', finalization_input_json = ? WHERE scan_id = 'scan'`,
+      )
+      .run(selected);
+    const upgraded = migrationHistory(database);
+    assert.deepEqual(precursorReceipts.all(), receipts);
+    assertMigrationNames(database, 73, 75, 76);
+
+    await open();
+    assert.deepEqual(migrationHistory(database), upgraded);
+    assert.equal(
+      storedValue(database, "deep_scan_runs", "finalization_input_json"),
+      selected,
+    );
+    assert.equal(
+      storedValue(database, "scan_progress", "last_observed_phase_json"),
+      stoppedPhase,
+    );
+    assert.equal(
+      storedValue(database, "deep_scan_workers", "sdk_thread_id"),
+      "first-thread",
+    );
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(
+      database.prepare("PRAGMA integrity_check").get()?.integrity_check,
+      "ok",
+    );
+  });
+}
+
 function storedRows(database: DatabaseSync) {
   return database
     .prepare(
