@@ -152,7 +152,7 @@ CREATE TABLE scan_comparison_matches(before_occurrence_id TEXT, after_occurrence
 """)
 history = Path(sys.argv[1]).parent / "shared" / "workbench-migrations.json"
 for migration in json.loads(history.read_text(encoding="utf-8")):
-    if migration["version"] in (61, 62, 64):
+    if migration["version"] in (61, 62, 64, 74):
         for statement in migration["statements"]:
             connection.execute(statement)
 origin = "https://example.invalid/synthetic/repository"

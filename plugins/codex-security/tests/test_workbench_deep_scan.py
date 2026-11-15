@@ -130,6 +130,7 @@ def test_target_admission_stops_at_the_first_non_directory_entry(
 
 def restore_v53_schema(state_dir: Path) -> None:
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("ALTER TABLE scan_progress DROP COLUMN last_observed_phase_json")
         connection.execute("DROP TRIGGER retain_unverified_deep_scan_worker_attempt")
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
