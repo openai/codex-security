@@ -474,21 +474,25 @@ def test_deadline_checks_require_original_elapsed_allowance():
         assert not elapsed(recipe)
 
 
-def test_elapsed_deadline_keeps_recorded_proof_gap_after_queue_finishes(tmp_path):
+@pytest.mark.parametrize("elapsed", [True, False], ids=["expired", "unbounded"])
+def test_completed_queue_keeps_recorded_proof_gap(tmp_path, elapsed):
     from test_workbench_completion_binding import register_cli_scan
 
     state, target, scan = (tmp_path / name for name in ("state", "target", "scan"))
     target.mkdir()
-    scan_id = register_cli_scan(state, target, scan, recipe_fields={"maxTimeMinutes": 1})["scanId"]
-    scan_command(
-        state,
-        "set-scan-thread",
-        scan_id,
-        "--thread-id",
-        "fixture",
-        "--time-budget-started-at",
-        "2000-01-01T00:00:00Z",
-    )
+    scan_id = register_cli_scan(
+        state, target, scan, recipe_fields={"maxTimeMinutes": 1} if elapsed else {}
+    )["scanId"]
+    if elapsed:
+        scan_command(
+            state,
+            "set-scan-thread",
+            scan_id,
+            "--thread-id",
+            "fixture",
+            "--time-budget-started-at",
+            "2000-01-01T00:00:00Z",
+        )
     write_completed_contract(scan, scan_id, target)
     queue = scan / "artifacts/01_context/standard-queue.json"
     queue.parent.mkdir(parents=True, exist_ok=True)

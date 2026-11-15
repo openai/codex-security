@@ -44,7 +44,7 @@ def read_standard_queue(scan_dir: Path) -> dict:
     if not queue and has_standard_review_state(scan_dir):
         raise RecoverableContractError(
             "The Standard file queue is missing or incomplete. Restore the queue before "
-            "publishing its results, or rebuild it if no worker returns were saved."
+            "publishing its results, or rebuild it if no worker returns or decisions were saved."
         )
     return queue
 
@@ -310,7 +310,8 @@ def require_standard_decisions(
             for row in receipt_rows[receipt["candidateId"]]:
                 for field in ("candidate", "counterevidence", "reviewed_files"):
                     row[field] = receipt[field]
-    return retain_deferred
+    # A completed traversal can still leave a recorded claim without sufficient proof.
+    return retain_deferred or any(part["disposition"] == "deferred" for part in outcomes.values())
 
 
 def main() -> None:
