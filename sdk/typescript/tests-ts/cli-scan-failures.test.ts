@@ -479,6 +479,20 @@ test("scan discovery accepts caller inputs and validates the reported result var
   expect(inputs({ maxCost: "not a number" })).toBe(false);
   const data = ajv.compile(output);
   expect(data({ dryRun: true, ...fakePreflight() })).toBe(true);
+  expect(
+    data({
+      dryRun: true,
+      ...fakePreflight(),
+      configuredParentSessionThreadLimit: 4,
+    }),
+  ).toBe(true);
+  expect(
+    data({
+      dryRun: true,
+      ...fakePreflight(),
+      configuredParentSessionThreadLimit: 0,
+    }),
+  ).toBe(false);
   expect(data(JSON.parse(JSON.stringify(fakeResult(["high"]).toJSON())))).toBe(
     true,
   );

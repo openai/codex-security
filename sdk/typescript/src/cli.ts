@@ -1335,6 +1335,7 @@ const scanPreflightOutput = z.looseObject({
   model: z.string(),
   reasoningEffort: z.string(),
   modelProvider: z.string().optional(),
+  configuredParentSessionThreadLimit: z.number().int().positive().optional(),
   outputDir: z.string().nullable(),
   stateDirectory: z.string().optional(),
   archiveDir: z.string().optional(),
