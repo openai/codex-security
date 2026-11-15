@@ -1297,6 +1297,13 @@ async function readReceipts(
         if (saved[flag] !== undefined && typeof saved[flag] !== "boolean")
           throw new Error(`Expected a boolean ${flag}`);
       }
+      if (
+        (saved.knowledgeBaseFailure || saved.checkoutOccupied) &&
+        (saved.status !== "failed" || saved.policyFailed !== undefined)
+      )
+        throw new Error(
+          "A pre-scan failure requires failed status and no policyFailed verdict",
+        );
     } catch (cause) {
       throw new Error(
         `${path}:${index + 1}: ${errorMessage(cause)}. Restore a complete ledger backup that includes every committed attempt, or start a separate campaign in a new --output-dir.`,

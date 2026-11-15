@@ -624,6 +624,16 @@ describe("multiscan", () => {
     ["invalid pending checkout cleanup", { cleanupPending: "recover" }, false],
     ["non-boolean checkout flag", { checkoutOccupied: "false" }, false],
     ["non-boolean policy outcome", { policyFailed: "true" }, false],
+    [
+      "policy verdict on a knowledge base failure",
+      { policyFailed: true, knowledgeBaseFailure: true, status: "failed" },
+      true,
+    ],
+    [
+      "completed status on an occupied checkout",
+      { status: "completed", checkoutOccupied: true },
+      true,
+    ],
   ] as const)(
     "CLI identifies the %s and preserves committed history",
     async (_name, bad, middle) => {
