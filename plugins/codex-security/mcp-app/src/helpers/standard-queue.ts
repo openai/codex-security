@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { artifactDestination, replaceArtifactJson } from "../artifact-io.js";
+import { sqliteFilename } from "../windows-path";
 import { loadScopes, scopedSourceFiles } from "./generate-inventory";
 import { environmentValue, readFile, resolvedPathText } from "./helper-files";
 import { append, exists } from "./inventory-paths";
@@ -18,6 +20,34 @@ interface Queue {
 
 const readJson = (file: string) => JSON.parse(readFile(file).toString("utf8"));
 
+// The file stays in the reserved returns directory so every helper locks the
+// same inode. SQLite releases the transaction even if its process exits.
+async function withQueueWriteLock<T>(file: string, write: () => Promise<T>) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const guard = new DatabaseSync(sqliteFilename(file));
+  try {
+    for (;;) {
+      try {
+        guard.exec("BEGIN IMMEDIATE");
+        break;
+      } catch (error) {
+        // A paused writer still owns its transaction. Wait without blocking
+        // the event loop, including when helpers run in the same process.
+        if (
+          !(error instanceof Error) ||
+          !("errcode" in error) ||
+          ![5, 6].includes(Number(error.errcode) & 0xff)
+        )
+          throw error;
+        await delay(50);
+      }
+    }
+    return await write();
+  } finally {
+    guard.close();
+  }
+}
+
 export async function standardQueue(args: string[], home?: string) {
   const [command, scanDir, ...values] = args;
   if (!scanDir)
@@ -31,6 +61,8 @@ export async function standardQueue(args: string[], home?: string) {
       "Standard file queue",
     );
   const file = await destination("artifacts/01_context/standard-queue.json");
+  const lockFile = () =>
+    destination("artifacts/02_discovery/standard-returns/queue.lock.sqlite");
   let queue: Queue;
   if (command === "build") {
     if (exists(file))
@@ -79,12 +111,14 @@ export async function standardQueue(args: string[], home?: string) {
     queue = { rules, batches: [], reviewed: [], returns: [] };
     for (let i = 0; i < paths.length; i += 5)
       queue.batches.push(paths.slice(i, i + 5));
-    await replaceArtifactJson(file, queue);
+    await withQueueWriteLock(await lockFile(), async () => {
+      if (exists(file))
+        throw new Error("Queue already built. Use pending to resume.");
+      await replaceArtifactJson(file, queue);
+    });
   } else {
     queue = readJson(file);
   }
-  const paths = new Set(queue.batches.flat());
-  const reviewed = new Set(queue.reviewed);
   if (command === "reviewed") {
     const batch = Number(values[0]);
     const assigned = queue.batches[batch - 1];
@@ -97,23 +131,29 @@ export async function standardQueue(args: string[], home?: string) {
     for (const path of reviewed_files) {
       if (!assigned.includes(path))
         throw new Error(`File is outside batch ${batch}: ${path}`);
-      reviewed.add(path);
     }
     const result = { batch, reviewed_files, findings, resolved_questions };
     const digest = createHash("sha256")
       .update(JSON.stringify(result))
       .digest("hex");
     const returned = `artifacts/02_discovery/standard-returns/${digest}.json`;
-    queue.returns ??= [];
-    if (!queue.returns.some((saved) => saved.file === returned)) {
-      await replaceArtifactJson(await destination(returned), result);
-      queue.returns.push({ file: returned, count: findings.length });
-    }
-    queue.reviewed = [...reviewed].sort();
-    await replaceArtifactJson(file, queue);
+    await withQueueWriteLock(await lockFile(), async () => {
+      queue = readJson(file);
+      queue.returns ??= [];
+      if (!queue.returns.some((saved) => saved.file === returned)) {
+        await replaceArtifactJson(await destination(returned), result);
+        queue.returns.push({ file: returned, count: findings.length });
+      }
+      queue.reviewed = [
+        ...new Set([...queue.reviewed, ...reviewed_files]),
+      ].sort();
+      await replaceArtifactJson(file, queue);
+    });
   } else if (!["build", "pending", "check"].includes(command)) {
     throw new Error(`Unknown queue operation: ${command}`);
   }
+  const paths = new Set(queue.batches.flat());
+  const reviewed = new Set(queue.reviewed);
   const remaining = paths.size - reviewed.size;
   if (command === "check" && remaining)
     throw new Error(

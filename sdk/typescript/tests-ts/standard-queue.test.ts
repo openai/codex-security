@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   mkdirSync,
   readFileSync,
@@ -107,4 +108,89 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
     readFileSync(join(scan, queue.returns[0].file), "utf8"),
   );
   expect(saved.findings).toEqual([{ title: "Retained claim" }]);
+});
+
+test("overlapping Standard returns keep both batches and candidate offsets", async () => {
+  // Keep each component valid while taking the SQLite guard beyond MAX_PATH.
+  const scan = join(
+    temporary.create("standard-queue-ack-"),
+    "batch".repeat(24),
+    "state".repeat(24),
+  );
+  const context = join(scan, "artifacts", "01_context");
+  mkdirSync(context, { recursive: true });
+  const queueFile = join(context, "standard-queue.json");
+  writeFileSync(
+    queueFile,
+    JSON.stringify({
+      rules: [{ path: ".*" }],
+      batches: [["a.py"], ["b.py"]],
+      reviewed: [],
+      returns: [],
+    }),
+  );
+  // Hold two helpers at their stdin reads so their invocations overlap on every platform.
+  const preloader = join(scan, "ready.cjs");
+  writeFileSync(
+    preloader,
+    `const fs = require("node:fs");
+    const read = fs.readFileSync;
+    fs.readFileSync = function (file, ...args) {
+      if (file === 0) process.send("ready");
+      return read.call(this, file, ...args);
+    };`,
+  );
+  const start = (batch: number) => {
+    const child = spawn(
+      nodeCommand().command,
+      [
+        "--require",
+        preloader,
+        join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+        "standard-queue",
+        "reviewed",
+        scan,
+        String(batch),
+      ],
+      { stdio: ["pipe", "ignore", "pipe", "ipc"] },
+    );
+    const closed = once(child, "close");
+    const ready = Promise.race([
+      once(child, "message"),
+      closed.then(([code]) => {
+        throw new Error(`Helper exited before reading stdin: ${code}`);
+      }),
+    ]);
+    const finish = async (path: string) => {
+      child.stdin!.end(
+        JSON.stringify({
+          reviewed_files: [path],
+          findings: [{ title: path }],
+          resolved_questions: [],
+        }),
+      );
+      expect((await closed)[0]).toBe(0);
+    };
+    return { child, ready, finish };
+  };
+  const first = start(1);
+  const second = start(2);
+  try {
+    await Promise.all([first.ready, second.ready]);
+    // Python assigns candidate IDs by acknowledgement order, including on resume.
+    await second.finish("b.py");
+    await first.finish("a.py");
+    const queue = JSON.parse(readFileSync(queueFile, "utf8"));
+    expect(queue.reviewed).toEqual(["a.py", "b.py"]);
+    expect(
+      queue.returns.map((row: { file: string; count: number }) => {
+        expect(row.count).toBe(1);
+        return JSON.parse(readFileSync(join(scan, row.file), "utf8"))
+          .findings[0].title;
+      }),
+    ).toEqual(["b.py", "a.py"]);
+  } finally {
+    first.child.kill();
+    second.child.kill();
+  }
 });
