@@ -72,6 +72,24 @@ function input(): ExternalFindings {
 const source = { provider: "snyk" as const, sourceKey: "example-project/main" };
 
 describe("local normalized scanner findings", () => {
+  test("preserves normalized Promptfoo findings from existing custom adapters", async () => {
+    const { repository, environment } = await fixture();
+    const options = { repository, provider: "promptfoo", sourceKey: "qa" };
+    const adapted = input();
+    const first = await prepareNormalizedLocalImport(adapted, options, {
+      environment,
+    });
+    expect((await first.import()).counts.created).toBe(adapted.findings.length);
+    const replay = await prepareNormalizedLocalImport(
+      { ...adapted, report: { format: "custom-adapter/v1" } },
+      options,
+      { environment },
+    );
+    expect((await replay.import()).counts.unchanged).toBe(
+      adapted.findings.length,
+    );
+  });
+
   test("binds retained Promptfoo evidence to its provider, evaluation and native result ID", async () => {
     const { repository, stateDirectory, environment } = await fixture();
     const format = "promptfoo-redteam/v3";

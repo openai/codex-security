@@ -176,6 +176,7 @@ test("imports file and dataset plugin rubrics while excluding inherited quality 
         severity: "informational",
       },
       assert: [quality, assertion],
+      options: { disableDefaultAsserts: true },
     },
     gradingResult: {
       pass: false,
@@ -195,26 +196,34 @@ test("imports file and dataset plugin rubrics while excluding inherited quality 
         ],
       },
     },
-    ...["CyberSecEval", "DoNotAnswer", "XSTest"].map((metric) => {
-      const pluginRubric = { ...assertion, metric };
-      return {
-        ...result,
-        id: metric,
-        testCase: {
-          metadata: { pluginId: metric.toLowerCase() },
-          assert: [pluginRubric],
-          options: { disableDefaultAsserts: true },
-        },
-        gradingResult: {
-          pass: false,
-          componentResults: [{ ...failed, assertion: pluginRubric }],
-        },
-      };
-    }),
+    ...["CyberSecEval", "DoNotAnswer", "XSTest", "XSTest/Base64"].map(
+      (metric) => {
+        const pluginRubric = { ...assertion, metric };
+        return {
+          ...result,
+          id: metric,
+          testCase: {
+            metadata: { pluginId: metric.split("/")[0]!.toLowerCase() },
+            assert: [pluginRubric],
+            options: { disableDefaultAsserts: true },
+          },
+          gradingResult: {
+            pass: false,
+            componentResults: [{ ...failed, assertion: pluginRubric }],
+          },
+        };
+      },
+    ),
   ]);
   await fixture.writeJson({
     ...input,
-    config: { ...input.config, defaultTest: { assert: [quality] } },
+    config: {
+      ...input.config,
+      defaultTest: {
+        assert: [quality],
+        options: { disableDefaultAsserts: true },
+      },
+    },
   });
   const selection = await readPromptfooFindings(fixture.file);
   expect(selection.findings.map((item) => item.source_finding_id)).toEqual([
@@ -222,6 +231,7 @@ test("imports file and dataset plugin rubrics while excluding inherited quality 
     "CyberSecEval",
     "DoNotAnswer",
     "XSTest",
+    "XSTest/Base64",
   ]);
   expect(selection.findings[0]!.evidence.severity).toBe("informational");
   expect(selection.excluded).toEqual([
@@ -230,6 +240,109 @@ test("imports file and dataset plugin rubrics while excluding inherited quality 
       source_finding_id: "quality",
       reason: expect.stringMatching(/no failed/i),
     },
+  ]);
+});
+
+test("recognizes generated Best-of-N refusal and harmful moderation failures", async () => {
+  await using fixture = await checkout();
+  const refusal = { type: "is-refusal", metric: "RBAC/BestOfN" };
+  const harmful = { type: "promptfoo:redteam:harmful:hate", metric: "Hate" };
+  const moderation = { type: "moderation", metric: "Hate" };
+  const makeRow = (
+    id: string,
+    pluginId: string,
+    strategyId: string,
+    declared: (typeof refusal)[],
+    checked: typeof refusal,
+  ) => ({
+    ...leak,
+    id,
+    testCase: { metadata: { pluginId, strategyId }, assert: declared },
+    gradingResult: {
+      pass: false,
+      componentResults: [{ ...failed, assertion: checked }],
+    },
+  });
+  await fixture.writeJson(
+    report([
+      makeRow("refusal", "rbac", "best-of-n", [refusal], refusal),
+      makeRow(
+        "moderation",
+        "harmful:hate",
+        "basic",
+        [harmful, moderation],
+        moderation,
+      ),
+      makeRow("ordinary refusal", "rbac", "basic", [refusal], refusal),
+      makeRow("unrelated refusal", "rbac", "best-of-n", [harmful], refusal),
+      makeRow(
+        "ordinary moderation",
+        "harmful:hate",
+        "basic",
+        [moderation],
+        moderation,
+      ),
+      makeRow("other metric", "harmful:hate", "basic", [harmful, moderation], {
+        ...moderation,
+        metric: "Safety",
+      }),
+    ]),
+  );
+  const selection = await readPromptfooFindings(fixture.file);
+  expect(selection.findings.map((item) => item.source_finding_id)).toEqual([
+    "refusal",
+    "moderation",
+  ]);
+  expect(selection.excluded.map((item) => item.position)).toEqual([3, 4, 5, 6]);
+});
+
+test("preserves independent failed security assertions alongside grader errors", async () => {
+  await using fixture = await checkout();
+  const unavailable = {
+    ...failed,
+    reason: "Unavailable",
+    metadata: { graderError: true },
+  };
+  await fixture.writeJson(
+    report([
+      {
+        ...leak,
+        gradingResult: { pass: false, componentResults: [unavailable, failed] },
+      },
+      {
+        ...leak,
+        id: "aggregate",
+        gradingResult: {
+          ...unavailable,
+          componentResults: [failed],
+        },
+      },
+      {
+        ...leak,
+        id: "incomplete",
+        success: true,
+        failureReason: 0,
+        gradingResult: {
+          pass: true,
+          componentResults: [
+            {
+              pass: true,
+              metadata: {
+                gradingIncomplete: true,
+                gradingError: "Partial grader outage",
+              },
+            },
+          ],
+        },
+      },
+    ]),
+  );
+  const selection = await readPromptfooFindings(fixture.file);
+  expect(selection.findings).toHaveLength(1);
+  expect(selection.findings[0]!.evidence.description).toBe(failed.reason);
+  expect(selection.excluded.map((item) => item.reason)).toEqual([
+    expect.stringContaining("Unavailable"),
+    expect.stringContaining("Partial grader outage"),
   ]);
 });
 

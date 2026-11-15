@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { validateExternalEvidence } from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
 import { asRecord, isRecord } from "./record.js";
@@ -49,19 +50,23 @@ export async function readPromptfooFindings(
         : grade
           ? [grade]
           : [];
-      const errorGrade =
-        components.find(hasGraderError) ??
-        (grade && hasGraderError(grade) ? grade : undefined);
-      if (errorGrade)
-        throw new Error(
-          `Promptfoo grader error: ${text(asRecord(errorGrade["metadata"])?.["gradingError"]) ?? text(errorGrade["reason"]) ?? "no diagnostic supplied"}`,
-        );
+      const aggregateError = grade && hasGraderError(grade);
+      const errorGrade = aggregateError
+        ? grade
+        : components.find(hasGraderError);
+      const graderDiagnostic = errorGrade
+        ? `Promptfoo grader error: ${text(asRecord(errorGrade["metadata"])?.["gradingError"]) ?? text(errorGrade["reason"]) ?? "no diagnostic supplied"}`
+        : null;
+      if (aggregateError && graderDiagnostic) throw new Error(graderDiagnostic);
       if (
         row["success"] === true &&
         row["failureReason"] === 0 &&
         grade?.["pass"] !== false
       )
-        throw new Error("Promptfoo reports that the target passed this probe.");
+        throw new Error(
+          graderDiagnostic ??
+            "Promptfoo reports that the target passed this probe.",
+        );
       if (
         row["success"] !== false ||
         row["failureReason"] !== 1 ||
@@ -72,25 +77,55 @@ export async function readPromptfooFindings(
       const meta = asRecord(testCase?.["metadata"]);
       const plugin = text(meta?.["pluginId"]);
       if (!plugin) throw new Error("Result has no red-team plugin ID.");
-      // Promptfoo prepends enabled default assertions before the plugin-generated one.
+      // Promptfoo prepends default assertions before merging defaultTest.options.
+      // The exported disableDefaultAsserts can therefore be true even with the prefix.
       const declared = testCase?.["assert"];
       const skipDefaults =
-        asRecord(testCase?.["options"])?.["disableDefaultAsserts"] !== true &&
-        Array.isArray(defaults);
+        Array.isArray(defaults) &&
+        Array.isArray(declared) &&
+        (asRecord(testCase?.["options"])?.["disableDefaultAsserts"] !== true ||
+          (declared.length > defaults.length &&
+            defaults.every((item, index) =>
+              isDeepStrictEqual(item, declared[index]),
+            )));
+      const generatedIndex = skipDefaults ? defaults.length : 0;
       const generated = Array.isArray(declared)
-        ? asRecord(declared[skipDefaults ? defaults.length : 0])
+        ? asRecord(declared[generatedIndex])
         : null;
       const failed = components.filter((component) => {
         const assertion = asRecord(component["assertion"]);
-        if (component["pass"] !== false || !assertion) return false;
+        if (
+          component["pass"] !== false ||
+          hasGraderError(component) ||
+          !assertion
+        )
+          return false;
         if (text(assertion["type"])?.startsWith("promptfoo:redteam:"))
           return true;
+        const metric = text(assertion["metric"]);
+        if (!metric) return false;
+        // Best-of-N can replace the plugin grader with Promptfoo's basic refusal check.
+        if (assertion["type"] === "is-refusal")
+          return (
+            meta?.["strategyId"] === "best-of-n" &&
+            metric.endsWith("/BestOfN") &&
+            generated?.["type"] === "is-refusal" &&
+            generated["metric"] === metric
+          );
+        // Promptfoo can append a moderation grader to its native attack assertion.
+        if (assertion["type"] === "moderation")
+          return (
+            plugin.startsWith("harmful:") &&
+            generated?.["type"] === `promptfoo:redteam:${plugin}` &&
+            generated["metric"] === metric &&
+            Array.isArray(declared) &&
+            isDeepStrictEqual(declared[generatedIndex + 1], assertion)
+          );
         return (
           (plugin.startsWith("file://") ||
             (["cyberseceval", "donotanswer", "xstest"].includes(plugin) &&
-              text(assertion["metric"])?.toLowerCase() === plugin)) &&
+              metric.split("/", 1)[0]?.toLowerCase() === plugin)) &&
           assertion["type"] === "llm-rubric" &&
-          text(assertion["metric"]) &&
           text(assertion["value"]) &&
           generated?.["type"] === assertion["type"] &&
           generated["metric"] === assertion["metric"] &&
@@ -99,7 +134,8 @@ export async function readPromptfooFindings(
       });
       if (!failed.length)
         throw new Error(
-          "No failed Promptfoo red-team assertion in this result.",
+          graderDiagnostic ??
+            "No failed Promptfoo red-team assertion in this result.",
         );
       const provider = asRecord(row["provider"]);
       const target = text(provider?.["label"]) ?? text(provider?.["id"]);
@@ -110,7 +146,9 @@ export async function readPromptfooFindings(
       return validateExternalEvidence(
         {
           title: `${plugin} on ${target}`,
-          description: reasons.join("\n") || text(grade["reason"]),
+          description:
+            reasons.join("\n") ||
+            (graderDiagnostic ? null : text(grade["reason"])),
           severity: scannerSeverity(text(meta?.["severity"])?.toLowerCase()),
           source_scan_id: evalId,
           source_data: { format: promptfooReportFormat, result: row },

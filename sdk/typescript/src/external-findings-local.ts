@@ -875,11 +875,8 @@ async function prepareUnboundLocalImport(
   const current = snapshotNormalizedFindings(input, checkStoredNumber);
   validateFindingIds(current);
   checkLocalOnlyProvider(settings.provider, current);
-  if (settings.provider === "promptfoo") {
-    if (current.report?.["format"] !== promptfooReportFormat)
-      throw new CodexSecurityError(
-        "Promptfoo imports require a red-team evaluation report.",
-      );
+  // Custom adapters could use the promptfoo provider before the native reader existed.
+  if (current.report?.["format"] === promptfooReportFormat) {
     const evalId = current.report["evalId"];
     requireIdentity(evalId, "Promptfoo evaluation ID");
     for (const { source_finding_id, evidence } of current.findings) {
@@ -898,7 +895,15 @@ async function prepareUnboundLocalImport(
           "Promptfoo evidence must belong to the selected evaluation.",
         );
     }
-  }
+  } else if (
+    current.findings.some(
+      ({ evidence }) =>
+        evidence.source_data?.["format"] === promptfooReportFormat,
+    )
+  )
+    throw new CodexSecurityError(
+      "Native Promptfoo results require a red-team evaluation report.",
+    );
   if (current.report !== undefined && !isRecord(current.report))
     throw new CodexSecurityError("Report metadata must be an object.");
   if (current.read !== current.findings.length + current.excluded.length)
