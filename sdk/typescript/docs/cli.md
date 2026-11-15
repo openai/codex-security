@@ -1245,6 +1245,11 @@ assessment. The completed report remains the source for the final set.
 The [plugin MCP feed](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md#follow-reviewed-findings-during-a-scan)
 lets another client replay these changes by scan ID.
 
+If startup reports `Unsupported workbench migration 73`, a different build used
+that version for another schema change. Use the build that created the database
+to open its history. To start a separate history with this build, set
+`CODEX_SECURITY_STATE_DIR` to a new private directory.
+
 Token totals include input plus output; cache reads and writes are subsets of
 input. Missing cache-write usage makes the uncached/cache-write breakdown
 unavailable. The CLI cannot recover missing information already recorded as zero
