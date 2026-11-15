@@ -172,7 +172,7 @@ export class DeepScanRemoteCoordinator {
             }
           }
           if (claim?.acquired) {
-            const coordinator = registry.start({ ...options, run: claim.run });
+            const coordinator = registry.start({ ...options, ...claim });
             return deadline === undefined
               ? await coordinator.wait(signal)
               : await coordinator.wait(
@@ -224,7 +224,7 @@ export async function startOrJoinDeepScanCoordinator(
     };
   }
   return {
-    coordinator: input.registry.start({ ...input.options, run: claim.run }),
+    coordinator: input.registry.start({ ...input.options, ...claim }),
     joined: false,
   };
 }

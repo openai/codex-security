@@ -94,7 +94,6 @@ export const runSchema = z
         .optional(),
       scanDir: requiredString,
       workerUsageDirectory: optionalString,
-      workbenchDatabasePath: z.string().optional(),
       dispatchedCount: nonNegativeInteger,
       completionSequence: nonNegativeInteger.optional(),
       noNewStreak: nonNegativeInteger,

@@ -152,13 +152,12 @@ def test_admission_excludes_git_in_another_saved_workbench_target(tmp_path, monk
     monkeypatch.setenv("PATH", str(historical) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("HOST_GIT", host_git)
     monkeypatch.setenv("MARKER", str(marker))
-    claimed = deep.command("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan")[
-        "deepScan"
-    ]
+    claimed = deep.command("claim-deep-scan-coordinator", "--thread-id", "thread-deep-scan")
+    request = {**claimed["deepScan"], "workbenchDatabasePath": claimed["workbenchDatabasePath"]}
     script = Path(__file__).resolve().parents[1] / "scripts" / "check_deep_scan_target.py"
     subprocess.run(
         [sys.executable, "-I", "-B", str(script)],
-        input=json.dumps(claimed),
+        input=json.dumps(request),
         text=True,
         check=True,
     )

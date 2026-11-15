@@ -30,6 +30,7 @@ export type DeepScanWorkerKind = PersistedDeepScanWorker["kind"];
 
 export interface DeepScanCoordinatorClaim {
   run: DeepScanRunState;
+  workbenchDatabasePath?: string;
   acquired: boolean;
 }
 

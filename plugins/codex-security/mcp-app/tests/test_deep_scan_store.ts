@@ -105,16 +105,11 @@ async function testBeginProtocolAndParsing() {
       deepScan: {
         includePaths: ["api", "README.md"],
         filePaths: ["README.md"],
-        workbenchDatabasePath: "/fixture/state/workbench.sqlite3",
       },
     }),
   );
   assert.deepEqual(scoped.includePaths, ["api", "README.md"]);
   assert.deepEqual(scoped.filePaths, ["README.md"]);
-  assert.equal(
-    scoped.workbenchDatabasePath,
-    "/fixture/state/workbench.sqlite3",
-  );
 }
 
 async function testScopeResponseParsing() {
@@ -247,11 +242,14 @@ async function testHeartbeatBypassesBlockedWriteQueue() {
         deepScan: { coordinatorGeneration: 2, scanDir },
       }),
       coordinatorDisposition: "claimed",
+      workbenchDatabasePath: "/fixture/state/workbench.sqlite3",
     };
   };
   const store = new WorkbenchDeepScanStore(runner);
   const lease = { scanId, threadId: "thread-fixture", handoffClaimToken };
-  await store.claimCoordinator(lease);
+  const claim = await store.claimCoordinator(lease);
+  assert.equal(claim.workbenchDatabasePath, "/fixture/state/workbench.sqlite3");
+  assert.equal("workbenchDatabasePath" in claim.run, false);
   const blockedWrite = store.updateProgress({ scanId, phase: "discovery" });
   await new Promise((resolve) => setImmediate(resolve));
   const heartbeat = store.heartbeatCoordinator(lease);

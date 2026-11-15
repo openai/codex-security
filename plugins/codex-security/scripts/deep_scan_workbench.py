@@ -1010,8 +1010,11 @@ def claim_deep_scan_coordinator_locked(
     database = connection.execute(
         "SELECT CAST(file AS BLOB) FROM pragma_database_list WHERE name = 'main'"
     ).fetchone()[0]
-    result["deepScan"]["workbenchDatabasePath"] = os.fsdecode(database)
-    return {**result, "coordinatorDisposition": disposition}
+    return {
+        **result,
+        "coordinatorDisposition": disposition,
+        "workbenchDatabasePath": os.fsdecode(database),
+    }
 
 
 def recover_expired_coordinator(
