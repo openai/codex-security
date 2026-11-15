@@ -8,6 +8,7 @@ import { sqliteFilename } from "../windows-path";
 import { loadScopes, scopedSourceFiles } from "./generate-inventory";
 import { environmentValue, readFile, resolvedPathText } from "./helper-files";
 import { append, exists, fsPath } from "./inventory-paths";
+import { contentMatcherForFile } from "./source-preview";
 
 interface Rule {
   path?: string;
@@ -99,12 +100,12 @@ export async function standardQueue(args: string[], home?: string) {
     )) {
       if (explicit) matches.add(name);
       if (matches.has(name)) continue;
-      let source: string | undefined;
+      let matchesContent: ((pattern: RegExp) => boolean) | undefined;
       for (const rule of matchers) {
         if (rule.path && !rule.path.test(name)) continue;
         if (rule.content) {
-          source ??= readFile(append(repo, name)).toString("utf8");
-          if (!rule.content.test(source)) continue;
+          matchesContent ??= contentMatcherForFile(append(repo, name));
+          if (!matchesContent(rule.content)) continue;
         }
         matches.add(name);
         break;

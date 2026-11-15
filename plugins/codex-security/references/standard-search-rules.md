@@ -4,7 +4,7 @@ Inspect representative source before choosing rules. Look for the framework's ac
 
 When the caller requests batching in context, apply the rules with an offline search tool over the supplied scope, dispatch the matching files in batches, and validate the returned candidates in batches using the caller’s draft handoff. Skip the file and helper instructions below for that handoff.
 
-Save the rules as a JSON array in `<scan_dir>/artifacts/01_context/standard-rules.json`. Each rule has a `path` or `content` JavaScript regular expression, or both. Both must match when present. Paths are repository-relative with forward slashes. Content patterns are multiline and case-sensitive. For example, `{"path":"[.]ts$","content":"registerWebhook\\("}` selects TypeScript files that call that registration function. Use the repository's own names.
+Save the rules as a JSON array in `<scan_dir>/artifacts/01_context/standard-rules.json`. Each rule has a `path` or `content` JavaScript regular expression, or both. Both must match when present. Paths are repository-relative with forward slashes. Content patterns are multiline and case-sensitive. The helper decodes UTF-8 and BOM-marked UTF-16 text. For text over 8 MiB, it queues the file if the rule’s path filter permits it, since a JavaScript expression can span the whole file. Binary files can enter through an explicit file selection or a path-only rule. For example, `{"path":"[.]ts$","content":"registerWebhook\\("}` selects TypeScript files that call that registration function. Use the repository's own names.
 
 Run the bundled helper from `<plugin_dir>/scripts/launch_codex_security_mcp --helper standard-queue` (use the `.cmd` launcher on Windows). Quote each argument for the current shell.
 

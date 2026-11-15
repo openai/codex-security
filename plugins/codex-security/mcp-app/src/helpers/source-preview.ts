@@ -126,16 +126,48 @@ export function createSourceSampler() {
   };
 }
 
+function readSourceChunks(path: string, consume: (data: Buffer) => boolean) {
+  if (process.platform === "win32")
+    windowsFiles().readChunks(Buffer.from(path, "utf16le"), consume);
+  else for (const chunk of readChunks(path)) if (!consume(chunk)) break;
+}
+
 /** Retain a bounded preview while checking every byte for binary content. */
 export function sampleFile(path: string): [Buffer, boolean] {
   try {
     const sampler = createSourceSampler();
-    if (process.platform === "win32")
-      windowsFiles().readChunks(Buffer.from(path, "utf16le"), sampler.consume);
-    else
-      for (const chunk of readChunks(path)) if (!sampler.consume(chunk)) break;
+    readSourceChunks(path, sampler.consume);
     return sampler.finish();
   } catch {
     return [Buffer.alloc(0), true];
   }
+}
+
+const MAX_EXACT_SEARCH_BYTES = 8 * 1024 * 1024;
+
+export function contentMatcherForFile(
+  path: string,
+): (pattern: RegExp) => boolean {
+  const sampler = createSourceSampler();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  readSourceChunks(path, (chunk) => {
+    if (!sampler.consume(chunk)) return false;
+    size += chunk.length;
+    if (size <= MAX_EXACT_SEARCH_BYTES) chunks.push(chunk);
+    else chunks.length = 0;
+    return true;
+  });
+  const [, binary] = sampler.finish();
+  if (binary) return () => false;
+  // An arbitrary JavaScript regex can span the entire file. Keep oversized
+  // text in the queue for source review, even if its bounded prefix does not match.
+  if (size > MAX_EXACT_SEARCH_BYTES) return () => true;
+  const bytes = Buffer.concat(chunks);
+  const encoding = bomEncoding(bytes);
+  const source =
+    encoding === "utf-8"
+      ? bytes.toString("utf8")
+      : new TextDecoder(encoding).decode(bytes);
+  return (pattern) => pattern.test(source);
 }
