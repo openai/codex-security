@@ -79,6 +79,7 @@ from workbench.saved_sources import (
     _unselected_root_order,
     _worker_outputs,
 )
+from workbench.standard_stop import STANDARD_STOP_SNAPSHOT, add_unfinished_standard_work
 from workbench_coverage_receipts import (
     _deferred_candidate_id,
     _generic_surface_updates,
@@ -259,6 +260,9 @@ def merge_saved_results(
             if frozen_source_digests is None:
                 source_times.update(_frozen_source_times(scan_dir, scan_id, recorded))
     paths: dict[str, str | None] = {}
+    standard_deferred = []
+    if stopped and scan_mode == "standard" and (scan_dir / STANDARD_STOP_SNAPSHOT).is_file():
+        paths[STANDARD_STOP_SNAPSHOT] = None
     reducer_paths: set[str] = set()
     current_results: set[str] = set()
     reducer_outputs: list[tuple[Any, str, list[str], int]] = []
@@ -364,6 +368,9 @@ def merge_saved_results(
             source_digests[relative] = digest
             source_times.setdefault(relative, observed)
             source_order[relative] = (0, source_times[relative])
+            if relative == STANDARD_STOP_SNAPSHOT:
+                standard_deferred = draft["reviewState"]["deferred"]
+                continue
             directory = Path(relative).parent
             if directory.name in {"checkpoints", "checkpoint-heads"}:
                 directory = directory.parent
@@ -904,7 +911,7 @@ def merge_saved_results(
             ):
                 discarded_coverage_sources.add(relative)
 
-    if parent is None and not sources:
+    if parent is None and not sources and not standard_deferred:
         return None
     if (
         parent_manifest
@@ -3150,6 +3157,10 @@ def merge_saved_results(
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
+        if standard_deferred:
+            add_unfinished_standard_work(
+                standard_deferred, coverage, (f for f in findings if valid_finding(f))
+            )
         item = {"id": "scan-stopped", "reason": reason}
         if item not in coverage["deferred"]:
             coverage["deferred"].append(item)
