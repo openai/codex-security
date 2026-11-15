@@ -300,6 +300,13 @@ export function createDependencyInventory() {
       ...new Set([...receipts.values()].map((value) => value.server)),
     ],
     snapshot: () => [...receipts.values()].map(describe),
+    // Host-only projection; do not return bulk originals to the model for metadata checks.
+    readOriginalField(
+      receiptId: string,
+      path: readonly (string | number)[],
+    ): unknown {
+      return inventoryJsonField(receipt(receiptId).result, [...path]);
+    },
     read(query: DependencyInventoryReceiptQuery): JsonObject {
       const value = receipt(query.receiptId);
       const metadata = describe(value) as JsonObject;

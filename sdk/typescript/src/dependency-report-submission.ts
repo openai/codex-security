@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { isRecord } from "./record.js";
+import { canonicalJson, isRecord } from "./record.js";
 import type { JsonObject } from "./config.js";
 import type { DependencyIssue } from "./dependency-advisory.js";
 import type {
@@ -14,6 +14,7 @@ import {
 } from "./dependency-investigation-tools.js";
 import {
   createDependencyInventory,
+  inventoryResultPayload,
   inventoryReceiptSelectionSchema,
   type BoundDependencyInventoryReceipt,
   type DependencyInventoryReceiptMetadata,
@@ -92,6 +93,85 @@ export const dependencyReviewQueueDescription = [
   "Include place on each assessed use. State the exact scope that the evidence establishes and use null for unverified environment, revision, artifact, observation time, copy selection or patch. Keep an explicit assumption about deployment separate from a verified observation. Include deciding unresolved questions for each place, and preserve independent verified exclusions.",
   reviewEvidenceContract,
 ].join("\n");
+
+const unavailableDataCoverage = z.discriminatedUnion("basis", [
+  z
+    .strictObject({
+      basis: z.literal("observed_scope"),
+      scope: identity,
+      checked: z.number().int().min(2),
+      missing: z.number().int().min(2),
+      representativeness: identity.describe(
+        "Why these are actual required records covering the affected scope, rather than guessed query aliases or isolated misses.",
+      ),
+      checks: z
+        .array(
+          z.strictObject({
+            requiredRecord: identity.describe(
+              "An evidenced required record identity, not a guessed alias.",
+            ),
+            selection: inventoryReceiptSelectionSchema,
+            missing: z.boolean(),
+          }),
+        )
+        .min(2),
+    })
+    .refine(
+      (value) => value.missing <= value.checked,
+      "Missing coverage cannot exceed checked coverage.",
+    ),
+  z.strictObject({
+    basis: z.literal("provider_declared"),
+    scope: identity,
+    declaration: identity.describe(
+      "Copy the provider's exact statement that broad needed data is unavailable, not a summary inferred from one missing record.",
+    ),
+    selection: inventoryReceiptSelectionSchema,
+    representativeness: identity.describe(
+      "Explain the breadth of required data covered by this provider declaration and its effect on this investigation.",
+    ),
+  }),
+]);
+
+export const dependencyInvestigationAbortSchema = z.strictObject({
+  reason: identity,
+  category: z.literal("widespread_required_data_unavailable"),
+  tool: z.strictObject({ server: identity, name: identity }),
+  affectedScope: identity,
+  coverage: unavailableDataCoverage,
+  scopeImpact: identity.describe(
+    "Why the missing data materially prevents the requested investigation after preserving independent useful work.",
+  ),
+  unblockCondition: identity,
+  evidenceReferences: z.array(identity).default([]),
+});
+
+export const dependencyInvestigationBlockedSchema =
+  dependencyInvestigationAbortSchema.extend({
+    status: z.literal("blocked"),
+    code: z.literal("INVESTIGATION_BLOCKED"),
+    nativeThreadId: identity.optional(),
+    retainedEvidence: z.object({
+      assessmentRevisions: z.array(
+        z.object({
+          id: identity,
+          revision: z.number().int(),
+          status: identity,
+        }),
+      ),
+      inventoryReceiptIds: z.array(identity),
+    }),
+  });
+
+export type DependencyInvestigationBlocked = z.infer<
+  typeof dependencyInvestigationBlockedSchema
+>;
+
+export class DependencyInvestigationBlockedError extends CodexSecurityError {
+  constructor(readonly outcome: DependencyInvestigationBlocked) {
+    super(outcome.reason);
+  }
+}
 
 export const dependencyReviewQueueSchema = z.strictObject({
   items: z
@@ -244,6 +324,8 @@ export function createDependencyReportSubmission(options: {
     typeof createDependencyInvestigationTools
   >["profileCoverage"];
   signal?: AbortSignal;
+  onBlocked?: (failure: DependencyInvestigationBlockedError) => void;
+  isConfiguredTool?: (server: string, tool: string) => boolean;
 }) {
   const controller = new AbortController();
   const signal = options.signal
@@ -278,6 +360,8 @@ export function createDependencyReportSubmission(options: {
   let submitting = false;
   let lastFeedback: string | undefined;
   let terminalError: Error | undefined;
+  let blocked: DependencyInvestigationBlockedError | undefined;
+  let closing: Promise<void> | undefined;
 
   function snapshot() {
     return (
@@ -298,6 +382,7 @@ export function createDependencyReportSubmission(options: {
     return result;
   }
   function checkOpen() {
+    if (blocked) throw blocked;
     signal.throwIfAborted();
     if (closed)
       throw new CodexSecurityError("Dependency review queue is closed.");
@@ -1000,6 +1085,7 @@ export function createDependencyReportSubmission(options: {
           for (const item of input.items) {
             prepared.push(await prepare(item, candidates));
           }
+          checkOpen();
           const items = prepared.map((item) => {
             const state = upsert(item);
             return { id: state.input.id, revision: state.revision };
@@ -1018,6 +1104,156 @@ export function createDependencyReportSubmission(options: {
           };
         }
       });
+    },
+    blockedOutcome: () => blocked?.outcome,
+    abort(
+      value: unknown,
+      nativeThreadId?: string,
+    ): DependencyInvestigationBlocked {
+      if (blocked) return blocked.outcome;
+      checkOpen();
+      if (currentReport())
+        throw new CodexSecurityError(
+          "The accepted report is final; the investigation cannot be aborted.",
+        );
+      const input = dependencyInvestigationAbortSchema.parse(value);
+      const configured = inventoryServers[input.tool.server];
+      const normalize = (name: string) => name.replace(/[^a-zA-Z0-9_]/gu, "_");
+      const sameTool = (name: string) =>
+        normalize(name) === normalize(input.tool.name);
+      if (
+        !Object.hasOwn(inventoryServers, input.tool.server) ||
+        (configured !== null && configured?.filter(sameTool).length !== 1) ||
+        options.isConfiguredTool?.(input.tool.server, input.tool.name) === false
+      )
+        throw new CodexSecurityError(
+          "Abort requires an enabled configured tool with widespread unavailable required data.",
+        );
+      const selectCoverage = (
+        selection: z.infer<typeof inventoryReceiptSelectionSchema>,
+      ) => {
+        const metadata = inventory.read({ receiptId: selection.receiptId });
+        const original = inventory.readOriginalField(selection.receiptId, []);
+        const payloads = [inventoryResultPayload(original, null)];
+        if (selection.textBlock !== null)
+          payloads.push(inventoryResultPayload(original, selection.textBlock));
+        if (
+          payloads.some(
+            (payload) =>
+              isRecord(payload) &&
+              (payload["status"] === "not_recorded" ||
+                payload["status"] === "unsupported_tool"),
+          )
+        )
+          throw new CodexSecurityError(
+            "Unsupported archived requests do not establish widespread missing provider data. Preserve the archive coverage gap as an unknown or limitation.",
+          );
+        if (
+          metadata["tool"] === undefined &&
+          metadata["outcome"] === "unavailable" &&
+          selection.textBlock === null
+        ) {
+          if (metadata["server"] !== input.tool.server)
+            throw new CodexSecurityError(
+              "Coverage evidence belongs to a different configured server.",
+            );
+          return {
+            receiptId: selection.receiptId,
+            origin: { tool: undefined, arguments: metadata["arguments"] },
+            result: inventory.readOriginalField(
+              selection.receiptId,
+              selection.record,
+            ),
+            outcome: "unavailable" as const,
+          };
+        }
+        return inventory.bind([input.tool.server], [], [selection])[0]!;
+      };
+      const selected =
+        input.coverage.basis === "provider_declared"
+          ? [selectCoverage(input.coverage.selection)]
+          : input.coverage.checks.map((check) =>
+              selectCoverage(check.selection),
+            );
+      if (
+        selected.some((receipt) =>
+          receipt.origin.tool === undefined
+            ? receipt.outcome !== "unavailable"
+            : !sameTool(receipt.origin.tool),
+        )
+      )
+        throw new CodexSecurityError(
+          "Coverage evidence must come from the named configured tool or its unavailable server startup.",
+        );
+      if (input.coverage.basis === "observed_scope") {
+        const { checks, checked, missing } = input.coverage;
+        const origins = new Set(
+          selected.map((receipt) =>
+            canonicalJson([
+              input.tool.server,
+              receipt.origin.tool === undefined
+                ? undefined
+                : normalize(receipt.origin.tool),
+              receipt.origin.arguments,
+            ]),
+          ),
+        );
+        if (
+          checked !== checks.length ||
+          missing !== checks.filter((check) => check.missing).length ||
+          new Set(checks.map((check) => check.requiredRecord)).size !==
+            checked ||
+          origins.size !== checked
+        )
+          throw new CodexSecurityError(
+            "Observed coverage must enumerate distinct actual required-record checks with matching checked and missing counts.",
+          );
+        if (
+          checks.some(
+            (check, index) =>
+              check.missing &&
+              selected[index]!.outcome === undefined &&
+              selected[index]!.result !== null &&
+              !(
+                Array.isArray(selected[index]!.result) &&
+                selected[index]!.result.length === 0
+              ),
+          )
+        )
+          throw new CodexSecurityError(
+            "A missing check needs a current failed/unavailable result or a selected null/empty record result, not a healthy populated record.",
+          );
+      }
+      if (input.coverage.basis === "provider_declared") {
+        const coverage = input.coverage;
+        if (
+          !selected.some((receipt) => receipt.result === coverage.declaration)
+        )
+          throw new CodexSecurityError(
+            "The provider declaration must exactly match its selected current original text.",
+          );
+      }
+      blocked = new DependencyInvestigationBlockedError({
+        ...input,
+        status: "blocked",
+        code: "INVESTIGATION_BLOCKED",
+        ...(nativeThreadId === undefined ? {} : { nativeThreadId }),
+        retainedEvidence: {
+          assessmentRevisions: [...items.values()].map((item) => ({
+            id: item.input.id,
+            revision: item.revision,
+            status: item.status,
+          })),
+          inventoryReceiptIds: inventory
+            .snapshot()
+            .map((receipt) => receipt.id),
+        },
+      });
+      terminalError = blocked;
+      clearScheduled();
+      controller.abort(blocked);
+      options.onBlocked?.(blocked);
+      return blocked.outcome;
     },
     async submit(
       value: unknown,
@@ -1288,6 +1524,7 @@ export function createDependencyReportSubmission(options: {
                 },
               ],
         );
+        checkOpen();
         acceptedPlaces = selected.flatMap((item) => {
           if (item.input.kind !== "use") return [];
           const keys = new Set(decisions.get(item.fingerprint)?.evidenceKeys);
@@ -1332,13 +1569,16 @@ export function createDependencyReportSubmission(options: {
         submitting = false;
       }
     },
-    async close() {
-      if (closed) return;
+    close() {
+      if (closing) return closing;
       closed = true;
       clearScheduled();
-      controller.abort(new Error("Dependency report review closed."));
-      await mutations;
-      await Promise.allSettled([...inFlight]);
+      closing = Promise.resolve().then(async () => {
+        controller.abort(new Error("Dependency report review closed."));
+        await mutations;
+        await Promise.allSettled([...inFlight]);
+      });
+      return closing;
     },
     continuationPrompt(): string | undefined {
       checkOpen();

@@ -1597,6 +1597,7 @@ test("continues the same thread after a rejection and publishes a tenth-attempt 
             { name: "queue_codex_security_dependency_assessments" },
             { name: "get_codex_security_review_status" },
             { name: reportTool.tool },
+            { name: "abort_codex_security_investigation" },
           ],
         },
       ],

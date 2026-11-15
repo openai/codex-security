@@ -137,10 +137,15 @@ import {
 } from "./dependency-advisory.js";
 import {
   dependencyCheckOutputSchema,
+  dependencyPackageCheckOutputSchema,
   reviewedDependencyCheckSchema,
 } from "./dependency-reachability.js";
 import {
   createDependencyReportSubmission,
+  DependencyInvestigationBlockedError,
+  dependencyInvestigationAbortSchema,
+  dependencyInvestigationBlockedSchema,
+  type DependencyInvestigationBlocked,
   dependencyReportInputSchema,
   dependencyReviewQueueDescription,
   dependencyReviewQueueSchema,
@@ -1255,7 +1260,7 @@ type DependencyReportTool = Pick<
   Partial<
     Pick<
       ReturnType<typeof createDependencyReportSubmission>,
-      "submit" | "queue" | "recordInventoryStartup"
+      "submit" | "queue" | "recordInventoryStartup" | "abort" | "blockedOutcome"
     >
   > & {
     status?: (
@@ -1290,6 +1295,12 @@ const dependencyReportTools = {
     description:
       "Coordinator only. Submit the exact current IDs and revisions of reviewed or pending assessments and dispositions, the checked candidate generation, and material limitations. The host finishes pending reviews, verifies candidate accounting, and builds the report from the selected items.",
     schema: dependencyReportInputSchema,
+  },
+  abort: {
+    name: "abort_codex_security_investigation",
+    description:
+      "Active coordinator only. Exceptionally end an investigation when a significant share of required data from one configured tool is unavailable across the affected scope. Identify the configured tool, current original coverage evidence, actual checked/missing records or an exact provider declaration, representativeness, material impact and unblock condition. Guessed aliases, isolated misses, optional failures, slow work or generic lack of progress do not justify abort. Preserve independent useful findings. This terminal operation returns a nonzero blocked outcome, not a reviewed exploitability verdict.",
+    schema: dependencyInvestigationAbortSchema,
   },
 } as const;
 type DependencyReportMethod = keyof typeof dependencyReportTools;
@@ -2254,7 +2265,8 @@ async function runCodexSkillProcess(
           requestedSignal === null &&
           events?.completed !== true &&
           events?.error === undefined &&
-          !events?.sandboxUnavailable
+          !events?.sandboxUnavailable &&
+          !events?.blocked
         ) {
           recoveryAttempted = true;
           recovery.session.resetTurns();
@@ -2264,6 +2276,8 @@ async function runCodexSkillProcess(
           );
           continue;
         }
+        if (events?.blocked && !signal.aborted)
+          throw new DependencyInvestigationBlockedError(events.blocked);
         if (events?.sandboxUnavailable && requestedSignal === null) {
           throw new PatchCommandError(
             "SANDBOX_UNAVAILABLE",
@@ -3063,7 +3077,22 @@ export async function main(
           "Assess this suspected vulnerability in the named package instead of looking up published advisories.",
         ),
     }),
-    output: dependencyCheckOutputSchema,
+    output: z.union([
+      ...dependencyCheckOutputSchema.options,
+      dependencyInvestigationBlockedSchema,
+      dependencyPackageCheckOutputSchema.extend({
+        status: z.literal("blocked"),
+        code: z.literal("INVESTIGATION_BLOCKED"),
+        checks: z.array(
+          z.union([
+            dependencyPackageCheckOutputSchema.shape.checks.element,
+            dependencyInvestigationBlockedSchema.extend({
+              advisoryId: z.string().nullable(),
+            }),
+          ]),
+        ),
+      }),
+    ]),
     async run({ args, options }) {
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
@@ -3150,6 +3179,7 @@ export async function main(
           return {
             signal: AbortSignal.any([controller.signal, local.signal]),
             close: () => local.abort(),
+            abort: (reason: unknown) => local.abort(reason),
           };
         }
 
@@ -3212,6 +3242,23 @@ export async function main(
             }),
             candidates,
             sourceWorkCoverage: () => dependencyGraph?.sourceWorkCoverage,
+            onBlocked: (failure) => scope.abort(failure),
+            isConfiguredTool(server, tool) {
+              const config = inventoryServers[server];
+              if (!isJsonObject(config) || config["enabled"] === false)
+                return false;
+              const normalized = tool.replace(/[^a-zA-Z0-9_]/gu, "_");
+              const matches = (value: unknown) =>
+                typeof value === "string" &&
+                value.replace(/[^a-zA-Z0-9_]/gu, "_") === normalized;
+              const disabled = config["disabled_tools"];
+              if (Array.isArray(disabled) && disabled.some(matches))
+                return false;
+              const enabled = config["enabled_tools"];
+              return (
+                !Array.isArray(enabled) || enabled.filter(matches).length === 1
+              );
+            },
             profileCoverage: (findings) =>
               evidenceTools?.profileCoverage(findings),
             catalogServerNames,
@@ -3483,6 +3530,8 @@ export async function main(
                         : { cyberAccessProgram }),
                     };
                   },
+                  abort: submission.abort,
+                  blockedOutcome: submission.blockedOutcome,
                   submit: submission.submit,
                   queue: submission.queue,
                   status: submission.readStatus,
@@ -3497,6 +3546,8 @@ export async function main(
                 },
               },
             );
+            const blocked = submission.blockedOutcome();
+            if (blocked) throw new DependencyInvestigationBlockedError(blocked);
             if (exitCode !== 0)
               throw new CodexSecurityError(
                 `Dependency assessment exited with status ${exitCode}.`,
@@ -3511,6 +3562,11 @@ export async function main(
                 ? addTokenUsage(helperUsage, investigatorUsage)
                 : helperUsage,
             });
+          } catch (failure) {
+            const blocked = submission.blockedOutcome();
+            if (blocked && !controller.signal.aborted)
+              throw new DependencyInvestigationBlockedError(blocked);
+            throw failure;
           } finally {
             scope.close();
             try {
@@ -3547,17 +3603,50 @@ export async function main(
           dependencies.lookupPackageAdvisories ?? lookupPackageAdvisories
         )(pkg, controller.signal);
         const checks = [];
+        let blockedChecks = false;
         for (const advisory of advisories) {
           controller.signal.throwIfAborted();
-          checks.push({
-            advisoryId: advisory.id,
-            ...(await assess({ package: pkg, ...advisory })),
-          });
+          try {
+            checks.push({
+              advisoryId: advisory.id,
+              ...(await assess({ package: pkg, ...advisory })),
+            });
+          } catch (failure) {
+            if (
+              !(failure instanceof DependencyInvestigationBlockedError) ||
+              controller.signal.aborted
+            )
+              throw failure;
+            blockedChecks = true;
+            checks.push({ advisoryId: advisory.id, ...failure.outcome });
+            errorOutput.write(`codex-security: ${diagnosticValue(failure)}\n`);
+          }
         }
-        return { package: pkg, checks };
+        if (blockedChecks) {
+          exitCode = 2;
+          return {
+            package: pkg,
+            checks,
+            status: "blocked" as const,
+            code: "INVESTIGATION_BLOCKED" as const,
+          };
+        }
+        return dependencyPackageCheckOutputSchema.parse({
+          package: pkg,
+          checks,
+        });
       } catch (error) {
-        exitCode = interruptedExitCode(controller.signal) ?? (exitCode || 2);
+        exitCode =
+          interruptedExitCode(controller.signal) ??
+          (error instanceof DependencyInvestigationBlockedError
+            ? 2
+            : exitCode || 2);
         errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+        if (
+          error instanceof DependencyInvestigationBlockedError &&
+          !controller.signal.aborted
+        )
+          return error.outcome;
         throw error;
       } finally {
         removeSignals();
@@ -10712,6 +10801,7 @@ export async function readSkillCommandOutput(
   completed?: boolean;
   sandboxUnavailable?: boolean;
   connectionError?: string;
+  blocked?: DependencyInvestigationBlocked;
 }> {
   const recovery = appServer?.recovery;
   const resuming = recovery?.threadId !== undefined;
@@ -10731,6 +10821,7 @@ export async function readSkillCommandOutput(
   let pendingInventoryCaptures = Promise.resolve();
   let investigationPlan = recovery?.plan;
   function pendingResearchPrompt(): string | undefined {
+    if (appServer?.dependencyReport?.blockedOutcome?.()) return undefined;
     const leads = new Map<string, string>();
     for (const item of investigationPlan ?? []) {
       const marker = /^\[research(?:\s+([^\]]+))?\]/iu.exec(item.step);
@@ -10783,7 +10874,12 @@ export async function readSkillCommandOutput(
     params: JsonObject,
   ) {
     return new Promise<unknown>((resolve, reject) => {
-      if (!threadId || !appServer?.input.writable || inventoryRpcClosed) {
+      if (
+        !threadId ||
+        !appServer?.input.writable ||
+        inventoryRpcClosed ||
+        appServer.dependencyReport?.blockedOutcome?.()
+      ) {
         reject(new CodexSecurityError("The inventory connection is closed."));
         return;
       }
@@ -10817,8 +10913,51 @@ export async function readSkillCommandOutput(
     method: DependencyReportMethod,
     args: unknown,
   ) {
+    if (method === "abort" && appServer?.dependencyReport?.abort) {
+      try {
+        const blocked = appServer.dependencyReport.abort(args, threadId);
+        send({
+          id,
+          result: {
+            success: true,
+            contentItems: [
+              {
+                type: "inputText",
+                text: JSON.stringify({
+                  status: blocked.status,
+                  code: blocked.code,
+                  reason: blocked.reason,
+                  tool: blocked.tool,
+                  affectedScope: blocked.affectedScope,
+                  unblockCondition: blocked.unblockCondition,
+                  retainedAssessments:
+                    blocked.retainedEvidence.assessmentRevisions.length,
+                  retainedReceipts:
+                    blocked.retainedEvidence.inventoryReceiptIds.length,
+                }),
+              },
+            ],
+          },
+        });
+        appServer.input.end();
+      } catch (failure) {
+        send({
+          id,
+          result: {
+            success: false,
+            contentItems: [{ type: "inputText", text: errorMessage(failure) }],
+          },
+        });
+      }
+      return;
+    }
+    if (appServer?.dependencyReport?.blockedOutcome?.()) return;
     await pendingInventoryCaptures;
-    if (clientFailure !== undefined) return;
+    if (
+      clientFailure !== undefined ||
+      appServer?.dependencyReport?.blockedOutcome?.()
+    )
+      return;
     if (method === "submit" && appServer?.dependencyReport?.submit) {
       await appServer.dependencyGraph?.flush?.();
       if (
@@ -10856,6 +10995,7 @@ export async function readSkillCommandOutput(
           : research !== undefined
             ? { accepted: false, feedback: research }
             : await appServer.dependencyReport.submit(args);
+      if (appServer.dependencyReport.blockedOutcome?.()) return;
       send({
         id,
         result: {
@@ -10937,6 +11077,7 @@ export async function readSkillCommandOutput(
     rootTurn: boolean,
     finishedAt: string,
   ) {
+    if (appServer?.dependencyReport?.blockedOutcome?.()) return;
     const item = params["item"];
     const caller = params["threadId"];
     if (
@@ -10959,6 +11100,7 @@ export async function readSkillCommandOutput(
       }
       if (!nativeSession.ownsThread(caller)) return;
     }
+    if (appServer?.dependencyReport?.blockedOutcome?.()) return;
     const result = item["result"];
     const payload = isJsonObject(result) ? result : undefined;
     const failed =
@@ -10996,6 +11138,21 @@ export async function readSkillCommandOutput(
     params: Record<string, unknown>,
   ) {
     if (!appServer) return;
+    if (appServer.dependencyReport?.blockedOutcome?.()) {
+      send({
+        id: value["id"] as string | number,
+        result: {
+          success: false,
+          contentItems: [
+            {
+              type: "inputText",
+              text: "The investigation is terminally blocked; no further work is accepted.",
+            },
+          ],
+        },
+      });
+      return;
+    }
     const caller = params["threadId"];
     if (
       appServer?.dependencyReport &&
@@ -11026,6 +11183,7 @@ export async function readSkillCommandOutput(
         return;
       }
     }
+    if (appServer.dependencyReport?.blockedOutcome?.()) return;
     const rootTurn = caller === threadId && params["turnId"] === turnId;
     const investigatorTurn =
       appServer?.dependencyReport && nativeSession.isCurrentTurn(params);
@@ -11057,8 +11215,9 @@ export async function readSkillCommandOutput(
       );
     } else if (reportMethod) {
       if (
-        reportMethod === "submit" &&
-        !nativeSession.isRoot(params["threadId"])
+        (reportMethod === "submit" || reportMethod === "abort") &&
+        (!nativeSession.isRoot(params["threadId"]) ||
+          (reportMethod === "abort" && !nativeSession.isCurrentTurn(params)))
       ) {
         send({
           id: value["id"] as string | number,
@@ -11067,7 +11226,10 @@ export async function readSkillCommandOutput(
             contentItems: [
               {
                 type: "inputText",
-                text: "The coordinator owns final report submission. Queue your evidence and send the coordinator your assessment IDs and revisions.",
+                text:
+                  reportMethod === "abort"
+                    ? "Only the active coordinator turn may abort the investigation. Send the coordinator your blocker, scope, evidence and unblock condition."
+                    : "The coordinator owns final report submission. Queue your evidence and send the coordinator your assessment IDs and revisions.",
               },
             ],
           },
@@ -11080,6 +11242,10 @@ export async function readSkillCommandOutput(
           reportMethod,
           params["arguments"],
         );
+      if (reportMethod === "abort") {
+        await report();
+        return;
+      }
       // Keep report completion visible to finishTurn while the reader handles
       // replies needed by graph ingestion or receipt authentication.
       const pending = pendingReportCalls.then(report);
@@ -11099,10 +11265,16 @@ export async function readSkillCommandOutput(
     status: string;
     error?: { message: string };
   }) {
+    if (appServer?.dependencyReport?.blockedOutcome?.()) return;
     await pendingReportCalls;
     await pendingInventoryCaptures;
+    if (appServer?.dependencyReport?.blockedOutcome?.()) return;
     await appServer?.dependencyGraph?.flush?.();
-    if (clientFailure !== undefined) return;
+    if (
+      clientFailure !== undefined ||
+      appServer?.dependencyReport?.blockedOutcome?.()
+    )
+      return;
     if (turn.status === "completed" && appServer?.dependencyReport) {
       // An investigator can resume while final submission awaits review.
       const prompt =
@@ -11146,7 +11318,11 @@ export async function readSkillCommandOutput(
     let text: string;
     try {
       await pendingInventoryCaptures;
-      if (clientFailure !== undefined) return;
+      if (
+        clientFailure !== undefined ||
+        appServer?.dependencyReport?.blockedOutcome?.()
+      )
+        return;
       const result = await (appServer?.dependencyReport &&
       appServer.allowedMcpServers?.length
         ? graph.call(tool, args, inventoryRpc)
@@ -11184,6 +11360,7 @@ export async function readSkillCommandOutput(
     }
   }
   const startTurn = (prompt = appServer!.prompt): void => {
+    if (appServer?.dependencyReport?.blockedOutcome?.()) return;
     const selected = appServer?.cyberAccessProgram;
     const program =
       selected === undefined
@@ -11208,6 +11385,7 @@ export async function readSkillCommandOutput(
           );
     void program.then(
       (cyberAccessProgram) => {
+        if (appServer?.dependencyReport?.blockedOutcome?.()) return;
         if (appServer?.dependencyReport) {
           if (
             cyberAccessProgram === "daybreakBlue" ||
@@ -11280,7 +11458,11 @@ export async function readSkillCommandOutput(
     );
   };
   const startThread = (threadConfig?: JsonObject): void => {
-    if (appServer === undefined) return;
+    if (
+      appServer === undefined ||
+      appServer.dependencyReport?.blockedOutcome?.()
+    )
+      return;
     const submission = appServer.dependencyReport !== undefined;
     const graph = appServer.dependencyGraph;
     if (submission && !appServer.permissionProfile) {
@@ -11787,6 +11969,8 @@ export async function readSkillCommandOutput(
     }
   }
   await Promise.all([...pendingClientWork]);
+  const blocked = appServer?.dependencyReport?.blockedOutcome?.();
+  if (blocked) return { completed: false, blocked };
   if (clientFailure !== undefined) throw clientFailure;
   if (connectionFailure !== undefined && !recovery?.threadId)
     throw connectionFailure;

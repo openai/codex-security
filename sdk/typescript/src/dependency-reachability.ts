@@ -452,17 +452,18 @@ export const reviewedDependencyCheckSchema =
 
 // The CVE form keeps its original result. A package can have zero or more
 // independent issues, so each reviewed verdict belongs to a particular check.
+export const dependencyPackageCheckOutputSchema = z.object({
+  package: z.object({ ecosystem: z.string(), name: z.string() }),
+  vulnDescription: z.string().optional(),
+  checks: z.array(
+    reviewedDependencyCheckSchema.extend({
+      advisoryId: z.string().nullable(),
+    }),
+  ),
+});
 export const dependencyCheckOutputSchema = z.union([
   dependencyReachabilityReportSchema,
-  z.object({
-    package: z.object({ ecosystem: z.string(), name: z.string() }),
-    vulnDescription: z.string().optional(),
-    checks: z.array(
-      reviewedDependencyCheckSchema.extend({
-        advisoryId: z.string().nullable(),
-      }),
-    ),
-  }),
+  dependencyPackageCheckOutputSchema,
 ]);
 
 // Saved v1 reports are readable without publishing their checkout-wide verdict.

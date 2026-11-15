@@ -2338,6 +2338,43 @@ codex-security exploitability check npm:example-package \
   --vuln-description "Version 2.3.1 may skip signature verification when reading a manifest"
 ```
 
+A healthy lookup with missing, empty, stale, incomplete, or mismatched records
+leaves the affected conclusion unknown. It does not prove safety or a tool outage.
+Investigators escalate unusable required capabilities to the coordinator while
+independent work continues. Source-proven exclusions do not require optional
+runtime enrichment.
+
+The coordinator may use `abort_codex_security_investigation` only exceptionally,
+when a significant share of required data from one configured tool is unavailable
+across a material investigation scope. The call must identify that tool, bind
+current original coverage evidence, enumerate actual checked and missing records
+or cite an exact provider-wide declaration, and explain representativeness, impact,
+and what must change. The host verifies tool identity, original captures and count
+consistency; the coordinator judges significance and relevance. There is no fixed
+percentage threshold. Guessed aliases and archive `not_recorded` responses do not
+measure missing live data. Isolated misses, optional failures, one endpoint denial,
+slow productive work, or generic lack of progress do not authorize abort.
+
+An accepted abort cancels that investigation's native workers and helpers and
+returns exit code `2` with a diagnostic JSON outcome: `status: "blocked"`,
+`code: "INVESTIGATION_BLOCKED"`, the scoped data-loss evidence and unblock condition.
+This operational outcome is separate from a reviewed exploitability verdict and
+cannot be rendered as one. An ordinary required-tool startup error remains an
+ordinary setup failure rather than invoking this exceptional data-loss operation.
+Ctrl-C and SIGTERM keep their existing exit codes `130` and `143`.
+
+For a package with several advisories, a blocked advisory does not discard
+completed checks or stop independent advisory checks. The result retains each
+advisory's reviewed report or blocked outcome in `checks`, marks the package
+operation blocked, and exits with code `2` if any advisory was blocked.
+
+Blocked outcomes include the known assessment revisions and inventory receipt IDs
+at the time of abort, and the host's native thread ID when available. Existing
+native Codex history remains subject to the user's Codex settings. These IDs aid
+diagnosis; the CLI still removes its temporary graph and review cache on exit and
+does not provide a resumable investigation checkpoint. Start a new check after
+unblocking the required capability.
+
 From a source checkout with the SDK built, render a saved `--json` result as a
 self-contained HTML report. The renderer works offline for CVE, package, and
 user-described checks.
