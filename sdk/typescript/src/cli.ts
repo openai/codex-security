@@ -11392,12 +11392,25 @@ async function withPatchIndex<T>(
   }
 }
 
+interface PatchTransportBindings {
+  readonly proxy: Map<string, string | null>;
+  // A fresh publication captures its HTTPS helpers before the model turn.
+  // Resume selects the configuration active for its own invocation.
+  readonly askPass?: Map<string, string>;
+  // A branch include can add an HTTPS push URL after an SSH-only preflight.
+  environmentAskPass?: {
+    name: "GIT_ASKPASS" | "SSH_ASKPASS";
+    command: string;
+    executable: string;
+  };
+}
+
 interface PatchPublication {
   parent: string;
   verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
   sshCommand?: string;
-  proxyBindings: Map<string, string | null>;
+  transportBindings: PatchTransportBindings;
   context: GitPatchState["context"];
   branch: string;
   directory: string;
@@ -11724,13 +11737,34 @@ async function patchTransportDirectories(
 ) {
   if (dependencies.patchTransportContext)
     return dependencies.patchTransportContext;
+  let bare = false;
   const root = await realpath(
-    await patchRepositoryRoot(repository, dependencies),
+    await patchRepositoryRoot(repository, dependencies).catch(async (error) => {
+      // Git keeps the caller's cwd in a bare repository, even under its gitdir.
+      bare =
+        (await dependencies
+          .runRepositoryCommand(
+            "git",
+            ["rev-parse", "--is-bare-repository"],
+            repository,
+          )
+          .catch(() => undefined)) === "true";
+      if (!bare) throw error;
+      return (
+        await dependencies.runRepositoryCommand(
+          "git",
+          ["rev-parse", "--absolute-git-dir"],
+          repository,
+          { trim: false },
+        )
+      ).replace(/\n$/u, "");
+    }),
   );
   const caller = await realpath(
     dependencies.patchCallerDirectory ?? repository,
   );
-  const directory = isOutsidePath(relative(root, caller)) ? caller : root;
+  const directory =
+    bare || isOutsidePath(relative(root, caller)) ? caller : root;
   return { root, caller, directory };
 }
 
@@ -11970,7 +12004,7 @@ async function runPatchTransport(
   remotes: readonly string[],
   repository: string,
   dependencies: CliDependencies,
-  proxyBindings: Map<string, string | null>,
+  transportBindings: PatchTransportBindings,
   transportEnvironment: NodeJS.ProcessEnv,
   options: { maxBuffer?: number } = {},
 ) {
@@ -11980,6 +12014,7 @@ async function runPatchTransport(
     dependencies,
     transportEnvironment,
     args[0] === "push",
+    transportBindings,
   );
   // An outer git -c takes precedence over GIT_CONFIG_COUNT. Override it in this invocation.
   const transportArgs = environmentEntry(
@@ -12039,7 +12074,7 @@ async function runPatchTransport(
     dependencies,
   );
   const pin = async (command: string): Promise<string | null> => {
-    if (!proxyBindings.has(command)) {
+    if (!transportBindings.proxy.has(command)) {
       const result = await inspectPatchGitExecutable(
         command,
         repository,
@@ -12047,9 +12082,9 @@ async function runPatchTransport(
         [root, caller],
         directory,
       );
-      proxyBindings.set(command, result.executable);
+      transportBindings.proxy.set(command, result.executable);
     }
-    return proxyBindings.get(command)!;
+    return transportBindings.proxy.get(command)!;
   };
   if (override !== undefined) {
     const executable = await pin(override);
@@ -12210,6 +12245,7 @@ async function patchTransportEnvironment(
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv = {},
   pushing = false,
+  bindings?: PatchTransportBindings,
 ): Promise<NodeJS.ProcessEnv> {
   const pinned = { ...environment };
   let count = Number(
@@ -12245,8 +12281,11 @@ async function patchTransportEnvironment(
   );
   set("credential.helper", "");
   set("core.askPass", "");
-  if (entries.length < 3) return pinned;
+  const override = environmentEntry(dependencies.environment, "GIT_ASKPASS");
+  const fallback = environmentEntry(dependencies.environment, "SSH_ASKPASS");
+  if (entries.length < 3 && !(override ?? fallback)) return pinned;
   const directories = await patchTransportDirectories(repository, dependencies);
+  let askPass: string | undefined;
   for (let i = 0; i + 2 < entries.length; i += 3) {
     const entry = entries[i + 2]!;
     const newline = entry.indexOf("\n");
@@ -12257,10 +12296,9 @@ async function patchTransportEnvironment(
       entries[i + 1]!,
       directories,
     );
-    if (
-      key === "core.askpass" ||
-      (key.startsWith("credential.") && key.endsWith(".helper"))
-    ) {
+    if (key === "core.askpass") {
+      if (!value || trusted) askPass = value;
+    } else if (key.startsWith("credential.") && key.endsWith(".helper")) {
       if (!value || trusted) set(key, value);
     } else if (!trusted) {
       // Keep matching rules in the operator's original URL scope and precedence.
@@ -12272,6 +12310,39 @@ async function patchTransportEnvironment(
       );
     }
   }
+  // Git selects the first defined setting, including an explicitly empty one.
+  // Use the environment so an inherited git -c cannot override the binding.
+  const command = override ?? askPass ?? fallback;
+  const selected = bindings?.environmentAskPass;
+  const fromEnvironment =
+    override !== undefined
+      ? "GIT_ASKPASS"
+      : askPass === undefined
+        ? "SSH_ASKPASS"
+        : undefined;
+  let executable =
+    command &&
+    (selected?.name === fromEnvironment && selected?.command === command
+      ? selected.executable
+      : bindings?.askPass?.get(command));
+  if (command && executable === undefined) {
+    if (pushing && bindings?.askPass)
+      throw new CodexSecurityError(
+        "The configured Git askpass helper was not selected during patch preflight. Inspect the active configuration before resuming publication.",
+      );
+    const helper = await inspectPatchGitExecutable(
+      command,
+      repository,
+      dependencies,
+      [directories.root, directories.caller],
+      directories.directory,
+    );
+    executable = helper.executable ?? "";
+    bindings?.askPass?.set(command, executable);
+  }
+  if (askPass !== undefined)
+    set("core.askPass", override === undefined ? (executable ?? "") : askPass);
+  pinned["GIT_ASKPASS"] = executable ?? "";
   return pinned;
 }
 
@@ -13223,7 +13294,11 @@ async function preparePatchPublication(
     });
   }
   let sshCommand: string | undefined;
-  const proxyBindings = new Map<string, string | null>();
+  let preflightUsedHttps = false;
+  const transportBindings: PatchTransportBindings = {
+    proxy: new Map(),
+    askPass: new Map(),
+  };
   if (!existing) {
     const destination = await patchPublicationDestination(
       repository,
@@ -13231,6 +13306,9 @@ async function preparePatchPublication(
       dependencies,
     );
     existing = Boolean(destination.existing);
+    preflightUsedHttps = destination.remotes.some((remote) =>
+      remote.startsWith("https://"),
+    );
     for (const remote of destination.remotes) {
       if (existing) break;
       const ssh = isSshPatchRemote(remote);
@@ -13264,7 +13342,7 @@ async function preparePatchPublication(
               [remote],
               repository,
               dependencies,
-              proxyBindings,
+              transportBindings,
               {
                 ...environment,
                 ...(ssh ? { GIT_SSH_COMMAND: sshCommand } : {}),
@@ -13300,6 +13378,17 @@ async function preparePatchPublication(
         dependencies,
       )
     ).dependencies;
+  }
+  if (!preflightUsedHttps) {
+    // Reuse the environment launcher already pinned from the selected Git cwd.
+    // A newly selected core.askPass still needs a fresh publication decision.
+    const override = environmentEntry(dependencies.environment, "GIT_ASKPASS");
+    const name = override !== undefined ? "GIT_ASKPASS" : "SSH_ASKPASS";
+    const command =
+      override ?? environmentEntry(dependencies.environment, "SSH_ASKPASS");
+    const executable = context.environment[name];
+    if (command && executable !== undefined)
+      transportBindings.environmentAskPass = { name, command, executable };
   }
   const paths = await patchGitRecords(
     repository,
@@ -13507,7 +13596,7 @@ async function preparePatchPublication(
     nestedRepositoryDigests,
     stagedBlobs,
     sshCommand,
-    proxyBindings,
+    transportBindings,
     tree,
     root,
     context,
@@ -13698,7 +13787,7 @@ async function publishPatchBranch(
   stderr: Writable,
   dependencies: CliDependencies,
   approvedSshCommand?: string,
-  proxyBindings = new Map<string, string | null>(),
+  transportBindings: PatchTransportBindings = { proxy: new Map() },
 ): Promise<{ branch: string; url: string }> {
   const run = (command: "git" | "gh" | "glab", args: string[]) =>
     dependencies.runRepositoryCommand(command, args, repository);
@@ -13825,7 +13914,7 @@ async function publishPatchBranch(
         remotes,
         repository,
         dependencies,
-        proxyBindings,
+        transportBindings,
         remotes.some(isSshPatchRemote)
           ? { GIT_SSH_COMMAND: await getSshCommand() }
           : {},
@@ -14654,7 +14743,7 @@ async function createPatchPullRequest(
     stderr,
     dependencies,
     publication.sshCommand,
-    publication.proxyBindings,
+    publication.transportBindings,
   );
 }
 

@@ -2850,6 +2850,12 @@ retrying. `--resume-pr` selects the current operator settings for that invocatio
 Use HTTPS or SSH for authenticated remotes. Automatic publication rejects plain
 HTTP fetch and push URLs before contacting the hosting service.
 
+For HTTPS, publication checks `GIT_ASKPASS`, the operator's `core.askPass`, and
+`SSH_ASKPASS` in order. The first defined value selects the helper. An empty
+value disables askpass. If the patch branch activates a new helper, inspect
+the configuration and run `codex-security patch --resume-pr BRANCH` to publish
+the saved commit.
+
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.

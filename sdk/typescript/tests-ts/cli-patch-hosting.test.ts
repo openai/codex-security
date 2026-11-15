@@ -455,6 +455,148 @@ exit 1
     },
   );
 
+  test.each(["unchanged", "branch helper", "SSH to HTTPS"] as const)(
+    "preserves the operator's askpass selection across publication: %s",
+    async (mode) => {
+      const { directory, git, remote } = await publicationRepository();
+      const external = await fixtures.create("patch-askpass-");
+      const global = join(external, "gitconfig");
+      const included = join(external, "branch.gitconfig");
+      const helper = async (name: string) => {
+        const path = join(external, name + ".sh");
+        await writeFile(path, `#!/bin/sh\necho ${name}\n`, { mode: 0o755 });
+        return path;
+      };
+      const ordinary = await helper("ordinary");
+      const ssh = mode === "SSH to HTTPS";
+      const https = "https://gitlab.example.test/example/repository.git";
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        ssh ? "git@gitlab.example.test:example/repository.git" : https,
+      );
+      if (!ssh) git("config", "--file", global, "core.askPass", ordinary);
+      if (mode !== "unchanged") {
+        git(
+          "config",
+          "--file",
+          global,
+          "includeIf.onbranch:codex-security/**.path",
+          included,
+        );
+        if (ssh)
+          git("config", "--file", included, "remote.origin.pushurl", https);
+        else
+          git(
+            "config",
+            "--file",
+            included,
+            "core.askPass",
+            await helper("branch"),
+          );
+      }
+      const environment = {
+        GITLAB_HOST: "gitlab.example.test",
+        GIT_CONFIG_GLOBAL: global,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_ASKPASS: ssh ? ordinary : undefined,
+        SSH_ASKPASS: undefined,
+        GIT_TERMINAL_PROMPT: "0",
+      };
+      const selections: string[] = [];
+      const onRepositoryCommand: typeof runGitRepositoryCommand = async (
+        tool,
+        args,
+        cwd,
+        options,
+      ) => {
+        if (tool !== "git")
+          return args[1] === "list"
+            ? ""
+            : "https://gitlab.example.test/example/repository/-/merge_requests/1";
+        const context = {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        };
+        if (options?.patchTransport) {
+          const preflight = args.includes("ls-remote");
+          if (preflight && ssh) {
+            expect(options.environment?.["GIT_SSH_COMMAND"]).toBeTruthy();
+            selections.push("SSH");
+          } else {
+            expect(options.environment?.["GIT_SSH_COMMAND"]).toBeUndefined();
+            // Git fills a synthetic password with the same options as the network transport.
+            const filled = await runGitRepositoryCommand(
+              tool,
+              ["-c", "credential.helper=", "credential", "fill"],
+              cwd,
+              {
+                ...context,
+                input:
+                  "protocol=https\nhost=example.invalid\nusername=fixture\n\n",
+              },
+            );
+            selections.push(filled.match(/^password=(.+)$/mu)?.[1] ?? "");
+          }
+          return runLocalHostingTransport(
+            tool,
+            preflight
+              ? ["ls-remote", "--heads", "--", remote]
+              : args.map((arg) => (arg === "origin" ? remote : arg)),
+            cwd,
+            context,
+          );
+        }
+        return runGitRepositoryCommand(tool, args, cwd, context);
+      };
+      const common = {
+        currentDirectory: directory,
+        environment,
+        onRepositoryCommand,
+      };
+      const branch = "codex-security/patch-scan-1";
+      const fixture = { localHosting: false };
+      const fresh = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          ...common,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+        },
+        fixture,
+      );
+      if (mode === "branch helper") {
+        expect(fresh.exitCode, fresh.stderr).toBe(2);
+        expect(fresh.stderr).toContain("not selected during patch preflight");
+        expect(fresh.stderr).toContain(`--resume-pr ${branch}`);
+        expect(selections).toEqual(["ordinary"]);
+        expect(git("ls-remote", remote, `refs/heads/${branch}`)).toBe("");
+        const resumed = await runWorkflow(
+          ["patch", "--resume-pr", branch, "--json"],
+          {
+            ...common,
+            onCodex: throwing("Resume attempted a second patch turn"),
+          },
+          fixture,
+        );
+        expect(resumed.exitCode, resumed.stderr).toBe(0);
+      } else expect(fresh.exitCode, fresh.stderr).toBe(0);
+      expect(selections).toEqual([
+        ssh ? "SSH" : "ordinary",
+        mode === "branch helper" ? "branch" : "ordinary",
+      ]);
+      expect(git("--git-dir", remote, "rev-parse", branch)).toBe(
+        git("rev-parse", branch),
+      );
+    },
+  );
+
   test.each(["local", "include", "separate caller include"] as const)(
     "publication preflight refuses a checkout-selected SSH command from %s",
     async (source) => {
@@ -733,6 +875,8 @@ exit 1
   test.skipIf(process.platform === "win32").each([
     ["GIT_SSH", false],
     ["GIT_ASKPASS", false],
+    ["core.askPass", false],
+    ["core.askPass", true],
     ["GIT_PROXY_COMMAND", false],
     ["GIT_PROXY_COMMAND", true],
   ] as const)(
@@ -741,7 +885,8 @@ exit 1
       const { directory, git } = await publicationRepository();
       const trusted = await fixtures.create("patch-approved-tool-");
       const writable = await fixtures.create("patch-writable-tool-");
-      const launcher = join(writable, "launcher");
+      const launcher = join(writable, "launcher with spaces;$literal");
+      const askpass = setting === "GIT_ASKPASS" || setting === "core.askPass";
       const targetDirectory = writableTarget ? writable : trusted;
       const marker = join(trusted, "invoked");
       for (const name of ["approved", "replacement"]) {
@@ -752,12 +897,7 @@ exit 1
         );
       }
       await symlink(join(targetDirectory, "approved"), launcher);
-      const scheme =
-        setting === "GIT_SSH"
-          ? "ssh"
-          : setting === "GIT_ASKPASS"
-            ? "https"
-            : "git";
+      const scheme = setting === "GIT_SSH" ? "ssh" : askpass ? "https" : "git";
       git(
         "remote",
         "set-url",
@@ -765,9 +905,21 @@ exit 1
         `${scheme}://127.0.0.1:1/example/repository.git`,
       );
       const environment: NodeJS.ProcessEnv = {
-        [setting]: launcher,
         GITLAB_HOST: "127.0.0.1:1",
       };
+      if (setting === "core.askPass") {
+        environment["GIT_CONFIG_GLOBAL"] = join(trusted, "operator.gitconfig");
+        environment["GIT_CONFIG_NOSYSTEM"] = "1";
+        git(
+          "config",
+          "--file",
+          environment["GIT_CONFIG_GLOBAL"],
+          setting,
+          launcher,
+        );
+      } else {
+        environment[setting] = launcher;
+      }
       const venv = join(trusted, "venv");
       let prefix: string | undefined;
       if (setting === "GIT_ASKPASS") {
@@ -809,14 +961,16 @@ exit 1
               return "hostname 127.0.0.1";
             if (tool !== "git" || args.includes("ls-remote")) return "";
             if (!options?.patchTransport || !args.includes("push"))
-              return runGitRepositoryCommand(tool, args, cwd, options);
+              return runGitRepositoryCommand(tool, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              });
 
             // The host has just revalidated the launcher. Git has yet to look it up.
             await unlink(launcher);
             await symlink(join(targetDirectory, "replacement"), launcher);
             // Exercise Git's askpass lookup without requiring an HTTP server.
-            const askpass = setting === "GIT_ASKPASS";
-            if (askpass) {
+            if (setting === "GIT_ASKPASS") {
               const python = options.environment!["SSH_ASKPASS"]!;
               prefix = (
                 await promisify(execFile)(python, [
