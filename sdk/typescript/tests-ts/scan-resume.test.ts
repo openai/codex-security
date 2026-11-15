@@ -2021,7 +2021,27 @@ test("sealed SDK resume accepts the canonical target of a saved repository alias
     await expect(client.run(f.root, options)).rejects.toThrow(
       "mismatched scan resume context",
     );
-    const result = await client.run(f.repository, options);
+    let repository = f.repository;
+    if (process.platform !== "win32") {
+      const other = await temporaryDirectory();
+      const otherRepository = join(other, basename(f.repository));
+      await mkdir(otherRepository);
+      const foreignLink = join(f.root, "foreign-link");
+      await symlink(otherRepository, foreignLink);
+      const foreign = `${foreignLink}/../${basename(f.repository)}`;
+      await expect(client.run(foreign, options)).rejects.toThrow(
+        "mismatched scan resume context",
+      );
+      await rm(foreignLink);
+      await expect(client.run(foreign, options)).rejects.toThrow(
+        "mismatched scan resume context",
+      );
+
+      const savedLink = join(other, "saved-link");
+      await symlink(f.scanDir, savedLink);
+      repository = `${savedLink}/../${basename(f.repository)}`;
+    }
+    const result = await client.run(repository, options);
     expect(result.manifest.scan.id).toBe(f.scanId);
     expect(result.threadId).toBe(f.threadId);
   } finally {

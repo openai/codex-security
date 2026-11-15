@@ -309,10 +309,11 @@ import {
   requirePrivateCredentialHome,
   preparePolicyOutputDirectory,
   resolveCodexCommand,
-  resolvePluginPath,
-  resolvePluginSource,
+  resolveInputPath,
   resolveParentTraversal,
+  resolvePluginPath,
   resolvePluginPython,
+  resolvePluginSource,
   resolveScanOutputPath,
   runWorkbench,
   setCodexSecurityCredentialLogout,
@@ -329,6 +330,7 @@ import {
   normalizeRepository,
   normalizeTarget,
   nullIfMissingFile,
+  nullIfMissingPath,
   gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
@@ -2299,9 +2301,13 @@ export class CodexSecurity {
       await realpath(dirname(selectedScanDir)),
       basename(selectedScanDir),
     );
-    const requestedRepository = resolve(
-      expandHome(repository, this.#dependencies.environment),
-    );
+    const requestedRepository = await resolveParentTraversal(
+      resolveInputPath(
+        repository,
+        process.cwd(),
+        this.#dependencies.environment,
+      ),
+    ).catch(nullIfMissingPath);
     const pluginRoot = await bundledPluginRoot();
     const saved = await savedScanWorkbench(scanId, {
       environment: this.#dependencies.environment,
@@ -2327,6 +2333,7 @@ export class CodexSecurity {
       typeof recipe["repository"] !== "string" ||
       typeof repo !== "string" ||
       !isAbsolute(repo) ||
+      requestedRepository === null ||
       (requestedRepository !== repo &&
         requestedRepository !== recipe["repository"] &&
         (await canonicalConfigPath(requestedRepository)) !== repo) ||
