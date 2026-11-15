@@ -1905,20 +1905,11 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         scan = require_scan(connection, occurrence["scan_id"])
         scan_history.require_finding_checkout_owner(connection, scan)
         indexed_finding = _indexed_scan_findings(connection, scan).get(occurrence["id"])
-        triaged_occurrences = [occurrence]
+        triaged_occurrences = finding_results.triage_occurrences(
+            connection, occurrence, indexed_finding
+        )
         verification_ids = {occurrence["id"]}
         verification_loaded = False
-        if indexed_finding is not None:
-            triaged_occurrences = connection.execute(
-                """
-                SELECT occurrences.*
-                FROM finding_occurrences AS occurrences
-                JOIN scans ON scans.id = occurrences.scan_id
-                WHERE occurrences.id IN (SELECT value FROM json_each(?))
-                ORDER BY scans.rowid, occurrences.id
-                """,
-                (json.dumps(sorted(indexed_finding["occurrence_ids"])),),
-            ).fetchall()
         if args.status == "closed":
             for checked_occurrence in triaged_occurrences:
                 remediation = remediation_state.latest_attempt(connection, checked_occurrence["id"])
@@ -1958,6 +1949,10 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         admission_sequence = connection.execute(
             "SELECT COALESCE(MAX(sequence), 0) FROM scan_admissions"
         ).fetchone()[0]
+        # The latest decision supplies feedback evidence. Append the reviewed occurrence last.
+        decision_source = (
+            indexed_finding["decision_occurrence_id"] if indexed_finding else occurrence["id"]
+        )
         for triaged_occurrence in triaged_occurrences:
             previous_triage = connection.execute(
                 "SELECT status, close_reason, note, "
@@ -1969,6 +1964,10 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
             ).fetchone()
             changed = (
                 previous_triage is None
+                or (
+                    triaged_occurrence["id"] == occurrence["id"]
+                    and decision_source != occurrence["id"]
+                )
                 or (indexed_finding is not None and indexed_finding["status"] != args.status)
                 or previous_triage["admission_sequence"] != admission_sequence
                 or (
@@ -1979,6 +1978,7 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 != (args.status, close_reason, note)
             )
             if changed:
+                decision_source = triaged_occurrence["id"]
                 connection.execute(
                     """
                     INSERT INTO finding_decisions (
