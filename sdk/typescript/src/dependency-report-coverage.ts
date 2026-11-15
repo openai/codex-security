@@ -11,6 +11,7 @@ export class DependencyReportCoverage {
   private unresolved = 0;
   private truncated = false;
   private sourceEvidenceCount = 0;
+  private discoveryOmissions = new Set<string>();
   generation = 0;
 
   observe(
@@ -63,6 +64,22 @@ export class DependencyReportCoverage {
       this.sourceEvidenceCount = evidenceCount;
       this.generation++;
     }
+    const traceCoverage = isRecord(payload) ? payload["coverage"] : undefined;
+    if (
+      isRecord(traceCoverage) &&
+      Array.isArray(traceCoverage["discovery_omissions"])
+    ) {
+      for (const entry of traceCoverage["discovery_omissions"]) {
+        if (
+          isRecord(entry) &&
+          typeof entry["path"] === "string" &&
+          !this.discoveryOmissions.has(entry["path"])
+        ) {
+          this.discoveryOmissions.add(entry["path"]);
+          this.generation++;
+        }
+      }
+    }
     if (status["revision"] < this.revision) return;
     if (status["revision"] > this.revision) {
       this.revision = status["revision"];
@@ -95,9 +112,11 @@ export class DependencyReportCoverage {
     return this.unreadable || this.pending > 0;
   }
 
-  /** Catalog nonmatches are limitations; pending or lost coverage is incomplete. */
+  /** Missing graph coverage or omitted source cannot establish an overall exclusion. */
   get incomplete() {
-    return this.outstanding || this.truncated;
+    return (
+      this.outstanding || this.truncated || this.discoveryOmissions.size > 0
+    );
   }
 
   limitation() {
@@ -121,5 +140,11 @@ export class DependencyReportCoverage {
     return reasons.length
       ? `Service resolution is partial because ${reasons.join(" and ")}.`
       : undefined;
+  }
+
+  discoveryLimitation() {
+    const files = this.discoveryOmissions.size;
+    if (files)
+      return `Operator scope omitted ${files} matched source ${files === 1 ? "file" : "files"} from one or more broad structural searches. The search audit records the exact locations. Exact-file follow-up remains available.`;
   }
 }

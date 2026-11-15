@@ -16,6 +16,18 @@ function entityKey({ kind, name, scope }: TraceEntity) {
 // Keep the graph and the CLI candidate registry independent of the model view.
 export function boundTraceResponse<T extends object>(result: T) {
   const view = { ...result };
+  const coverage = (
+    result as { coverage?: ReturnType<typeof traceResponse>["coverage"] }
+  ).coverage;
+  if (coverage?.discovery_omissions) {
+    const { discovery_omissions, ...rest } = coverage;
+    Object.assign(view, {
+      coverage: {
+        ...rest,
+        discovery_omitted_file_count: discovery_omissions.length,
+      },
+    });
+  }
   const executions = (view as Record<string, unknown>).ruleExecutions;
   if (Array.isArray(executions))
     Object.assign(view, {
@@ -53,6 +65,7 @@ export function traceResponse(result: TraceResult) {
     Omit<TextMatch, "line"> & { lines: Set<number> }
   >();
   const searched = new Set<string>();
+  const omissions = new Map<string, { path: string; excludedBy: string }>();
   const partial = [];
   const batches = result.scopes.filter(
     ({ scope }) => scope.kind === "source_batch",
@@ -64,7 +77,9 @@ export function traceResponse(result: TraceResult) {
     complete,
     reason,
     hops,
+    omissions: omitted,
   } of result.scopes) {
+    for (const entry of omitted ?? []) omissions.set(entry.path, entry);
     if (
       complete &&
       (scope.kind === "search" || scope.kind === "manifests") &&
@@ -148,6 +163,11 @@ export function traceResponse(result: TraceResult) {
       complete: result.complete,
       limits: result.limits,
       searched_paths: [...searched].sort(),
+      ...(omissions.size && {
+        discovery_omissions: [...omissions.values()].sort((a, b) =>
+          a.path.localeCompare(b.path),
+        ),
+      }),
       partial,
       ...(batches.length > 0 && {
         source_batches: {

@@ -157,6 +157,7 @@ export async function processTrace(
       node.evidence = result.evidence;
       if (result.ruleExecution) node.ruleExecution = result.ruleExecution;
       if (result.textMatches?.length) node.textMatches = result.textMatches;
+      if (result.omissions?.length) node.omissions = result.omissions;
       results.set(id, result.next);
       expand(id);
     }

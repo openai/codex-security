@@ -20,6 +20,7 @@ import {
 } from "./dependency-inventory.js";
 import { DependencyReportCoverage } from "./dependency-report-coverage.js";
 import { DependencySearchAudit } from "./dependency-search-audit.js";
+import type { DependencySourceWorkCoverage } from "./dependency-source-worklist.js";
 import {
   dependencyReviewStatusInputSchema,
   summarizeDependencyReviewStatus,
@@ -238,6 +239,7 @@ export function createDependencyReportSubmission(options: {
   candidates?: Pick<DependencyCandidates, "snapshot">;
   inventoryServers?: Readonly<Record<string, readonly string[] | null>>;
   catalogServerNames?: readonly string[];
+  sourceWorkCoverage?: () => DependencySourceWorkCoverage | undefined;
   profileCoverage?: ReturnType<
     typeof createDependencyInvestigationTools
   >["profileCoverage"];
@@ -269,6 +271,7 @@ export function createDependencyReportSubmission(options: {
   let acceptedCoverage = -1;
   let acceptedCandidates = -1;
   let acceptedInventory = -1;
+  let acceptedSourceWork = -1;
   let acceptedItems = new Map<string, number>();
   let attempts = 0;
   let submittedThisTurn = false;
@@ -875,6 +878,8 @@ export function createDependencyReportSubmission(options: {
         acceptedCoverage !== coverage.generation ||
         acceptedCandidates !== snapshot().generation ||
         acceptedInventory !== inventory.generation() ||
+        acceptedSourceWork !==
+          (options.sourceWorkCoverage?.()?.generation() ?? 0) ||
         [...acceptedItems].some(([id, revision]) => {
           const item = items.get(id);
           return (
@@ -1045,6 +1050,9 @@ export function createDependencyReportSubmission(options: {
           );
         const coverageGeneration = coverage.generation;
         const inventoryGeneration = inventory.generation();
+        const sourceWork = options.sourceWorkCoverage?.();
+        const sourceWorkGeneration = sourceWork?.generation() ?? 0;
+        const sourceWorkLimitations = sourceWork?.limitations() ?? [];
         const limitation = coverage.limitation();
         if (coverage.outstanding && attempts < MAX_DEPENDENCY_REPORT_ATTEMPTS)
           return reject(
@@ -1131,6 +1139,7 @@ export function createDependencyReportSubmission(options: {
         const unresolved =
           selected.some((item) => item.input.kind === "unresolved") ||
           coverage.incomplete ||
+          sourceWorkLimitations.length > 0 ||
           candidateSnapshot.limitations.length > 0;
         const derivedStatus = aggregateDependencyVerdict(uses, {
           unresolved,
@@ -1157,6 +1166,7 @@ export function createDependencyReportSubmission(options: {
           coverage.generation !== coverageGeneration ||
           snapshot().generation !== candidateSnapshot.generation ||
           inventory.generation() !== inventoryGeneration ||
+          (sourceWork?.generation() ?? 0) !== sourceWorkGeneration ||
           [...knownUses.keys()].some((id) => !selectedIds.has(id)) ||
           selected.some(
             (item) =>
@@ -1167,8 +1177,13 @@ export function createDependencyReportSubmission(options: {
           return reject(
             "Candidate coverage, inventory, or selected assessments changed during finalization. Check status and resubmit; unchanged approvals are retained.",
           );
-        const limitations = new Set(input.limitations);
+        const limitations = new Set([
+          ...input.limitations,
+          ...sourceWorkLimitations,
+        ]);
         if (limitation) limitations.add(limitation);
+        const discoveryLimitation = coverage.discoveryLimitation();
+        if (discoveryLimitation) limitations.add(discoveryLimitation);
         for (const text of candidateSnapshot.limitations) limitations.add(text);
         const profiles = options.profileCoverage?.({
           findings: selected.map(({ input, receipts }) => ({
@@ -1304,6 +1319,7 @@ export function createDependencyReportSubmission(options: {
         acceptedCoverage = coverageGeneration;
         acceptedCandidates = candidateSnapshot.generation;
         acceptedInventory = inventoryGeneration;
+        acceptedSourceWork = sourceWorkGeneration;
         acceptedItems = new Map(
           selected.map((item) => [item.input.id, item.revision]),
         );

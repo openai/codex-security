@@ -621,9 +621,62 @@ test("returns only the report accepted after the investigator corrects a rejecte
         "trace_codex_security_code",
         "resolve_codex_security_services",
         "query_codex_security_graph",
+        "record_codex_security_source_work",
         "record_codex_security_evidence",
       ]);
       const paths = ["app/index.ts"];
+      const work = (input: JsonObject) =>
+        graph.call("record_codex_security_source_work", { work: input });
+      await work({
+        operation: "append_roster_page",
+        id: "decoder-discovery",
+        owner: "coordinator",
+        paths,
+        declaredComplete: true,
+        search: "Find the decoder import",
+        sourceRefs: ["source-read"],
+        gaps: [],
+      });
+      await work({
+        operation: "assign_partition",
+        id: "caller",
+        rosterId: "decoder-discovery",
+        owner: "first",
+        paths,
+      });
+      await work({
+        operation: "offer_handoff",
+        partitionId: "caller",
+        owner: "first",
+        expectedRevision: 1,
+        recipient: "second",
+        newPartitionId: "continued-caller",
+        paths,
+      });
+      await work({
+        operation: "accept_handoff",
+        partitionId: "caller",
+        recipient: "second",
+        expectedRevision: 2,
+      });
+      await work({
+        operation: "record_examined",
+        partitionId: "continued-caller",
+        owner: "second",
+        expectedRevision: 1,
+        paths,
+      });
+      expect(
+        await graph.call("query_codex_security_graph", { sourceWork: {} }),
+      ).toMatchObject({
+        source_work: {
+          rosterCount: 1,
+          gapCount: 0,
+          unassignedFileCount: 0,
+          remainingFileCount: 0,
+          pendingHandoffCount: 0,
+        },
+      });
       const serviceResolution = {
         services_found: 0,
         services: [],

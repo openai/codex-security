@@ -1,12 +1,13 @@
 import * as z from "zod/v4";
 import { canonicalDirectory } from "../artifact-context.js";
 import { safeRelativePath } from "../contract-values.js";
+import { createDiscoveryScope } from "./discovery-scope.js";
 import {
   EvidenceGraph,
   boundGraphResponse,
   type CatalogReceiptSelection,
 } from "./graph.js";
-import { findProjectReferences } from "./provider.js";
+import { findProjectReferences, localProvider } from "./provider.js";
 import { boundTraceResponse, traceResponse } from "./response.js";
 import {
   graphQuerySchema,
@@ -66,10 +67,19 @@ function catalogInput(args: unknown) {
 export async function createDependencyGraphSession(
   checkout: string,
   catalogConfigured: boolean,
-  { fullTraceReply = false }: { fullTraceReply?: boolean } = {},
+  {
+    fullTraceReply = false,
+    excludedSourcePaths,
+  }: { fullTraceReply?: boolean; excludedSourcePaths?: readonly string[] } = {},
 ) {
   const root = await canonicalDirectory(checkout, "Dependency trace checkout");
-  const tracer = createDependencyTracer(root);
+  const sourceScope = excludedSourcePaths?.length
+    ? await createDiscoveryScope(root, excludedSourcePaths)
+    : undefined;
+  const tracer = createDependencyTracer(
+    root,
+    sourceScope ? localProvider(root, sourceScope) : undefined,
+  );
   const graph = new EvidenceGraph();
 
   function serviceResolution() {
@@ -90,6 +100,9 @@ export async function createDependencyGraphSession(
 
   return {
     boundTraceResponse,
+    includeDiscoveryFile(path: string) {
+      sourceScope?.includeExactFile(path);
+    },
     // Used by host replies that only need counts, without querying the graph.
     serviceResolutionCoverage() {
       const {
@@ -120,6 +133,8 @@ export async function createDependencyGraphSession(
             { ...request, paths, files },
             signal,
           );
+          if (sourceScope && files)
+            for (const file of files) sourceScope.includeExactFile(file);
           graph.addTrace(result, catalogConfigured && !request.source_only);
           const response = reply(traceResponse(result));
           return fullTraceReply ? response : boundTraceResponse(response);

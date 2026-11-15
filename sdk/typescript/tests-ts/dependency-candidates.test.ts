@@ -56,6 +56,22 @@ test("labels conventional test paths and keeps test and production graph evidenc
     path: importedHelper,
     testCandidate: true,
   });
+  const snapshot = registry.snapshot();
+  await registry.observeGraph(trace, {
+    coverage: {
+      discovery_omissions: [{ path: importedHelper, excludedBy: "dir/tests" }],
+    },
+  });
+  expect(registry.snapshot()).toEqual(snapshot);
+  const reentered = await registry.observeGraph(trace, {
+    trace: [
+      {
+        relation: "candidate_call",
+        evidence: [{ source: importedHelper, lines: [2] }],
+      },
+    ],
+  });
+  expect(reentered[0]?.id).toBe(observed[1]?.id);
   expect(registry.snapshot().candidates).toHaveLength(2);
 });
 test("retains structural call, flow, and dependency locations across trace and graph queries", async () => {

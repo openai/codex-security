@@ -458,6 +458,7 @@ import {
   type ProjectConfigProvenance,
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
+import { safeRelativePath } from "./contract-values.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
@@ -3067,8 +3068,6 @@ export async function main(
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       let temporary: string | undefined;
-      const callerScope =
-        invocation.dependencyCallerScope ?? defaultDependencyCallerScope;
       try {
         const pkg = /^CVE-/iu.test(args.subject)
           ? undefined
@@ -3082,6 +3081,18 @@ export async function main(
           options.config,
           dependencies,
         );
+        const excludedSourcePaths =
+          project?.input.exploitability?.scope?.exclude_paths?.map((path) =>
+            safeRelativePath(path, "exploitability.scope.exclude_paths"),
+          );
+        const callerScope = [
+          invocation.dependencyCallerScope ?? defaultDependencyCallerScope,
+          ...(excludedSourcePaths?.length
+            ? [
+                `Operator-selected broad structural discovery exclusions: ${JSON.stringify(excludedSourcePaths)}. For broad structural scans use trace_codex_security_code with directory paths and source_terms so the host applies this boundary. Retain discovered candidate IDs. Follow source, build, wrapper and matched workload evidence into these locations with explicit file traces. An omission describes discovery scope only.`,
+              ]
+            : []),
+        ].join("\n");
         const {
           servers: inventoryServers,
           catalogServers,
@@ -3200,6 +3211,7 @@ export async function main(
               callerScopeIsDefault: true,
             }),
             candidates,
+            sourceWorkCoverage: () => dependencyGraph?.sourceWorkCoverage,
             profileCoverage: (findings) =>
               evidenceTools?.profileCoverage(findings),
             catalogServerNames,
@@ -3436,6 +3448,7 @@ export async function main(
                   ),
                 readInventoryReceipt: submission.readInventoryReceipt,
               },
+              excludedSourcePaths,
             );
             exitCode = await runSkill(
               "dependency-exploitability",

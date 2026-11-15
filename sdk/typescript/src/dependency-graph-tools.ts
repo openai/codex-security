@@ -17,6 +17,12 @@ import {
 } from "./dependency-inventory.js";
 import { readDependencyEvidence } from "./dependency-reachability.js";
 import { createDependencySourceIdentityReader } from "./dependency-source-identity.js";
+import {
+  createDependencySourceWorkTools,
+  sourceWorkQuerySchema,
+  sourceWorkTool,
+} from "./dependency-source-work-tools.js";
+import type { DependencySourceWorkCoverage } from "./dependency-source-worklist.js";
 import { errorMessage } from "./errors.js";
 import { isRecord } from "./record.js";
 import type { resolveDependencyServices } from "./dependency-service-catalog.js";
@@ -62,6 +68,7 @@ export interface DependencyGraphTools {
     rpc: DependencyInventoryRpc,
   ): void;
   flush?(): Promise<void>;
+  sourceWorkCoverage?: DependencySourceWorkCoverage;
   ingestProfileCollection?(resource: string, receiptId: string): void;
 }
 
@@ -83,6 +90,7 @@ export async function openDependencyGraph(
       query: DependencyInventoryReceiptQuery,
     ) => JsonObject;
   },
+  excludedSourcePaths?: readonly string[],
 ): Promise<DependencyGraphTools> {
   const sourceRoot = await realpath(repository);
   const readSourceIdentity = createDependencySourceIdentityReader(sourceRoot);
@@ -92,7 +100,7 @@ export async function openDependencyGraph(
   const graph = (await createDependencyGraphSession(
     repository,
     resolveCatalog !== undefined,
-    { fullTraceReply: true },
+    { fullTraceReply: true, excludedSourcePaths },
   )) as Pick<DependencyGraphTools, "tools" | "close" | "boundTraceResponse"> & {
     call(
       name: string,
@@ -100,6 +108,7 @@ export async function openDependencyGraph(
       signal?: AbortSignal,
     ): Promise<JsonObject & { service_resolution: JsonObject }>;
     serviceResolutionCoverage?(): JsonObject;
+    includeDiscoveryFile?(path: string): void;
     pendingCatalogRequests(args?: unknown): Parameters<CatalogResolver>[0];
     recordCatalogResolutions(
       answers: Awaited<ReturnType<CatalogResolver>>,
@@ -118,6 +127,7 @@ export async function openDependencyGraph(
         graph.recordObservations(observations, receiptId),
       signal,
     });
+  const sourceWork = createDependencySourceWorkTools();
   const sourceEvidence = new Map<
     string,
     {
@@ -187,6 +197,7 @@ export async function openDependencyGraph(
     );
   };
   return {
+    sourceWorkCoverage: sourceWork.coverage,
     tools: [
       ...(supplemental?.tools ?? []),
       ...graph.tools.map((tool) =>
@@ -196,6 +207,7 @@ export async function openDependencyGraph(
               description:
                 tool.description +
                 " Use evidence:{} to list shared source-note IDs and questions, evidence:{id} to read host-captured excerpts, or evidence:{search} to search notes. Note claims and scope associations are investigator assertions." +
+                " Use sourceWork:{} for source-plan remainder counts, sourceWork:{rosterId} or sourceWork:{partitionId} for a summary, and page:{view,limit,cursor} within that selection for exact paths, gaps or search receipts. Follow nextCursor until null." +
                 (supplemental?.readInventoryReceipt
                   ? " Use inventory:{receiptId} for original runtime receipt metadata and shape, or inventory:{receiptId,textBlock,record} for an exact value. textBlock=null selects structured content. Set original:true for an explicit whole ordinary result when necessary."
                   : ""),
@@ -206,6 +218,9 @@ export async function openDependencyGraph(
                     ? tool.inputSchema["properties"]
                     : {}),
                   evidence: z.toJSONSchema(evidenceQuerySchema) as JsonObject,
+                  sourceWork: z.toJSONSchema(
+                    sourceWorkQuerySchema,
+                  ) as JsonObject,
                   ...(supplemental?.readInventoryReceipt && {
                     inventory: z.toJSONSchema(
                       inventoryReceiptQuerySchema,
@@ -216,6 +231,7 @@ export async function openDependencyGraph(
             }
           : tool,
       ),
+      sourceWorkTool,
       {
         name: "record_codex_security_evidence",
         description:
@@ -240,6 +256,17 @@ export async function openDependencyGraph(
       graph.recordObservations(captured.observations, receiptId);
     },
     async call(name, args, inventoryRpc) {
+      signal?.throwIfAborted();
+      if (name === sourceWorkTool.name)
+        return focusedReply({ source_work: sourceWork.mutate(args) });
+      if (
+        name === "query_codex_security_graph" &&
+        isRecord(args) &&
+        args["sourceWork"] !== undefined
+      )
+        return focusedReply({
+          source_work: sourceWork.query(args["sourceWork"]),
+        });
       await evidence?.flush();
       signal?.throwIfAborted();
       if (supplemental?.tools.some((tool) => tool.name === name))
@@ -367,6 +394,16 @@ export async function openDependencyGraph(
               )
             : fresh;
           graph.recordCatalogResolutions(answers, batch);
+          for (const answer of answers) {
+            if (
+              excludedSourcePaths?.length &&
+              requestsByPath.has(answer.path) &&
+              "services" in answer &&
+              answer.services.length &&
+              reusable(answer)
+            )
+              graph.includeDiscoveryFile?.(answer.path);
+          }
           for (const answer of fresh) {
             const entry = requestsByPath.get(answer.path);
             if (!entry) continue;

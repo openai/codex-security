@@ -29,6 +29,7 @@ async function withGraph(
     read: ReturnType<typeof createDependencyInventory>["read"];
   },
   serviceCoverage?: JsonObject,
+  excludedSourcePaths?: string[],
 ) {
   const root = await mkdtemp(join(tmpdir(), "catalog-cache-test-"));
   try {
@@ -36,9 +37,10 @@ async function withGraph(
     await writeFile(
       join(root, "mcp", "helpers.mjs"),
       `export default {
-        createDependencyGraphSession() {
+        createDependencyGraphSession(_checkout, _catalogConfigured, { excludedSourcePaths }) {
           let answers = [];
           let fullQueries = 0;
+          const reopened = [];
           return {
             ${serviceCoverage ? `serviceResolutionCoverage: () => (${JSON.stringify(serviceCoverage)}),` : ""}
             tools: [{
@@ -53,6 +55,7 @@ async function withGraph(
                 ...${JSON.stringify(queryPayload)},
                 service_resolution: ${JSON.stringify(queryPayload["service_resolution"] ?? {})},
                 answers,
+                ...(excludedSourcePaths && { excludedSourcePaths, reopened }),
               };
             },
             pendingCatalogRequests({paths, project}) {
@@ -61,6 +64,9 @@ async function withGraph(
             recordCatalogResolutions(batch) {
               answers = batch;
               return {};
+            },
+            includeDiscoveryFile(path) {
+              reopened.push(path);
             },
           };
         },
@@ -81,6 +87,7 @@ async function withGraph(
         },
         readInventoryReceipt: inventory.read,
       },
+      excludedSourcePaths,
     );
     try {
       await run(
@@ -121,6 +128,28 @@ function mapping(
 const first = "workers/parser.ts";
 const second = "workers/decoder.ts";
 const project = "workers";
+
+test("a current catalog selection reopens just its requested source file", async () => {
+  await withGraph(
+    async () => [
+      mapping(first, "current"),
+      mapping(second, "stale"),
+      mapping("workers/unrequested.ts", "current"),
+    ],
+    (id) => id === "current",
+    async (resolve) => {
+      const result = await resolve([first, second], project);
+      expect(result).toMatchObject({
+        excludedSourcePaths: [project],
+        reopened: [first],
+      });
+    },
+    {},
+    undefined,
+    undefined,
+    [project],
+  );
+});
 
 test("automatic runtime lookups share receipt references and the graph reads exact current evidence on demand", async () => {
   const inventory = createDependencyInventory();
@@ -626,6 +655,117 @@ test("source notes return the actual ranges when an excerpt ends at EOF", async 
             },
           ],
         },
+      });
+    },
+  );
+});
+
+test("the graph retains exact source work with compact receipts and checked pagination", async () => {
+  await withGraph(
+    async () => [],
+    () => false,
+    async (_resolve, _trace, graph) => {
+      const mutation = "record_codex_security_source_work";
+      const query = (sourceWork: JsonObject) =>
+        graph.call("query_codex_security_graph", { sourceWork });
+      const paths = Array.from(
+        { length: 300 },
+        (_, index) => "work/file-" + index.toString().padStart(3, "0") + ".ts",
+      );
+      const initial = {
+        operation: "append_roster_page",
+        id: "decoder-discovery",
+        owner: "discovery",
+        paths,
+        declaredComplete: false,
+        gaps: [
+          {
+            id: "next",
+            description: "The next source partition is not yet ingested.",
+          },
+        ],
+        search: "List paths importing the decoder",
+        sourceRefs: ["search-result-1"],
+      };
+      const first = await graph.call(mutation, { work: initial });
+      expect(first).toMatchObject({
+        source_work: {
+          id: initial.id,
+          matchedFileCount: 300,
+          declaredComplete: false,
+          gapCount: 1,
+        },
+      });
+      expect(JSON.stringify(first)).not.toContain(paths[0]!);
+      expect(
+        graph.tools.find((tool) => tool.name === mutation)?.inputSchema,
+      ).toMatchObject({
+        type: "object",
+        required: ["work"],
+      });
+      const read = await query({
+        rosterId: initial.id,
+        page: { view: "unassigned", limit: 2 },
+      });
+      const result = read["source_work"] as JsonObject;
+      const page = result["page"] as JsonObject;
+      expect(page).toMatchObject({ items: paths.slice(0, 2), total: 300 });
+      expect(page["nextCursor"]).not.toBeNull();
+      expect(
+        await query({
+          rosterId: initial.id,
+          page: { view: "unassigned", limit: 2, cursor: page["nextCursor"]! },
+        }),
+      ).toMatchObject({ source_work: { page: { items: paths.slice(2, 4) } } });
+
+      await graph.call(mutation, {
+        work: {
+          operation: "assign_partition",
+          id: "small-worker",
+          owner: "first-investigator",
+          rosterId: initial.id,
+          paths: paths.slice(0, 2),
+        },
+      });
+      await expect(
+        query({
+          rosterId: initial.id,
+          page: { view: "unassigned", limit: 2, cursor: page["nextCursor"]! },
+        }),
+      ).rejects.toThrow("changed since this cursor");
+      expect(
+        await query({
+          rosterId: initial.id,
+          page: { view: "pages", limit: 1 },
+        }),
+      ).toMatchObject({
+        source_work: {
+          page: {
+            total: 1,
+            items: [
+              {
+                search: initial.search,
+                sourceRefs: initial.sourceRefs,
+                gaps: initial.gaps,
+              },
+            ],
+            nextCursor: null,
+          },
+        },
+      });
+      expect(await query({})).toMatchObject({
+        source_work: {
+          incompleteRosterCount: 1,
+          gapCount: 1,
+          unassignedFileCount: 298,
+          remainingFileCount: 2,
+          pendingHandoffCount: 0,
+        },
+      });
+      expect(
+        await graph.call("query_codex_security_graph", { evidence: {} }),
+      ).toMatchObject({
+        source_evidence: [],
       });
     },
   );

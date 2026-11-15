@@ -172,6 +172,17 @@
     "exploitability": {
       "type": "object",
       "properties": {
+        "scope": {
+          "type": "object",
+          "properties": {
+            "exclude_paths": {
+              "description": "Literal checkout-relative files or directories to omit from broad exploitability structural discovery. Explicit file traces and exact caller leads can revisit them.",
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          },
+          "additionalProperties": false
+        },
         "service_catalog_mcps": {
           "description": "Read-only service catalog servers selected from codex.mcp_servers for service identities, running revisions and access observations in exploitability checks. Defaults to none.",
           "type": "array",

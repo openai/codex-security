@@ -27,6 +27,16 @@ afterEach(cleanup);
 const cases: [string, unknown, boolean][] = [
   ["minimal file", {}, true],
   [
+    "explicit exploitability discovery exclusions",
+    { exploitability: { scope: { exclude_paths: ["examples/demo.py"] } } },
+    true,
+  ],
+  [
+    "exploitability discovery exclusions must be a list",
+    { exploitability: { scope: { exclude_paths: "examples" } } },
+    false,
+  ],
+  [
     "removed deployment server setting",
     { exploitability: { deployment_status_mcps: ["releases"] } },
     false,

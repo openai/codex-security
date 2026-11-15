@@ -24,6 +24,9 @@ test("audits source scope, truncation, errors and registered tools that never ra
           searched_paths: ["sources"],
           partial: [{ path: "sources/extra", reason: "Time limit" }],
           frontier: [{ path: "sources/later" }],
+          discovery_omissions: [
+            { path: "examples/demo.py", excludedBy: "examples" },
+          ],
         },
         trace: [{ source: "sources/worker.ts" }],
         ruleExecutions: [{ id: "rule-1" }],
@@ -58,6 +61,9 @@ test("audits source scope, truncation, errors and registered tools that never ra
     "Incomplete: path=sources/extra · Time limit",
   );
   expect(searches[0]!.details).toContain("Not visited: path=sources/later");
+  expect(searches[0]!.details).toContain(
+    'Broad discovery omitted "examples/demo.py" under operator exclusion "examples".',
+  );
 });
 
 test("observes partial no-match and treats an empty payload as unknown coverage", () => {

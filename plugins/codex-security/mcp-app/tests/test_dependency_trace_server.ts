@@ -81,6 +81,140 @@ test("host-only service coverage reads current lookup counts", async (t) => {
   });
 });
 
+test("operator discovery exclusions preserve nested policy and exact caller follow-ups", async (t) => {
+  for (const command of ["rg", "opengrep"]) {
+    try {
+      await promisify(execFile)(command, ["--version"]);
+    } catch {
+      return t.skip(command + " required");
+    }
+  }
+  const temps = createTemporaryDirectories(true);
+  t.after(() => temps.cleanup());
+  const checkout = await temps.create("source-scope-checkout-");
+  const runtime = await temps.create("source-scope-session-");
+  const bundle = join(runtime, "session.cjs");
+  await buildServer(bundle, {
+    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
+  });
+  const { createDependencyGraphSession } = (
+    (await import(pathToFileURL(bundle).href)) as {
+      default: typeof import("../src/dependency-trace/session.ts");
+    }
+  ).default;
+  await mkdir(join(checkout, "examples", "runtime"), { recursive: true });
+  await mkdir(join(checkout, "tests"));
+  const uncertainPolicyFiles: string[] = [];
+  if (process.platform !== "win32") {
+    for (const [directory, target] of [
+      ["dangling-policy", "missing.md"],
+      ["looping-policy", "SECURITY.md"],
+    ] as const) {
+      await mkdir(join(checkout, "examples", directory));
+      await symlink(
+        target,
+        join(checkout, "examples", directory, "SECURITY.md"),
+      );
+      uncertainPolicyFiles.push(`examples/${directory}/consumer.py`);
+    }
+  }
+  const allFiles = [
+    "examples/already-read.py",
+    "examples/demo.py",
+    "examples/runtime/consumer.py",
+    "examples/worker.py",
+    "tests/test_named.py",
+    ...uncertainPolicyFiles,
+  ].sort();
+  for (const file of allFiles)
+    await writeFile(
+      join(checkout, file),
+      "from image_lib import decode\ndecode(data)\n",
+    );
+  await writeFile(
+    join(checkout, "SECURITY.md"),
+    "Report through the project security team.\n",
+  );
+  await writeFile(
+    join(checkout, "examples/runtime/SECURITY.md"),
+    "The executor consumes this code.\n",
+  );
+  for (const path of ["../outside", ".", checkout, "D:/outside"]) {
+    await assert.rejects(
+      createDependencyGraphSession(checkout, false, {
+        excludedSourcePaths: [path],
+      }),
+      /expected a safe scan-relative POSIX path/u,
+    );
+  }
+  const baseline = await createDependencyGraphSession(checkout, false, {
+    fullTraceReply: true,
+  });
+  const scoped = await createDependencyGraphSession(checkout, false, {
+    fullTraceReply: true,
+    excludedSourcePaths: ["examples"],
+  });
+  t.after(async () => {
+    await baseline.close();
+    await scoped.close();
+  });
+  const request = {
+    package: "image-package",
+    symbol: "decode",
+    rules: nativeRules("decode"),
+    source_only: true,
+    max_hops: 0,
+    time_budget_ms: 60000,
+  };
+  type Session = Awaited<ReturnType<typeof createDependencyGraphSession>>;
+  async function trace(session: Session, targets: object) {
+    return (await session.call("trace_codex_security_code", {
+      ...request,
+      ...targets,
+    })) as unknown as ReturnType<typeof traceResponse>;
+  }
+  function locations(result: ReturnType<typeof traceResponse>) {
+    return [
+      ...new Set(
+        result.trace.flatMap(({ evidence }) =>
+          evidence.map(({ source }) => source),
+        ),
+      ),
+    ].sort();
+  }
+  const broad = { paths: ["."], source_terms: ["image_lib"] };
+  assert.deepEqual(locations(await trace(baseline, broad)), allFiles);
+  assert.deepEqual(
+    locations(await trace(scoped, { files: ["examples/already-read.py"] })),
+    ["examples/already-read.py"],
+  );
+  const first = await trace(scoped, broad);
+  assert.equal(first.coverage.complete, true);
+  assert.deepEqual(
+    locations(first),
+    [
+      "examples/already-read.py",
+      "examples/runtime/consumer.py",
+      "tests/test_named.py",
+      ...uncertainPolicyFiles,
+    ].sort(),
+  );
+  assert.deepEqual(first.coverage.discovery_omissions, [
+    { path: "examples/demo.py", excludedBy: "examples" },
+    { path: "examples/worker.py", excludedBy: "examples" },
+  ]);
+  assert.equal(
+    scoped.boundTraceResponse(first).coverage.discovery_omissions,
+    undefined,
+  );
+  assert.deepEqual(
+    locations(await trace(scoped, { files: ["examples/demo.py"] })),
+    ["examples/demo.py"],
+  );
+  scoped.includeDiscoveryFile("examples/worker.py");
+  assert.deepEqual(locations(await trace(scoped, broad)), allFiles);
+});
+
 test("filtered directory discovery registers OpenGrep hits without selecting files", async (t) => {
   for (const command of ["rg", "opengrep"]) {
     try {

@@ -31,6 +31,7 @@ import {
 } from "../trusted-executable.ts";
 import { catalogEvidence, catalogNames, maxCatalogBytes } from "./catalog.ts";
 import { configIdentity } from "./rule-config.ts";
+import type { DiscoveryScope } from "./discovery-scope.ts";
 import {
   dependencyEvidence,
   dependencyManifestGlob,
@@ -484,7 +485,10 @@ function taintIntrafile(scope: TraceScope) {
 
 // Keep repository configuration, filenames and ignore rules out of the native
 // parser. The temporary input is exactly the bytes whose fingerprint we cache.
-export function localProvider(root: string): TraceProvider {
+export function localProvider(
+  root: string,
+  discoveryScope?: DiscoveryScope,
+): TraceProvider {
   const tools = new Map<string, Promise<TrustedExecutable | null>>();
   let inheritedDescriptors = true;
   function tool(name: string) {
@@ -1299,12 +1303,24 @@ export function localProvider(root: string): TraceProvider {
             .join(" ");
           const checkoutPath = (file: string) =>
             relative(canonicalRoot, file).split(sep).join("/");
+          const omissions =
+            symbolSearch && supported && discoveryScope
+              ? discoveryScope.omit([...files].map(checkoutPath))
+              : [];
+          if (omissions.length) {
+            const skipped = new Set(omissions.map((entry) => entry.path));
+            for (const file of files) {
+              if (skipped.has(checkoutPath(file))) files.delete(file);
+            }
+          }
+          const scopeCoverage = omissions.length ? { omissions } : {};
           if (terms) {
             const next = sourceBatches(scope, [...files].map(checkoutPath));
             return {
               evidence: [],
               next,
               complete: !reason,
+              ...scopeCoverage,
               ...(reason && { reason }),
             };
           }
@@ -1345,6 +1361,7 @@ export function localProvider(root: string): TraceProvider {
             })),
             next,
             complete,
+            ...scopeCoverage,
             ...(complete
               ? {}
               : {

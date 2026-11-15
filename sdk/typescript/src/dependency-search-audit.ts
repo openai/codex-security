@@ -468,6 +468,17 @@ export class DependencySearchAudit {
       ...strings(reported["searched_paths"]).map((path) => `searched=${path}`),
     );
     const details = strings(reported["limits"]);
+    if (sourceTrace && Array.isArray(reported["discovery_omissions"])) {
+      for (const entry of reported["discovery_omissions"].filter(isRecord)) {
+        if (
+          typeof entry["path"] === "string" &&
+          typeof entry["excludedBy"] === "string"
+        )
+          details.push(
+            `Broad discovery omitted ${JSON.stringify(entry["path"])} under operator exclusion ${JSON.stringify(entry["excludedBy"])}.`,
+          );
+      }
+    }
     for (const [key, label] of [
       ["partial", "Incomplete"],
       ["frontier", "Not visited"],

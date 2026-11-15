@@ -905,6 +905,61 @@ test("a sibling source finding reopens the report while duplicate note reads pre
   }
 });
 
+test("a new operator source omission invalidates finalization and remains in the audit", async () => {
+  await using repo = await scopedTemporaryDirectory("review-source-scope-");
+  await writeFile(join(repo.path, "worker.ts"), "start\nchecked entry\n");
+  const state = createDependencyReportSubmission({
+    advisory,
+    repository: repo.path,
+    review: async (prompt) => reviewDecision(prompt, approved),
+  });
+  try {
+    expect(await queueUse(state, draft().uses[0]!)).toMatchObject({
+      queued: true,
+    });
+    state.recordGraphEvent("item/completed", graphItem("scope-baseline", 1, 0));
+    expect((await finalize(state, [], ["worker"])).accepted).toBe(true);
+    expect(state.acceptedReport().status).toBe("ruled_out");
+    const item = graphItem("source-omission", 1, 0);
+    const trace = {
+      ...item,
+      tool: "trace_codex_security_code",
+      result: {
+        structuredContent: {
+          ...item.result.structuredContent,
+          coverage: {
+            complete: true,
+            discovery_omissions: [
+              { path: "examples/demo.py", excludedBy: "examples" },
+            ],
+          },
+        },
+      },
+    };
+    state.recordGraphEvent("item/completed", trace);
+    expect(() => state.acceptedReport()).toThrow(
+      "evidence changed after finalization",
+    );
+    expect((await finalize(state, [], ["worker"])).accepted).toBe(true);
+    state.recordGraphEvent("item/completed", trace);
+    expect(state.acceptedReport().status).toBe("unknown");
+    expect(state.acceptedReport().uses[0]?.verdict).toBe("ruled_out");
+    expect(state.publicReport().limitations).toContainEqual(
+      expect.stringContaining("Operator scope omitted 1 matched source file"),
+    );
+    expect(state.publicReport().searches).toContainEqual(
+      expect.objectContaining({
+        tool: "trace_codex_security_code",
+        details: expect.arrayContaining([
+          'Broad discovery omitted "examples/demo.py" under operator exclusion "examples".',
+        ]),
+      }),
+    );
+  } finally {
+    await state.close();
+  }
+});
+
 test.each(["native", "resource", "failed resource", "empty resource"])(
   "late unbound %s evidence reopens an accepted report",
   async (kind) => {

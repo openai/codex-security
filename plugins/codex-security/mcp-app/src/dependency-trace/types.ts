@@ -1,4 +1,5 @@
 export type { TraceRequest } from "./schema.ts";
+import type { DiscoveryOmission } from "./discovery-scope.ts";
 
 export interface TraceScope {
   kind: "search" | "manifests" | "file" | "source_batch" | "catalog";
@@ -77,6 +78,7 @@ export interface ScopeResult {
   fingerprint?: string;
   evidence: TraceEvidence[];
   textMatches?: TextMatch[];
+  omissions?: DiscoveryOmission[];
   next: TraceScope[];
   complete: boolean;
   reason?: string;
@@ -108,6 +110,7 @@ export interface TraceResult {
     reason?: string;
     evidence: TraceEvidence[];
     textMatches?: TextMatch[];
+    omissions?: DiscoveryOmission[];
     ruleExecution?: RuleExecution;
   }[];
   /** Sample of the next lookups that did not fit the hop budget. */

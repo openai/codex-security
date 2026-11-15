@@ -2,12 +2,16 @@ import { expect, mock, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough, Readable, Writable } from "node:stream";
 import { readSkillCommandOutput } from "../src/cli.js";
 import { createDependencyCandidates } from "../src/dependency-candidates.js";
-import type { DependencyGraphTools } from "../src/dependency-graph-tools.js";
+import {
+  dependencyGraphNamespace,
+  openDependencyGraph,
+  type DependencyGraphTools,
+} from "../src/dependency-graph-tools.js";
 import { createDependencyNativeSession } from "../src/dependency-native-session.js";
 import type { DependencyUseProof } from "../src/dependency-report-proof.js";
 import { createDependencyReportSubmission } from "../src/dependency-report-submission.js";
@@ -2164,4 +2168,176 @@ test("an open research lead received during review prevents closing the native i
   expect(
     run.requests.filter((value) => value["method"] === "turn/start"),
   ).toHaveLength(2);
+});
+
+test("finalizes after native source work calls and preserves known remaining coverage", async () => {
+  await using repo = await scopedTemporaryDirectory("native-source-work-");
+  await mkdir(join(repo.path, "mcp"));
+  await writeFile(join(repo.path, "worker.ts"), 'saveImage("PNG");\n');
+  await writeFile(
+    join(repo.path, "mcp", "helpers.mjs"),
+    [
+      "export default { createDependencyGraphSession: () => ({",
+      "  tools: [{ name: 'query_codex_security_graph', description: 'Query', inputSchema: { type: 'object', properties: {} } }],",
+      "  serviceResolutionCoverage: () => ({ revision: 0, pending: 0 }),",
+      "  async call() { throw new Error('An ordinary graph query must not repair coverage.'); },",
+      "  async close() {},",
+      "}) };",
+    ].join("\n"),
+  );
+  const graph = await openDependencyGraph(repo.path, repo.path);
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory: { cve: "CVE-2000-0001", advisories: [] },
+    sourceWorkCoverage: () => graph.sourceWorkCoverage,
+    review: async (prompt) => {
+      const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as {
+        items: { id: string; revision: number; excerptIds: string[] }[];
+      };
+      return JSON.stringify({
+        items: packet.items.map(({ id, revision, excerptIds }) => ({
+          id,
+          revision,
+          accepted: true,
+          reason: "The fixed format excludes this call.",
+          citedVersion: null,
+          evidenceIds: excerptIds,
+        })),
+      });
+    },
+  });
+  try {
+    const reviewed = await state.queue({
+      items: [
+        {
+          id: "fixed-format",
+          kind: "use",
+          candidateIds: [],
+          use: {
+            location: "worker.ts:1",
+            component: "image-library",
+            version: null,
+            verdict: "ruled_out",
+            deployment: "unknown",
+            reason: "The call selects a format outside the advisory.",
+            evidence: [
+              { path: "worker.ts", startLine: 1, endLine: 1, supports: [] },
+            ],
+            observations: [],
+          },
+        },
+      ],
+    });
+    expect(reviewed).toMatchObject({ queued: true });
+    const tool = "record_codex_security_source_work";
+    const write = {
+      operation: "append_roster_page",
+      id: "format-dispatch",
+      owner: "discovery",
+      paths: ["worker.ts", "worker-extra.ts"],
+      declaredComplete: false,
+      gaps: [
+        { id: "remaining", description: "Remaining worker search timed out." },
+      ],
+      search: "Find image library calls",
+      sourceRefs: ["search-receipt-1"],
+    };
+    const mutation = Promise.withResolvers<void>();
+    const query = Promise.withResolvers<void>();
+    const final = Promise.withResolvers<void>();
+    async function* events() {
+      for (const event of setup()) yield JSON.stringify(event) + "\n";
+      yield JSON.stringify(
+        submission(
+          "source-work-write",
+          { work: write },
+          {
+            namespace: dependencyGraphNamespace,
+            tool,
+          },
+        ),
+      ) + "\n";
+      await mutation.promise;
+      yield JSON.stringify(
+        submission(
+          "source-work-read",
+          { sourceWork: {} },
+          {
+            namespace: dependencyGraphNamespace,
+            tool: "query_codex_security_graph",
+          },
+        ),
+      ) + "\n";
+      await query.promise;
+      yield JSON.stringify(
+        submission("source-work-final", {
+          reviewItems: [{ id: "fixed-format", revision: 1 }],
+          candidateGeneration: 0,
+          limitations: [],
+        }),
+      ) + "\n";
+      await final.promise;
+      yield JSON.stringify(complete("turn")) + "\n";
+    }
+    const responses = new Map<string, Record<string, unknown>>();
+    expect(
+      await readSkillCommandOutput(Readable.from(events()), {
+        directory: repo.path,
+        prompt: "Review dependency",
+        sandbox: "read-only",
+        permissionProfile: "restricted",
+        cyberAccessProgram: "standard",
+        threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
+        dependencyGraph: graph,
+        dependencyReport: {
+          submit: state.submit,
+          recordInventory: state.recordInventory,
+          recordGraphEvent: state.recordGraphEvent,
+          continuationPrompt: state.continuationPrompt,
+        },
+        input: new Writable({
+          write(chunk, _encoding, done) {
+            const reply = JSON.parse(String(chunk)) as Record<string, unknown>;
+            if (typeof reply["id"] === "string")
+              responses.set(reply["id"], reply);
+            if (reply["id"] === "source-work-write") mutation.resolve();
+            if (reply["id"] === "source-work-read") query.resolve();
+            if (reply["id"] === "source-work-final") final.resolve();
+            done();
+          },
+        }),
+      }),
+    ).toEqual({ completed: true });
+    for (const id of [
+      "source-work-write",
+      "source-work-read",
+      "source-work-final",
+    ])
+      expect(responses.get(id)).toHaveProperty("result.success", true);
+    const report = state.acceptedReport();
+    expect(report.status).toBe("unknown");
+    expect(report.uses[0]?.verdict).toBe("ruled_out");
+    expect(state.publicReport().limitations).toEqual([
+      expect.stringContaining('["worker-extra.ts","worker.ts"]'),
+    ]);
+    expect(report.limitations[0]).toContain(
+      "Remaining worker search timed out.",
+    );
+    expect(report.limitations[0]).toContain("search-receipt-1");
+    await graph.call(tool, {
+      work: {
+        operation: "assign_partition",
+        id: "worker-check",
+        rosterId: write.id,
+        owner: "worker",
+        paths: ["worker.ts"],
+      },
+    });
+    expect(() => state.acceptedReport()).toThrow(
+      "Coverage or report evidence changed after finalization",
+    );
+  } finally {
+    state.close();
+    await graph.close();
+  }
 });

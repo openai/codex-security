@@ -93,6 +93,22 @@ resources, but has no source-to-service catalog, in `exploitability.runtime_mcps
 This keeps its tools and receipts available without sending it catalog requests.
 A server listed in both settings is connected once and participates in both roles.
 
+Optionally set `exploitability.scope.exclude_paths` to omit literal
+checkout-relative files or directories from broad structural discovery:
+
+```yaml
+exploitability:
+  scope:
+    exclude_paths: [examples/standalone-jobs]
+```
+
+Omit the setting to keep broad discovery across the checkout. The command
+retains already discovered candidates and records each omitted path in the
+search audit. A different nested `SECURITY.md` policy keeps that path in the
+search. Exact file traces or receipt-backed caller leads can reopen a file
+for follow-up. The setting describes your discovery boundary. It does not
+establish whether an omitted path runs or is affected by the advisory.
+
 ```yaml
 exploitability:
   service_catalog_mcps: [inventory]

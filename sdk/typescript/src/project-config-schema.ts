@@ -83,6 +83,16 @@ export const ProjectConfigInputSchema = z.strictObject({
     ),
   exploitability: z
     .strictObject({
+      scope: z
+        .strictObject({
+          exclude_paths: z
+            .array(nonempty)
+            .optional()
+            .describe(
+              "Literal checkout-relative files or directories to omit from broad exploitability structural discovery. Explicit file traces and exact caller leads can revisit them.",
+            ),
+        })
+        .optional(),
       service_catalog_mcps: z
         .array(nonempty)
         .optional()
