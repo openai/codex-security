@@ -283,7 +283,7 @@ describe("scans show observed files", () => {
                   finishedAt: "2026-10-22T12:05:00Z",
                 },
                 progress: { status: "complete" },
-                executionThreadIds: executionThreads,
+                executionThreadIds: [...executionThreads],
                 continuationThreadId: "parent",
                 observedFilesRead: { count: null, observedAt: null },
               },
