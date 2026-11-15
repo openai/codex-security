@@ -661,7 +661,7 @@ exit 1
 
   test
     .skipIf(process.platform === "win32")
-    .each(["GIT_SSH", "GIT_ASKPASS"] as const)(
+    .each(["GIT_SSH", "GIT_ASKPASS", "SSH_ASKPASS"] as const)(
     "stops publication when a patch retargets the selected %s launcher",
     async (setting) => {
       const { directory, git } = await publicationRepository();
@@ -714,6 +714,102 @@ exit 1
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain("Patch transport executable changed");
       expect(attemptedAuthentication).toBe(false);
+    },
+  );
+
+  test.each([
+    "ssh config",
+    "identity",
+    "known hosts",
+    "interpreter script",
+    "resume",
+    "approved known-hosts update",
+  ] as const)(
+    "preserves selected transport file identity: %s",
+    async (kind) => {
+      const { directory, git } = await publicationRepository();
+      const external = await fixtures.create("patch-transport-input-");
+      const file = join(external, "operand");
+      await writeFile(file, "approved\n");
+      const path = file.replaceAll("\\", "/");
+      const sshCommand =
+        kind === "interpreter script"
+          ? 'node "' + path + '"'
+          : kind === "identity"
+            ? 'ssh -i "' + path + '"'
+            : kind === "known hosts" || kind === "approved known-hosts update"
+              ? 'ssh -o "UserKnownHostsFile=' + path + '"'
+              : 'ssh -F "' + path + '"';
+      git("remote", "set-url", "origin", "git@work:example/repository.git");
+      const branch = "codex-security/patch-scan-1";
+      const resume = kind === "resume";
+      if (resume) {
+        git("branch", branch);
+        git(
+          "config",
+          "branch." + branch + ".codexSecurityPatchCommit",
+          git("rev-parse", "HEAD"),
+        );
+      }
+      const approvedUpdate = kind === "approved known-hosts update";
+      let changed = false;
+      let pushed = false;
+      const outcome = await runWorkflow(
+        resume
+          ? ["patch", "--resume-pr", branch, "--json"]
+          : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment: {
+            GIT_SSH_COMMAND: sshCommand,
+            GITLAB_HOST: "gitlab.com",
+          },
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            expect(resume).toBe(false);
+            if (!approvedUpdate) {
+              await writeFile(file, "replaced by patch\n");
+              changed = true;
+            }
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: async (tool, args, cwd, options) => {
+            if (args.includes("codex-security-ssh-config")) {
+              if (resume && !changed) {
+                await writeFile(file, "replaced during resume\n");
+                changed = true;
+              }
+              return "hostname gitlab.com";
+            }
+            if (args.includes("ls-remote")) {
+              if (approvedUpdate) {
+                // A successful SSH connection can record a new host key.
+                await writeFile(file, "operator-approved host key\n");
+                changed = true;
+              }
+              return "";
+            }
+            if (args.includes("push")) {
+              pushed = true;
+              throw new Error("fixture reached push");
+            }
+            return tool === "git"
+              ? runGitRepositoryCommand(tool, args, cwd, options)
+              : "";
+          },
+        },
+        { localHosting: false },
+      );
+      expect(changed, outcome.stderr).toBe(true);
+      expect(pushed, outcome.stderr).toBe(approvedUpdate);
+      expect(outcome.stderr).toContain(
+        approvedUpdate
+          ? "fixture reached push"
+          : "Patch transport file changed",
+      );
     },
   );
 

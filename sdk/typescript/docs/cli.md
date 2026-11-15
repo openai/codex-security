@@ -2814,7 +2814,10 @@ Patch results are `verified`, `no_change`, `blocked`, or
 ### Create or resume a draft pull request
 
 For a custom SSH command, use your user Git configuration or `GIT_SSH_COMMAND`.
-Publication checks the source of `core.sshCommand` before it runs SSH.
+Publication checks the source of `core.sshCommand` before it runs SSH and
+rechecks the selected launcher and explicit SSH file operands during publication.
+If a transport file changes, inspect the file and your transport settings before
+retrying. `--resume-pr` selects the current operator settings for that invocation.
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
