@@ -22,6 +22,7 @@ import { DependencySearchAudit } from "./dependency-search-audit.js";
 import {
   dependencyReviewStatusInputSchema,
   summarizeDependencyReviewStatus,
+  type DependencyReviewItemStatus,
 } from "./dependency-review-status.js";
 import {
   aggregateDependencyVerdict,
@@ -136,7 +137,6 @@ type Decision = Omit<
   z.infer<typeof itemDecisionSchema>,
   "id" | "revision" | "evidenceIds"
 > & { evidenceKeys: string[] };
-type ItemStatus = "queued" | "reviewing" | "accepted" | "rejected" | "error";
 type BoundCandidate = Pick<
   DependencyCandidate,
   "path" | "line" | "package" | "sourceSha256" | "sourceBytes" | "testCandidate"
@@ -154,7 +154,7 @@ interface PreparedItem {
 }
 interface ItemState extends PreparedItem {
   revision: number;
-  status: ItemStatus;
+  status: DependencyReviewItemStatus;
   queuedAt: number;
   feedback?: string;
 }
@@ -331,10 +331,8 @@ export function createDependencyReportSubmission(options: {
   }
   function readStatus(value: unknown = {}) {
     const request = dependencyReviewStatusInputSchema.parse(value);
-    const summary = summarizeDependencyReviewStatus(
-      status(request.inventoryReceipts === true),
-      request,
-    );
+    const current = status(request.inventoryReceipts === true);
+    const summary = summarizeDependencyReviewStatus(current, request);
     const assessmentItems = request.assessmentIds?.map((id) => {
       const state = items.get(id);
       if (!state) throw new CodexSecurityError(`Unknown assessment ID: ${id}.`);
@@ -343,26 +341,27 @@ export function createDependencyReportSubmission(options: {
     let assessmentPage;
     if (request.assessments) {
       const { after, limit = 50 } = request.assessments;
-      const visible = [...items.values()];
       const cursor =
         after === undefined
           ? -1
-          : visible.findIndex(({ input }) => input.id === after);
+          : current.items.findIndex(({ id }) => id === after);
       if (after !== undefined && cursor === -1)
         throw new CodexSecurityError(
           `Unknown or out-of-scope assessment cursor: ${after}.`,
         );
-      const page = visible.slice(cursor + 1, cursor + 1 + limit);
+      const page = current.items.slice(cursor + 1, cursor + 1 + limit);
       assessmentPage = {
         items: page.map((state) => {
-          const { input } = state;
+          const input = items.get(state.id)!.input;
           return {
             id: input.id,
             revision: state.revision,
             kind: input.kind,
-            status: inventory.staleReason(state.receipts)
-              ? "error"
-              : state.status,
+            status: state.status,
+            ...((state.status === "rejected" || state.status === "error") &&
+            state.feedback
+              ? { feedback: state.feedback }
+              : {}),
             ...(input.kind === "use" && {
               location: input.use.location,
               component: input.use.component,
@@ -373,8 +372,8 @@ export function createDependencyReportSubmission(options: {
           };
         }),
         nextAfter:
-          cursor + 1 + page.length < visible.length
-            ? page.at(-1)!.input.id
+          cursor + 1 + page.length < current.items.length
+            ? page.at(-1)!.id
             : null,
       };
     }

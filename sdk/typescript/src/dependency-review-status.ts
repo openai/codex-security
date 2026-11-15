@@ -26,7 +26,7 @@ export const dependencyReviewStatusInputSchema = z.strictObject({
     })
     .optional()
     .describe(
-      "Page compact active assessment summaries, including accepted worker items. Defaults to 50 items. Pass nextAfter as after to read the next page.",
+      "Page active assessment summaries and repair feedback, including accepted worker items. Defaults to 50 items. Pass assessmentPage.nextAfter as after to read the next page.",
     ),
   assessmentIds: z
     .array(z.string().trim().min(1))
@@ -37,7 +37,7 @@ export const dependencyReviewStatusInputSchema = z.strictObject({
     )
     .optional()
     .describe(
-      "Read exact queued items by ID before repairing their evidence. The returned item can be requeued under the same ID. Native investigators share the assessment queue.",
+      "Read exact queued items and their current status by ID before repairing their evidence. The returned item can be requeued under the same ID. Native investigators share the assessment queue.",
     ),
   inventoryReceipts: z
     .boolean()
@@ -46,6 +46,9 @@ export const dependencyReviewStatusInputSchema = z.strictObject({
       "Include current receipt metadata when choosing an explicit evidence binding. Prefer authenticated record selectors already returned by catalog mappings.",
     ),
 });
+
+export type DependencyReviewItemStatus =
+  "queued" | "reviewing" | "accepted" | "rejected" | "error";
 
 interface ReviewStatus {
   candidateGeneration: number;
@@ -60,7 +63,7 @@ interface ReviewStatus {
     revision: number;
     kind: string;
     candidateIds: readonly string[];
-    status: string;
+    status: DependencyReviewItemStatus;
     feedback?: string | undefined;
   }[];
   queued: number;
@@ -68,14 +71,21 @@ interface ReviewStatus {
   closed: boolean;
 }
 
-/** Keep polling and queue acknowledgments independent of the full candidate ledger. */
+/** Return global progress and only the item details requested by a scoped read. */
 export function summarizeDependencyReviewStatus(
   status: ReviewStatus,
-  value: unknown = {},
+  input: z.infer<typeof dependencyReviewStatusInputSchema>,
 ) {
-  const input = dependencyReviewStatusInputSchema.parse(value);
   const bindings = new Map<string, string[]>();
+  const assessmentCounts: Record<DependencyReviewItemStatus, number> = {
+    queued: 0,
+    reviewing: 0,
+    accepted: 0,
+    rejected: 0,
+    error: 0,
+  };
   for (const item of status.items) {
+    assessmentCounts[item.status]++;
     for (const id of item.candidateIds) {
       const ids = bindings.get(id) ?? [];
       ids.push(item.id);
@@ -85,6 +95,12 @@ export function summarizeDependencyReviewStatus(
   const unassigned = status.candidates.filter(
     (candidate) => !bindings.has(candidate.id),
   );
+  const selectedIds = new Set(input.assessmentIds);
+  const selectedItems = input.assessmentIds
+    ? status.items.filter((item) => selectedIds.has(item.id))
+    : input.candidates || input.assessments || input.inventoryReceipts
+      ? []
+      : status.items;
   let candidatePage;
   if (input.candidates) {
     const request = input.candidates;
@@ -133,9 +149,11 @@ export function summarizeDependencyReviewStatus(
     candidateGeneration: status.candidateGeneration,
     candidateCount: status.candidates.length,
     unassignedCandidateCount: unassigned.length,
+    assessmentCount: status.items.length,
+    assessmentCounts,
     scope: status.scope,
     limitations: status.limitations,
-    items: status.items.map((item) => ({
+    items: selectedItems.map((item) => ({
       id: item.id,
       revision: item.revision,
       kind: item.kind,
@@ -149,13 +167,12 @@ export function summarizeDependencyReviewStatus(
     queued: status.queued,
     inFlight: status.inFlight,
     closed: status.closed,
-    nextAction: status.items.some(
-      (item) => item.status === "rejected" || item.status === "error",
-    )
-      ? "Read the specific rejection/error feedback and revise affected active assessments. Complete unassigned candidate accounting, then finalize; pending review alone does not require polling."
-      : unassigned.length
-        ? "Request candidates: {} for unassigned locations; follow nextCursor and assess related locations together."
-        : "If investigation is complete, finalize now even when items are queued or reviewing. Finalization starts pending reviews immediately and waits for them; polling is unnecessary.",
+    nextAction:
+      assessmentCounts.rejected || assessmentCounts.error
+        ? "Read assessments pages or the affected assessment IDs for specific rejection/error feedback. Revise affected active assessments, complete unassigned candidate accounting, and finalize."
+        : unassigned.length
+          ? "Request candidates: {} for unassigned locations; follow nextCursor and assess related locations together."
+          : "If investigation is complete, finalize now even when items are queued or reviewing. Finalization starts pending reviews immediately and waits for them; polling is unnecessary.",
     ...(candidatePage ? { candidatePage } : {}),
     ...(input.inventoryReceipts
       ? {

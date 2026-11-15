@@ -1575,12 +1575,38 @@ test("reads the exact shared item for an in-place citation repair", async () => 
     ),
   });
   expect(state.readStatus()).not.toHaveProperty("assessmentItems");
-  expect(state.readStatus({ assessmentIds: [id] }).assessmentItems).toEqual([
+  const scoped = state.readStatus({ assessmentIds: [id] });
+  expect(scoped.assessmentItems).toEqual([
     {
       revision: 1,
       item: { ...item, id },
     },
   ]);
+  expect(scoped).toMatchObject({
+    assessmentCount: 2,
+    assessmentCounts: { accepted: 1, rejected: 1 },
+    items: [
+      {
+        id,
+        revision: 1,
+        status: "rejected",
+        feedback: expect.stringContaining("installed version"),
+      },
+    ],
+  });
+  expect(state.readStatus({ assessments: { limit: 1 } })).toMatchObject({
+    items: [],
+    assessmentPage: {
+      items: [
+        {
+          id,
+          status: "rejected",
+          feedback: expect.stringContaining("installed version"),
+        },
+      ],
+      nextAfter: id,
+    },
+  });
   expect(() => state.readStatus({ assessmentIds: ["missing"] })).toThrow(
     "Unknown assessment ID",
   );
@@ -1637,6 +1663,63 @@ test("reads the exact shared item for an in-place citation repair", async () => 
   expect(() => state.readStatus({ assessments: { after: "missing" } })).toThrow(
     "Unknown or out-of-scope assessment cursor",
   );
+});
+
+test("reads many assessments a page at a time without duplicating the complete ledger", async () => {
+  await using repo = await scopedTemporaryDirectory("review-pages-");
+  await writeFile(join(repo.path, "worker.ts"), "candidate();\n");
+  const candidates = await createDependencyCandidates(repo.path);
+  const [candidate] = await candidates.observeGraph("trace", {
+    paths: [{ relation: "candidate_call", source: "worker.ts", line: 1 }],
+  });
+  const state = createDependencyReportSubmission({
+    repository: repo.path,
+    advisory,
+    candidates,
+    review: async (prompt) => reviewDecision(prompt, approved, null),
+  });
+  const items = Array.from({ length: 64 }, (_, index) => ({
+    id: `assessment-${index}`,
+    kind: "unresolved",
+    candidateIds: index === 63 ? [candidate!.id] : [],
+    reason: "The cited handoff does not establish the runtime choice.",
+    evidence: [{ path: "worker.ts", startLine: 1, endLine: 1, supports: [] }],
+    observations: [],
+  }));
+  try {
+    expect(await state.queue({ items })).toMatchObject({ queued: true });
+    const first = state.readStatus({ assessments: {} });
+    expect(first.assessmentCount).toBe(64);
+    expect(first.items).toEqual([]);
+    const page = first.assessmentPage!;
+    expect(page.items.map(({ id }) => id)).toEqual(
+      items.slice(0, 50).map(({ id }) => id),
+    );
+    expect(page.nextAfter).toBe("assessment-49");
+    const second = state.readStatus({
+      assessments: { after: page.nextAfter! },
+    });
+    expect(second.items).toEqual([]);
+    expect(second.assessmentPage?.items.map(({ id }) => id)).toEqual(
+      items.slice(50).map(({ id }) => id),
+    );
+    expect(second.assessmentPage?.nextAfter).toBeNull();
+    const bindings = state.readStatus({
+      candidates: { unassignedOnly: false },
+    });
+    expect(bindings).toMatchObject({
+      candidateGeneration: first.candidateGeneration,
+      candidateCount: 1,
+      unassignedCandidateCount: 0,
+      items: [],
+      candidatePage: {
+        candidates: [{ id: candidate!.id, assessmentIds: ["assessment-63"] }],
+      },
+    });
+    expect(state.readStatus().items).toHaveLength(64);
+  } finally {
+    await state.close();
+  }
 });
 
 test("verifies the inventory claim against actual results from cited inventory servers", async () => {
