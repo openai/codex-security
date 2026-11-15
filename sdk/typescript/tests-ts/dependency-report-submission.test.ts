@@ -311,13 +311,28 @@ test("starts queued review promptly, coalesces items and preserves reviewer conc
     await dispatched();
     expect(batches).toEqual([["first"], ["second", "third"]]);
 
+    const remaining = Array.from(
+      { length: 14 },
+      (_, index) => "batch-" + (index + 3),
+    );
+    for (const id of remaining) {
+      await submission.queue({ items: [item(id)] });
+      await dispatched();
+    }
+    const expected = [
+      ["first"],
+      ["second", "third"],
+      ...remaining.map((id) => [id]),
+    ];
+    expect(batches).toEqual(expected);
+
     await submission.queue({ items: [item("fourth")] });
     await dispatched();
-    expect(batches).toHaveLength(2);
+    expect(batches).toHaveLength(16);
 
     release.resolve();
     await dispatched();
-    expect(batches).toEqual([["first"], ["second", "third"], ["fourth"]]);
+    expect(batches).toEqual([...expected, ["fourth"]]);
   } finally {
     release.resolve();
     await submission.close();

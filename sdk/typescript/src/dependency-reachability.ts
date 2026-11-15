@@ -129,7 +129,7 @@ export const dependencyUseSchema = z
       .string()
       .nullable()
       .describe(
-        "Version selected for this use by a bound import, package, build, artifact or runtime record, including any package revision. A bound configured selection does not require a live observation. Keep an unbound version declaration in reason and use null here. Explain packaging and patches in reason.",
+        "Version selected for this use by a bound import, package, build, artifact or runtime record, including a package revision when verified. A matching runtime record can establish the loaded dependency's upstream version even when package revision and patch are unknown. A bound configured selection does not require a live observation. Keep an unbound version declaration in reason and use null here. Explain packaging and patches in reason.",
       ),
     verdict: verdict.describe(
       "potentially_exploitable requires proof of the affected copy and source evidence of its applicable use. exploitable also requires confirmation of the running revision and relevant caller access. Use unknown if a deciding fact about the copy or use is missing.",
