@@ -31,13 +31,23 @@ JIRA = {"type": "jira", "cloudId": "site-example", "projectId": "10001"}
 
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("root", ["C:\\", "\\\\server\\share\\"])
-def test_inspection_windows_filename_spelling(tmp_path: Path, monkeypatch, root) -> None:
+@pytest.mark.parametrize("near_byte_limit", [False, True])
+def test_inspection_windows_filename_spelling(
+    tmp_path: Path, monkeypatch, root, near_byte_limit
+) -> None:
     publication = load_script("workbench_publication")
     scan_dir, validated = source(tmp_path)
     payload = {"action": "inspect", "scanDirectory": str(scan_dir), "destination": LINEAR}
     directory = PureWindowsPath(root) / ("s" * (240 - len(root))) / "state #% é"
+    if near_byte_limit:
+        directory /= "界" * 200
+        remaining = 1030 - len(str(directory / "workbench.sqlite3").encode("utf-8")) - 1
+        directory /= "s" * remaining
     ordinary = directory / "workbench.sqlite3"
-    assert len(str(directory)) < 260 <= len(str(ordinary))
+    if near_byte_limit:
+        assert len(str(ordinary).encode("utf-8")) == 1030
+    else:
+        assert len(str(directory)) < 260 <= len(str(ordinary))
     expected = (
         ("\\\\?\\UNC\\" + str(ordinary)[2:])
         if root.startswith("\\\\")
@@ -61,7 +71,7 @@ def test_inspection_windows_filename_spelling(tmp_path: Path, monkeypatch, root)
     assert result["storeExists"] is True
     assert {"stat": stat.call_args.args[0], "uri": connect.call_args.args[0]} == {
         "stat": expected,
-        "uri": f"file:{quote(expected, safe='')}?mode=ro",
+        "uri": f"file:{quote(str(ordinary) if near_byte_limit else expected, safe='')}?mode=ro",
     }
     assert connect.call_args.kwargs == {"uri": True, "timeout": 5}
 
