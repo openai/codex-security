@@ -692,6 +692,41 @@ describe("multiscan", () => {
     },
   );
 
+  test("preserves committed receipts for tasks absent from the campaign", async () => {
+    const { paths } = await repositoryFixture("receipt");
+    const run = mock(completeRun);
+    const configured = options(paths, client(run));
+    const { resultsPath } = await runMultiscan(configured);
+    const first = await readFile(resultsPath, "utf8");
+    const receipt = JSON.parse(first);
+    const later = {
+      ...receipt,
+      id: "other-task",
+      attempt: 2,
+      status: "failed",
+      outputDir: join(dirname(receipt.outputDir), "attempt-2"),
+    };
+    const damaged = Buffer.concat([
+      Buffer.from(`${first}${JSON.stringify(later)}\n`),
+      Buffer.from([0xe2, 0x82]),
+    ]);
+    await writeFile(resultsPath, damaged);
+    const recoverScan = mock(rejecting("Must stop before recovery"));
+    for (const recover of [undefined, recoverScan]) {
+      await expect(
+        runMultiscan({ ...configured, recoverScan: recover }),
+      ).rejects.toThrow(`${resultsPath}:2: Receipt task id`);
+      expect(await readFile(resultsPath)).toEqual(damaged);
+      expect(
+        (await readdir(paths.output)).filter((name) =>
+          name.startsWith("results.jsonl.interrupted-"),
+        ),
+      ).toEqual([]);
+    }
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(recoverScan).not.toHaveBeenCalled();
+  });
+
   const interruptedUtf8Cases: [string, number, boolean][] = [
     ["é", 1, false],
     ["中", 1, false],

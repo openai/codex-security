@@ -369,6 +369,7 @@ async function runCampaign(
   );
   const receipts = await readReceipts(
     ledger,
+    new Set(tasks.map((task) => task.id.toLowerCase())),
     options.recoverScan !== undefined,
   );
   const pending: MultiscanTask[] = [];
@@ -1251,6 +1252,7 @@ async function ensureManifest(
 
 async function readReceipts(
   path: string,
+  campaignIds: ReadonlySet<string>,
   preserveInterrupted = false,
 ): Promise<Map<string, MultiscanHistory>> {
   let contents: Buffer;
@@ -1270,6 +1272,8 @@ async function readReceipts(
       saved = JSON.parse(line);
       if (typeof saved?.id !== "string")
         throw new Error("Expected a receipt with a string id");
+      if (!campaignIds.has(saved.id.toLowerCase()))
+        throw new Error("Receipt task id is absent from the campaign manifest");
       if (!Number.isSafeInteger(saved.attempt) || saved.attempt < 1)
         throw new Error("Expected a positive integer receipt attempt");
     } catch (cause) {
