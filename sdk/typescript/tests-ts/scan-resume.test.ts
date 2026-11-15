@@ -1661,7 +1661,14 @@ test.each(["complete", "partial", "unpriced"] as const)(
       "deep",
       false,
       scenario === "complete"
-        ? { config: { profile: "review" }, sealedPricing: { model } }
+        ? {
+            config: { profile: "review" },
+            sealedPricing: { model },
+            scanInputs: {
+              ...scanInputIdentity("Keep the original scan instructions."),
+              modelFileInputs: { model_instructions_file: null },
+            },
+          }
         : { config: { model } },
     );
     const worker = randomUUID();
