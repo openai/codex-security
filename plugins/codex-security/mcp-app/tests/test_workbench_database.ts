@@ -1711,6 +1711,11 @@ with sqlite3.connect(sys.argv[2]) as connection:
               delete row[column];
             }
           }
+        if (name === "scan_progress")
+          for (const row of rows as Record<string, unknown>[]) {
+            assert.equal(row.last_observed_phase_json, null);
+            delete row.last_observed_phase_json;
+          }
         if (name === "workspaces")
           for (const row of rows as Record<string, unknown>[]) {
             assert.equal(row.deep_scan_config_json, null);
