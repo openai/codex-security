@@ -123,7 +123,7 @@ def apply_migrations(
                     repair_schema(connection, version)
                 elif version == 11:
                     repair_deep_scan_migration(connection)
-                elif version == 63 or 73 <= version <= 77:
+                elif version in (51, 63) or 73 <= version <= 77:
                     # Recreated Deep tables need the recorded extensions too.
                     # Do not replay data updates from an already applied migration.
                     for statement in _STATEMENTS[version]:

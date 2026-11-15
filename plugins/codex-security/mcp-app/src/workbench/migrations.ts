@@ -237,6 +237,7 @@ export function applyMigrations(
           repairSchema(database, item.version);
         else if (item.version === 11) repairDeepScan(database);
         else if (
+          item.version === 51 ||
           item.version === 63 ||
           (item.version >= 73 && item.version <= 77)
         ) {

@@ -1064,7 +1064,7 @@ test("recorded additive migrations restore missing columns and configured error 
     workers, subagents, stop_after_no_new, max_discovery_runs, created_at, updated_at)
     VALUES ('scan', 1, 'v1', 'running', 'discovery', 1, 0, 7, 10, 'created', 'updated')`);
   for (const version of [
-    27, 28, 31, 32, 47, 54, 55, 57, 58, 59, 60, 61, 63, 73, 74, 75, 76, 77,
+    27, 28, 31, 32, 47, 51, 54, 55, 57, 58, 59, 60, 61, 63, 73, 74, 75, 76, 77,
   ])
     database
       .prepare("INSERT INTO schema_migrations VALUES (?, ?, 'original')")
@@ -1120,9 +1120,20 @@ test("recorded additive migrations restore missing columns and configured error 
     SELECT result_manifest_path, result_manifest_sha256, attempt FROM deep_scan_dedup_inputs;
     SELECT 1 FROM deep_scan_attempts, deep_scan_attempt_sessions, deep_scan_merge_claims;`);
   database.exec(`INSERT INTO deep_scan_workers (
-    id, scan_id, kind, status, prompt_path, artifact_dir, started_at, created_at, updated_at
-  ) VALUES ('worker', 'scan', 'discovery', 'running', 'prompt', 'artifacts', 'started', 'created', 'updated');
-  UPDATE deep_scan_workers SET attempt = attempt + 1 WHERE id = 'worker'`);
+    id, scan_id, kind, status, prompt_path, artifact_dir, started_at, created_at, updated_at, sdk_thread_id
+  ) VALUES ('worker', 'scan', 'discovery', 'running', 'prompt', 'artifacts', 'started', 'created', 'updated', NULL),
+    ('known', 'scan', 'discovery', 'running', 'prompt', 'artifacts', 'started', 'created', 'updated', 'first');
+  UPDATE deep_scan_workers SET attempt = attempt + 1 WHERE id = 'worker';
+  UPDATE deep_scan_workers SET attempt = attempt + 1, sdk_thread_id = 'second' WHERE id = 'known'`);
+  assert.deepEqual(
+    database
+      .prepare(
+        "SELECT sdk_thread_id FROM deep_scan_worker_threads WHERE worker_id = 'known' ORDER BY sdk_thread_id",
+      )
+      .all()
+      .map((row) => row.sdk_thread_id),
+    ["first", "second"],
+  );
   assert.equal(storedValue(database, "deep_scan_runs", "worker_usage_gap"), 1);
   database.exec(`UPDATE deep_scan_runs SET stop_after_consecutive_errors = 2,
     discovery_user_context_json = '"Original discovery context"'`);
