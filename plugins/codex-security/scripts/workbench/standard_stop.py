@@ -12,7 +12,13 @@ from finalize_scan_contract import (
     finding_candidate_id,
     write_scan_local_bytes,
 )
-from standard_validation import DECISIONS, read_optional, read_standard_queue
+from standard_validation import (
+    DECISIONS,
+    can_revisit,
+    claim_outcomes,
+    read_optional,
+    read_standard_queue,
+)
 
 RETURNS = "artifacts/02_discovery/standard-returns"
 STANDARD_STOP_SNAPSHOT = f"{RETURNS}/stopped.json"
@@ -48,6 +54,9 @@ def capture_standard_stop(scan_dir: Path, scan_id: str, warnings: list[str]) -> 
     except (ContractError, OSError, ValueError) as exc:
         warnings.append(f"Could not read Standard claim decisions at stop: {exc}")
         decisions = {}
+    outcomes = claim_outcomes(
+        {key: parts for key, parts in decisions.items() if isinstance(parts, list)}
+    )
     offset = 0
     for ref in queue.get("returns", []):
         if not isinstance(ref, dict) or type(ref.get("count")) is not int or ref["count"] < 0:
@@ -105,6 +114,11 @@ def capture_standard_stop(scan_dir: Path, scan_id: str, warnings: list[str]) -> 
                         "counterevidence": receipt.get("resolved_questions", []),
                         "paths": receipt.get("reviewed_files", []),
                         **({"duplicateOf": duplicate} if isinstance(duplicate, str) else {}),
+                        **(
+                            {"decision": decision}
+                            if isinstance(duplicate, str) and can_revisit(decision, outcomes)
+                            else {}
+                        ),
                     }
                 )
     unread = unread_standard_paths(queue)
@@ -131,7 +145,7 @@ def add_unfinished_standard_work(rows, coverage, findings):
         if isinstance(aliases, list):
             reported.update(alias for alias in aliases if isinstance(alias, str))
     reported.discard(None)
-    represented = set(reported)
+    represented = set()
     for surface in coverage.get("surfaces", []):
         if (
             isinstance(surface, dict)
@@ -156,7 +170,10 @@ def add_unfinished_standard_work(rows, coverage, findings):
     }
     for row in rows:
         key = row["id"]
-        if key in represented or row.get("duplicateOf") in reported:
+        # An unconfirmed link stays pending even if the checkpoint lists its target as an alias.
+        if key in represented or (
+            "decision" not in row and (key in reported or row.get("duplicateOf") in reported)
+        ):
             continue
         existing = pending.get(key)
         if existing is None:
@@ -167,7 +184,13 @@ def add_unfinished_standard_work(rows, coverage, findings):
         else:
             # A pending checkpoint owns its explanation. Add the acknowledged
             # worker evidence even when the parent has already deferred this ID.
-            for field in ("candidateId", "workerReturn", "workerCandidate", "duplicateOf"):
+            for field in (
+                "candidateId",
+                "workerReturn",
+                "workerCandidate",
+                "duplicateOf",
+                "decision",
+            ):
                 if field in row:
                     existing[field] = row[field]
             for field in ("paths", "counterevidence"):

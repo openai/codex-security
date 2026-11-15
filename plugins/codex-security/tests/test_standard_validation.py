@@ -100,11 +100,11 @@ def test_standard_cannot_publish_a_shortlist(tmp_path):
 
     record(decisions[:5])
     record(decisions[5:])
-    assert page() == []
+    assert [row["candidateId"] for row in page()] == ["standard-5"]
     recorded_deferred = decisions[4]
     record([recorded_deferred])
     rewritten = {
-        **recorded_deferred,
+        **decisions[5],
         "parts": [{"disposition": "duplicate", "duplicateOf": "standard-1.1", "reason": "Same."}],
     }
     assert "already has a different decision" in record([rewritten], check=False).stderr
@@ -218,9 +218,15 @@ def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_pat
     finding = findings["findings"][0]
     finding["provenance"]["candidateId"] = "standard-1.1"
     pending = {"title": "Unverified boundary", "source": "src/read.py:2"}
+    duplicate_candidate = {"title": "Possible second copy"}
+    proposed_link = {
+        "disposition": "duplicate",
+        "duplicateOf": "standard-2.1",
+        "reason": "The two paths appear to reach the same guard.",
+    }
     source = {
         "reviewed_files": ["src/read.py"],
-        "findings": [{"title": finding["title"]}, pending],
+        "findings": [{"title": finding["title"]}, pending, duplicate_candidate],
         "resolved_questions": ["A guard is active on the first route."],
     }
     returned = "artifacts/02_discovery/worker.json"
@@ -233,7 +239,7 @@ def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_pat
             {
                 "batches": [["src/read.py", "src/z.py", "src/b.py", "src/a.py"]],
                 "reviewed": ["src/read.py"],
-                "returns": [{"file": returned, "count": 2}],
+                "returns": [{"file": returned, "count": 3}],
             }
         )
     )
@@ -249,7 +255,8 @@ def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_pat
                             "reason": "The entry point reaches the operation.",
                         }
                     ],
-                }
+                },
+                {"candidateId": "standard-3", "parts": [proposed_link]},
             ]
         ),
         text=True,
@@ -313,6 +320,18 @@ def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_pat
         in scan_command(state, "complete-scan", scan_id, check=False)["stderr"]
     )
     del finding["provenance"]["duplicateCandidateIds"]
+    for result in (
+        publish(check=False),
+        scan_command(state, "complete-scan", scan_id, check=False),
+    ):
+        assert "Duplicate target standard-2.1 has no reportable decision" in result["stderr"]
+    coverage["deferred"].append(
+        {
+            "id": "pending-link",
+            "candidateId": "standard-3.1",
+            "reason": "The target still needs validation.",
+        }
+    )
     publish()
     result = scan_command(state, "complete-scan", scan_id)
     assert result["scan"]["findingCount"] == 1
@@ -322,6 +341,11 @@ def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_pat
     assert saved["candidate"] == pending
     assert saved["counterevidence"] == source["resolved_questions"]
     assert saved["reviewed_files"] == source["reviewed_files"]
+    link = next(row for row in deferred if row.get("candidateId") == "standard-3.1")
+    assert link["decision"] == proposed_link
+    assert link["candidate"] == duplicate_candidate
+    assert link["counterevidence"] == source["resolved_questions"]
+    assert link["reviewed_files"] == source["reviewed_files"]
     assert unread in deferred
     report = (scan / "report.md").read_text()
     assert "## Deferred Requested Work" in report

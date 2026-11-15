@@ -49,13 +49,13 @@ def read_standard_queue(scan_dir: Path) -> dict:
     return queue
 
 
-def pending_candidates(scan_dir: Path, queue: dict, decisions: dict, after: int):
+def returned_candidates(scan_dir: Path, queue: dict, after: int, wanted):
     offset = 0
     for ref in queue.get("returns", []):
         result = None
         for number in range(max(offset, after) + 1, offset + ref["count"] + 1):
             key = f"standard-{number}"
-            if key in decisions:
+            if not wanted(key):
                 continue
             if result is None:
                 result = _read_scan_local_json(scan_dir, ref["file"], "Standard worker return")
@@ -69,8 +69,25 @@ def pending_candidates(scan_dir: Path, queue: dict, decisions: dict, after: int)
         offset += ref["count"]
 
 
+def can_revisit(part: dict, outcomes: dict) -> bool:
+    if part["disposition"] != "duplicate":
+        return part["disposition"] == "deferred"
+    target = part.get("duplicateOf")
+    linked = outcomes.get(target) if isinstance(target, str) else None
+    return not isinstance(linked, dict) or linked.get("disposition") != "reportable"
+
+
 def pending_batch(scan_dir: Path, queue: dict, decisions: dict, after: int) -> list:
-    return list(islice(pending_candidates(scan_dir, queue, decisions, after), 5))
+    outcomes = claim_outcomes(decisions)
+
+    def wanted(key):
+        return key not in decisions or any(can_revisit(part, outcomes) for part in decisions[key])
+
+    rows = list(islice(returned_candidates(scan_dir, queue, after, wanted), 5))
+    for row in rows:
+        if row["candidateId"] in decisions:
+            row["parts"] = decisions[row["candidateId"]]
+    return rows
 
 
 def candidate_ids(queue: dict):
@@ -86,15 +103,35 @@ def claim_outcomes(decisions: dict) -> dict:
     }
 
 
+def update_part(claim: str, part: dict, saved: dict | None, outcomes: dict) -> dict:
+    # History belongs to the saved claim, including when a reviewer retries an earlier return.
+    part = {k: v for k, v in part.items() if k != "previousDecisions"}
+    if saved is None:
+        return part
+    original = {k: v for k, v in saved.items() if k != "previousDecisions"}
+    if part == original:
+        return saved
+    if (
+        not can_revisit(saved, outcomes)
+        or saved["disposition"] == part["disposition"] == "deferred"
+    ):
+        raise ContractError(f"Standard claim {claim} already has a different decision.")
+    return {**part, "previousDecisions": [*saved.get("previousDecisions", []), original]}
+
+
 def record(scan_dir: Path, queue: dict, decisions: dict, rows: list) -> None:
     known = set(candidate_ids(queue))
+    original = claim_outcomes(decisions)
     for row in rows:
         key, parts = row["candidateId"], row["parts"]
         if key not in known or not isinstance(parts, list) or not parts:
             raise ContractError(f"Expected a decision on a returned Standard candidate: {key}.")
-        if key in decisions and decisions[key] != parts:
-            raise ContractError(f"Standard candidate {key} already has a different decision.")
-        for part in parts:
+        previous = decisions.get(key)
+        if previous is not None and len(previous) != len(parts):
+            raise ContractError(f"Standard candidate {key} must keep its recorded claim IDs.")
+        updated_parts = []
+        for index, part in enumerate(parts, 1):
+            claim = f"{key}.{index}"
             disposition = part["disposition"]
             if disposition not in {
                 "reportable",
@@ -106,20 +143,32 @@ def record(scan_dir: Path, queue: dict, decisions: dict, rows: list) -> None:
                 raise ContractError(f"Unknown decision for {key}: {disposition}.")
             if not part.get("reason", "").strip():
                 raise ContractError(f"Standard candidate {key} needs a source-backed reason.")
-            if disposition == "duplicate" and not part.get("duplicateOf"):
-                raise ContractError(
-                    f"Standard candidate {key} needs a reportable duplicate target."
-                )
-        decisions[key] = parts
+            saved = previous[index - 1] if previous is not None else None
+            updated_parts.append(update_part(claim, part, saved, original))
+        decisions[key] = updated_parts
+
     outcomes = claim_outcomes(decisions)
-    for row in rows:
-        for part in row["parts"]:
-            if part["disposition"] == "duplicate" and (
-                outcomes.get(part["duplicateOf"], {}).get("disposition") != "reportable"
-            ):
-                raise ContractError(
-                    f"Duplicate target {part['duplicateOf']} has no reportable decision."
-                )
+    for claim, part in outcomes.items():
+        if part["disposition"] != "duplicate" or part == original.get(claim):
+            continue
+        target = part.get("duplicateOf")
+        match = (
+            re.fullmatch(r"(standard-[1-9][0-9]*)\.[1-9][0-9]*", target)
+            if isinstance(target, str)
+            else None
+        )
+        if not match or match[1] not in known or target == claim:
+            raise ContractError(
+                f"Standard claim {claim} needs a different returned claim as its duplicate target."
+            )
+        if match[1] in decisions and (
+            target not in outcomes
+            or (
+                outcomes[target]["disposition"] != "reportable"
+                and not can_revisit(outcomes[target], outcomes)
+            )
+        ):
+            raise ContractError(f"Duplicate target {target} has no reportable decision.")
     write_scan_local_bytes(scan_dir, DECISIONS, json.dumps(decisions).encode())
 
 
@@ -196,18 +245,16 @@ def require_standard_decisions(
     deferred_candidates = {
         row["candidateId"]: row for row in deferred_rows if isinstance(row.get("candidateId"), str)
     }
+    receipt_rows = {}
     for key in candidate_ids(queue):
-        if key not in decisions and (not elapsed or key not in deferred_candidates):
+        if key in decisions:
+            continue
+        if not elapsed or key not in deferred_candidates:
             raise RecoverableContractError(
                 f"Standard candidate {key} has no decision. "
                 "Resume with standard_validation.py pending."
             )
-    if elapsed:
-        for pending in pending_candidates(scan_dir, queue, decisions, 0):
-            # Retain the acknowledged source record, including counterevidence, with its proof gap.
-            row = deferred_candidates[pending["candidateId"]]
-            for field in ("candidate", "counterevidence", "reviewed_files"):
-                row[field] = pending[field]
+        receipt_rows[key] = [deferred_candidates[key]]
 
     outcomes = claim_outcomes(decisions)
     reported = set()
@@ -238,7 +285,17 @@ def require_standard_decisions(
         if disposition == "reportable":
             saved = claim in reported
         elif disposition == "duplicate":
-            saved = part["duplicateOf"] in reported
+            target = part["duplicateOf"]
+            if can_revisit(part, outcomes):
+                if elapsed and claim in deferred_candidates and claim not in reported:
+                    row = deferred_candidates[claim]
+                    row["decision"] = part
+                    receipt_rows.setdefault(claim.rsplit(".", 1)[0], []).append(row)
+                    continue
+                raise RecoverableContractError(
+                    f"Duplicate target {target} has no reportable decision."
+                )
+            saved = target in reported
         elif disposition == "deferred":
             saved = claim in deferred and claim not in reported
         else:
@@ -247,6 +304,12 @@ def require_standard_decisions(
             raise RecoverableContractError(
                 f"Standard claim {claim} is {disposition}. The report does not match its decision."
             )
+    if receipt_rows:
+        for receipt in returned_candidates(scan_dir, queue, 0, receipt_rows.__contains__):
+            # A deadline proof gap keeps the worker's original evidence and counterevidence.
+            for row in receipt_rows[receipt["candidateId"]]:
+                for field in ("candidate", "counterevidence", "reviewed_files"):
+                    row[field] = receipt[field]
     return retain_deferred
 
 

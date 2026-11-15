@@ -35,7 +35,9 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
         write_completed_contract(scan, scan_id, target)
         path = scan / "findings.json"
         findings = json.loads(path.read_text())
-        findings["findings"][0]["provenance"]["candidateId"] = "standard-2.1"
+        findings["findings"][0]["provenance"].update(
+            candidateId="standard-2.1", duplicateCandidateIds=["standard-6.1", "standard-7.1"]
+        )
         path.write_text(json.dumps(findings))
         path = scan / "coverage.json"
         coverage = json.loads(path.read_text())
@@ -58,7 +60,13 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
     missing = write_receipt(scan, "unavailable")
     (scan / missing["file"]).unlink()
     returned = write_receipt(
-        scan, "checkpointed claim", "pending worker claim", "matching claim", "closed"
+        scan,
+        "checkpointed claim",
+        "pending worker claim",
+        "matching claim",
+        "closed",
+        "provisional link",
+        "pending target",
     )
     orphan = write_receipt(scan, "unacknowledged result")
     queue = {
@@ -71,10 +79,16 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
     queue_path.write_text(json.dumps(queue))
     decisions = scan / "artifacts/04_validation/standard-decisions.json"
     decisions.parent.mkdir(parents=True, exist_ok=True)
+    provisional = {
+        "disposition": "duplicate",
+        "duplicateOf": "standard-7.1",
+        "reason": "Potentially the same guard.",
+    }
     decisions.write_text(
         json.dumps(
             {
                 "standard-2": [{"disposition": "reportable", "reason": "Verified."}],
+                "standard-6": [provisional],
                 "standard-4": [
                     {
                         "disposition": "duplicate",
@@ -92,6 +106,10 @@ def test_stopped_standard_receipts_are_frozen_at_transition(tmp_path, stop):
     assert saved["findingCount"] == int(stop == "fail-scan")
     assert any("Could not retain Standard return" in w for w in saved["warnings"])
     rows = read_review_state(state, scan)["deferred"]
+    link = next(row for row in rows if row["id"] == "standard-6.1")
+    assert link["decision"] == provisional
+    assert link["workerCandidate"] == {"title": "provisional link"}
+    assert link["counterevidence"] == ["A caller checks the input."]
     assert [row["id"] for row in rows].count("standard-3") == 1
     assert ("standard-2.1" in {row["id"] for row in rows}) == (stop == "cancel-scan")
     assert ("standard-4.1" in {row["id"] for row in rows}) == (stop == "cancel-scan")
