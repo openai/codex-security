@@ -203,12 +203,11 @@ def test_unreadable_case_variant_keeps_the_selected_directory_usable(tmp_path, c
         alias.chmod(0o700)
 
 
-@pytest.mark.cross_platform
 @pytest.mark.parametrize(
     ("damage", "diagnostic"),
     [
-        ("config", "config"),
-        ("HEAD", "git repository"),
+        pytest.param("config", "config", marks=pytest.mark.cross_platform),
+        pytest.param("HEAD", "git repository", marks=pytest.mark.cross_platform),
         pytest.param(
             "permissions",
             "git repository|Permission denied",
@@ -221,7 +220,7 @@ def test_unreadable_case_variant_keeps_the_selected_directory_usable(tmp_path, c
 def test_damaged_nested_checkout_does_not_supply_ignored_content(
     tmp_path, check_targets, damage, diagnostic
 ):
-    from workbench_target import git_directory_snapshot_paths
+    import workbench_target
 
     root = tmp_path / "repo"
     initialize_git_repository(root)
@@ -246,7 +245,7 @@ def test_damaged_nested_checkout_does_not_supply_ignored_content(
     else:
         metadata.chmod(0)
     try:
-        assert cache in git_directory_snapshot_paths(selected)
+        assert cache in workbench_target.git_directory_snapshot_paths(selected)
         with pytest.raises(OSError, match=diagnostic):
             check_targets(root, ["selected"], [])
         sibling = selected / "usable.py"
