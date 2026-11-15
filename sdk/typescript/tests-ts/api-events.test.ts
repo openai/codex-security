@@ -2,7 +2,7 @@ import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { once } from "node:events";
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   Codex,
   type McpToolCallItem,
@@ -266,6 +266,7 @@ describe("one-shot scan events", () => {
       "OPENROUTER_API_KEY",
       "FIREWORKS_API_KEY",
       "CHEAPER_INFERENCE_API_KEY",
+      "CUSTOM_GATEWAY_TOKEN",
     ] as const) {
       for (const status of ["not_granted", "unknown"] as const) {
         const { warnings } = await runTacEvents(
@@ -713,22 +714,32 @@ describe("one-shot scan events", () => {
     const onReconnect = mock();
     async function* events(): AsyncGenerator<ThreadEvent> {
       for (const message of [
-        "Reconnecting... 1/5 (ECONNRESET org-private)",
-        "Reconnecting... 2/5 (Rate limit reached for org-private. Please try again in 1.2s.)",
-        "Reconnecting... 3/5 (Rate limit reached. Please try again in 999999s.)",
-        "Reconnecting... 4/5",
-        "Reconnecting... 5/5 (429 rate limit reached org-private)",
+        "Reconnecting... 1/10 (ECONNRESET org-private)",
+        "Reconnecting... 2/10 (Rate limit reached for org-private. Please try again in 1.2s.)",
+        "Reconnecting... 3/10 (Rate limit reached. Please try again in 999999s.)",
+        "Reconnecting... 4/10",
+        "Reconnecting... 5/10 (429 rate limit reached org-private)",
+        "Reconnecting... 6/10 (error sending request for url (https://example.test/v1?error=invalid.api.key))",
+        "Reconnecting... 7/10 (error sending request for url (https://example.test/v1#model.not.found))",
+        "Reconnecting... 8/10 (Rate limit reached for org-private. Please try again in 28ms.)",
+        "Reconnecting... 9/10 (Rate limit reached. Please try again in 3600000ms.)",
+        "Reconnecting... 10/10 (Rate limit reached. Please try again in 3600001ms.)",
       ])
         yield { type: "error", message };
       yield* completedEvents();
     }
     await runEvents(scanDir, events(), { onReconnect });
     expect(onReconnect.mock.calls).toEqual([
-      [1, 5, { reason: "network" }],
-      [2, 5, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
-      [3, 5, { reason: "rate_limit" }],
-      [4, 5, undefined],
-      [5, 5, { reason: "rate_limit" }],
+      [1, 10, { reason: "network" }],
+      [2, 10, { reason: "rate_limit", retryAfterSeconds: 1.2 }],
+      [3, 10, { reason: "rate_limit" }],
+      [4, 10, undefined],
+      [5, 10, { reason: "rate_limit" }],
+      [6, 10, { reason: "network" }],
+      [7, 10, { reason: "network" }],
+      [8, 10, { reason: "rate_limit", retryAfterSeconds: 0.028 }],
+      [9, 10, { reason: "rate_limit", retryAfterSeconds: 3600 }],
+      [10, 10, { reason: "rate_limit" }],
     ]);
   });
 
@@ -736,6 +747,7 @@ describe("one-shot scan events", () => {
     for (const message of [
       "Reconnecting... 1/5 (401 invalid API key org-private)",
       "Reconnecting... 1/5 (403 model access denied org-private)",
+      "Reconnecting... 1/5 (error sending request for url (https://example.test/v1) error=invalid.api.key)",
     ]) {
       const scanDir = join(await temporaryDirectory(), "partial-scan");
       await mkdir(scanDir, { mode: 0o700 });
@@ -774,10 +786,30 @@ describe("one-shot scan events", () => {
     });
   });
 
+  test("continues while Codex waits for the network to reconnect", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const onReconnect = mock();
+    async function* events(): AsyncGenerator<ThreadEvent> {
+      yield {
+        type: "error",
+        message:
+          "Reconnecting... waiting for network (error sending request for url (https://api.example.test/v1/responses))",
+      };
+      yield { type: "error", message: "Reconnecting... waiting for network" };
+      yield* completedEvents();
+    }
+    await runEvents(scanDir, events(), { onReconnect });
+    expect(onReconnect).not.toHaveBeenCalled();
+  });
+
   test("keeps non-reconnect stream errors terminal", async () => {
     const scanDir = join(await temporaryDirectory(), "partial-scan");
     await mkdir(scanDir, { mode: 0o700 });
-    for (const message of ["stream disconnected", "Reconnecting... 6/5"]) {
+    for (const message of [
+      "stream disconnected",
+      "Reconnecting... 6/5",
+      "Reconnecting... waiting for networking",
+    ]) {
       async function* failedEvents(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
         yield { type: "turn.started" };
@@ -946,6 +978,16 @@ describe("one-shot scan events", () => {
   });
 });
 
+test("preserves the reason a required scan artifact cannot be read", async () => {
+  const scanDir = await copyCompletedScan(await temporaryDirectory());
+  const artifact = join(scanDir, "findings.json");
+  await rm(artifact);
+  await mkdir(artifact);
+  await expect(runEvents(scanDir, completedEvents())).rejects.toThrow(
+    /findings\.json:.*Expected a regular non-(?:symlink|reparse) scan file/u,
+  );
+});
+
 test.each(["scan-manifest.json", "findings.json", "report.md"])(
   "missing required artifact %s remains an incomplete scan",
   async (name) => {
@@ -1002,11 +1044,18 @@ test.skipIf(process.platform === "win32")(
   "preserves unsafe scan-root diagnostics instead of reporting missing files",
   async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
-    await chmod(scanDir, 0o755);
-    await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject({
-      name: ContractValidationError.name,
-      message: expect.stringContaining("chmod 700"),
-      cause: expect.any(Error),
-    });
+    const parent = dirname(scanDir);
+    await chmod(parent, 0o777);
+    try {
+      await expect(runEvents(scanDir, completedEvents())).rejects.toMatchObject(
+        {
+          name: ContractValidationError.name,
+          message: expect.stringContaining("sticky bit"),
+          cause: expect.any(Error),
+        },
+      );
+    } finally {
+      await chmod(parent, 0o700);
+    }
   },
 );

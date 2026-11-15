@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMain } from "../../../../sdk/typescript/scripts/is-main.mjs";
 import { hash } from "node:crypto";
 import { runGit } from "./hydrate-sastbench-repos.mts";
 import fs from "node:fs";
@@ -111,7 +112,7 @@ export function installSastBench(target: string = DEFAULT_INSTALL_ROOT) {
   return verifyInstallation(inspectInstallation(resolvedTarget));
 }
 
-if (import.meta.filename === fs.realpathSync(process.argv[1])) {
+if (isMain(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
   if (args.dryRun) {
     console.log(

@@ -1,6 +1,7 @@
 import { gitText } from "./shell.js";
 import { readJsonLines } from "./json.js";
-import { createHash } from "node:crypto";
+import { reseal } from "./sealed-scan.js";
+export { reseal };
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { zipSync } from "fflate";
@@ -89,19 +90,6 @@ export async function completedScan(
   }
   const result = fakeResult([], completeness);
   return { manifest: result.manifest, review: result.review } as ScanResult;
-}
-
-export async function reseal(scanDir: string): Promise<void> {
-  const manifestPath = join(scanDir, "scan-manifest.json");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-    scan: { artifacts: Array<{ path: string; sha256: string }> };
-  };
-  for (const artifact of manifest.scan.artifacts) {
-    artifact.sha256 = createHash("sha256")
-      .update(await readFile(join(scanDir, artifact.path)))
-      .digest("hex");
-  }
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 export async function customPlugin(

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import copy
 import os
-import re
 from collections.abc import Callable, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from finalize_scan_contract import (
     ContractError,
+    MissingScanLocalFileError,
     _require_portable_relative_path,
     _require_str,
     _validate_schema_node,
@@ -18,22 +18,6 @@ from finalize_scan_contract import (
     path_within_scope,
 )
 from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
-
-
-def _checkpoint_head_directory(relative: str) -> Path | None:
-    path = Path(relative)
-    if path.name == "checkpoint-head.json":
-        return path.parent
-    if path.parent.name == "checkpoint-heads":
-        return path.parent.parent
-    return None
-
-
-def _is_source_order_snapshot(relative: str) -> bool:
-    path = Path(relative)
-    return path.parent == Path("source-order") and bool(
-        re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
-    )
 
 
 def capture_receipt_checkpoints(
@@ -125,6 +109,7 @@ def retain_recorded_receipt_ownership(
 def resolve_coverage_receipts(
     scan_dir: Path, item: dict[str, Any], worker: Any, relative: str
 ) -> Any:
+    """Qualify worker receipt references relative to their source checkpoint for use in parent coverage."""
     refs = item.get("receiptRefs", [])
     if not isinstance(refs, list):
         return refs
@@ -414,9 +399,7 @@ def _generic_surface_updates(
                     for ref in previous_refs if isinstance(previous_refs, list) else []:
                         if ref not in refs:
                             failure = receipt_error(ref) if repaired else None
-                            replaceable = failure is not None and isinstance(
-                                failure.__cause__, FileNotFoundError
-                            )
+                            replaceable = isinstance(failure, MissingScanLocalFileError)
                             if repaired and isinstance(ref, str):
                                 try:
                                     normalized = _require_portable_relative_path(

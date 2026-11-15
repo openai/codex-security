@@ -170,14 +170,36 @@ export function draftFixture(root: string, layout: Layout) {
       ...reviewState,
     },
   });
+  const findingsDraft = (
+    findings: DraftFixture["findings"],
+    options: Pick<DraftFixture, "complete"> = {},
+  ) => ({ ...draft({}, options.complete), findings });
+  const write = (input: unknown) =>
+    layout === "worker"
+      ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
+      : recordCodexSecurityScanDraft(context, input);
   return {
     root,
     context,
     draft,
-    write: (input: unknown) =>
+    findingsDraft,
+    findingsPath: path.join(
+      root,
+      layout === "worker" ? "result.json" : "findings.json",
+    ),
+    readComplete: async () =>
       layout === "worker"
-        ? draftApi.recordCodexSecurityWorkerScanDraft(context, input)
-        : recordCodexSecurityScanDraft(context, input),
+        ? (await readJson(root, "result.json")).complete
+        : (await readJson(root, "scan-manifest.json")).scan.complete,
+    write,
+    writeReviewState: (...args: Parameters<typeof draft>) =>
+      write(draft(...args)),
+    writeFindings: (
+      findings: DraftFixture["findings"],
+      options?: Pick<DraftFixture, "complete">,
+    ) => write(findingsDraft(findings, options)),
+    checkpoint: (input: unknown) =>
+      draftApi.saveScanDraftCheckpoint(context, input, false),
     read: async () =>
       layout === "worker"
         ? (await readJson(root, "result.json")).reviewState

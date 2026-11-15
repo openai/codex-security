@@ -1,6 +1,10 @@
 import type { JsonObject } from "./config.js";
-import { observedFilesFromLogs } from "./observed-files.js";
-import { readSavedScanLogs, type ScanLogSource } from "./scan-logs.js";
+import { createObservedFileCollector } from "./observed-files.js";
+import {
+  readSavedScanLogs,
+  savedScanLogBoundaries,
+  type ScanLogSource,
+} from "./scan-logs.js";
 
 /** Refresh the saved set without replacing evidence from earlier scan attempts. */
 export async function refreshObservedFiles(
@@ -9,8 +13,11 @@ export async function refreshObservedFiles(
   record: (args: readonly string[], input: string) => Promise<JsonObject>,
 ): Promise<ScanLogSource> {
   const targetPath = scan["targetPath"];
-  const startedAt = scan["startedAt"];
-  const completedAt = scan["completedAt"];
+  const startedAt = scan.lifecycle?.startedAt;
+  // The log reader retains the final scan turn up to the next turn. Only
+  // older scans without this boundary need a timestamp cutoff on each event.
+  const bounds = savedScanLogBoundaries(scan);
+  const completedAt = bounds.logCompletedAt ? null : bounds.completedAt;
   if (
     typeof targetPath !== "string" ||
     typeof startedAt !== "string" ||
@@ -22,26 +29,22 @@ export async function refreshObservedFiles(
   ) {
     return scan;
   }
-  if (
-    !scan.continuationThreadId &&
-    !scan.threadIds?.length &&
-    !scan.executionThreadIds?.length
-  ) {
-    return scan;
-  }
+  if (!scan.executionThreadIds?.length) return scan;
+  const collector = createObservedFileCollector({
+    targetPath,
+    startedAt,
+    completedAt,
+  });
   const logs = await readSavedScanLogs(scan, codexHomes, {
     allowMissingRoot: true,
-    workerWindow: { startedAt, completedAt },
+    executionOnly: true,
+    onEvent: collector.observe,
   });
   // Missing logs cannot establish a measured zero, or erase earlier evidence.
   if (logs.sessions.length === 0) return scan;
-  const files = observedFilesFromLogs(
-    { targetPath, startedAt, completedAt },
-    logs,
-  );
   const observedFilesRead = await record(
     ["record-observed-files", "--scan-id", scan.scanId],
-    JSON.stringify({ files }),
+    JSON.stringify({ files: collector.files() }),
   );
   return { ...scan, observedFilesRead };
 }

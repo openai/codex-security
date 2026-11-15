@@ -1,12 +1,15 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { fileURLToPath } from "node:url";
-import { importModule } from "./import-module.ts";
+import { importCoordinatorServer } from "./import-module.ts";
 
 interface FixtureScanResults {
+  scanId?: string;
   progress: { status: string };
 }
 
@@ -41,6 +44,7 @@ interface CancelResponseModule {
     _registeredTools: {
       cancel_codex_security_scan_from_app: {
         handler(args: { scanId: string }): Promise<{
+          _meta?: Record<string, unknown>;
           structuredContent: { workspace: FixtureWorkspace };
         }>;
       };
@@ -49,10 +53,13 @@ interface CancelResponseModule {
   };
 }
 
-const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
-const source = await readFile(new URL("../server.ts", import.meta.url), "utf8");
 const calls: string[][] = [];
 let workspace: FixtureWorkspace;
+const scanId = randomUUID();
+const replacement = {
+  setup: { submitted: true },
+  results: { scanId: randomUUID(), progress: { status: "running" } },
+};
 let fixtureRoot: string | undefined;
 let joining = false;
 let persisted: PromiseWithResolvers<void>;
@@ -72,8 +79,10 @@ const fixture: CancelResponseFixture = {
   },
   async workbench(args) {
     calls.push(args);
-    if (args[0] === "cancel-scan")
+    if (args[0] === "cancel-scan") {
       workspace.results.progress.status = "canceled";
+      return { ...replacement, canceledScanId: scanId };
+    }
     return args[0] === "get-scan"
       ? { workspace, scan: workspace.results }
       : workspace;
@@ -81,43 +90,29 @@ const fixture: CancelResponseFixture = {
 };
 globalThis.cancelResponseFixture = fixture;
 try {
-  const { createCodexSecurityServer } = (await importModule({
-    stdin: {
-      contents: source
-        .replace(
-          "const deepScanCoordinators = new DeepScanCoordinatorRegistry();",
-          "const deepScanCoordinators = globalThis.cancelResponseFixture.registry;",
-        )
-        .replace(
-          'import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";',
-          'import { PLUGIN_ROOT, scanRoot } from "./src/workbench-client.js";\nconst runWorkbench = (...args) => globalThis.cancelResponseFixture.workbench(...args);',
-        ),
-      loader: "ts",
-      resolveDir: applicationRoot,
-    },
-    define: {
-      __dirname: JSON.stringify(applicationRoot),
-      "import.meta.url": JSON.stringify(
-        new URL("../server.ts", import.meta.url).href,
-      ),
-    },
-    loader: { ".md": "text" },
-  })) as CancelResponseModule;
+  const { createCodexSecurityServer } = (await importCoordinatorServer(
+    "cancelResponseFixture",
+  )) as CancelResponseModule;
   const server = createCodexSecurityServer();
   const cancel =
     server._registeredTools.cancel_codex_security_scan_from_app.handler;
   workspace = {
     setup: { submitted: true },
-    results: { progress: { status: "canceled" } },
+    results: { scanId, progress: { status: "canceled" } },
   };
   persisted = Promise.withResolvers<void>();
   release = Promise.withResolvers<void>();
-  const first = cancel({ scanId: "fixture-scan" });
+  const first = cancel({ scanId });
   await persisted.promise;
-  const second = cancel({ scanId: "fixture-scan" });
+  const second = cancel({ scanId });
   release.resolve();
-  for (const result of await Promise.all([first, second])) {
-    assert.deepEqual(result.structuredContent.workspace, workspace);
+  const [firstResult, joinedResult] = await Promise.all([first, second]);
+  assert.deepEqual(firstResult.structuredContent.workspace, replacement);
+  assert.deepEqual(joinedResult.structuredContent.workspace, workspace);
+  for (const result of [firstResult, joinedResult]) {
+    assert.deepEqual(result._meta, {
+      "codex/telemetry": { span: { target_id: scanId } },
+    });
   }
   assert.deepEqual(
     calls.map(([command]) => command),
@@ -128,7 +123,7 @@ try {
     results: { progress: { status: "failed" } },
   };
   assert.deepEqual(
-    (await cancel({ scanId: "fixture-scan" })).structuredContent.workspace,
+    (await cancel({ scanId })).structuredContent.workspace,
     workspace,
   );
   assert.equal(
@@ -147,17 +142,13 @@ try {
   );
   const run = (args: string[]): WorkbenchScanRecord & { scanId: string } =>
     JSON.parse(
-      execFileSync(
-        process.env.PYTHON || "python3",
-        ["-I", "-B", workbenchPath, ...args],
-        {
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            CODEX_SECURITY_STATE_DIR: join(fixtureRoot!, "state"),
-          },
+      execFileSync(fixturePython, ["-I", "-B", workbenchPath, ...args], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CODEX_SECURITY_STATE_DIR: join(fixtureRoot!, "state"),
         },
-      ),
+      }),
     );
   const registered = run([
     "register-cli-scan",

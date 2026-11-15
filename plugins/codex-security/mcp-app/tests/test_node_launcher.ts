@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   copyFile,
   mkdir,
@@ -13,6 +14,7 @@ import { after, test } from "node:test";
 import { nativeTarget } from "../../native/platform.mts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
+const launcherTest = process.platform === "win32" ? test.skip : test;
 const directories = createTemporaryDirectories(true);
 after(() => directories.cleanup());
 const sourcePluginRoot = path.resolve(import.meta.dirname, "../..");
@@ -22,6 +24,13 @@ const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT
 
 function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
+async function readLog(path: string) {
+  return (await readFile(path, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
 }
 
 async function fixture(
@@ -43,21 +52,15 @@ async function fixture(
     ),
   );
   // Keep host-installed Node runtimes out of the simulated macOS runtime set.
-  const tools = path.join(root, "shell-tools");
-  await mkdir(tools);
-  for (const name of ["dirname", "od", "tr"]) {
-    const executable = spawnSync("/bin/sh", ["-c", `command -v ${name}`], {
-      encoding: "utf8",
-    }).stdout.trim();
-    await symlink(executable, path.join(tools, name));
-  }
+  const fallback = path.join(root, "fallback-bin");
+  await mkdir(fallback);
   const source = await readFile(
     path.join(sourcePluginRoot, "scripts", path.basename(launcher)),
     "utf8",
   );
   await writeFile(
     launcher,
-    source.replace(/^PATH=.*$/m, `PATH="\${PATH}:"${shellQuote(tools)}`),
+    source.replace(/^ *PATH=.*$/m, `  PATH="\${PATH}:"${shellQuote(fallback)}`),
   );
   for (const entry of await readdir(path.join(pluginRoot, "mcp"), {
     withFileTypes: true,
@@ -147,11 +150,14 @@ process.dlopen = function(module, filename, ...args) {
     "CODEX_ELECTRON_RESOURCES_PATH",
     "CODEX_CLI_PATH",
     "CODEX_SECURITY_CONFIG_PATH",
+    "CODEX_SECURITY_PLUGIN_ROOT",
   ])
     delete env[name];
   return {
     root,
     repo,
+    fallback,
+    launcher,
     addon,
     managed,
     ordinary,
@@ -174,24 +180,59 @@ process.dlopen = function(module, filename, ...args) {
         input,
       });
     },
-    async loads() {
-      return (await readFile(log, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
-    },
-    async launches() {
-      return (await readFile(launchLog, "utf8"))
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line));
+    loads: () => readLog(log),
+    async helperRuntimes() {
+      return (await readLog(launchLog))
+        .filter((entry) => entry.argv.includes("--helper"))
+        .map((entry) => entry.runtime);
     },
   };
 }
 
-test(
+launcherTest("SDK launches preserve the supplied search path", async () => {
+  const { repo, fallback, launcher } = await fixture(false);
+  const node = path.join(fallback, "node");
+  await writeFile(
+    node,
+    `#!/bin/sh
+if [ "\${2:-}" = --helper ]; then
+  [ -n "$(command -p cat <&3)" ] || exit 1
+fi
+printf '%s' "$PATH"
+`,
+    { mode: 0o755 },
+  );
+  const run = (args: string[], env: NodeJS.ProcessEnv = {}) =>
+    spawnSync("/bin/sh", [launcher, ...args], {
+      env: { PATH: repo, HOME: repo, XDG_CACHE_HOME: repo, ...env },
+      encoding: "utf8",
+    });
+
+  const plugin = {
+    CODEX_SECURITY_PLUGIN_ROOT: path.dirname(path.dirname(launcher)),
+  };
+  for (const environment of [{}, plugin]) {
+    const standalone = run(["--stdio"], environment);
+    assert.equal(standalone.status, 0, standalone.stderr);
+    assert.equal(standalone.stdout, `${repo}:${fallback}`);
+  }
+
+  const sdk = { ...plugin, _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: "" };
+  assert.equal(run(["--stdio"], sdk).status, 127);
+  for (const args of [["--stdio"], ["--helper", "probe"]]) {
+    for (const selection of [
+      { CODEX_MCP_NODE_PATH: node },
+      { _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: fallback },
+    ]) {
+      const selected = run(args, { ...sdk, ...selection });
+      assert.equal(selected.status, 0, selected.stderr);
+      assert.equal(selected.stdout, repo);
+    }
+  }
+});
+
+launcherTest(
   "macOS helpers skip managed runtimes that reject the packaged addon",
-  { skip: process.platform === "win32" },
   async () => {
     for (const command of ["synthetic-native-helper", "resolve-security-md"]) {
       const setup = await fixture(
@@ -230,9 +271,8 @@ test(
   },
 );
 
-test(
+launcherTest(
   "macOS helpers try later PATH runtimes after an incompatible first runtime",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(true, true, true);
     await setup.addPathRuntime();
@@ -243,18 +283,90 @@ test(
       (await setup.loads()).slice(0, 3).map((entry) => entry.runtime),
       ["managed", "ordinary", "later"],
     );
-    assert.deepEqual(
-      (await setup.launches())
-        .filter((entry) => entry.argv.includes("--helper"))
-        .map((entry) => entry.runtime),
-      ["later"],
-    );
+    assert.deepEqual(await setup.helperRuntimes(), ["later"]);
   },
 );
 
 test(
+  "Linux helpers use a system SQLite fallback without probing the checkout PATH",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const root = await directories.create("codex-security-linux-launcher-");
+    const withoutSqlite = path.join(root, "node-without-sqlite");
+    const marker = path.join(root, "path-node-ran");
+    await writeFile(
+      path.join(root, "node"),
+      `#!/bin/sh\n: > ${shellQuote(marker)}\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    await writeFile(
+      withoutSqlite,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} --no-experimental-sqlite "$@"\n`,
+      { mode: 0o755 },
+    );
+    const launcher = path.join(
+      pluginRoot,
+      "scripts",
+      "launch_codex_security_mcp",
+    );
+    const installedNode = path.join(root, "installed-node");
+    const systemLink = path.join(root, "system Node's link");
+    await writeFile(
+      installedNode,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    await symlink(installedNode, systemLink);
+    const source = await readFile(launcher, "utf8");
+    // Relocate only the fixed system paths so the test can supply a system symlink.
+    const systemPaths = "/usr/local/bin/node /usr/bin/node /bin/node";
+    assert.ok(source.includes(systemPaths));
+    const fixtureLauncher = path.join(root, "scripts", "launch");
+    await mkdir(path.dirname(fixtureLauncher));
+    await symlink(path.join(pluginRoot, "mcp"), path.join(root, "mcp"));
+    await writeFile(
+      fixtureLauncher,
+      source.replace(systemPaths, '"$FIXTURE_SYSTEM_NODE"'),
+    );
+    const run = (candidate: string, inspected?: string) =>
+      spawnSync("/bin/sh", [fixtureLauncher, "--helper", "database-info"], {
+        cwd: root,
+        encoding: "utf8",
+        input: JSON.stringify(root),
+        env: {
+          HOME: root,
+          PATH: root,
+          NODE_DEBUG: "module",
+          CODEX_BROWSER_USE_NODE_PATH: withoutSqlite,
+          FIXTURE_SYSTEM_NODE: candidate,
+          ...(inspected === undefined
+            ? {}
+            : {
+                CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
+                _CODEX_SECURITY_SDK_NODE_SEARCH_PATH: inspected,
+              }),
+        },
+      });
+    const linked = run(systemLink);
+    assert.equal(linked.status, 0, linked.stderr);
+    assert.deepEqual(JSON.parse(linked.stdout), {
+      databasePath: path.join(root, "workbench.sqlite3"),
+    });
+    const missing = run(path.join(root, "missing-node"));
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /node:sqlite/);
+    const excluded = run(systemLink, "");
+    assert.notEqual(excluded.status, 0);
+    assert.match(excluded.stderr, /node:sqlite/);
+    const selected = run(systemLink, path.dirname(systemLink));
+    assert.equal(selected.status, 0, selected.stderr);
+    assert.deepEqual(JSON.parse(selected.stdout), JSON.parse(linked.stdout));
+    assert.equal(existsSync(marker), false);
+  },
+);
+
+launcherTest(
   "compatible managed runtimes retain priority over PATH",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(false);
     const result = setup.run([
@@ -270,26 +382,21 @@ test(
   },
 );
 
-test(
-  "explicit runtime selection remains authoritative",
-  { skip: process.platform === "win32" },
-  async () => {
-    const setup = await fixture(true, false, true);
-    const result = setup.run(["synthetic-native-helper"], setup.managed);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stdout, /different Team IDs/);
-    const loads = await setup.loads();
-    assert.ok(loads.every((entry) => entry.runtime === "managed"));
-    assert.ok(
-      loads[0].argv.includes("--helper"),
-      "Explicit runtimes launch directly.",
-    );
-  },
-);
+launcherTest("explicit runtime selection remains authoritative", async () => {
+  const setup = await fixture(true, false, true);
+  const result = setup.run(["synthetic-native-helper"], setup.managed);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /different Team IDs/);
+  const loads = await setup.loads();
+  assert.ok(loads.every((entry) => entry.runtime === "managed"));
+  assert.ok(
+    loads[0].argv.includes("--helper"),
+    "Explicit runtimes launch directly.",
+  );
+});
 
-test(
+launcherTest(
   "helper failures are reported without trying another runtime",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(false);
     const result = setup.run([
@@ -306,9 +413,8 @@ test(
   },
 );
 
-test(
+launcherTest(
   "helpers without native dependencies still run when all runtimes reject the addon",
-  { skip: process.platform === "win32" },
   async () => {
     for (const command of [
       "validate-patch-risk-assessment",
@@ -329,11 +435,8 @@ test(
         (await setup.loads()).map((entry) => entry.runtime),
         ["managed", "ordinary"],
       );
-      const helpers = (await setup.launches()).filter((entry) =>
-        entry.argv.includes("--helper"),
-      );
       assert.deepEqual(
-        helpers.map((entry) => entry.runtime),
+        await setup.helperRuntimes(),
         ["managed"],
         "The original default must launch the command exactly once.",
       );
@@ -341,9 +444,8 @@ test(
   },
 );
 
-test(
+launcherTest(
   "native commands retain their error when no compatible runtime exists",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(true, true, true);
     const result = setup.run(["synthetic-native-helper"]);
@@ -356,20 +458,16 @@ test(
       (await setup.loads()).map((entry) => entry.runtime),
       ["managed", "ordinary", "managed"],
     );
-    const helpers = (await setup.launches()).filter((entry) =>
-      entry.argv.includes("--helper"),
-    );
     assert.deepEqual(
-      helpers.map((entry) => entry.runtime),
+      await setup.helperRuntimes(),
       ["managed"],
       "A failing command must not retry in another runtime.",
     );
   },
 );
 
-test(
+launcherTest(
   "database helpers retain the managed runtime when PATH Node lacks SQLite",
-  { skip: process.platform === "win32" },
   async () => {
     const setup = await fixture(true, false, false, false);
     const result = setup.run(
@@ -378,11 +476,6 @@ test(
       JSON.stringify(setup.root),
     );
     assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(
-      (await setup.launches())
-        .filter((entry) => entry.argv.includes("--helper"))
-        .map((entry) => entry.runtime),
-      ["managed"],
-    );
+    assert.deepEqual(await setup.helperRuntimes(), ["managed"]);
   },
 );

@@ -19,6 +19,10 @@ export interface DeepScanProgress extends z.output<typeof deepProgressSchema> {
   consolidating?: boolean;
 }
 
+export function formatDeepScanReviews(progress: DeepScanProgress): string {
+  return `Reviews: ${progress.completed} completed, ${progress.active} active, cap ${progress.maximum}`;
+}
+
 interface ScanProgressTrackerOptions {
   read: (signal: AbortSignal) => Promise<unknown>;
   onProgress?: (progress: SavedScanProgress) => void;

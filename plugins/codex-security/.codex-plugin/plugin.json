@@ -20,6 +20,9 @@
   "mcpServers": "./.mcp.json",
   "codexSecurity": {
     "directDeepScanEngine": 1,
+    "hostedScopeInventory": 1,
+    "scopedInventoryReceipt": 1,
+    "standardScanHandoff": 1,
     "workerProviderSnapshot": 4
   },
   "interface": {

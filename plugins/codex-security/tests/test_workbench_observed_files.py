@@ -60,8 +60,8 @@ def test_empty_observation_is_zero_and_unobserved_history_is_unavailable(tmp_pat
     saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
     assert saved["observedFilesRead"]["count"] == 0
     assert saved["observedFilesRead"]["observedAt"]
-    assert saved["startedAt"]
-    assert saved["completedAt"] is None
+    assert saved["lifecycle"]["startedAt"]
+    assert saved["lifecycle"]["finishedAt"] is None
 
 
 def test_existing_scan_migrates_without_inventing_observations(tmp_path: Path) -> None:
@@ -69,7 +69,7 @@ def test_existing_scan_migrates_without_inventing_observations(tmp_path: Path) -
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute("DROP TABLE scan_observed_files")
         connection.execute("ALTER TABLE scans DROP COLUMN observed_files_read_at")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 58")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 73")
     saved = run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]
     assert saved["scanId"] == scan_id
     assert saved["observedFilesRead"] == {"count": None, "observedAt": None}

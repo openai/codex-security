@@ -1,4 +1,8 @@
-"""Synthetic Git fixtures for finding-source authorization tests."""
+"""Run one source-scope scenario in a temporary Git repository and print its JSON result.
+
+The SDK test passes the workbench scripts directory and scenario name on the command line.
+Scenarios exercise saved scan permissions against Git objects and the host filesystem.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ from workbench_target import clean_worktree_content_digest
 
 
 def git(repository: Path, *arguments: str, input_data: bytes | None = None) -> str:
+    """Run Git with fixture-local author details and return stripped stdout on success."""
     environment = dict(
         os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"
     )
@@ -60,12 +65,14 @@ def write(repository: Path, name: str, content: str) -> None:
 
 
 def commit(repository: Path) -> str:
+    """Stage all fixture changes, commit them, and return the resulting revision."""
     git(repository, "add", "--all")
     git(repository, "commit", "--quiet", "-m", "Synthetic fixture")
     return git(repository, "rev-parse", "HEAD")
 
 
 def scan(repository: Path, revision: str, paths: list[str]) -> dict:
+    """Build a saved scan record for a clean revision using the requested relative paths."""
     identity = (revision, clean_worktree_content_digest(), 0, 0)
     return {
         "target_revision": revision,
@@ -80,6 +87,7 @@ def scan(repository: Path, revision: str, paths: list[str]) -> dict:
 def excerpt(
     record: dict, repository: Path, path: str, selected: list[str]
 ) -> str | None:
+    """Return the numbered excerpt for the first line at path, or None when it is unavailable."""
     return excerpts.finding_source_excerpt(
         record, repository, [{"path": path, "startLine": 1}], selected
     )
@@ -88,6 +96,16 @@ def excerpt(
 def register_recipe(
     repository: Path, recipe: dict, environment: dict[str, str] | None = None
 ) -> tuple[dict, dict]:
+    """Register a real CLI scan in fixture state and read it back from SQLite.
+
+    Args:
+        repository (Path): Synthetic target with a writable parent for state and scan files.
+        recipe (dict): Launch recipe serialized for the register-cli-scan command.
+        environment (dict | None): Extra environment variables for the workbench subprocess.
+
+    Returns:
+        tuple: The JSON reply used by CLI callers and the complete persisted scan row.
+    """
     state = repository.parent / "state"
     scan_dir = Path(tempfile.mkdtemp(prefix="cli-scan-", dir=repository.parent))
     result = subprocess.run(
@@ -125,6 +143,7 @@ def register_recipe(
 
 
 def directory_link(target: Path, link: Path) -> None:
+    """Create a directory junction on Windows or a directory symlink on POSIX."""
     if os.name == "nt":
         subprocess.run(
             [
@@ -141,7 +160,8 @@ def directory_link(target: Path, link: Path) -> None:
         link.symlink_to(target, target_is_directory=True)
 
 
-def replacements(repository: Path) -> dict:
+def replacements(repository: Path) -> None:
+    """Check that saved excerpts use original Git objects and active replacements block new scopes."""
     write(repository, "selected.py", "selected source\n")
     write(repository, "private.py", "private source\n")
     write(repository, "selected/public.py", "selected directory\n")
@@ -167,10 +187,10 @@ def replacements(repository: Path) -> dict:
     scopes.tree_entries.cache_clear()
     captured = scan(repository, revision, ["selected.py", "selected"])
     assert json.loads(captured["source_scopes_json"])["scopes"] == []
-    return {"savedObjectsUnchanged": True, "newReplacementViewOmitted": True}
 
 
-def replacement_filters(repository: Path) -> dict:
+def replacement_filters(repository: Path) -> None:
+    """Check that registering a revision with replacement refs never invokes the worktree clean filter."""
     write(repository, "tracked.py", "synthetic source\n")
     write(repository, ".gitattributes", "tracked.py filter=scope_probe\n")
     revision = commit(repository)
@@ -215,10 +235,10 @@ def replacement_filters(repository: Path) -> dict:
     assert not marker.exists(), "source capture executed a working-tree filter"
     assert json.loads(record["source_scopes_json"])["scopes"] == []
     assert json.loads(record["recipe_json"]) == recipe
-    return {"workingTreeFilterNotRun": True, "registrationRecipeUnchanged": True}
 
 
-def replacement_snapshot(repository: Path) -> dict:
+def replacement_snapshot(repository: Path) -> None:
+    """Exercise saved and legacy scopes when replacements make a different tree appear clean."""
     from workbench_scan_start import scan_target_identity
 
     write(repository, "src/public.py", "historical source\n")
@@ -258,10 +278,10 @@ def replacement_snapshot(repository: Path) -> dict:
             == []
         )
         assert excerpt(legacy, repository, "src/removed.py", ["."]) is None
-    return {"mismatchedCaptureOmitted": True, "ambiguousLegacyViewOmitted": True}
 
 
-def indexed_scopes(repository: Path) -> dict:
+def indexed_scopes(repository: Path) -> int:
+    """Return the number of selected files after checking that path normalization scales linearly."""
     selected = [f"source-{index}.py" for index in range(256)]
     for name in selected:
         write(repository, name, "synthetic source\n")
@@ -279,10 +299,11 @@ def indexed_scopes(repository: Path) -> dict:
         record = scan(repository, revision, selected)
     assert len(json.loads(record["source_scopes_json"])["scopes"]) == len(selected)
     assert calls <= 3 * len(selected), calls
-    return {"selected": len(selected), "linearNormalization": True}
+    return len(selected)
 
 
-def display_locations(repository: Path) -> dict:
+def display_locations(repository: Path) -> int:
+    """Return the displayed location count after checking the excerpt uses a visible location."""
     import workbench_db as db
     from filesystem_identity import serialize_filesystem_identity
 
@@ -340,10 +361,11 @@ def display_locations(repository: Path) -> dict:
     assert [item["path"] for item in result["locations"]] == selected[:8]
     assert result["sourceExcerpt"] == "1  source 0"
     connection.close()
-    return {"displayed": 8, "excerptUsesDisplayedLocation": True}
+    return len(result["locations"])
 
 
-def selected_redirects(repository: Path) -> dict:
+def selected_redirects(repository: Path) -> None:
+    """Verify requested paths stay in the recipe even when directory links prevent excerpt access."""
     write(repository, ".gitignore", "/selected/link\n")
     write(repository, "selected/public.py", "selected source\n")
     write(repository, "private/secret.py", "private source\n")
@@ -374,15 +396,10 @@ def selected_redirects(repository: Path) -> dict:
         excerpt(direct, repository, "private/secret.py", ["private"])
         == "1  private source"
     )
-    return {
-        "selectedLinkOmitted": True,
-        "linkedAncestorOmitted": True,
-        "registrationRecipeUnchanged": True,
-        "directSelectionPreserved": True,
-    }
 
 
 def working_tree_excerpt(repository: Path) -> dict:
+    """Report excerpt availability for dirty working-tree scans and explicit commit-range scans."""
     write(repository, "source.py", "old committed source\n")
     revision = commit(repository)
     write(repository, "source.py", "new working-tree source\n")
@@ -423,7 +440,8 @@ def working_tree_excerpt(repository: Path) -> dict:
     }
 
 
-def unsafe_locations(repository: Path) -> dict:
+def unsafe_locations(repository: Path) -> None:
+    """Check that malformed line numbers and paths outside the repository are rejected before Git lookup."""
     write(repository, "source.py", "selected source\n")
     record = scan(repository, commit(repository), ["."])
     outside = repository.parent / "outside"
@@ -448,13 +466,10 @@ def unsafe_locations(repository: Path) -> dict:
             )
             is None
         )
-    return {
-        "unsafePathsRejectedBeforeGit": True,
-        "invalidLocationRejectedBeforeGit": True,
-    }
 
 
 def boundaries(repository: Path) -> dict:
+    """Return excerpt results for saved and legacy scopes, including removed paths and offline reads."""
     for name, content in {
         "src/public.py": "public source\n",
         "src/support.py": "support source\n",
@@ -577,22 +592,17 @@ def boundaries(repository: Path) -> dict:
     result["removedDirectory"] = excerpt(
         selected, repository, "src/nested/child.py", ["src"]
     )
-    calls = []
-    original = scopes.git_bytes
-
-    def observed(target: Path, *arguments: str):
-        calls.append(
-            (
-                os.environ.get("GIT_NO_LAZY_FETCH"),
-                os.environ.get("GIT_ALLOW_PROTOCOL"),
-                os.environ.get("GIT_NO_REPLACE_OBJECTS"),
-            )
-        )
-        return original(target, *arguments)
-
-    with patch.object(scopes, "git_bytes", observed):
+    scopes.tree_entries.cache_clear()
+    with patch.object(subprocess, "run", wraps=subprocess.run) as run:
         result["offline"] = excerpt(selected, repository, "src/public.py", ["src"])
-    assert calls and all(call == ("1", "", "1") for call in calls)
+    for command in ("ls-tree", "cat-file"):
+        reads = [call for call in run.call_args_list if command in call.args[0]]
+        assert reads, command
+        for call in reads:
+            env = call.kwargs["env"]
+            assert env["GIT_NO_LAZY_FETCH"] == "1"
+            assert env["GIT_ALLOW_PROTOCOL"] == ""
+            assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
     with patch.object(excerpts, "offline_git_bytes", return_value=None):
         result["missingObject"] = excerpt(
             selected, repository, "src/public.py", ["src"]
@@ -601,6 +611,7 @@ def boundaries(repository: Path) -> dict:
 
 
 def aliases(repository: Path) -> dict:
+    """Return the case and Unicode aliases supported by the fixture filesystem after checking excerpt lookup."""
     composed = unicodedata.normalize("NFC", "café")
     decomposed = unicodedata.normalize("NFD", composed)
     write(repository, "src/nested/public.py", "historical source\n")
@@ -683,7 +694,8 @@ def aliases(repository: Path) -> dict:
     return result
 
 
-def descendant_aliases(repository: Path) -> dict:
+def descendant_aliases(repository: Path) -> None:
+    """Exercise case collisions below a saved directory before and after deleting its worktree copy."""
     pairs = [("foo.py", "FOO.py"), ("nested/public.py", "NESTED/public.py")]
     for lower, _ in pairs:
         write(repository, f"selected/{lower}", "lower source\n")
@@ -718,10 +730,10 @@ def descendant_aliases(repository: Path) -> dict:
     for lower, upper in pairs:
         for path in (lower, upper):
             assert excerpt(record, repository, f"selected/{path}", ["selected"]) is None
-    return {"fileAndDirectoryCollisionsChecked": True, "missingWitnessesOmitted": True}
 
 
 def alias_evidence(_: Path) -> dict:
+    """Return alias decisions for simulated regular files, hard links, symlinks, and reparse points."""
     selected, candidate = Path("/synthetic/SECRET.py"), Path("/synthetic/secret.py")
     result = {}
     for kind in ("ordinary", "hardlink", "symlink", "reparse"):
@@ -750,7 +762,8 @@ def alias_evidence(_: Path) -> dict:
     return result
 
 
-def worktrees(repository: Path) -> dict:
+def worktrees(repository: Path) -> None:
+    """Check that scopes in a nested scan target retain that boundary in a linked worktree."""
     write(repository, "nested/src/public.py", "nested target source\n")
     write(repository, "private.py", "outside target source\n")
     revision = commit(repository)
@@ -773,10 +786,10 @@ def worktrees(repository: Path) -> dict:
         == "1  nested target source"
     )
     assert excerpt(linked_record, linked_target, "private.py", ["."]) is None
-    return {"subdirectoryBound": True, "linkedWorktreeBound": True}
 
 
-def writer(repository: Path, kind: str) -> dict:
+def writer(repository: Path, kind: str) -> str:
+    """Exercise the named scan entry point, check persisted scope metadata, and return the entry point name."""
     write(repository, "src/public.py", "public source\n")
     write(repository, "selected.py", "selected file\n")
     revision = commit(repository)
@@ -913,15 +926,11 @@ def writer(repository: Path, kind: str) -> dict:
         else:
             raise AssertionError("Original commit was not pruned")
         assert excerpt(row, repository, "selected.py", ["."]) == "1  selected file"
-    return {
-        "writer": kind,
-        "sourceAuthorityRecorded": True,
-        "launchRecipeUnchanged": True,
-        "legacyExactScopesPreserved": True,
-    }
+    return kind
 
 
-def migration(_: Path) -> dict:
+def migration(_: Path) -> None:
+    """Check how source-scope migrations handle preexisting scans and conflicting migration records."""
     from workbench_schema import MIGRATIONS, apply_migrations
 
     timestamp = "2026-08-01T00:00:00Z"
@@ -1003,11 +1012,6 @@ def migration(_: Path) -> dict:
             )
             apply(MIGRATIONS)
         connection.close()
-    return {
-        "legacyAuthorityUnset": True,
-        "otherMigrationsPreserved": True,
-        "conflictRejected": True,
-    }
 
 
 with tempfile.TemporaryDirectory(prefix="codex-security-source-scopes-") as temporary:

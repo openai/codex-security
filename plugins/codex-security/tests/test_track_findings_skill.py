@@ -1,3 +1,5 @@
+"""Check provider app declarations and skill connector links."""
+
 from __future__ import annotations
 
 import json
@@ -17,6 +19,9 @@ class TrackFindingsSkillTest(unittest.TestCase):
         app_ids = [apps[name].get("id") for name in ("linear", "github", "atlassian")]
         self.assertTrue(all(isinstance(app_id, str) and app_id for app_id in app_ids))
         self.assertEqual(len(set(app_ids)), len(app_ids))
+        for name in ("linear", "github", "atlassian"):
+            with self.subTest(app=name):
+                self.assertIs(apps[name].get("required"), False)
         self.assertEqual(apps["atlassian"]["capabilities"], ["read", "write"])
         self.assertEqual(apps["atlassian"]["id"], "asdk_app_6a83901dde988191b3f3cefdcc19acfa")
 
@@ -29,7 +34,7 @@ class TrackFindingsSkillTest(unittest.TestCase):
         linked_ids = set()
         for path in (PLUGIN_ROOT / "skills").rglob("*.md"):
             for app_id in re.findall(r"app://([\w-]+)", path.read_text(encoding="utf-8")):
-                with self.subTest(path=path, app_id=app_id):
+                with self.subTest(path=str(path), app_id=app_id):
                     self.assertIn(app_id, declared_ids)
                 linked_ids.add(app_id)
         self.assertIn(apps["atlassian"]["id"], linked_ids)

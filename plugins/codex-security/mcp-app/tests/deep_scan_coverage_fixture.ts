@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -9,21 +10,18 @@ import { promisify } from "node:util";
 import type { JsonObject } from "../src/types.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { importModule } from "./import-module.ts";
-import { readJson } from "./support/json.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 type FixtureRuntime = typeof import("../src/deep-scan/artifacts.js") &
   typeof import("../src/deep-scan/coordinator.js") &
   typeof import("../src/deep-scan/store.js") &
   typeof import("../src/artifact-context.js") &
-  typeof import("../src/artifact-scan-draft.js") &
-  typeof import("../src/artifact-deep-reducer.js");
+  typeof import("../src/artifact-scan-draft.js");
 
 interface CoverageFixtureOptions {
   resume?: boolean;
   continueAfterResume?: boolean;
-  stopAfterDraft?: boolean;
-  stopBeforeDraft?: boolean;
+  outcome?: "completion" | "recovery" | "no parent" | "frozen recovery";
   receiptRetry?: boolean;
   firstCheckpointReceipt?: "shared" | "worker";
   sameAttemptCloseout?: boolean;
@@ -42,7 +40,6 @@ interface CoverageFixtureOptions {
   otherWorkerCandidateIds?: string[];
   retryFindings?: JsonObject[][];
   questionRows?: (string | JsonObject)[];
-  interruptPublication?: boolean;
 }
 interface ProjectedRecord {
   id?: string;
@@ -74,7 +71,7 @@ export async function readFixtureCoverage(
   scanDir: string,
   stateDir = path.resolve(scanDir, "../../../state"),
 ): Promise<PublishedCoverage> {
-  const { stdout } = await exec(process.env.PYTHON || "python3", [
+  const { stdout } = await exec(fixturePython, [
     "-c",
     `import json,sys
 from pathlib import Path
@@ -98,7 +95,6 @@ const {
   createScanArtifactContext,
   recordCodexSecurityScanDraftViaWorkbench,
   recordCodexSecurityWorkerScanDraft,
-  recordCodexSecurityDeepReduction,
 } = (await importModule({
   stdin: {
     contents: [
@@ -107,12 +103,16 @@ const {
       'export { WorkbenchDeepScanStore } from "./src/deep-scan/store.ts";',
       'export { createScanArtifactContext } from "./src/artifact-context.ts";',
       'export { getCodexSecurityCompletedScan, recordCodexSecurityWorkerScanDraft, recordCodexSecurityScanDraftViaWorkbench } from "./src/artifact-scan-draft.ts";',
-      'export { recordCodexSecurityDeepReduction } from "./src/artifact-deep-reducer.ts";',
     ].join("\n"),
     resolveDir: path.join(pluginRoot, "mcp-app"),
   },
   loader: { ".md": "text" },
 })) as FixtureRuntime;
+async function writeReceipt(file: string, contents: string) {
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, contents);
+}
+
 export async function publishReceiptFixture(options: CoverageFixtureOptions) {
   const root = await temporaryDirectory("retry-coverage-receipts-");
   try {
@@ -128,8 +128,7 @@ export async function publishCoverageFixture(
   {
     resume = false,
     continueAfterResume = false,
-    stopAfterDraft = false,
-    stopBeforeDraft = false,
+    outcome = "completion",
     receiptRetry = false,
     firstCheckpointReceipt,
     sameAttemptCloseout = false,
@@ -148,7 +147,6 @@ export async function publishCoverageFixture(
     otherWorkerCandidateIds = ["candidate-1"],
     retryFindings,
     questionRows,
-    interruptPublication = false,
   }: CoverageFixtureOptions = {},
 ) {
   const targetPath = path.join(root, "target");
@@ -173,7 +171,7 @@ export async function publishCoverageFixture(
   const runWorkbench = async (args: string[]) => {
     const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
     const command = [workbenchPath, ...args];
-    if (interruptPublication && args[0] === "fail-scan") {
+    if (outcome === "frozen recovery" && args[0] === "fail-scan") {
       command.unshift(
         "-c",
         `
@@ -190,7 +188,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 `,
       );
     }
-    const { stdout } = await exec(process.env.PYTHON || "python3", command, {
+    const { stdout } = await exec(fixturePython, command, {
       signal: workbenchAbort.signal,
       env: {
         ...process.env,
@@ -210,34 +208,28 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   const context = await createScanArtifactContext(run.scanId, runWorkbench, {
     requireRunning: true,
   });
+  const recordWorkerDraft = (root: string, draft: JsonObject) =>
+    recordCodexSecurityWorkerScanDraft(
+      { root, layout: "worker", repoRoot: targetPath, scanId: run.scanId },
+      { scanId: run.scanId, ...draft },
+    );
   const rawSources = new Map<string, string>();
   const writeReceiptAttempt = async (artifactDir: string) => {
     if (retryCoverage) {
       await mkdir(artifactDir, { recursive: true });
-      await recordCodexSecurityWorkerScanDraft(
-        {
-          root: artifactDir,
-          layout: "worker",
-          repoRoot: targetPath,
-          scanId: run.scanId,
-        },
-        {
-          scanId: run.scanId,
-          complete: false,
-          findings: retryFindings?.[0] ?? [],
-          reviewState: retryCoverage[0],
-        },
-      );
+      await recordWorkerDraft(artifactDir, {
+        complete: false,
+        findings: retryFindings?.[0] ?? [],
+        reviewState: retryCoverage[0],
+      });
       return;
     }
-    await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
-    await writeFile(
+    await writeReceipt(
       path.join(artifactDir, "artifacts", "prior.txt"),
       emptyReceipt ? "" : "Archived receipt.\n",
     );
     if (receiptCollision) {
-      await mkdir(path.join(run.scanDir, "artifacts"), { recursive: true });
-      await writeFile(
+      await writeReceipt(
         path.join(run.scanDir, "artifacts", "prior.txt"),
         "Synthetic unrelated parent review.\n",
       );
@@ -245,10 +237,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     const archivedRef = `${path.relative(run.scanDir, path.dirname(artifactDir)).split(path.sep).join("/")}/attempts/attempt-01/artifacts/prior.txt`;
     const sharedPrior = "artifacts/01_context/false_positive_feedback.json";
     if (receiptSpelling === "shared scan") {
-      await mkdir(path.dirname(path.join(run.scanDir, sharedPrior)), {
-        recursive: true,
-      });
-      await writeFile(
+      await writeReceipt(
         path.join(run.scanDir, sharedPrior),
         emptyReceipt ? "" : "Archived receipt.\n",
       );
@@ -262,152 +251,125 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             ? archivedRef
             : `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/prior.txt`;
     if (receiptOwnershipRetry) {
-      await recordCodexSecurityWorkerScanDraft(
-        {
-          root: artifactDir,
-          layout: "worker",
-          repoRoot: targetPath,
-          scanId: run.scanId,
-        },
-        {
-          scanId: run.scanId,
-          complete: false,
-          findings: [],
-          reviewState: {
-            completeness: "partial",
-            surfaces: [
-              {
-                id: "current",
-                label: "Current review",
-                disposition:
-                  receiptOwnershipRetry === "unrelated"
-                    ? "no_issue_found"
-                    : "needs_follow_up",
-                ...(receiptOwnershipRetry === "candidate"
-                  ? { candidateId: "prior-candidate" }
-                  : {}),
-                receiptRefs: [receiptRef],
-              },
-              ...(receiptOwnershipRetry === "unrelated"
-                ? [
-                    {
-                      id: "closed",
-                      label: "Separate review",
-                      disposition: "needs_follow_up",
-                      receiptRefs: [receiptRef],
-                    },
-                  ]
-                : []),
-            ],
-            explicitExclusions: [],
-            deferred:
-              receiptOwnershipRetry === "ordinary"
-                ? []
-                : [
-                    {
-                      id: "prior-gap",
-                      ...(receiptOwnershipRetry === "candidate"
-                        ? { candidateId: "prior-candidate" }
-                        : {}),
-                      reason: "Verify the earlier boundary.",
-                      surfaceIds: [
-                        receiptOwnershipRetry === "unrelated"
-                          ? "closed"
-                          : "current",
-                      ],
-                    },
-                  ],
-          },
-        },
-      );
-      return;
-    }
-    if (closeRetriedSurface) {
-      await recordCodexSecurityWorkerScanDraft(
-        {
-          root: artifactDir,
-          layout: "worker",
-          repoRoot: targetPath,
-          scanId: run.scanId,
-        },
-        {
-          scanId: run.scanId,
-          complete: false,
-          findings: [],
-          reviewState: {
-            completeness: "partial",
-            surfaces: [
-              {
-                id: "current",
-                label: "Current review",
-                disposition: "needs_follow_up",
-                receiptRefs: [receiptRef],
-              },
-            ],
-            explicitExclusions: [],
-            deferred: [
-              {
-                id: "prior-gap",
-                reason: "Verify the earlier boundary.",
-                surfaceIds: ["current"],
-              },
-            ],
-          },
-        },
-      );
-      return;
-    }
-    await recordCodexSecurityWorkerScanDraft(
-      {
-        root: artifactDir,
-        layout: "worker",
-        repoRoot: targetPath,
-        scanId: run.scanId,
-      },
-      {
-        scanId: run.scanId,
+      await recordWorkerDraft(artifactDir, {
         complete: false,
         findings: [],
         reviewState: {
           completeness: "partial",
           surfaces: [
             {
-              id: "prior",
-              label: "Prior review",
-              disposition: "needs_follow_up",
-              candidateId: "shared-prior-candidate",
+              id: "current",
+              label: "Current review",
+              disposition:
+                receiptOwnershipRetry === "unrelated"
+                  ? "no_issue_found"
+                  : "needs_follow_up",
+              ...(receiptOwnershipRetry === "candidate"
+                ? { candidateId: "prior-candidate" }
+                : {}),
               receiptRefs: [receiptRef],
             },
+            ...(receiptOwnershipRetry === "unrelated"
+              ? [
+                  {
+                    id: "closed",
+                    label: "Separate review",
+                    disposition: "needs_follow_up",
+                    receiptRefs: [receiptRef],
+                  },
+                ]
+              : []),
+          ],
+          explicitExclusions: [],
+          deferred:
+            receiptOwnershipRetry === "ordinary"
+              ? []
+              : [
+                  {
+                    id: "prior-gap",
+                    ...(receiptOwnershipRetry === "candidate"
+                      ? { candidateId: "prior-candidate" }
+                      : {}),
+                    reason: "Verify the earlier boundary.",
+                    surfaceIds: [
+                      receiptOwnershipRetry === "unrelated"
+                        ? "closed"
+                        : "current",
+                    ],
+                  },
+                ],
+        },
+      });
+      return;
+    }
+    if (closeRetriedSurface) {
+      await recordWorkerDraft(artifactDir, {
+        complete: false,
+        findings: [],
+        reviewState: {
+          completeness: "partial",
+          surfaces: [
             {
-              id: "prior-second",
-              label: "Prior second surface",
+              id: "current",
+              label: "Current review",
               disposition: "needs_follow_up",
-              candidateId: "shared-prior-candidate",
-              receiptRefs: [
-                receiptSpelling === "worker"
-                  ? receiptRef
-                  : receiptRef.replace("artifacts/", "artifacts/./"),
-              ],
+              receiptRefs: [receiptRef],
             },
           ],
           explicitExclusions: [],
           deferred: [
             {
               id: "prior-gap",
-              candidateId: "shared-prior-candidate",
-              reason: "Verify the earlier attempt's unresolved boundary.",
-              surfaceIds: ["prior", "prior-second"],
-            },
-            {
-              id: "prior-gap-2",
-              candidateId: "shared-prior-candidate",
-              reason: "Verify the same candidate's second boundary.",
-              surfaceIds: ["prior", "prior-second"],
+              reason: "Verify the earlier boundary.",
+              surfaceIds: ["current"],
             },
           ],
         },
+      });
+      return;
+    }
+    await recordWorkerDraft(artifactDir, {
+      complete: false,
+      findings: [],
+      reviewState: {
+        completeness: "partial",
+        surfaces: [
+          {
+            id: "prior",
+            label: "Prior review",
+            disposition: "needs_follow_up",
+            candidateId: "shared-prior-candidate",
+            receiptRefs: [receiptRef],
+          },
+          {
+            id: "prior-second",
+            label: "Prior second surface",
+            disposition: "needs_follow_up",
+            candidateId: "shared-prior-candidate",
+            receiptRefs: [
+              receiptSpelling === "worker"
+                ? receiptRef
+                : receiptRef.replace("artifacts/", "artifacts/./"),
+            ],
+          },
+        ],
+        explicitExclusions: [],
+        deferred: [
+          {
+            id: "prior-gap",
+            candidateId: "shared-prior-candidate",
+            reason: "Verify the earlier attempt's unresolved boundary.",
+            surfaceIds: ["prior", "prior-second"],
+          },
+          {
+            id: "prior-gap-2",
+            candidateId: "shared-prior-candidate",
+            reason: "Verify the same candidate's second boundary.",
+            surfaceIds: ["prior", "prior-second"],
+          },
+        ],
       },
-    );
+    });
   };
   const writeDiscovery = async (
     artifactDir: string,
@@ -423,30 +385,17 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           : "artifacts/first.txt";
       const firstRoot =
         firstCheckpointReceipt === "shared" ? run.scanDir : artifactDir;
-      await mkdir(path.dirname(path.join(firstRoot, firstRef)), {
-        recursive: true,
-      });
-      await writeFile(
+      await writeReceipt(
         path.join(firstRoot, firstRef),
         "Synthetic first checkpoint.\n",
       );
       if (firstCheckpointReceipt === "worker") {
-        await mkdir(path.dirname(path.join(run.scanDir, firstRef)), {
-          recursive: true,
-        });
-        await writeFile(
+        await writeReceipt(
           path.join(run.scanDir, firstRef),
           "Synthetic unrelated parent checkpoint.\n",
         );
       }
-      const workerContext = {
-        root: artifactDir,
-        layout: "worker" as const,
-        repoRoot: targetPath,
-        scanId: run.scanId,
-      };
-      await recordCodexSecurityWorkerScanDraft(workerContext, {
-        scanId: run.scanId,
+      await recordWorkerDraft(artifactDir, {
         complete: false,
         findings: [],
         reviewState: {
@@ -479,15 +428,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         rawSources.set(checkpoint, await readFile(checkpoint, "utf8"));
       }
       const nextRef = receiptCollision ? firstRef : "artifacts/later.txt";
-      await mkdir(path.dirname(path.join(artifactDir, nextRef)), {
-        recursive: true,
-      });
-      await writeFile(
+      await writeReceipt(
         path.join(artifactDir, nextRef),
         "Synthetic later checkpoint.\n",
       );
-      await recordCodexSecurityWorkerScanDraft(workerContext, {
-        scanId: run.scanId,
+      await recordWorkerDraft(artifactDir, {
         complete,
         findings: [],
         reviewState: {
@@ -577,14 +522,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         };
       }
     }
-    await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
-    await writeFile(
+    await writeReceipt(
       path.join(artifactDir, "artifacts", "review.md"),
       emptyReceipt ? "" : "Synthetic review evidence.\n",
     );
     if (receiptCollision) {
-      await mkdir(path.join(run.scanDir, "artifacts"), { recursive: true });
-      await writeFile(
+      await writeReceipt(
         path.join(run.scanDir, "artifacts", "review.md"),
         "Synthetic unrelated parent review.\n",
       );
@@ -596,24 +539,19 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         "01_context",
         "false_positive_feedback.json",
       );
-      await mkdir(path.dirname(collision), { recursive: true });
-      await writeFile(collision, "Synthetic unrelated retry receipt.\n");
+      await writeReceipt(collision, "Synthetic unrelated retry receipt.\n");
     }
     const activeQualifiedRef = `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/review.md`;
     const sharedRef = "artifacts/01_context/false_positive_feedback.json";
     if (sharedReceipt) {
-      await mkdir(path.dirname(path.join(run.scanDir, sharedRef)), {
-        recursive: true,
-      });
-      await writeFile(
+      await writeReceipt(
         path.join(run.scanDir, sharedRef),
         emptyReceipt ? "" : "Synthetic review evidence.\n",
       );
     }
     if (sameNamedNewSurface) {
       const local = path.join(artifactDir, sharedRef);
-      await mkdir(path.dirname(local), { recursive: true });
-      await writeFile(local, "Synthetic review evidence.\n");
+      await writeReceipt(local, "Synthetic review evidence.\n");
     }
     const closureReceiptRef = receiptCollision
       ? receiptSpelling === "shared scan"
@@ -622,8 +560,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       : "artifacts/review.md";
     if (closeRetriedSurface) {
       const local = path.join(artifactDir, closureReceiptRef);
-      await mkdir(path.dirname(local), { recursive: true });
-      await writeFile(local, "Synthetic review evidence.\n");
+      await writeReceipt(local, "Synthetic review evidence.\n");
     }
     const activeReceiptRef = closeRetriedSurface
       ? closureReceiptRef
@@ -644,8 +581,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           : "artifacts/prior.txt"
         : "artifacts/review.md";
       const local = path.join(artifactDir, newRef);
-      await mkdir(path.dirname(local), { recursive: true });
-      await writeFile(local, "Synthetic review evidence.\n");
+      await writeReceipt(local, "Synthetic review evidence.\n");
       const current = {
         id: "current",
         label: "Current review",
@@ -663,128 +599,92 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             : `${path.relative(run.scanDir, path.dirname(artifactDir)).split(path.sep).join("/")}/attempts/attempt-01/artifacts/prior.txt`,
         ];
       }
-      await recordCodexSecurityWorkerScanDraft(
-        {
-          root: artifactDir,
-          layout: "worker",
-          repoRoot: targetPath,
-          scanId: run.scanId,
-        },
-        {
-          scanId: run.scanId,
-          complete,
-          findings: [],
-          reviewState: {
-            completeness: status,
-            surfaces: [
-              current,
-              ...(receiptOwnershipRetry === "unrelated"
-                ? [
-                    {
-                      id: "closed",
-                      label: "Separate review",
-                      disposition: "no_issue_found",
-                      receiptRefs: [newRef],
-                    },
-                  ]
-                : []),
-            ],
-            explicitExclusions: [],
-            deferred: [],
+      await recordWorkerDraft(artifactDir, {
+        complete,
+        findings: [],
+        reviewState: {
+          completeness: status,
+          surfaces: [
+            current,
             ...(receiptOwnershipRetry === "unrelated"
-              ? {
-                  resolvedDeferred: [
-                    {
-                      id: "prior-gap",
-                      reason: "The separate boundary is verified.",
-                    },
-                  ],
-                }
-              : {}),
-          },
+              ? [
+                  {
+                    id: "closed",
+                    label: "Separate review",
+                    disposition: "no_issue_found",
+                    receiptRefs: [newRef],
+                  },
+                ]
+              : []),
+          ],
+          explicitExclusions: [],
+          deferred: [],
+          ...(receiptOwnershipRetry === "unrelated"
+            ? {
+                resolvedDeferred: [
+                  {
+                    id: "prior-gap",
+                    reason: "The separate boundary is verified.",
+                  },
+                ],
+              }
+            : {}),
         },
-      );
+      });
       rawSources.set(resultPath, await readFile(resultPath, "utf8"));
       return;
     }
     if (receiptRetry) {
-      const saved = await recordCodexSecurityWorkerScanDraft(
-        {
-          root: artifactDir,
-          repoRoot: targetPath,
-          layout: "worker",
-          scanId: run.scanId,
+      const saved = await recordWorkerDraft(artifactDir, {
+        complete,
+        findings: [],
+        reviewState: {
+          completeness: retryPending ? "partial" : status,
+          surfaces: [
+            {
+              id: "current",
+              label: "Current review",
+              disposition: "no_issue_found",
+              receiptRefs: [activeReceiptRef],
+              ...(receiptCollision
+                ? { provenance: { scanReceiptRefs: [activeReceiptRef] } }
+                : {}),
+            },
+          ],
+          explicitExclusions: [],
+          ...(closeRetriedSurface
+            ? {
+                resolvedDeferred: [
+                  { id: "prior-gap", reason: "The boundary is verified." },
+                ],
+              }
+            : {}),
+          deferred: retryPending
+            ? [
+                {
+                  id: "prior-gap",
+                  candidateId: "shared-prior-candidate",
+                  reason: "The earlier boundary still needs verification.",
+                  surfaceIds: ["prior", "prior-second"],
+                },
+              ]
+            : [],
         },
-        {
-          scanId: run.scanId,
-          complete,
-          findings: [],
-          reviewState: {
-            completeness: retryPending ? "partial" : status,
-            surfaces: [
-              {
-                id: "current",
-                label: "Current review",
-                disposition: "no_issue_found",
-                receiptRefs: [activeReceiptRef],
-                ...(receiptCollision
-                  ? { provenance: { scanReceiptRefs: [activeReceiptRef] } }
-                  : {}),
-              },
-            ],
-            explicitExclusions: [],
-            ...(closeRetriedSurface
-              ? {
-                  resolvedDeferred: [
-                    { id: "prior-gap", reason: "The boundary is verified." },
-                  ],
-                }
-              : {}),
-            deferred: retryPending
-              ? [
-                  {
-                    id: "prior-gap",
-                    candidateId: "shared-prior-candidate",
-                    reason: "The earlier boundary still needs verification.",
-                    surfaceIds: ["prior", "prior-second"],
-                  },
-                ]
-              : [],
-          },
-        },
-      );
+      });
 
       if (rewriteReturnedCoverage && index === 0) {
-        await recordCodexSecurityWorkerScanDraft(
-          {
-            root: artifactDir,
-            repoRoot: targetPath,
-            layout: "worker",
-            scanId: run.scanId,
-          },
-          {
-            scanId: run.scanId,
-            complete,
-            findings: [],
-            reviewState: structuredClone(saved.reviewState),
-          },
-        );
+        await recordWorkerDraft(artifactDir, {
+          complete,
+          findings: [],
+          reviewState: structuredClone(saved.reviewState),
+        });
       }
     } else {
-      await recordCodexSecurityWorkerScanDraft(
-        {
-          root: artifactDir,
-          repoRoot: targetPath,
-          layout: "worker",
-          scanId: run.scanId,
-        },
-        {
-          scanId: run.scanId,
-          complete: true,
-          findings: index === 0 ? (retryFindings?.[1] ?? []) : [],
-          coverage,
-        },
-      );
+      await recordWorkerDraft(artifactDir, {
+        complete: true,
+        findings: index === 0 ? (retryFindings?.[1] ?? []) : [],
+        coverage,
+      });
       for (const name of await readdir(path.join(artifactDir, "checkpoints"))) {
         const checkpointPath = path.join(artifactDir, "checkpoints", name);
         rawSources.set(checkpointPath, await readFile(checkpointPath, "utf8"));
@@ -852,13 +752,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     await mkdir(artifactDir, { recursive: true });
     await writeFile(promptPath, "Synthetic reducer prompt.\n");
     const id = randomUUID();
-    await store.claimDedup({
-      id,
-      scanId: run.scanId,
-      workerIds: workers.map((worker) => worker.id),
-      artifactDir,
-      promptPath,
-    });
     const resultManifestPath = path.join(artifactDir, "result.json");
     // Legacy accepted reducers omitted coverage entirely.
     const findings = retryFindings?.flat() ?? [];
@@ -870,11 +763,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       resultManifestPath,
       await readFile(resultManifestPath, "utf8"),
     );
-    await store.commitDedup({
+    await store.recordIteration({
       id,
       scanId: run.scanId,
-      newFindings: findings.length,
-      resultManifestPath,
+      workerIds: workers.map((w) => w.id),
+      resultPath: resultManifestPath,
+      noNewStreak: findings.length ? 0 : workers.length,
+      consecutiveErrors: 0,
     });
     run = await store.get(run.scanId, threadId);
   }
@@ -912,15 +807,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           index,
           !(extraReceiptRetry && index === 0 && discoveryCalls === 2),
         );
-      } else {
-        await recordCodexSecurityDeepReduction(
-          {
-            ...request.artifactContext,
-            repoRoot: targetPath,
-            scanId: run.scanId,
-          },
-          { scanId: run.scanId, findings: retryFindings?.flat() ?? [] },
-        );
       }
       return { threadId: thread, finalResponse: "Audit finished." };
     },
@@ -934,7 +820,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     threadId,
     retryDelaysMs: extraReceiptRetry ? [1, 1] : [1],
     onComplete: async (draft, signal, publication) => {
-      if (stopBeforeDraft)
+      if (outcome === "no parent")
         throw new Error("Synthetic stop before parent draft.");
       await recordCodexSecurityScanDraftViaWorkbench(
         context,
@@ -956,7 +842,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   }
   assert.equal(
     terminal.status,
-    stopBeforeDraft ? "failed" : "succeeded",
+    outcome === "no parent" ? "failed" : "succeeded",
     terminal.error ?? "Unexpected Deep Scan terminal status.",
   );
   if (!retryFindings) {
@@ -987,25 +873,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       false,
       "v1 reducers remain readable by earlier binaries",
     );
-    if (!rawSources.has(worker.resultManifestPath)) {
-      for (const name of await readdir(
-        path.join(worker.artifactDir, "checkpoints"),
-      )) {
-        const checkpoint = JSON.parse(
-          await readFile(
-            path.join(worker.artifactDir, "checkpoints", name),
-            "utf8",
-          ),
-        );
-        assert.equal(
-          Object.hasOwn(checkpoint, "sourceCoverage"),
-          false,
-          "v1 checkpoints remain readable by earlier binaries",
-        );
-      }
-    }
   }
-  if (stopBeforeDraft) {
+  if (outcome === "no parent") {
     const recovered = await runWorkbench([
       "recover-scan-results",
       "--scan-id",
@@ -1016,7 +885,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     const published = await readFile(coveragePath, "utf8");
     await runWorkbench(["recover-scan-results", "--scan-id", run.scanId]);
     assert.equal(await readFile(coveragePath, "utf8"), published);
-  } else if (stopAfterDraft) {
+  } else if (outcome !== "completion") {
     const stopped = await runWorkbench([
       "fail-scan",
       "--scan-id",
@@ -1024,7 +893,10 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       "--message",
       "Synthetic stop after parent draft.",
     ]);
-    assert.equal(stopped.scan.resultsRecoveryNeeded, interruptPublication);
+    assert.equal(
+      stopped.scan.resultsRecoveryNeeded,
+      outcome === "frozen recovery",
+    );
     const recovered = await runWorkbench([
       "recover-scan-results",
       "--scan-id",
@@ -1050,7 +922,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     const coverage = await readFixtureCoverage(run.scanDir);
     assert.deepEqual(
       coverage.deferred.map((row) => row.id),
-      stopAfterDraft || stopBeforeDraft ? ["scan-stopped"] : [],
+      outcome === "completion" ? [] : ["scan-stopped"],
     );
     if (sameAttemptCloseout) {
       assert.deepEqual(

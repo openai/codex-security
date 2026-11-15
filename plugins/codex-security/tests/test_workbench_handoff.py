@@ -1,3 +1,5 @@
+"""Check handoff claims, releases, and continuation ownership across concurrent workbench requests."""
+
 from __future__ import annotations
 
 import sqlite3
@@ -11,6 +13,7 @@ from workbench_test_support import (
     cancel_scan,
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     get_scan,
     mark_handoff_delivered,
     run_workbench,
@@ -24,9 +27,7 @@ from workbench_test_support import (
 
 @pytest.mark.parametrize("mode", ("standard", "deep"))
 def test_running_scan_context_is_owned_by_attached_continuation(tmp_path: Path, mode: str) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     original_thread_id = "original-thread"
     continuation_thread_id = "continuation-thread"
     saved = create_saved_workspace(state_dir, target, thread_id=original_thread_id, mode=mode)
@@ -88,9 +89,7 @@ def test_running_scan_context_is_owned_by_attached_continuation(tmp_path: Path, 
 
 
 def test_workbench_serializes_concurrent_handoff_delivery(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -121,10 +120,32 @@ def test_workbench_serializes_concurrent_handoff_delivery(tmp_path: Path) -> Non
     )
 
 
+def test_standard_context_begins_delivered_scan_once_without_checkout_identity(
+    tmp_path: Path,
+) -> None:
+    state_dir, target = empty_target_paths(tmp_path)
+    saved = create_saved_workspace(state_dir, target, thread_id="owner")
+    scan_id = start_scan_command(state_dir, str(saved["id"]))["results"]["scanId"]
+    claim_token = str(uuid.uuid4())
+    scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
+    delivered = mark_handoff_delivered(state_dir, scan_id, claim_token)
+    assert delivered["results"]["progress"]["phase"] == "preflight"
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        connection.execute("UPDATE scans SET target_inode = NULL WHERE id = ?", (scan_id,))
+    inspected = get_scan(state_dir, scan_id)
+    assert inspected["scan"]["progress"]["phase"] == "preflight"
+
+    args = (state_dir, scan_id, claim_token, "--thread-id", "owner", "--return-context")
+    context = mark_handoff_delivered(*args)
+    assert context["scan"]["targetPath"] == str(target)
+    assert context["scan"]["progress"]["phase"] == "threat_model"
+    assert "securityPolicyPaths" not in context
+    assert context["beganStandardReview"] is True
+    assert "beganStandardReview" not in mark_handoff_delivered(*args)
+
+
 def test_deep_handoff_leaves_preflight_progress_to_coordinator(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id, "--target-path", str(target))
     save_workspace(state_dir, workspace_id, str(target), ".", "deep")
@@ -144,6 +165,28 @@ def test_deep_handoff_leaves_preflight_progress_to_coordinator(tmp_path: Path) -
         "completed": 0,
         "total": 0,
     }
+
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as other_writer:
+        other_writer.execute("BEGIN IMMEDIATE")
+        model_progress = update_progress(
+            state_dir,
+            scan_id,
+            "--model-update",
+            "--phase",
+            "discovery",
+            "--claim-token",
+            claim_token,
+        )
+    assert model_progress == {
+        "deepPreflight": True,
+        "scan": {
+            "scanId": scan_id,
+            "userContext": delivered["results"]["userContext"],
+            "progress": delivered["results"]["progress"],
+        },
+    }
+    rejected = update_progress(state_dir, scan_id, "--model-update", check=False)
+    assert "owned by another continuation" in rejected["stderr"]
 
 
 def test_workbench_upgrade_keeps_preexisting_delivered_continuation_writable(
@@ -182,9 +225,7 @@ def test_workbench_upgrade_keeps_preexisting_delivered_continuation_writable(
 
 
 def test_workbench_handoff_claim_is_owned_by_one_token(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -209,9 +250,7 @@ def test_workbench_handoff_claim_is_owned_by_one_token(tmp_path: Path) -> None:
 
 
 def test_workbench_handoff_claim_only_allows_stale_takeover(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -254,9 +293,7 @@ def test_workbench_handoff_claim_only_allows_stale_takeover(tmp_path: Path) -> N
 def test_workbench_attaches_one_continuation_thread_to_claimed_scan(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -288,9 +325,7 @@ def test_workbench_attaches_one_continuation_thread_to_claimed_scan(
 def test_workbench_allows_attached_continuation_thread_to_cancel_scan(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target, thread_id="workspace-thread")
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -306,9 +341,7 @@ def test_workbench_allows_attached_continuation_thread_to_cancel_scan(
 def test_workbench_releases_attached_continuation_for_a_fresh_handoff(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])
@@ -338,9 +371,7 @@ def test_workbench_releases_attached_continuation_for_a_fresh_handoff(
 def test_released_pending_handoff_rejects_tokenless_mutations(
     tmp_path: Path, command: str, arguments: tuple[str, ...]
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(state_dir, str(saved["id"]))
     scan_id = str(started["results"]["scanId"])

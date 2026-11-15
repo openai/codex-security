@@ -1,5 +1,7 @@
 import { describe, expect, test, mock } from "bun:test";
+import { Formatter } from "incur";
 import { main } from "../src/cli.js";
+import { ScanInterruptedError } from "../src/errors.js";
 import {
   FakeSignals,
   capture,
@@ -11,7 +13,7 @@ import { throwing } from "./support/errors.js";
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 
 describe("CLI signals", () => {
-  test("maps Ctrl-C and SIGTERM to conventional exits and preserves partial output", async () => {
+  test("maps Ctrl-C and SIGTERM to conventional exits and preserves the output location", async () => {
     for (const [signal, expectedExit, phrase] of [
       ["SIGINT", 130, "Scan canceled by Ctrl-C."],
       ["SIGTERM", 143, "Scan terminated by SIGTERM."],
@@ -31,7 +33,7 @@ describe("CLI signals", () => {
       expect(exit).toBe(expectedExit);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(phrase);
-      expect(stderr.text()).toContain("Partial output was kept at /tmp/scan.");
+      expect(stderr.text()).toContain("Output directory: /tmp/scan");
       expect(onInterrupt).toHaveBeenCalled();
       expect(signals.listeners.get(signal)?.size).toBe(0);
     }
@@ -52,8 +54,80 @@ describe("CLI signals", () => {
     expect(await runCli(["scan", "."], deps)).toBe(130);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toContain("Scan canceled by Ctrl-C.");
-    expect(stderr.text()).toContain("No partial output was kept.");
+    expect(stderr.text()).not.toMatch(/output directory|partial output/i);
   });
+
+  test("uses the SDK output directory when archive registration is interrupted", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const scanDir = "/tmp/pending-registration";
+    const signals = new FakeSignals();
+    const deps = dependencies({ signals });
+    deps.createSecurity = () =>
+      fakeSecurity(async () => {
+        signals.emit("SIGINT");
+        throw new ScanInterruptedError("Scan interrupted", scanDir);
+      });
+    expect(
+      await runCli(
+        [
+          "scan",
+          ".",
+          "--archive-existing",
+          "--output-dir",
+          "pending-registration",
+        ],
+        deps,
+      ),
+    ).toBe(130);
+    expect(stdout.text()).toBe("");
+    expect(stderr.text()).toContain(`Output directory: ${scanDir}`);
+    expect(stderr.text()).not.toContain("scans show");
+  });
+
+  test.each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const)(
+    "retains completed scan output when %s interrupts validation",
+    async (signal, expectedExit) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const signals = new FakeSignals();
+      const result = fakeResult();
+      const exit = await runCli(
+        ["scan", ".", "--validate"],
+        dependencies({
+          currentDirectory: process.cwd(),
+          result,
+          signals,
+          onWorkbench: (args) => {
+            expect(args).toEqual([
+              "get-scan",
+              "--scan-id",
+              result.manifest.scan.id,
+              "--check-target",
+            ]);
+            signals.emit(signal);
+            return { scan: { targetPath: process.cwd() } };
+          },
+        }),
+      );
+      expect(exit).toBe(expectedExit);
+      expect(stderr.text()).toContain("Validation interrupted.");
+      expect(stdout.text()).toBe(
+        Formatter.format(
+          {
+            ...result.toJSON(),
+            validation: {
+              status: "failed",
+              findings: 0,
+              exitCode: expectedExit,
+            },
+          },
+          "toon",
+        ).trimEnd() + "\n",
+      );
+    },
+  );
 
   test("preserves signals received during client cleanup", async () => {
     const { stdout, stderr, runCli } = createCliTest(main);

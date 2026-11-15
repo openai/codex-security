@@ -78,13 +78,21 @@ function visibleChanges(changes) {
 
 export function generateNoteSections(changes) {
   const visible = visibleChanges(changes);
+  const highlights = visible.filter((change) => !change.breaking);
   const breaking = visible.filter((change) => change.breaking);
   return {
     highlights: [
       "## Highlights",
       "",
-      visible.length > 0
-        ? visible.map(changeLine).join("\n")
+      highlights.length > 0
+        ? [
+            "<details>",
+            "<summary>Changes to review for highlights</summary>",
+            "",
+            ...highlights.map(changeLine),
+            "",
+            "</details>",
+          ].join("\n")
         : "No release highlights have been drafted yet.",
     ].join("\n"),
     upgrades: [
@@ -92,7 +100,7 @@ export function generateNoteSections(changes) {
       "",
       breaking.length > 0
         ? [
-            "Review migration steps for these breaking changes:",
+            "<!-- Replace each candidate with the affected users and the action they need to take. -->",
             "",
             ...breaking.map(changeLine),
           ].join("\n")

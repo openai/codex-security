@@ -1,5 +1,6 @@
 import { posix, win32 } from "node:path";
 import { isRecord } from "./record.js";
+import { compareTimestamps } from "./timestamps.js";
 
 export interface ObservedFile {
   path: string;
@@ -10,22 +11,20 @@ export interface ObservedFile {
 type Command = { cwd?: string; words: string[] };
 
 /** Source files identifiable in retained, model-facing shell output, not review coverage. */
-export function observedFilesFromLogs(
-  scan: { targetPath: string; startedAt: string; completedAt?: string | null },
-  logs: { events: Record<string, unknown>[]; sessions: unknown[] },
-): ObservedFile[] {
-  const start = Date.parse(scan.startedAt);
-  const end =
-    scan.completedAt == null ? Infinity : Date.parse(scan.completedAt);
+export function createObservedFileCollector(scan: {
+  targetPath: string;
+  startedAt: string;
+  completedAt?: string | null;
+}) {
   const paths = /^[a-z]:[\\/]|^\\\\/iu.test(scan.targetPath) ? win32 : posix;
   const observed = new Map<string, ObservedFile>();
   const directories = new Map<string, string>();
   const calls = new Map<string, Command>();
-  for (const entry of logs.events) {
+  function observe(entry: Record<string, unknown>): void {
     const { threadId, event } = entry;
-    if (typeof threadId !== "string" || !isRecord(event)) continue;
+    if (typeof threadId !== "string" || !isRecord(event)) return;
     const payload = event["payload"];
-    if (!isRecord(payload)) continue;
+    if (!isRecord(payload)) return;
     if (
       (event["type"] === "session_meta" && payload["id"] === threadId) ||
       event["type"] === "turn_context"
@@ -33,32 +32,43 @@ export function observedFilesFromLogs(
       if (typeof payload["cwd"] === "string") {
         directories.set(threadId, payload["cwd"]);
       }
-      continue;
+      return;
     }
-    if (event["type"] !== "response_item") continue;
-    const timestamp =
-      typeof event["timestamp"] === "string"
-        ? Date.parse(event["timestamp"])
-        : NaN;
-    if (!(timestamp >= start && timestamp <= end)) continue;
+    if (event["type"] !== "response_item") return;
+    const timestamp = event["timestamp"];
+    const inScanWindow =
+      typeof timestamp === "string" &&
+      compareTimestamps(timestamp, scan.startedAt) >= 0 &&
+      (scan.completedAt == null ||
+        compareTimestamps(timestamp, scan.completedAt) <= 0);
+    if (!inScanWindow) return;
     const callId = payload["call_id"];
-    if (typeof callId !== "string") continue;
+    if (typeof callId !== "string") return;
     const key = JSON.stringify([threadId, callId]);
     if (payload["type"] === "function_call") {
       const command = shellCommand(payload, directories.get(threadId));
       if (command !== null) calls.set(key, command);
-      continue;
+      return;
     }
-    if (payload["type"] !== "function_call_output") continue;
+    if (payload["type"] !== "function_call_output") return;
     const command = calls.get(key);
-    if (command === undefined) continue;
+    if (command === undefined) return;
+    calls.delete(key);
     const output = retainedOutput(payload["output"]);
-    if (output === null || payload["success"] === false) continue;
+    if (output === null || payload["success"] === false) return;
     for (const file of sourceFiles(command.words, output)) {
       if (/[*?\[\]{}$`]/u.test(file)) continue;
       const cwd = command.cwd;
       if (cwd !== undefined && !paths.isAbsolute(cwd)) continue;
       if (!paths.isAbsolute(file) && cwd === undefined) continue;
+      // Lexical ".." can cross a directory link. The saved output cannot
+      // establish which physical directory it traversed.
+      const separator = paths === win32 ? /[\\/]/u : "/";
+      if (
+        file.split(separator).includes("..") ||
+        cwd?.split(separator).includes("..")
+      )
+        continue;
       const absolute = paths.resolve(cwd ?? scan.targetPath, file);
       const relative = paths.relative(scan.targetPath, absolute);
       if (
@@ -70,13 +80,17 @@ export function observedFilesFromLogs(
         continue;
       }
       const path = relative.split(paths.sep).join("/");
+      // The workbench accepts portable relative paths. One unrepresentable
+      // POSIX name must not discard other observations from the same batch.
+      if (path.includes("\\") || /^[a-z]:/iu.test(path) || path.includes("\0"))
+        continue;
       const identity = paths === win32 ? path.toLowerCase() : path;
       if (!observed.has(identity)) {
         observed.set(identity, { path: identity, threadId, callId });
       }
     }
   }
-  return [...observed.values()];
+  return { observe, files: () => [...observed.values()] };
 }
 
 function shellCommand(
@@ -169,7 +183,7 @@ function retainedOutput(value: unknown): string | null {
   // With no retained content, truncation notices are not evidence of a read.
   const content = output
     .replace(/^Warning: truncated output \(original token count: \d+\)\n/mu, "")
-    .replace(/^.*\d+ tokens truncated.*$/gmu, "");
+    .replace(/^(?:…|\.\.\.)\s*\d+ tokens truncated\s*(?:…|\.\.\.)\r?$/gmu, "");
   return content.trim() === "" ? null : content;
 }
 
@@ -178,14 +192,31 @@ function sourceFiles(words: string[], output: string): string[] {
   if (executable === undefined) return [];
   const name = executable.split(/[\\/]/u).at(-1)!.toLowerCase();
   if (name === "rg" || name === "grep") {
-    const search = sourceSearch(args);
+    const search = sourceSearch(name, args);
     if (search === null) return [];
     return output.split(/\r?\n/u).flatMap((line) => {
+      // These summaries report a match without showing the matching file contents.
+      if (
+        (name === "rg" &&
+          /: binary file matches \(found "\\0" byte around offset \d+\)$/u.test(
+            line,
+          )) ||
+        (name === "grep" && /^Binary file .+ matches$/u.test(line))
+      )
+        return [];
       // Require a filename prefix and source text; filename-only searches and
       // count modes are rejected by sourceSearch before interpreting output.
-      const match = line.match(/^((?:[a-z]:[\\/])?[^:]+):(?:\d+:)?(.+)$/iu);
-      if (match === null || match[1] === name) return [];
-      const file = match[1]!;
+      // A colon is legal in a filename and in source text. Only attribute
+      // the line when its output mode leaves a single possible separator.
+      const delimiter = search.lineNumbers ? /:\d+:/gu : /:/gu;
+      delimiter.lastIndex = /^[a-z]:[\\/]/iu.test(line) ? 2 : 0;
+      const match = delimiter.exec(line);
+      if (!match || match.index === 0 || delimiter.lastIndex === line.length)
+        return [];
+      delimiter.lastIndex = match.index + 1;
+      if (delimiter.test(line)) return [];
+      const file = line.slice(0, match.index);
+      if (file === name) return [];
       // A search of one file normally omits its name. A colon in source text
       // is not a filename prefix unless the command's scope supports it.
       const prefixed =
@@ -271,11 +302,13 @@ function singleRead(name: string, args: string[]): string | null {
 }
 
 function sourceSearch(
+  name: "rg" | "grep",
   args: string[],
-): { targets: string[]; withFilename: boolean } | null {
+): { targets: string[]; withFilename: boolean; lineNumbers: boolean } | null {
   let hasPattern = false;
   let options = true;
   let withFilename = false;
+  let lineNumbers = false;
   const targets: string[] = [];
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
@@ -289,11 +322,15 @@ function sourceSearch(
       continue;
     }
     if (arg === "--with-filename") withFilename = true;
+    if (arg === "--line-number") lineNumbers = true;
     if (/^-[nHiIsSwxFEPaUv]+$/u.test(arg)) {
+      // ripgrep -I suppresses filename prefixes. grep -I skips binary input.
+      if (name === "rg" && arg.includes("I")) return null;
+      if (arg.includes("n")) lineNumbers = true;
       if (arg.includes("H")) withFilename = true;
       continue;
     }
-    if (/^-(?:[ABCm])\d+$/u.test(arg)) continue;
+    if (/^-m\d+$/u.test(arg)) continue;
     if (
       [
         "--line-number",
@@ -325,12 +362,6 @@ function sourceSearch(
         "--type-not",
         "-m",
         "--max-count",
-        "-A",
-        "-B",
-        "-C",
-        "--context",
-        "--before-context",
-        "--after-context",
       ].includes(arg)
     ) {
       if (args[++index] === undefined) return null;
@@ -339,5 +370,5 @@ function sourceSearch(
     }
     return null;
   }
-  return hasPattern ? { targets, withFilename } : null;
+  return hasPattern ? { targets, withFilename, lineNumbers } : null;
 }

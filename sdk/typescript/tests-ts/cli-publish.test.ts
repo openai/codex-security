@@ -574,10 +574,36 @@ describe("publish scan to custom", () => {
     },
   );
 
+  test("identifies an invalid custom destination URL in JSON", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.publishScanToCustom = async () => fail("must not publish");
+    expect(
+      await runCli(
+        [
+          "publish",
+          "scan",
+          "completed-scan",
+          "--to",
+          "custom",
+          "--findings-url",
+          "not-a-url",
+          "--json",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toContain("--findings-url");
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: "Invalid value for --findings-url: Invalid URL",
+      fieldErrors: [{ path: "findingsUrl" }],
+    });
+  });
+
   test.each([
     [["--to", "custom"], "requires --findings-url"],
     [["--to", "custom", "--findings-url", "--dry-run"], "--findings-url"],
-    [["--to", "custom", "--findings-url", "not-a-url"], "URL"],
     [
       [
         "--to",
@@ -726,9 +752,12 @@ describe("publish check", () => {
     expect(stdout.text().trim()).toBe("");
   });
 
-  test.each(["completed-scan", "~/completed-scan"])(
+  test.each([
+    ["completed-scan", DESTINATION_OPTIONS.slice(2)],
+    ["~/completed-scan", DESTINATION_OPTIONS],
+  ] as const)(
     "resolves %s and shared options without invoking publication",
-    async (scanDir) => {
+    async (scanDir, options) => {
       const { stdout, stderr, runCli } = createCliTest(main);
 
       const currentDirectory = join(tmpdir(), "codex-security-check-current");
@@ -781,7 +810,7 @@ describe("publish check", () => {
             "publish",
             "check",
             scanDir,
-            ...DESTINATION_OPTIONS,
+            ...options,
             "--linear-api-key",
             "explicit-key",
             "--linear-assignee",
@@ -818,6 +847,25 @@ describe("publish check", () => {
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("The selected project is unavailable.");
+    expect(stdout.text().trim()).toBe("");
+  });
+
+  test("escapes terminal controls in check failures while preserving diagnostic text", async () => {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const deps = dependencies();
+    deps.checkScanPublication = async () =>
+      fail(
+        "Linear check failed: \u001B[2Jrequest\rdenied\nkey=sk-synthetic-example",
+      );
+    expect(
+      await runCli(
+        ["publish", "check", "completed-scan", ...DESTINATION_OPTIONS],
+        deps,
+      ),
+    ).toBe(2);
+    expect(stderr.text()).toBe(
+      "codex-security: Linear check failed:  [2Jrequest denied\nkey=sk-synthetic-example\n",
+    );
     expect(stdout.text().trim()).toBe("");
   });
 
@@ -1810,6 +1858,13 @@ describe("publish scan", () => {
         age: "4 days ago",
       },
       {
+        repository: "ｶﾅ",
+        width: 2,
+        findingCount: 1,
+        elapsed: 0,
+        age: "just now",
+      },
+      {
         repository: "服务",
         width: 4,
         findingCount: 22,
@@ -2145,6 +2200,58 @@ describe("publish scan", () => {
     expect(stderr.text()).not.toContain("\u001B");
     expect(JSON.parse(stdout.text())).toEqual(publicationResult());
   });
+
+  test.each([
+    ["exact ASCII", "a".repeat(113), "a".repeat(113)],
+    ["exact emoji", `${"a".repeat(111)}😀`, `${"a".repeat(111)}😀`],
+    ["wide text", "界".repeat(60), `${"界".repeat(56)}…`],
+    ["halfwidth text", "ｶ".repeat(113), "ｶ".repeat(113)],
+    ["wide vowel mark", "ー".repeat(60), `${"ー".repeat(56)}…`],
+    ["lone surrogate", `${"a".repeat(113)}\uD800`, `${"a".repeat(112)}…`],
+    [
+      "combining marks",
+      `${"a".repeat(111)}e\u0301 tail`,
+      `${"a".repeat(111)}e\u0301…`,
+    ],
+    ["joined emoji", `${"a".repeat(110)}👩‍💻 tail`, `${"a".repeat(110)}👩‍💻…`],
+    ["flag at cutoff", `${"a".repeat(111)}🇺🇸 tail`, `${"a".repeat(111)}…`],
+  ])(
+    "fits noninteractive progress without splitting graphemes: %s",
+    async (_name, text, expected) => {
+      const { stderr, runCli } = createCliTest(main);
+
+      const deps = dependencies();
+      deps.publishScan = async (_scanDirectory, options) => {
+        options.onProgress?.({
+          type: "codex_event",
+          event: {
+            type: "item.completed",
+            item: {
+              id: "reasoning-1",
+              type: "reasoning",
+              text,
+            },
+          },
+        });
+        return publicationResult();
+      };
+
+      expect(
+        await runCli(
+          [
+            "publish",
+            "scan",
+            "completed-scan",
+            ...DESTINATION_OPTIONS,
+            "--json",
+          ],
+          deps,
+        ),
+      ).toBe(0);
+
+      expect(stderr.text()).toBe(`Codex: ${expected}\n`);
+    },
+  );
 
   test("hides source-bearing handoff commands in plain and full-screen progress", async () => {
     for (const interactive of [false, true]) {

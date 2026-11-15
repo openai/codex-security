@@ -5,6 +5,8 @@ import {
   chmod,
   mkdir,
   readFile,
+  realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -22,6 +24,8 @@ import {
 } from "../src/classify-severity.js";
 import { Database } from "bun:sqlite";
 import { loadContract } from "../src/contract.js";
+import { workflowDigest } from "../src/finding-workflow.js";
+import { defaultSeverityRubric } from "../src/default-severity-rubric.js";
 import type { JsonObject } from "../src/config.js";
 import type { Finding, FindingsDocument, ScanManifest } from "../src/models.js";
 import { prepareScanPublication } from "../src/publication.js";
@@ -184,6 +188,39 @@ test("classifies and reads a saved scan with an embedded NUL in its ID without P
   ).toEqual(classification);
 });
 
+test("saved scan artifacts cannot redirect knowledge-base reads", async () => {
+  const { scanDirectory, root, environment, rubricPath } = await fixture();
+  const alias = join(scanDirectory, "documents");
+  await symlink(root, alias, "junction");
+  await expect(
+    classifyScanDirectorySeverity(scanDirectory, {
+      environment,
+      findingIds: [],
+      rubricPath,
+      knowledgeBasePaths: [join(alias, "policy.md")],
+    }),
+  ).rejects.toThrow(/symbolic link|directory link/i);
+});
+
+test("classifying a saved scan ID checks document links in its source directory", async () => {
+  const { environment, repository, root, scanId } = await savedFixture();
+  await symlink(root, join(repository, "documents"), "junction");
+  const classify = (directory: string) =>
+    classifyScanSeverityInternal(scanId, {
+      environment,
+      findingIds: [],
+      rubricPath: join(directory, "documents", "policy.md"),
+    });
+  await expect(classify(repository)).rejects.toThrow(
+    /symbolic link|directory link/i,
+  );
+  const moved = join(root, "moved");
+  await rename(repository, moved);
+  await expect(classify(moved)).rejects.toThrow("canonical path");
+  await mkdir(repository);
+  await expect(classify(moved)).rejects.toThrow("canonical path");
+});
+
 test("severity helpers skip Node executables in the caller's enclosing checkout", async () => {
   const { root, environment, scanDirectory } = await fixture();
   const repository = join(root, "repository");
@@ -302,6 +339,7 @@ test.each(["id", "prefix", "latest", "missing target"])(
       {
         environment,
         expectedScanId: f.scanId,
+        rubricPath: await realpath(f.rubricPath),
         codex: recordingClassifier().codex,
       },
       {
@@ -541,13 +579,20 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
     { environment, codex: recordingClassifier().codex },
   );
   query(environment, "DROP TABLE scan_severity_assessments");
+  query(
+    environment,
+    "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json",
+  );
   for (const table of [
     "finding_severity_assessments",
     "scan_severity_classifications",
   ]) {
     query(environment, `ALTER TABLE ${table} DROP COLUMN classification_runs`);
   }
-  query(environment, "DELETE FROM schema_migrations WHERE version IN (43, 52)");
+  query(
+    environment,
+    "DELETE FROM schema_migrations WHERE version IN (43, 52, 60)",
+  );
   expect(
     await readScanSeverityClassification(
       first.scanDirectory,
@@ -556,7 +601,12 @@ test("migration leaves unindexed legacy assessments incomplete until reclassifie
       undefined,
       environment,
     ),
-  ).toEqual({ ...classification, classificationRuns: undefined });
+  ).toEqual({
+    ...classification,
+    classificationRuns: undefined,
+    rubricRevision: undefined,
+    rubricSha256: workflowDigest([defaultSeverityRubric]),
+  });
   expect(
     query(
       environment,
@@ -964,7 +1014,7 @@ test("migrates existing databases without changing findings and reads older stat
   query(environment, "DROP TABLE scan_severity_classifications");
   query(
     environment,
-    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52)",
+    "DELETE FROM schema_migrations WHERE version IN (41, 43, 52, 60)",
   );
   expect(
     (
@@ -1061,7 +1111,7 @@ test("default rubric replaces legacy inherited assessments and respects custom p
   }
   query(
     environment,
-    "UPDATE scan_severity_classifications SET rubric_sha256 = NULL",
+    "UPDATE scan_severity_classifications SET rubric_sha256 = NULL, rubric_binding_json = NULL",
   );
   const legacy = await readScanSeverityClassification(
     scanDirectory,
@@ -1076,13 +1126,30 @@ test("default rubric replaces legacy inherited assessments and respects custom p
   calls.length = 0;
   const result = await classifyScanDirectorySeverity(scanDirectory, options);
   expect(calls).toHaveLength(6);
-  expect(result.rubricSha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(result.rubricSha256).toBe(sha256(defaultSeverityRubric));
+  expect(result.rubricRevision).toBe(1);
   expect(
     result.assessments.every(
       (a) => a.source === "rubric" && a.level === "medium",
     ),
   ).toBe(true);
+  expect(
+    await readScanSeverityClassification(
+      scanDirectory,
+      scanId,
+      findings,
+      undefined,
+      environment,
+    ),
+  ).toMatchObject({
+    rubricSha256: result.rubricSha256,
+    rubricRevision: result.rubricRevision,
+  });
   calls.length = 0;
+  query(
+    environment,
+    "UPDATE scan_severity_classifications SET rubric_binding_json = NULL",
+  );
   expect(
     (await classifyScanDirectorySeverity(scanDirectory, options)).assessments,
   ).toEqual(result.assessments);

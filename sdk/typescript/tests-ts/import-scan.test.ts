@@ -22,11 +22,15 @@ import { importScan, type ImportScanOptions } from "../src/import-scan.js";
 import type { FindingsDocument } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
 import { runWorkbench } from "../src/runtime.js";
+import { VERSION } from "../src/version.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
+import { useTestPython } from "./support/python.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { rejecting } from "./support/errors.js";
 import { TestClient } from "./support/api-client.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectories: roots, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
@@ -85,7 +89,7 @@ async function fixture(format: "csv" | "json" = "csv") {
     join(await realpath(tmpdir()), "import-scan-test-"),
   );
   roots.track(root);
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
   const stateDirectory = join(root, "state");
   const environment = {
@@ -169,6 +173,7 @@ test.each(["completed", "failed", "interrupted", "preview"] as const)(
       runTestInSubprocess(
         import.meta.path,
         `scratch cleanup failure preserves the ${outcome} import outcome`,
+        { PYTHON: pythonExecutable() ?? undefined },
       )
     )
       return;
@@ -367,6 +372,19 @@ test.each(["csv", "json"] as const)(
     });
     expect(stored!.target_path).not.toBe(process.cwd());
     expect(stored!.target_path).not.toBe(context.root);
+    const saved = await runWorkbench(context.workbenchOptions, [
+      "get-scan",
+      "--scan-id",
+      result.manifest.scan.id,
+    ]);
+    expect(saved["scan"]).toMatchObject({
+      lifecycle: {
+        mode: "import",
+        surface: "cli",
+        packageVersion: VERSION,
+        status: "completed",
+      },
+    });
     const recipe = await runWorkbench(context.workbenchOptions, [
       "get-scan-recipe",
       "--scan-id",
@@ -620,6 +638,7 @@ test.each(["regular file", "symbolic link"])(
       runTestInSubprocess(
         import.meta.path,
         `import rejects a source replaced with a ${replacement} before reading`,
+        { PYTHON: pythonExecutable() ?? undefined },
       )
     )
       return;

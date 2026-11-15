@@ -60,10 +60,27 @@ export function registerFindingIssueTools(
 ): void {
   const meta = { ui: { visibility: ["model"] } };
   const execute = async (action: "inspect" | "record", input: object) => {
-    const result = await runWorkbench(
-      ["finding-issues"],
-      JSON.stringify({ action, ...input }),
-    );
+    let result: JsonObject;
+    try {
+      result = await runWorkbench(
+        ["finding-issues"],
+        JSON.stringify({ action, ...input }),
+      );
+    } catch (error) {
+      const processError = error instanceof Error ? error.cause : undefined;
+      if (
+        action !== "inspect" ||
+        !(processError instanceof Error) ||
+        !("code" in processError) ||
+        processError.code !== 73
+      )
+        throw error;
+      return {
+        isError: true,
+        content: [{ type: "text" as const, text: String(error) }],
+        structuredContent: { code: "state_unavailable" },
+      };
+    }
     return {
       content: [{ type: "text" as const, text: JSON.stringify(result) }],
       structuredContent: result,

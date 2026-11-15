@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path, PureWindowsPath
@@ -25,6 +26,11 @@ def observed_files_summary(connection: sqlite3.Connection, scan_id: str) -> dict
         "count": row["file_count"] if row["observed_files_read_at"] is not None else None,
         "observedAt": row["observed_files_read_at"],
     }
+
+
+def record_command(wb: Any, connection: sqlite3.Connection, args: argparse.Namespace) -> dict:
+    scan = wb.require_scan(connection, args.scan_id)
+    return record_observed_files(connection, scan["id"], json.load(sys.stdin), wb.now())
 
 
 def record_observed_files(

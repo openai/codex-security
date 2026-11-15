@@ -1,10 +1,13 @@
 import { hash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, type FileHandle } from "node:fs/promises";
+import { posix } from "node:path";
 import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
+import validSemver from "semver/functions/valid.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
-import { isRecord } from "./record.js";
+import { REPORTABLE_SEVERITIES, SCAN_SEVERITIES } from "./scan-settings.js";
+import { asRecord, isRecord } from "./record.js";
 
 export function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -17,14 +20,220 @@ export function array(value: unknown, label: string): unknown[] {
   return value;
 }
 
+export function optionalArray(value: unknown, label: string): unknown[] {
+  return value === undefined ? [] : array(value, label);
+}
+
+// SARIF uses the same index/GUID/ID references for components and descriptors.
+function sarifReferences<T>(
+  entries: unknown[],
+  select: (entry: Record<string, unknown>) => T,
+  first = 0,
+) {
+  const refs = new Map<string | number, T>();
+  entries.forEach((entry, index) => {
+    if (!isRecord(entry)) return;
+    const item = select(entry);
+    refs.set(index + first, item);
+    if (typeof entry["guid"] === "string")
+      refs.set("guid:" + entry["guid"].toLowerCase(), item);
+    if (typeof entry["id"] === "string") refs.set("id:" + entry["id"], item);
+  });
+  return (ref: unknown) => {
+    const { index, guid, id } = asRecord(ref) ?? {};
+    if (typeof index === "number" && index >= 0) return refs.get(index);
+    if (typeof guid === "string") return refs.get("guid:" + guid.toLowerCase());
+    return typeof id === "string" ? refs.get("id:" + id) : refs.get(-1);
+  };
+}
+
+function notificationDescriptors(value: unknown) {
+  const tool = asRecord(value);
+  // The driver is the default component (-1); extension indexes start at 0.
+  const component = sarifReferences(
+    [
+      tool?.["driver"],
+      ...optionalArray(tool?.["extensions"], "SARIF tool extensions"),
+    ],
+    (owner) =>
+      sarifReferences(
+        optionalArray(owner["notifications"], "SARIF notification descriptors"),
+        (entry) => entry,
+      ),
+    -1,
+  );
+  return (ref: unknown) => component(asRecord(ref)?.["toolComponent"])?.(ref);
+}
+
+export function validateSarifRun(
+  run: Record<string, unknown>,
+  producer: string,
+): void {
+  if (hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"]))
+    throw new Error(`Use a self-contained ${producer} SARIF report.`);
+  function validate(
+    values: unknown[],
+    tool: unknown,
+    strictExecution: boolean,
+  ) {
+    let descriptors: ReturnType<typeof notificationDescriptors> | undefined;
+    const resolve = (ref: unknown) =>
+      isRecord(ref)
+        ? (descriptors ??= notificationDescriptors(tool))(ref)
+        : undefined;
+    for (const value of values) {
+      const invocation = record(value, `${producer} invocation`);
+      const successful = invocation["executionSuccessful"];
+      if (typeof successful !== "boolean")
+        throw new Error(
+          `${producer} SARIF executionSuccessful must be a boolean.`,
+        );
+      const list = (key: string) =>
+        optionalArray(invocation[key], `${producer} ${key}`);
+      const execution = list("toolExecutionNotifications");
+      const notices = execution.concat(list("toolConfigurationNotifications"));
+      if (!successful) {
+        const details = [
+          invocation["processStartFailureMessage"],
+          invocation["exitCodeDescription"],
+          invocation["exitCode"],
+          invocation["exitSignalName"],
+          ...notices,
+        ].filter((value) => value !== undefined);
+        throw new Error(
+          `${producer} SARIF contains an unsuccessful invocation.${details.length ? " " + JSON.stringify(details) : ""}`,
+        );
+      }
+      if (strictExecution && execution.length)
+        throw new Error(
+          `${producer} SARIF contains scan error notifications: ${JSON.stringify(execution)}`,
+        );
+      const levels = new Map<Record<string, unknown>, unknown>();
+      for (const value of list("notificationConfigurationOverrides")) {
+        const override = asRecord(value);
+        const descriptor = resolve(override?.["descriptor"]);
+        const level = asRecord(override?.["configuration"])?.["level"];
+        if (descriptor && level !== undefined) levels.set(descriptor, level);
+      }
+      for (const value of notices) {
+        const notice = record(value, `${producer} notification`);
+        const descriptor = resolve(notice["descriptor"]);
+        const level =
+          notice["level"] ??
+          (descriptor && levels.get(descriptor)) ??
+          asRecord(descriptor?.["defaultConfiguration"])?.["level"];
+        if (level === "error")
+          throw new Error(
+            `${producer} SARIF contains scan error notifications: ${JSON.stringify(notice)}`,
+          );
+      }
+    }
+  }
+  // Semgrep reports scanner errors as execution notices even below error level.
+  validate(
+    optionalArray(run["invocations"], `${producer} invocations`),
+    run["tool"],
+    producer === "Semgrep",
+  );
+  if (run["conversion"] !== undefined) {
+    const conversion = record(run["conversion"], `${producer} conversion`);
+    if (conversion["invocation"] !== undefined)
+      validate([conversion["invocation"]], conversion["tool"], false);
+  }
+}
+
 export function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+/** AWS APIs use epoch seconds and AWS CLI exports use timezone-qualified ISO dates. */
+export function awsTimestampSeconds(value: unknown): number {
+  if (typeof value === "number") return value;
+  if (
+    typeof value === "string" &&
+    /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/u.test(value)
+  )
+    return Date.parse(value) / 1000;
+  return NaN;
+}
+
+export function concreteVersion(
+  value: unknown,
+  ecosystem: string | null,
+  osPackage: boolean,
+): string | null {
+  const version = text(value);
+  if (!version) return null;
+  // Debian versions use internal tildes for prereleases and backports.
+  if (osPackage && version.includes("~"))
+    return /^(?:\d+:)?\d[a-z\d.+~]*(?:-[a-z\d.+~]+)*$/iu.test(version)
+      ? version
+      : null;
+  if (validSemver(version)) return version;
+  if (ecosystem === "npm" || ecosystem === "cargo") return null;
+  if (ecosystem === "java" || ecosystem === "maven") {
+    if (
+      version === "LATEST" ||
+      version === "RELEASE" ||
+      version.startsWith("latest.")
+    )
+      return null;
+    return /^[a-z\d][\w.+-]*$/iu.test(version) && !version.endsWith("+")
+      ? version
+      : null;
+  }
+  if (!ecosystem && version.endsWith("+")) return null;
+  const publicVersion =
+    ecosystem === "pypi" ? version.split("+", 1)[0]! : version;
+  return /\d/u.test(version) &&
+    /^(?:\d+:)?[a-z\d][\w.+!-]*$/iu.test(version) &&
+    !/(?:^|\.)x(?:\.|$)/iu.test(publicVersion)
+    ? version
+    : null;
 }
 
 export function requiredText(value: unknown, label: string): string {
   const result = text(value);
   if (!result) throw new Error(`${label} must be nonempty text.`);
   return result;
+}
+
+/** SARIF repository claims must be checked even when a run has no results. */
+export function sarifRunRepositories(
+  run: unknown,
+  producer: string,
+): { url: string; branch?: string }[] {
+  if (run == null) return [];
+  return array(
+    record(run, `${producer} run context`)["versionControlProvenance"] ?? [],
+    `${producer} version control provenance`,
+  ).flatMap((entry) => {
+    const ref = record(entry, `${producer} repository provenance`);
+    const url =
+      producer === "Semgrep"
+        ? text(ref["repositoryUri"])
+        : requiredText(ref["repositoryUri"], `${producer} repository URI`);
+    if (url === null) return [];
+    const branch = ref["branch"];
+    return [
+      {
+        url,
+        ...(producer === "Semgrep" && typeof branch === "string" && { branch }),
+      },
+    ];
+  });
+}
+
+/** Normalize scanners whose reported severities range from low to critical. */
+export function reportableScannerSeverity(value: unknown) {
+  const level = text(value)?.toLowerCase();
+  return (
+    REPORTABLE_SEVERITIES.find((severity) => severity === level) ?? "unknown"
+  );
+}
+
+export function scannerSeverity(value: string | null | undefined) {
+  return SCAN_SEVERITIES.find((severity) => severity === value) ?? "unknown";
 }
 
 export function strings(value: unknown): string[] {
@@ -45,16 +254,56 @@ export function relativePath(value: unknown): string | null {
     : null;
 }
 
+// Hosted findings do not identify the scanner operating system or its path separator.
+export function hostedRepositoryPath(value: unknown) {
+  const path = text(value);
+  return path && !path.includes("\\") && !path.includes("://")
+    ? relativePath(path)
+    : null;
+}
+
+export function repositoryFilePath(value: unknown): string | null {
+  const relative = relativePath(value);
+  if (!relative) return null;
+  const path = posix.normalize(relative);
+  // Anchor the SCP branch at the first eligible @ to avoid rescanning long filenames.
+  return path === "." ||
+    path.endsWith("/") ||
+    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/][^/@]*@[^/]+:)/iu.test(path)
+    ? null
+    : path;
+}
+
 export function stableId(prefix: string, fields: unknown[]): string {
   return `${prefix}:${hash("sha256", JSON.stringify(fields))}`;
 }
 
-/** Detect gzip from the report bytes and preserve identities with strict UTF-8. */
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+const gunzipAsync = promisify(gunzip);
+
+async function readScannerInput(path: string | FileHandle) {
+  const bytes = await readFile(path);
+  const gzip = bytes[0] === 0x1f && bytes[1] === 0x8b;
+  return { gzip, bytes: gzip ? await gunzipAsync(bytes) : bytes };
+}
+
+export async function readScannerBytes(
+  path: string | FileHandle,
+): Promise<Buffer> {
+  return (await readScannerInput(path)).bytes;
+}
+
 export async function readScannerText(path: string): Promise<string> {
-  let bytes = await readFile(path);
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b)
-    bytes = await promisify(gunzip)(bytes);
-  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const { bytes, gzip } = await readScannerInput(path);
+  const contents = strictUtf8.decode(bytes);
+  // Empty JSONL is a valid stream of zero records; a blank JSON or CSV document isn't.
+  if (!contents.trim()) {
+    if (!gzip && /\.gz$/iu.test(path))
+      throw new Error("The report is blank and contains no gzip stream.");
+    if (/\.(?:json|csv)(?:\.gz)?$/iu.test(path))
+      throw new Error("The report is blank.");
+  }
+  return contents;
 }
 
 export function parseJsonOrJsonl(contents: string): unknown {
@@ -68,13 +317,22 @@ export function parseJsonOrJsonl(contents: string): unknown {
   }
 }
 
-export async function readScannerJson(path: string): Promise<unknown> {
-  let bytes = await readFile(path);
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b)
-    bytes = await promisify(gunzip)(bytes);
+/** Bind a normalized JSON report reader to the SDK's file entrypoint. */
+export function scannerJsonReader<Options extends unknown[]>(
+  normalize: (report: unknown, ...options: Options) => ExternalFindings,
+) {
+  return async (path: string, ...options: Options): Promise<ExternalFindings> =>
+    normalize(await readScannerJson(path), ...options);
+}
+
+export async function readScannerJson(
+  path: string | FileHandle,
+  parse: (json: string) => unknown = JSON.parse,
+): Promise<unknown> {
+  const bytes = await readScannerBytes(path);
   let decoded: string;
   try {
-    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    decoded = strictUtf8.decode(bytes);
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner report is not valid UTF-8. ${errorMessage(error)}`,
@@ -82,7 +340,7 @@ export async function readScannerJson(path: string): Promise<unknown> {
     );
   }
   try {
-    return JSON.parse(decoded.replace(/^\uFEFF/u, ""));
+    return parse(decoded.replace(/^\uFEFF/u, ""));
   } catch (error) {
     throw new CodexSecurityError(
       `Scanner JSON could not be parsed. ${errorMessage(error)}`,
@@ -116,13 +374,7 @@ const sarifArtifactLocationFields = new Set([
   "displayBase",
 ]);
 
-/** Keep original artifact indexes; omit only inventory unrelated to this finding. */
-export function sarifRunContextForResult(
-  runContext: Record<string, unknown>,
-  ...selectedEvidence: unknown[]
-): Record<string, unknown> {
-  const { artifacts, ...context } = runContext;
-  if (!Array.isArray(artifacts) || artifacts.length === 0) return runContext;
+function sarifArtifactReferences(evidence: unknown) {
   const locations: Record<string, unknown>[] = [];
   let hasArtifactLink = false;
   function visit(value: unknown): void {
@@ -147,41 +399,202 @@ export function sarifRunContextForResult(
         visit(child);
       }
   }
-  visit([context, ...selectedEvidence]);
-  if (hasArtifactLink) return runContext;
-  const unresolvedUri = /[%:\\]|(?:^|\/)\.\.?(?:\/|$)/u;
-  for (const location of locations) {
-    if (typeof location["index"] === "number" && location["index"] >= 0)
-      return runContext;
-    if (typeof location["uri"] !== "string") continue;
-    for (const artifact of artifacts) {
-      if (!isRecord(artifact) || !isRecord(artifact["location"])) continue;
-      const candidate = artifact["location"];
-      // Keep URI spellings that need resolution; evidence is never rewritten.
-      if (
-        location["uriBaseId"] !== candidate["uriBaseId"] ||
-        unresolvedUri.test(location["uri"]) ||
-        (typeof candidate["uri"] === "string" &&
-          unresolvedUri.test(candidate["uri"])) ||
-        location["uri"] === candidate["uri"]
-      )
-        return runContext;
-    }
+  visit(evidence);
+  return { locations, hasArtifactLink };
+}
+
+const unresolvedUri = /[%:\\]|(?:^|\/)\.\.?(?:\/|$)/u;
+
+function artifactUriMatcher(artifacts: unknown[]) {
+  const uris = new Set<string>();
+  let hasLocation = false;
+  let base: unknown;
+  for (const artifact of artifacts) {
+    if (!isRecord(artifact) || !isRecord(artifact["location"])) continue;
+    const { uri, uriBaseId } = artifact["location"];
+    // Mixed bases or a URI that needs resolution can match any direct reference.
+    if (
+      (hasLocation && uriBaseId !== base) ||
+      (typeof uri === "string" && unresolvedUri.test(uri))
+    )
+      return () => true;
+    hasLocation = true;
+    base = uriBaseId;
+    if (typeof uri === "string") uris.add(uri);
   }
-  return context;
+  return (uri: string, uriBaseId: unknown) =>
+    hasLocation &&
+    (uriBaseId !== base || unresolvedUri.test(uri) || uris.has(uri));
+}
+
+/** Keep original artifact indexes; omit only inventory unrelated to this finding. */
+export function sarifRunContextSelector(runContext: Record<string, unknown>) {
+  const { artifacts, ...context } = runContext;
+  if (!Array.isArray(artifacts) || artifacts.length === 0)
+    return () => runContext;
+  let matchesUri: ReturnType<typeof artifactUriMatcher> | undefined;
+  return (...selectedEvidence: unknown[]) => {
+    const { locations, hasArtifactLink } = sarifArtifactReferences([
+      context,
+      ...selectedEvidence,
+    ]);
+    if (hasArtifactLink) return runContext;
+    for (const location of locations) {
+      const { index, uri, uriBaseId } = location;
+      if (typeof index === "number" && index >= 0) return runContext;
+      if (typeof uri === "string") {
+        matchesUri ??= artifactUriMatcher(artifacts);
+        if (matchesUri(uri, uriBaseId)) return runContext;
+      }
+    }
+    return context;
+  };
+}
+
+type IndexedSarifRule = { rule: Record<string, unknown>; index: number };
+
+/** Duplicate IDs cannot identify a single rule in this run. */
+export function indexSarifRules(
+  entries: Iterable<[number, Record<string, unknown>]>,
+) {
+  const byId = new Map<unknown, IndexedSarifRule | null>();
+  for (const [index, rule] of entries) {
+    const id = rule["id"];
+    byId.set(id, byId.has(id) ? null : { rule, index });
+  }
+  return byId;
+}
+
+type SarifRun = Record<
+  "document" | "run" | "tool" | "driver",
+  Record<string, unknown>
+>;
+
+/** Unpack the common SARIF envelope; each reader qualifies its own producer. */
+export function readSarifRuns<T>(
+  input: unknown,
+  producer: "Semgrep" | "Snyk" | "Endor",
+  read: (context: SarifRun) => T[],
+): T[] {
+  const document = record(input, `${producer} SARIF`);
+  if (document["version"] !== "2.1.0")
+    throw new Error(`Expected ${producer} SARIF 2.1.0.`);
+  return array(document["runs"], "SARIF runs").flatMap((value) => {
+    const run = record(value, "SARIF run");
+    const tool = record(run["tool"], "SARIF tool");
+    const driver = record(tool["driver"], "SARIF driver");
+    return read({ document, run, tool, driver });
+  });
+}
+
+/** Pair each result with its shared run context and original evidence. */
+export function sarifRunResults(
+  { document, run, tool, driver }: SarifRun,
+  producer: "Endor" | "Semgrep",
+) {
+  validateSarifRun(run, producer);
+  const rules = array(driver["rules"] ?? [], `${producer} rules`).map((rule) =>
+    record(rule, `${producer} rule`),
+  );
+  const rulesById = indexSarifRules(rules.entries());
+  const { runs: _runs, ...documentContext } = document;
+  const { results: _results, tool: _tool, ...runContext } = run;
+  const { rules: _rules, ...driverContext } = driver;
+  const { driver: _driver, ...toolContext } = tool;
+  const selectRunContext = sarifRunContextSelector(runContext);
+  // JS callers may supply lazy metadata. Preserve each adapter's original traversal order.
+  const metadataInReadOrder =
+    producer === "Semgrep"
+      ? [driverContext, toolContext, documentContext]
+      : [documentContext, driverContext, toolContext];
+  const context = {
+    rulesById,
+    runContext,
+    sourceData(
+      result: Record<string, unknown>,
+      rule?: Record<string, unknown>,
+    ) {
+      return structuredClone({
+        documentContext,
+        runContext: selectRunContext(result, rule, ...metadataInReadOrder),
+        driverContext,
+        toolContext,
+        ...(rule ? { rule } : {}),
+        result,
+      });
+    },
+  };
+  return optionalArray(run["results"], `${producer} results`).map((result) => ({
+    result,
+    context,
+  }));
+}
+
+/** The top-level index and nested descriptor must agree with the selected driver rule. */
+export function validateSarifRuleReference(
+  result: Record<string, unknown>,
+  ruleId: string,
+  selected: IndexedSarifRule | undefined,
+  producer: "Endor" | "Semgrep" | "Snyk",
+) {
+  // Snyk's original diagnostics use unqualified SARIF field names.
+  const label = producer === "Snyk" ? "Result" : producer;
+  if (
+    result["ruleIndex"] !== undefined &&
+    result["ruleIndex"] !== selected?.index
+  )
+    throw new Error(`${label} ruleIndex and ruleId disagree.`);
+  if (result["rule"] === undefined) return;
+  const reference = record(
+    result["rule"],
+    producer === "Snyk" ? "Rule reference" : `${producer} rule reference`,
+  );
+  if (
+    reference["toolComponent"] !== undefined ||
+    (reference["id"] !== undefined && reference["id"] !== ruleId) ||
+    (reference["index"] !== undefined &&
+      reference["index"] !== selected?.index) ||
+    (reference["guid"] !== undefined &&
+      reference["guid"] !== selected?.rule["guid"])
+  )
+    throw new Error(
+      producer === "Snyk"
+        ? "Result uses an inconsistent or external rule reference."
+        : `Inconsistent or external ${producer} rule reference.`,
+    );
+}
+
+/** Append the evidence or its exclusion at the original input position. */
+export function appendFinding(
+  result: ExternalFindings,
+  position: number,
+  id: string,
+  project: () => ExternalFinding["evidence"],
+) {
+  try {
+    result.findings.push({ source_finding_id: id, evidence: project() });
+  } catch (error) {
+    result.excluded.push({
+      position,
+      source_finding_id: id,
+      reason: errorMessage(error),
+    });
+  }
 }
 
 /** Exclude every colliding record: choosing the first could overwrite another occurrence. */
 export function normalizeRecords<T>(
   records: T[],
-  normalize: (record: T, id: string) => ExternalFinding,
+  projectEvidence: (record: T, id: string) => ExternalFinding["evidence"],
   identify: (record: T) => string,
   target: "local" | "cloud" = "cloud",
+  options: Pick<ExternalFindings, "report"> = {},
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
     findings: [],
     excluded: [],
+    ...(options.report === undefined ? {} : { report: options.report }),
   };
   const identified: { position: number; value: T; id: string }[] = [];
   const counts = new Map<string, number>();
@@ -218,18 +631,7 @@ export function normalizeRecords<T>(
       });
       continue;
     }
-    try {
-      const finding = normalize(value, id);
-      if (finding.source_finding_id !== id)
-        throw new Error("Finding identity changed during normalization.");
-      result.findings.push(finding);
-    } catch (error) {
-      result.excluded.push({
-        position,
-        source_finding_id: id,
-        reason: errorMessage(error),
-      });
-    }
+    appendFinding(result, position, id, () => projectEvidence(value, id));
   }
   result.excluded.sort((a, b) => a.position - b.position);
   return result;

@@ -59,7 +59,7 @@ async function writeSession(
           name: "exec_command",
           call_id: `call-${index}`,
           arguments: JSON.stringify({
-            cmd: `cat ${path}`,
+            cmd: `cat "${path.replaceAll("\\", "/")}"`,
             workdir: repository,
           }),
         },
@@ -99,7 +99,9 @@ describe("scans show observed files", () => {
             scan: {
               scanId: "scan-example",
               targetPath: repository,
-              startedAt: "2026-10-22T12:00:00Z",
+              lifecycle: { startedAt: "2026-10-22T12:00:00Z" },
+              progress: { status: "running" },
+              executionThreadIds: ["parent"],
               continuationThreadId: "parent",
               observedFilesRead: {
                 count: 7,
@@ -123,13 +125,28 @@ describe("scans show observed files", () => {
       const directory = await temporaryDirectory();
       const home = join(directory, "home");
       const repository = join(directory, "repository");
-      await writeSession(home, repository, "parent", ["src/shared.ts"]);
+      await writeSession(home, repository, "parent", [
+        "src/parent.ts",
+        "src/shared.ts",
+      ]);
+      if (!dedicated) {
+        await writeSession(
+          home,
+          repository,
+          "other-task",
+          ["src/unrelated.ts"],
+          "parent",
+        );
+      }
       await writeSession(
         home,
         repository,
         "worker",
         ["src/shared.ts", "src/worker.ts"],
         "parent",
+        "2026-10-22T12:01:00Z",
+        // The final owned turn can return tool output just after the scan was sealed.
+        dedicated ? "2026-10-22T12:05:01Z" : "2026-10-22T12:01:00Z",
       );
       await writeSession(
         home,
@@ -137,7 +154,7 @@ describe("scans show observed files", () => {
         "earlier-worker",
         ["src/unrelated.ts"],
         "parent",
-        "2026-10-22T11:59:00Z",
+        "2026-10-22T12:00:00.000009Z",
         "2026-10-22T12:02:00Z",
       );
       await writeSession(
@@ -148,13 +165,25 @@ describe("scans show observed files", () => {
         "parent",
         "2026-10-22T12:06:00Z",
       );
+      const scanDir = join(directory, "scan");
+      await writeSession(
+        home,
+        join(scanDir, "artifacts", "deep_discovery"),
+        "unbound-comparison",
+        [join(repository, "src", "comparison.ts")],
+      );
       const scan: JsonObject = {
         scanId: "scan-example",
+        mode: "deep",
+        scanDir,
         targetPath: repository,
-        startedAt: "2026-10-22T12:00:00Z",
-        completedAt: "2026-10-22T12:05:00Z",
+        lifecycle: {
+          startedAt: "2026-10-22T12:00:00.000010Z",
+          finishedAt: "2026-10-22T12:05:00Z",
+        },
         continuationThreadId: "parent",
-        executionThreadIds: dedicated ? ["parent"] : [],
+        executionThreadIds: dedicated ? ["parent"] : ["worker"],
+        ...(dedicated ? { logCompletedAt: "2026-10-22T12:05:00Z" } : {}),
         progress: { status: "complete", updatedAt: "2026-10-22T12:05:00Z" },
         observedFilesRead: { count: null, observedAt: null },
       };
@@ -187,9 +216,12 @@ describe("scans show observed files", () => {
         expect(
           await stdout.run(["scans", "show", "scan-example", "--json"], deps),
         ).toBe(0);
-        expect(JSON.parse(stdout.text()).observedFilesRead.count).toBe(2);
+        expect(JSON.parse(stdout.text()).observedFilesRead.count).toBe(
+          dedicated ? 3 : 2,
+        );
       }
       expect([...evidence.keys()].sort()).toEqual([
+        ...(dedicated ? ["src/parent.ts"] : []),
         "src/shared.ts",
         "src/worker.ts",
       ]);
@@ -199,27 +231,45 @@ describe("scans show observed files", () => {
       expect(
         await stdout.run(["scans", "show", "scan-example", "--json"], deps),
       ).toBe(0);
-      expect(JSON.parse(stdout.text()).observedFilesRead.count).toBe(2);
+      expect(JSON.parse(stdout.text()).observedFilesRead.count).toBe(
+        dedicated ? 3 : 2,
+      );
       expect(writes).toBe(2);
     },
   );
 
-  test("keeps missing observations unavailable without failing show", async () => {
+  test("keeps missing and shared-owner-only observations unavailable", async () => {
     const directory = await temporaryDirectory();
+    const home = join(directory, "home");
+    const repository = join(directory, "repository");
+    await writeSession(home, repository, "parent", ["src/unrelated.ts"]);
+    await writeSession(
+      home,
+      repository,
+      "later-worker",
+      ["src/later.ts"],
+      "missing-worker",
+      "2026-10-22T12:06:00Z",
+    );
     const stdout = captureCli(main, "stdout");
     expect(
       await stdout.run(
         ["scans", "show", "scan-example", "--json"],
         dependencies({
           environment: {
-            CODEX_HOME: join(directory, "home"),
+            CODEX_HOME: home,
             CODEX_SECURITY_STATE_DIR: join(directory, "state"),
           },
           onWorkbench: () => ({
             scan: {
               scanId: "scan-example",
-              targetPath: join(directory, "repository"),
-              startedAt: "2026-10-22T12:00:00Z",
+              targetPath: repository,
+              lifecycle: {
+                startedAt: "2026-10-22T12:00:00Z",
+                finishedAt: "2026-10-22T12:05:00Z",
+              },
+              progress: { status: "complete" },
+              executionThreadIds: ["missing-worker"],
               continuationThreadId: "parent",
               observedFilesRead: { count: null, observedAt: null },
             },

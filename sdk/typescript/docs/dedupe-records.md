@@ -6,25 +6,26 @@ Findings API. It performs no authentication, update checks, local Codex launches
 candidate retrieval, or persistence. The host owns repository authorization,
 model execution, sessions, credentials, cancellation of remote work, and cleanup.
 
-The SDK equivalent is:
+## A minimal exchange
 
-```typescript
-import { deduplicateRecords } from "@openai/codex-security";
+To check the connection before dispatching reviews, send an empty batch as
+one line on the CLI's stdin. Keep the pipe open.
 
-const result = await deduplicateRecords(input, {
-  reviewRunner: {
-    async run(request, { signal } = {}) {
-      return await hostReview(request, signal); // Return the structured answer.
-    },
-  },
-  signal: controller.signal,
-});
+```text
+{"jsonrpc":"2.0","id":"run-1","method":"run","params":{"version":1,"observations":[],"candidateRelationships":[]}}
 ```
 
-`DeduplicateRecordsInput`, `DeduplicateRecordsResult`,
-`DeduplicationReviewRequest`, and `DeduplicationReviewRunner` are exported types.
-The entry point validates the input structure, unique identities, and candidate
-references before any review.
+The CLI writes one line to stdout with the same run ID. With no candidates,
+this exchange makes zero model calls.
+
+```text
+{"jsonrpc":"2.0","id":"run-1","result":{"version":1,"status":"completed","groups":[],"unresolved":[]}}
+```
+
+For a populated batch, supply observations and candidate relationships as below.
+[Answer each review](#review-exchange) using its own request ID, then read the
+[terminal result](#final-response-and-persistence) using your original run ID.
+The [Python host](#runnable-python-fake-host) demonstrates the complete exchange.
 
 ## Input and identities
 
@@ -36,7 +37,8 @@ from -9007199254740991 through 9007199254740991 and are compared without coercio
 Use strings for larger numeric identifiers. Review IDs are generated strings;
 request and response ID namespaces are directional.
 
-The host sends:
+The following messages are expanded for reading. Serialize each object to a
+single line before writing it to the pipe. For a populated batch, the host sends:
 
 ```json
 {
@@ -65,6 +67,16 @@ locations, evidence, and all available source/revision information. Provenance
 must describe the actual source; it does not authorize additional repository
 access. Unknown extension fields are preserved. This does not require creating
 scan manifests or other saved-scan artifacts.
+
+For an imported observation, set `"kind": "imported"` on its entry alongside
+`id` and `finding`. Supply the actual source in `finding.provenance.source`
+and retain original source references and evidence as extensions. Imported
+findings may omit `ruleId`, `identity`, `taxonomy`, and `remediation`. If
+there is no known repository line, supply an empty `locations` array and
+preserve any file-level evidence in the original source data. All other
+Finding requirements apply. Entries without a kind use the full Finding
+schema. A SAME review must return a merged finding that satisfies the schema
+of the assigned canonical original.
 
 Observation IDs are host-owned, nonempty strings, unique within `observations`.
 Supply the pending observations and their retrieved neighbors together as original
@@ -121,8 +133,7 @@ and beneficiaries are nonempty. Candidate-only observations never become
 beneficiaries, even when selected as the final representative. An incoming
 observation participating in several reviews appears in each review's metadata.
 
-This is additive metadata: JSON-RPC remains 2.0 and input/result versions remain 1.
-Older hosts may ignore it; hosts that require attribution must validate it
+Hosts that use attribution for accounting must validate it
 and reject missing or unknown identities before executing a review. Persist the
 request UUID and attribution before provisioning remote execution. The host owns
 accounting and any partitioning of invocation anchors by origin scan; the CLI
@@ -190,18 +201,40 @@ For failure or an inconclusive review, send an explicit error:
 }
 ```
 
-The CLI never resubmits a review, including after this error. Invalid model
-answers, missing decisions, and host errors make the whole batch unresolved;
+A host error ends the review without another submission. Invalid final model
+answers, missing final decisions, and host errors make the whole batch unresolved;
 previous successful reviews in that run do not become persistence decisions.
-The existing algorithm treats a validated `DISTINCT` as a nonmatch, when
+The CLI treats a validated `DISTINCT` as a nonmatch, when
 supplied finding content is insufficient to establish a shared correction. If the host considers the review
 inconclusive, it must return an error rather than manufacture a `DISTINCT` answer.
 No new `INCONCLUSIVE` model decision is introduced.
 
-The existing screening, independent pair review, contradiction-aware grouping, and
-severity-based representative selection are reused. No local review checkpoints
-are read or written in records mode. Local saved-scan execution retains its
-existing tool-submission validation and workflow checkpoints.
+### Continuing a review
+
+A `review.run` request with `supportsContinuation: true` can receive the result
+`{"status":"missing_submission"}`. Send this only after verifying that the
+original turn completed without a pending decision or blocker. Keep that
+review session open. The CLI then sends one `review.continue` request with a
+fresh JSON-RPC ID and `params: {requestId, prompt}`. The request ID in the
+parameters identifies the original review. Submit the prompt in the same
+session and reply on the new JSON-RPC ID. The correction omits
+`supportsContinuation`, so the host releases the session after that turn. A second missing submission ends
+the review as unresolved. A pending tool call stays in the original turn.
+An uncertain outcome or explicit blocker follows the
+existing error path. Hosts without continuation support can ignore the field.
+
+When `review.run` also advertises `supportsSubmissionValidation: true`, a host
+can keep a pending decision tool call open by adding `reviewPending: true` to
+the JSON-RPC reply envelope, alongside `id` and `result`. Put the raw tool
+arguments in `result`; only the host sets the envelope flag. The CLI checks
+the arguments against the original assignment. If valid, it sends
+`review.release` with `{requestId}`. Release the session and reply
+`{"status":"released"}` only after cleanup succeeds. If invalid, the CLI sends
+`review.continue` with the validation error. Return that prompt to the pending
+tool call in the same session. Release the session and reply with the corrected
+decision. The CLI validates this final answer and allows no further correction.
+Either follow-up uses a fresh JSON-RPC ID. A host that has already closed the
+session returns its ordinary final answer as before.
 
 ## Final response and persistence
 
@@ -240,6 +273,30 @@ original evidence. Do not treat a failed run, absent final response, or unresolv
 observation as unique. Cross-run replay/idempotency and reconciliation of remote
 work whose acceptance is uncertain belong to the host; a new process creates
 new review IDs and does not resume earlier remote execution.
+
+## TypeScript integration
+
+The SDK accepts the same input and returns the result directly. In this host
+integration, provide an authorized `reviewRunner` that executes the request
+and returns the structured answer. Pass an `AbortSignal` to support cancellation.
+
+```ts
+import {
+  deduplicateRecords,
+  type DeduplicateRecordsInput,
+  type DeduplicationReviewRunner,
+} from "@openai/codex-security";
+
+export function reviewDuplicates(
+  input: DeduplicateRecordsInput,
+  reviewRunner: DeduplicationReviewRunner,
+  signal: AbortSignal,
+) {
+  return deduplicateRecords(input, { reviewRunner, signal });
+}
+```
+
+`DeduplicateRecordsResult` and `DeduplicationReviewRequest` are also exported.
 
 ## Cancellation and protocol failures
 

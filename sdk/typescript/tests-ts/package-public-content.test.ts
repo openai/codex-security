@@ -66,11 +66,11 @@ describe("npm package public contents", () => {
     expect(() =>
       assertPublicPackageContents(new Map([["package/logo.png", approved]])),
     ).not.toThrow();
-    const stored = Buffer.from(approved);
-    expect(stored.subarray(171, 178)).toEqual(Buffer.alloc(7));
-    stored.set(Buffer.from("\0go/x\0\0"), 171);
+    const changed = Buffer.from(approved);
+    const last = changed.length - 1;
+    changed.writeUInt8(changed.readUInt8(last) ^ 1, last);
     expect(() =>
-      assertPublicPackageContents(new Map([["package/logo.png", stored]])),
+      assertPublicPackageContents(new Map([["package/logo.png", changed]])),
     ).toThrow("npm tarball contains an unexpected PNG asset");
   });
 

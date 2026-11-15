@@ -1,3 +1,5 @@
+"""Export saved findings from stopped scans while retaining newer drafts across recovery."""
+
 from __future__ import annotations
 
 import copy
@@ -16,24 +18,24 @@ from types import SimpleNamespace
 
 import pytest
 from workbench_test_support import (
+    RemediationRequest,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     fail_scan,
     get_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
+    read_draft_documents,
     read_review_state,
-    request_remediation,
-    request_remediation_action,
     resume_deep_scan,
     run_workbench,
     save_workspace,
     saved_coverage,
     saved_draft,
     scan_command,
-    set_remediation,
     set_triage,
     start_saved_scan,
     start_scan_command,
@@ -84,14 +86,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
 ) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    documents = {
-        key: json.loads((scan_dir / filename).read_text())
-        for key, filename in (
-            ("manifest", "scan-manifest.json"),
-            ("findings", "findings.json"),
-            ("coverage", "coverage.json"),
-        )
-    }
+    documents = read_draft_documents(scan_dir)
     fail_scan(state_dir, scan_id, "Stopped.")
     stopped = get_scan(state_dir, scan_id)["scan"]
     seal = (scan_dir / "scan-manifest.json").read_bytes()
@@ -137,9 +132,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
 def test_canceled_scan_does_not_accept_checkpoints_written_after_cancellation(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     started = start_scan_command(
         state_dir, str(saved["id"]), "--scan-root", str(tmp_path / "scans")
@@ -441,21 +434,12 @@ def test_incomplete_parent_checkpoint_cannot_complete_scan(tmp_path: Path) -> No
 def test_model_only_draft_is_available_before_findings_and_survives_stop(
     tmp_path: Path, termination: str, projection_failure_at: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     update_progress(state_dir, scan_id, "--phase", "threat_model")
     write_completed_contract(scan_dir, scan_id, target)
-    documents = {
-        key: json.loads((scan_dir / filename).read_text())
-        for key, filename in (
-            ("manifest", "scan-manifest.json"),
-            ("findings", "findings.json"),
-            ("coverage", "coverage.json"),
-        )
-    }
+    documents = read_draft_documents(scan_dir)
     model = {
         "format": "markdown",
         "content": "# Service Boundaries\n\nQueue producers and consumers.\n",
@@ -553,20 +537,11 @@ def test_history_does_not_expose_a_model_from_changed_sealed_artifacts(
 def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
     tmp_path: Path, malformation: str
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target)
-    documents = {
-        key: json.loads((scan_dir / filename).read_text())
-        for key, filename in (
-            ("manifest", "scan-manifest.json"),
-            ("findings", "findings.json"),
-            ("coverage", "coverage.json"),
-        )
-    }
+    documents = read_draft_documents(scan_dir)
     model = {"summary": "Queue boundaries.", "assets": ["Stored messages"]}
     documents["manifest"]["scan"].update(threatModel=model, complete=False)
     malformed = json.loads(json.dumps(documents["manifest"]))
@@ -664,9 +639,7 @@ def test_export_validation_checks_binding_without_writing_or_pinning_legacy_arti
 
 
 def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     source = target / "src/extract.py"
     source.parent.mkdir()
     source.write_text("".join(f"line {line}\n" for line in range(1, 46)))
@@ -740,10 +713,8 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     monkeypatch: pytest.MonkeyPatch,
     workbench_api,
 ) -> None:
-    state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     workspace_id = str(uuid.uuid4())
     create_workspace(
         state_dir, workspace_id, "--thread-id", "thread-deep-export", "--target-path", str(target)
@@ -844,6 +815,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
     assert closed_rows == {closed_occurrence: "wont_fix"}
 
 
+@pytest.mark.cross_platform
 def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
@@ -857,7 +829,7 @@ def test_csv_export_escapes_newline_and_full_width_formula_prefixes(tmp_path: Pa
 
     scan_command(state_dir, "complete-scan", scan_id)
     exported = scan_command(state_dir, "export-findings", scan_id, "--format", "csv")["export"]
-    with Path(exported["path"]).open(newline="") as source:
+    with Path(exported["path"]).open(encoding="utf-8", newline="") as source:
         row = next(csv.DictReader(source))
 
     assert row["title"] == "'\n=1+1"
@@ -889,9 +861,9 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
         state_dir, "list-findings", scan_id, "--offset", "20", "--limit", "50"
     )["findingsPage"]
     assert second_page["offset"] == 20
-    assert second_page["nextOffset"] == 40
+    assert second_page["nextOffset"] == 70
     assert second_page["total"] == 75
-    assert len(second_page["findings"]) == 20
+    assert len(second_page["findings"]) == 50
     assert embedded_occurrence_ids.isdisjoint(
         finding["occurrenceId"] for finding in second_page["findings"]
     )
@@ -900,6 +872,26 @@ def test_completed_findings_are_returned_in_bounded_pages(tmp_path: Path) -> Non
     assert any(
         finding["occurrenceId"] == off_prefix_occurrence_id for finding in selected["findings"]
     )
+
+    request = RemediationRequest(state_dir, off_prefix_occurrence_id)
+    action_token = str(uuid.uuid4())
+    request.start(action_token)
+    patch = "--- /dev/null\n+++ b/contained.txt\n@@ -0,0 +1 @@\n+safe\n"
+    generated = request.update(
+        action_token,
+        "1",
+        "generated",
+        "--patch-stdin",
+        input_text=patch,
+    )
+    findings = {finding["occurrenceId"]: finding for finding in generated["scan"]["findings"]}
+    remediation = findings[off_prefix_occurrence_id]["remediationState"]
+    assert remediation["state"] == "generated"
+    patch_path = scan_dir / remediation["patchPath"]
+    assert patch_path.read_text(encoding="utf-8") == patch
+    digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+    assert remediation["patchDigest"] == f"sha256:{digest}"
+    assert generated["workspace"]["results"]["findings"] == completed["findings"]
 
 
 def test_embedded_and_paged_findings_bound_large_stored_fields(tmp_path: Path) -> None:
@@ -1064,9 +1056,7 @@ def test_embedded_and_paged_findings_normalize_scalar_attack_path_assessments(
 def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     tmp_path: Path,
 ) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     for index in range(9):
         (target / f"support-{index}.py").write_text("support\n")
     (target / "root.py").write_text("vulnerable\n")
@@ -1093,6 +1083,7 @@ def test_primary_location_prefers_root_control_in_bounded_and_csv_results(
     assert row["path"] == "root.py"
 
 
+@pytest.mark.cross_platform
 def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
@@ -1112,7 +1103,9 @@ def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> 
         }
     )
     manifest_path = scan_dir / "scan-manifest.json"
-    manifest_path.write_text(json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n")
+    manifest_path.write_bytes(
+        (json.dumps(manifest, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    )
     run_workbench(state_dir, "complete-scan", "--scan-id", scan_id)
     sealed_manifest = manifest_path.read_bytes()
 
@@ -1160,17 +1153,20 @@ def test_export_rejects_replaced_scan_directory(tmp_path: Path) -> None:
     assert not (outside / "exports" / "findings.csv").exists()
 
 
+def symlink_scan_parent(scan_dir: Path, replacement_parent: Path) -> Path:
+    stored_parent = scan_dir.parent
+    moved_parent = stored_parent.with_name(f"{stored_parent.name}.moved")
+    stored_parent.rename(moved_parent)
+    shutil.copytree(moved_parent, replacement_parent)
+    stored_parent.symlink_to(replacement_parent, target_is_directory=True)
+    return replacement_parent / scan_dir.name
+
+
 def test_csv_export_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
     scan_command(state_dir, "complete-scan", scan_id)
-    stored_parent = scan_dir.parent
-    moved_parent = stored_parent.with_name(f"{stored_parent.name}.moved")
-    stored_parent.rename(moved_parent)
-    replacement_parent = tmp_path / "replacement-parent"
-    shutil.copytree(moved_parent, replacement_parent)
-    stored_parent.symlink_to(replacement_parent, target_is_directory=True)
-    replacement_scan_dir = replacement_parent / scan_dir.name
+    replacement_scan_dir = symlink_scan_parent(scan_dir, tmp_path / "replacement-parent")
     failed = scan_command(state_dir, "export-findings", scan_id, "--format", "csv", check=False)
     assert failed["returncode"] != 0
     assert not (replacement_scan_dir / "exports" / "findings.csv").exists()
@@ -1190,13 +1186,7 @@ def test_completion_rejects_replaced_scan_directory(tmp_path: Path) -> None:
 def test_completion_rejects_replaced_scan_directory_ancestor(tmp_path: Path) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
     write_completed_contract(scan_dir, scan_id, target)
-    stored_parent = scan_dir.parent
-    moved_parent = stored_parent.with_name(f"{stored_parent.name}.moved")
-    stored_parent.rename(moved_parent)
-    replacement_parent = tmp_path / "replacement-parent"
-    shutil.copytree(moved_parent, replacement_parent)
-    stored_parent.symlink_to(replacement_parent, target_is_directory=True)
-    replacement_scan_dir = replacement_parent / scan_dir.name
+    replacement_scan_dir = symlink_scan_parent(scan_dir, tmp_path / "replacement-parent")
     failed = scan_command(state_dir, "complete-scan", scan_id, check=False)
     assert failed["returncode"] != 0
     assert not (replacement_scan_dir / "exports" / "results.sarif").exists()
@@ -1207,32 +1197,14 @@ def test_remediation_apply_rejects_replaced_scan_directory_ancestor(tmp_path: Pa
     write_completed_contract(scan_dir, scan_id, target)
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     occurrence_id = str(completed["findings"][0]["occurrenceId"])
-    request_id = str(uuid.uuid4())
+    request = RemediationRequest(state_dir, occurrence_id)
     generation_token = str(uuid.uuid4())
-    request_remediation(state_dir, occurrence_id, request_id, generation_token)
+    request.start(generation_token)
     patch_path = scan_dir / "remediation.patch"
     patch_path.write_text("diff --git a/src/extract.py b/src/extract.py\n")
-    set_remediation(
-        state_dir,
-        occurrence_id,
-        request_id,
-        generation_token,
-        "1",
-        "generated",
-        "--patch-path",
-        patch_path.name,
-        "--patch-digest",
-        f"sha256:{hashlib.sha256(patch_path.read_bytes()).hexdigest()}",
-    )
-    stored_parent = scan_dir.parent
-    moved_parent = stored_parent.with_name(f"{stored_parent.name}.moved")
-    stored_parent.rename(moved_parent)
-    replacement_parent = tmp_path / "replacement-parent"
-    shutil.copytree(moved_parent, replacement_parent)
-    stored_parent.symlink_to(replacement_parent, target_is_directory=True)
-    failed = request_remediation_action(
-        state_dir, occurrence_id, request_id, "2", "apply", str(uuid.uuid4()), check=False
-    )
+    request.generate(generation_token, patch_path)
+    symlink_scan_parent(scan_dir, tmp_path / "replacement-parent")
+    failed = request.request_action("2", "apply", str(uuid.uuid4()), check=False)
     assert "canonical non-symlink directory" in str(failed["stderr"])
 
 
@@ -1257,14 +1229,7 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
         target,
         coverage_mode="deep_repository" if mode == "deep" else "repository",
     )
-    documents = {
-        key: json.loads((scan_dir / filename).read_text())
-        for key, filename in (
-            ("manifest", "scan-manifest.json"),
-            ("findings", "findings.json"),
-            ("coverage", "coverage.json"),
-        )
-    }
+    documents = read_draft_documents(scan_dir)
     if mode == "deep":
         documents["manifest"]["scan"]["complete"] = False
     documents["findings"]["findings"] = []
@@ -1411,14 +1376,7 @@ def test_deep_draft_admission_survives_interrupted_projection(
     workspace = create_saved_workspace(state_dir, target, mode="deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
     write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
-    documents = {
-        key: json.loads((scan_dir / filename).read_text())
-        for key, filename in (
-            ("manifest", "scan-manifest.json"),
-            ("findings", "findings.json"),
-            ("coverage", "coverage.json"),
-        )
-    }
+    documents = read_draft_documents(scan_dir)
     documents["manifest"]["scan"]["complete"] = False
     raw = {
         "scanId": scan_id,

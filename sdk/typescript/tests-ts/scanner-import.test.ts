@@ -1,9 +1,181 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import {
   hasSarifExternalPropertyReferences,
+  readScannerJson,
+  readScannerText,
   relativePath,
-  sarifRunContextForResult,
+  sarifRunContextSelector,
+  validateSarifRun,
 } from "../src/scanner-import.js";
+import { createTemporaryDirectories } from "./support/temporary-directories.js";
+
+const reports = createTemporaryDirectories();
+afterEach(reports.cleanup);
+
+async function failure(operation: () => unknown): Promise<Error> {
+  try {
+    await operation();
+  } catch (error) {
+    if (error instanceof Error) return error;
+    throw error;
+  }
+  throw new Error("Expected the operation to fail");
+}
+
+test("scanner readers detect gzip by content and preserve BOM handling", async () => {
+  const path = join(await reports.create("scanner-report-"), "report");
+  await writeFile(path, gzipSync('\uFEFF\uFEFF"λ"'));
+  expect(await readScannerText(path)).toBe('\uFEFF"λ"');
+  expect(await readScannerJson(path)).toBe("λ");
+});
+
+test("scanner readers propagate filesystem and gzip errors", async () => {
+  const path = join(await reports.create("scanner-report-"), "missing");
+  const missing = await failure(() => readFile(path));
+  for (const read of [readScannerText, readScannerJson]) {
+    await expect(read(path)).rejects.toMatchObject({
+      code: "ENOENT",
+      message: missing.message,
+    });
+  }
+
+  const truncated = Buffer.from([0x1f, 0x8b]);
+  await writeFile(path, truncated);
+  const gzip = await failure(() => gunzipSync(truncated));
+  for (const read of [readScannerText, readScannerJson]) {
+    await expect(read(path)).rejects.toMatchObject({
+      code: "Z_BUF_ERROR",
+      message: gzip.message,
+    });
+  }
+});
+
+test("scanner readers preserve UTF-8 and JSON parse diagnostics", async () => {
+  const path = join(await reports.create("scanner-report-"), "report");
+  const invalid = Uint8Array.of(0xff);
+  await writeFile(path, gzipSync(invalid));
+  const utf8 = await failure(() =>
+    new TextDecoder("utf-8", { fatal: true }).decode(invalid),
+  );
+  await expect(readScannerText(path)).rejects.toMatchObject({
+    name: "TypeError",
+    message: utf8.message,
+  });
+  await expect(readScannerJson(path)).rejects.toMatchObject({
+    name: "CodexSecurityError",
+    message: `Scanner report is not valid UTF-8. ${utf8.message}`,
+    cause: { name: "TypeError", message: utf8.message },
+  });
+
+  await writeFile(path, "{");
+  expect(await readScannerText(path)).toBe("{");
+  const syntax = await failure(() => JSON.parse("{"));
+  await expect(readScannerJson(path)).rejects.toMatchObject({
+    name: "CodexSecurityError",
+    message: `Scanner JSON could not be parsed. ${syntax.message}`,
+    cause: { name: "SyntaxError", message: syntax.message },
+  });
+});
+
+test.each(["toolExecutionNotifications", "toolConfigurationNotifications"])(
+  "SARIF %s warnings preserve a successful invocation",
+  (property) => {
+    const invocation = {
+      executionSuccessful: true,
+      [property]: [
+        { level: "warning", message: { text: "Synthetic scan warning" } },
+        { level: "note", message: { text: "Synthetic scan note" } },
+      ],
+    };
+    const run = { invocations: [invocation], conversion: { invocation } };
+    expect(() => validateSarifRun(run, "Example")).not.toThrow();
+  },
+);
+
+test("SARIF extension descriptors retain error severity across index, ID and GUID references", () => {
+  const guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const componentGuid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+  const tool = {
+    extensions: [
+      {
+        guid: componentGuid,
+        notifications: [
+          { id: "coverage", guid, defaultConfiguration: { level: "error" } },
+        ],
+      },
+    ],
+  };
+  for (const reference of [
+    { index: 0 },
+    { id: "coverage" },
+    { guid: guid.toUpperCase() },
+  ]) {
+    const notification = {
+      descriptor: {
+        ...reference,
+        toolComponent: { guid: componentGuid.toUpperCase() },
+      },
+      message: { text: "Synthetic descriptor failure" },
+    };
+    const invocation = {
+      executionSuccessful: true,
+      toolConfigurationNotifications: [notification],
+    };
+    const validate = (overrides = {}) =>
+      validateSarifRun(
+        {
+          tool,
+          invocations: [{ ...invocation, ...overrides }],
+        },
+        "Example",
+      );
+    expect(() => validate()).toThrow("Synthetic descriptor failure");
+    expect(() =>
+      validate({
+        notificationConfigurationOverrides: [
+          {
+            descriptor: notification.descriptor,
+            configuration: { level: "warning" },
+          },
+        ],
+      }),
+    ).not.toThrow();
+  }
+});
+
+test("malformed SARIF notifications cannot hide a scanner error", () => {
+  for (const [notifications, message] of [
+    [{ level: "error" }, "must be an array"],
+    [[null], "must be an object"],
+  ] as const) {
+    const invocation = {
+      executionSuccessful: true,
+      toolConfigurationNotifications: notifications,
+    };
+    const run = { invocations: [invocation] };
+    expect(() => validateSarifRun(run, "Example")).toThrow(message);
+  }
+});
+
+test("SARIF validates converter failures separately from scanner invocations", () => {
+  const converted = (invocation: unknown) =>
+    validateSarifRun({ conversion: { invocation } }, "Example");
+  expect(() => converted({ executionSuccessful: false })).toThrow(
+    "unsuccessful invocation",
+  );
+  const failedConversion = {
+    toolExecutionNotifications: [
+      { level: "error", message: { text: "Synthetic conversion failure" } },
+    ],
+  };
+  for (const executionSuccessful of [true, false])
+    expect(() =>
+      converted({ ...failedConversion, executionSuccessful }),
+    ).toThrow("Synthetic conversion failure");
+});
 
 test("scanner repository paths retain colons outside Windows drive prefixes", () => {
   expect(relativePath("schema:prod.json")).toBe("schema:prod.json");
@@ -49,7 +221,8 @@ test("SARIF findings omit unrelated inventory without mutating shared run contex
       { physicalLocation: { artifactLocation: { uri: "src/main.ts" } } },
     ],
   };
-  expect(sarifRunContextForResult(context, direct)).toEqual({
+  const selectContext = sarifRunContextSelector(context);
+  expect(selectContext(direct)).toEqual({
     versionControlProvenance: provenance,
   });
   expect(context.artifacts).toBe(artifacts);
@@ -64,9 +237,7 @@ test("SARIF findings omit unrelated inventory without mutating shared run contex
     ],
   };
   const before = structuredClone(indexed);
-  expect(sarifRunContextForResult(context, indexed)["artifacts"]).toBe(
-    artifacts,
-  );
+  expect(selectContext(indexed)["artifacts"]).toBe(artifacts);
   expect(indexed).toEqual(before);
 });
 
@@ -110,7 +281,7 @@ test.each([
       },
     ];
     const context = { artifacts };
-    expect(sarifRunContextForResult(context, selected)["artifacts"]).toBe(
+    expect(sarifRunContextSelector(context)(selected)["artifacts"]).toBe(
       artifacts,
     );
   },
@@ -141,7 +312,7 @@ test.each([
     const result = {
       locations: [{ physicalLocation: { artifactLocation: location } }],
     };
-    expect(sarifRunContextForResult(context, result)["artifacts"]).toBe(
+    expect(sarifRunContextSelector(context)(result)["artifacts"]).toBe(
       artifacts,
     );
   },
@@ -155,5 +326,5 @@ test("unrelated SARIF property-bag indexes do not require artifact inventory", (
       { physicalLocation: { artifactLocation: { uri: "src/main.ts" } } },
     ],
   };
-  expect(sarifRunContextForResult(context, result)).toEqual({});
+  expect(sarifRunContextSelector(context)(result)).toEqual({});
 });

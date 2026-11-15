@@ -1,3 +1,5 @@
+"""Bind CLI scan counts, final artifacts, and recovered coverage to the registered target."""
+
 from __future__ import annotations
 
 import copy
@@ -16,6 +18,7 @@ import pytest
 from workbench_test_support import (
     create_saved_workspace,
     create_workspace,
+    empty_target_paths,
     empty_target_scan,
     fail_scan,
     get_scan,
@@ -44,9 +47,7 @@ def _start_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
 
 
 def _start_deep_scan_with_draft_findings(tmp_path: Path) -> tuple[Path, str, Path]:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(
         state_dir, target, thread_id="thread-completion-binding", mode="deep"
     )
@@ -68,6 +69,7 @@ def register_cli_scan(
     scan_dir: Path,
     *,
     scan_target: dict[str, Any] | None = None,
+    recipe_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scan_dir.mkdir(mode=0o700)
     return run_workbench(
@@ -80,6 +82,7 @@ def register_cli_scan(
         "--recipe-json",
         json.dumps(
             {
+                **(recipe_fields or {}),
                 "config": {},
                 "mode": "standard",
                 "repository": str(target),
@@ -87,6 +90,309 @@ def register_cli_scan(
             }
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("recipe_fields", "phase"),
+    [({}, "threat_model"), ({"mock": True}, "preflight"), ({"import": {}}, "preflight")],
+    ids=["scan", "mock", "import"],
+)
+def test_cli_registration_returns_stored_phase(
+    tmp_path: Path, recipe_fields: dict[str, Any], phase: str
+) -> None:
+    repo = tmp_path / "repo"
+    initialize_git_repository(repo)
+    state = tmp_path / "state"
+    registration = register_cli_scan(state, repo, tmp_path / "scan", recipe_fields=recipe_fields)
+    context = scan_command(state, "get-scan", registration["scanId"])
+    assert registration["phase"] == context["scan"]["progress"]["phase"] == phase
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ["src/code.py", "src/code.py", "src/explicit.log", "src/tracked.log"],
+        ["src", "src/code.py", "src/explicit.log"],
+    ],
+    ids=["repeated-file", "overlapping-directory-and-file"],
+)
+def test_cli_registration_saves_deduplicated_scope_estimate(
+    tmp_path: Path, paths: list[str]
+) -> None:
+    state, repo, scan = tmp_path / "state", tmp_path / "repo", tmp_path / "scan"
+    initialize_git_repository(repo)
+    (repo / ".gitignore").write_text("*.log\n")
+    src = repo / "src"
+    src.mkdir()
+    for name in ("code.py", "explicit.log", "tracked.log", "ignored.log"):
+        (src / name).touch()
+    subprocess.run(["git", "add", "-f", "--", "src/tracked.log"], cwd=repo, check=True)
+
+    registered = register_cli_scan(state, repo, scan, scan_target={"kind": "paths", "paths": paths})
+    assert registered["scopeFileCount"] == 3
+    saved = get_scan(state, registered["scanId"])["scan"]
+    assert saved["progress"]["coverage"]["filesTotal"] == 3
+
+
+@pytest.fixture
+def running_directory_scope(tmp_path: Path) -> tuple[Path, str, Path]:
+    state, repo, scan = tmp_path / "state", tmp_path / "repo", tmp_path / "scan"
+    src = repo / "src"
+    src.mkdir(parents=True)
+    (repo / ".ignore").write_text("ignored.py\n")
+    for name in ("a.py", "b.py", "ignored.py"):
+        (src / name).touch()
+    registered = register_cli_scan(
+        state, repo, scan, scan_target={"kind": "paths", "paths": ["src"]}
+    )
+    assert registered["scopeFileCount"] == 3
+    return state, registered["scanId"], scan / "scoped-source-input.receipt.json"
+
+
+def write_scoped_count(report: Path, scan_id: str, repository: Path, count: int) -> None:
+    report.write_text(
+        json.dumps({"scanId": scan_id, "repository": str(repository), "count": count})
+    )
+
+
+def test_refresh_scope_count_retries_after_writer_releases_lock(
+    running_directory_scope, tmp_path: Path
+) -> None:
+    state, scan_id, report = running_directory_scope
+    write_scoped_count(report, scan_id, tmp_path / "repo", 0)
+    with sqlite3.connect(state / "workbench.sqlite3") as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        pending = scan_command(state, "update-progress", scan_id, "--refresh-scope-file-count")
+        assert pending == {"scopeFileCount": None, "retry": True}
+
+    refreshed = scan_command(state, "update-progress", scan_id, "--refresh-scope-file-count")
+    assert refreshed == {"scopeFileCount": 0}
+    assert get_scan(state, scan_id)["scan"]["progress"]["coverage"]["filesTotal"] == 0
+
+
+def test_refresh_scope_count_preserves_estimate_for_invalid_reports(
+    running_directory_scope, tmp_path: Path
+) -> None:
+    state, scan_id, report = running_directory_scope
+
+    def assert_ignored() -> None:
+        assert scan_command(state, "update-progress", scan_id, "--refresh-scope-file-count") == {
+            "scopeFileCount": None
+        }
+        assert get_scan(state, scan_id)["scan"]["progress"]["coverage"]["filesTotal"] == 3
+
+    report.write_text("{")
+    assert_ignored()
+    write_scoped_count(report, scan_id, tmp_path / "repo", 1)
+    with report.open("a") as stream:
+        stream.write(" " * 2048)
+    assert_ignored()
+    for candidate_id, repository, count in [
+        (str(uuid.uuid4()), tmp_path / "repo", 1),
+        (scan_id, tmp_path / "other", 1),
+        (scan_id, tmp_path / "repo", 2**53),
+    ]:
+        write_scoped_count(report, candidate_id, repository, count)
+        assert_ignored()
+
+
+@pytest.mark.parametrize(
+    "command", ["fail-scan", "cancel-scan", "prepare-scan-completion", "complete-scan"]
+)
+def test_scan_transition_records_reported_scope_count(
+    running_directory_scope, tmp_path: Path, command: str
+) -> None:
+    state, scan_id, report = running_directory_scope
+    repo = tmp_path / "repo"
+    completes = command in ("prepare-scan-completion", "complete-scan")
+    if completes:
+        write_completed_contract(
+            report.parent, scan_id, repo, include_paths=["src"], coverage_mode="scoped_path"
+        )
+    reported_count = 5000
+    inventory = report.parent / "scoped-source-input.jsonl"
+    with inventory.open("w") as stream:
+        for index in range(reported_count):
+            stream.write(json.dumps({"path": f"src/{index}.py"}) + "\n")
+    write_scoped_count(report, scan_id, repo, reported_count)
+    args = ("--message", "Stopped.") if command == "fail-scan" else ()
+    scan_command(state, command, scan_id, *args)
+    assert get_scan(state, scan_id)["scan"]["progress"]["coverage"]["filesTotal"] == reported_count
+
+
+def test_completion_retains_registration_estimate_without_a_report(
+    running_directory_scope, tmp_path: Path
+) -> None:
+    state, scan_id, report = running_directory_scope
+    write_completed_contract(
+        report.parent,
+        scan_id,
+        tmp_path / "repo",
+        include_paths=["src"],
+        coverage_mode="scoped_path",
+    )
+    result = scan_command(state, "complete-scan", scan_id)
+    assert result["scan"]["progress"]["coverage"]["filesTotal"] == 3
+
+
+def test_cancel_succeeds_when_scoped_scan_directory_is_a_link_loop(running_directory_scope) -> None:
+    state, scan_id, report = running_directory_scope
+    scan_dir = report.parent
+    scan_dir.rename(scan_dir.with_suffix(".moved"))
+    try:
+        scan_dir.symlink_to(scan_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"fixture needs symlink support: {exc}")
+    result = scan_command(state, "cancel-scan", scan_id)
+    assert result["canceledScanId"] == scan_id
+
+
+def test_cli_registration_counts_empty_git_directory_scope(tmp_path: Path) -> None:
+    repo, scan = tmp_path / "repo", tmp_path / "scan"
+    initialize_git_repository(repo)
+    (repo / "src").mkdir()
+    registered = register_cli_scan(
+        tmp_path / "state",
+        repo,
+        scan,
+        scan_target={"kind": "paths", "paths": ["src"]},
+    )
+    assert registered["scopeFileCount"] == 0
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"), [("repository", 4), ("refs", 2), ("working_tree", 3)]
+)
+def test_cli_registration_counts_the_selected_target(
+    tmp_path: Path, kind: str, expected: int
+) -> None:
+    state_dir = tmp_path / "state"
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "README.md").write_text("updated fixture\n")
+    (target / "new.py").write_text("new = True\n")
+    (target / "binary.dat").write_bytes(b"\0")
+    subprocess.run(["git", "add", "."], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Update fixture"], cwd=target, check=True)
+
+    (target / "README.md").unlink()
+    (target / "new.py").write_bytes(b"\0")
+    (target / "staged.py").write_text("staged = True\n")
+    subprocess.run(["git", "add", "staged.py"], cwd=target, check=True)
+    (target / "untracked.py").write_text("untracked = True\n")
+
+    scan_target = {"kind": kind, "paths": []}
+    if kind != "repository":
+        scan_target.update(base=base if kind == "refs" else "HEAD", head="HEAD")
+    registered = register_cli_scan(state_dir, target, tmp_path / "scan", scan_target=scan_target)
+    assert registered["scopeFileCount"] == expected
+    saved = get_scan(state_dir, registered["scanId"])["scan"]
+    assert saved["progress"]["coverage"]["filesTotal"] == expected
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("missing_object", ["head_blob", "base_blob", "base_tree"])
+def test_diff_registration_keeps_unknown_total_for_missing_local_objects(
+    tmp_path: Path, missing_object: str
+) -> None:
+    target = tmp_path / "target"
+    base = initialize_git_repository(target)
+    (target / "changed.py").write_text("changed = True\n")
+
+    def git(*args: str) -> str:
+        return subprocess.check_output(["git", "-C", str(target), *args], text=True).strip()
+
+    (target / "README.md").unlink()
+    git("add", "-A")
+    git("commit", "-qm", "Add changed file")
+    oid = git(
+        "rev-parse",
+        {
+            "head_blob": "HEAD:changed.py",
+            "base_blob": f"{base}:README.md",
+            "base_tree": f"{base}^{{tree}}",
+        }[missing_object],
+    )
+    remote = tmp_path / "remote.git"
+    git("clone", "--bare", "--no-local", str(target), str(remote))
+    git("-C", str(remote), "config", "uploadpack.allowFilter", "true")
+    git("remote", "add", "origin", remote.as_uri())
+    git("config", "remote.origin.promisor", "true")
+    git("config", "remote.origin.partialCloneFilter", "blob:none")
+    missing = target / ".git" / "objects" / oid[:2] / oid[2:]
+    missing.chmod(0o600)  # Git marks loose objects read-only on Windows.
+    missing.unlink()
+
+    state_dir = tmp_path / "state"
+    registered = register_cli_scan(
+        state_dir,
+        target,
+        tmp_path / "scan",
+        scan_target={"kind": "refs", "paths": [], "base": base, "head": "HEAD"},
+    )
+    assert registered["scopeFileCount"] is None
+    saved = get_scan(state_dir, registered["scanId"])["scan"]
+    assert saved["progress"]["coverage"]["filesTotal"] is None
+    assert (
+        subprocess.run(
+            ["git", "-C", str(target), "cat-file", "-e", oid],
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""},
+        ).returncode
+        != 0
+    )
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("entry_point", ["register-cli-scan", "start-scan"])
+def test_working_tree_change_during_count_prevents_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_point: str
+) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    head = initialize_git_repository(target)
+    source = target / "README.md"
+    source.write_text("selected version\n")
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state_dir))
+    db = load_script("workbench_db")
+    count = db.scan_scope_file_count
+
+    def count_then_change(*args):
+        total = count(*args)
+        source.write_text("changed during registration\n")
+        return total
+
+    monkeypatch.setattr(db, "scan_scope_file_count", count_then_change)
+    if entry_point == "register-cli-scan":
+        scan_dir = tmp_path / "scan"
+        scan_dir.mkdir(mode=0o700)
+        recipe = {
+            "repository": str(target),
+            "config": {},
+            "mode": "standard",
+            "target": {"kind": "working_tree", "base": head, "head": head, "paths": []},
+        }
+        options = [
+            "--repository",
+            str(target),
+            "--scan-dir",
+            str(scan_dir),
+            "--recipe-json",
+            json.dumps(recipe),
+        ]
+    else:
+        workspace_id = str(uuid.uuid4())
+        create_workspace(state_dir, workspace_id)
+        save_workspace(
+            state_dir, workspace_id, str(target), ".", "diff", "--diff-target-kind", "working_tree"
+        )
+        options = ["--workspace-id", workspace_id, "--scan-root", str(tmp_path / "scans")]
+    monkeypatch.setattr(sys, "argv", ["workbench_db.py", entry_point, *options])
+    args = db.parse_args(db.__doc__)
+    with db.connect() as connection:
+        start = db.register_cli_scan if entry_point == "register-cli-scan" else db.start_scan
+        with pytest.raises(SystemExit, match="changed"):
+            start(connection, args)
+        assert connection.execute("SELECT count(*) FROM scans").fetchone()[0] == 0
 
 
 def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, dict[str, Any]]:
@@ -118,11 +424,10 @@ def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, 
             )
         registered = start_delivered_scan(
             state_dir,
-            "--workspace-id",
             workspace_id,
             "--scan-root",
             str(tmp_path / "scans"),
-        )["results"]
+        )
     else:
         if kind == "working_tree":
             (target / "README.md").write_text("uncommitted fixture\n")
@@ -392,9 +697,7 @@ def test_cli_scan_completes_when_draft_omits_registered_scope(
 
 
 def test_prepared_completion_does_not_publish_scan_before_acceptance(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
@@ -477,9 +780,7 @@ def test_incompatible_sealed_deep_scan_remains_recoverable(tmp_path: Path) -> No
 
 
 def test_rejected_prepared_completion_can_be_marked_failed(tmp_path: Path) -> None:
-    state_dir = tmp_path / "state"
-    target = tmp_path / "target"
-    target.mkdir()
+    state_dir, target = empty_target_paths(tmp_path)
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     scan_id = str(registered["scanId"])
@@ -547,23 +848,8 @@ def test_scoped_cli_completion_adopts_registered_revision_kind(tmp_path: Path) -
         text=True,
     ).stdout.strip()
     scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
-    registered = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(target),
-                "target": {"kind": "paths", "paths": ["app"]},
-            }
-        ),
+    registered = register_cli_scan(
+        state_dir, target, scan_dir, scan_target={"kind": "paths", "paths": ["app"]}
     )
     assert registered["contract"]["target"]["allowedKinds"] == ["git_revision"]
     scan_id = str(registered["scanId"])
@@ -666,23 +952,11 @@ def test_cli_completion_adopts_diff_kind_with_bound_range_digest(tmp_path: Path)
     (target / "README.md").write_text("second fixture\n")
     subprocess.run(["git", "commit", "-qam", "Second commit"], cwd=target, check=True)
     scan_dir = tmp_path / "scan"
-    scan_dir.mkdir(mode=0o700)
-    registered = run_workbench(
+    registered = register_cli_scan(
         state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(target),
-                "target": {"kind": "refs", "paths": [], "base": "HEAD~1", "head": "HEAD"},
-            }
-        ),
+        target,
+        scan_dir,
+        scan_target={"kind": "refs", "paths": [], "base": "HEAD~1", "head": "HEAD"},
     )
     assert registered["contract"]["target"]["allowedKinds"] == ["git_diff"]
     scan_id = str(registered["scanId"])
@@ -935,7 +1209,7 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
     coverage = read_review_state(state_dir, scan_dir)
 
     coverage["deferred"] = [{"id": "review", "reason": "Review remains."}]
-    independent = write_checkpoint(
+    write_checkpoint(
         scan_dir / "checkpoints",
         {
             "scanId": scan_id,
@@ -945,15 +1219,15 @@ def test_rejected_completion_restores_parent_head_before_corrected_retry(
                 "deferred": [{"id": "other-review", "reason": "Independent earlier review."}],
             },
         },
+        mtime_ns=50,
     )
-    os.utime(independent, ns=(50, 50))
     head_path = scan_dir / "checkpoint-head.json"
     if existing_head:
         checkpoint = write_checkpoint(
             scan_dir / "checkpoints",
             saved_results._parent_scan_draft(scan_id, manifest["scan"], findings, coverage),
+            mtime_ns=100,
         )
-        os.utime(checkpoint, ns=(100, 100))
         head_path.write_text(json.dumps({"checkpoint": checkpoint.name}, indent=3))
         os.utime(head_path, ns=(100, 100))
         saved_results._capture_saved_source(scan_dir, "checkpoint-head.json", scan_id)
@@ -1252,17 +1526,24 @@ def test_completion_rejects_bad_findings_and_failed_scan_preserves_valid_rows(
 
     stopped = get_scan(state_dir, scan_id)["scan"]
     assert stopped["progress"]["status"] == "failed"
-    assert stopped["findingCount"] == 1
+    assert stopped["findingCount"] == 2
     retained = json.loads((scan_dir / "findings.json").read_text())["findings"]
-    assert len(retained) == 1
-    assert retained[0]["summary"] == valid["summary"]
+    by_anchor = {row["identity"]["anchor"]: row for row in retained}
+    assert set(by_anchor) == {valid["identity"]["anchor"], "invalid-evidence-id"}
+    clean = by_anchor[valid["identity"]["anchor"]]
+    assert clean["summary"] == valid["summary"]
+    assert clean["codeEvidence"] == valid["codeEvidence"]
+    repaired = by_anchor["invalid-evidence-id"]
+    assert "codeEvidence" not in repaired
+    assert repaired["locations"] == valid["locations"]
+    assert repaired["rootCause"] == {**invalid_evidence_id["rootCause"], "evidenceRefs": []}
 
     assert json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "failed"
     assert (scan_dir / "report.md").is_file()
     sarif = json.loads((scan_dir / "exports/results.sarif").read_text())
     assert sarif["runs"][0]["invocations"][0]["executionSuccessful"] is False
     warnings = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]["warnings"]
-    assert warnings
+    assert any("Skipped malformed codeEvidence" in warning for warning in warnings)
     notifications = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"]
     assert all(
         {"level": "warning", "message": {"text": warning}} in notifications for warning in warnings

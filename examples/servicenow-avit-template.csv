@@ -1,0 +1,2 @@
+Risk rating,Requested by,CWE category,Vulnerability ID,Application,Purpose of application,Types of sensitive data,List of compliance programs,Technology stack details,Application team,URLs to test,Steps to reproduce,Technical details,Assigned to,Assignment group
+,Example Requester,,,Invoice Desk,Generates invoices,Billing records,None,Node.js,Billing Engineering,https://invoice.example.test,,,Example Tester,Application Security

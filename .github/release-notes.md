@@ -1,15 +1,17 @@
-<!-- release-version: 0.7.0 -->
+<!-- release-version: 0.10.0 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.7.0 adds optional post-scan validation and improves Deep Scan recovery, usage reporting, and saved results. Review the upgrade notes for changes to external imports, hosted verification, and direct helper integrations.
+Codex Security 0.10.0 gives clearer guidance when a patch is blocked, lets interrupted Standard scans resume, and adds a budget for batch scans.
 
-- **Post-scan validation.** Add `--validate` to run a supplemental validation pass after a scan and save a separate `validation.md` report. This pass makes additional model calls, leaves the saved findings and `--fail-on-severity` decision unchanged, and cannot be combined with `--max-cost`, a configured cost cap, `--dry-run`, or `--mock`. See [validation options](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/cli.md#follow-up-finding-validation).
-- **Deep Scan recovery.** Deadline recovery retains unfinished checkpoints and worker coverage, retries keep selected results stable, and the CLI waits for the coordinator to finish before returning. Scan finalization preserves findings and honors project budgets.
-- **Clearer usage and progress.** Scan output distinguishes file inventory from review progress and reports usage timestamps and account allowance. Large usage receipts, policy files, checkpoints, failure diagnostics, and reviewed feedback are retained.
-- **Owner reports and saved results.** Scan owner reports are finalized without an extra model call. Saved findings remain consistent through recovery, SARIF exports retain run warnings, and report rendering preserves literal source paths and text.
+- **Blocked patch results.** The patch prompt asks whether any files changed, what stopped the fix, and what to do next. When a fix depends on work outside the checkout, the result explains why the external change is needed and where it belongs when known. [#2609](https://github.com/openai/codex-security/pull/2609)
+- **Standard scan setup.** Standard scans start with the vulnerability audit and load host-specific instructions when needed. Focused investigators receive their own briefs, and scan history records the file count from the scan's inventory. [#2046](https://github.com/openai/codex-security/pull/2046)
+- **Resume interrupted Standard scans.** Run `codex-security scans resume SCAN_ID` to continue from a saved checkpoint in the original Codex session. The resumed scan retains its usage and budget. [#2610](https://github.com/openai/codex-security/pull/2610)
+- **Batch scan budgets.** Set `--max-total-cost` on bulk or component scans to share one estimated budget across repositories or components, including retries and recoveries. In-flight work can exceed the estimate. [#2592](https://github.com/openai/codex-security/pull/2592)
+- **Scanner imports and publication.** Import saved ArmorCode SAST findings into the local workbench. SDK callers can publish selected workbench finding versions to Cloud using retained evidence. [#2608](https://github.com/openai/codex-security/pull/2608) · [#2603](https://github.com/openai/codex-security/pull/2603)
+- **Hosted remediation.** A hosted patch or verification that ends at a different commit reports `revision_changed` and retains its execution receipt. Retry from the requested revision. [#2583](https://github.com/openai/codex-security/pull/2583)
 
 <!-- release-section: highlights:end -->
 
@@ -17,24 +19,9 @@ Codex Security 0.7.0 adds optional post-scan validation and improves Deep Scan r
 
 ## Upgrade notes
 
-- **External imports require opt-in.** Set `CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS=1` before using `publish findings`, `findings imported`, `import github-advisories`, or the corresponding SDK operations. Only the literal value `1` enables these features. SDK callers that supply `dependencies.environment` must include the flag there. Previously imported records are retained. See [external import setup](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/cli.md#import-vendor-findings-locally).
-- **Hosted verification uses the CLI verdict contract.** Remove imports of `FindingVerificationCheck` and replace reads of `verification.checks` with `verification.status` and `verification.evidence`. The original executor report, when supplied, remains available in `execution.finalResponse`. Update custom executors to return the matching finding `id`, a status of `fixed`, `still_vulnerable`, or `inconclusive`, and nonempty evidence. See [the hosted remediation contract](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/hosted-remediation.md).
-- **Direct inventory helper calls move to Node.** Integrations that invoke the removed Python inventory and ranking scripts must use the bundled launcher and its `--helper` commands below. SDK and MCP callers use the new implementation automatically; the inventory and ranking artifact formats are unchanged.
-- **Committed-diff scans require a clean, full checkout.** Check out the requested head revision and commit or stash local changes before running a committed-diff scan, including with `--validate`. A mismatched checkout or local changes now fail before scanning. See [scan options](https://github.com/openai/codex-security/blob/npm-v0.7.0/sdk/typescript/docs/cli.md#scan-options-and-output).
-
-<details>
-<summary>Direct helper migration</summary>
-
-Use `launch_codex_security_mcp` from the bundled plugin's `scripts` directory, or `launch_codex_security_mcp.cmd` on Windows, with the existing arguments after the helper name:
-
-| Removed Python invocation | Launcher arguments |
-| --- | --- |
-| `generate_in_scope_files.py` | `--helper generate-in-scope-files` |
-| `generate_rank_input.py make-repo-scope-input` | `--helper make-repo-scope-input` |
-| `generate_rank_input.py make-diff-rank-input` | `--helper make-diff-rank-input` |
-
-The removed `rank_preview.py` implementation is incorporated into these helpers. See [diff helper examples and Windows quoting](https://github.com/openai/codex-security/blob/npm-v0.7.0/plugins/codex-security/skills/security-scan/references/scan-artifacts-and-ledger.md).
-
-</details>
+- **POSIX paths through symlinks.** Paths such as `link/../repo` now follow filesystem traversal. To resume an older bulk campaign whose source was normalized differently, enter its exact saved source path in the CSV. Use a new output directory to scan the corrected physical target. [#1709](https://github.com/openai/codex-security/pull/1709)
+- **MCP registration scripts.** Pass `--all` if you relied on selecting all clients after automatic detection found none, or pass `--agent NAME` for one client. Use `--package NAME` for bare npm package names previously passed to `--command`. [#2591](https://github.com/openai/codex-security/pull/2591)
+- **Archived scanner captures and Cloud retries.** Recollect Semgrep Platform v1 and Snyk REST v1 captures with the current collectors. Finish interrupted Cloud submissions with the client that created them. If the outcome is uncertain, check the inbox job or repository records before submitting again. [#2602](https://github.com/openai/codex-security/pull/2602)
+- **Patch follow-ups with scan budgets.** Run patch preparation separately when a scan has a cost limit. The scan rejects an explicit patch follow-up and skips its interactive patch offer. [#2592](https://github.com/openai/codex-security/pull/2592)
 
 <!-- release-section: upgrades:end -->

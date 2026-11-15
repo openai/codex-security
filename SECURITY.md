@@ -14,14 +14,13 @@ configuration. Examples include bypassing a filesystem or network restriction,
 a required approval, or an administrator-enforced control.
 
 Prompt injection or a model misusing access it already has does not qualify
-by itself, even if it leaks data or performs an unwanted action. A report must
-identify a separate flaw in an enforced security control. Model-behavior
+by itself, even if it leaks data or performs an unwanted action. Model-behavior
 reports may qualify under the separate
 [Safety Bug Bounty](https://bugcrowd.com/engagements/openai-safety).
 
 Missed findings, false positives, incorrect scan results, and performance issues
 are ordinary bugs unless they also demonstrate such a flaw. Report ordinary
-bugs through GitHub issues.
+bugs through [GitHub issues](https://github.com/openai/codex-security/issues) with a synthetic example that can be shared publicly.
 
 ## Scan permissions
 

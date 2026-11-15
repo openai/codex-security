@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Threat model explorer</title>
+<style>__EXPLORER_CSS__</style>
+</head>
+<body>
+<header><div class="brand" id="brand"></div><div class="actions"><button id="svg-download">Download map SVG</button><button id="html-download">Download HTML</button></div></header>
+<main>
+<section class="intro"><div><h1 id="title"></h1><p id="subtitle"></p></div><div class="snapshot" id="snapshot"></div></section>
+<section class="workspace" aria-label="Threat model workbench">
+<nav class="rail" aria-label="Threat scenarios" id="rail"></nav>
+<div class="map-column">
+<div class="toolbar"><div><h2 id="map-title"></h2><p id="map-description"></p></div><button id="edge-context" hidden aria-pressed="false">More connections</button></div>
+<div class="canvas"><svg id="map" role="group" aria-label="Interactive architecture map"></svg><div class="zoom"><button id="out" aria-label="Zoom out">−</button><button id="in" aria-label="Zoom in">+</button><button id="fit">Fit</button></div></div>
+<div class="legend"><span id="source-legend"></span><span class="risk">Selected route</span><span class="transit">On route · normal outline</span><span class="focus">Scenario focus</span><span class="existing">Existing control</span><span class="proposed">Proposed control</span><span class="unknown">Conditional / unreached</span></div>
+</div>
+<aside class="detail-panel" aria-label="Path and controls">
+<div class="detail-heading"><h2>Path & controls</h2><span id="trace-position"></span></div>
+<div class="trace-navigation" id="trace-navigation"></div>
+<section id="trace" aria-live="polite"></section>
+<section id="inspector" class="inspector hidden" aria-live="polite"></section>
+</aside>
+</section>
+<section class="metadata"><details><summary>Source & deployment context</summary><div id="metadata"></div></details><details><summary>Full supplied assessment</summary><p>The supplied assessment is preserved in full, including its qualifications.</p><pre id="assessment"></pre></details></section>
+<footer id="footer"></footer>
+</main>
+<dialog id="dialog" aria-labelledby="evidence-title"><button class="close" id="close-dialog" aria-label="Close evidence">×</button><div id="dialog-content"></div></dialog>
+<script id="model-data" type="application/json">__MODEL_JSON__</script>
+<script id="assessment-data" type="application/json">__ASSESSMENT_JSON__</script>
+<script>__CONTROL_EFFECTS_JS__</script>
+<script>__ROUTE_PATHS_JS__</script>
+<script>__SOURCE_ROLES_JS__</script>
+<script>__SVG_LAYOUT_JS__</script>
+<script>__EXPLORER_JS__</script>
+</body>
+</html>

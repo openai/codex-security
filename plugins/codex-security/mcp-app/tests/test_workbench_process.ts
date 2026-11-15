@@ -1,3 +1,4 @@
+import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { randomUUID } from "node:crypto";
@@ -8,20 +9,6 @@ import { promisify } from "node:util";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { loadWorkbenchProcess } from "./support/workbench-process.ts";
 import { importSource } from "./import-module.ts";
-import { PassThrough } from "node:stream";
-import type { ExecFileOptionsWithStringEncoding } from "node:child_process";
-
-type WorkbenchProcessFixture = (
-  python: string,
-  args: string[],
-  options: ExecFileOptionsWithStringEncoding,
-) => Promise<{ stdout: string; stderr: string }> & {
-  child: { stdin: PassThrough };
-};
-
-declare global {
-  var workbenchProcessFixture: WorkbenchProcessFixture | undefined;
-}
 
 interface WorkbenchModule {
   executeWorkbench(
@@ -31,99 +18,31 @@ interface WorkbenchModule {
     options?: { isolatedPython?: boolean },
   ): Promise<Record<string, unknown>>;
 }
-const invocations: {
-  args: string[];
-  options: ExecFileOptionsWithStringEncoding;
-}[] = [];
-let failure: Error | undefined;
-globalThis.workbenchProcessFixture = (_python, args, options) => {
-  invocations.push({ args, options });
-  return Object.assign(
-    failure
-      ? Promise.reject(failure)
-      : Promise.resolve({ stdout: "{}", stderr: "" }),
-    { child: { stdin: new PassThrough() } },
-  );
-};
-try {
-  const { executeWorkbench } = (await loadWorkbenchProcess((source) =>
-    source.replace(
-      "const execFileAsync = promisify(execFile);",
-      "const execFileAsync = globalThis.workbenchProcessFixture;",
-    ),
-  )) as WorkbenchModule;
-  for (const command of [
-    "cancel-scan",
-    "fail-scan",
-    "preserve-scan-results",
-    "complete-scan",
-    "finding-issues",
-    "start-prompt-only-scan",
-  ]) {
-    await executeWorkbench("fixture-python", [command, "--scan-id", "fixture"]);
-    assert.equal(
-      invocations.at(-1)!.options.timeout,
-      300_000,
-      `${command} must allow its saved-result publication to finish`,
-    );
-  }
-  await executeWorkbench("fixture-python", [
-    "inspect-target",
-    "--target-path",
-    "/fixture",
-  ]);
-  assert.equal(invocations.at(-1)!.options.timeout, 30_000);
-  failure = Object.assign(
-    new Error("Command failed: fixture-python\nfixture diagnostic"),
-    {
-      killed: true,
-      signal: "SIGTERM",
-      stderr: "fixture diagnostic",
-      stdout: "",
-    },
-  );
-  await assert.rejects(
-    executeWorkbench("fixture-python", ["cancel-scan"]),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /cancel-scan.*timed out.*300/);
-      assert.match(error.message, /fixture diagnostic/);
-      assert.equal(error.cause, failure);
-      return true;
-    },
-  );
-  await assert.rejects(
-    promisify(execFile)(
-      process.execPath,
-      ["-e", 'process.stdout.write("x".repeat(65536))'],
-      { maxBuffer: 1024 },
-    ),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.ok("code" in error);
-      assert.equal(error.code, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
-      failure = error;
-      return true;
-    },
-  );
-  await assert.rejects(
-    executeWorkbench("fixture-python", ["cancel-scan"]),
-    (error) => error === failure,
-  );
-} finally {
-  delete globalThis.workbenchProcessFixture;
-}
 
-const { executeWorkbench, runWorkbench } = await loadWorkbenchProcess();
+const { executeWorkbench, runWorkbench, workbenchTimeout } =
+  await loadWorkbenchProcess();
 const { workbenchArgs } = await importSource(
   path.join(import.meta.dirname, "../src/workbench-arguments.ts"),
 );
+await test("token-bearing context reads share the get-scan timeout", () => {
+  assert.equal(workbenchTimeout(["mark-handoff-delivered"]), 30_000);
+  assert.equal(workbenchTimeout(["get-scan"]), 300_000);
+  assert.equal(
+    workbenchTimeout(["mark-handoff-delivered", "--return-context"]),
+    300_000,
+  );
+});
+
 async function userSitePython(): Promise<string> {
   // A caller's virtualenv may intentionally disable user-site imports.
-  const { stdout } = await promisify(execFile)(
-    process.env.PYTHON?.trim() || "python3",
-    ["-I", "-X", "utf8", "-B", "-c", "import sys; print(sys._base_executable)"],
-  );
+  const { stdout } = await promisify(execFile)(fixturePython, [
+    "-I",
+    "-X",
+    "utf8",
+    "-B",
+    "-c",
+    "import sys; print(sys._base_executable)",
+  ]);
   return stdout.trim();
 }
 
@@ -138,6 +57,59 @@ async function fixtureWorkbench(root: string, source: string) {
   );
   return executeWorkbench as WorkbenchModule["executeWorkbench"];
 }
+
+await test("Python compressed-rollout reads inherit the plugin Node without Node on PATH", async () => {
+  const root = await temporaryDirectory("workbench-node-runtime-");
+  const python = await userSitePython();
+  const original = {
+    PATH: process.env.PATH,
+    CODEX_MCP_NODE_PATH: process.env.CODEX_MCP_NODE_PATH,
+  };
+  try {
+    const rollout = path.join(root, "rollout.jsonl.zst");
+    await writeFile(
+      rollout,
+      Buffer.from(
+        "KLUv/SA2sQEAeyJ0eXBlIjoic2Vzc2lvbl9tZXRhIiwicGF5bG9hZCI6eyJpZCI6ImNvbXByZXNzZWQifX0K",
+        "base64",
+      ),
+    );
+    const scripts = path.resolve(
+      import.meta.dirname,
+      "../../../../sdk/typescript/_bundled_plugin/scripts",
+    );
+    const execute = await fixtureWorkbench(
+      root,
+      `import json, os, sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(scripts)})
+from workbench_scan_usage import _rollout_lines
+def main():
+    with _rollout_lines(Path(sys.argv[1])) as source:
+        contents = b"".join(source).decode("utf-8")
+    print(json.dumps({"contents": contents, "node": os.environ["CODEX_MCP_NODE_PATH"]}))
+`,
+    );
+    process.env.PATH = "";
+    for (const configured of [undefined, ""]) {
+      if (configured === undefined) delete process.env.CODEX_MCP_NODE_PATH;
+      else process.env.CODEX_MCP_NODE_PATH = configured;
+      const result = await execute(python, [rollout]);
+      assert.equal(result.node, process.execPath);
+      assert.equal(
+        result.contents,
+        '{"type":"session_meta","payload":{"id":"compressed"}}\n',
+      );
+      assert.equal(process.env.CODEX_MCP_NODE_PATH, configured);
+    }
+  } finally {
+    for (const [name, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 await test("workbench scalar arguments reach the Python parser literally", async () => {
   const root = await temporaryDirectory("workbench-literal-arguments-");
@@ -163,17 +135,17 @@ def main():
       "--help",
     ];
     const result = await executeParser(
-      process.env.PYTHON?.trim() || "python3",
-      workbenchArgs("claim-deep-scan-dedup", {
+      fixturePython,
+      workbenchArgs("record-deep-scan-iteration", {
         scanId: randomUUID(),
         workerId: randomUUID(),
-        promptPath: "--prompt.md",
-        artifactDir: "",
+        resultManifestPath: "--result.json",
+        noNewStreak: 1,
+        consecutiveErrors: 0,
         inputWorkerId: workerIds,
       }),
     );
-    assert.equal(result.prompt_path, "--prompt.md");
-    assert.equal(result.artifact_dir, "");
+    assert.equal(result.result_manifest_path, "--result.json");
     assert.deepEqual(result.input_worker_id, workerIds);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -288,7 +260,7 @@ try {
   );
   for (const stdin of [true, false]) {
     const result = await executeWorkbench(
-      process.env.PYTHON?.trim() || "python3",
+      fixturePython,
       workbenchArgs("create-workspace", {
         workspaceId: randomUUID(),
         targetPath: target,
@@ -315,15 +287,33 @@ try {
     "raw.bin",
   ];
   await executeWorkbench(
-    process.env.PYTHON?.trim() || "python3",
+    fixturePython,
     ["save-artifact", ...artifactArgs],
     binary,
   );
-  const saved = await executeWorkbench(
-    process.env.PYTHON?.trim() || "python3",
-    ["read-artifact", ...artifactArgs],
-  );
+  const saved = await executeWorkbench(fixturePython, [
+    "read-artifact",
+    ...artifactArgs,
+  ]);
   assert.deepEqual(Buffer.from(saved.content, "base64"), binary);
+  await assert.rejects(
+    executeWorkbench(fixturePython, [
+      "read-artifact",
+      "--artifact-root",
+      artifactRoot,
+      "--artifact-path",
+      "missing.bin",
+    ]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error && "stderr" in error);
+      assert.match(
+        String(error.stderr),
+        /Saved artifact: expected a file inside the scan directory/,
+      );
+      assert.doesNotMatch(String(error.stderr), /Traceback/);
+      return true;
+    },
+  );
   const replacementTarget = path.join(root, "target-\ufffd");
   await mkdir(replacementTarget);
   for (const rawBytePath of [false, true]) {
@@ -339,10 +329,11 @@ try {
             ]),
           );
         }
-        const inspected = await executeWorkbench(
-          process.env.PYTHON?.trim() || "python3",
-          ["inspect-target", "--target-path", path.join(root, "target-\udcff")],
-        );
+        const inspected = await executeWorkbench(fixturePython, [
+          "inspect-target",
+          "--target-path",
+          path.join(root, "target-\udcff"),
+        ]);
         assert.equal(inspected.targetPath, replacementTarget);
       },
     );
@@ -363,10 +354,9 @@ await test("large saved context retains cancellation results and diagnostics", a
     await writeFile(path.join(target, "example.py"), "value = 1\n");
     const state = path.join(root, "state");
     process.env.CODEX_SECURITY_STATE_DIR = state;
-    const python = process.env.PYTHON || "python3";
     const userContext = "x".repeat(1_500_000);
     const begun = (await executeWorkbench(
-      python,
+      fixturePython,
       [
         "begin-deep-scan",
         "--target-path",
@@ -383,7 +373,11 @@ await test("large saved context retains cancellation results and diagnostics", a
     )) as { deepScan: { scanId: string } };
     const scanId = begun.deepScan.scanId;
     const readScan = async () =>
-      (await executeWorkbench(python, ["get-scan", "--scan-id", scanId])) as {
+      (await executeWorkbench(fixturePython, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ])) as {
         workspace: {
           results: { userContext: string; progress: { status: string } };
         };
@@ -391,7 +385,7 @@ await test("large saved context retains cancellation results and diagnostics", a
     const current = await readScan();
     assert.equal(current.workspace.results.userContext, userContext);
     assert.equal(current.workspace.results.progress.status, "running");
-    await executeWorkbench(python, ["cancel-scan", "--scan-id", scanId]);
+    await executeWorkbench(fixturePython, ["cancel-scan", "--scan-id", scanId]);
     assert.equal(
       (await readScan()).workspace.results.progress.status,
       "canceled",

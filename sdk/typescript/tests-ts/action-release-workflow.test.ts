@@ -893,6 +893,16 @@ const channelCases: Array<[Record<string, string>, boolean]> = [
   [{ CONTAINER_RESULT: "failure" }, false],
   [{ CONTAINER_RESULT: "cancelled" }, false],
   [{ CONTAINER_RESULT: "skipped" }, false],
+  [{ HAS_WOLFI: "true", DEBIAN_DIGEST: "debian-digest" }, false],
+  [{ HAS_WOLFI: "true", WOLFI_DIGEST: "wolfi-digest" }, false],
+  [
+    {
+      HAS_WOLFI: "true",
+      DEBIAN_DIGEST: "debian-digest",
+      WOLFI_DIGEST: "wolfi-digest",
+    },
+    true,
+  ],
   [{ CONTAINER_RESULT: "skipped", HAS_CONTAINER: "" }, true],
 ];
 
@@ -911,12 +921,17 @@ test.each(channelCases)(
 
 test("detects container support from the release commit, not the automation checkout", () => {
   const release = fixture();
+  release.write(".github/workflows/wolfi-build.yml", "name: Wolfi\n");
+  const withoutContainer = release.commit("Add Wolfi workflow");
+  expect(
+    release.run(detectContainer, { RELEASE_SHA: withoutContainer }).output,
+  ).toBe("");
   release.write("Dockerfile", "FROM scratch\n");
   const containerSource = release.commit("Add container");
   expect(release.run(detectContainer).output).toBe("");
   expect(
     release.run(detectContainer, { RELEASE_SHA: containerSource }).output,
-  ).toBe("present=true\n");
+  ).toBe("present=true\nwolfi=true\n");
 });
 
 test.each([
@@ -959,11 +974,26 @@ test.each(["success", "failure", "cancelled", "skipped"])(
         GITHUB_SERVER_URL: "https://github.com",
         GITHUB_REPOSITORY: "example/project",
         CONTAINER_RESULT: containerResult,
+        RELEASE_SHA: "a".repeat(40),
+        DEBIAN_DIGEST:
+          containerResult === "success" ? `sha256:${"a".repeat(64)}` : "",
+        WOLFI_DIGEST:
+          containerResult === "success" ? `sha256:${"b".repeat(64)}` : "",
       },
       ["-e", "-o", "pipefail"],
     );
     expect(result.status, result.stderr).toBe(0);
-    const rows = readFileSync(summary, "utf8")
+    const text = readFileSync(summary, "utf8");
+    if (containerResult === "success") {
+      for (const digit of ["a", "b"]) {
+        const ref = `ghcr.io/example/project@sha256:${digit.repeat(64)}`;
+        expect(text).toContain(`docker pull ${ref}`);
+        expect(text).toContain(
+          `gh attestation verify oci://${ref} --repo example/project`,
+        );
+      }
+    }
+    const rows = text
       .split("\n")
       .filter((line) => line.startsWith("|"))
       .map((line) => line.split("|").map((cell) => cell.trim()));

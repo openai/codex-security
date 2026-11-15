@@ -1,23 +1,15 @@
 import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, isAbsolute, resolve } from "node:path";
-import Ajv from "ajv";
+import Ajv, { type ValidateFunction } from "ajv";
 import { parseDocument } from "yaml";
+import { DEEP_SCAN_SETTINGS, hoursConflict } from "../deep-scan-settings.js";
 import schema from "./project-config.schema.json";
 
-const validate = new Ajv({ allErrors: true }).compile(schema);
-const fields = {
-  workers: "workers",
-  subagents_per_worker: "subagents",
-  stop_after_no_new: "stopAfterNoNew",
-  stop_after_consecutive_errors: "stopAfterConsecutiveErrors",
-  max_discovery_runs: "maxDiscoveryRuns",
-  max_time_hours: "maxTimeHours",
-} as const;
-
+let validate: ValidateFunction | undefined;
 export interface DeepScanProjectConfig {
   path: string;
-  settings: Partial<Record<(typeof fields)[keyof typeof fields], number>>;
+  settings: Partial<Record<(typeof DEEP_SCAN_SETTINGS)[number][0], number>>;
 }
 
 /** Read only an explicitly selected file; repository configuration is never discovered. */
@@ -26,7 +18,11 @@ export async function readDeepScanProjectConfig(
   canonicalTarget: string,
 ): Promise<DeepScanProjectConfig | undefined> {
   if (file === undefined) return undefined;
-  const selected = file.replace(/^~(?=$|[/\\])/, () => homedir());
+  const spelling =
+    process.platform !== "win32" && file.startsWith("~\\")
+      ? file.replaceAll("\\", "/")
+      : file;
+  const selected = spelling.replace(/^~(?=$|[/\\])/, () => homedir());
   const extension = extname(selected).toLowerCase();
   if (![".json", ".yaml", ".yml"].includes(extension)) {
     throw new Error(
@@ -42,7 +38,7 @@ export async function readDeepScanProjectConfig(
   const text = await readFile(path, "utf8");
   let value: unknown;
   try {
-    if (extension === ".json") value = JSON.parse(text);
+    if (extension === ".json") value = JSON.parse(text.replace(/^\uFEFF/u, ""));
     else {
       const document = parseDocument(text, { prettyErrors: false });
       if (document.errors.length > 0) throw document.errors[0];
@@ -54,6 +50,7 @@ export async function readDeepScanProjectConfig(
       { cause: error },
     );
   }
+  validate ??= new Ajv({ allErrors: true }).compile(schema);
   if (!validate(value)) {
     throw new Error(
       `Invalid project configuration at ${path}: ${validate.errors!.map((issue) => `${issue.instancePath || "configuration"}: ${issue.keyword === "additionalProperties" ? `Unknown key ${issue.params["additionalProperty"]}.` : issue.message}`).join("; ")}`,
@@ -63,7 +60,7 @@ export async function readDeepScanProjectConfig(
     scan?: {
       mode?: string;
       max_time_minutes?: number;
-      deep?: Record<keyof typeof fields, number>;
+      deep?: Record<(typeof DEEP_SCAN_SETTINGS)[number][2], number>;
     };
     [key: string]: unknown;
   };
@@ -84,8 +81,8 @@ export async function readDeepScanProjectConfig(
     );
   }
   const settings: DeepScanProjectConfig["settings"] = {};
-  for (const [field, name] of Object.entries(fields)) {
-    const value = input.scan?.deep?.[field as keyof typeof fields];
+  for (const [name, , field] of DEEP_SCAN_SETTINGS) {
+    const value = input.scan?.deep?.[field];
     if (value !== undefined) settings[name] = value;
   }
   const minutes = input.scan?.max_time_minutes;
@@ -95,11 +92,7 @@ export async function readDeepScanProjectConfig(
         "Deep Scan scan.max_time_minutes must be no greater than 5760 minutes.",
       );
     const hours = minutes / 60;
-    if (
-      settings.maxTimeHours !== undefined &&
-      Math.abs(settings.maxTimeHours - hours) >
-        Number.EPSILON * Math.max(settings.maxTimeHours, hours)
-    ) {
+    if (hoursConflict(hours, settings.maxTimeHours)) {
       throw new Error(
         "Conflicting scan.max_time_minutes and scan.deep.max_time_hours settings.",
       );

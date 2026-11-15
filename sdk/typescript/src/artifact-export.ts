@@ -7,13 +7,17 @@ import { Writable as NodeWritable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 import type { JsonObject } from "./config.js";
+import { resolveConfigPath } from "./config-path.js";
 import { CodexSecurityError } from "./errors.js";
 import { relativePathIsOutside as isOutsidePath } from "./targets.js";
+import { campaignCommandEnvironment } from "./trusted-executable.js";
 import {
   type PluginPythonOptions,
   bundledPluginRoot,
   codexSecurityStateDirectory,
   expandHome,
+  resolveInputPath,
+  resolveParentTraversal,
   pythonUtf8Environment,
   resolvePluginPython,
   runWorkbench,
@@ -26,6 +30,7 @@ export type ArtifactOutput = Pick<NodeJS.WriteStream, "write">;
 
 export const ARTIFACT_EXPORT_FILENAMES = {
   csv: "findings.csv",
+  "servicenow-avit": "servicenow-avit.csv",
   json: "findings.json",
   sarif: "results.sarif",
   md: "threatmodel.md",
@@ -39,9 +44,11 @@ export interface ArtifactExportArguments {
   format: ExportFormat;
   output: string;
   sourceRoot?: string;
+  avitTemplate?: string;
   pythonPath?: string;
   signal?: AbortSignal;
   includeMetadata?: boolean;
+  noClobber?: boolean;
 }
 
 export type ExportArtifactOptions = {
@@ -52,11 +59,23 @@ export type ExportArtifactOptions = {
   pythonPath?: string;
   signal?: AbortSignal;
 } & (
-  | { artifact: "threat-model"; format?: "md"; sourceRoot?: never }
+  | {
+      artifact: "threat-model";
+      format?: "md";
+      sourceRoot?: never;
+      avitTemplate?: never;
+    }
   | {
       artifact?: "findings";
       format?: "csv" | "json" | "sarif";
       sourceRoot?: string;
+      avitTemplate?: never;
+    }
+  | {
+      artifact?: "findings";
+      format: "servicenow-avit";
+      avitTemplate: string;
+      sourceRoot?: never;
     }
 );
 
@@ -74,16 +93,48 @@ interface HelperOptions {
   failureMessage?: string;
 }
 
+export async function artifactSourceProtectionRoots(
+  sourceRoot: string | undefined,
+  directory = process.cwd(),
+): Promise<string[] | undefined> {
+  return (await resolveArtifactSource(sourceRoot, directory))?.protectedRoots;
+}
+
+async function resolveArtifactSource(
+  sourceRoot: string | undefined,
+  directory = process.cwd(),
+) {
+  if (sourceRoot === undefined) return;
+  const path = await resolveParentTraversal(sourceRoot);
+  return {
+    path,
+    protectedRoots: [
+      ...new Set([directory, resolve(directory, sourceRoot), path]),
+    ],
+  };
+}
+
 export function resolveArtifactFormat(
   artifact: ExportArtifactKind,
   format?: ExportFormat,
+  avitTemplate?: string,
 ): ExportFormat {
   const selected = format ?? (artifact === "threat-model" ? "md" : "sarif");
   if ((artifact === "threat-model") !== (selected === "md")) {
     throw new CodexSecurityError(
       artifact === "threat-model"
         ? "Threat-model exports only support --export-format md."
-        : "Findings exports support --export-format csv, json, or sarif.",
+        : "Findings exports support --export-format csv, json, sarif, or servicenow-avit.",
+    );
+  }
+  if (selected === "servicenow-avit" && !avitTemplate) {
+    throw new CodexSecurityError(
+      "--export-format servicenow-avit requires --avit-template.",
+    );
+  }
+  if (selected !== "servicenow-avit" && avitTemplate !== undefined) {
+    throw new CodexSecurityError(
+      "--avit-template is only supported with --export-format servicenow-avit.",
     );
   }
   return selected;
@@ -112,7 +163,7 @@ export async function runArtifactHelper(
       ...args,
     ],
     {
-      env: environment,
+      env: (await campaignCommandEnvironment(environment)) ?? environment,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       signal: options.signal,
@@ -190,9 +241,11 @@ export async function readThreatModelPath(
 export async function runArtifactExport(
   arguments_: ArtifactExportArguments,
   output?: ArtifactOutput,
+  diagnostics: ArtifactOutput = process.stderr,
 ): Promise<string | undefined> {
   const artifact = arguments_.artifact ?? "findings";
-  resolveArtifactFormat(artifact, arguments_.format);
+  resolveArtifactFormat(artifact, arguments_.format, arguments_.avitTemplate);
+  const source = await resolveArtifactSource(arguments_.sourceRoot);
   const result = await runArtifactHelper(
     [
       "--scan-dir",
@@ -200,20 +253,19 @@ export async function runArtifactExport(
       ...(artifact === "findings" ? [] : ["--export-artifact", artifact]),
       "--export-format",
       arguments_.format,
+      ...(arguments_.avitTemplate === undefined
+        ? []
+        : ["--avit-template", arguments_.avitTemplate]),
       ...(arguments_.output === "-"
         ? []
         : ["--export-output", arguments_.output]),
-      ...(arguments_.sourceRoot === undefined
-        ? []
-        : ["--source-root", arguments_.sourceRoot]),
+      ...(source === undefined ? [] : ["--source-root", source.path]),
       ...(arguments_.includeMetadata ? ["--export-metadata"] : []),
+      ...(arguments_.noClobber ? ["--no-clobber"] : []),
     ],
     {
       pythonPath: arguments_.pythonPath,
-      protectedRoot:
-        arguments_.sourceRoot === undefined
-          ? undefined
-          : [process.cwd(), arguments_.sourceRoot],
+      protectedRoot: source?.protectedRoots,
       signal: arguments_.signal,
       failureMessage:
         artifact === "findings"
@@ -222,6 +274,9 @@ export async function runArtifactExport(
       ...(arguments_.output === "-" && output !== undefined ? { output } : {}),
     },
   );
+  if (arguments_.format === "servicenow-avit" && result.stderr) {
+    diagnostics.write(result.stderr);
+  }
   return (arguments_.output === "-" && output === undefined) ||
     arguments_.includeMetadata
     ? result.stdout
@@ -232,10 +287,11 @@ export async function resolveArtifactExportOutput(
   arguments_: ArtifactExportArguments,
   currentDirectory: string,
 ): Promise<ArtifactExportArguments> {
-  const canonicalScan = await realpath(arguments_.scanDir).catch(
-    () => arguments_.scanDir,
-  );
-  const scanRelativeOutput = relative(arguments_.scanDir, arguments_.output);
+  const scanDir = await resolveParentTraversal(arguments_.scanDir, {
+    allowMissing: true,
+  });
+  const canonicalScan = await realpath(scanDir).catch(() => scanDir);
+  const scanRelativeOutput = relative(scanDir, arguments_.output);
   const scanLocalOutput = join(
     "exports",
     ARTIFACT_EXPORT_FILENAMES[arguments_.format],
@@ -315,14 +371,20 @@ export async function resolveArtifactExportOutput(
         break;
     }
   }
-  return { ...arguments_, scanDir: canonicalScan, output: outputPath };
+  return {
+    ...arguments_,
+    scanDir: canonicalScan,
+    output: outputPath,
+    avitTemplate:
+      arguments_.avitTemplate &&
+      resolveConfigPath(currentDirectory, arguments_.avitTemplate),
+  };
 }
 
 /** Resolve saved artifacts after the workbench validates their recorded identity. */
 export async function resolveSavedArtifactDirectory(
   scanId: string,
   artifact: ExportArtifactKind,
-  format: ExportFormat,
   workbench: (args: readonly string[]) => Promise<JsonObject>,
 ): Promise<string> {
   // Reuse the workbench's recorded digest and scan binding checks without
@@ -331,7 +393,6 @@ export async function resolveSavedArtifactDirectory(
     workbenchArgs("export-findings", {
       scanId,
       artifact,
-      format,
       validateOnly: true,
     }),
   );
@@ -348,31 +409,33 @@ export async function exportArtifact(
   options: ExportArtifactOptions,
 ): Promise<ArtifactExportResult> {
   const artifact = options.artifact ?? "findings";
-  const format = resolveArtifactFormat(artifact, options.format);
+  const format = resolveArtifactFormat(
+    artifact,
+    options.format,
+    options.avitTemplate,
+  );
   const sourceRoot =
     options.sourceRoot === undefined
       ? undefined
-      : resolve(expandHome(options.sourceRoot));
+      : resolveInputPath(options.sourceRoot);
   const environment = {
     ...exportEnvironment(),
     CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(),
   };
   let directory: string;
   if (options.source.directory !== undefined) {
-    directory = resolve(expandHome(options.source.directory));
+    directory = resolveInputPath(options.source.directory);
   } else {
     const python = await resolvePluginPython({
       configuredPath: options.pythonPath,
       environment,
-      protectedRoot:
-        sourceRoot === undefined ? undefined : [process.cwd(), sourceRoot],
+      protectedRoot: await artifactSourceProtectionRoots(sourceRoot),
       signal: options.signal,
     });
     const pluginRoot = await bundledPluginRoot();
     directory = await resolveSavedArtifactDirectory(
       options.source.scanId,
       artifact,
-      format,
       (args) =>
         runWorkbench(
           {
@@ -396,7 +459,8 @@ export async function exportArtifact(
       pythonPath: options.pythonPath,
       signal: options.signal,
       includeMetadata: artifact === "threat-model" && options.output !== "-",
-      ...(sourceRoot === undefined ? {} : { sourceRoot }),
+      avitTemplate: options.avitTemplate,
+      sourceRoot,
     },
     process.cwd(),
   );

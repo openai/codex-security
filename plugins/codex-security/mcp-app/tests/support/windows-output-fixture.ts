@@ -1,52 +1,45 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
-export function windowsAcl(directory: string): string {
-  const system = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32");
-  const result = spawnSync(
-    path.join(system, "WindowsPowerShell", "v1.0", "powershell.exe"),
-    [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "$ErrorActionPreference = 'Stop'; Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $env:CODEX_SECURITY_TEST_ACL_PATH | Microsoft.PowerShell.Utility\\Select-Object -ExpandProperty Sddl",
-    ],
-    {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        CODEX_SECURITY_TEST_ACL_PATH: directory,
-        PSModulePath: path.join(system, "WindowsPowerShell", "v1.0", "Modules"),
-      },
-    },
-  );
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout.trim();
+const icacls = path.join(
+  process.env.SystemRoot ?? "C:\\Windows",
+  "System32",
+  "icacls.exe",
+);
+
+export function windowsAcl(target: string): string {
+  const work = mkdtempSync(path.join(tmpdir(), "codex-security-acl-"));
+  try {
+    const aclFile = path.join(work, "dacl.txt");
+    execFileSync(icacls, [target, "/save", aclFile, "/q"]);
+    // icacls writes the relative path followed by its SDDL, in UTF-16LE.
+    const dacl = readFileSync(aclFile, "utf16le")
+      .trimEnd()
+      .split(/\r?\n/u)
+      .at(-1);
+    assert.ok(dacl && dacl.startsWith("D:"));
+    return dacl;
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 }
 
 export async function privateWindowsOutputRoot(root: string): Promise<string> {
-  const icacls = path.join(
-    process.env.SystemRoot ?? "C:\\Windows",
-    "System32",
-    "icacls.exe",
-  );
-  assert.equal(
-    spawnSync(icacls, [root, "/grant", "*S-1-1-0:(OI)(CI)R"]).status,
-    0,
-  );
+  execFileSync(icacls, [root, "/grant", "*S-1-1-0:(OI)(CI)R"]);
   assert.ok(windowsAcl(root).includes(";;;WD)"));
   root = path.join(root, "private scan artifacts");
   // Use the same existing atomic creator as SDK scan-output preparation.
+  const pluginRoot = process.env.CODEX_SECURITY_TEST_PLUGIN_ROOT;
+  const nativeRoot = pluginRoot
+    ? path.resolve(pluginRoot, "mcp/native")
+    : path.resolve(import.meta.dirname, "../../../native/prebuilt");
   const native = createRequire(import.meta.url)(
-    path.resolve(
-      path.dirname(fileURLToPath(import.meta.url)),
-      `../../../native/prebuilt/win32-${process.arch}/windows.node`,
-    ),
+    path.join(nativeRoot, `win32-${process.arch}`, "windows.node"),
   ) as { createPrivateWindowsDirectory(path: Buffer): number };
   assert.equal(
     native.createPrivateWindowsDirectory(

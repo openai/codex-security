@@ -1,5 +1,7 @@
+import { join } from "node:path";
 import { createScanArtifactContext } from "../artifact-context.js";
 import { recordCodexSecurityScanDraftViaWorkbench } from "../artifact-scan-draft.js";
+import { runPythonWithInput } from "../python_command.js";
 import { workbenchArgs } from "../workbench-arguments.js";
 import { CodexSdkWorkerExecutor } from "./executor.js";
 import type { DeepWorkerParentSandbox } from "./parent-sandbox.js";
@@ -39,6 +41,7 @@ export function startDeepScanEngine(options: {
       executor: new CodexSdkWorkerExecutor({
         model: options.model,
         reasoningEffort: options.reasoningEffort,
+        serviceTier: run.serviceTier,
         deepScanConfig: run.config,
         parentSandbox: options.parentSandbox,
         parentTurn: options.parentTurn,
@@ -57,6 +60,8 @@ export function startDeepScanEngine(options: {
       onStart: options.onStart,
       handoffClaimToken,
       threadId,
+      checkFreshTarget: (state, signal) =>
+        checkFreshTarget(state, signal, options.pythonCommand, pluginRoot),
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,
@@ -91,4 +96,34 @@ export function startDeepScanEngine(options: {
       },
     },
   });
+}
+
+export async function checkFreshTarget(
+  run: DeepScanRunState,
+  signal: AbortSignal,
+  pythonCommand: string,
+  pluginRoot: string,
+): Promise<void> {
+  if (signal.aborted) return;
+  try {
+    await runPythonWithInput(
+      pythonCommand,
+      [
+        "-I",
+        "-X",
+        "utf8",
+        join(pluginRoot, "scripts", "check_deep_scan_target.py"),
+      ],
+      JSON.stringify({
+        targetPath: run.targetPath,
+        includePaths: run.includePaths ?? [run.scope],
+        filePaths: run.filePaths ?? [],
+      }),
+      "Deep Scan target check",
+      signal,
+    );
+  } catch (error) {
+    // Cancellation and elapsed discovery budgets are finalized by the coordinator.
+    if (!signal.aborted) throw error;
+  }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { observedFilesFromLogs } from "../src/observed-files.js";
+import { createObservedFileCollector } from "../src/observed-files.js";
 
 const scan = {
   targetPath: "/repo",
@@ -63,30 +63,33 @@ function read(
     ),
   ];
 }
+function collect(
+  source: Parameters<typeof createObservedFileCollector>[0],
+  events: Record<string, unknown>[],
+) {
+  const collector = createObservedFileCollector(source);
+  events.forEach(collector.observe);
+  return collector.files();
+}
+
 function paths(events: Record<string, unknown>[]) {
-  return observedFilesFromLogs(scan, {
-    events: [cwd(), ...events],
-    sessions: [],
-  }).map(({ path }) => path);
+  return collect(scan, [cwd(), ...events]).map(({ path }) => path);
 }
 
 describe("files observed in saved tool outputs", () => {
   test("deduplicates parent, worker and resumed reads and keeps supporting call identity", () => {
     expect(
-      observedFilesFromLogs(scan, {
-        sessions: [],
-        events: [
-          cwd(),
-          cwd("worker", "/repo/src"),
-          ...read("cat src/a.ts", undefined, { id: "first" }),
-          ...read("head -n 10 ./a.ts", undefined, {
-            id: "first",
-            thread: "worker",
-          }),
-          ...read("cat /repo/src/a.ts", undefined, { id: "resumed" }),
-          ...read("cat b.ts", undefined, { id: "second", thread: "worker" }),
-        ],
-      }),
+      collect(scan, [
+        cwd(),
+        cwd("worker", "/repo/src"),
+        ...read("cat src/a.ts", undefined, { id: "first" }),
+        ...read("head -n 10 ./a.ts", undefined, {
+          id: "first",
+          thread: "worker",
+        }),
+        ...read("cat /repo/src/a.ts", undefined, { id: "resumed" }),
+        ...read("cat b.ts", undefined, { id: "second", thread: "worker" }),
+      ]),
     ).toEqual([
       { path: "src/a.ts", threadId: "parent", callId: "first" },
       { path: "src/b.ts", threadId: "worker", callId: "second" },
@@ -116,6 +119,60 @@ describe("files observed in saved tool outputs", () => {
       paths(read("grep -H 'token' src/a.ts", "src/a.ts:const token = 1;\n")),
     ).toEqual(["src/a.ts"]);
   });
+  test("requires an unambiguous filename in a search excerpt", () => {
+    expect(
+      paths([
+        ...read("rg -I marker .", "missing.ts: marker\n"),
+        ...read("rg -nI marker .", "1:marker\n"),
+        ...read("rg -C1 marker .", "actual.ts-2-context: marker\n"),
+        ...read("grep -H marker src", "src/docs:guide.ts:marker\n"),
+        ...read("rg -nH marker docs:guide.ts", "docs:guide.ts:1:marker\n"),
+        ...read("rg -nH marker src", "src/a.ts:1:ambiguous:2:marker\n"),
+      ]),
+    ).toEqual(["docs:guide.ts"]);
+  });
+
+  test("skips binary-match summaries and retains actual search excerpts", () => {
+    expect(
+      paths([
+        ...read(
+          "rg -H TOKEN src/data.bin src/code.ts",
+          'src/data.bin: binary file matches (found "\\0" byte around offset 6)\nsrc/code.ts:TOKEN binary file matches the pattern\n',
+        ),
+        ...read(
+          "grep -H TOKEN src/data.bin",
+          "grep: src/data.bin: binary file matches\n",
+        ),
+        ...read(
+          "grep -H TOKEN src/demo:data.bin",
+          "Binary file src/demo:data.bin matches\n",
+        ),
+      ]),
+    ).toEqual(["src/code.ts"]);
+  });
+
+  test("omits paths whose identity depends on directory links or shell parsing", () => {
+    expect(
+      paths([
+        ...read("cat link/../outside.ts"),
+        ...read("cat outside.ts", undefined, { workdir: "/repo/link/.." }),
+        ...read("cat src/file\\name.ts"),
+        ...read("cat src/known.ts"),
+      ]),
+    ).toEqual(["src/known.ts"]);
+  });
+
+  test("keeps file contents that mention token truncation", () => {
+    expect(
+      paths(
+        read(
+          "cat report.txt",
+          "The fixture logs 12 tokens truncated per line.\n",
+        ),
+      ),
+    ).toEqual(["report.txt"]);
+  });
+
   test("excludes unresolved home expansion while retaining literal tilde paths", () => {
     expect(
       paths([
@@ -173,6 +230,27 @@ describe("files observed in saved tool outputs", () => {
       ]),
     ).toEqual(["during.ts"]);
   });
+  test("keeps only observations within sub-millisecond scan boundaries", () => {
+    const boundary = (microseconds: string) =>
+      `2026-10-22T12:00:00.${microseconds}Z`;
+    const files = collect(
+      {
+        ...scan,
+        startedAt: boundary("000002"),
+        completedAt: boundary("000004"),
+      },
+      [
+        cwd(),
+        ...read("cat before.ts", undefined, {
+          timestamp: boundary("000001"),
+        }),
+        ...read("cat start.ts", undefined, { timestamp: boundary("000002") }),
+        ...read("cat end.ts", undefined, { timestamp: boundary("000004") }),
+        ...read("cat after.ts", undefined, { timestamp: boundary("000005") }),
+      ],
+    );
+    expect(files.map(({ path }) => path)).toEqual(["start.ts", "end.ts"]);
+  });
   test("honors turn and command directories and excludes paths outside the repository", () => {
     expect(
       paths([
@@ -186,28 +264,17 @@ describe("files observed in saved tool outputs", () => {
         ...read("cat /repo-other/outside.ts"),
       ]),
     ).toEqual(["src/local.ts", "test/selected.ts"]);
-    expect(
-      observedFilesFromLogs(scan, {
-        sessions: [],
-        events: read("cat unknown-cwd.ts"),
-      }),
-    ).toEqual([]);
+    expect(collect(scan, read("cat unknown-cwd.ts"))).toEqual([]);
   });
   test("normalizes and deduplicates Windows reads and filename-prefixed search results", () => {
     expect(
-      observedFilesFromLogs(
-        { ...scan, targetPath: "C:\\repo" },
-        {
-          sessions: [],
-          events: [
-            cwd("parent", "C:\\repo\\src"),
-            ...read("Get-Content -Path '.\\a file.ts'"),
-            ...read("Get-Content -Path 'c:\\REPO\\src\\A FILE.ts'"),
-            ...read("Get-Content -Path 'D:\\outside.ts'"),
-            ...read("rg -n token .", "C:\\repo\\src\\b.ts:2:token();\n"),
-          ],
-        },
-      ).map(({ path }) => path),
+      collect({ ...scan, targetPath: "C:\\repo" }, [
+        cwd("parent", "C:\\repo\\src"),
+        ...read("Get-Content -Path '.\\a file.ts'"),
+        ...read("Get-Content -Path 'c:\\REPO\\src\\A FILE.ts'"),
+        ...read("Get-Content -Path 'D:\\outside.ts'"),
+        ...read("rg -n token .", "C:\\repo\\src\\b.ts:2:token();\n"),
+      ]).map(({ path }) => path),
     ).toEqual(["src/a file.ts", "src/b.ts"]);
   });
   test("uses only model-facing output and supports shell and content-item envelopes", () => {

@@ -1,34 +1,110 @@
-import type { ExternalImportTarget } from "./external-import-contract.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  type ExternalImportTarget,
+  validateEnrichedExternalEvidence,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import type { ExternalFindings } from "./external-findings.js";
-import { isRecord } from "./record.js";
+import { asRecord } from "./record.js";
 import {
   array,
-  hasSarifExternalPropertyReferences,
   normalizeRecords,
   readScannerJson,
   record,
   relativePath,
+  reportableScannerSeverity,
   requiredText,
-  sarifRunContextForResult,
+  sarifRunRepositories,
+  sarifRunResults,
   strings,
+  readSarifRuns,
   text,
+  validateSarifRuleReference,
 } from "./scanner-import.js";
 
 /** @internal Repository claims retained in the adapter's original SARIF context. */
-export function endorRepositoryUrls(sourceData: unknown): string[] {
-  if (!isRecord(sourceData)) return [];
-  const run = sourceData["runContext"];
+export function endorRepositoryUrls(
+  sourceData: unknown,
+  retainedUrlsOnly = false,
+): string[] {
+  const run = asRecord(sourceData)?.["runContext"];
   if (run == null) return [];
-  return array(
-    record(run, "Endor run context")["versionControlProvenance"] ?? [],
-    "Endor version control provenance",
-  ).map((entry) =>
-    requiredText(
-      record(entry, "Endor repository provenance")["repositoryUri"],
-      "Endor repository URI",
-    ),
+  if (retainedUrlsOnly) {
+    // Historical projections can retain opaque run metadata alongside explicit URLs.
+    const entries = asRecord(run)?.["versionControlProvenance"];
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .map((entry) => asRecord(entry)?.["repositoryUri"])
+      .filter((url) => typeof url === "string");
+  }
+  return sarifRunRepositories(run, "Endor").map((ref) => ref.url);
+}
+
+function positiveCount(value: unknown): boolean {
+  return (
+    (typeof value === "number" || typeof value === "string") &&
+    Number(value) > 0
   );
+}
+
+function endorListObjects(root: Record<string, unknown>): unknown[] {
+  const list = record(root["list"], "Endor list");
+  const response = record(list["response"] ?? {}, "Endor list response");
+  const {
+    next_page_id: nextId,
+    next_page_token: token,
+    total_size: total,
+  } = response;
+  if (nextId != null && typeof nextId !== "string")
+    throw new Error("Endor next_page_id must be a string.");
+  if (
+    text(nextId) ||
+    (token != null && token !== 0 && token !== "0" && token !== "")
+  )
+    throw new Error(
+      "The Endor list response has another page. Supply a complete export or an explicitly selected array.",
+    );
+  const values = array(list["objects"] ?? [], "Endor list.objects");
+  if (values.length) return values;
+
+  // Protobuf can omit an empty repeated field. Recognize only its known
+  // pagination envelope; don't mistake an unrecognized payload for no matches.
+  if (
+    positiveCount(total) ||
+    (list["objects"] == null &&
+      (Object.keys(list).some(
+        (key) => key !== "response" && key !== "objects",
+      ) ||
+        Object.keys(response).some(
+          (key) =>
+            !["next_page_token", "next_page_id"].includes(key) &&
+            !(key === "total_size" && (total === 0 || total === "0")),
+        )))
+  )
+    throw new Error("Expected Endor list.objects in the finding export.");
+
+  const { count } = record(
+    root["count_response"] ?? {},
+    "Endor count response",
+  );
+  const { groups } = record(
+    root["group_response"] ?? {},
+    "Endor group response",
+  );
+  if (
+    positiveCount(count) ||
+    (groups != null && Object.keys(record(groups, "Endor groups")).length)
+  )
+    throw new Error(
+      "The Endor report contains a summary without finding objects. Supply the complete finding export.",
+    );
+  return values;
+}
+
+const reducedReports = new WeakSet<ExternalFindings>();
+
+/** A native upload would ask the worker to reconstruct fields that Cloud could not accept. */
+export function requiresStructuredEndorReport(findings: ExternalFindings) {
+  return reducedReports.has(findings);
 }
 
 /** Saved Endor Finding objects, an array, or an unmasked ListFindingsResponse. */
@@ -39,33 +115,22 @@ export function normalizeEndorFindings(
   const root = Array.isArray(input) ? null : record(input, "Endor report");
   if (root?.["version"] === "2.1.0" && root["runs"] !== undefined)
     return normalizeEndorSarif(root, target);
-  const list =
-    root?.["list"] === undefined ? null : record(root["list"], "Endor list");
-  if (list) {
-    const response = record(list["response"] ?? {}, "Endor list response");
-    const token = response["next_page_token"];
-    if (
-      text(response["next_page_id"]) ||
-      (token != null && token !== 0 && token !== "0" && token !== "")
-    ) {
-      throw new Error(
-        "The Endor list response has another page. Supply a complete export or an explicitly selected array.",
-      );
-    }
-  }
-  const values = list
-    ? array(list["objects"] ?? [], "Endor list.objects")
-    : Array.isArray(input)
-      ? input
-      : [input];
-  return normalizeRecords(
+  const values =
+    root?.["list"] !== undefined
+      ? endorListObjects(root)
+      : Array.isArray(input)
+        ? input
+        : [input];
+  let reduced = false;
+  const result = normalizeRecords(
     values,
-    (value, id) => {
+    (value) => {
       const finding = record(value, "Endor finding");
       const meta = record(finding["meta"], "Endor meta");
       const spec = record(finding["spec"], "Endor spec");
       requiredText(spec["project_uuid"], "Endor project_uuid");
-      const name = text(spec["target_dependency_name"]);
+      const bareName = text(spec["target_dependency_name"]);
+      const name = bareName ?? text(spec["target_dependency_package_name"]);
       const paths = [
         ...new Set(
           strings(spec["dependency_file_paths"])
@@ -116,13 +181,15 @@ export function normalizeEndorFindings(
       const aliases = strings(
         record(vulnerability["spec"] ?? {}, "Vulnerability spec")["aliases"],
       );
-      const level = text(spec["level"])
-        ?.replace(/^FINDING_LEVEL_/u, "")
-        .toLowerCase();
-      const severity =
-        level && ["critical", "high", "medium", "low"].includes(level)
-          ? level
-          : "unknown";
+      const vulnerabilityIds = [
+        ...new Set([...(advisory ? [advisory] : []), ...aliases]),
+      ];
+      const malware = asRecord(metadata["malware"]);
+      const advisories = new Set([
+        ...vulnerabilityIds,
+        ...strings([asRecord(malware?.["meta"])?.["name"]]),
+        ...strings(asRecord(malware?.["spec"])?.["aliases"]),
+      ]);
       // A recommended version can refer to an introducing dependency; retain it in source_data.
       const packages = name
         ? (paths.length ? paths : [null]).map((path) => ({
@@ -138,42 +205,50 @@ export function normalizeEndorFindings(
         : [];
       const context = record(finding["context"] ?? {}, "Endor context");
       const updated = text(meta["update_time"]);
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            title: requiredText(meta["name"], "Endor finding title"),
-            description:
-              [
-                text(spec["summary"]),
-                text(spec["explanation"]),
-                text(spec["remediation"]),
-              ]
-                .filter(Boolean)
-                .join("\n\n") || text(meta["description"]),
-            severity,
-            branch:
-              context["type"] === "CONTEXT_TYPE_REF"
-                ? text(context["id"])
-                : null,
-            code_revision: text(
-              record(
-                spec["source_code_version"] ?? {},
-                "Endor source code version",
-              )["sha"],
-            ),
-            source_updated_at:
-              updated === null ? null : Math.floor(Date.parse(updated) / 1000),
-            advisory_ids: [
-              ...new Set([...(advisory ? [advisory] : []), ...aliases]),
-            ],
-            packages,
-            locations,
-            source_data: structuredClone(finding),
-          },
-          target,
-        ),
-      };
+      const malwareIds =
+        advisories.size > vulnerabilityIds.length
+          ? { advisory_ids: [...advisories] }
+          : undefined;
+      const fallbackPackage = name !== bareName ? { packages } : undefined;
+      const evidence = validateEnrichedExternalEvidence(
+        {
+          title: requiredText(meta["name"], "Endor finding title"),
+          description:
+            [
+              text(spec["summary"]),
+              text(spec["explanation"]),
+              text(spec["remediation"]),
+            ]
+              .filter(Boolean)
+              .join("\n\n") || text(meta["description"]),
+          severity: reportableScannerSeverity(
+            text(spec["level"])?.replace(/^FINDING_LEVEL_/u, ""),
+          ),
+          branch:
+            context["type"] === "CONTEXT_TYPE_REF" ? text(context["id"]) : null,
+          code_revision: text(
+            record(
+              spec["source_code_version"] ?? {},
+              "Endor source code version",
+            )["sha"],
+          ),
+          source_updated_at:
+            updated === null ? null : Math.floor(Date.parse(updated) / 1000),
+          advisory_ids: vulnerabilityIds,
+          packages: bareName ? packages : [],
+          locations,
+          source_data: structuredClone(finding),
+        },
+        target,
+        malwareIds && fallbackPackage && { ...malwareIds, ...fallbackPackage },
+        malwareIds,
+        fallbackPackage,
+      );
+      const acceptedIds = evidence.advisory_ids!.length;
+      const acceptedPackages = evidence.packages!.length;
+      reduced ||=
+        acceptedIds < advisories.size || acceptedPackages < packages.length;
+      return evidence;
     },
     (value) =>
       requiredText(
@@ -182,6 +257,8 @@ export function normalizeEndorFindings(
       ),
     target,
   );
+  if (target === "cloud" && reduced) reducedReports.add(result);
+  return result;
 }
 
 /** Endor's documented SARIF producer uses properties.finding-uuid, not its rule name. */
@@ -189,46 +266,14 @@ export function normalizeEndorSarif(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  const document = record(input, "Endor SARIF");
-  if (document["version"] !== "2.1.0")
-    throw new Error("Expected Endor SARIF 2.1.0.");
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
-    const run = record(value, "SARIF run");
-    const tool = record(run["tool"], "SARIF tool");
-    const driver = record(tool["driver"], "SARIF driver");
-    if (driver["name"] !== "endorctl")
+  const entries = readSarifRuns(input, "Endor", (context) => {
+    if (context.driver["name"] !== "endorctl")
       throw new Error("Expected the endorctl SARIF producer.");
-    if (
-      hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
-    )
-      throw new Error("Use a self-contained Endor SARIF report.");
-    const rules = array(driver["rules"] ?? [], "Endor rules").map((r) =>
-      record(r, "Endor rule"),
-    );
-    const rulesById = new Map<
-      unknown,
-      { rule: Record<string, unknown>; index: number } | null
-    >();
-    for (const [index, rule] of rules.entries()) {
-      const id = rule["id"];
-      rulesById.set(id, rulesById.has(id) ? null : { rule, index });
-    }
-    const { runs: _runs, ...documentContext } = document;
-    const { results: _results, tool: _tool, ...runContext } = run;
-    const { rules: _rules, ...driverContext } = driver;
-    const { driver: _driver, ...toolContext } = tool;
-    return array(run["results"] ?? [], "Endor results").map((result) => ({
-      result,
-      rulesById,
-      documentContext,
-      runContext,
-      driverContext,
-      toolContext,
-    }));
+    return sarifRunResults(context, "Endor");
   });
   return normalizeRecords(
     entries,
-    ({ result: value, rulesById, ...context }, id) => {
+    ({ result: value, context }) => {
       const result = record(value, "Endor result");
       const properties = record(
         result["properties"],
@@ -236,29 +281,13 @@ export function normalizeEndorSarif(
       );
       requiredText(properties["project-uuid"], "Endor project-uuid");
       const ruleId = requiredText(result["ruleId"], "Endor ruleId");
-      const selectedRule = rulesById.get(ruleId);
+      const selectedRule = context.rulesById.get(ruleId);
       if (!selectedRule)
         throw new Error(
           "Endor result must reference exactly one rule in its run.",
         );
-      const { rule, index: ruleIndex } = selectedRule;
-      if (
-        result["ruleIndex"] !== undefined &&
-        result["ruleIndex"] !== ruleIndex
-      )
-        throw new Error("Endor ruleIndex and ruleId disagree.");
-      if (result["rule"] !== undefined) {
-        const reference = record(result["rule"], "Endor rule reference");
-        if (
-          reference["toolComponent"] !== undefined ||
-          (reference["id"] !== undefined && reference["id"] !== ruleId) ||
-          (reference["index"] !== undefined &&
-            reference["index"] !== ruleIndex) ||
-          (reference["guid"] !== undefined &&
-            reference["guid"] !== rule["guid"])
-        )
-          throw new Error("Inconsistent or external Endor rule reference.");
-      }
+      const { rule } = selectedRule;
+      validateSarifRuleReference(result, ruleId, selectedRule, "Endor");
       const message = record(result["message"], "Endor message");
       const short = record(
         rule["shortDescription"] ?? {},
@@ -311,46 +340,28 @@ export function normalizeEndorSarif(
           },
         ];
       });
-      return {
-        source_finding_id: id,
-        evidence: validateExternalEvidence(
-          {
-            title: text(short["text"]) ?? text(rule["name"]) ?? ruleId,
-            url: text(properties["finding-url"]),
-            description: [
-              text(message["markdown"]) ?? text(message["text"]),
-              text(full["text"]),
-              text(help["markdown"]) ?? text(help["text"]),
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-            // Diagnostic level and CVSS are not Endor's finding severity. Keep both as source evidence.
-            severity: "unknown",
-            locations: [
-              ...new Map(
-                locations.map((location) => [
-                  JSON.stringify(location),
-                  location,
-                ]),
-              ).values(),
-            ],
-            source_data: structuredClone({
-              ...context,
-              runContext: sarifRunContextForResult(
-                context.runContext,
-                result,
-                rule,
-                context.documentContext,
-                context.driverContext,
-                context.toolContext,
-              ),
-              rule,
-              result,
-            }),
-          },
-          target,
-        ),
-      };
+      return validateExternalEvidence(
+        {
+          title: text(short["text"]) ?? text(rule["name"]) ?? ruleId,
+          url: text(properties["finding-url"]),
+          description: [
+            text(message["markdown"]) ?? text(message["text"]),
+            text(full["text"]),
+            text(help["markdown"]) ?? text(help["text"]),
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          // Diagnostic level and CVSS are not Endor's finding severity. Keep both as source evidence.
+          severity: "unknown",
+          locations: [
+            ...new Map(
+              locations.map((location) => [JSON.stringify(location), location]),
+            ).values(),
+          ],
+          source_data: context.sourceData(result, rule),
+        },
+        target,
+      );
     },
     ({ result }) =>
       requiredText(

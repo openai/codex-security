@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import Ajv2020 from "ajv/dist/2020.js";
 import { main } from "../src/cli.js";
 import { CodexSecurityError } from "../src/index.js";
 import {
@@ -459,3 +460,74 @@ for (const command of ["rerun", "resume"]) {
     },
   );
 }
+
+test("scan discovery accepts caller inputs and validates the reported result variants", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  expect(
+    await main(
+      ["scan", "--schema", "--json"],
+      stdout.stream,
+      stderr.stream,
+      dependencies(),
+    ),
+  ).toBe(0);
+  const { options, output } = JSON.parse(stdout.text());
+  const ajv = new Ajv2020({ strict: false });
+  const inputs = ajv.compile(options);
+  expect(inputs({ dryRun: true })).toBe(true);
+  expect(inputs({ maxCost: "not a number" })).toBe(false);
+  const data = ajv.compile(output);
+  expect(data({ dryRun: true, ...fakePreflight() })).toBe(true);
+  expect(data(JSON.parse(JSON.stringify(fakeResult(["high"]).toJSON())))).toBe(
+    true,
+  );
+  expect(
+    data({ status: "failed", code: "SCAN_FAILED", message: "Example" }),
+  ).toBe(true);
+  const retained = fakeResult(["medium"]);
+  expect(
+    data({
+      mode: retained.mode,
+      manifest: retained.manifest,
+      findings: retained.findings,
+      review: retained.review,
+      scanDir: retained.scanDir,
+      reportPath: retained.reportPath,
+    }),
+  ).toBe(true);
+  expect(data({})).toBe(false);
+  expect(data({ status: "failed", code: 0, message: 42 })).toBe(false);
+});
+
+test.each([
+  { args: ["--max-cost"] },
+  { args: ["--format"] },
+  { args: ["--format", "--json"] },
+  { args: ["--token-limit", "--json"] },
+  { args: ["--max-cost", "invalid"] },
+  { args: ["--path", "src", "--diff", "HEAD"] },
+  { args: ["--token-limit", "invalid"] },
+])(
+  "returns a JSON error envelope for invalid scan arguments %j",
+  async ({ args }) => {
+    for (const flags of [["--format=jsonl"], ["--json"]]) {
+      const stdout = capture();
+      const stderr = capture();
+      expect(
+        await main(
+          ["scan", ".", "--dry-run", "--full-output", ...flags, ...args],
+          stdout.stream,
+          stderr.stream,
+          dependencies(),
+        ),
+      ).toBe(2);
+      const result = JSON.parse(stdout.text());
+      expect(stderr.text()).toContain(result.error.message.split("\n")[0]);
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: expect.any(String), message: expect.any(String) },
+      });
+    }
+  },
+);

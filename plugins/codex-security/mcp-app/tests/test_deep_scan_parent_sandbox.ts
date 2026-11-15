@@ -17,6 +17,55 @@ const pinnedReadOnly = {
   network: "restricted",
 };
 
+const stagedPlugin = path.resolve("bundled plugin [fixture]");
+const selectedSource = path.resolve("private source [fixture]");
+for (const access of ["read", "write"] as const) {
+  assert.deepEqual(
+    resolveDeepWorkerParentSandbox(
+      restricted([
+        rootRead,
+        { path: { type: "path", path: selectedSource }, access },
+        {
+          path: { type: "path", path: path.dirname(selectedSource) },
+          access: "read",
+        },
+        {
+          path: {
+            type: "path",
+            path: path.join(selectedSource, "config.toml"),
+          },
+          access: "deny",
+        },
+      ]),
+      stagedPlugin,
+      selectedSource,
+    ),
+    {
+      filesystemDenies: [],
+      literalFilesystemDenies: [path.join(selectedSource, "config.toml")],
+      ...(access === "read" ? { sourceReadRoot: selectedSource } : {}),
+    },
+  );
+}
+assert.deepEqual(
+  resolveDeepWorkerParentSandbox(
+    restricted([
+      rootRead,
+      { path: { type: "path", path: stagedPlugin }, access: "read" },
+      {
+        path: { type: "path", path: path.dirname(stagedPlugin) },
+        access: "write",
+      },
+      {
+        path: { type: "path", path: path.resolve("other-plugin") },
+        access: "read",
+      },
+    ]),
+    stagedPlugin,
+  ),
+  { filesystemDenies: [], pluginReadRoot: stagedPlugin },
+);
+
 assert.equal(CODEX_SANDBOX_STATE_META_CAPABILITY, "codex/sandbox-state-meta");
 assert.deepEqual(resolveDeepWorkerParentSandbox(extra(pinnedReadOnly)), {
   filesystemDenies: [],
@@ -66,6 +115,7 @@ assert.deepEqual(
     restricted(
       [
         rootRead,
+        { path: { type: "path", path: "/repo" }, access: "write" },
         {
           path: { type: "path", path: "/repo/.env" },
           access: "deny",
@@ -87,12 +137,8 @@ assert.deepEqual(
     ),
   ),
   {
-    filesystemDenies: [
-      "/repo/.env",
-      "/repo/.secrets",
-      "/repo-a/**/.env",
-      "/repo-b/**/*.pem",
-    ],
+    filesystemDenies: ["/repo-a/**/.env", "/repo-b/**/*.pem"],
+    literalFilesystemDenies: ["/repo/.env", "/repo/.secrets"],
     globScanMaxDepth: 3,
   },
 );
@@ -189,6 +235,21 @@ assert.deepEqual(
     filesystemDenies: [],
   },
 );
+
+assert.throws(
+  () => resolveDeepWorkerParentSandbox({}),
+  /trusted parent sandbox metadata/,
+);
+for (const entry of [
+  { access: "deny", path: { type: "path", path: "relative/secret" } },
+  { access: "deny", path: { type: "special", value: { kind: "tmpdir" } } },
+  { access: "write", path: { type: "glob_pattern", pattern: "/repo/*" } },
+]) {
+  assert.throws(
+    () => resolveDeepWorkerParentSandbox(restricted([rootRead, entry])),
+    /cannot be preserved/,
+  );
+}
 
 for (const invalid of [
   undefined,

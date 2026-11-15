@@ -4,7 +4,7 @@ import {
   type SpawnOptions,
 } from "node:child_process";
 import * as childProcess from "node:child_process";
-import { getEventListeners } from "node:events";
+import { getEventListeners, once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
 } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { runCodexSkillCommand } from "../src/cli.js";
 import { CodexReviewRunner } from "../src/deduplication/codex-review.js";
 import { sendFeedback } from "../src/feedback.js";
 import { runCodexCommand } from "../src/runtime.js";
@@ -26,6 +27,51 @@ const fixture = fileURLToPath(
   new URL("fixtures/inherited-codex-pipes.mjs", import.meta.url),
 );
 const node = nodeCommand().command;
+
+test.each([
+  ["SIGINT", 130],
+  ["default reason", 143],
+] as const)(
+  "a running skill child honors controller abort (%s)",
+  async (reason, status) => {
+    const controller = new AbortController();
+    const spawned = Promise.withResolvers<ReturnType<typeof spawn>>();
+    const originalSpawn = childProcess.spawn;
+    using _observer = spyOn(childProcess, "spawn").mockImplementation(((
+      ...args: Parameters<typeof originalSpawn>
+    ) => {
+      const child = originalSpawn(...args);
+      spawned.resolve(child);
+      return child;
+    }) as typeof originalSpawn);
+    const run = runCodexSkillCommand(
+      [
+        "-e",
+        "process.on('SIGTERM', () => {}); process.stdout.write('{}\\n'); setTimeout(() => process.exit(1), 4000);",
+        "--",
+      ],
+      {
+        command: "verify-fix",
+        signal: controller.signal,
+        stdout: process.stdout,
+        stderr: process.stderr,
+      },
+      { command: node },
+      { ...process.env, CODEX_SECURITY_STATE_DIR: await temporaryDirectory() },
+    );
+    const child = await spawned.promise;
+    try {
+      await once(child.stdout!, "data");
+      controller.abort(reason === "SIGINT" ? reason : undefined);
+      expect(await run).toBe(status);
+      expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    } finally {
+      child.kill("SIGKILL");
+      await run;
+    }
+  },
+);
 
 for (const mode of [
   "command-success",
@@ -79,7 +125,7 @@ for (const mode of [
         },
         undefined,
         controller.signal,
-        mode.startsWith("archive-"),
+        { registrationHandshake: mode.startsWith("archive-") },
       );
     } finally {
       observer.mockRestore();

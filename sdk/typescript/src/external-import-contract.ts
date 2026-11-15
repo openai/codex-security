@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
-import Ajv2020 from "ajv/dist/2020.js";
+import { isNumberObject } from "node:util/types";
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import schema from "../schemas/external-findings.schema.json" with { type: "json" };
 import type {
   ExternalFindingEvidence,
@@ -24,6 +25,7 @@ const localSchema = JSON.parse(
     key === "maxLength" || key === "maxItems" ? undefined : value,
   ),
 ) as typeof schema;
+export const DEFAULT_CLOUD_STRING_BYTES = 512;
 const STRING_BYTE_LIMITS: Readonly<Record<string, number>> = {
   description: 65536,
   snippet: 65536,
@@ -84,7 +86,7 @@ function validateModelStrings(
         throw new Error(
           `${field} must be nonempty and contain no NUL characters.`,
         );
-      const limit = STRING_BYTE_LIMITS[field] ?? 512;
+      const limit = STRING_BYTE_LIMITS[field] ?? DEFAULT_CLOUD_STRING_BYTES;
       if (target === "cloud" && Buffer.byteLength(value) > limit)
         throw new Error(
           `${field} exceeds its Cloud limit of ${limit} UTF-8 bytes.`,
@@ -153,8 +155,7 @@ function normalizeEvidenceDetails(
 ): void {
   if (value !== null && typeof value === "object") {
     const fields = value as Record<string, unknown>;
-    // Cloud omits these new optional fields when null. Preserve every legacy
-    // default so saved Wiz requests still replay the same evidence bytes.
+    // Cloud omits these optional fields when null.
     if (Array.isArray(fields["packages"]))
       for (const value of fields["packages"]) {
         if (
@@ -184,11 +185,12 @@ function validator<T>(
   name: keyof typeof schema.$defs,
   target: ExternalImportTarget = "cloud",
 ) {
-  const check = ajv.compile<T>({
-    $defs: (target === "local" ? localSchema : schema).$defs,
-    $ref: `#/$defs/${name}`,
-  });
+  let check: ValidateFunction<T> | undefined;
   return (input: unknown): T => {
+    check ??= ajv.compile<T>({
+      $defs: (target === "local" ? localSchema : schema).$defs,
+      $ref: `#/$defs/${name}`,
+    });
     if (name === "ImportedFindingEvidence")
       normalizeEvidenceDetails(input, target);
     else if (input && typeof input === "object") {
@@ -225,7 +227,67 @@ export const validateSourceReports =
   validator<SourceReportPage>("SourceReportPage");
 export const validateSourceReport = validator<SourceReport>("SourceReport");
 
-export function validateExternalEvidence(
+// Normalize equivalent JSON numbers exactly. Keep very large exponents compact.
+export function canonicalNumber(token: string, fixedDigits = 21): string {
+  const [, sign = "", integer, fraction = "", exponent = "0"] =
+    /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]?\d+))?$/iu.exec(token)!;
+  const significant = (integer + fraction).replace(/^0+/u, "");
+  if (!significant) return "0";
+  let end = significant.length;
+  while (significant[end - 1] === "0") end--;
+  const digits = significant.slice(0, end);
+  const point = BigInt(exponent) + BigInt(significant.length - fraction.length);
+  // Ordinary evidence follows JSON.stringify’s fixed/scientific notation thresholds.
+  if (point > -6n && point <= BigInt(fixedDigits)) {
+    const split = Number(point);
+    if (split <= 0) return sign + "0." + "0".repeat(-split) + digits;
+    if (split >= digits.length) return sign + digits.padEnd(split, "0");
+    return sign + digits.slice(0, split) + "." + digits.slice(split);
+  }
+  const trailing = digits.slice(1);
+  const scientific = point - 1n;
+  return (
+    sign +
+    digits.charAt(0) +
+    (trailing ? "." + trailing : "") +
+    "e" +
+    (scientific >= 0n ? "+" : "") +
+    scientific
+  );
+}
+
+export function requireSafeJsonInteger(value: number, label: string): void {
+  if (Number.isInteger(value) && !Number.isSafeInteger(value))
+    throw new Error(
+      `${label} integers must be within JavaScript's safe integer range; export larger values as strings to preserve them exactly.`,
+    );
+}
+
+export function requireJsonNumber(value: number, label: string): void {
+  if (!Number.isFinite(value))
+    throw new Error(`${label} must contain finite JSON numbers.`);
+  requireSafeJsonInteger(value, label);
+}
+
+/** Report metadata is retained in previews and receipts without Cloud evidence size limits. */
+export function validateExternalReport(
+  report: Record<string, unknown> | undefined,
+): void {
+  if (report === undefined) return;
+  serializeImportJson(report, checkReportNumber);
+}
+
+export function validateCodeLineRange(
+  firstLine: number | null | undefined,
+  endLine: number | null | undefined,
+) {
+  if (endLine != null && (firstLine == null || endLine < firstLine))
+    throw new Error(
+      "The code end line requires a first source location line and cannot precede it.",
+    );
+}
+
+export function validateExternalEvidenceFields(
   input: unknown,
   target: ExternalImportTarget = "cloud",
 ): ExternalFindingEvidence {
@@ -261,14 +323,10 @@ export function validateExternalEvidence(
         throw new Error("Advisory source context requires advisory evidence.");
     }
   }
-  const endLine = result.details?.code?.end_line;
-  if (endLine !== null && endLine !== undefined) {
-    const firstLine = result.locations?.[0]?.line;
-    if (firstLine === null || firstLine === undefined || endLine < firstLine)
-      throw new Error(
-        "The code end line requires a first source location line and cannot precede it.",
-      );
-  }
+  validateCodeLineRange(
+    result.locations?.[0]?.line,
+    result.details?.code?.end_line,
+  );
   const urls = [
     result.url,
     result.details?.repository?.url,
@@ -303,41 +361,200 @@ export function validateExternalEvidence(
         "Evidence URLs must be HTTP(S) links without credentials.",
       );
   }
-  // Local evidence still has to be serializable JSON, including acyclic source data.
-  if (target === "local") JSON.stringify(result);
-  let numericByteAdjustment = 0;
-  const pending: [unknown, number][] = [[result, 0]];
-  while (pending.length > 0) {
-    const [value, depth] = pending.pop()!;
-    if (target === "cloud" && depth > 20)
-      throw new Error("Evidence exceeds the Cloud JSON depth limit of 20.");
-    if (value !== null && typeof value === "object") {
-      for (const child of Object.values(value))
-        pending.push([child, depth + 1]);
-    } else if (typeof value === "number") {
-      if (!Number.isFinite(value))
-        throw new Error("Evidence must contain finite JSON numbers.");
-      if (Number.isInteger(value) && !Number.isSafeInteger(value))
-        throw new Error(
-          "Evidence integers must be within JavaScript's safe integer range; export larger values as strings to preserve them exactly.",
-        );
-      const wire = JSON.stringify(value);
-      // Cloud pads short exponents and formats small fractions scientifically.
-      const cloud = (
-        wire.includes(".") && Math.abs(value) < 1e-4
-          ? value.toExponential()
-          : wire
-      ).replace(/e-(\d)$/u, "e-0$1");
-      numericByteAdjustment += cloud.length - wire.length;
+  return result;
+}
+
+/** Keep a valid native record when its optional structured fields exceed the target's bounds. */
+export function validateEnrichedExternalEvidence(
+  evidence: Record<string, unknown>,
+  target: ExternalImportTarget,
+  ...projections: (Record<string, unknown> | undefined)[]
+): ExternalFindingEvidence {
+  for (const extra of projections) {
+    if (!extra) continue;
+    try {
+      return validateExternalEvidence({ ...evidence, ...extra }, target);
+    } catch {
+      // Try the next projection. The native record must pass the same validation.
     }
   }
-  if (
-    target === "cloud" &&
-    Buffer.byteLength(JSON.stringify(result)) + numericByteAdjustment >
-      256 * 1024
-  )
-    throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
+  return validateExternalEvidence(evidence, target);
+}
+
+export function validateExternalEvidence(
+  input: unknown,
+  target: ExternalImportTarget = "cloud",
+): ExternalFindingEvidence {
+  const result = validateExternalEvidenceFields(input, target);
+  validateExternalEvidenceJson(result, target);
   return result;
+}
+
+function cloudNumberByteAdjustment(value: number): number {
+  if (!value || Math.abs(value) >= 1e-4) return 0;
+  const wire = JSON.stringify(value);
+  const cloud = (wire.includes(".") ? value.toExponential() : wire).replace(
+    /e-(\d)$/u,
+    "e-0$1",
+  );
+  return cloud.length - wire.length;
+}
+
+type ValidateNumber = (value: number) => void;
+const evidenceNumber: ValidateNumber = (value) =>
+  requireJsonNumber(value, "Evidence");
+
+const rawJson = JSON as JSON & {
+  isRawJSON?(value: unknown): value is { rawJSON: string };
+};
+/** Check the numeric value JSON emits before parsing can round a raw decimal. */
+export function checkEmittedJsonNumber(
+  value: unknown,
+  check: ValidateNumber,
+): number | undefined {
+  if (typeof value === "number") {
+    check(value);
+    return value;
+  }
+  if (!rawJson.isRawJSON?.(value)) return;
+  const token: unknown = JSON.parse(value.rawJSON);
+  if (typeof token !== "number") return;
+  check(token);
+  if (canonicalNumber(value.rawJSON) !== String(token))
+    throw new Error(
+      "Raw JSON number loses precision when converted to a JavaScript number. Export the value as a string to preserve it exactly.",
+    );
+  return token;
+}
+
+const reportNumber: ValidateNumber = (value) =>
+  requireJsonNumber(value, "Scanner report");
+
+export function checkReportNumber(value: unknown): void {
+  checkEmittedJsonNumber(value, reportNumber);
+}
+
+export class CloudEvidenceDepthError extends Error {
+  constructor() {
+    super("Evidence exceeds the Cloud JSON depth limit of 20.");
+  }
+}
+
+/** JSON omits these object properties, but emits null for the same array elements. */
+export function requireCloudEvidenceDepth(
+  depth: number,
+  holder: object,
+  value: unknown,
+): void {
+  if (
+    depth > 20 &&
+    (Array.isArray(holder) ||
+      (value !== undefined &&
+        typeof value !== "symbol" &&
+        typeof value !== "function"))
+  )
+    throw new CloudEvidenceDepthError();
+}
+
+function serializeImportJson(
+  input: unknown,
+  validate: (value: unknown) => void,
+  limitDepth = false,
+): string {
+  const parents: object[] = [];
+  return JSON.stringify(input, function (this: object, _key, value: unknown) {
+    if (limitDepth) {
+      while (parents.length && parents.at(-1) !== this) parents.pop();
+      requireCloudEvidenceDepth(parents.length, this, value);
+      if (value !== null && typeof value === "object") parents.push(value);
+    }
+    // JSON applies Number conversion to wrappers after calling toJSON.
+    if (isNumberObject(value)) value = +value;
+    validate(value);
+    return value;
+  });
+}
+
+/** Enforce the numeric and depth limits on raw evidence as well as its serialized form. */
+function validateRawEvidence(
+  input: unknown,
+  target: ExternalImportTarget,
+): void {
+  if (typeof input === "number") evidenceNumber(input);
+  if (input === null || typeof input !== "object") return;
+  const checked = target === "local" ? new WeakSet<object>() : undefined;
+  const ancestors: object[] = [];
+  const pending = [{ value: input, depth: 0 }];
+  while (pending.length) {
+    const { value, depth } = pending.pop()!;
+    if (checked?.has(value)) continue;
+    checked?.add(value);
+    ancestors.length = depth;
+    if (ancestors.includes(value)) continue;
+    ancestors[depth] = value;
+    for (const child of Object.values(value)) {
+      if (target === "cloud" && depth >= 20)
+        throw new CloudEvidenceDepthError();
+      if (typeof child === "number") evidenceNumber(child);
+      if (child !== null && typeof child === "object") {
+        pending.push({ value: child, depth: depth + 1 });
+      }
+    }
+  }
+}
+
+export const CLOUD_EVIDENCE_BYTES = 256 * 1024;
+function checkEvidenceSize(bytes: number): number {
+  if (bytes > CLOUD_EVIDENCE_BYTES)
+    throw new Error("Evidence exceeds the Cloud limit of 256 KiB.");
+  return bytes;
+}
+
+/** Return the validated Cloud wire size, or zero for local evidence. */
+export function validateExternalEvidenceJson(
+  input: unknown,
+  target: ExternalImportTarget,
+  additionalCloudBytes = 0,
+): number {
+  let adjustment = 0;
+  const validateNumber = (value: unknown) => {
+    const number = checkEmittedJsonNumber(value, evidenceNumber);
+    if (target === "cloud" && number !== undefined)
+      adjustment += cloudNumberByteAdjustment(number);
+  };
+  if (target === "local") {
+    serializeImportJson(input, validateNumber);
+    validateRawEvidence(input, target);
+    return 0;
+  }
+  validateRawEvidence(input, target);
+  const text = serializeImportJson(input, validateNumber, true);
+  return checkEvidenceSize(
+    Buffer.byteLength(text) + additionalCloudBytes + adjustment,
+  );
+}
+
+/** Use the array index as toJSON's key, as when saving the supplied GitHub records. */
+export function exportedGitHubRecord(
+  value: unknown,
+  index: number,
+  target: ExternalImportTarget,
+) {
+  let invalid: unknown;
+  const text = serializeImportJson(
+    { [index]: value },
+    (value) => {
+      if (!invalid)
+        try {
+          checkEmittedJsonNumber(value, evidenceNumber);
+        } catch (error) {
+          invalid = error;
+        }
+    },
+    target === "cloud",
+  );
+  const record: unknown = JSON.parse(text)[index];
+  return { record, invalid };
 }
 
 export function validateImportRequest(input: unknown): FindingImportRequest {

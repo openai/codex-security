@@ -45,3 +45,31 @@ test("pins one Codex version across the CLI, MCP app, and evals", async () => {
     }
   }
 });
+
+test("the Wolfi recipe records sources for its pinned Linux amd64 binaries", async () => {
+  const repo = new URL("../../../", import.meta.url);
+  const [sources, sdk, wolfi, action] = await Promise.all(
+    [
+      "docker/wolfi/payload/native-sources.json",
+      "sdk/typescript/package.json",
+      "docker/wolfi/payload/package-lock.json",
+      "github-action/runtime/package-lock.json",
+    ].map((path) => Bun.file(new URL(path, repo)).json()),
+  );
+  const codex = wolfi.packages["node_modules/@openai/codex-linux-x64"];
+  const canvas = "@napi-rs/canvas-linux-x64-gnu";
+  // Action release preparation replaces the scanner and its exact Codex dependency.
+  // It can retain the transitive Canvas resolution from its existing npm lock.
+  for (const name of [
+    `@openai/codex@${sdk.dependencies["@openai/codex"]}-linux-x64`,
+    `${codex.name}@${codex.version}`,
+    ...[wolfi, action].map(
+      (lock) => `${canvas}@${lock.packages[`node_modules/${canvas}`].version}`,
+    ),
+  ]) {
+    expect(
+      sources[name] ?? "",
+      `Review Wolfi source and notices for ${name}`,
+    ).toMatch(/\/tree\/[a-f0-9]{40}$/);
+  }
+});

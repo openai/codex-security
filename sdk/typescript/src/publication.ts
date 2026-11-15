@@ -40,7 +40,7 @@ export interface PrepareScanPublicationOptions {
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
-  /** Publish only these finding IDs from the supplied scan; dedupe representatives may belong to other scans. */
+  /** Publish only these finding IDs from the supplied scan. Use scanRepresentativeFindingIds from saved-scan dedupe. */
   findingIds?: readonly string[];
   /** Use this assessment; otherwise use the scan's saved classification when present. */
   classification?: SeverityClassification | ScanSeverityClassification;
@@ -501,8 +501,15 @@ function immutableSourceUrl(
   const repository = remote.pathname
     .replace(/\.git\/?$/, "")
     .replace(/\/$/, "");
-  const path = location.path.split("/").map(encodeURIComponent).join("/");
+  const segments = location.path.split("/");
+  const path = segments.map(encodeURIComponent).join("/");
   remote.pathname = `${repository}/blob/${target.revision}/${path}`;
+  // GitHub renders Markdown previews without source line anchors.
+  const markdownPath =
+    /\.(?:md|markdown|mdown|mdwn|mkd|mkdn|mkdown|mdx|litcoffee|livemd|ronn|scd|workbook)$/i;
+  if (markdownPath.test(location.path) || segments.at(-1) === "contents.lr") {
+    remote.search = "plain=1";
+  }
   remote.hash = `L${location.startLine}${
     location.endLine === undefined || location.endLine === location.startLine
       ? ""

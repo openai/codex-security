@@ -48,6 +48,7 @@ jobs:
         uses: ./.github/actions/setup-tools
         with:
           compile: true
+          cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Fetch locked Rust dependencies
         run: |
           rustup toolchain install 1.97.1 --profile minimal

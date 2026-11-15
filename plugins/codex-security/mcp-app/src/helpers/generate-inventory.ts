@@ -6,18 +6,13 @@ import {
 } from "./helper-files";
 import { randomBytes } from "node:crypto";
 import { renameSync, unlinkSync } from "node:fs";
-import { dirname, isAbsolute, parse, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, parse, relative, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { mkdir, readFile, writeFile } from "./helper-files";
 import { expandHome, windowsFiles, windowsJoin } from "./resolve-security-md";
 import { decodePosixBytes, encodePosixPath } from "./posix-path";
-import { stringifyJson } from "./json";
-import {
-  compare,
-  print,
-  reportCommandError,
-  ArgumentError,
-} from "./rank-worklists";
+import { compareCodePoints, stringifyJson } from "./json";
+import { print, reportCommandError, ArgumentError } from "./rank-worklists";
 import { decodeUtf8 } from "./utf8";
 import {
   ancestors,
@@ -29,6 +24,7 @@ import {
   lstat,
   regular,
   rejectStreams,
+  sameFile,
   stat,
   sourceMetadata,
   walk,
@@ -37,21 +33,28 @@ import {
 import {
   blobSamples,
   changedPaths,
-  decodeGitPath,
   directoryPaths,
   encodeGitPath,
-  git,
+  ignoredTrackedPaths,
   runRipgrep,
 } from "./inventory-git";
 import { PREVIEW_BYTES, previewForBytes, sampleFile } from "./source-preview";
+import {
+  writeHostedOutput,
+  writeHostedScopeInventory,
+} from "./hosted-scope-inventory";
 
 export type InventoryCommand =
-  "generate-in-scope-files" | "make-repo-scope-input" | "make-diff-rank-input";
+  | "generate-in-scope-files"
+  | "make-repo-scope-input"
+  | "make-hosted-repo-scope-input"
+  | "make-diff-rank-input";
 export interface InventoryOptions {
   repo: string;
   out: string;
   scope?: string;
   scopesFile?: string;
+  stateDir?: string;
   area?: string;
   previewBytes?: number;
   base?: string;
@@ -208,17 +211,14 @@ function inventoryOutput(value: string): string {
   return output;
 }
 
-function writeInventory(output: string, rows: Buffer[]): number {
-  const unique = [
-    ...new Map(rows.map((row) => [row.toString("hex"), row])).values(),
-  ].sort(Buffer.compare);
+function replaceInventory(output: string, rows: Buffer[]): void {
   mkdir(dirname(output));
   const temporary = append(
     dirname(output),
     `.${randomBytes(12).toString("hex")}.tmp`,
   );
   try {
-    writeFile(temporary, unique, true);
+    writeFile(temporary, rows, true);
     if (windows)
       windowsFiles().rename(
         Buffer.from(temporary, "utf16le"),
@@ -231,14 +231,44 @@ function writeInventory(output: string, rows: Buffer[]): number {
       else unlinkSync(fsPath(temporary));
     }
   }
-  return unique.length;
+}
+
+function reportScopedInventoryCount(
+  repo: string,
+  scopesFile: string,
+  output: string,
+  count: number,
+): void {
+  if (basename(output) !== "scoped-source-input.jsonl") return;
+  try {
+    const scanDir = environmentValue("CODEX_SECURITY_SCAN_DIR");
+    const scanId = environmentValue("CODEX_SECURITY_SCAN_ID");
+    const repository = environmentValue("CODEX_SECURITY_REPOSITORY");
+    const targetPaths = environmentValue("CODEX_SECURITY_TARGET_PATHS_FILE");
+    if (
+      !scanId ||
+      !scanDir ||
+      !repository ||
+      !targetPaths ||
+      !sameFile(repo, repository) ||
+      !sameFile(scopesFile, targetPaths) ||
+      !sameFile(dirname(output), scanDir)
+    )
+      return;
+
+    replaceInventory(append(scanDir, "scoped-source-input.receipt.json"), [
+      Buffer.from(JSON.stringify({ scanId, repository: repo, count }) + "\n"),
+    ]);
+  } catch {
+    // The inventory is ready even if the mount cannot publish its progress count.
+  }
 }
 
 export async function generateInventory(
   command: InventoryCommand,
   options: InventoryOptions,
   home = environmentValue("HOME"),
-): Promise<number> {
+): Promise<{ count: number; output: string }> {
   const repo = canonical(expandHome(options.repo, home));
   if (!directory(repo)) throw new Error(`Repo path not found: ${repo}`);
   const outputPath = expandHome(options.out, home),
@@ -297,31 +327,26 @@ export async function generateInventory(
         `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
       );
     let bytes = result.stdout;
-    if ([...ancestors(repo)].some((path) => exists(append(path, ".git")))) {
-      const tracked = await git(repo, [
-        "ls-files",
-        "--cached",
-        "--ignored",
-        "--exclude-standard",
-        "-z",
-        "--",
-        requested,
-      ]).catch((error: unknown) => {
-        if (error instanceof Error && "code" in error)
-          return { status: 127, stdout: Buffer.alloc(0) };
-        throw error;
-      });
-      if (tracked.status === 0) {
-        const prefix =
-          requested === "." || requested.startsWith("./") ? "./" : "";
-        const paths = decodeGitPath(tracked.stdout)
-          .split("\0")
-          .filter((path) => path && regular(append(repo, path)));
-        bytes = Buffer.concat([
-          bytes,
-          encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
-        ]);
-      }
+    const inWorktree = [...ancestors(repo)].some((path) => {
+      const marker = append(path, ".git");
+      // An empty .git directory can be a sandbox placeholder.
+      return (
+        exists(marker) &&
+        (!directory(marker) ||
+          exists(append(marker, "HEAD")) ||
+          regular(append(marker, "index")))
+      );
+    });
+    if (inWorktree) {
+      const paths = (await ignoredTrackedPaths(repo, requested)).filter(
+        (path) => regular(append(repo, path)),
+      );
+      const prefix =
+        requested === "." || requested.startsWith("./") ? "./" : "";
+      bytes = Buffer.concat([
+        bytes,
+        encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
+      ]);
     }
     for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
       if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
@@ -418,22 +443,50 @@ export async function generateInventory(
       }
     }
   }
-  if (inventory) return writeInventory(output, inventoryRows);
-  mkdir(dirname(output));
-  writeFile(
-    output,
-    [...rankRows.values()]
-      .sort((left, right) => compare(left.path, right.path))
-      .map((row) =>
-        Buffer.from(
-          stringifyJson(row, 0).replace(
-            /[\u007f-\uffff]/g,
-            (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
-          ) + (windows ? "\r\n" : "\n"),
-        ),
+  if (inventory) {
+    const unique = [
+      ...new Map(
+        inventoryRows.map((row) => [row.toString("hex"), row]),
+      ).values(),
+    ].sort(Buffer.compare);
+    replaceInventory(output, unique);
+    return { count: unique.length, output };
+  }
+  const rows = [...rankRows.values()]
+    .sort((left, right) => compareCodePoints(left.path, right.path))
+    .map((row) =>
+      Buffer.from(
+        stringifyJson(row, 0).replace(
+          /[\u007f-\uffff]/g,
+          (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+        ) + (windows ? "\r\n" : "\n"),
       ),
-  );
-  return rankRows.size;
+    );
+  if (command === "make-hosted-repo-scope-input") {
+    if (options.stateDir !== undefined) {
+      const hosted = writeHostedScopeInventory(
+        expandHome(options.stateDir, home),
+        expandHome(options.scopesFile!, home),
+        repo,
+        output,
+        rows,
+      );
+      if (hosted !== undefined) return { count: rows.length, output: hosted };
+    }
+    if (windows) replaceInventory(output, rows);
+    else writeHostedOutput(output, rows);
+  } else {
+    mkdir(dirname(output));
+    writeFile(output, rows);
+    if (command === "make-repo-scope-input")
+      reportScopedInventoryCount(
+        repo,
+        expandHome(options.scopesFile!, home),
+        output,
+        rows.length,
+      );
+  }
+  return { count: rows.length, output };
 }
 
 export async function inventoryCommand(
@@ -443,23 +496,18 @@ export async function inventoryCommand(
 ): Promise<number> {
   const inventory = command === "generate-in-scope-files",
     diff = command === "make-diff-rank-input",
-    scoped = command === "make-repo-scope-input";
+    scoped = !inventory && !diff;
   const required = [
     "repo",
     "out",
-    ...(inventory
-      ? ["scope"]
-      : diff
-        ? ["base"]
-        : scoped
-          ? ["scopes-file"]
-          : []),
+    inventory ? "scope" : diff ? "base" : "scopes-file",
   ];
   const optional = inventory
     ? ["diff-base", "diff-head", "diff-mode"]
     : diff
       ? ["head", "mode", "area", "preview-bytes"]
       : [];
+  if (command === "make-hosted-repo-scope-input") optional.push("state-dir");
   const usage = `usage: launch_codex_security_mcp[.cmd] --helper ${command} ${required.map((name) => `--${name} VALUE`).join(" ")}`;
   try {
     let values: Record<string, string | boolean | undefined>;
@@ -514,13 +562,14 @@ Defaults: scope=., head=HEAD, mode=revisions, preview-bytes=1024; area uses the 
         error instanceof Error ? error.message : String(error),
       );
     }
-    const count = await generateInventory(
+    const { count, output } = await generateInventory(
       command,
       {
         repo: values.repo as string,
         out: values.out as string,
         scope: values.scope as string | undefined,
         scopesFile: values["scopes-file"] as string | undefined,
+        stateDir: values["state-dir"] as string | undefined,
         area: values.area as string | undefined,
         previewBytes:
           values["preview-bytes"] === undefined
@@ -535,7 +584,7 @@ Defaults: scope=., head=HEAD, mode=revisions, preview-bytes=1024; area uses the 
     print(
       inventory
         ? `Recorded ${count} in-scope files.`
-        : `Wrote ${count} ${scoped ? "scoped paths" : "rows"} to ${expandHome(values.out as string, home)}`,
+        : `Wrote ${count} ${scoped ? "scoped paths" : "rows"} to ${output}`,
     );
     return 0;
   } catch (error) {

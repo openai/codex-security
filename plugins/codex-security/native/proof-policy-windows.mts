@@ -19,12 +19,12 @@ import {
 const testDirectory = join(output, "policy-proof");
 const helper = join(testDirectory, "helpers.cjs");
 if (process.argv[2] === "build") {
-  const sdkModules = join(root, "../../../sdk/typescript/node_modules");
+  const mcpApp = join(root, "../mcp-app");
   execFileSync(
     process.execPath,
     [
-      join(sdkModules, "esbuild/bin/esbuild"),
-      join(root, "../mcp-app/helpers-main.ts"),
+      join(mcpApp, "node_modules/esbuild/bin/esbuild"),
+      join(mcpApp, "helpers-main.ts"),
       "--bundle",
       "--platform=node",
       "--format=cjs",
@@ -32,11 +32,7 @@ if (process.argv[2] === "build") {
       "--define:import.meta.url=__filename",
       `--outfile=${helper}`,
     ],
-    {
-      stdio: "inherit",
-      // Native CI installs the helper's dependencies only in the SDK.
-      env: { ...process.env, NODE_PATH: sdkModules },
-    },
+    { stdio: "inherit" },
   );
   const nativeDirectory = join(testDirectory, "native", nativeTarget);
   mkdirSync(nativeDirectory, { recursive: true });

@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
 import * as os from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { strToU8, zipSync } from "fflate";
 import { ConfigurationError } from "../src/errors.js";
@@ -53,15 +53,25 @@ function docxBody(body: string): Uint8Array {
 }
 
 function pdf(text: string): Uint8Array {
-  const escaped = text.replace(/[\\()]/gu, "\\$&");
-  const stream = `BT /F1 12 Tf 72 720 Td (${escaped}) Tj ET`;
+  return pdfContent(`(${text.replace(/[\\()]/gu, "\\$&")}) Tj`);
+}
+
+function pdfContent(operators: string, form?: string): Uint8Array {
+  const stream = `BT /F1 12 Tf 72 720 Td ${operators} ET`;
+  const font = "/Font << /F1 4 0 R >>";
+  const forms = form ? " /XObject << /Word 6 0 R >>" : "";
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << ${font}${forms} >> /Contents 5 0 R >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
   ];
+  if (form) {
+    objects.push(
+      `<< /Type /XObject /Subtype /Form /BBox [0 0 300 100] /Resources << ${font} >> /Length ${Buffer.byteLength(form)} >>\nstream\n${form}\nendstream`,
+    );
+  }
   let output = "%PDF-1.4\n";
   const offsets = [0];
   for (const [index, object] of objects.entries()) {
@@ -474,7 +484,10 @@ describe("scan knowledge bases", () => {
     const root = await temporaryDirectory();
     await writeFile(
       join(root, "architecture.pdf"),
-      pdf("Payment service boundary"),
+      pdfContent(
+        "(Policy ) Tj /F1 14 Tf (guide) Tj /F1 12 Tf 0 -14 Td (Require) Tj ET q 1 0 0 1 117.348 706 cm /Word Do Q BT",
+        "BT /F1 12 Tf (authentication) Tj ET",
+      ),
     );
     await writeFile(
       join(root, "threat-model.docx"),
@@ -494,7 +507,14 @@ describe("scan knowledge bases", () => {
     );
     await writeFile(
       join(root, "self-closing-tab.docx"),
-      docx("User", "Permission", "<w:tab/>"),
+      docxBody(
+        '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="1701"/></w:tabs></w:pPr>' +
+          "<w:r><w:t>User</w:t><w:tab/><w:t>Permission</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "non-breaking-hyphen.docx"),
+      docx("X", "Frame-Options", "<w:noBreakHyphen/>"),
     );
     await writeFile(
       join(root, "tracked-change.docx"),
@@ -502,6 +522,26 @@ describe("scan knowledge bases", () => {
         '<w:p><w:r><w:t xml:space="preserve">Admin API is </w:t></w:r>' +
           '<w:del w:id="1" w:author="Example Author"><w:r><w:delText>public</w:delText></w:r></w:del>' +
           "<w:r><w:t>internal only</w:t></w:r></w:p>",
+      ),
+    );
+    await writeFile(
+      join(root, "tracked-move.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Rotate keys. </w:t></w:r>' +
+          '<w:moveFrom w:id="2" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveFrom></w:p>' +
+          '<w:p><w:moveTo w:id="3" w:author="Example Author"><w:r><w:t>Audit weekly.</w:t></w:r></w:moveTo></w:p>',
+      ),
+    );
+    await writeFile(
+      join(root, "content-controls.docx"),
+      docxBody(
+        '<w:p><w:r><w:t xml:space="preserve">Owner: </w:t></w:r>' +
+          "<w:sdt><w:sdtPr><w:showingPlcHdr/></w:sdtPr><w:sdtContent>" +
+          "<w:r><w:t>Click here to enter text.</w:t></w:r></w:sdtContent></w:sdt></w:p>" +
+          '<w:p><w:r><w:t xml:space="preserve">Data: </w:t></w:r>' +
+          '<w:sdt><w:sdtPr><w:showingPlcHdr w:val="0"/></w:sdtPr><w:sdtContent>' +
+          "<w:r><w:t>Confidential</w:t></w:r>" +
+          "</w:sdtContent></w:sdt></w:p>",
       ),
     );
     await writeFile(
@@ -517,14 +557,17 @@ describe("scan knowledge bases", () => {
     temporaryDirectories.track(knowledgeBase.path);
     const documents = await extractedDocuments(knowledgeBase.path);
 
-    expect(documents).toContain("Payment service boundary");
+    expect(documents).toContain("Policy guide\nRequire authentication");
     expect(documents).toContain("SSRF & IDOR\nReview authentication\n");
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
     expect(documents).toContain("Role\tCapability\n");
     expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("X-Frame-Options\n");
     expect(documents).toContain("Admin API is internal only\n");
+    expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
     expect(documents).toContain("See the runbook\n");
+    expect(documents).toContain("Owner: \nData: Confidential\n");
   });
 
   test.each([
@@ -641,6 +684,20 @@ describe("scan knowledge bases", () => {
         "<w:delInstrText>removed field</w:delInstrText></w:r></w:del>" +
         "<w:r><w:instrText>Visible scope</w:instrText></w:r></w:p>",
       "Visible scope\n",
+    ],
+    [
+      "drawing placement and relative dimensions around visible text",
+      '<w:p xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:r><w:t>Before </w:t>' +
+        '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+        '<mc:Choice Requires="wps"><w:drawing><d:anchor><d:positionH relativeFrom="column"><d:align>center</d:align></d:positionH>' +
+        '<d:positionV relativeFrom="paragraph"><d:posOffset><![CDATA[12700]]></d:posOffset></d:positionV>' +
+        "<wps:txbx><w:txbxContent><w:p><w:r><w:t>Rule 12700.</w:t></w:r></w:p></w:txbxContent></wps:txbx>" +
+        '<sizeRelH xmlns="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"><pctWidth>75000</pctWidth></sizeRelH>' +
+        '</d:anchor></w:drawing></mc:Choice><mc:Fallback><w:pict><v:textbox xmlns:v="urn:schemas-microsoft-com:vml">' +
+        '<div xmlns:d="urn:example:format">Rule <d:align>12700.</d:align></div></v:textbox></w:pict></mc:Fallback></mc:AlternateContent>' +
+        "<w:drawing><d:anchor><d:positionH><d:posOffset>25400</d:posOffset></d:positionH></d:anchor></w:drawing>" +
+        "<w:t> After.</w:t></w:r></w:p>",
+      "Before Rule 12700.\nRule 12700. After.\n",
     ],
   ])("preserves DOCX text with %s", async (_description, body, expected) => {
     const root = await temporaryDirectory();
@@ -820,16 +877,72 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Boundary &#x110000; case.\n");
   });
 
-  test("skips Office owner files while a document is open", async () => {
+  test("skips Office owner files and LibreOffice lock files during discovery", async () => {
     const root = await temporaryDirectory();
     await writeFile(join(root, "policy.docx"), docx("Access policy."));
     await writeFile(join(root, "~$policy.docx"), new Uint8Array(162).fill(1));
+    await writeFile(
+      join(root, ".~lock.policy.docx#"),
+      ",Example User,example-host,01.01.2026 09:00,file:///home/example/.config/libreoffice/4;",
+    );
+    await writeFile(join(root, ".~lock.#"), "Named document");
 
     const knowledgeBase = await prepareKnowledgeBase([root]);
     temporaryDirectories.track(knowledgeBase.path);
 
-    expect(await extractedDocuments(knowledgeBase.path)).toEqual([
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
       "Access policy.\n",
+      "Named document",
+    ]);
+  });
+
+  test.each(["relative", "linked parent"])(
+    "stages knowledge in the worker-readable temporary directory: %s",
+    async (spelling) => {
+      const root = await temporaryDirectory();
+      const source = join(root, "policy.md");
+      await writeFile(source, "Synthetic policy.");
+      const staging = join(root, "staging");
+      await mkdir(staging);
+      let temporary = relative(process.cwd(), staging);
+      if (spelling === "linked parent") {
+        const child = join(staging, "child");
+        const link = join(root, "alias");
+        await mkdir(child);
+        await symlink(
+          child,
+          link,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        temporary = link + sep + "..";
+      }
+      const expected = await filesystem.realpath(temporary);
+      using _temporary = spyOn(os, "tmpdir").mockReturnValue(temporary);
+      const prepared = await prepareKnowledgeBase([source]);
+      expect(dirname(prepared.path)).toBe(expected);
+      expect(await extractedDocuments(prepared.path)).toEqual([
+        "Synthetic policy.",
+      ]);
+    },
+  );
+
+  test("skips macOS metadata files copied next to documents", async () => {
+    const root = await temporaryDirectory();
+    await writeFile(join(root, "guide.md"), "Rotate admin keys monthly.");
+    await writeFile(join(root, "policy.pdf"), pdf("Access policy."));
+    await writeFile(join(root, "._policy.md"), "Keep audit records.");
+    const appleDouble = Buffer.alloc(82);
+    appleDouble.write("\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X", "latin1");
+    await writeFile(join(root, "._guide.md"), appleDouble);
+    await writeFile(join(root, "._policy.pdf"), appleDouble);
+
+    const knowledgeBase = await prepareKnowledgeBase([root]);
+    temporaryDirectories.track(knowledgeBase.path);
+
+    expect((await extractedDocuments(knowledgeBase.path)).sort()).toEqual([
+      "Access policy.",
+      "Keep audit records.",
+      "Rotate admin keys monthly.",
     ]);
   });
 
@@ -899,6 +1012,25 @@ describe("scan knowledge bases", () => {
     );
   });
 
+  testPosix(
+    "a directory link before a parent traversal cannot select outside documents",
+    async () => {
+      const repository = await temporaryDirectory();
+      const outside = await temporaryDirectory();
+      await mkdir(join(outside, "child"));
+      await symlink(join(outside, "child"), join(repository, "context"));
+      await writeFile(join(outside, "guide.md"), "External data");
+      const requested = `${repository}/context/../guide.md`;
+      await expect(prepareKnowledgeBase([requested])).rejects.toThrow();
+      await writeFile(join(repository, "guide.md"), "Repository guide");
+      const prepared = await prepareKnowledgeBase([requested]);
+      temporaryDirectories.track(prepared.path);
+      expect(await extractedDocuments(prepared.path)).toEqual([
+        "Repository guide",
+      ]);
+    },
+  );
+
   testPosix("does not follow symbolic links", async () => {
     const root = await temporaryDirectory();
     const source = join(root, "scope.md");
@@ -914,6 +1046,32 @@ describe("scan knowledge bases", () => {
     await expect(prepareKnowledgeBase([linked])).rejects.toThrow(
       "cannot be symbolic links",
     );
+  });
+
+  test("checks each directory link on the way to an external document", async () => {
+    const repository = await temporaryDirectory();
+    const external = await temporaryDirectory();
+    await writeFile(join(external, "guide.md"), "External policy.");
+    const escape = join(repository, "outside");
+    const viaRepository = join(external, "via-repository");
+    const operatorAlias = join(external, "current");
+    await symlink(external, escape, "junction");
+    await symlink(escape, viaRepository, "junction");
+    await symlink(external, operatorAlias, "junction");
+    const read = (directory: string, checkout: string) =>
+      readKnowledgeBaseSnapshot(
+        [join(directory, "guide.md")],
+        undefined,
+        checkout,
+      );
+    await expect(read(viaRepository, repository)).rejects.toThrow(
+      "repository directory links",
+    );
+    for (const checkout of [repository, external]) {
+      expect(
+        Object.values((await read(operatorAlias, checkout)).documents),
+      ).toEqual(["External policy."]);
+    }
   });
 
   testPosix("rejects unreadable source documents", async () => {

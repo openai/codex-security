@@ -2,13 +2,12 @@ import test from "node:test";
 import { publishReceiptFixture } from "./deep_scan_coverage_fixture.ts";
 
 for (const resume of [false, true]) {
-  for (const outcome of ["completion", "recovery", "no parent"]) {
+  for (const outcome of ["completion", "recovery", "no parent"] as const) {
     test(`shared scan receipts survive ${resume ? "reconstruction" : "live retry"} and ${outcome}`, () =>
       publishReceiptFixture({
         receiptRetry: true,
         sharedReceipt: true,
-        stopAfterDraft: outcome === "recovery",
-        stopBeforeDraft: outcome === "no parent",
+        outcome,
         resume,
       }));
 
@@ -16,8 +15,7 @@ for (const resume of [false, true]) {
       publishReceiptFixture({
         receiptRetry: true,
         receiptSpelling: "shared scan",
-        stopAfterDraft: outcome === "recovery",
-        stopBeforeDraft: outcome === "no parent",
+        outcome,
         resume,
       }));
 
@@ -27,8 +25,7 @@ for (const resume of [false, true]) {
           receiptRetry: true,
           sharedReceipt,
           emptyReceipt: true,
-          stopAfterDraft: outcome === "recovery",
-          stopBeforeDraft: outcome === "no parent",
+          outcome,
           resume,
         }));
     }
@@ -37,8 +34,7 @@ for (const resume of [false, true]) {
         receiptRetry: true,
         receiptSpelling: "shared scan",
         emptyReceipt: true,
-        stopAfterDraft: outcome === "recovery",
-        stopBeforeDraft: outcome === "no parent",
+        outcome,
         resume,
       }));
 
@@ -46,8 +42,7 @@ for (const resume of [false, true]) {
       publishReceiptFixture({
         receiptRetry: true,
         receiptCollision: true,
-        stopAfterDraft: outcome === "recovery",
-        stopBeforeDraft: outcome === "no parent",
+        outcome,
         resume,
       }));
 
@@ -56,8 +51,7 @@ for (const resume of [false, true]) {
         receiptRetry: true,
         receiptSpelling: "shared scan",
         receiptCollision: true,
-        stopAfterDraft: outcome === "recovery",
-        stopBeforeDraft: outcome === "no parent",
+        outcome,
         resume,
       }));
   }

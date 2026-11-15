@@ -3,7 +3,6 @@ import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdin } from "node:process";
 import { Writable } from "node:stream";
-import { checkbox, confirm, input, search, Separator } from "@inquirer/prompts";
 import { Octokit } from "@octokit/core";
 import Papa from "papaparse";
 import { createAuthenticatedGitHub } from "./github.js";
@@ -147,7 +146,7 @@ export async function runBulkScanWizard(
     return null;
   }
 
-  prompt.write(`\nFound ${discovered.length} repositories.\n`);
+  prompt.write(`\nFound ${formatRepositoryCount(discovered.length)}.\n`);
   const repositories = await selectGitHubRepositories(
     discovered,
     prompt,
@@ -167,7 +166,7 @@ export async function runBulkScanWizard(
   const inputPath = join(outputDir, "repositories.csv");
   await validateWizardOutput(outputDir);
   prompt.write(
-    `\nReady to scan ${repositories.length} repositories?\n` +
+    `\nReady to scan ${formatRepositoryCount(repositories.length)}?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
   if (!(await prompt.confirm("Start scanning?", false, signal))) {
@@ -226,20 +225,26 @@ async function selectGitHubOwner(
   return personal;
 }
 
+function formatRepositoryCount(count: number): string {
+  return count === 1 ? "1 repository" : `${count} repositories`;
+}
+
 async function selectGitHubRepositories(
   repositories: GitHubRepository[],
   prompt: BulkScanPrompt,
   signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
+  const allLabel =
+    repositories.length === 1
+      ? "All repositories"
+      : `All ${formatRepositoryCount(repositories.length)}`;
   const selected = new Set<string>();
   while (selected.size < repositories.length) {
     const choice = await prompt.select(
       "Select repositories to scan (type to filter)",
       [
         {
-          label: selected.size
-            ? `Done (${selected.size} selected)`
-            : `All ${repositories.length} repositories`,
+          label: selected.size ? `Done (${selected.size} selected)` : allLabel,
           value: "",
         },
         ...repositories
@@ -346,12 +351,18 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
     write: (value) => {
       output.write(value);
     },
-    confirm: (message, defaultValue = false, signal) =>
-      confirm({ message, default: defaultValue }, context(signal)),
-    input: (message, defaultValue, signal) =>
-      input({ message, default: defaultValue }, context(signal)),
-    checkbox: (message, options, presentation, signal) =>
-      checkbox(
+    async confirm(message, defaultValue = false, signal) {
+      const { default: confirm } = await import("@inquirer/confirm");
+      return confirm({ message, default: defaultValue }, context(signal));
+    },
+    async input(message, defaultValue, signal) {
+      const { default: input } = await import("@inquirer/input");
+      return input({ message, default: defaultValue }, context(signal));
+    },
+    async checkbox(message, options, presentation, signal) {
+      const { default: checkbox, Separator } =
+        await import("@inquirer/checkbox");
+      return checkbox(
         {
           message,
           choices: [
@@ -367,9 +378,11 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
           required: presentation?.required,
         },
         context(signal),
-      ),
-    select: (message, options, presentation, signal) =>
-      search(
+      );
+    },
+    async select(message, options, presentation, signal) {
+      const { default: search } = await import("@inquirer/search");
+      return search(
         {
           message,
           ...(presentation?.header === undefined
@@ -394,6 +407,7 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
               })),
         },
         context(signal),
-      ),
+      );
+    },
   };
 }

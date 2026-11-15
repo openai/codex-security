@@ -2,6 +2,7 @@ export interface SourceCase {
   id: string;
   path: string;
   line: number;
+  endLine?: number;
   cwes: string[];
 }
 
@@ -15,7 +16,7 @@ export function createFixture(): Fixture {
   const files: Record<string, string> = {
     "README.md": `# Account portal
 
-This Python Flask service serves authenticated tenant accounts. Both the account
+This Python Flask 3.1 service serves authenticated tenant accounts. Both the account
 and billing routes are currently supported. The sign-in service creates signed
 Flask sessions containing a server-selected integer tenant_id; clients cannot
 choose that value. The session signing key comes from deployment configuration.
@@ -27,6 +28,16 @@ Export downloads are available to all authenticated users, but only files under
 /srv/portal/exports may be downloaded. That directory and its symlinks are
 deployment-managed; account users cannot create or modify files there. Other
 server files, including configuration, must remain private.
+
+Private monthly statements are stored separately under
+/srv/portal/statements/<tenant_id>/monthly.csv. A signed-in user may download
+only their own tenant's statements. Tenant numbers are present in the account
+directory. The operator manages the statement directories and their contents.
+
+Account users also receive short-lived signed report grants for their tenant.
+Only the report issuer and the portal hold the report signing key. When a
+client presents a pair of grants, the portal may release invoices only for
+a tenant covered by a valid grant.
 
 Preview endpoints render user-provided titles in HTML for the signed-in browser.
 The deployment does not add an HTML sanitizer or Content-Security-Policy header.
@@ -43,10 +54,12 @@ import sqlite3
 from flask import Flask, abort, g, session
 
 from .downloads import downloads
+from .grants import grants
 from .invoices import invoices
 from .partners import partners
 from .preview import preview
 from .search import search
+from .statements import statements
 
 app = Flask(__name__)
 app.secret_key = os.environ["SESSION_SIGNING_KEY"]
@@ -76,6 +89,8 @@ app.register_blueprint(search)
 app.register_blueprint(downloads)
 app.register_blueprint(preview)
 app.register_blueprint(partners)
+app.register_blueprint(statements)
+app.register_blueprint(grants)
 `,
     "src/__init__.py": "",
     "src/invoices.py": `from flask import Blueprint, abort, g, jsonify
@@ -149,6 +164,88 @@ def billing_download():
         abort(403)
     return send_file(target, as_attachment=True)
 `,
+    "src/statements.py": `from pathlib import Path
+
+from flask import Blueprint, abort, g, send_file
+
+statements = Blueprint("statements", __name__)
+STATEMENT_ROOT = Path("/srv/portal/statements")
+
+
+def statement_path(tenant_id, name):
+    root = (STATEMENT_ROOT / str(tenant_id)).resolve()
+    target = (root / name).resolve()
+    if not target.is_relative_to(root):
+        abort(403)
+    return target
+
+
+@statements.get("/account/statements/<int:tenant_id>/<path:name>")
+def account_statement(tenant_id, name):
+    return send_file(statement_path(tenant_id, name), as_attachment=True)
+
+
+@statements.get("/billing/statements/<path:name>")
+def billing_statement(name):
+    return send_file(statement_path(g.tenant_id, name), as_attachment=True)
+`,
+    "src/grants.py": `import os
+
+from flask import Blueprint, abort, g, jsonify, request
+from itsdangerous import BadData, URLSafeTimedSerializer
+
+grants = Blueprint("grants", __name__)
+signer = URLSafeTimedSerializer(os.environ["REPORT_SIGNING_KEY"], salt="tenant-report")
+
+
+def submitted_grants():
+    request.max_content_length = 4096
+    envelope = request.get_json()
+    batch = envelope.get("grants") if isinstance(envelope, dict) else None
+    if not isinstance(batch, list) or len(batch) != 2:
+        abort(400)
+    for grant in batch:
+        if not isinstance(grant, dict):
+            abort(400)
+        tenant = grant.get("tenant_id")
+        proof = grant.get("proof")
+        if type(tenant) is not int or not 0 < tenant < 2**63:
+            abort(400)
+        if not isinstance(proof, str) or not proof.isascii():
+            abort(400)
+    return batch
+
+
+def verified_grant(batch):
+    for grant in batch:
+        try:
+            tenant = signer.loads(grant["proof"], max_age=300)
+        except BadData:
+            continue
+        if tenant == grant["tenant_id"]:
+            return grant
+    abort(403)
+
+
+def invoice_report(tenant_id):
+    rows = g.database.execute(
+        "SELECT id, recipient, total FROM invoices WHERE tenant_id = ?", (tenant_id,)
+    ).fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@grants.post("/account/report")
+def account_report():
+    batch = submitted_grants()
+    verified_grant(batch)
+    return invoice_report(batch[0]["tenant_id"])
+
+
+@grants.post("/billing/report")
+def billing_report():
+    grant = verified_grant(submitted_grants())
+    return invoice_report(grant["tenant_id"])
+`,
     "src/preview.py": `from html import escape
 
 from flask import Blueprint, Response, request
@@ -212,13 +309,28 @@ CREATE TABLE catalog (
     cwes: string[],
     occurrence = 0,
   ): SourceCase => {
-    const matchingLines = files[path]
-      .split("\n")
-      .flatMap((line, index) => (line.includes(marker) ? [index + 1] : []));
+    const lines = files[path].split("\n");
+    const markers = marker.split("\n");
+    const matchingLines = lines.flatMap((_, index) =>
+      markers.every((part, offset) => lines[index + offset]?.includes(part))
+        ? [index + 1]
+        : [],
+    );
     const line = matchingLines[occurrence];
     if (!line) throw new Error(`Fixture marker missing: ${id}`);
-    return { id, path, line, cwes };
+    const expected: SourceCase = { id, path, line, cwes };
+    if (markers.length > 1) expected.endLine = line + markers.length - 1;
+    return expected;
   };
+  const tenantAccessCwes = ["CWE-639", "CWE-862", "CWE-863", "CWE-284"];
+  const grantCwes = [
+    ...tenantAccessCwes,
+    "CWE-347",
+    "CWE-345",
+    "CWE-287",
+    "CWE-349",
+    "CWE-252",
+  ];
   return {
     files,
     positives: [
@@ -226,7 +338,7 @@ CREATE TABLE catalog (
         "invoice-tenant-isolation",
         "src/invoices.py",
         'FROM invoices WHERE id = ?"',
-        ["CWE-639", "CWE-862", "CWE-863", "CWE-284"],
+        tenantAccessCwes,
       ),
       sourceCase("catalog-sql-injection", "src/search.py", "query = f", [
         "CWE-89",
@@ -249,13 +361,25 @@ CREATE TABLE catalog (
         'requests.head(request.args["url"]',
         ["CWE-918"],
       ),
+      sourceCase(
+        "statement-tenant-selection",
+        "src/statements.py",
+        "send_file(statement_path(tenant_id, name)",
+        tenantAccessCwes,
+      ),
+      sourceCase(
+        "report-unverified-grant",
+        "src/grants.py",
+        'verified_grant(batch)\nreturn invoice_report(batch[0]["tenant_id"])',
+        grantCwes,
+      ),
     ],
     controls: [
       sourceCase(
         "invoice-scoped-query",
         "src/invoices.py",
         "AND tenant_id = ?",
-        ["CWE-639", "CWE-862", "CWE-863", "CWE-284"],
+        tenantAccessCwes,
       ),
       sourceCase("catalog-bound-parameters", "src/search.py", "name LIKE ?", [
         "CWE-89",
@@ -278,6 +402,24 @@ CREATE TABLE catalog (
         "src/partners.py",
         "requests.head(url,",
         ["CWE-918"],
+      ),
+      sourceCase(
+        "statement-session-tenant",
+        "src/statements.py",
+        "send_file(statement_path(g.tenant_id, name)",
+        tenantAccessCwes,
+      ),
+      sourceCase(
+        "statement-contained-path",
+        "src/statements.py",
+        "if not target.is_relative_to(root):",
+        ["CWE-22", "CWE-23", "CWE-36", "CWE-73"],
+      ),
+      sourceCase(
+        "report-verified-grant",
+        "src/grants.py",
+        "return invoice_report(grant[",
+        grantCwes,
       ),
     ],
   };

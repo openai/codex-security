@@ -1,6 +1,5 @@
 import { workbenchArgs } from "../workbench-arguments.js";
 import { readDeepScanProjectConfig } from "./project-config.js";
-import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
@@ -14,7 +13,6 @@ import {
   isStaleCoordinatorGenerationError,
 } from "./errors.js";
 import type {
-  DedupCommit,
   DeepScanCoordinatorClaim,
   DeepScanCoordinatorLeaseInput,
   DeepScanRunState,
@@ -111,8 +109,7 @@ class DeepScanPersistenceError extends Error {
 
 const RETRYABLE_PERSISTENCE_COMMANDS = new Set([
   "upsert-deep-scan-worker",
-  "claim-deep-scan-dedup",
-  "commit-deep-scan-dedup",
+  "record-deep-scan-iteration",
   "finish-deep-scan",
   "record-deep-scan-publication-failure",
 ]);
@@ -138,12 +135,15 @@ export class WorkbenchDeepScanStore {
     handoffClaimToken?: string;
     model?: string;
     reasoningEffort?: string;
+    serviceTier?: string;
     threadId: string;
+    modelThreadId?: string;
     scanRoot: string;
   }): Promise<DeepScanRunState> {
     const userContext = input.userContext;
     const args = {
       threadId: input.threadId,
+      modelThreadId: input.modelThreadId,
       scanId: input.scanId || undefined,
       targetPath: input.targetPath || undefined,
       projectConfigPath: input.projectConfigPath,
@@ -152,8 +152,8 @@ export class WorkbenchDeepScanStore {
       claimToken: input.handoffClaimToken || undefined,
       model: input.model || undefined,
       reasoningEffort: input.reasoningEffort || undefined,
+      serviceTier: input.serviceTier,
       scanRoot: input.scanRoot,
-      availableParallelism: availableParallelism(),
       workflowVersion: WORKFLOW_VERSION,
     };
     let result = await this.enqueueWrite(
@@ -290,6 +290,7 @@ export class WorkbenchDeepScanStore {
         sdkThreadId: update.threadId || undefined,
       }),
       ...(update.error ? [`--error-message=${update.error}`] : []),
+      ...(update.terminalFailure ? ["--terminal-failure"] : []),
       ...(update.replaceableFailureKind
         ? ["--replaceable-failure-kind", update.replaceableFailureKind]
         : []),
@@ -297,35 +298,24 @@ export class WorkbenchDeepScanStore {
     return parseWorker(result, update.id);
   }
 
-  async claimDedup(input: {
-    id: string;
+  async recordIteration(input: {
     scanId: string;
+    id: string;
     workerIds: string[];
-    promptPath: string;
-    artifactDir: string;
-  }): Promise<void> {
-    await this.enqueueWrite(
-      workbenchArgs("claim-deep-scan-dedup", {
-        scanId: input.scanId,
-        workerId: input.id,
-        promptPath: input.promptPath,
-        artifactDir: input.artifactDir,
-        coordinatorGeneration: this.coordinatorGeneration(input.scanId),
-        inputWorkerId: input.workerIds,
-      }),
-    );
-  }
-
-  async commitDedup(commit: DedupCommit): Promise<DeepScanRunState> {
+    resultPath: string;
+    noNewStreak: number;
+    consecutiveErrors: number;
+  }): Promise<DeepScanRunState> {
     return parseDeepScan(
       await this.enqueueWrite(
-        workbenchArgs("commit-deep-scan-dedup", {
-          scanId: commit.scanId,
-          workerId: commit.id,
-          coordinatorGeneration: this.coordinatorGeneration(commit.scanId),
-          resultManifestPath: commit.resultManifestPath,
-          candidateLedgerPath: commit.candidateLedgerPath || undefined,
-          newFindingsCount: commit.newFindings,
+        workbenchArgs("record-deep-scan-iteration", {
+          scanId: input.scanId,
+          workerId: input.id,
+          inputWorkerId: input.workerIds,
+          resultManifestPath: input.resultPath,
+          noNewStreak: input.noNewStreak,
+          consecutiveErrors: input.consecutiveErrors,
+          coordinatorGeneration: this.coordinatorGeneration(input.scanId),
         }),
       ),
     );
@@ -415,7 +405,7 @@ export class WorkbenchDeepScanStore {
     );
   }
 
-  private coordinatorGeneration(scanId: string): number | undefined {
+  coordinatorGeneration(scanId: string): number | undefined {
     return this.coordinatorLeases.get(scanId)?.run.coordinatorGeneration;
   }
 
@@ -428,13 +418,6 @@ export class WorkbenchDeepScanStore {
    * other workbench processes. Reads remain concurrent and observe a committed
    * state before or after each mutation.
    */
-  coordinatorLeaseArgs(scanId: string): string[] {
-    const generation = this.coordinatorGeneration(scanId);
-    return generation === undefined
-      ? []
-      : ["--coordinator-generation", String(generation)];
-  }
-
   private enqueueWrite(args: string[], input?: string): Promise<JsonObject> {
     const operation = this.writeTail.then(async () => {
       try {

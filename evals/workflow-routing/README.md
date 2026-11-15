@@ -5,16 +5,7 @@ production security skill for a natural-language request. The request does not
 name a skill. The eval stops after workflow selection and loading, before source
 review, scan startup, triage, patching, or verification.
 
-| Request                                    | Expected skill       |
-| ------------------------------------------ | -------------------- |
-| Ordinary repository security review        | `security-scan`      |
-| Security review of uncommitted changes     | `security-diff-scan` |
-| Explicit exhaustive, multi-pass scan       | `deep-security-scan` |
-| Assess a supplied vulnerability claim      | `triage-finding`     |
-| Implement and test a security fix          | `fix-finding`        |
-| Explicitly verify an existing security fix | `verify-fix`         |
-| Fix an ordinary sorting bug                | None                 |
-| Check a refactor's build and unit tests    | None                 |
+See [the routing cases](cases.mts) for each prompt and expected skill.
 
 The negative controls catch accidental security-workflow activation. In
 particular, testing a fix does not automatically request the standalone
@@ -22,20 +13,27 @@ particular, testing a fix does not automatically request the standalone
 
 ## Run
 
-Use the repository's normal SDK and MCP dependency setup, then:
+[Build the evaluation tools](../README.md#build-the-evaluation-tools), then run the commands below from the repository root.
+
+## Deterministic checks
+
+Run the CI checks for staging, expected routes, false-positive trace rejection, cancellation, and SDK thread setup without making model calls:
 
 ```sh
-pnpm --dir sdk/typescript run build:evals
+node --experimental-strip-types --test evals/workflow-routing/test_*.mts
+```
+
+## Run a model evaluation
+
+To measure model routing accuracy, run the following command from the same directory. It consumes model usage. Pass a model name as a positional argument to select one explicitly. If omitted, Codex selects a default and the SDK does not report its name.
+
+```sh
 node --experimental-strip-types evals/workflow-routing/run.mts
 ```
 
-An optional positional argument selects a model. Without one, Codex selects its
-default; the SDK does not expose that resolved model. Model runs consume usage
-and are not part of CI.
-
 The runner reuses the secret-discovery eval's private-home authentication,
 restricted permission profile, native preflight, cancellation draining, and
-cleanup. See its [runtime notes](../secret-discovery/README.md#run), including
+cleanup. See its [runtime notes](../secret-discovery/README.md#runtime-and-isolation), including
 saved-login refresh behavior and the Windows elevated-sandbox requirement. It
 also isolates `HOME` so ambient user skills do not enter discovery. Each case
 starts a fresh thread with the fixture as its authoritative working directory.
@@ -71,13 +69,3 @@ stops at the routing boundary; a passing case must not be presented as a complet
 security task. It does not parse arbitrary shell programs to prove what they
 read. Unsupported command-output formats can fail the content-based grader and
 should be reviewed in the retained transcript before changing the assertion.
-
-## Deterministic checks
-
-```sh
-node --experimental-strip-types --test evals/workflow-routing/test_*.mts
-```
-
-Normal CI checks unchanged production staging, each expected route, negative
-controls, false-positive trace rejection, failures, cancellation, and SDK thread
-setup. These checks validate the harness; they do not establish model accuracy.

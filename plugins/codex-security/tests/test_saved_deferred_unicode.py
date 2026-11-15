@@ -1,3 +1,5 @@
+"""Recover and publish scans whose earlier writers stored Unicode review identifiers."""
+
 from __future__ import annotations
 
 import json
@@ -64,8 +66,7 @@ def test_stopped_publication_recovers_after_unicode_reviews_are_closed(tmp_path:
         scan_id,
         deferred=[{"reason": reason, "paths": ["src/example.py"]} for reason, _ in SURROGATE_IDS],
     )
-    checkpoint = write_checkpoint(result.parent / "checkpoints", pending)
-    os.utime(checkpoint, ns=(100, 100))
+    write_checkpoint(result.parent / "checkpoints", pending, mtime_ns=100)
     closed = saved_draft(
         scan_id,
         closures=[{"id": identity, "reason": "Review completed."} for _, identity in SURROGATE_IDS],

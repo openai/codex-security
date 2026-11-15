@@ -48,6 +48,17 @@ export function temporaryDirectory(
   return createPluginTemporaryDirectory(prefix, canonicalize);
 }
 
+export async function scopedTemporaryDirectory(
+  prefix: string,
+  canonicalize = true,
+) {
+  const path = await temporaryDirectory(prefix, canonicalize);
+  return {
+    path,
+    [Symbol.asyncDispose]: () => rm(path, { recursive: true, force: true }),
+  };
+}
+
 export function createTemporaryDirectoriesSync(canonicalize = false) {
   const roots: string[] = [];
   return {
