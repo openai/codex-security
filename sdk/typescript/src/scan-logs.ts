@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
 import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
-import { sessionFiles } from "./cost.js";
+import { compressedSessionThreadId, sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -22,6 +22,7 @@ import { shortArchivePrefix } from "./scan-archive-path.js";
 interface ScanLogOptions {
   scanId: string;
   threadId?: string;
+  onlyRequestedThread?: boolean;
   threadIds?: readonly string[];
   executionThreadIds?: readonly string[];
   codexHome: string | readonly string[];
@@ -90,14 +91,32 @@ export function readSavedScanLogs(
 
 type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
-async function* scanSessions(codexHome: string, directory = "sessions") {
+async function* scanSessions(
+  codexHome: string,
+  directory = "sessions",
+  onlyThreadId?: string,
+) {
   for await (const path of sessionFiles(join(codexHome, directory), true)) {
-    const first = await firstSessionEvent(path);
+    let first;
+    try {
+      first = await firstSessionEvent(path);
+    } catch (error) {
+      // During an owner-only lookup, a damaged native archive for a different
+      // thread cannot supply the requested settings. Unknown archives still fail.
+      const archiveThread = compressedSessionThreadId(path);
+      if (onlyThreadId && archiveThread && archiveThread !== onlyThreadId)
+        continue;
+      throw error;
+    }
     if (first?.["type"] !== "session_meta" || !isRecord(first["payload"]))
       continue;
     const metadata = first["payload"];
     const threadId = metadata["id"];
-    if (typeof threadId !== "string") continue;
+    if (
+      typeof threadId !== "string" ||
+      (onlyThreadId && onlyThreadId !== threadId)
+    )
+      continue;
     yield {
       threadId,
       parentThreadId: sessionParentThreadId(metadata),
@@ -137,7 +156,11 @@ export async function readScanLogs(options: ScanLogOptions) {
   // Recovered workers retain their original home; the parent can use the current home.
   for (const directory of ["sessions", "archived_sessions"]) {
     for (const home of homes) {
-      for await (const session of scanSessions(home, directory)) {
+      for await (const session of scanSessions(
+        home,
+        directory,
+        options.onlyRequestedThread ? options.threadId : undefined,
+      )) {
         const copies = logs.get(session.threadId);
         if (copies === undefined) logs.set(session.threadId, [session]);
         else copies.push(session);

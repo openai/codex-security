@@ -249,7 +249,7 @@ async function originalParentSettings(
     const log = await readScanLogs({
       scanId: parent.threadId,
       threadId: parent.threadId,
-      executionThreadIds: [],
+      onlyRequestedThread: true,
       codexHome: await fs.realpath(codexHome),
       allowMissingRoot: true,
     });

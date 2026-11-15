@@ -3727,7 +3727,7 @@ export class ScanCostTracker {
   }
 }
 
-function compressedSessionThreadId(path: string): string | null {
+export function compressedSessionThreadId(path: string): string | null {
   return (
     /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})(?:_[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12})?\.jsonl\.zst$/u.exec(
       basename(path),

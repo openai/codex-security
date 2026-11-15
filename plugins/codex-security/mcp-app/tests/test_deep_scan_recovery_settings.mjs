@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  rename,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -50,6 +51,38 @@ const {
   loadDeepScanExecutionSettings: loadSettings,
 } = module;
 try {
+  const ownerHome = join(root, "owner-home");
+  const ownerId = "00000000-0000-4000-8000-000000000001";
+  const otherId = "00000000-0000-4000-8000-000000000002";
+  const ownerHistory = join(ownerHome, "sessions");
+  const archives = join(ownerHome, "archived_sessions");
+  await mkdir(ownerHistory, { recursive: true });
+  await mkdir(archives);
+  await writeFile(
+    join(ownerHistory, "owner.jsonl"),
+    JSON.stringify({
+      type: "session_meta",
+      payload: { id: ownerId, model_provider: "owner-provider" },
+    }) + "\n",
+  );
+  const archivePath = (id) =>
+    join(archives, `rollout-2026-01-01T00-00-00-${id}.jsonl.zst`);
+  const captureOwner = () =>
+    captureSettings(
+      {},
+      { filesystemDenies: [] },
+      { CODEX_HOME: ownerHome, CODEX_CLI_PATH: process.execPath },
+      { threadId: ownerId },
+    );
+  await writeFile(
+    archivePath(otherId),
+    Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x60]),
+  );
+  assert.equal((await captureOwner()).modelProvider, "owner-provider");
+  await rename(archivePath(otherId), archivePath(ownerId));
+  await assert.rejects(captureOwner, /unexpected EOF/i);
+  await rename(archivePath(ownerId), join(archives, "unknown.jsonl.zst"));
+  await assert.rejects(captureOwner, /unexpected EOF/i);
   const settings = {
     codexPath: "/fixture/runtime/codex",
     codexHome: "/fixture/account",
