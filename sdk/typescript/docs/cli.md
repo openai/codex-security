@@ -1248,9 +1248,9 @@ codex-security login status
 
 Creation stops if the destination already exists. If creation is denied or the
 ancestry check fails, ask an administrator to provision a new private directory
-under a trusted ancestor. A "not logged in" result (exit code 1) is expected
-for the new directory. Use `codex-security login` to sign in and set the same
-`CODEX_SECURITY_STATE_DIR` in subsequent shells and SDK processes.
+under a trusted ancestor. If `login status` reports "not logged in" (exit code 1),
+run `codex-security login`. Set the same `CODEX_SECURITY_STATE_DIR` in subsequent
+shells and SDK processes.
 
 ### Progress and cost
 
