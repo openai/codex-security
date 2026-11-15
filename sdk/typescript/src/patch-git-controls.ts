@@ -25,6 +25,10 @@ import {
   resolve,
   sep,
 } from "node:path";
+import {
+  proxyUserinfo,
+  withoutUrlCredentials,
+} from "./patch-publication-hooks.js";
 import { gitAlternatePathBytes, gitMarkerRoot } from "./targets.js";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
@@ -199,6 +203,7 @@ export interface PatchGitControls {
   readonly nestedCheckouts: readonly string[];
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
+  readonly externalConfigPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
   readonly snapshotConfigPaths: readonly string[];
@@ -262,6 +267,39 @@ async function readConfiguredHooks(
         entry.slice(separator + 1),
       );
   }
+}
+
+// These settings can hold authentication material in the file itself. A
+// credential helper name or ordinary SSH command alone is not an inline secret.
+function hasInlineGitAuthentication(key: string, value: string): boolean {
+  if (
+    withoutUrlCredentials(key) !== key ||
+    withoutUrlCredentials(value) !== value
+  )
+    return true;
+  if (/^(?:http|remote)(?:\..*)?\.proxy$/iu.test(key))
+    return proxyUserinfo.test(value);
+  if (/^http(?:\..*)?\.extraheader$/iu.test(key)) {
+    const header = /^([^:]+):\s*(\S.*)$/u.exec(value);
+    return (
+      !!header &&
+      (/(?:^|-)(?:authorization|auth|token|api-?key|cookie|secret)(?:$|-)/iu.test(
+        header[1]!.trim(),
+      ) ||
+        /^(?:basic|bearer|digest|negotiate)\s+\S+/iu.test(header[2]!))
+    );
+  }
+  return (
+    /^credential(?:\..*)?\.helper$/iu.test(key) &&
+    value.startsWith("!") &&
+    /(?:password|credential|oauth_refresh_token)=/iu.test(value)
+  );
+}
+
+function rejectCredentialedGitDelegate(): never {
+  throw new Error(
+    "Cannot run Git filters or hooks with inline authentication in an external Git configuration file. Select a Git configuration without inline credentials for patching.",
+  );
 }
 
 // Resume has no model turn or private-index discovery. These queries only read configuration and paths.
@@ -656,6 +694,8 @@ export const PATCH_LOCAL_GIT_ENVIRONMENT = {
   GIT_ALLOW_PROTOCOL: "",
 } as const;
 
+export type PatchGitControlMode = "sandbox" | "external" | "resumed-hook";
+
 export async function capturePatchGitControls(
   directory: string,
   runGit: RunGit,
@@ -672,6 +712,7 @@ export async function capturePatchGitControls(
     alternateObjectDirectories: process.env["GIT_ALTERNATE_OBJECT_DIRECTORIES"],
   },
   automaticPublication = false,
+  mode: PatchGitControlMode = "sandbox",
 ): Promise<PatchGitControls | undefined> {
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
@@ -716,21 +757,26 @@ export async function capturePatchGitControls(
   const configPath = (field: string) =>
     controlPathText(Buffer.from(field, "latin1"));
   let root: string;
-  try {
-    const output = await runControl(directory, directory, [
-      "rev-parse",
-      "--show-toplevel",
-    ]);
-    if (output.length === 0) return undefined;
-    root = await realControlPath(output.replace(/\n$/u, ""));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (
-      message.includes("not a git repository") ||
-      message.toLowerCase() === "git is not available on a trusted path."
-    )
-      return undefined;
-    throw error;
+  if (mode === "resumed-hook") {
+    // Use the saved push's working directory, including a bare repository.
+    root = await realControlPath(directory);
+  } else {
+    try {
+      const output = await runControl(directory, directory, [
+        "rev-parse",
+        "--show-toplevel",
+      ]);
+      if (output.length === 0) return undefined;
+      root = await realControlPath(output.replace(/\n$/u, ""));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        message.includes("not a git repository") ||
+        message.toLowerCase() === "git is not available on a trusted path."
+      )
+        return undefined;
+      throw error;
+    }
   }
   const isGitDirectory = async (
     path: string,
@@ -856,6 +902,7 @@ export async function capturePatchGitControls(
   >();
   const snapshotStoragePaths = new Set<string>();
   const snapshotConfigPaths = new Set<string>();
+  const configurationFiles = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const externalCachePaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
@@ -902,6 +949,7 @@ export async function capturePatchGitControls(
     const control = controlPaths.get(path)!;
     if (control.contents !== undefined) return;
     if (!(await stat(control.canonical).catch(missing))?.isFile()) return;
+    configurationFiles.add(control.canonical);
     try {
       control.contents = await readFile(control.canonical);
       unreadableConfigurations.delete(path);
@@ -1102,6 +1150,11 @@ export async function capturePatchGitControls(
   let hasConditionalFilters = false;
   const filterDirectories = new Map<string, string>();
   let checkoutCleanFilter = false;
+  let configuredFilter = false;
+  let externalInlineAuthentication = false;
+  const snapshotFilter = (key: string) =>
+    /^filter\..+\.(?:clean|process)$/u.test(key) ||
+    (automaticPublication && /^filter\..+\.smudge$/u.test(key));
   const activeCheckoutFilters = async (
     checkout: string,
     configurationDirectory: string,
@@ -1167,14 +1220,34 @@ export async function capturePatchGitControls(
       });
     }
     const activeConfigurations = new Set<string>();
-    if (settings.some(({ key }) => /^hook\..+\.event$/u.test(key)))
+    if (
+      mode !== "resumed-hook" &&
+      settings.some(({ key }) => /^hook\..+\.event$/u.test(key))
+    )
       await readConfiguredHooks(publicationHooks, (args) =>
         runControl(root, checkout, args, {
           environment: configurationEnvironment,
         }),
       );
-    for (const { origin } of settings) {
+    if (!configuredFilter) {
+      const filters = new Map(
+        settings
+          .filter(({ key }) => snapshotFilter(key))
+          .map(({ key, value }) => [key, value]),
+      );
+      configuredFilter = [...filters.values()].some(Boolean);
+    }
+    for (const { scope, origin, key, value } of settings) {
       if (origin.startsWith("file:")) {
+        if (
+          hasInlineGitAuthentication(key, value) &&
+          (await userSelectedConfig(
+            scope,
+            configPath(origin),
+            configurationDirectory,
+          ))
+        )
+          externalInlineAuthentication = true;
         const path = relativeFile(
           configurationDirectory,
           configPath(origin.slice(5)),
@@ -1299,6 +1372,13 @@ export async function capturePatchGitControls(
         const separator = entry.indexOf("\n");
         const key = entry.slice(0, separator);
         const value = entry.slice(separator + 1);
+        configuredFilter ||=
+          automaticPublication && Boolean(value) && snapshotFilter(key);
+        if (
+          !insideSelectedRoots(control.canonical) &&
+          hasInlineGitAuthentication(key, value)
+        )
+          externalInlineAuthentication = true;
         recordConfiguredHook(
           publicationHooks,
           configPath(key),
@@ -1313,7 +1393,8 @@ export async function capturePatchGitControls(
           if (!userSelected || insideSelectedRoots(control.canonical))
             branchFilterSettings.add(configPath(key));
         }
-        if (key === "core.hookspath") await captureHooks(configPath(value));
+        if (key === "core.hookspath" && mode !== "resumed-hook")
+          await captureHooks(configPath(value));
         else if (/^(include|includeif\..*)\.path$/u.test(key))
           await captureInclude(
             origin,
@@ -1337,6 +1418,7 @@ export async function capturePatchGitControls(
         await userSelectedConfig(scope, origin, configurationDirectory),
       );
     }
+    if (mode === "resumed-hook") return;
     for (const path of activeConfigurations) await rememberConfiguration(path);
     if (
       automaticPublication &&
@@ -1421,6 +1503,15 @@ export async function capturePatchGitControls(
   const selectedDirectories = await Promise.all(
     selectedPaths.map(realControlPath),
   );
+  if (mode === "resumed-hook") {
+    // Resume has already found a hook. Inspect only its config graph, including
+    // inactive includes it could open directly. No private index or working tree
+    // walk is needed to publish the saved commit.
+    for (const path of selectedDirectories) await remember(path);
+    await captureReferences(root);
+    if (externalInlineAuthentication) rejectCredentialedGitDelegate();
+    return undefined;
+  }
   const gitDirectory = selectedDirectories[0]!;
   const commonDirectory = selectedDirectories[1]!;
   // A checkout's core.worktree can change Git's reported top-level directory.
@@ -1825,6 +1916,10 @@ export async function capturePatchGitControls(
                 "core.hooksPath=/dev/null",
                 "-c",
                 "hook.post-index-change.enabled=false",
+                ...[...publicationHooks.configured].flatMap((name) => [
+                  "-c",
+                  `hook.${name}.enabled=false`,
+                ]),
                 "-c",
                 "core.fsmonitor=false",
                 ...args,
@@ -1951,6 +2046,25 @@ export async function capturePatchGitControls(
       }
     };
     await visit(root);
+    if (
+      mode === "sandbox" &&
+      capture &&
+      externalInlineAuthentication &&
+      (configuredFilter ||
+        publicationHooks.events.has("post-index-change") ||
+        (automaticPublication &&
+          [
+            "post-checkout",
+            "pre-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-commit",
+            "pre-push",
+            "reference-transaction",
+            "pre-auto-gc",
+          ].some((event) => publicationHooks.events.has(event))))
+    )
+      rejectCredentialedGitDelegate();
     if (capture && checkoutCleanFilter) {
       // Inspect the original checkout before status or add can invoke a filter.
       const passive = [
@@ -2189,6 +2303,9 @@ export async function capturePatchGitControls(
     ],
     nestedCheckouts: [...nestedDirectories.keys()],
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
+    externalConfigPaths: [...configurationFiles].filter(
+      (path) => !insideSelectedRoots(path),
+    ),
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
     snapshotConfigPaths: [...snapshotConfigPaths],

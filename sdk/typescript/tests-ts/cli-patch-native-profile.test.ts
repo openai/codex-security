@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -90,7 +90,18 @@ async function resolvePatchProfile(
         join(repository, "cache"),
         process.platform === "win32" ? "junction" : "dir",
       );
-    const selectedConfig = join(home, "selected.gitconfig");
+    const selectedConfig = join(root, "selected.gitconfig");
+    if (optionalStorage === "selected") {
+      await writeFile(
+        selectedConfig,
+        '[http]\n extraHeader = "Authorization: Synthetic fixture"\n' +
+          "[include]\n path = included.gitconfig\n",
+      );
+      await writeFile(
+        join(root, "included.gitconfig"),
+        '[synthetic]\n source = "Included fixture"\n',
+      );
+    }
     execFileSync(
       "git",
       [
@@ -291,6 +302,7 @@ glob_scan_max_depth = 8
         name: "codex_security_patch",
         readOnlyPaths,
         modelOnlyReadOnlyPaths,
+        externalConfigPaths: controls?.externalConfigPaths,
         externalCachePaths,
       },
     });
@@ -307,13 +319,6 @@ glob_scan_max_depth = 8
     const configuration = responses.find((response) => response["id"] === 4)![
       "result"
     ] as RpcMessage;
-    const selected = await rpc("thread/start", {
-      cwd: repository,
-      ephemeral: true,
-      approvalPolicy: "never",
-      permissions: turn["params"].permissions,
-      config: start["params"].config,
-    });
     const expectedPolicy = {
       type: "workspaceWrite",
       writableRoots: configured ? [extra] : [],
@@ -341,16 +346,8 @@ glob_scan_max_depth = 8
       (request) => request["method"] === "command/exec",
     )!;
     expect(preflight["params"].sandboxPolicy).toEqual(expectedPolicy);
-    expect(selected["sandbox"]).toEqual(expectedPolicy);
-    expect(selected["sandbox"].writableRoots).not.toContain(
-      join(administration, "hooks"),
-    );
     const name = turn["params"].permissions as string;
     expect(name).not.toBe("codex_security_patch");
-    expect(selected["activePermissionProfile"]).toEqual({
-      id: name,
-      extends: ":workspace",
-    });
     const profiles = start["params"].config.permissions as Record<
       string,
       RpcMessage
@@ -370,9 +367,19 @@ glob_scan_max_depth = 8
       ...snapshotFilesystem,
       ...Object.fromEntries(
         [
-          ...modelOnlyReadOnlyPaths,
+          ...modelOnlyReadOnlyPaths.filter(
+            (path) =>
+              !readOnlyPaths.includes(dirname(path)) ||
+              (configured && dirname(path) === extra),
+          ),
           ...(configured ? externalCachePaths : []),
         ].map((path) => [path, { ".": "read" }]),
+      ),
+      ...Object.fromEntries(
+        (controls?.externalConfigPaths ?? []).map((path) => [
+          path,
+          { ".": "deny" },
+        ]),
       ),
     });
     expect(await readFile(join(administration, "config"))).toEqual(
@@ -416,6 +423,22 @@ glob_scan_max_depth = 8
         return result["stdout"] as string;
       });
     }
+    // Resolve the selected policy after exercising the normal snapshot/turn order.
+    const selected = await rpc("thread/start", {
+      cwd: repository,
+      ephemeral: true,
+      approvalPolicy: "never",
+      permissions: turn["params"].permissions,
+      config: start["params"].config,
+    });
+    expect(selected["sandbox"]).toEqual(expectedPolicy);
+    expect(selected["sandbox"].writableRoots).not.toContain(
+      join(administration, "hooks"),
+    );
+    expect(selected["activePermissionProfile"]).toEqual({
+      id: name,
+      extends: ":workspace",
+    });
     return context;
   } finally {
     clearTimeout(timeout);
@@ -452,6 +475,54 @@ test.each([false, true])(
   },
   30_000,
 );
+
+test("patch model cannot read external Git configuration used by snapshots", async () => {
+  await resolvePatchProfile(
+    false,
+    "selected",
+    true,
+    async (context, inspectModel) => {
+      const root = dirname(context.repository);
+      const selected = join(root, "selected.gitconfig");
+      const included = join(root, "included.gitconfig");
+      const temporary = await fixtures.create("patch-model-config-");
+      const reads = await inspectModel(
+        `const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const paths = ${JSON.stringify([selected, included])};
+for (const path of paths) {
+  try { process.stdout.write(fs.readFileSync(path)); }
+  catch (error) { process.stdout.write(error.code); }
+}
+const git = spawnSync("git", ["config", "--file", paths[0], "--get", "http.extraHeader"]);
+if (git.stdout) process.stdout.write(git.stdout);`,
+        temporary,
+      );
+      expect(reads).not.toContain("Synthetic fixture");
+      expect(reads).not.toContain("Included fixture");
+      const environment = patchSnapshotEnvironment(temporary, {
+        ...process.env,
+        CODEX_HOME: context.home,
+        GIT_CONFIG_GLOBAL: selected,
+      });
+      expect(
+        await runRepositoryCommand(
+          "git",
+          ["config", "--get", "synthetic.source"],
+          context.repository,
+          {
+            sandbox: {
+              directory: context.repository,
+              environment,
+              profile: context.snapshotProfile,
+              gitEnvironment: { GIT_CONFIG_GLOBAL: selected },
+            },
+          },
+        ),
+      ).toBe("Included fixture");
+    },
+  );
+}, 30_000);
 
 test.each(["administration", "direct-administration"] as const)(
   "storage keeps overlapping Git administration protected in snapshots: %s",

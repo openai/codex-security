@@ -1,4 +1,5 @@
 import { gitText } from "./support/shell.js";
+import { loopbackProxy, loopbackTls } from "./support/loopback-git-proxy.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
 import {
@@ -323,15 +324,17 @@ exit 1
   );
 
   test.each(["preflight", "push", "push from removed component"] as const)(
-    "HTTP %s uses the operator credential helper without executing checkout helpers",
+    "HTTPS %s uses the operator credential helper without executing checkout helpers",
     async (stage) => {
       const { directory, git } = await publicationRepository();
       const external = await fixtures.create("patch-credentials-");
       const component = join(directory, "component");
       const removesComponent = stage === "push from removed component";
       if (removesComponent) await mkdir(component);
+      const global = join(external, "global.gitconfig");
       let challenged = false;
       const server = Bun.serve({
+        tls: await loopbackTls(global, git),
         hostname: "127.0.0.1",
         port: 0,
         fetch() {
@@ -346,7 +349,6 @@ exit 1
         const remote = new URL("example/repository.git", server.url).href;
         const marker = join(external, "helper-log");
         const script = join(external, "helper.cjs");
-        const global = join(external, "global.gitconfig");
         await writeFile(
           script,
           `const fs = require("node:fs"); const path = fs.readFileSync(0, "utf8").split("\\n").find(line => line.startsWith("path=")); fs.appendFileSync(${JSON.stringify(marker)}, process.argv[2] + " " + path + "\\n");`,
@@ -714,6 +716,137 @@ exit 1
       expect(outcome.exitCode).toBe(2);
       expect(outcome.stderr).toContain("Patch transport executable changed");
       expect(attemptedAuthentication).toBe(false);
+    },
+  );
+
+  test.skipIf(process.platform === "win32").each([
+    ["GIT_SSH", false],
+    ["GIT_ASKPASS", false],
+    ["GIT_PROXY_COMMAND", false],
+    ["GIT_PROXY_COMMAND", true],
+  ] as const)(
+    "dispatches %s through a writable launcher only when the target is protected (writable target: %p)",
+    async (setting, writableTarget) => {
+      const { directory, git } = await publicationRepository();
+      const trusted = await fixtures.create("patch-approved-tool-");
+      const writable = await fixtures.create("patch-writable-tool-");
+      const launcher = join(writable, "launcher");
+      const targetDirectory = writableTarget ? writable : trusted;
+      const marker = join(trusted, "invoked");
+      for (const name of ["approved", "replacement"]) {
+        await writeFile(
+          join(targetDirectory, name),
+          `#!/bin/sh\nprintf '%s' ${name} > "$LAUNCHER_MARKER"\nexit 1\n`,
+          { mode: 0o755 },
+        );
+      }
+      await symlink(join(targetDirectory, "approved"), launcher);
+      const scheme =
+        setting === "GIT_SSH"
+          ? "ssh"
+          : setting === "GIT_ASKPASS"
+            ? "https"
+            : "git";
+      git(
+        "remote",
+        "set-url",
+        "origin",
+        `${scheme}://127.0.0.1:1/example/repository.git`,
+      );
+      const environment: NodeJS.ProcessEnv = {
+        [setting]: launcher,
+        GITLAB_HOST: "127.0.0.1:1",
+      };
+      const venv = join(trusted, "venv");
+      let prefix: string | undefined;
+      if (setting === "GIT_ASKPASS") {
+        await promisify(execFile)(process.env["PYTHON"] ?? "python3", [
+          "-m",
+          "venv",
+          "--without-pip",
+          "--symlinks",
+          venv,
+        ]);
+        environment["SSH_ASKPASS"] = join(venv, "bin", "python");
+      }
+      const outcome = await runWorkflow(
+        ["patch", "--scan", "scan-1", "--create-pr", "--json"],
+        {
+          currentDirectory: directory,
+          environment,
+          manualCodexPreparation: true,
+          onWorkbench: () =>
+            savedScan(resultWithFindings(["high"]), "scan-1", directory),
+          onCodex: async (args, output) => {
+            output!.appServer!.onPermissions!({
+              directory,
+              environment,
+              profile: {
+                extends: ":workspace",
+                network: { enabled: false },
+                workspace_roots: { [writable]: true },
+                filesystem: { ":tmpdir": {}, ":slash_tmp": {} },
+              },
+            });
+            await output!.appServer!.onBeforeTurn?.();
+            await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
+            completePatches(args, output);
+            return 0;
+          },
+          onRepositoryCommand: async (tool, args, cwd, options) => {
+            if (args.includes("codex-security-ssh-config"))
+              return "hostname 127.0.0.1";
+            if (tool !== "git" || args.includes("ls-remote")) return "";
+            if (!options?.patchTransport || !args.includes("push"))
+              return runGitRepositoryCommand(tool, args, cwd, options);
+
+            // The host has just revalidated the launcher. Git has yet to look it up.
+            await unlink(launcher);
+            await symlink(join(targetDirectory, "replacement"), launcher);
+            // Exercise Git's askpass lookup without requiring an HTTP server.
+            const askpass = setting === "GIT_ASKPASS";
+            if (askpass) {
+              const python = options.environment!["SSH_ASKPASS"]!;
+              prefix = (
+                await promisify(execFile)(python, [
+                  "-c",
+                  "import sys; print(sys.prefix)",
+                ])
+              ).stdout.trim();
+            }
+            return runGitRepositoryCommand(
+              tool,
+              askpass
+                ? ["-c", "credential.helper=", "credential", "fill"]
+                : args,
+              cwd,
+              {
+                ...options,
+                input: askpass
+                  ? "protocol=https\nhost=127.0.0.1\n\n"
+                  : undefined,
+                environment: {
+                  ...options.environment,
+                  LAUNCHER_MARKER: marker,
+                  GIT_TERMINAL_PROMPT: "0",
+                },
+              },
+            );
+          },
+        },
+        { localHosting: false },
+      );
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      if (writableTarget) {
+        expect(outcome.stderr).toContain("patch-writable");
+        await expect(readFile(marker)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        if (setting === "GIT_ASKPASS")
+          expect(prefix).toBe(await realpath(venv));
+        expect(await readFile(marker, "utf8")).toBe("approved");
+      }
     },
   );
 
@@ -1286,7 +1419,12 @@ exit 1
       const environment = { ...process.env };
       for (const key of Object.keys(environment))
         if (/^(?:https?|all|no)_proxy$/iu.test(key)) delete environment[key];
-      const proxy = Bun.serve({
+      const config = join(
+        await fixtures.create("patch-proxy-config-"),
+        "gitconfig",
+      );
+      const origin = Bun.serve({
+        tls: await loopbackTls(config, git),
         hostname: "127.0.0.1",
         port: 0,
         async fetch(request) {
@@ -1334,11 +1472,12 @@ exit 1
         },
       });
       try {
+        using proxy = await loopbackProxy(origin.port!);
         git(
           "remote",
           "set-url",
           "origin",
-          `http://127.0.0.2:${proxy.port}/${remote.split(/[\\/]/u).at(-1)!}`,
+          `https://127.0.0.2:${origin.port}/${remote.split(/[\\/]/u).at(-1)!}`,
         );
         for (const destination of [remote, secondary])
           git(
@@ -1347,19 +1486,9 @@ exit 1
             "--add",
             "--push",
             "origin",
-            `http://127.0.0.2:${proxy.port}/${destination.split(/[\\/]/u).at(-1)!}`,
+            `https://127.0.0.2:${origin.port}/${destination.split(/[\\/]/u).at(-1)!}`,
           );
-        const config = join(
-          await fixtures.create("patch-proxy-config-"),
-          "gitconfig",
-        );
-        git(
-          "config",
-          "--file",
-          config,
-          "remote.origin.proxy",
-          `http://127.0.0.1:${proxy.port}`,
-        );
+        git("config", "--file", config, "remote.origin.proxy", proxy.url);
         environment["GIT_CONFIG_GLOBAL"] = config;
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
@@ -1410,7 +1539,7 @@ exit 1
               ),
             ).toBe("fixed");
       } finally {
-        proxy.stop(true);
+        origin.stop(true);
       }
     },
   );
