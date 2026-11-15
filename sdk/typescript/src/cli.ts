@@ -90,6 +90,7 @@ import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
   activePatchPublicationHooks,
   capturePatchGitControls,
+  patchFilterParameters,
   PATCH_LOCAL_GIT_ENVIRONMENT,
   type PatchGitControlMode,
   type PatchGitControls,
@@ -1421,6 +1422,8 @@ interface SkillPermissions {
   readonly name: string;
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
+  readonly credentialStorePaths?: readonly string[];
+  readonly unavailableFilters?: readonly string[];
   readonly externalConfigPaths?: readonly string[];
   readonly externalCachePaths?: readonly string[];
 }
@@ -1475,6 +1478,7 @@ async function reusableWindowsSnapshotHome(
   if (!isJsonObject(filesystem) || !isJsonObject(workspaces)) return false;
   const writable = [sandbox.directory, ...Object.keys(workspaces)];
   for (const [path, access] of Object.entries(filesystem)) {
+    if (access === "deny" && isAbsolute(path)) continue;
     if (!isJsonObject(access)) return false;
     if (
       (path === ":tmpdir" || path === ":slash_tmp") &&
@@ -1527,6 +1531,7 @@ async function removeSnapshotProfiles(profiles: PatchSnapshotProfiles) {
 function patchWorkspaceProfile(
   workspace: JsonObject,
   readOnlyPaths: readonly string[],
+  credentialStorePaths: readonly string[] = [],
 ) {
   return {
     extends: ":workspace",
@@ -1541,12 +1546,32 @@ function patchWorkspaceProfile(
       ...Object.fromEntries(
         readOnlyPaths.map((path) => [path, { ".": "read" }]),
       ),
+      ...Object.fromEntries(
+        credentialStorePaths.map((path) => {
+          if (process.platform !== "win32" || existsSync(path))
+            return [path, { ".": "deny" }];
+          // A literal deny on Windows can materialize an absent file as a
+          // directory. Match its exact name with an absolute glob instead.
+          const escape = (part: string) => part.replace(/[*?[\]{},]/gu, "[$&]");
+          const file = escape(basename(path));
+          return [join(escape(dirname(path)), `{${file},${file}}`), "deny"];
+        }),
+      ),
       ...(workspace["exclude_tmpdir_env_var"] === true
         ? { ":tmpdir": {} }
         : {}),
       ...(workspace["exclude_slash_tmp"] === true ? { ":slash_tmp": {} } : {}),
     },
   };
+}
+
+function currentGitParameters(
+  environment: NodeJS.ProcessEnv | undefined,
+  inherited: NodeJS.ProcessEnv,
+) {
+  return environment && Object.hasOwn(environment, "GIT_CONFIG_PARAMETERS")
+    ? environment["GIT_CONFIG_PARAMETERS"]
+    : environmentEntry(inherited, "GIT_CONFIG_PARAMETERS");
 }
 
 function publicationHookCommand(args: readonly string[]): boolean {
@@ -1565,6 +1590,7 @@ async function resumeHookSandbox(
   directory: string,
   environment: NodeJS.ProcessEnv,
   gitDirectories: string[],
+  credentialStorePaths: readonly string[],
   signal: AbortSignal,
 ): Promise<PatchSnapshotSandbox> {
   const operator = resolveCodexCommand(environment);
@@ -1614,7 +1640,11 @@ async function resumeHookSandbox(
     environment,
     providerKeyVariable: scanProviderEnvKey(config),
     stripAwsCredentials: scanModelProvider(config) === "amazon-bedrock",
-    profile: patchWorkspaceProfile(workspace, gitDirectories),
+    profile: patchWorkspaceProfile(
+      workspace,
+      gitDirectories,
+      credentialStorePaths,
+    ),
     configuration: {
       sandbox_workspace_write: {
         writable_roots: [],
@@ -3277,6 +3307,7 @@ export async function main(
   let gitRepository: string | undefined;
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let publicationHooks: PatchPublicationHooks | undefined;
+  let unavailableFilters: readonly string[] = [];
   let snapshotConfigPaths: readonly string[] | undefined;
   let snapshotConfigReady: Promise<void> | undefined;
   let patchPreparationSignal: AbortSignal | undefined;
@@ -3286,6 +3317,8 @@ export async function main(
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
         const appServer = output.appServer;
+        if (appServer.permissions)
+          unavailableFilters = appServer.permissions.unavailableFilters ?? [];
         if (appServer.publicationHooks)
           publicationHooks = appServer.publicationHooks;
         output = {
@@ -3342,6 +3375,18 @@ export async function main(
           [`GIT_CONFIG_KEY_${count}`]: "core.fsmonitor",
           [`GIT_CONFIG_VALUE_${count}`]: "false",
         };
+        if (unavailableFilters.length && publicationHookCommand(args)) {
+          // Only Git knows which drivers are selected, including after a patch
+          // changes attributes or switches branches. Fail if one actually runs.
+          options.environment["GIT_CONFIG_PARAMETERS"] = patchFilterParameters(
+            unavailableFilters,
+            true,
+            currentGitParameters(
+              options.environment,
+              parentDependencies.environment,
+            ),
+          );
+        }
         gitRepository ??= repository;
         gitEnvironment ??= Object.fromEntries(
           ["GIT_DIR", "GIT_WORK_TREE"].flatMap((name) => {
@@ -8606,6 +8651,7 @@ export async function main(
                   });
                 publicationHooks = await activePatchPublicationHooks(read);
                 if (!publicationHooks.events.size) return;
+                const credentialStorePaths = new Set<string>();
                 if (
                   publicationHooks.events.has("pre-push") ||
                   publicationHooks.events.has("reference-transaction")
@@ -8615,6 +8661,7 @@ export async function main(
                     dependencies,
                     false,
                     "resumed-hook",
+                    credentialStorePaths,
                   );
                 const gitDirectories = (
                   await read([
@@ -8633,6 +8680,7 @@ export async function main(
                     directory,
                     dependencies.environment,
                     gitDirectories,
+                    [...credentialStorePaths],
                     controller.signal,
                   );
                 } finally {
@@ -13181,29 +13229,7 @@ async function createPatchPullRequest(
       : `${introduction}\n\n## Patch risk assessment\n\n${patchRisk.summary}`;
   // Native commit hooks keep their normal worktree and index. Git's implicit
   // index refresh may inspect a file again, but its filtered blob is already captured.
-  const hostFilterEnvironment = async (
-    switchingBranch: boolean,
-  ): Promise<NodeJS.ProcessEnv> => {
-    const config = new Map<string, string>();
-    for (const key of (await publication.hostFilterSettings?.(
-      switchingBranch,
-    )) ?? []) {
-      config.set(key, "");
-      config.set(key.slice(0, key.lastIndexOf(".")) + ".required", "false");
-    }
-    const environment: NodeJS.ProcessEnv = {};
-    let count = Number(
-      environmentEntry(dependencies.environment, "GIT_CONFIG_COUNT") ?? 0,
-    );
-    for (const [key, value] of config) {
-      environment[`GIT_CONFIG_KEY_${count}`] = key;
-      environment[`GIT_CONFIG_VALUE_${count}`] = value;
-      count++;
-    }
-    if (config.size) environment["GIT_CONFIG_COUNT"] = String(count);
-    return environment;
-  };
-  let branchEnvironment: NodeJS.ProcessEnv | undefined;
+  let branchFilters: readonly string[] | undefined;
   const run = async (
     args: string[],
     options?: Parameters<CliDependencies["runRepositoryCommand"]>[3],
@@ -13216,13 +13242,27 @@ async function createPatchPullRequest(
         options,
       );
     const switching = args[0] === "switch";
-    if (switching) branchEnvironment = undefined;
-    const filterEnvironment = switching
-      ? await hostFilterEnvironment(true)
-      : (branchEnvironment ??= await hostFilterEnvironment(false));
+    if (switching) branchFilters = undefined;
+    const keys = switching
+      ? await publication.hostFilterSettings?.(true)
+      : (branchFilters ??= await publication.hostFilterSettings?.(false));
     return dependencies.runRepositoryCommand("git", args, repository, {
       ...options,
-      environment: { ...options?.environment, ...filterEnvironment },
+      environment: {
+        ...options?.environment,
+        ...(keys?.length
+          ? {
+              GIT_CONFIG_PARAMETERS: patchFilterParameters(
+                keys,
+                false,
+                currentGitParameters(
+                  options?.environment,
+                  dependencies.environment,
+                ),
+              ),
+            }
+          : {}),
+      },
     });
   };
   const isDeleted = (file: string) =>
@@ -15046,6 +15086,7 @@ async function readPatchGitControls(
   dependencies: CliDependencies,
   automaticPublication: boolean | undefined,
   mode: PatchGitControlMode,
+  credentialStorePaths?: Set<string>,
 ) {
   const selectedGitDirectory = environmentValue(
     dependencies.environment,
@@ -15105,6 +15146,8 @@ async function readPatchGitControls(
     },
     automaticPublication,
     mode,
+    credentialStorePaths,
+    environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
   );
 }
 
@@ -15512,6 +15555,8 @@ async function runSkill(
                       permissions: {
                         name: patchPermissions,
                         readOnlyPaths: gitControls!.readOnlyPaths,
+                        credentialStorePaths: gitControls!.credentialStorePaths,
+                        unavailableFilters: gitControls!.unavailableFilters,
                         externalConfigPaths: gitControls!.externalConfigPaths,
                         ...(gitControls!.externalCachePaths.length
                           ? {
@@ -15836,6 +15881,7 @@ export async function readSkillCommandOutput(
             const profile = patchWorkspaceProfile(
               workspace,
               appServer.permissions.readOnlyPaths,
+              appServer.permissions.credentialStorePaths,
             );
             appServer.onPermissions?.(profile, {
               ...config,

@@ -2765,10 +2765,26 @@ additional writable roots and network access in your user configuration.
 Snapshot Git retains access to external Git configuration files selected by the
 operator. The patch model’s filesystem profile denies access to those files.
 When a snapshot filter or publication hook can run, keep inline Git credentials
-out of external configuration files, including conditional includes. Use a
-credential helper for transport authentication. A patch stops before it runs
-a delegate with an authorization header, credential-bearing URL or proxy, or
-inline helper password available in those files.
+out of external configuration files, including conditional includes. A patch
+stops before running a delegate with an authorization header, credential-bearing
+URL or proxy, or inline helper password available in those files.
+
+Git's built-in `store` helper can authenticate the host publication transport.
+The patch model, snapshot filters, and publication hooks have filesystem deny
+rules for Git's standard credential stores and for operator-selected
+`store --file` commands with a literal absolute file path. Use forward slashes
+and a drive letter for an explicit store on Windows. Other helpers, including
+shell commands and OS credential managers, can use storage outside those
+files. When an operator configuration names one of these helpers, a patch
+stops before running a publication hook that could call it. Configured filters
+can stay installed. If a file's attributes select one, Git reports the
+incompatible helper before processing the file. An empty helper reset controls
+Git's lookup order. A filter can still read and invoke an earlier helper named
+in the same configuration. For patching with those delegates, select a
+configuration that omits the opaque helper. When a file-backed store is in use,
+the host commit reuses the captured filtered blobs so it can authenticate the
+push without re-running the filters outside the snapshot sandbox.
+
 An external Git administration directory must belong to a registered worktree or
 be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git
 directory points to a separate external common directory, select that common

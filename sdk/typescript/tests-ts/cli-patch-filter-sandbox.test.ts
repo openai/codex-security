@@ -54,13 +54,7 @@ test.each([
       "transport-config",
     );
     git("config", "--file", included, "http.extraHeader", header);
-    git(
-      "config",
-      "--file",
-      included,
-      "credential.helper",
-      "!gh auth git-credential",
-    );
+    git("config", "--file", included, "credential.helper", "");
     git("config", "--file", included, "core.sshCommand", "ssh");
     if (delegate.endsWith("filter")) {
       git("config", "--file", config, "filter.synthetic.clean", "cat");
@@ -130,6 +124,57 @@ test.each([
       ).rejects.toMatchObject({ code: "ENOENT" });
     }
     expect(git("rev-parse", "HEAD")).toBe(head);
+  },
+);
+
+test.each(["unused", "activated", "disabled", "checkout driver"] as const)(
+  "file attributes with an opaque credential helper (%s filter)",
+  async (mode) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const global = join(await fixtures.create("patch-lfs-auth-"), "gitconfig");
+    git("config", "--file", global, "credential.helper", "manager");
+    git("config", "--file", global, "filter.lfs.clean", "git-lfs clean -- %f");
+    git("config", "--file", global, "filter.lfs.required", "false");
+    if (mode === "checkout driver")
+      git("config", "filter.synthetic.clean", "cat");
+    if (mode === "disabled") {
+      git("config", "--file", global, "filter.synthetic.clean", "cat");
+      git("config", "filter.synthetic.clean", "");
+    }
+    const environment = {
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: global,
+      GIT_CONFIG_PARAMETERS: "'filter.lfs.process=git-lfs filter-process'",
+    };
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: directory,
+      environment,
+      onRepositoryCommand(tool, args, cwd, options) {
+        return runGitRepositoryCommand(tool, args, cwd, {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        });
+      },
+      async onCodex(_args, output) {
+        if (mode !== "unused")
+          await writeFile(
+            join(directory, ".gitattributes"),
+            mode === "activated"
+              ? "*.ts filter=lfs\n"
+              : "*.ts filter=synthetic\n",
+          );
+        await writeFile(join(directory, "example.ts"), "fixture change\n");
+        output!.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    if (mode === "activated" || mode === "checkout driver") {
+      expect(outcome.exitCode, outcome.stderr).toBe(2);
+      expect(outcome.stderr).toContain("Cannot run Git filter");
+    } else {
+      expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(JSON.parse(outcome.stdout).files).toContain("example.ts");
+    }
   },
 );
 

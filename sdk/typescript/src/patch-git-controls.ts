@@ -194,6 +194,8 @@ export interface PatchGitControls {
   readonly nestedCheckouts: readonly string[];
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
+  readonly unavailableFilters: readonly string[];
+  readonly credentialStorePaths: readonly string[];
   readonly externalConfigPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
@@ -284,6 +286,50 @@ function hasInlineGitAuthentication(key: string, value: string): boolean {
     value.startsWith("!") &&
     /(?:password|credential|oauth_refresh_token)=/iu.test(value)
   );
+}
+
+// Command parameters take precedence over config files and GIT_CONFIG_COUNT.
+// Quote the entire key separately: a driver subsection may itself contain "=".
+export function patchFilterParameters(
+  keys: readonly string[],
+  block: boolean,
+  previous?: string,
+): string {
+  const quote = (text: string) => "'" + text.replaceAll("'", "'\\''") + "'";
+  const settings = new Map<string, string>();
+  for (const key of keys) {
+    settings.set(
+      key,
+      block
+        ? 'echo "Cannot run Git filter with an operator credential helper whose backing store cannot be isolated." >&2; exit 1'
+        : "",
+    );
+    settings.set(
+      key.slice(0, key.lastIndexOf(".")) + ".required",
+      String(block),
+    );
+  }
+  return [
+    previous,
+    ...[...settings].map(([key, value]) => quote(key) + "=" + quote(value)),
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+// A helper is a shell command. Only interpret an unambiguous literal file
+// argument to Git's built-in store. Other helpers can use arbitrary backends.
+function credentialStoreFile(helper: string): string | undefined {
+  const match =
+    /^store[ \t]+--file(?:=|[ \t]+)(?:'([^']+)'|"([^"$`\\]+)"|([\w/.:@%+=,-]+))$/u.exec(
+      helper,
+    );
+  const path = match?.[1] ?? match?.[2] ?? match?.[3];
+  if (!path || !isAbsolute(path)) return undefined;
+  // Git for Windows' shell can translate POSIX paths and drive-relative paths.
+  if (process.platform === "win32" && !/^[a-z]:\//iu.test(path))
+    return undefined;
+  return path;
 }
 
 function rejectCredentialedGitDelegate(): never {
@@ -689,6 +735,9 @@ export async function capturePatchGitControls(
   },
   automaticPublication = false,
   mode: PatchGitControlMode = "sandbox",
+  credentialStorePaths = new Set<string>(),
+  commandParameters: string | null = process.env["GIT_CONFIG_PARAMETERS"] ??
+    null,
 ): Promise<PatchGitControls | undefined> {
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
@@ -994,6 +1043,50 @@ export async function capturePatchGitControls(
       throw error;
     }
   };
+  // An untrusted delegate can select "store" itself, even when no helper was
+  // configured. Deny the default stores as well as explicitly named files.
+  let hostMayReadStore = false;
+  const storeTarget = async (path: string): Promise<string> => {
+    try {
+      return await realControlPath(path);
+    } catch (error) {
+      missing(error);
+    }
+    // A dangling store symlink may acquire credentials after preflight. Deny
+    // its physical target even when an ancestor or the final file is absent.
+    const parent = dirname(path);
+    if (parent === path) return path;
+    if ((await lstat(path).catch(missing))?.isSymbolicLink())
+      return storeTarget(relativeFile(parent, await readlink(path)));
+    return relativeFile(await storeTarget(parent), basename(path));
+  };
+  const protectStore = async (path: string) => {
+    try {
+      const metadata = await stat(path).catch(missing);
+      if (metadata?.isFile()) hostMayReadStore = true;
+      // Mounting a deny at a symlink itself fails on Linux. Git's file store
+      // follows the link when locking and replacing its backing file.
+      if (!metadata || metadata.isFile())
+        credentialStorePaths.add(await storeTarget(path));
+    } catch (error) {
+      // Git cannot read an inaccessible store or a cyclic link. Preserve its
+      // normal behavior without creating a mount at an unresolved alias.
+      if (
+        !["EACCES", "EPERM", "ELOOP"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      )
+        throw error;
+    }
+  };
+  if (mode !== "external") {
+    const legacy = await expandConfigurationPath("~/.git-credentials");
+    if (legacy) await protectStore(relativeFile(root, legacy));
+    const xdg = configuration.xdgConfigHome
+      ? relativeFile(configuration.xdgConfigHome, "git/credentials")
+      : await expandConfigurationPath("~/.config/git/credentials");
+    if (xdg) await protectStore(relativeFile(root, xdg));
+  }
   const globalConfigurationPaths: string[] = [];
   if (configuration.global !== undefined) {
     if (configuration.global !== "")
@@ -1097,8 +1190,37 @@ export async function capturePatchGitControls(
   let hasConditionalFilters = false;
   const filterCheckouts = new Set<string>();
   let checkoutCleanFilter = false;
-  let configuredFilter = false;
+  const delegateFilters = new Set<string>();
+  const nonemptyFilters = new Set<string>();
+  const conditionalFilters = new Set<string>();
+  const protectedFilterKeys = () => [...delegateFilters].map(configPath);
   let externalInlineAuthentication = false;
+  let unisolatedCredentialHelper = false;
+  const captureCredentialHelper = async (key: string, value: string) => {
+    if (
+      mode === "external" ||
+      !/^credential(?:\..*)?\.helper$/iu.test(key) ||
+      value === ""
+    )
+      return;
+    if (value === "store") {
+      hostMayReadStore = true;
+      return;
+    }
+    const file = credentialStoreFile(value);
+    if (file === undefined) unisolatedCredentialHelper = true;
+    else {
+      hostMayReadStore = true;
+      await protectStore(configPath(file));
+    }
+  };
+  const checkDelegateCredentials = (canRunOtherDelegate: boolean) => {
+    if (externalInlineAuthentication) rejectCredentialedGitDelegate();
+    if (unisolatedCredentialHelper && canRunOtherDelegate)
+      throw new Error(
+        "Cannot run Git filters or hooks with an operator credential helper whose backing store cannot be isolated. Select a Git configuration without that helper for patching.",
+      );
+  };
   const snapshotFilter = (key: string) =>
     /^filter\..+\.(?:clean|process)$/u.test(key) ||
     (automaticPublication && /^filter\..+\.smudge$/u.test(key));
@@ -1172,23 +1294,31 @@ export async function capturePatchGitControls(
           environment: configurationEnvironment,
         }),
       );
-    if (!configuredFilter) {
-      const filters = new Map(
-        settings
-          .filter(({ key }) => snapshotFilter(key))
-          .map(({ key, value }) => [key, value]),
-      );
-      configuredFilter = [...filters.values()].some(Boolean);
+    for (const [key, value] of new Map(
+      settings
+        .filter(({ key }) => snapshotFilter(key))
+        .map(({ key, value }) => [key, value]),
+    )) {
+      if (value) delegateFilters.add(key);
     }
     for (const { scope, origin, key, value } of settings) {
+      if (automaticPublication && value && snapshotFilter(key))
+        nonemptyFilters.add(key);
       if (origin.startsWith("file:")) {
+        const inline = hasInlineGitAuthentication(key, value);
         if (
-          hasInlineGitAuthentication(key, value) &&
+          (inline || /^credential(?:\..*)?\.helper$/iu.test(key)) &&
           (await userSelectedConfig(scope, configPath(origin), checkout))
-        )
-          externalInlineAuthentication = true;
+        ) {
+          externalInlineAuthentication ||= inline;
+          await captureCredentialHelper(key, value);
+        }
         const path = relativeFile(checkout, configPath(origin.slice(5)));
         activeConfigurations.add(path);
+      } else if (scope === "command") {
+        // Command-scope credentials are filtered from delegates. A configured
+        // store remains a file the delegate could select or open independently.
+        await captureCredentialHelper(key, value);
       }
     }
     const captureHooks = async (configured?: string): Promise<void> => {
@@ -1305,13 +1435,19 @@ export async function capturePatchGitControls(
         const separator = entry.indexOf("\n");
         const key = entry.slice(0, separator);
         const value = entry.slice(separator + 1);
-        configuredFilter ||=
-          automaticPublication && Boolean(value) && snapshotFilter(key);
-        if (
-          !insideSelectedRoots(control.canonical) &&
-          hasInlineGitAuthentication(key, value)
-        )
-          externalInlineAuthentication = true;
+        if (automaticPublication && snapshotFilter(key)) {
+          // Leaving a branch can remove an empty override and activate a
+          // nonempty command that was present earlier in Git's config order.
+          conditionalFilters.add(key);
+          if (value) nonemptyFilters.add(key);
+        }
+        if (!insideSelectedRoots(control.canonical)) {
+          externalInlineAuthentication ||= hasInlineGitAuthentication(
+            key,
+            value,
+          );
+          await captureCredentialHelper(key, value);
+        }
         recordConfiguredHook(
           publicationHooks,
           configPath(key),
@@ -1434,7 +1570,7 @@ export async function capturePatchGitControls(
     // walk is needed to publish the saved commit.
     for (const path of selectedDirectories) await remember(path);
     await captureReferences(root);
-    if (externalInlineAuthentication) rejectCredentialedGitDelegate();
+    checkDelegateCredentials(true);
     return undefined;
   }
   const gitDirectory = selectedDirectories[0]!;
@@ -1970,11 +2106,11 @@ export async function capturePatchGitControls(
       }
     };
     await visit(root);
-    if (
-      mode === "sandbox" &&
-      capture &&
-      externalInlineAuthentication &&
-      (configuredFilter ||
+    if (capture)
+      for (const key of conditionalFilters)
+        if (nonemptyFilters.has(key)) delegateFilters.add(key);
+    if (mode === "sandbox" && capture) {
+      const hookCanRun =
         publicationHooks.events.has("post-index-change") ||
         (automaticPublication &&
           [
@@ -1986,9 +2122,10 @@ export async function capturePatchGitControls(
             "pre-push",
             "reference-transaction",
             "pre-auto-gc",
-          ].some((event) => publicationHooks.events.has(event))))
-    )
-      rejectCredentialedGitDelegate();
+          ].some((event) => publicationHooks.events.has(event)));
+      if (delegateFilters.size || hookCanRun)
+        checkDelegateCredentials(hookCanRun);
+    }
     if (capture && checkoutCleanFilter) {
       // Inspect the original checkout before status or add can invoke a filter.
       const passive = [
@@ -2001,49 +2138,67 @@ export async function capturePatchGitControls(
         "-c",
         "core.checkStat=default",
       ];
-      for (const key of activeHostFilters)
-        passive.push(
-          "-c",
-          `${key}=`,
-          "-c",
-          `${key.slice(0, key.lastIndexOf("."))}.required=false`,
-        );
+      // Git can re-read any effective driver while checking for local edits,
+      // including an external definition that executes code from the checkout.
+      const passiveFilters =
+        hostMayReadStore || unisolatedCredentialHelper
+          ? protectedFilterKeys()
+          : [...activeHostFilters];
+      const passiveOptions = {
+        environment: {
+          GIT_CONFIG_PARAMETERS: patchFilterParameters(
+            passiveFilters,
+            false,
+            commandParameters ?? undefined,
+          ),
+        },
+      };
       for (const checkout of visited) {
-        const local = await runBytes(root, checkout, [
-          ...passive,
-          "ls-files",
-          "--others",
-          "--directory",
-          "--no-empty-directory",
-          "-z",
-        ]);
+        const local = await runBytes(
+          root,
+          checkout,
+          [
+            ...passive,
+            "ls-files",
+            "--others",
+            "--directory",
+            "--no-empty-directory",
+            "-z",
+          ],
+          passiveOptions,
+        );
         const error =
           "Cannot automatically publish from a checkout with local-only files or tracked edits and a checkout-selected Git filter. Run patch without --create-pr and review the changes before publishing.";
         if (local.length) throw new Error(error);
         // Git normally skips these paths when it compares the worktree to the index.
-        const entries = await runBytes(root, checkout, [
-          ...passive,
-          "ls-files",
-          "-v",
-          "-z",
-        ]);
+        const entries = await runBytes(
+          root,
+          checkout,
+          [...passive, "ls-files", "-v", "-z"],
+          passiveOptions,
+        );
         if (/(?:^|\0)[a-zS] /u.test(entries.toString("latin1")))
           throw new Error(error);
         // The index may itself contain private edits. Check it separately even when
         // the worktree exactly matches those staged bytes. Visit gitlinks below
         // their own root rather than letting Git invoke a nested status command.
         for (const comparison of [["diff", "--cached"], ["diff-files"]]) {
-          const changed = await runBytes(root, checkout, [
-            ...passive,
-            ...comparison,
-            "--name-only",
-            "-z",
-            "--no-renames",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=dirty",
-            "--",
-          ]);
+          const changed = await runBytes(
+            root,
+            checkout,
+            [
+              ...passive,
+              ...comparison,
+              "--name-only",
+              "-z",
+              "--no-renames",
+              "--no-ext-diff",
+              "--no-textconv",
+              "--ignore-submodules=dirty",
+              "--",
+            ],
+            passiveOptions,
+          );
           if (changed.length) throw new Error(error);
         }
       }
@@ -2224,6 +2379,8 @@ export async function capturePatchGitControls(
     ],
     nestedCheckouts: [...nestedDirectories.keys()],
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
+    unavailableFilters: unisolatedCredentialHelper ? protectedFilterKeys() : [],
+    credentialStorePaths: [...credentialStorePaths],
     externalConfigPaths: [...configurationFiles].filter(
       (path) => !insideSelectedRoots(path),
     ),
@@ -2231,6 +2388,13 @@ export async function capturePatchGitControls(
     snapshotStoragePaths: [...snapshotStoragePaths],
     snapshotConfigPaths: [...snapshotConfigPaths],
     async hostFilterSettings(switchingBranch) {
+      // The commit reuses the verified native snapshot's blobs. An external
+      // filter can still run a model-edited script during the host index refresh.
+      if (
+        mode === "sandbox" &&
+        (hostMayReadStore || unisolatedCredentialHelper)
+      )
+        return protectedFilterKeys();
       if (!hasConditionalFilters) return [...activeHostFilters];
       // Switching can activate a conditional config before Git calls post-checkout.
       if (switchingBranch)
