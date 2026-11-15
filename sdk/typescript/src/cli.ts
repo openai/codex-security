@@ -10410,7 +10410,7 @@ async function runSkill(
           ? [
               "Caller scope for this assessment (JSON data):",
               JSON.stringify(options.dependencyCallerScope),
-              "Use the requested scope to select callers and workloads. When the scope names an entrypoint, bind the chain from that entrypoint to the affected operation. Keep distinct capabilities, entrypoints, and deployment variants separate. Verify actual deployment and access with evidence for each place.",
+              "Use the requested scope to select callers and workloads. When the scope names an entrypoint, bind the chain from that entrypoint to the affected operation. Keep distinct capabilities, entrypoints, and deployment variants separate. Match deployment and access claims to evidence for the same place. Investigate these facts when they could change the scoped verdict or answer an explicit request.",
             ]
           : []),
         ...(dependencyCheck
