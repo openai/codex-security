@@ -13,7 +13,9 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from contextlib import closing
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -198,6 +200,138 @@ def complete_budget_scan(
         warning,
         check=check,
     )
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("root", ["C:\\", "\\\\server\\share\\"])
+@pytest.mark.parametrize(
+    "size,explicit", [(255, False), (262, False), (315, False), (1030, False), (1030, True)]
+)
+def test_workbench_windows_state_filename_at_file_and_sqlite_boundaries(
+    tmp_path, monkeypatch, root, size, explicit
+):
+    store = tmp_path / "test.sqlite3"
+    db = load_script("workbench_db")
+    history = load_script("workbench_scan_history")
+    windows = sys.modules["windows_scan_local_files"]
+    real_connect = sqlite3.connect
+
+    class Filename(PureWindowsPath):
+        def chmod(self, mode):
+            assert str(self) == native
+            store.chmod(mode)
+
+        def lstat(self):
+            if str(self) != native and size >= 260:
+                raise FileNotFoundError
+            return store.lstat()
+
+    directory = Filename(root)
+    name = "workbench.sqlite3"
+    while size - len(str(directory / name).encode("utf-8")) > 220:
+        directory /= "界" * 60 if size == 1030 else "d" * 100
+    directory /= "d" * (size - len(str(directory / name).encode("utf-8")) - 1)
+    path = directory / name
+    native = windows._extended_path(path)
+    selected = str(path) if size == 1030 else native
+
+    def connect(filename, **options):
+        assert str(filename) == selected
+        return real_connect(store, **options)
+
+    def create_private_directory(parent):
+        assert str(parent) == str(Filename(native).parent)
+
+    monkeypatch.setattr(windows, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(windows, "Path", Filename)
+    configured = Filename(native).parent if explicit else directory
+    monkeypatch.setattr(db, "state_dir", lambda: configured)
+    monkeypatch.setattr(db, "create_private_directory", create_private_directory)
+    monkeypatch.setattr(db.sqlite3, "connect", connect)
+    args = SimpleNamespace(command="list-scans")
+    assert history.reads_missing_history(args, path)
+    with closing(db.connect()) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert connection.execute("SELECT count(*) FROM scans").fetchone()[0] == 0
+    assert not history.reads_missing_history(args, path)
+
+
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("suffix", ["reports.", "reports ", "NUL .txt", "result:stream"])
+def test_writable_windows_store_preserves_verbatim_only_or_ambiguous_names(suffix, monkeypatch):
+    windows = load_script("windows_scan_local_files")
+    monkeypatch.setattr(windows, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(windows, "Path", PureWindowsPath)
+    for root in ["C:/state", "//server/share"]:
+        parent = PureWindowsPath(root, *(["界" * 80] * 4), suffix)
+        filename = "workbench.sqlite3"
+        padding = 1030 - len(str(parent / filename).encode("utf-8")) - 1
+        ordinary = parent / ("s" * padding) / filename
+        explicit = PureWindowsPath(windows._extended_path(ordinary))
+        assert len(str(ordinary).encode("utf-8")) == 1030 < len(str(explicit).encode("utf-8"))
+        for path in (ordinary, explicit):
+            assert windows.workbench_sqlite_paths(path) == (path, path)
+    device = PureWindowsPath("//./C:/state", "x" * 240, "workbench.sqlite3")
+    assert windows.workbench_sqlite_paths(device) == (device, device)
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows filesystem and SQLite")
+def test_database_info_creates_long_writable_windows_store(tmp_path_factory):
+    root = tmp_path_factory.mktemp("store")
+    padding = 244 - len(str(root).encode("utf-16-le")) // 2 - 1
+    if padding < 1:
+        pytest.skip("needs a temporary root shorter than the 244-unit state directory")
+    state = root / ("s" * padding)
+    path = state / "workbench.sqlite3"
+    assert len(str(path).encode("utf-16-le")) // 2 == 262
+    assert run_workbench(state, "database-info") == {"databasePath": str(path)}
+    with closing(
+        sqlite3.connect(load_script("windows_scan_local_files")._extended_path(path))
+    ) as db:
+        assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert db.execute("SELECT count(*) FROM scans").fetchone()[0] == 0
+
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows SQLite")
+@pytest.mark.parametrize("explicit", [False, True])
+def test_workbench_writes_and_reads_at_the_windows_sqlite_filename_limit(
+    tmp_path: Path, explicit: bool
+) -> None:
+    name = "workbench.sqlite3"
+    state = tmp_path
+    while 1030 - len(str(state / name).encode("utf-8")) > 180:
+        state /= "界" * 40
+    padding = 1030 - len(str(state / name).encode("utf-8")) - 1
+    state /= "s" * padding
+    path = state / name
+    assert len(str(path).encode("utf-8")) == 1030
+    native = Path(load_script("windows_scan_local_files")._extended_path(path))
+    native.parent.mkdir(parents=True)
+
+    # The regression needs an ordinary filename this native SQLite build can write in WAL mode.
+    try:
+        with closing(sqlite3.connect(path)) as control:
+            assert control.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    except sqlite3.OperationalError as exc:
+        if str(exc) == "unable to open database file":
+            pytest.skip("native SQLite cannot write the ordinary 1,030-byte control filename")
+        raise
+
+    workspace_id = str(uuid.uuid4())
+    configured = native.parent if explicit else state
+    created = create_workspace(configured, workspace_id, "--thread-id", "synthetic-thread")
+    assert created["id"] == workspace_id
+    reopened = workspace_command(
+        configured, "get-workspace", workspace_id, "--thread-id", "synthetic-thread"
+    )
+    assert reopened["id"] == workspace_id
+    uri = load_script("snapshot_sqlite").readonly_sqlite_uri(path)
+    with closing(sqlite3.connect(uri, uri=True)) as reader:
+        assert reader.execute("SELECT id, thread_id FROM workspaces").fetchall() == [
+            (workspace_id, "synthetic-thread")
+        ]
 
 
 def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
