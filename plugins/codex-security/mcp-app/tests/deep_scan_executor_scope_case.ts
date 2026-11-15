@@ -153,7 +153,15 @@ export async function testLargeScopeTransport({
               scope: ".",
               includePaths,
               filePaths: includePaths.filter((_, index) => index % 2 === 0),
-              startDisposition: resumed ? "resumed" : "created",
+              config: {
+                workers: index + 1,
+                subagents: 0,
+                stopAfterNoNew: 2,
+                stopAfterConsecutiveErrors: 3,
+                maxDiscoveryRuns: 9,
+                maxTimeHours: index + 0.5,
+              },
+              startDisposition: resumed ? "joined" : "created",
               createdAt: "2026-01-01T00:01:00Z",
               usageOwner: {
                 threadId: `scope-parent-${index}`,
@@ -236,6 +244,20 @@ export async function testLargeScopeTransport({
               invocation.argv,
               "--cyber-access-program",
               index === 0 ? "standard" : "daybreak_blue",
+            );
+            assert.equal(typeof invocation.deepConfig, "string");
+            assert.deepEqual(
+              JSON.parse(
+                JSON.stringify(parseToml(invocation.deepConfig).deep_scan),
+              ),
+              {
+                workers: run.config.workers,
+                subagents: 0,
+                stop_after_no_new: 2,
+                stop_after_consecutive_errors: 3,
+                max_discovery_runs: 9,
+                max_time_hours: run.config.maxTimeHours,
+              },
             );
             assert.deepEqual(invocation.scopeInput.paths, includePaths);
             assert.deepEqual(

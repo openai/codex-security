@@ -86,6 +86,7 @@ export function startDeepScanEngine(options: {
             options.parentSandbox,
           ),
           serviceTier: active.serviceTier,
+          deepScanConfig: active.config,
           artifactContext: {
             pluginRoot,
             scanRoot: active.scanDir,
