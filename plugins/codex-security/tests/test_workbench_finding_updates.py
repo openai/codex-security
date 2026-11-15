@@ -129,6 +129,13 @@ def test_direct_files_and_historical_index_are_replayed(tmp_path):
         "updates"
     ]
 
+    # Scans completed before migration 8 have valid seals without a pinned digest.
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
+    assert scan_command(state, "list-finding-updates", scan_id) == old
+    (scan_dir / "findings.json").write_text("{}")
+    assert scan_command(state, "list-finding-updates", scan_id)["updates"] == []
+
 
 def test_completed_custom_pending_source_discovery_cannot_replay_as_reviewed(tmp_path):
     state, target, scan_id, scan_dir = empty_target_scan(tmp_path)
@@ -141,6 +148,9 @@ def test_completed_custom_pending_source_discovery_cannot_replay_as_reviewed(tmp
     page = scan_command(state, "list-finding-updates", scan_id)
     assert page["status"] == "complete"
     assert page["updates"] == []
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("UPDATE scans SET seal_manifest_digest = NULL WHERE id = ?", (scan_id,))
+    assert scan_command(state, "list-finding-updates", scan_id) == page
 
 
 def test_feed_append_failure_preserves_completion_and_replays_its_terminal_changes(tmp_path):

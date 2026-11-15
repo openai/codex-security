@@ -27,6 +27,7 @@ from workbench_constants import (
     FINDING_VALIDATION_PREVIEW_BYTES,
     FINDINGS_PAGE_MAX,
 )
+from workbench_scan_history import read_unpinned_history_seal
 from workbench_validation import bounded_output_text
 
 _FINAL_FEED_WARNING = (
@@ -229,34 +230,37 @@ def record_deep_iteration_updates(connection, scan, run, result_path, requested_
             connection.execute("RELEASE deep_iteration_updates")
 
 
-def _reviewed_legacy_seal(scan: sqlite3.Row) -> bool:
+def _reviewed_legacy_seal(wb: Any, scan: sqlite3.Row) -> bool:
     """Older indexes do not say whether custom validation was still pending."""
-    if scan["seal_manifest_digest"] is None:
-        return False
     try:
-        manifest, contents = _read_scan_local_json_bytes(
-            Path(scan["scan_dir"]), "scan-manifest.json", "sealed scan manifest"
-        )
-    except (ContractError, OSError):
+        scan_dir = Path(scan["scan_dir"])
+        if scan["seal_manifest_digest"] is None:
+            manifest, _ = read_unpinned_history_seal(
+                wb, scan, wb.require_canonical_scan_directory(scan_dir)
+            )
+        else:
+            manifest, contents = _read_scan_local_json_bytes(
+                scan_dir, "scan-manifest.json", "sealed scan manifest"
+            )
+            if "sha256:" + hashlib.sha256(contents).hexdigest() != scan["seal_manifest_digest"]:
+                return False
+    except (ContractError, OSError, SystemExit):
         return False
-    return (
-        "sha256:" + hashlib.sha256(contents).hexdigest() == scan["seal_manifest_digest"]
-        and manifest["scan"]["scope"].get("validationMode") != "custom_pending"
-    )
+    return manifest["scan"]["scope"].get("validationMode") != "custom_pending"
 
 
 def list_finding_updates(
-    require_scan, connection: sqlite3.Connection, args: argparse.Namespace
+    wb: Any, connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
     # Observe status and the last page under the same SQLite snapshot.
     connection.execute("BEGIN")
     with connection:
-        scan = require_scan(connection, args.scan_id)
-        return finding_update_page(connection, scan, args.after_cursor, args.limit)
+        scan = wb.require_scan(connection, args.scan_id)
+        return finding_update_page(wb, connection, scan, args.after_cursor, args.limit)
 
 
 def finding_update_page(
-    connection: sqlite3.Connection, scan: sqlite3.Row, after: int, limit: int
+    wb: Any, connection: sqlite3.Connection, scan: sqlite3.Row, after: int, limit: int
 ) -> dict[str, Any]:
     if not _supports_feed(scan):
         raise SystemExit(
@@ -301,7 +305,7 @@ def finding_update_page(
         and not connection.execute(
             "SELECT 1 FROM scan_finding_updates WHERE scan_id = ? LIMIT 1", (scan["id"],)
         ).fetchone()
-        and _reviewed_legacy_seal(scan)
+        and _reviewed_legacy_seal(wb, scan)
     ):
         indexed = connection.execute(
             """SELECT id, finding_id, title, severity, summary, details_json FROM finding_occurrences WHERE scan_id = ?

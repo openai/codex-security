@@ -1242,7 +1242,7 @@ Deep reports findings when the coordinator merges a batch of completed passes.
 Use `--headless` for plain progress lines on stderr.
 Follow the same finding ID to see revisions, withdrawals, and the final
 assessment. The completed report remains the source for the final set.
-The [plugin MCP feed](../../docs/agent-workflows.md#follow-reviewed-findings-during-a-scan)
+The [plugin MCP feed](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md#follow-reviewed-findings-during-a-scan)
 lets another client replay these changes by scan ID.
 
 Token totals include input plus output; cache reads and writes are subsets of

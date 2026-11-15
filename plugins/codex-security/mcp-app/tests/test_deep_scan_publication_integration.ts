@@ -164,6 +164,10 @@ test("three Standard scans publish two distinct findings with their original evi
               {
                 ...finding,
                 identity: undefined,
+                provenance: {
+                  ...finding.provenance,
+                  candidateId: "worker-local-id",
+                },
                 title: sink,
                 codeEvidence: [
                   {

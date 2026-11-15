@@ -5470,7 +5470,7 @@ export async function main(
         { args: { repository: "." }, options: { diff: "origin/main" } },
         { args: { repository: "." }, options: { mode: "deep" } },
       ],
-      hint: "Local Standard scans show reviewed findings and subsequent changes on stderr. Import existing findings without security analysis with scan import --help. Use ./import to scan a repository named import. Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
+      hint: "Local Standard, Diff, and Deep scans show reviewed findings and subsequent changes on stderr. Import existing findings without security analysis with scan import --help. Use ./import to scan a repository named import. Execution failures in JSON/JSONL --full-output return ok: false and keep scan results under data.",
       destructive: true,
       alias: { config: "c" },
       args: z.object({

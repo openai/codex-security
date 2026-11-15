@@ -395,7 +395,7 @@ coordinator's merged findings after a batch of completed passes. Resuming a
 scan can replay earlier events. Use `(scanId, cursor)` to recognize a
 delivery your application has already processed. An SDK scan
 using the file-only handoff can first surface findings when the SDK seals its
-result. Use the [plugin MCP feed](../../docs/agent-workflows.md#follow-reviewed-findings-during-a-scan)
+result. Use the [plugin MCP feed](https://github.com/openai/codex-security/blob/main/docs/agent-workflows.md#follow-reviewed-findings-during-a-scan)
 to read from a saved cursor.
 
 Use `onProgress` for scan progress and `onMeasurement` for observed token/cost

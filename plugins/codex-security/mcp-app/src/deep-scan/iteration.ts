@@ -398,6 +398,7 @@ function withoutSourceHistory(finding: Finding): Finding {
     sourceFindingIds,
     sourceFindings,
     deepScanRepairGroups,
+    deepScanPublicationIdentity,
     ...provenance
   } = finding.provenance;
   return { ...finding, provenance };
@@ -486,6 +487,11 @@ function restoreRepairGroups(findings: Finding[]): RestoredGroup[] {
       ).data;
       if (!finding) return visibleGroups();
       delete finding.provenance.deepScanRepairGroups;
+      // On a split only the original primary group keeps the published ID.
+      delete finding.provenance.deepScanPublicationIdentity;
+      if (order === target && visible.provenance.deepScanPublicationIdentity)
+        finding.provenance.deepScanPublicationIdentity =
+          visible.provenance.deepScanPublicationIdentity;
       finding.provenance.sourceFindingIds = sources;
       finding.provenance.sourceFindings = members;
       for (const member of members.slice(1)) {
@@ -640,6 +646,7 @@ export async function mergeBatch(
         finding.provenance.sourceFindingIds = [];
         finding.provenance.sourceFindings = [];
         delete finding.provenance.deepScanRepairGroups;
+        delete finding.provenance.deepScanPublicationIdentity;
         group = { id, finding, worker: workerIndex, target: id };
         retained.push(group);
       } else {

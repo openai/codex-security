@@ -3418,7 +3418,7 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             "list-global-findings": native_indexes.list_global_findings,
             "list-repositories": native_indexes.list_repositories,
             "list-findings": list_findings,
-            "list-finding-updates": partial(list_finding_updates, require_scan),
+            "list-finding-updates": partial(list_finding_updates, _WORKBENCH_DB_CONTEXT),
             "complete-budget-exhausted-scan": complete_budget_exhausted_scan,
             "set-finding-triage": set_finding_triage,
             "request-finding-remediation": request_finding_remediation,

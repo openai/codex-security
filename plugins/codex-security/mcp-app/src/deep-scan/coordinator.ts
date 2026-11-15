@@ -16,6 +16,7 @@ import {
   writeJsonAtomic,
 } from "./artifacts.js";
 import {
+  allocatePublicationIdentities,
   persistedScanUnion,
   parseScanUnion,
   addScanCoverage,
@@ -738,6 +739,8 @@ export class DeepScanCoordinator {
       resultPath,
       accepted.filter((w) => merged.has(w.id)),
     );
+    const scope = this.state.includePaths ?? [this.state.scope];
+    allocatePublicationIdentities(result, scope, this.state.filePaths);
     const scanLabel = await nextWorkerLabel(
       this.artifacts.workersRoot,
       "discovery",
@@ -812,6 +815,7 @@ export class DeepScanCoordinator {
           "output",
           "result.json",
         );
+        allocatePublicationIdentities(result, scope, this.state.filePaths);
         await writeJsonAtomic(resultPath, persistedScanUnion(result));
         const iterationId = randomUUID();
         const saved = await this.options.store.recordIteration({

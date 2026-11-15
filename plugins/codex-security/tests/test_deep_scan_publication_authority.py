@@ -65,7 +65,7 @@ def active_publication(workbench_db, publication_scan):
 
 def read_feed(scan, after=0):
     return scan.api["list_finding_updates"](
-        scan.api["require_scan"],
+        scan.api["_WORKBENCH_DB_CONTEXT"],
         scan.connection,
         Namespace(scan_id=scan.scan_id, after_cursor=after, limit=20),
     )

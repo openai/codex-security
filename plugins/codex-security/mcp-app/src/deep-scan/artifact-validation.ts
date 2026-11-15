@@ -9,6 +9,8 @@ import {
   validateWorkerReport,
 } from "../coverage-publication.js";
 import {
+  buildFindings,
+  findingsWithinScope,
   parsePersistedScanDraft,
   scanDraftInputSchema,
   retainRecordedReceiptOwnership,
@@ -21,16 +23,69 @@ import type { DeepScanArtifacts } from "./artifacts.js";
 import { errorMessage } from "./errors.js";
 import type { AcceptedDiscovery } from "./worker-runner.js";
 
+type Finding = ScanDraftInput["findings"][number];
+const publicationIdentitySchema =
+  scanDraftInputSchema.shape.findings.element.shape.identity;
+
 export type ScanUnion = Omit<ScanDraftInput, "reviewState"> & {
   /** Host-owned accepted coverage, omitted from the legacy persisted reducer format. */
   sourceCoverage?: ScanDraftInput["reviewState"];
 };
 const aggregateSchema = scanDraftInputSchema.omit({ reviewState: true });
 
+function publicationIdentity(finding: Finding) {
+  return publicationIdentitySchema.safeParse(
+    finding.provenance.deepScanPublicationIdentity,
+  ).data;
+}
+
+/** Keep each surviving aggregate finding's first published identity. */
+export function allocatePublicationIdentities(
+  result: ScanUnion,
+  includePaths: readonly string[],
+  filePaths?: readonly string[],
+): void {
+  const retained: {
+    finding: Finding;
+    identity: NonNullable<Finding["identity"]>;
+  }[] = [];
+  const added: Finding[] = [];
+  for (const finding of findingsWithinScope(
+    result.findings,
+    includePaths,
+    filePaths,
+  )) {
+    const identity = publicationIdentity(finding);
+    if (identity) retained.push({ finding, identity });
+    else added.push(finding);
+  }
+  // Reserve existing allocations first, even if the reducer has reordered groups.
+  if (added.length === 0) return;
+  const allocated = buildFindings(
+    [
+      ...retained.map(({ finding, identity }) => ({ ...finding, identity })),
+      ...added,
+    ],
+    "deep",
+  );
+  for (const [index, finding] of added.entries()) {
+    finding.provenance.deepScanPublicationIdentity =
+      allocated[retained.length + index].identity;
+  }
+}
+
 export function scanUnionToDraft(result: ScanUnion): ScanDraftInput {
   const { sourceCoverage, ...draft } = structuredClone(result);
-  for (const finding of draft.findings)
+  for (const finding of draft.findings) {
+    const identity = publicationIdentity(finding);
     delete finding.provenance.deepScanRepairGroups;
+    delete finding.provenance.deepScanPublicationIdentity;
+    if (identity) {
+      if (finding.identity && !isDeepStrictEqual(finding.identity, identity))
+        finding.provenance.preservedIdentity ??= finding.identity;
+      finding.identity = identity;
+    }
+  }
   return {
     ...draft,
     reviewState: sourceCoverage ?? {

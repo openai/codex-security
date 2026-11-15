@@ -241,6 +241,17 @@ def cli_scan_resume(
     return result
 
 
+def read_unpinned_history_seal(
+    wb: Any, scan: sqlite3.Row, scan_dir: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Verify a historical seal against its registered scan before using its metadata."""
+    manifest, _, coverage, _ = _read_sealed_scan(scan_dir, None, "history coverage")
+    wb.verify_manifest_binding(scan, manifest)
+    if coverage["mode"] != wb.expected_coverage_mode(scan):
+        raise ContractError("coverage.mode: must match the workbench scan")
+    return manifest, coverage
+
+
 def coverage_summary_for_history(
     wb: Any, scan: sqlite3.Row, canonical_scan_directory: Callable[[Path], Path]
 ) -> dict[str, Any]:
@@ -250,10 +261,7 @@ def coverage_summary_for_history(
     try:
         if scan["seal_manifest_digest"] is None:
             # Older workbench rows can have valid seals without a pinned digest.
-            manifest, _, coverage, _ = _read_sealed_scan(scan_dir, None, "history coverage")
-            wb.verify_manifest_binding(scan, manifest)
-            if coverage["mode"] != wb.expected_coverage_mode(scan):
-                raise ContractError("coverage.mode: must match the workbench scan")
+            _, coverage = read_unpinned_history_seal(wb, scan, scan_dir)
         else:
             # Completion already validated the full scan. History only needs the
             # pinned manifest and any legacy coverage artifact, not findings or receipts.

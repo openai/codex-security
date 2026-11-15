@@ -845,6 +845,62 @@ test("a failed comparison waits for every started worker batch", async () => {
   await rejected;
 });
 
+test("a legacy report without source IDs keeps its published identity after adoption and a collision", async () => {
+  const {
+    allocatePublicationIdentities,
+    parseScanUnion,
+    persistedScanUnion,
+    scanUnionToDraft,
+  } = await importSource(
+    join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
+  );
+  const original = {
+    ...lookup,
+    title: "First",
+    identity: undefined,
+    provenance: { ...lookup.provenance, candidateId: "shared" },
+  };
+  const result = parseScanUnion({ scanId: randomUUID(), findings: [original] });
+  allocatePublicationIdentities(result, ["."]);
+  const { mergeBatch } = await importSource(
+    join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
+  );
+  await mergeBatch(
+    result,
+    [
+      {
+        id: "w2",
+        resultPath: "/tmp/w2/result.json",
+        result: {
+          ...standardScanDraft(result.scanId, undefined, "w2"),
+          findings: [original, { ...original, title: "Second" }],
+        },
+      },
+    ],
+    "/tmp",
+    async () => JSON.stringify({ uncertain: [0, 1], defects: [] }),
+    (error: unknown) => {
+      throw error;
+    },
+  );
+  allocatePublicationIdentities(result, ["."]);
+  const restored = parseScanUnion(
+    JSON.parse(JSON.stringify(persistedScanUnion(result))),
+  );
+  assert.ok(
+    restored.findings.every(
+      (row: ScanDraftInput["findings"][number]) => !row.identity,
+    ),
+  );
+  allocatePublicationIdentities(restored, ["."]);
+  assert.deepEqual(
+    scanUnionToDraft(restored).findings.map(
+      (row: ScanDraftInput["findings"][number]) => row.identity,
+    ),
+    [{ anchor: "shared" }, { anchor: "shared", instance: "second" }],
+  );
+});
+
 test("a saved same-fix merge keeps both original comparison inputs on resume", async () => {
   const { mergeBatch } = await importSource(
     join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
