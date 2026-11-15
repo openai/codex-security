@@ -3388,6 +3388,9 @@ export async function main(
                     patchSandbox,
                   );
                 await appServer.onBeforeTurn?.(signal);
+                // The model's Windows profile denies external Git config files.
+                // Check their snapshot read grants again after the turn.
+                snapshotConfigReady = undefined;
               } finally {
                 patchPreparationSignal = previous;
               }

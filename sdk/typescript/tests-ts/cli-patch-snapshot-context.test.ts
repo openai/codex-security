@@ -741,6 +741,7 @@ test.each([
     let snapshots = 0;
     const bindings: NodeJS.ProcessEnv[] = [];
     const trees: string[] = [];
+    const configProbeTrees = new Set<number>();
     const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
       currentDirectory: repository,
       environment,
@@ -796,6 +797,8 @@ test.each([
       },
       async onRepositoryCommand(command, args, cwd, options) {
         if (options?.sandbox) {
+          if (args.includes("--stdin-paths"))
+            configProbeTrees.add(trees.length);
           snapshots++;
           bindings.push(options.sandbox.gitEnvironment!);
           if (selector === "GIT_ALTERNATE_OBJECT_DIRECTORIES")
@@ -832,6 +835,12 @@ test.each([
     expect(snapshots).toBeGreaterThan(0);
     expect(trees).toHaveLength(2);
     expect(trees[1]).toBe(trees[0]);
+    if (
+      process.platform === "win32" &&
+      selector === "GIT_CONFIG_GLOBAL" &&
+      state === "set"
+    )
+      expect([...configProbeTrees]).toEqual([0, 1]);
     if (filtered) {
       for (const binding of bindings) {
         if (selector === "GIT_CONFIG_COUNT")

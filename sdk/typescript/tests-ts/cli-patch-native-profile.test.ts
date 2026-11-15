@@ -15,7 +15,10 @@ import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { readSkillCommandOutput, runRepositoryCommand } from "../src/cli.js";
-import { capturePatchGitControls } from "../src/patch-git-controls.js";
+import {
+  capturePatchGitControls,
+  ensureWindowsSnapshotConfigReadable,
+} from "../src/patch-git-controls.js";
 import { runGitRepositoryCommand, runWorkflow } from "./cli-patch-fixtures.js";
 import {
   patchSnapshotEnvironment,
@@ -533,8 +536,7 @@ test("patch model cannot read external Git configuration used by snapshots", asy
       const root = dirname(context.repository);
       const selected = join(root, "selected.gitconfig");
       const included = join(root, "included.gitconfig");
-      const reads = await inspectModel(
-        `const fs = require("node:fs");
+      const readConfigs = `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const paths = ${JSON.stringify([selected, included])};
 for (const path of paths) {
@@ -542,10 +544,13 @@ for (const path of paths) {
   catch (error) { process.stdout.write(error.code); }
 }
 const git = spawnSync("git", ["config", "--file", paths[0], "--get", "http.extraHeader"]);
-if (git.stdout) process.stdout.write(git.stdout);`,
-      );
-      expect(reads).not.toContain("Synthetic fixture");
-      expect(reads).not.toContain("Included fixture");
+if (git.stdout) process.stdout.write(git.stdout);`;
+      const expectModelDenied = async () => {
+        const reads = await inspectModel(readConfigs);
+        expect(reads).not.toContain("Synthetic fixture");
+        expect(reads).not.toContain("Included fixture");
+      };
+      await expectModelDenied();
       const gitEnvironment = {
         GIT_CONFIG_GLOBAL: selected,
         GIT_CONFIG_NOSYSTEM: "1",
@@ -555,24 +560,37 @@ if (git.stdout) process.stdout.write(git.stdout);`,
         CODEX_HOME: context.home,
         ...gitEnvironment,
       });
+      const sandbox = {
+        directory: context.repository,
+        environment,
+        profile: context.snapshotProfile,
+        gitEnvironment,
+      };
+      if (process.platform === "win32")
+        await ensureWindowsSnapshotConfigReadable(
+          context.controls!.snapshotConfigPaths,
+          (args, input, refreshWindowsReadGrants) =>
+            runRepositoryCommand("git", args, context.repository, {
+              input,
+              sandbox: {
+                ...sandbox,
+                gitEnvironment: { ...gitEnvironment, LC_ALL: "C" },
+                refreshWindowsReadGrants,
+              },
+            }),
+        );
       expect(
         await runRepositoryCommand(
           "git",
           ["config", "--get", "synthetic.source"],
           context.repository,
-          {
-            sandbox: {
-              directory: context.repository,
-              environment,
-              profile: context.snapshotProfile,
-              gitEnvironment,
-            },
-          },
+          { sandbox },
         ),
       ).toBe("Included fixture");
+      await expectModelDenied();
     },
   );
-}, 30_000);
+}, 90000);
 
 test("patch model and snapshot filters cannot recover credentials from Git stores", async () => {
   const gitHome = await fixtures.create("patch-store-home-");
