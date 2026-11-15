@@ -36,6 +36,7 @@ import type { ScanCost, ScanUsageMeasurement } from "./cost.js";
 import { BatchCostPool, batchScanBudget } from "./batch-cost.js";
 import { deepScanOptions } from "./deep-config.js";
 import { readThreatModelPath } from "./artifact-export.js";
+import { savedCheckoutBoundaries } from "./saved-scan-bootstrap.js";
 import {
   OutputDirectoryNotEmptyError,
   errorMessage,
@@ -769,12 +770,25 @@ async function runCampaign(
         let reportedError =
           reportedErrors.length === 0 ? undefined : reportedErrors.join("; ");
         const status = failure !== undefined ? "failed" : "completed";
-        if (threatModelPath === undefined)
-          threatModelPath = await readThreatModelPath(scanDir, {
-            pythonPath: options.config.pythonPath,
-            protectedRoot,
-            signal: options.signal?.aborted ? undefined : options.signal,
-          });
+        if (threatModelPath === undefined) {
+          const signal = options.signal?.aborted ? undefined : options.signal;
+          try {
+            // Receipt collection also invokes Python when the recovery attempt failed.
+            const saved =
+              options.recoverScan &&
+              (await savedCheckoutBoundaries(process.env, { scanDir }, signal));
+            threatModelPath = await readThreatModelPath(scanDir, {
+              pythonPath: options.config.pythonPath,
+              protectedRoot: saved?.inputRoots.length
+                ? [protectedRoot, ...saved.inputRoots]
+                : protectedRoot,
+              signal,
+            });
+          } catch {
+            signal?.throwIfAborted();
+            threatModelPath = null;
+          }
+        }
         const recoveryCheckout =
           options.recoverScan !== undefined && failure === undefined
             ? checkout

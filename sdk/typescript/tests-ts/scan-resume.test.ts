@@ -1802,35 +1802,47 @@ test.each(["complete", "configured SQLite", "partial", "unpriced"] as const)(
   },
 );
 
+async function modelInputCheckout() {
+  const checkout = await temporaryDirectory();
+  gitText(["-C", checkout, "init", "-q"]);
+  const source = join(checkout, "settings", "instructions.md");
+  const bin = join(checkout, "tools");
+  await mkdir(dirname(source));
+  await mkdir(bin);
+  await writeFile(source, "# synthetic model settings\n");
+  const python = join(bin, "python3");
+  await writeFile(python, '#!/bin/sh\nprintf probed > "$0.ran"\nexit 23\n', {
+    mode: 0o700,
+  });
+  return { checkout, source, bin, python };
+}
+
 test
   .skipIf(process.platform === "win32")
-  .each(["config", "resupplied", "knowledge", "legacy-knowledge"] as const)(
+  .each([
+    "config",
+    "resupplied",
+    "knowledge",
+    "legacy-knowledge",
+    "legacy-model-instructions",
+  ] as const)(
   "sealed SDK recovery excludes the %s checkout before Python discovery",
   async (sourceKind) => {
-    const checkout = await temporaryDirectory();
-    gitText(["-C", checkout, "init", "-q"]);
-    const source = join(checkout, "settings", "instructions.md");
-    const bin = join(checkout, "tools");
-    await mkdir(dirname(source));
-    await mkdir(bin);
-    await writeFile(source, "# synthetic model settings\n");
-    const python = join(bin, "python3");
-    await writeFile(python, '#!/bin/sh\nprintf probed > "$0.ran"\nexit 23\n', {
-      mode: 0o700,
-    });
-
-    const f = await interruptedScan(
-      "deep",
-      false,
-      sourceKind === "knowledge" || sourceKind === "legacy-knowledge"
-        ? {
-            knowledgeBasePaths: [source],
-            ...(sourceKind === "knowledge" && {
-              knowledgeBaseProtectedRoots: [checkout],
-            }),
-          }
-        : { executableSourcePaths: [source] },
-    );
+    const { checkout, source, bin, python } = await modelInputCheckout();
+    const configuredSources = { executableSourcePaths: [source] };
+    const recipes = {
+      config: configuredSources,
+      resupplied: configuredSources,
+      knowledge: {
+        knowledgeBasePaths: [source],
+        knowledgeBaseProtectedRoots: [checkout],
+      },
+      "legacy-knowledge": { knowledgeBasePaths: [source] },
+      "legacy-model-instructions": {
+        config: { model_instructions_file: source },
+      },
+    };
+    const f = await interruptedScan("deep", false, recipes[sourceKind]);
     await sealWithOriginalPlugin(f);
     await rm(f.repository, { recursive: true });
     f.environment.PATH = bin;
@@ -1851,12 +1863,55 @@ test
           requireSealedResume: true,
         }),
       ).rejects.toThrow("interpreter is unavailable or unusable");
-      await expect(stat(python + ".ran")).rejects.toMatchObject({
+      await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
         code: "ENOENT",
       });
     } finally {
       await client.close();
     }
+  },
+);
+
+test.skipIf(process.platform === "win32").each([
+  { bulk: false, explicitPython: false },
+  { bulk: true, explicitPython: false },
+  { bulk: true, explicitPython: true },
+])(
+  "CLI sealed recovery excludes Python in its saved instruction checkout (%j)",
+  async ({ bulk, explicitPython }) => {
+    const { source, bin, python } = await modelInputCheckout();
+    const f = await interruptedScan("deep", bulk, {
+      config: { model_instructions_file: source },
+    });
+    await sealWithOriginalPlugin(f);
+    if (bulk) await rm(join(f.root, "results.jsonl"));
+    else await rm(f.repository, { recursive: true });
+    const args = bulk
+      ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover"]
+      : ["scans", "resume", f.scanId];
+    const cli = join(import.meta.dirname, "../src/cli.ts");
+    const result = Bun.spawnSync([process.execPath, cli, ...args, "--json"], {
+      cwd: f.root,
+      env: {
+        ...f.environment,
+        HOME: f.root,
+        TMPDIR: f.root,
+        PATH: [bin, f.environment.PATH].join(delimiter),
+        PYTHON: explicitPython ? python : "python3",
+        CODEX_CLI_PATH: join(f.root, "absent-codex"),
+      },
+    });
+    await expect(readFile(python + ".ran", "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(
+      explicitPython ? 2 : 0,
+    );
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({
+      progress: { status: explicitPython ? "running" : "complete" },
+    });
   },
 );
 

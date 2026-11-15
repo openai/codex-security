@@ -1719,22 +1719,38 @@ const DEFAULT_DEPENDENCIES: CliDependencies = {
     );
     const configuredPython =
       pythonPath ?? environmentEntry(environment, "PYTHON");
+    let selectedScan: string | { scanDir: string } | undefined;
+    if (args[0] === "get-cli-scan-resume" || args[0] === "get-deep-scan") {
+      const index = args.indexOf("--scan-id");
+      if (index !== -1) selectedScan = args[index + 1];
+    } else if (args[0] === "list-scans") {
+      const index = args.indexOf("--scan-root");
+      const scanDir = index === -1 ? undefined : args[index + 1];
+      if (scanDir !== undefined) selectedScan = { scanDir };
+    }
+    const discoverPython =
+      !configuredPython || !isPythonPathCandidate(configuredPython);
     const boundaries =
-      configuredPython && isPythonPathCandidate(configuredPython)
-        ? undefined
-        : await savedCheckoutBoundaries(environment);
+      discoverPython || selectedScan !== undefined
+        ? await savedCheckoutBoundaries(environment, selectedScan, signal)
+        : undefined;
+    const callerRoots =
+      protectedRoot === undefined ? undefined : protectedRoots;
     const python = await resolvePluginPython({
       configuredPath: pythonPath,
       environment,
       signal,
-      protectedRoot: protectedRoot === undefined ? undefined : protectedRoots,
-      discoveryProtectedRoots: boundaries
-        ? await savedDiscoveryRoots(
-            boundaries,
-            [...boundaries.byTarget.keys()],
-            signal,
-          )
-        : undefined,
+      protectedRoot: boundaries?.inputRoots.length
+        ? [...(callerRoots ?? [process.cwd()]), ...boundaries.inputRoots]
+        : callerRoots,
+      discoveryProtectedRoots:
+        discoverPython && boundaries
+          ? await savedDiscoveryRoots(
+              boundaries,
+              [...boundaries.byTarget.keys()],
+              signal,
+            )
+          : undefined,
       allowPathLookup: boundaries?.complete,
     });
     if (

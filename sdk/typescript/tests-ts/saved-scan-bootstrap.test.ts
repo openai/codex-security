@@ -124,6 +124,44 @@ test.skipIf(process.platform !== "win32")(byteLimitTest, async () => {
   expect(opened).toEqual([ordinary]);
 });
 
+test.skipIf(process.platform !== "win32")(
+  "saved model input roots survive a case-only Windows output directory rename",
+  async () => {
+    const state = await temporaryDirectory();
+    const scanDir = join(state, "résumé");
+    const savedScanDir = join(state, "RÉSUMÉ");
+    const inputRoot = join(state, "model-inputs");
+    await mkdir(scanDir);
+    await mkdir(inputRoot);
+    const database = new Database(join(state, "workbench.sqlite3"), {
+      create: true,
+    });
+    try {
+      database.exec(
+        "CREATE TABLE scans (id, target_path, scan_dir, recipe_json)",
+      );
+      database.query("INSERT INTO scans VALUES (?, ?, ?, ?)").run(
+        "synthetic",
+        state,
+        savedScanDir,
+        JSON.stringify({
+          config: {
+            model_instructions_file: join(inputRoot, "instructions.md"),
+          },
+        }),
+      );
+    } finally {
+      database.close();
+    }
+
+    const boundaries = await savedCheckoutBoundaries(
+      { CODEX_SECURITY_STATE_DIR: state },
+      { scanDir },
+    );
+    expect(boundaries?.inputRoots).toContain(inputRoot);
+  },
+);
+
 function writePythonProbe(path: string) {
   return writeFile(
     path,
