@@ -1345,7 +1345,7 @@ exit 1
             {
               cwd,
               env: { ...process.env, ...environment, ...options?.environment },
-              encoding: "utf8",
+              encoding: options?.encoding ?? "utf8",
             },
           );
           return options?.trim === false ? stdout : stdout.trim();
