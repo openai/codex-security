@@ -11479,7 +11479,12 @@ async function operatorPatchConfig(
     return false;
   if (!origin.startsWith("file:")) return true;
   // A global include retains global scope even when its file is in the checkout.
-  const path = resolve(caller, origin.slice(5));
+  const file = origin.slice(5);
+  const prefix = parse(file).root;
+  // Let the filesystem traverse link/.. in the same order as Git.
+  const path = isAbsolute(file)
+    ? file
+    : `${resolve(caller, prefix)}${sep}${file.slice(prefix.length)}`;
   const physical = await realpath(path);
   return [root, caller].every(
     (directory) =>
