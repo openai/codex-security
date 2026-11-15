@@ -4,6 +4,7 @@ import sys
 import uuid
 from pathlib import Path
 
+import pytest
 from workbench_test_support import (
     empty_target_scan,
     get_scan,
@@ -323,13 +324,30 @@ def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_pat
     assert (scan / "report.md").read_text() == report
 
 
-def test_deadline_file_handoff_waits_for_custom_validation(tmp_path):
-    from test_workbench_completion_binding import register_cli_scan
+@pytest.mark.parametrize("use_queue", [True, False], ids=["local-queue", "in-context"])
+def test_deadline_file_handoff_waits_for_custom_validation(tmp_path, use_queue):
+    from workbench_test_support import run_workbench
 
     state, target, scan = (tmp_path / name for name in ("state", "target", "scan"))
     target.mkdir()
-    scan_id = register_cli_scan(
-        state, target, scan, recipe_fields={"maxTimeMinutes": 1, "validationMode": "custom"}
+    scan.mkdir(mode=0o700)
+    recipe = {
+        "mode": "standard",
+        "config": {},
+        "repository": str(target),
+        "target": {"kind": "repository", "paths": []},
+        "maxTimeMinutes": 1,
+        "validationMode": "custom",
+    }
+    scan_id = run_workbench(
+        state,
+        "register-cli-scan",
+        "--repository",
+        str(target),
+        "--scan-dir",
+        str(scan),
+        "--registration-json-stdin",
+        input_text=json.dumps({"recipe": recipe, "surface": "sdk", "hosted": not use_queue}),
     )["scanId"]
     scan_command(
         state,
@@ -343,7 +361,10 @@ def test_deadline_file_handoff_waits_for_custom_validation(tmp_path):
     write_completed_contract(scan, scan_id, target)
     queue = scan / "artifacts/01_context/standard-queue.json"
     queue.parent.mkdir(parents=True, exist_ok=True)
-    queue.write_text(json.dumps({"batches": [["src/unread.py"]], "reviewed": [], "returns": []}))
+    if use_queue:
+        queue.write_text(
+            json.dumps({"batches": [["src/unread.py"]], "reviewed": [], "returns": []})
+        )
     manifest_path = scan / "scan-manifest.json"
     manifest = json.loads(manifest_path.read_text())
     coverage = json.loads((scan / "coverage.json").read_text())
@@ -360,12 +381,33 @@ def test_deadline_file_handoff_waits_for_custom_validation(tmp_path):
         k: coverage[k] for k in ("surfaces", "explicitExclusions", "deferred")
     }
     (scan / "coverage.json").unlink()
-    manifest["scan"]["scope"]["validationMode"] = "custom_pending"
-    manifest_path.write_text(json.dumps(manifest))
-    assert (
-        "awaiting custom validation"
-        in scan_command(state, "complete-scan", scan_id, check=False)["stderr"]
-    )
+    for mode in [None, "custom_pending", "unknown"]:
+        if mode is not None:
+            manifest["scan"]["scope"]["validationMode"] = mode
+        manifest_path.write_text(json.dumps(manifest))
+        if mode == "custom_pending" and use_queue:
+            # The bound discovery handoff can be accepted before separate SDK validation.
+            stage = scan / "drafts" / f"{uuid.uuid4()}.json"
+            stage.parent.mkdir(exist_ok=True)
+            stage.write_text(
+                json.dumps(
+                    {
+                        "manifest": manifest,
+                        "reviewState": coverage,
+                        "findings": json.loads((scan / "findings.json").read_text()),
+                    }
+                )
+            )
+            assert (
+                scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(stage))[
+                    "status"
+                ]
+                == "draft_written"
+            )
+        assert (
+            "awaiting custom validation"
+            in scan_command(state, "complete-scan", scan_id, check=False)["stderr"]
+        )
     assert get_scan(state, scan_id)["scan"]["progress"]["status"] == "running"
     # The SDK now owns the separate validation turn; simulate its accepted file handoff.
     manifest["scan"]["scope"]["validationMode"] = "custom"
@@ -394,3 +436,81 @@ def test_deadline_checks_require_original_elapsed_allowance():
         {"timeBudgetStartedAt": past, "maxTimeMinutes": -1},
     ]:
         assert not elapsed(recipe)
+
+
+def test_elapsed_deadline_keeps_recorded_proof_gap_after_queue_finishes(tmp_path):
+    from test_workbench_completion_binding import register_cli_scan
+
+    state, target, scan = (tmp_path / name for name in ("state", "target", "scan"))
+    target.mkdir()
+    scan_id = register_cli_scan(state, target, scan, recipe_fields={"maxTimeMinutes": 1})["scanId"]
+    scan_command(
+        state,
+        "set-scan-thread",
+        scan_id,
+        "--thread-id",
+        "fixture",
+        "--time-budget-started-at",
+        "2000-01-01T00:00:00Z",
+    )
+    write_completed_contract(scan, scan_id, target)
+    queue = scan / "artifacts/01_context/standard-queue.json"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    returned = "artifacts/02_discovery/worker.json"
+    (scan / returned).parent.mkdir(parents=True, exist_ok=True)
+    (scan / returned).write_text(
+        json.dumps(
+            {
+                "findings": [{"title": "Potential bypass"}],
+                "reviewed_files": ["src/read.py"],
+                "resolved_questions": [],
+            }
+        )
+    )
+    queue.write_text(
+        json.dumps(
+            {
+                "batches": [["src/read.py"]],
+                "reviewed": ["src/read.py"],
+                "returns": [{"file": returned, "count": 1}],
+            }
+        )
+    )
+    reason = "The backend configuration needed to verify the route was unavailable."
+    subprocess.run(
+        [sys.executable, SCRIPT, "record", scan],
+        input=json.dumps(
+            [
+                {
+                    "candidateId": "standard-1",
+                    "parts": [{"disposition": "deferred", "reason": reason}],
+                }
+            ]
+        ),
+        text=True,
+        check=True,
+    )
+    manifest_path = scan / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    coverage = json.loads((scan / "coverage.json").read_text())
+    coverage["deferred"] = [
+        {
+            "id": "proof-gap",
+            "candidateId": "standard-1.1",
+            "reason": reason,
+            "paths": ["src/read.py"],
+        }
+    ]
+    manifest["scan"].pop("coverageRef")
+    manifest["scan"]["mode"] = "repository"
+    manifest["scan"]["reviewState"] = {
+        k: coverage[k] for k in ("surfaces", "explicitExclusions", "deferred")
+    }
+    (scan / "coverage.json").unlink()
+    manifest_path.write_text(json.dumps(manifest))
+    assert scan_command(state, "complete-scan", scan_id)["scan"]["findingCount"] == 1
+    assert reason in (scan / "report.md").read_text()
+    assert (
+        json.loads(manifest_path.read_text())["scan"]["reviewState"]["deferred"]
+        == coverage["deferred"]
+    )

@@ -132,9 +132,11 @@ def require_standard_decisions(
         return False
     scan_dir = Path(scan["scan_dir"])
     queue = read_optional(scan_dir, QUEUE)
-    if not queue:
-        return False
-    remaining = {path for batch in queue["batches"] for path in batch} - set(queue["reviewed"])
+    remaining = (
+        {path for batch in queue["batches"] for path in batch} - set(queue["reviewed"])
+        if queue
+        else set()
+    )
     recipe = json.loads(scan["recipe_json"] or "{}")
     elapsed = investigation_deadline_elapsed(recipe)
     deferred_rows = [
@@ -142,6 +144,7 @@ def require_standard_decisions(
         for row in coverage.get("deferred", [])
         if isinstance(row, dict) and isinstance(row.get("reason"), str) and row["reason"].strip()
     ]
+    retain_deferred = elapsed and bool(deferred_rows)
     if remaining:
         if not elapsed:
             raise RecoverableContractError(
@@ -161,20 +164,21 @@ def require_standard_decisions(
             )
     if recipe.get("validationMode") == "custom":
         if (
-            remaining
+            retain_deferred
             and sealing
-            and manifest["scan"].get("scope", {}).get("validationMode") == "custom_pending"
+            and manifest["scan"].get("scope", {}).get("validationMode") != "custom"
         ):
             raise RecoverableContractError(
                 "The partial discovery draft is awaiting custom validation."
             )
-        return bool(remaining)
+        return retain_deferred
+    if not queue:
+        return retain_deferred
 
     decisions = read_optional(scan_dir, DECISIONS)
     deferred_candidates = {
         row["candidateId"]: row for row in deferred_rows if isinstance(row.get("candidateId"), str)
     }
-    partial = bool(remaining)
     for key in candidate_ids(queue):
         if key not in decisions and (not elapsed or key not in deferred_candidates):
             raise RecoverableContractError(
@@ -187,7 +191,6 @@ def require_standard_decisions(
             row = deferred_candidates[pending["candidateId"]]
             for field in ("candidate", "counterevidence", "reviewed_files"):
                 row[field] = pending[field]
-            partial = True
 
     outcomes = claim_outcomes(decisions)
     reported = set()
@@ -227,7 +230,7 @@ def require_standard_decisions(
             raise RecoverableContractError(
                 f"Standard claim {claim} is {disposition}. The report does not match its decision."
             )
-    return partial
+    return retain_deferred
 
 
 def main() -> None:
