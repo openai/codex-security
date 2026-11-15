@@ -185,8 +185,20 @@ def test_standard_cannot_publish_a_shortlist(tmp_path):
     del extra["provenance"]["duplicateCandidateIds"]
     stage.write_text(json.dumps(documents))
     scan_command(state, "write-scan-draft", scan_id, "--draft-path", str(stage))
+    # Losing the local index must not erase the relationship between a return
+    # and its decisions. Completion replay still uses the accepted sealed report.
+    index = queue.read_bytes()
+    queue.unlink()
+    stage.write_text(json.dumps(documents))
+    for args in [("write-scan-draft", "--draft-path", str(stage)), ("complete-scan",)]:
+        result = scan_command(state, args[0], scan_id, *args[1:], check=False)
+        assert result["returncode"] == 1
+        assert "Restore the queue" in result["stderr"]
+    queue.write_bytes(index)
     completed = scan_command(state, "complete-scan", scan_id)
     assert completed["scan"]["findingCount"] == 3
+    queue.unlink()
+    assert scan_command(state, "complete-scan", scan_id)["scan"]["findingCount"] == 3
 
 
 def test_registered_deadline_reports_unread_paths_and_pending_candidates(tmp_path):

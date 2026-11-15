@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { readdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { artifactDestination, replaceArtifactJson } from "../artifact-io.js";
 import { sqliteFilename } from "../windows-path";
 import { loadScopes, scopedSourceFiles } from "./generate-inventory";
 import { environmentValue, readFile, resolvedPathText } from "./helper-files";
-import { append, exists } from "./inventory-paths";
+import { append, exists, fsPath } from "./inventory-paths";
 
 interface Rule {
   path?: string;
@@ -111,9 +113,20 @@ export async function standardQueue(args: string[], home?: string) {
     queue = { rules, batches: [], reviewed: [], returns: [] };
     for (let i = 0; i < paths.length; i += 5)
       queue.batches.push(paths.slice(i, i + 5));
-    await withQueueWriteLock(await lockFile(), async () => {
+    const guardPath = await lockFile();
+    await withQueueWriteLock(guardPath, async () => {
       if (exists(file))
         throw new Error("Queue already built. Use pending to resume.");
+      const saved = await readdir(fsPath(dirname(guardPath)));
+      if (
+        saved.some((name) => name.endsWith(".json")) ||
+        exists(
+          await destination("artifacts/04_validation/standard-decisions.json"),
+        )
+      )
+        throw new Error(
+          "The Standard file queue is missing but review data remains. Restore the queue before resuming.",
+        );
       await replaceArtifactJson(file, queue);
     });
   } else {

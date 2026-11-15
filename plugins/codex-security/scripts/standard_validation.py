@@ -132,6 +132,14 @@ def require_standard_decisions(
         return False
     scan_dir = Path(scan["scan_dir"])
     queue = read_optional(scan_dir, QUEUE)
+    if not queue and any(
+        (scan_dir / marker).exists()
+        for marker in (QUEUE, DECISIONS, "artifacts/02_discovery/standard-returns")
+    ):
+        raise RecoverableContractError(
+            "The Standard file queue is missing or incomplete. Restore the queue before "
+            "publishing its results, or rebuild it if no worker returns were saved."
+        )
     remaining = (
         {path for batch in queue["batches"] for path in batch} - set(queue["reviewed"])
         if queue

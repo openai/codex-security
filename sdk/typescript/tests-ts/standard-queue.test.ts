@@ -108,6 +108,10 @@ test("Standard schedules every scoped match once and retains unfinished paths", 
     readFileSync(join(scan, queue.returns[0].file), "utf8"),
   );
   expect(saved.findings).toEqual([{ title: "Retained claim" }]);
+  unlinkSync(join(context, "standard-queue.json"));
+  expect(run("build", [repo, "src", "selected.txt"]).stderr).toContain(
+    "Restore the queue before resuming",
+  );
 });
 
 test("overlapping Standard returns keep both batches and candidate offsets", async () => {
