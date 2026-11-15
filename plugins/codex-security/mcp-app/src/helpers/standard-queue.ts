@@ -97,6 +97,14 @@ export async function standardQueue(args: string[], home?: string) {
       repo,
       scopes,
       home,
+      {
+        file: await destination(
+          scopeFile
+            ? "scoped-source-input.jsonl"
+            : "artifacts/02_discovery/in_scope_files.txt",
+        ),
+        scoped: Boolean(scopeFile),
+      },
     )) {
       if (explicit) matches.add(name);
       if (matches.has(name)) continue;
