@@ -6550,7 +6550,7 @@ export async function main(
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} finding${result.sourceFindingCount === 1 ? "" : "s"} → ${result.findingCount} group${result.findingCount === 1 ? "" : "s"}${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(

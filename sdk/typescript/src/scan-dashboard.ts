@@ -499,7 +499,7 @@ export class ScanDashboard {
         dashboard.setStage(status);
         dashboard.note(
           receipt.error ??
-            `${status} · ${receipt.findingCount ?? 0} findings before deduplication`,
+            `${status} · ${receipt.findingCount ?? 0} finding${receipt.findingCount === 1 ? "" : "s"} before deduplication`,
         );
       }
     }
@@ -1040,8 +1040,8 @@ export class ScanDashboard {
     );
     const findings =
       this.#componentResult === null
-        ? `${rawFindings} findings before deduplication`
-        : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
+        ? `${rawFindings} finding${rawFindings === 1 ? "" : "s"} before deduplication`
+        : `${this.#componentResult.sourceFindingCount} finding${this.#componentResult.sourceFindingCount === 1 ? "" : "s"} → ${this.#componentResult.findingCount} group${this.#componentResult.findingCount === 1 ? "" : "s"}${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     return this.#formatFrame([
       `  CODEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,

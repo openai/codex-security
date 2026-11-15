@@ -1591,6 +1591,48 @@ describe("live scan dashboard", () => {
     expect(stderr.text().split("\u001B[?1049h")).toHaveLength(2);
   });
 
+  test("uses the singular for one component finding and group", () => {
+    const stderr = capture(true);
+    const input = new DashboardTestInput();
+    const dashboard = createDashboard(
+      { ...stderr.stream, columns: 100, rows: 16 },
+      {
+        repository: "/synthetic/project",
+        presentation: "components",
+        input,
+      },
+    );
+    const receipt: ComponentReceipt = {
+      id: "component-1",
+      name: "API",
+      paths: ["src/api"],
+      status: "pending",
+      outputDir: "/synthetic/results/1",
+    };
+    const frame = () =>
+      stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!);
+    dashboard.start();
+    dashboard.setComponents([receipt]);
+    dashboard.updateComponent({
+      ...receipt,
+      status: "completed",
+      findingCount: 1,
+    });
+    expect(frame()).toContain("1 finding before deduplication");
+    dashboard.finishComponents({
+      total: 1,
+      completed: 1,
+      failed: 0,
+      planPath: "/synthetic/plan.json",
+      sourceFindingCount: 1,
+      findingCount: 1,
+    });
+    expect(frame()).toContain("1 finding → 1 group\n");
+    input.emit("data", "\r");
+    expect(frame()).toContain("Complete · 1 finding before deduplication");
+    dashboard.stop();
+  });
+
   test("navigates a long component list and shows original failure details", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
