@@ -391,12 +391,8 @@ JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
 def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.Row:
     return connection.execute(
         """
-        SELECT scans.*, lifecycle.snapshot AS lifecycle_json, progress.updated_at AS progress_updated_at,
-               progress.scope_file_count, progress.reportable_findings_count,
-               progress.review_items_total, progress.review_items_completed, progress.deep_review_pass,
-               progress.phase_items_total, progress.phase_items_completed, progress.phase_progress_unit,
-               progress.preflight_checks_total, progress.preflight_checks_completed,
-               progress.preflight_issues_json, progress.last_observed_phase_json
+        SELECT scans.*, lifecycle.snapshot AS lifecycle_json,
+               progress.*, progress.updated_at AS progress_updated_at
         FROM scans
         JOIN scan_progress AS progress ON progress.scan_id = scans.id
         JOIN scan_lifecycles AS lifecycle ON lifecycle.scan_id = scans.id
@@ -404,6 +400,23 @@ def scan_with_progress(connection: sqlite3.Connection, scan_id: str) -> sqlite3.
         """,
         (scan_id,),
     ).fetchone()
+
+
+def scan_progress_summary(row: sqlite3.Row) -> dict[str, Any]:
+    progress = {
+        "candidates": {"reportable": row["reportable_findings_count"]},
+        "coverage": {
+            "closedRows": row["review_items_completed"],
+            "filesTotal": row["scope_file_count"],
+            "worklistRows": row["review_items_total"],
+        },
+        "phase": row["phase"],
+        "status": "canceled" if row["canceled_at"] else row["status"],
+        "updatedAt": row["progress_updated_at"],
+    }
+    if row["last_observed_phase_json"] is not None:
+        progress["lastObservedPhase"] = json.loads(row["last_observed_phase_json"])
+    return progress
 
 
 def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
@@ -419,22 +432,7 @@ def scan_summary(row: sqlite3.Row) -> dict[str, Any]:
         "model": row["model"],
         "name": row["name"],
         "parentScanId": row["parent_scan_id"],
-        "progress": {
-            "candidates": {"reportable": row["reportable_findings_count"]},
-            "coverage": {
-                "closedRows": row["review_items_completed"],
-                "filesTotal": row["scope_file_count"],
-                "worklistRows": row["review_items_total"],
-            },
-            "phase": row["phase"],
-            **(
-                {"lastObservedPhase": json.loads(row["last_observed_phase_json"])}
-                if row["last_observed_phase_json"] is not None
-                else {}
-            ),
-            "status": "canceled" if row["canceled_at"] else row["status"],
-            "updatedAt": row["progress_updated_at"],
-        },
+        "progress": scan_progress_summary(row),
         "recipeAvailable": row["recipe_json"] is not None,
         "reasoningEffort": row["reasoning_effort"],
         "scanDir": row["scan_dir"],

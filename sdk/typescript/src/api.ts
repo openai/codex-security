@@ -2278,6 +2278,7 @@ export class CodexSecurity {
     let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
+    const now = this.#dependencies.now ?? Date.now;
     let observedPhase: ObservedScanPhase | undefined;
     let activeScan: {
       id: string;
@@ -2621,9 +2622,9 @@ export class CodexSecurity {
           ? await pluginCapabilities(shellPluginRoot)
           : undefined;
       const standard = standardCapabilities?.["standardScanHandoff"] === 1;
+      const localStandard = standard && !hosted;
       const trackStoppedPhase =
-        standard &&
-        !hosted &&
+        localStandard &&
         options.validationPrompt === undefined &&
         standardCapabilities?.["stoppedScanPhaseObservation"] === 1;
       const discoveryPrompt =
@@ -2670,9 +2671,8 @@ export class CodexSecurity {
       }
       const trackScopedInventory =
         options.resumeScanId === undefined &&
-        !hosted &&
+        localStandard &&
         normalized.kind === "paths" &&
-        standard &&
         standardCapabilities?.["scopedInventoryReceipt"] === 1;
       let scopeFileCount: number | null = null;
       let reviewedFileCount = 0;
@@ -2724,9 +2724,7 @@ export class CodexSecurity {
           ) {
             observedPhase = {
               phase: progress.phase,
-              observedAt: new Date(
-                (this.#dependencies.now ?? Date.now)(),
-              ).toISOString(),
+              observedAt: new Date(now()).toISOString(),
             };
           }
         }
@@ -3304,7 +3302,6 @@ export class CodexSecurity {
         });
         await chmod(targetPathsFile, 0o400);
       }
-      const localStandard = standard && !hosted;
       latestPhase =
         scanPhaseSchema.safeParse(registration["phase"]).data ?? latestPhase;
       const registeredFileCount = registration["scopeFileCount"];
@@ -3695,7 +3692,7 @@ export class CodexSecurity {
         const timing = scanTimeBudget(
           options.maxTimeMinutes,
           timeBudgetStartedAt === undefined
-            ? (this.#dependencies.now ?? Date.now)()
+            ? now()
             : Date.parse(timeBudgetStartedAt),
         );
         timeBudgetStartedAt = timing.startedAt;
@@ -7087,23 +7084,22 @@ async function stopRegisteredScan(
   observedPhase?: ObservedScanPhase,
 ): Promise<void> {
   const cleanupOptions = { ...activeScan.options, signal: undefined };
-  const costArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
-  const phaseArgs = observedPhase
-    ? [
-        "--observed-phase",
-        observedPhase.phase,
-        "--phase-observed-at",
-        observedPhase.observedAt,
-      ]
-    : [];
+  const stopArgs = cost ? ["--cost-json", JSON.stringify(cost)] : [];
+  if (observedPhase) {
+    stopArgs.push(
+      "--observed-phase",
+      observedPhase.phase,
+      "--phase-observed-at",
+      observedPhase.observedAt,
+    );
+  }
   if (canceled) {
     try {
       const stopped = await workbench(cleanupOptions, [
         "cancel-scan",
         "--scan-id",
         activeScan.id,
-        ...costArgs,
-        ...phaseArgs,
+        ...stopArgs,
       ]);
       // A workspace can already display a replacement when cancellation returns.
       const results = stopped["results"];
@@ -7125,8 +7121,7 @@ async function stopRegisteredScan(
     "--scan-id",
     activeScan.id,
     `--message=${errorMessage(error)}`,
-    ...costArgs,
-    ...phaseArgs,
+    ...stopArgs,
   ]);
   notifyScanLifecycle(options, failed["scan"], true);
 }

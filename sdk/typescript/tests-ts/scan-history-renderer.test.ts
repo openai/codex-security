@@ -34,30 +34,6 @@ describe("scan history renderer", () => {
     expect(historical).not.toContain("scoped paths:");
   });
 
-  test("shows the coordinator's reported phase and receipt time in stopped scan details", () => {
-    const text = renderScanHistory(
-      {
-        scanId: "synthetic-scan",
-        targetPath: "/synthetic/repository",
-        mode: "standard",
-        findings: [],
-        progress: {
-          status: "canceled",
-          phase: "threat_model",
-          lastObservedPhase: {
-            phase: "discovery",
-            observedAt: "2026-01-02T12:01:00Z",
-          },
-        },
-      },
-      "show",
-      { color: false },
-    );
-    expect(text).toMatch(
-      /LAST REPORTED PHASE.*discovery.*2026-01-02T12:01:00Z/u,
-    );
-  });
-
   test("counts singleton sides when the other side is grouped", () => {
     const text = renderScanHistory(
       {
@@ -520,7 +496,14 @@ describe("scan history renderer", () => {
       renderScanHistory(
         {
           ...scan,
-          progress: { status: "failed" },
+          progress: {
+            status: "failed",
+            phase: "threat_model",
+            lastObservedPhase: {
+              phase: "discovery",
+              observedAt: "2026-01-02T12:01:00Z",
+            },
+          },
           failureMessage: "Repository checkout became unavailable.",
           findings: [],
         },
@@ -528,6 +511,9 @@ describe("scan history renderer", () => {
       ),
     );
     expect(failed).toContain("ERROR  Repository checkout became unavailable.");
+    expect(failed).toContain(
+      "LAST REPORTED PHASE  discovery  ·  2026-01-02T12:01:00Z",
+    );
   });
 
   test("shows saved completion warnings without marking a scan failed", () => {

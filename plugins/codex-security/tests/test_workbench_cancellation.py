@@ -130,26 +130,17 @@ def test_stop_retains_observation_separately_from_committed_progress(tmp_path: P
     assert "lastObservedPhase" not in before
     extra = ["--message", "Fixture interruption"] if stop == "fail-scan" else []
     observed_at = before["updatedAt"]
-    scan_command(
-        state_dir,
-        stop,
-        scan_id,
-        *extra,
-        "--observed-phase",
-        "discovery",
-        "--phase-observed-at",
-        observed_at,
-    )
-    scan_command(
-        state_dir,
-        stop,
-        scan_id,
-        *extra,
-        "--observed-phase",
-        "reporting",
-        "--phase-observed-at",
-        observed_at,
-    )
+    for phase in ("discovery", "reporting"):
+        scan_command(
+            state_dir,
+            stop,
+            scan_id,
+            *extra,
+            "--observed-phase",
+            phase,
+            "--phase-observed-at",
+            observed_at,
+        )
     detail = get_scan(state_dir, scan_id)["scan"]
     summary = run_workbench(state_dir, "list-scans")["scans"][0]
     compact = get_scan(state_dir, scan_id, "--progress-only")["scan"]

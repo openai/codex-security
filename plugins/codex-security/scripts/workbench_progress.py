@@ -13,6 +13,7 @@ from deep_scan_workbench import independent_review_progress, require_current_coo
 from finalize_scan_contract import open_scan_local_file_descriptor
 from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench_constants import PHASES
+from workbench_scan_history import scan_progress_summary
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
 
@@ -83,18 +84,7 @@ def scan_progress_result(
         else None
     )
     progress_result = {
-        "candidates": {"reportable": scan["reportable_findings_count"]},
-        "coverage": {
-            "closedRows": scan["review_items_completed"],
-            "filesTotal": scan["scope_file_count"],
-            "worklistRows": scan["review_items_total"],
-        },
-        "phase": scan["phase"],
-        **(
-            {"lastObservedPhase": json.loads(scan["last_observed_phase_json"])}
-            if scan["last_observed_phase_json"] is not None
-            else {}
-        ),
+        **scan_progress_summary(scan),
         "phaseProgress": {
             "completed": scan["phase_items_completed"],
             "total": scan["phase_items_total"],
@@ -106,8 +96,6 @@ def scan_progress_result(
         },
         "preflightIssues": json.loads(scan["preflight_issues_json"]),
         "reviewPass": scan["deep_review_pass"],
-        "status": "canceled" if scan["canceled_at"] else scan["status"],
-        "updatedAt": scan["progress_updated_at"],
     }
     review_updated_at = ""
     if independent_reviews is not None:

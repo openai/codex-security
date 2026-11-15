@@ -139,6 +139,10 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const pythonExecutable = useTestPython();
 
+function liveMessage(id: string, text: string): ThreadEvent {
+  return { type: "item.completed", item: { id, type: "agent_message", text } };
+}
+
 async function registerEightFileScan(
   _options: unknown,
   args: readonly string[],
@@ -4492,8 +4496,10 @@ if __name__ == "__main__":
     "saves only an accepted coordinator phase at its observation time on stop (%s)",
     async (scenario) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
-      const pluginRoot = await copyCredentialTestPlugin(root);
+      const runtime = preparedRuntime(codexHome);
       if (scenario === "legacy plugin") {
+        const pluginRoot = await copyCredentialTestPlugin(root);
+        runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
         const path = join(pluginRoot, ".codex-plugin", "plugin.json");
         const manifest = JSON.parse(await readFile(path, "utf8"));
         delete manifest.codexSecurity.stoppedScanPhaseObservation;
@@ -4501,33 +4507,21 @@ if __name__ == "__main__":
       }
       const controller = new AbortController();
       const observedAt = "2026-01-02T12:00:00.000Z";
-      let now = Date.parse(observedAt);
+      let now = Date.parse(observedAt) - 60_000;
       async function* events(): AsyncGenerator<ThreadEvent> {
         if (scenario !== "tool output only") {
-          yield {
-            type: "item.completed",
-            item: {
-              type: "agent_message",
-              id: "phase",
-              text: progressMarker("discovery", 1, 8),
-            },
-          };
+          yield liveMessage("inventory", progressMarker("discovery", 0, 8));
+          now = Date.parse(observedAt);
+          yield liveMessage("review", progressMarker("validation", 1, 8));
         }
         now += 60_000;
         // A source read can quote a valid marker. A coordinator claim beyond
         // the registered inventory also fails the existing eligibility check.
         yield completedCommand(
           "cat example.txt",
-          progressMarker("validation", 2, 8),
+          progressMarker("attack_path", 2, 8),
         );
-        yield {
-          type: "item.completed",
-          item: {
-            type: "agent_message",
-            id: "too-large",
-            text: progressMarker("reporting", 3, 9),
-          },
-        };
+        yield liveMessage("too-large", progressMarker("reporting", 3, 9));
         if (scenario === "cancellation") controller.abort();
         throw new Error("Synthetic scan interruption");
       }
@@ -4535,11 +4529,7 @@ if __name__ == "__main__":
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         now: () => now,
-        prepareRuntime: async () => {
-          const runtime = preparedRuntime(codexHome);
-          runtime.plugin.pluginRoot = runtime.plugin.installedRoot = pluginRoot;
-          return runtime;
-        },
+        prepareRuntime: async () => runtime,
         createCodex: codexFactory(async () => ({ events: events() })),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "fail-scan" || args[0] === "cancel-scan")
@@ -4559,7 +4549,7 @@ if __name__ == "__main__":
       } else {
         expect(stopped?.slice(-4)).toEqual([
           "--observed-phase",
-          "discovery",
+          "validation",
           "--phase-observed-at",
           observedAt,
         ]);
@@ -5422,10 +5412,6 @@ if __name__ == "__main__":
           },
         },
       ];
-      const liveMessage = (id: string, text: string): ThreadEvent => ({
-        type: "item.completed",
-        item: { id, type: "agent_message", text },
-      });
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: registerEightFileScan,
