@@ -2769,6 +2769,12 @@ out of external configuration files, including conditional includes. A patch
 stops before running a delegate with an authorization header, credential-bearing
 URL or proxy, or inline helper password available in those files.
 
+HTTPS publication runs named Git credential helpers and executable wrappers
+outside the checkout. Operator settings can also select `!gh auth git-credential`
+or an interpreter with an absolute external script. Put shell logic in an
+external executable wrapper. Git applies the original URL scopes and empty
+helper resets when choosing which helper to invoke.
+
 Git's built-in `store` helper can authenticate the host publication transport.
 The patch model, snapshot filters, and publication hooks have filesystem deny
 rules for Git's standard credential stores and for operator-selected
