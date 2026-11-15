@@ -3499,6 +3499,6 @@ def main(
 
 if __name__ == "__main__":
     try:
-        main()
+        main(with_execution_settings=getattr(sys, "_codex_security_with_execution_settings", False))
     except ContractError as exc:
         raise SystemExit(str(exc)) from None

@@ -6121,6 +6121,32 @@ describe("runtime directories and plugin Python boundary", () => {
     },
   );
 
+  test("preserves a script-only workbench when requesting execution settings", async () => {
+    const pluginRoot = await temporaryDirectory();
+    await mkdir(join(pluginRoot, "scripts"));
+    await writeFile(
+      join(pluginRoot, "scripts", "workbench_db.py"),
+      [
+        "import json, pathlib, sys",
+        "with pathlib.Path(__file__).with_suffix('.ran').open('x'): pass",
+        "if __name__ == '__main__':",
+        "    print(json.dumps({'args': sys.argv[1:], 'input': sys.stdin.read()}))",
+      ].join("\n"),
+    );
+    const args = ["get-scan", "--scan-id", "synthetic-scan"];
+    const result = await runWorkbench(
+      {
+        python: await resolvePluginPython(),
+        pluginRoot,
+        environment: { PATH: process.env["PATH"] },
+        withExecutionSettings: true,
+      },
+      args,
+      "synthetic input",
+    );
+    expect(result).toEqual({ args, input: "synthetic input" });
+  });
+
   test.each([false, true])(
     "reads private execution settings without changing older workbench entrypoints (%p)",
     async (supportsPrivate) => {
@@ -6140,7 +6166,10 @@ describe("runtime directories and plugin Python boundary", () => {
           supportsPrivate
             ? "    print(json.dumps({'private': with_execution_settings}))"
             : "    print(json.dumps({'private': False}))",
-          "if __name__ == '__main__': main()",
+          "if __name__ == '__main__':",
+          supportsPrivate
+            ? "    main(with_execution_settings=getattr(sys, '_codex_security_with_execution_settings', False))"
+            : "    main()",
         ].join("\n"),
       );
       const options = {

@@ -2106,9 +2106,9 @@ export async function runWorkbench(
     if (nativeLocalDedupe && input !== undefined) JSON.parse(input);
     const pythonProgram = registrationHandshake
       ? WORKBENCH_REGISTRATION_PROGRAM
-      : options.withExecutionSettings
-        ? "import inspect, runpy, sys; main = runpy.run_path(sys.argv.pop(1))['main']; main(**({'with_execution_settings': True} if 'with_execution_settings' in inspect.signature(main).parameters else {}))"
-        : WORKBENCH_SCRIPT_PROGRAM;
+      : (options.withExecutionSettings
+          ? "sys._codex_security_with_execution_settings = True\n"
+          : "") + WORKBENCH_SCRIPT_PROGRAM;
     const result = await runCodexCommand(
       { command },
       native
