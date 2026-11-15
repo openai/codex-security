@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, test, mock } from "bun:test";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { connect } from "node:net";
-import { dirname, join, parse, relative } from "node:path";
+import { delimiter, dirname, join, parse, relative } from "node:path";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import { runRepositoryCommand } from "../src/cli.js";
@@ -592,8 +599,8 @@ exit 1
         onRepositoryCommand: (tool, args, cwd, options) => {
           if (tool === "glab") return "";
           if (args.includes("ls-remote")) {
-            expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
-              command("approved"),
+            expect(options?.environment?.["GIT_SSH_COMMAND"]).toEndWith(
+              ` '${script}' 'approved'`,
             );
             return "";
           }
@@ -1424,7 +1431,18 @@ exit 1
         "# Synthetic included Git configuration.\n",
       );
       git("config", "include.path", "hosting-config");
-      const configuredCommand = 'ssh -F "synthetic config"';
+      const tools = await realpath(
+        await fixtures.create("patch-ssh-fixtures-"),
+      );
+      const ssh = join(tools, process.platform === "win32" ? "ssh.exe" : "ssh");
+      await writeFile(ssh, "", { mode: 0o700 });
+      // Use native separators, including the literal backslashes in a
+      // double-quoted Windows path passed through Git for Windows.
+      const config = join(tools, "synthetic config");
+      await writeFile(config, "");
+      const configOption =
+        transport === "scp-command" ? (resume ? "NoNe" : "none") : config;
+      const configuredCommand = `ssh -F "${configOption}" -o ServerAliveInterval=60 -o IdentityFile=none -oUserKnownHostsFile=NoNe`;
       const coreCommand = transport.includes("core")
         ? configuredCommand
         : transport.endsWith("command")
@@ -1433,14 +1451,15 @@ exit 1
       const environment: NodeJS.ProcessEnv = transport.endsWith("command")
         ? { GIT_SSH_COMMAND: configuredCommand, GIT_SSH: "ignored-ssh" }
         : transport.endsWith("executable")
-          ? { GIT_SSH: "synthetic path/ssh" }
+          ? { GIT_SSH: relative(directory, ssh) }
           : {};
       if (transport === "local-fetch-ghrepo" || transport.endsWith("push-only"))
         environment["GH_REPO"] = "upstream-owner/repository";
+      environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
       const effectiveCommand =
-        environment["GIT_SSH_COMMAND"] ??
-        coreCommand ??
-        (environment["GIT_SSH"] === undefined ? "ssh" : '"$GIT_SSH"');
+        environment["GIT_SSH_COMMAND"] || coreCommand
+          ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60' '-o' 'IdentityFile=none' '-oUserKnownHostsFile=NoNe'`
+          : `'${ssh}'`;
       const alias =
         transport.includes("ipv6") && transport !== "ssh-uri-alias-ipv6-api"
           ? transport.includes("scoped")
@@ -1633,11 +1652,10 @@ exit 1
               }
               if (args[0] === "-c" && args[2] === "codex-security-ssh-config") {
                 sshLookups++;
-                expect(args.slice(0, 3)).toEqual([
-                  "-c",
-                  `alias.codex-security-ssh-config=!${effectiveCommand} -G`,
-                  "codex-security-ssh-config",
-                ]);
+                expect(args[1]).toStartWith(
+                  "alias.codex-security-ssh-config=!",
+                );
+                expect(args[1]).toEndWith(`${effectiveCommand} -G`);
                 if (
                   mirror?.startsWith("ssh:") &&
                   args.at(-1) === "git@mirror.example.test"
@@ -1670,7 +1688,7 @@ exit 1
                   transport.startsWith("ssh") ||
                   transport === "www-scp"
                 )
-                  expect(options?.environment?.["GIT_SSH_COMMAND"]).toBe(
+                  expect(options?.environment?.["GIT_SSH_COMMAND"]).toEndWith(
                     effectiveCommand,
                   );
                 pushes++;
