@@ -2263,9 +2263,11 @@ export class CodexSecurity {
     options: ScanOptions,
     signal: AbortSignal,
   ): Promise<ScanResult | undefined> {
-    const selectedScanDir = resolve(
-      expandHome(outputDir, this.#dependencies.environment),
-    );
+    const resolveRequestedPath = (value: string) =>
+      resolveParentTraversal(
+        resolveInputPath(value, process.cwd(), this.#dependencies.environment),
+      );
+    const selectedScanDir = await resolveRequestedPath(outputDir);
     // A manifest is only a hint. The workbench verifies the host ledger, producer,
     // owner and sealed artifact digests before this path can publish anything.
     try {
@@ -2301,13 +2303,8 @@ export class CodexSecurity {
       await realpath(dirname(selectedScanDir)),
       basename(selectedScanDir),
     );
-    const requestedRepository = await resolveParentTraversal(
-      resolveInputPath(
-        repository,
-        process.cwd(),
-        this.#dependencies.environment,
-      ),
-    ).catch(nullIfMissingPath);
+    const requestedRepository =
+      await resolveRequestedPath(repository).catch(nullIfMissingPath);
     const pluginRoot = await bundledPluginRoot();
     const saved = await savedScanWorkbench(scanId, {
       environment: this.#dependencies.environment,

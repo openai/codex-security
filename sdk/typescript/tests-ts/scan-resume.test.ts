@@ -19,7 +19,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { basename, delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join, relative } from "node:path";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { strToU8, zipSync } from "fflate";
@@ -1968,6 +1968,8 @@ test("sealed SDK resumes the registered path scope after the checkout is removed
   });
   await sealWithOriginalPlugin(f);
   await rm(f.repository, { recursive: true });
+  const other = await temporaryDirectory();
+  Object.assign(f.environment, { HOME: other });
   await using client = resumeDependencies(f, () =>
     fail("Unexpected model launch"),
   ).createSecurity({});
@@ -1979,6 +1981,30 @@ test("sealed SDK resumes the registered path scope after the checkout is removed
   await expect(
     client.run(f.repository, { ...options, target: ["other"] }),
   ).rejects.toThrow("requested target differs");
+  if (process.platform !== "win32") {
+    const name = basename(f.scanDir);
+    const foreignOutput = join(other, name);
+    await mkdir(foreignOutput, { mode: 0o700 });
+    const foreignManifest = join(foreignOutput, "scan-manifest.json");
+    await cp(join(f.scanDir, "scan-manifest.json"), foreignManifest);
+    const foreignLink = join(f.root, "foreign-output");
+    await symlink(foreignOutput, foreignLink);
+    const foreign = `${relative(process.cwd(), foreignLink)}/../${name}`;
+    await expect(
+      client.run(f.repository, { ...options, outputDir: foreign }),
+    ).rejects.toThrow("mismatched scan resume context");
+    await rm(foreignLink);
+    await expect(
+      client.run(f.repository, { ...options, outputDir: foreign }),
+    ).rejects.toThrow();
+
+    const savedLink = join(other, "saved-output");
+    await symlink(f.scanDir, savedLink);
+    await expect(
+      client.run(f.repository, { ...options, outputDir: savedLink }),
+    ).rejects.toThrow("non-symlink directory");
+    options.outputDir = `~/saved-output/../${name}`;
+  }
   const result = await client.run(f.repository, {
     ...options,
     target: ["./source.py"],
