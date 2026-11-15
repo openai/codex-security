@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmod, readFile, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
+import { resolveCodexCommand } from "../src/runtime.js";
 import {
   publicationRepository,
   repositoryGit,
@@ -306,6 +307,26 @@ for (const linked of [false, true]) {
         GIT_CONFIG_NOSYSTEM: "1",
         GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
       });
+      const bootstrapMarker = join(home, "checked-message-bootstrap");
+      if (!linked && process.platform !== "win32") {
+        const native = resolveCodexCommand(environment).command;
+        const wrapper = join(home, "codex-hook-bootstrap");
+        await writeFile(
+          wrapper,
+          [
+            "#!/bin/sh",
+            "set -eu",
+            'for argument in "$@"; do last=$argument; done',
+            'case "${last-}" in */COMMIT_EDITMSG)',
+            '  if test -e "$last"; then echo "private message existed before sandbox provisioning" >&2; exit 73; fi',
+            `  printf checked > ${shell(bootstrapMarker)} ;;`,
+            "esac",
+            `exec ${shell(native)} "$@"`,
+          ].join("\n") + "\n",
+          { mode: 0o700 },
+        );
+        environment["CODEX_CLI_PATH"] = wrapper;
+      }
       const admin = join(directory, ".git");
       const message = join(admin, "COMMIT_EDITMSG");
       const hook = join(admin, "hooks", "commit-msg");
@@ -373,6 +394,9 @@ for (const linked of [false, true]) {
           "utf8",
         ).catch((error: NodeJS.ErrnoException) => error.code);
         expect(edited, failure?.message).toContain("Reviewed-by: synthetic");
+        expect(edited).toBe(await readFile(message, "utf8"));
+        if (process.platform !== "win32")
+          expect(await readFile(bootstrapMarker, "utf8")).toBe("checked");
       }
       expect(git("rev-parse", "HEAD")).toBe(head);
       const retained = await readFile(message, "utf8");

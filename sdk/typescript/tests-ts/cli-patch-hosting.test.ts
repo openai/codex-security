@@ -1563,7 +1563,10 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           : {};
       if (transport === "local-fetch-ghrepo" || transport.endsWith("push-only"))
         environment["GH_REPO"] = "upstream-owner/repository";
-      environment["PATH"] = [tools, process.env["PATH"]].join(delimiter);
+      environment["GIT_EXEC_PATH"] = tools;
+      environment["PATH"] = [git("--exec-path"), process.env["PATH"]].join(
+        delimiter,
+      );
       const effectiveCommand =
         environment["GIT_SSH_COMMAND"] || coreCommand
           ? `'${ssh}' '-F' '${configOption}' '-o' 'ServerAliveInterval=60' '-o' 'IdentityFile=none' '-oUserKnownHostsFile=NoNe'`
