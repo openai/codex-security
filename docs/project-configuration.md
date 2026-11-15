@@ -102,12 +102,14 @@ exploitability:
     exclude_paths: [examples/standalone-jobs]
 ```
 
-Omit the setting to keep broad discovery across the checkout. The command
-retains already discovered candidates and records each omitted path in the
-search audit. A different nested `SECURITY.md` policy keeps that path in the
-search. Exact file traces or receipt-backed caller leads can reopen a file
-for follow-up. The setting describes your discovery boundary. It does not
-establish whether an omitted path runs or is affected by the advisory.
+This setting adds explicit exclusions to discovery. The default production
+scope also skips conventional example, test and documentation paths. A
+supplied `exploitability.scope.caller` uses the requested scope in place of
+those defaults. The command retains already discovered candidates and records
+matched omissions in the search audit. A different nested `SECURITY.md`
+policy keeps that path in the search. Exact file traces or receipt-backed
+caller leads can reopen a file for follow-up. An omission records search
+scope. Runtime and vulnerability conclusions require their own evidence.
 
 ```yaml
 exploitability:

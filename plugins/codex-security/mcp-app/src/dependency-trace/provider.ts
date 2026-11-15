@@ -1304,13 +1304,18 @@ export function localProvider(
           const checkoutPath = (file: string) =>
             relative(canonicalRoot, file).split(sep).join("/");
           const omissions =
-            symbolSearch && supported && discoveryScope
-              ? discoveryScope.omit([...files].map(checkoutPath))
+            supported && discoveryScope
+              ? discoveryScope.omit(
+                  [...new Set([...files, ...leads.files])].map(checkoutPath),
+                  symbolSearch,
+                )
               : [];
           if (omissions.length) {
             const skipped = new Set(omissions.map((entry) => entry.path));
-            for (const file of files) {
-              if (skipped.has(checkoutPath(file))) files.delete(file);
+            for (const matches of [files, leads.files]) {
+              for (const file of matches) {
+                if (skipped.has(checkoutPath(file))) matches.delete(file);
+              }
             }
           }
           const scopeCoverage = omissions.length ? { omissions } : {};

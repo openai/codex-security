@@ -60,6 +60,7 @@ export function createDependencyRuntimeInventory(options: {
     metadata: DependencyInventoryReceiptMetadata,
   ) => string | undefined;
   isReceiptCurrent?: (id: string) => boolean;
+  onLookup?: () => (outcome: "returned" | "partial" | "failed") => void;
   signal: AbortSignal;
 }) {
   const lookups = new Map<string, InventoryLookup>();
@@ -194,6 +195,7 @@ export function createDependencyRuntimeInventory(options: {
           ) {
             const response = (async (): Promise<InventoryOutcome> => {
               const startedAt = new Date().toISOString();
+              const finish = options.onLookup?.();
               let result: JsonValue;
               let outcome: "failed" | "empty" | undefined;
               try {
@@ -212,9 +214,13 @@ export function createDependencyRuntimeInventory(options: {
                 )
                   outcome = "empty";
               } catch (error) {
+                outcome = "failed";
                 options.signal.throwIfAborted();
                 result = { error: errorMessage(error) };
-                outcome = "failed";
+              } finally {
+                finish?.(
+                  outcome === "empty" ? "partial" : (outcome ?? "returned"),
+                );
               }
               const receiptId = options.record(server, result, {
                 tool,

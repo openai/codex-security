@@ -12,6 +12,7 @@ export class DependencyReportCoverage {
   private truncated = false;
   private sourceEvidenceCount = 0;
   private discoveryOmissions = new Set<string>();
+  private defaultDiscoveryOmissions = new Set<string>();
   generation = 0;
 
   observe(
@@ -70,13 +71,15 @@ export class DependencyReportCoverage {
       Array.isArray(traceCoverage["discovery_omissions"])
     ) {
       for (const entry of traceCoverage["discovery_omissions"]) {
-        if (
-          isRecord(entry) &&
-          typeof entry["path"] === "string" &&
-          !this.discoveryOmissions.has(entry["path"])
-        ) {
-          this.discoveryOmissions.add(entry["path"]);
-          this.generation++;
+        if (isRecord(entry) && typeof entry["path"] === "string") {
+          const omissions =
+            entry["basis"] === "production_default"
+              ? this.defaultDiscoveryOmissions
+              : this.discoveryOmissions;
+          if (!omissions.has(entry["path"])) {
+            omissions.add(entry["path"]);
+            this.generation++;
+          }
         }
       }
     }
@@ -142,9 +145,20 @@ export class DependencyReportCoverage {
       : undefined;
   }
 
-  discoveryLimitation() {
+  discoveryLimitations(): string[] {
     const files = this.discoveryOmissions.size;
-    if (files)
-      return `Operator scope omitted ${files} matched source ${files === 1 ? "file" : "files"} from one or more broad structural searches. The search audit records the exact locations. Exact-file follow-up remains available.`;
+    const defaults = this.defaultDiscoveryOmissions.size;
+    return [
+      ...(files
+        ? [
+            `Operator scope omitted ${files} matched source ${files === 1 ? "file" : "files"} from one or more broad structural searches. The search audit records the exact locations. Exact-file follow-up remains available.`,
+          ]
+        : []),
+      ...(defaults
+        ? [
+            `Default production discovery skipped ${defaults} matched example, test, or documentation ${defaults === 1 ? "path" : "paths"}. The search audit records the exact locations. Exact-file follow-up remains available.`,
+          ]
+        : []),
+    ];
   }
 }

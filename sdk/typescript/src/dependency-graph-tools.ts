@@ -98,7 +98,9 @@ export async function openDependencyGraph(
     ) => JsonObject;
   },
   excludedSourcePaths?: readonly string[],
-  endpointOptions?: Parameters<typeof openDependencyEndpoints>[0],
+  endpointOptions?: Parameters<typeof openDependencyEndpoints>[0] & {
+    productionDiscovery?: boolean;
+  },
 ): Promise<DependencyGraphTools & { endpoints: DependencyEndpointGraph }> {
   const sourceRoot = await realpath(repository);
   const endpoints = await openDependencyEndpoints(endpointOptions);
@@ -109,7 +111,11 @@ export async function openDependencyGraph(
   const graph = (await createDependencyGraphSession(
     repository,
     resolveCatalog !== undefined,
-    { fullTraceReply: true, excludedSourcePaths },
+    {
+      fullTraceReply: true,
+      excludedSourcePaths,
+      productionDiscovery: endpointOptions?.productionDiscovery,
+    },
   )) as Pick<DependencyGraphTools, "tools" | "close" | "boundTraceResponse"> & {
     call(
       name: string,
@@ -421,7 +427,8 @@ export async function openDependencyGraph(
           graph.recordCatalogResolutions(answers, batch);
           for (const answer of answers) {
             if (
-              excludedSourcePaths?.length &&
+              (excludedSourcePaths?.length ||
+                endpointOptions?.productionDiscovery) &&
               requestsByPath.has(answer.path) &&
               "services" in answer &&
               answer.services.length &&

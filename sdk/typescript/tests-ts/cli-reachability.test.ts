@@ -1,19 +1,29 @@
-import { expect, mock, test } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, realpath, writeFile } from "node:fs/promises";
-import { join, sep } from "node:path";
+import {
+  mkdir,
+  readFile,
+  readlink,
+  realpath,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import * as filesystem from "node:fs/promises";
+import { basename, dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import type { DependencyUse } from "../src/dependency-reachability.js";
 import { DependencyReportCoverage } from "../src/dependency-report-coverage.js";
+import type { DependencyProgressEvent } from "../src/dependency-progress.js";
 import { createDependencyVerdictProgress } from "../src/dependency-verdict-progress.js";
 import { canonicalJson } from "../src/record.js";
 import { bundledPluginRoot } from "../src/runtime.js";
-import { dependencies, type OnCodex } from "./cli-fixtures.js";
+import { dependencies, FakeSignals, type OnCodex } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest, runCapturedCli } from "./support/cli-run.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
@@ -723,6 +733,14 @@ test("returns only the report accepted after the investigator corrects a rejecte
       expect(session.prompt.split("\n")).toContain(
         JSON.stringify(defaultCallerScope),
       );
+      expect(session.prompt).toContain(
+        "production discovery defaults skip conventional example, test, and documentation paths",
+      );
+      expect(session.prompt).toContain("including nested SECURITY.md");
+      expect(session.prompt).toContain(
+        "case-insensitive conventional path exclusions",
+      );
+      expect(session.prompt).not.toContain("**/examples/**");
       expect(session.prompt).not.toContain("checkout-only marker");
 
       const tool = session.dependencyReport!;
@@ -924,6 +942,244 @@ test("returns an empty package result without investigating when OSV has no advi
   expect(reviews).toEqual([]);
   expect(report).toMatchObject({ package: decoder, checks: [] });
 });
+
+test.each([false, true])(
+  "preserves a destination present before or during the check (race=%s)",
+  async (race) => {
+    await using temp = await scopedTemporaryDirectory(
+      "dependency-report-existing-",
+    );
+    const reportFile = join(temp.path, "report.json");
+    const contents = "existing report\n";
+    if (!race) await writeFile(reportFile, contents);
+    const deps = dependencies({ currentDirectory: temp.path });
+    deps.lookupPackageAdvisories = mock(async () => {
+      await writeFile(reportFile, contents);
+      return [];
+    });
+    const { runCli, stdout, stderr } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "exploitability",
+          "check",
+          `npm:${decoder.name}`,
+          "--json",
+          "--report-file",
+          "report.json",
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(deps.lookupPackageAdvisories).toHaveBeenCalledTimes(race ? 1 : 0);
+    expect(await readFile(reportFile, "utf8")).toBe(contents);
+    expect(stderr.text()).toContain(
+      `Report destination already exists: ${reportFile}`,
+    );
+    expect(stderr.text()).not.toContain("Report saved");
+    expect(stdout.text()).toBe("");
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "rejects a dangling symlink as a report destination",
+  async () => {
+    await using temp = await scopedTemporaryDirectory(
+      "dependency-report-symlink-",
+    );
+    const reportFile = join(temp.path, "report.json");
+    await symlink("missing.json", reportFile, "file");
+    const deps = dependencies({ currentDirectory: temp.path });
+    deps.lookupPackageAdvisories = mock(async () => []);
+    const { runCli, stderr } = createCliTest(main);
+    expect(
+      await runCli(
+        [
+          "exploitability",
+          "check",
+          `npm:${decoder.name}`,
+          "--report-file",
+          reportFile,
+        ],
+        deps,
+      ),
+    ).toBe(2);
+    expect(deps.lookupPackageAdvisories).not.toHaveBeenCalled();
+    expect(await readlink(reportFile)).toBe("missing.json");
+    expect(stderr.text()).not.toContain("Report saved");
+  },
+);
+
+test("does not save or announce a completed report after an interrupt", async () => {
+  await using temp = await scopedTemporaryDirectory(
+    "dependency-report-interrupted-",
+  );
+  const reportFile = join(temp.path, "report.json");
+  const eventFile = join(temp.path, "progress.jsonl");
+  const signals = new FakeSignals();
+  const deps = dependencies({ currentDirectory: temp.path, signals });
+  deps.lookupPackageAdvisories = async () => {
+    signals.emit("SIGINT");
+    return [];
+  };
+  const { runCli, stderr } = createCliTest(main);
+  expect(
+    await runCli(
+      [
+        "exploitability",
+        "check",
+        `npm:${decoder.name}`,
+        "--report-file",
+        reportFile,
+        "--progress-events",
+        eventFile,
+      ],
+      deps,
+    ),
+  ).toBe(130);
+  await expect(readFile(reportFile, "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  const events = (await readFile(eventFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as DependencyProgressEvent);
+  expect(events.some(({ type }) => type === "report_ready")).toBe(false);
+  expect(events.at(-1)).toMatchObject({
+    type: "finished",
+    outcome: "interrupted",
+  });
+  expect(stderr.text()).not.toContain("Report saved");
+});
+
+test.each([
+  { boundary: "staging write", signal: "SIGINT", status: 130 },
+  { boundary: "review cleanup", signal: "SIGTERM", status: 143 },
+  { boundary: "staging cleanup", signal: "SIGINT", status: 0 },
+] as const)(
+  "linearizes report publication when interrupted during $boundary",
+  async ({ boundary, signal, status }) => {
+    await using checkout = await scopedTemporaryDirectory("report-checkout-");
+    await using output = await scopedTemporaryDirectory("report-output-");
+    const reportFile = join(output.path, "report.json");
+    const eventFile = join(output.path, "progress.jsonl");
+    const signals = new FakeSignals();
+    let reviewDirectory: string | undefined;
+    const deps = dependencies({
+      currentDirectory: checkout.path,
+      signals,
+      onRepositoryCommand(command, _args, _repository, options) {
+        if (command === "opengrep") reviewDirectory = options?.cwd;
+        return "";
+      },
+    });
+    deps.lookupPackageAdvisories = async () => [];
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    async function gate() {
+      entered.resolve();
+      await release.promise;
+    }
+    const { rm: remove, writeFile: write } = filesystem;
+    const writeSpy = spyOn(filesystem, "writeFile").mockImplementation(
+      async (path, data, options) => {
+        await write(path, data, options);
+        if (
+          boundary === "staging write" &&
+          typeof path === "string" &&
+          basename(dirname(path)).startsWith(".report-")
+        )
+          await gate();
+      },
+    );
+    const removeSpy = spyOn(filesystem, "rm").mockImplementation(
+      async (path, options) => {
+        await remove(path, options);
+        if (
+          (boundary === "review cleanup" &&
+            reviewDirectory !== undefined &&
+            path === reviewDirectory) ||
+          (boundary === "staging cleanup" &&
+            typeof path === "string" &&
+            basename(path).startsWith(".report-"))
+        ) {
+          await gate();
+          if (boundary === "staging cleanup")
+            throw new Error("Simulated staging cleanup failure");
+        }
+      },
+    );
+    const { runCli, stdout, stderr } = createCliTest(main);
+    const running = runCli(
+      [
+        "exploitability",
+        "check",
+        `npm:${decoder.name}`,
+        "--json",
+        "--report-file",
+        reportFile,
+        "--progress-events",
+        eventFile,
+      ],
+      deps,
+    );
+    async function readEvents() {
+      return (await readFile(eventFile, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as DependencyProgressEvent);
+    }
+    try {
+      await Promise.race([
+        entered.promise,
+        running.then(() => {
+          throw new Error(`Expected a pause during ${boundary}`);
+        }),
+      ]);
+      const committed = status === 0;
+      if (committed) {
+        expect(JSON.parse(await readFile(reportFile, "utf8"))).toEqual({
+          package: decoder,
+          checks: [],
+        });
+      } else {
+        await expect(readFile(reportFile, "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+      expect(
+        (await readEvents()).some(({ type }) => type === "report_ready"),
+      ).toBe(committed);
+      signals.emit(signal);
+      release.resolve();
+      expect(await running, stderr.text()).toBe(status);
+      const events = await readEvents();
+      expect(events.at(-1)).toMatchObject({
+        type: "finished",
+        outcome: committed ? "completed" : "interrupted",
+      });
+      expect(events.some(({ type }) => type === "report_ready")).toBe(
+        committed,
+      );
+      expect(stderr.text().includes("Report saved")).toBe(committed);
+      if (committed) {
+        expect(JSON.parse(await readFile(reportFile, "utf8"))).toEqual(
+          JSON.parse(stdout.text()),
+        );
+      } else {
+        await expect(readFile(reportFile, "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        expect(stdout.text()).toBe("");
+      }
+    } finally {
+      release.resolve();
+      await running.catch(() => {});
+      writeSpy.mockRestore();
+      removeSpy.mockRestore();
+    }
+  },
+);
 
 test("runtime citations require a successful result from the selected service catalog in this check", async () => {
   await using temp = await scopedTemporaryDirectory("cve-inventory-");
@@ -1197,6 +1453,7 @@ test("preserves a sibling's fixing hunk when revising the selected copy assessme
       const session = output!.appServer!;
       expect(session.prompt.split("\n")).toContain(JSON.stringify(callerScope));
       expect(session.prompt).not.toContain(defaultCallerScope);
+      expect(session.prompt).not.toContain("production discovery defaults");
       const tool = session.dependencyReport!;
       assert(tool.observeGraph && tool.queue && tool.status && tool.submit);
       const [candidate] = await tool.observeGraph("trace_codex_security_code", {
@@ -1377,7 +1634,23 @@ test.each([
     });
     deps.reviewDependencyReport = review;
     const { runCli, stdout, stderr } = createCliTest(main);
-    expect(await runCli(args, deps)).toBe(2);
+    const eventFile = join(temp.path, "progress.jsonl");
+    const reportFile = join(temp.path, "report.json");
+    expect(
+      await runCli(
+        [...args, "--report-file", reportFile, "--progress-events", eventFile],
+        deps,
+      ),
+    ).toBe(2);
+    await expect(readFile(reportFile, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const events = (await readFile(eventFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as DependencyProgressEvent);
+    expect(events.some(({ type }) => type === "report_ready")).toBe(false);
+    expect(stderr.text()).not.toContain("Report saved");
     expect(stderr.text()).toContain(gap);
     expect(continuedAfterRejection).toBe(false);
     expect(stdout.text()).not.toContain(limitation);
@@ -1998,11 +2271,25 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
   }
 
   const { runCli, stdout, stderr } = createCliTest(main);
+  const eventFile = join(temp.path, "progress.jsonl");
+  await using outputDirectory =
+    await scopedTemporaryDirectory("dependency-report-");
+  const reportFile = join(outputDirectory.path, "report.json");
+  const events = async () =>
+    (await readFile(eventFile, "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map(
+        (line) =>
+          JSON.parse(line) as DependencyProgressEvent & {
+            schemaVersion: number;
+          },
+      );
   const lines = () =>
     stderr
       .text()
       .split("\n")
-      .filter((line) => line.includes("] reviewed "));
+      .filter((line) => /(?:RULED OUT|UNKNOWN|EXPLOITABLE)  /u.test(line));
   const delayed = Promise.withResolvers<void>();
   let staleStarted = false;
   const started = new Set<string>();
@@ -2013,10 +2300,140 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
   const deps = dependencies({
     currentDirectory: temp.path,
     onCodex: async (_argv, output) => {
+      expect(stderr.text()).toContain("Starting source investigation");
+      expect((await events()).at(-1)).toMatchObject({
+        schemaVersion: 1,
+        type: "stage",
+        stage: "investigate",
+      });
+      expect(stderr.text()).not.toContain("Reviewing evidence");
+      expect(stdout.text()).toBe("");
+      expect(lines()).toEqual([]);
       const tool = output!.appServer!.dependencyReport;
       assert(
         tool?.queue && tool.queueClaims && tool.queryClaims && tool.submit,
       );
+      const trace = {
+        id: "progress-trace",
+        tool: "trace_codex_security_code",
+        arguments: { rules: {}, paths: ["app.ts"] },
+      };
+      tool.recordGraphEvent("item/started", trace);
+      expect(stderr.text()).toContain("app.ts");
+      const sink = {
+        id: "progress-sink",
+        tool: "record_codex_security_endpoint",
+      };
+      tool.recordGraphEvent("item/completed", {
+        ...sink,
+        status: "completed",
+        result: {
+          structuredContent: {
+            endpoints: {
+              endpoint: {
+                role: "sink",
+                origin: "advisory",
+                function: "Reader.decode",
+                path: "reader.ts",
+                line: 1,
+              },
+            },
+          },
+        },
+      });
+      const traced = { ...trace, id: "progress-partial" };
+      tool.recordGraphEvent("item/started", traced);
+      tool.recordGraphEvent("item/completed", {
+        ...traced,
+        status: "completed",
+        result: {
+          structuredContent: {
+            coverage: { complete: false, searched_paths: ["lib"] },
+          },
+        },
+      });
+      const native = {
+        id: "native-search",
+        type: "commandExecution",
+        cwd: temp.path,
+        commandActions: [
+          {
+            type: "search",
+            path: "src",
+            command: "private command",
+            query: "secret query",
+          },
+          { type: "read", path: join(temp.path, "reader.ts") },
+        ],
+      };
+      output!.appServer!.onEvent?.({
+        method: "item/started",
+        params: { item: native },
+      });
+      output!.appServer!.onEvent?.({
+        method: "item/completed",
+        params: { item: { ...native, status: "completed" } },
+      });
+      tool.recordGraphEvent("item/completed", { ...trace, status: "failed" });
+      const savedEvents = await events();
+      const search = savedEvents.find(
+        (event) => event.type === "activity_started",
+      );
+      expect(search).toMatchObject({
+        activity: "opengrep",
+        scope: { directories: ["app.ts"] },
+      });
+      assert(search?.type === "activity_started");
+      expect(savedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "activity_finished",
+          id: search.id,
+          outcome: "failed",
+        }),
+      );
+      expect(savedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "activity_finished",
+          outcome: "partial",
+          searchedPaths: ["lib"],
+        }),
+      );
+      expect(savedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "proposed_sink",
+          function: "Reader.decode",
+          path: "reader.ts",
+          origin: "advisory",
+        }),
+      );
+      expect(savedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "proposed_sink",
+          function: "decode",
+          origin: "advisory_record",
+        }),
+      );
+      expect(savedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "activity_started",
+          activity: "source_search",
+          scope: { directories: ["src"] },
+        }),
+      );
+      expect(savedEvents).toContainEqual(
+        expect.objectContaining({
+          type: "activity_started",
+          activity: "source_read",
+          scope: { files: ["reader.ts"] },
+        }),
+      );
+      expect(JSON.stringify(savedEvents)).not.toContain("private command");
+      expect(JSON.stringify(savedEvents)).not.toContain("secret query");
+      expect(stderr.text()).toContain("Synthetic decoder advisory");
+      expect(stderr.text()).toContain(
+        "Reader.decode · advisory-derived · reader.ts:1",
+      );
+      expect(stderr.text()).toContain("Searching with OpenGrep · app.ts");
       const selected = new Map<string, { id: string; revision: number }>();
       const enqueue = async (...items: ReturnType<typeof assessment>[]) => {
         const result = await tool.queue!({ items });
@@ -2053,8 +2470,16 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
       expect(lines()).toEqual([]);
       await enqueue(assessment("first", 1));
       await waitForReviewStart(() => lines().length > 0);
-      expect(lines()[0]).toMatch(
-        /app\.ts:1 ruled_out — The shared reader validates input\.$/u,
+      expect(lines()[0]).toContain("RULED OUT  app.ts:1");
+      expect(stderr.text()).toContain("The shared reader validates input.");
+      expect(stderr.text()).not.toContain("Source checked.");
+      expect(await events()).toContainEqual(
+        expect.objectContaining({
+          type: "reviewed",
+          verdict: "ruled_out",
+          location: "app.ts:1",
+          reason: "The shared reader validates input.",
+        }),
       );
       expect(stdout.text()).toBe("");
 
@@ -2069,17 +2494,17 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
         other,
       );
       await waitForReviewStart(() =>
-        lines().some((line) => line.includes("(3 callsites)")),
-      );
-      expect(lines().filter((line) => line.includes("callsites"))).toHaveLength(
-        1,
-      );
-      expect(lines().some((line) => line.includes("app.ts:4 ruled_out"))).toBe(
-        true,
+        lines().some((line) => line.includes("3 reviewed calls")),
       );
       expect(
-        lines().filter((line) => line.includes("app.ts:1 ruled_out")),
-      ).toHaveLength(2);
+        lines().filter((line) => line.includes("share this proof")),
+      ).toHaveLength(1);
+      expect(lines().some((line) => line.includes("RULED OUT  app.ts:4"))).toBe(
+        true,
+      );
+      expect(lines().filter((line) => line.includes("app.ts:1"))).toHaveLength(
+        2,
+      );
 
       const replacement = Promise.withResolvers<void>();
       holds.set("second:2", replacement);
@@ -2091,20 +2516,20 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
           assessment("while-pending-b", 26),
         );
         await waitForReviewStart(() =>
-          lines().some((line) => line.includes("(4 callsites)")),
+          lines().some((line) => line.includes("4 reviewed calls")),
         );
-        expect(lines().some((line) => line.includes("(5 callsites)"))).toBe(
+        expect(lines().some((line) => line.includes("5 reviewed calls"))).toBe(
           false,
         );
       } finally {
         replacement.resolve();
       }
       await waitForReviewStart(() =>
-        lines().some((line) => line.includes("app.ts:2 corrected")),
+        lines().some((line) => line.includes("app.ts:2 · was ruled out")),
       );
       expect(
         lines().some((line) =>
-          line.includes("app.ts:2 corrected ruled_out → unknown"),
+          line.includes("UNKNOWN  app.ts:2 · was ruled out"),
         ),
       ).toBe(true);
       const otherPlace = assessment(
@@ -2129,11 +2554,11 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
       running.receiptIds.push(receipt);
       await enqueue(otherPlace, running);
       await waitForReviewStart(() =>
-        lines().some((line) => line.includes("app.ts:5 exploitable")),
+        lines().some((line) => line.includes("EXPLOITABLE  app.ts:5")),
       );
       expect(
         lines().some((line) =>
-          line.includes("app.ts:1 (Configured reader) potentially_exploitable"),
+          line.includes("POTENTIALLY EXPLOITABLE  app.ts:1"),
         ),
       ).toBe(true);
 
@@ -2146,7 +2571,7 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
         delayed.resolve();
       }
       await waitForReviewStart(() =>
-        lines().some((line) => line.includes("app.ts:6 unknown")),
+        lines().some((line) => line.includes("UNKNOWN  app.ts:6")),
       );
       expect(lines().filter((line) => line.includes("app.ts:6"))).toHaveLength(
         1,
@@ -2226,32 +2651,28 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
         ambiguous(8),
       );
       await waitForReviewStart(() =>
-        lines().some((line) => line.includes("(4 callsites, 6 assessments)")),
+        lines().some((line) =>
+          line.includes("4 reviewed calls share this proof, 6 assessments"),
+        ),
       );
       expect(
-        lines().some((line) =>
-          line.includes("window-a, configured) ruled_out"),
+        (await events()).filter(
+          (event) =>
+            event.type === "reviewed" &&
+            event.location === "app.ts:1" &&
+            event.verdict === "ruled_out",
         ),
-      ).toBe(true);
-      expect(
-        lines().some((line) =>
-          line.includes("window-b, configured) ruled_out"),
-        ),
-      ).toBe(true);
+      ).toHaveLength(3);
       expect(
         lines().filter((line) =>
-          line.match(/app\.ts:(?:[78]|2[789]|30) ruled_out —/u),
+          line.match(/RULED OUT  app\.ts:(?:[78]|2[789]|30)$/u),
         ),
       ).toHaveLength(6);
-      for (const context of ["app.ts:7, app.ts:8", "app.ts:8, app.ts:9"]) {
-        expect(
-          lines().filter((line) =>
-            line.includes(
-              `reader.ts:1 (sink, caller unresolved, submitted location: ${context}) ruled_out —`,
-            ),
-          ),
-        ).toHaveLength(1);
-      }
+      expect(
+        (await events()).filter(
+          (event) => event.type === "reviewed" && event.locationKind === "sink",
+        ),
+      ).toHaveLength(2);
 
       // Each queue waits for its own review to start, so these occupy all
       // 16 actual batch slots. Deliver them in reverse order.
@@ -2266,7 +2687,7 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
           await waitForReviewStart(() => started.has(key));
         }
         expect(stdout.text()).toBe("");
-        expect(lines().some((line) => line.includes("20 callsites"))).toBe(
+        expect(lines().some((line) => line.includes("20 reviewed calls"))).toBe(
           false,
         );
       } finally {
@@ -2274,11 +2695,16 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
           holds.get(`${item.id}:1`)?.resolve();
       }
       await waitForReviewStart(() =>
-        lines().some((line) => line.includes("(20 callsites, 22 assessments)")),
+        lines().some((line) =>
+          line.includes("20 reviewed calls share this proof, 22 assessments"),
+        ),
       );
       expect(started.has("first:3")).toBe(false);
       expect(stderr.text()).not.toContain("\x1b");
       expect(stdout.text()).toBe("");
+      await expect(readFile(reportFile, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
 
       const outcome = await tool.submit({
         candidateGeneration: 0,
@@ -2289,8 +2715,26 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
       return 0;
     },
   });
-  deps.lookupDependencyAdvisory = async () => advisory;
+  deps.lookupDependencyAdvisory = async () => {
+    const progress = stderr.text();
+    expect(progress).toContain(advisory.cve);
+    expect(progress).toContain("Looking up advisories");
+    expect((await events()).map(({ type }) => type)).toEqual([
+      "started",
+      "stage",
+    ]);
+    expect(progress).not.toContain("Starting source investigation");
+    expect(stdout.text()).toBe("");
+    return {
+      ...advisory,
+      advisories: advisory.advisories.map((record) => ({
+        ...record,
+        vulnerableFunctions: ["decode"],
+      })),
+    };
+  };
   deps.reviewDependencyReport = async (prompt) => {
+    expect(stderr.text()).toContain("Reviewing evidence");
     const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as {
       excerpts: Record<string, { path: string }>;
       items: (Pick<ReturnType<typeof assessment>, "use"> & {
@@ -2345,9 +2789,21 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
       ),
     });
   };
-  expect(await runCli([...args, "--config", config], deps), stderr.text()).toBe(
-    0,
-  );
+  expect(
+    await runCli(
+      [
+        ...args,
+        "--config",
+        config,
+        "--progress-events",
+        eventFile,
+        "--report-file",
+        reportFile,
+      ],
+      deps,
+    ),
+    stderr.text(),
+  ).toBe(0);
   expect(JSON.parse(stdout.text())).toMatchObject({
     cve: advisory.cve,
     schemaVersion: 2,
@@ -2358,13 +2814,110 @@ test("streams accepted callsite verdicts before the final JSON report", async ()
     ]),
   });
   expect(JSON.parse(stdout.text()).uses).toHaveLength(36);
+  expect(JSON.parse(await readFile(reportFile, "utf8"))).toEqual(
+    JSON.parse(stdout.text()),
+  );
+  if (process.platform !== "win32")
+    expect((await stat(reportFile)).mode & 0o777).toBe(0o600);
+  expect(stderr.text()).toContain("Investigation summary · 36 reviewed uses");
+  expect(stderr.text()).toContain(`Report saved  ${reportFile}`);
+  expect(stderr.text().match(/Reviewing evidence/g)).toHaveLength(1);
+  expect((await events()).at(-1)).toMatchObject({
+    type: "finished",
+    outcome: "completed",
+  });
+  const eventsAfter = await events();
+  expect(
+    eventsAfter.filter((event) => event.type === "assessment_finished"),
+  ).toMatchObject([{ uses: 36 }]);
+  expect(eventsAfter.at(-2)).toMatchObject({
+    type: "report_ready",
+    path: reportFile,
+    verdicts: expect.objectContaining({ exploitable: 1 }),
+  });
+  expect(eventsAfter).toContainEqual(
+    expect.objectContaining({
+      type: "reviewed",
+      previousVerdict: "ruled_out",
+      verdict: "unknown",
+    }),
+  );
 });
 
+test("renders a live terminal header and leaves diagnostics readable when an event file exists", async () => {
+  await using temp = await scopedTemporaryDirectory("dependency-tty-");
+  const eventFile = join(temp.path, "progress.jsonl");
+  await writeFile(eventFile, "already here\n");
+  const deps = dependencies({ currentDirectory: temp.path });
+  deps.lookupDependencyAdvisory = async () => {
+    throw new Error("Advisory service unavailable");
+  };
+  const { runCli, stdout, stderr } = createCliTest(main, { stderr: true });
+  expect(await runCli([...args, "--progress-events", eventFile], deps)).toBe(2);
+  expect(await readFile(eventFile, "utf8")).toBe("already here\n");
+  expect(stderr.text()).toContain("Exploitability");
+  expect(stderr.text()).toContain("\r\x1b[2K");
+  expect(stderr.text()).toContain("Could not create progress file");
+  expect(stderr.text()).toContain("Advisory service unavailable");
+  expect(stdout.text()).toBe("");
+});
+
+test.each([
+  ["standard", "WARNING: DAYBREAK IS NOT ACTIVE"],
+  ["unconfirmed", "WARNING: DAYBREAK ACCESS NOT CONFIRMED"],
+  ["daybreak_blue", "Daybreak Blue"],
+  ["daybreak_red", "Daybreak Red"],
+] as const)(
+  "shows the selected access program and prints one clean failure (%s)",
+  async (program, label) => {
+    await using temp = await scopedTemporaryDirectory(
+      "dependency-access-display-",
+    );
+    const eventFile = join(temp.path, "progress.jsonl");
+    const diagnostic =
+      "Codex declined this turn.\nThe provider supplied this reason.";
+    const deps = dependencies({
+      currentDirectory: temp.path,
+      onCodex: async (_argv, output) => {
+        const report = output!.appServer!.dependencyReport!;
+        report.onAccessProgram!(program);
+        report.onAccessProgram!(program);
+        await output!.onDiagnostic!(diagnostic, "failure");
+        return 1;
+      },
+    });
+    deps.lookupDependencyAdvisory = async () => advisory;
+    const { runCli, stdout, stderr } = createCliTest(main, { stderr: true });
+    expect(await runCli([...args, "--progress-events", eventFile], deps)).toBe(
+      1,
+    );
+    const output = stderr.text();
+    expect(output).toContain(label);
+    expect(output.split(label)).toHaveLength(2);
+    expect(output.split(diagnostic)).toHaveLength(2);
+    expect(output).toContain(`\r\x1b[2Kcodex-security: ${diagnostic}\n`);
+    expect(output).not.toContain("Dependency assessment exited");
+    expect(output).not.toContain("Investigation failed");
+    expect(stdout.text()).toBe("");
+    const events = (await readFile(eventFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as DependencyProgressEvent);
+    expect(events.filter(({ type }) => type === "access_program")).toEqual([
+      expect.objectContaining({ program }),
+    ]);
+    expect(events.at(-1)).toMatchObject({
+      type: "finished",
+      outcome: "failed",
+    });
+  },
+);
+
 test("removes invalidated approvals before a coalesced verdict update", () => {
-  const output: string[] = [];
-  const progress = createDependencyVerdictProgress("example", {
-    write: (line) => output.push(line),
-  });
+  const output: DependencyProgressEvent[] = [];
+  const progress = createDependencyVerdictProgress("example", (event) =>
+    output.push(event),
+  );
   function approve(
     id: string,
     line: number,
@@ -2385,7 +2938,7 @@ test("removes invalidated approvals before a coalesced verdict update", () => {
         ],
         observations: [],
       },
-      reason,
+      reason: `Reviewed ${id}. ${reason}`,
       evidenceKeys: [`excerpt:call-${line}`, "excerpt:wrapper"],
       sharedEvidenceKeys: ["excerpt:wrapper"],
     });
@@ -2398,18 +2951,94 @@ test("removes invalidated approvals before a coalesced verdict update", () => {
   approve("third", 3);
   approve("fourth", 4);
   progress.flush();
-  expect(output[1]).toContain("(3 callsites)");
+  expect(output[1]).toMatchObject({ type: "reviewed_group", callsites: 3 });
   approve("second", 2, "unknown");
-  expect(output[2]).toContain("app.ts:2 corrected ruled_out → unknown");
+  expect(output[2]).toMatchObject({
+    type: "reviewed",
+    location: "app.ts:2",
+    previousVerdict: "ruled_out",
+    verdict: "unknown",
+  });
   progress.flush();
   expect(output).toHaveLength(3);
+
+  const group = output[1];
+  assert(group?.type === "reviewed_group");
+  for (const id of ["first", "third", "fourth"]) progress.update(id);
+  progress.flush();
+  expect(output[3]).toMatchObject({
+    type: "reviewed_group",
+    groupId: group.groupId,
+    callsites: 0,
+    assessments: 0,
+  });
+  approve("first", 1);
+  const restored = output[4];
+  assert(restored?.type === "reviewed");
+  expect(restored.groupId).toBeDefined();
+  expect(restored.groupId).not.toBe(group.groupId);
 });
 
+test.each([true, false])(
+  "keeps distinct deciding reasons out of a shared proof group (conditions=%s)",
+  (withConditions) => {
+    const events: DependencyProgressEvent[] = [];
+    const progress = createDependencyVerdictProgress("example", (event) =>
+      events.push(event),
+    );
+    function approve(line: number, explanation: string) {
+      const callSite = { path: "app.ts", line };
+      progress.update(`call-${line}`, {
+        callSite,
+        use: {
+          location: `app.ts:${line}`,
+          component: "example",
+          version: null,
+          verdict: "ruled_out",
+          deployment: "unknown",
+          reason: withConditions
+            ? "The guard rules out the call."
+            : explanation,
+          evidence: [],
+          observations: [],
+          proof: {
+            sink: { function: "read", callSite },
+            conditions: withConditions
+              ? [
+                  {
+                    label: "Input guard",
+                    status: "ruled_out",
+                    explanation,
+                    citations: [{ path: "guard.ts", line: 7 }],
+                  },
+                ]
+              : [],
+          },
+        },
+        reason: "Reviewed the guard.",
+        evidenceKeys: [`excerpt:call-${line}`, "excerpt:guard"],
+        sharedEvidenceKeys: ["excerpt:guard"],
+      });
+    }
+    approve(1, "The guard validates the length.");
+    approve(2, "The guard authenticates the input.");
+    progress.flush();
+    expect(events.map(({ type }) => type)).toEqual(["reviewed", "reviewed"]);
+    approve(3, "The guard validates the length.");
+    progress.flush();
+    expect(events.at(-1)).toMatchObject({
+      type: "reviewed_group",
+      callsites: 2,
+      assessments: 2,
+    });
+  },
+);
+
 test("keeps reviewed stderr concise without merging distinct places", () => {
-  const output: string[] = [];
-  const progress = createDependencyVerdictProgress("example", {
-    write: (line) => output.push(line),
-  });
+  const output: DependencyProgressEvent[] = [];
+  const progress = createDependencyVerdictProgress("example", (event) =>
+    output.push(event),
+  );
   const path = `src/${"nested/".repeat(14)}reader.ts`;
   const callSite = { path, line: 7 };
   const longReason = "The selected reader has its own review findings. ".repeat(
@@ -2468,17 +3097,23 @@ test("keeps reviewed stderr concise without merging distinct places", () => {
   progress.flush();
 
   expect(output).toHaveLength(3);
-  expect(output[0]).toContain(`${path}:7 (staging, sha256:`);
-  expect(output[0]).toContain("first observation window");
-  expect(output[1]).toContain("second observation window");
-  expect(output[2]).toContain("(1 callsite, 2 assessments)");
-  expect(output[0]).toEndWith(
-    " — The reader validates the input before opening it.\n",
+  const [first, second] = output;
+  assert(first?.type === "reviewed" && second?.type === "reviewed");
+  expect(first.location).toBe(`${path}:7`);
+  expect(first.scope).toContain("staging, sha256:");
+  expect(first.reason).toBe(
+    "The reader validates the input before opening it.",
   );
-  for (const line of output) {
-    expect(line.length).toBeLessThan(path.length + 240);
-    expect(line).not.toContain("narrative");
-    expect(line).not.toContain(longReason);
+  expect(first.scope).toContain("first observation window");
+  expect(second.scope).toContain("second observation window");
+  expect(output[2]).toMatchObject({
+    type: "reviewed_group",
+    callsites: 1,
+    assessments: 2,
+  });
+  for (const record of output) {
+    expect(JSON.stringify(record)).not.toContain("narrative");
+    expect(JSON.stringify(record)).not.toContain(longReason);
   }
 
   progress.update("ambiguous", {
@@ -2490,14 +3125,17 @@ test("keeps reviewed stderr concise without merging distinct places", () => {
       verdict: "unknown",
     },
   });
-  const ambiguous = output.at(-1)!;
-  expect(ambiguous).toContain(
-    `${path}:7 (sink, caller unresolved, submitted location:`,
-  );
-  expect(ambiguous).not.toContain(context);
-  expect(ambiguous).not.toContain("\x1b");
-  const fallback = ambiguous.split(" — ")[1]!.trimEnd();
-  expect(fallback).toEndWith("…");
-  expect(fallback.length).toBeLessThanOrEqual(180);
+  const ambiguous = output.at(-1);
+  assert(ambiguous?.type === "reviewed");
+  expect(ambiguous).toMatchObject({
+    location: `${path}:7`,
+    locationKind: "sink",
+  });
+  expect(ambiguous.scope).toContain("submitted location:");
+  expect(ambiguous.scope).not.toContain(context);
+  expect(ambiguous.scope).not.toContain("\x1b");
+  expect(ambiguous.scope!.length).toBeLessThanOrEqual(120);
+  expect(ambiguous.reason).toEndWith("…");
+  expect(ambiguous.reason.length).toBeLessThanOrEqual(180);
   expect(use.reason).toBe(longReason);
 });

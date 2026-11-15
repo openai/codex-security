@@ -26,6 +26,7 @@ import {
   constants,
   createReadStream,
   existsSync,
+  linkSync,
   lstatSync,
   realpathSync,
   writeSync,
@@ -41,6 +42,7 @@ import {
   readlink,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -52,6 +54,7 @@ import {
   parse,
   relative,
   resolve,
+  sep,
   win32,
 } from "node:path";
 import { cwd } from "node:process";
@@ -150,6 +153,11 @@ import {
   dependencyReviewQueueDescription,
   dependencyReviewQueueSchema,
 } from "./dependency-report-submission.js";
+import {
+  createDependencyProgress,
+  type DependencyAccessProgram,
+  type DependencyProgressScope,
+} from "./dependency-progress.js";
 import { createDependencyVerdictProgress } from "./dependency-verdict-progress.js";
 import {
   createDependencyCandidates,
@@ -1284,6 +1292,7 @@ type DependencyReportTool = Pick<
       typeof createDependencyReportSubmission
     >["recordInventory"];
     observeGraph?: DependencyCandidates["observeGraph"];
+    onAccessProgram?: (program: DependencyAccessProgram) => void;
     bindReviewer?: (
       environment: Record<string, string>,
       providerConfig: JsonObject,
@@ -1333,6 +1342,11 @@ const dependencyReportMethods = Object.entries(dependencyReportTools) as [
   (typeof dependencyReportTools)[DependencyReportMethod],
 ][];
 
+type SkillDiagnosticObserver = (
+  message: string,
+  kind: "notice" | "failure",
+) => void | Promise<void>;
+
 interface SkillCommandOutput {
   readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
@@ -1344,6 +1358,7 @@ interface SkillCommandOutput {
   readonly codexOverrides?: JsonObject;
   readonly command:
     "validate" | "patch" | "verify-fix" | "exploitability check";
+  readonly onDiagnostic?: SkillDiagnosticObserver;
   readonly onUsage?: (usage: ScanTokenUsage) => void;
   readonly telemetryCommand?: OperationTelemetryEvent["command"];
   readonly stdout: Writable;
@@ -1375,10 +1390,12 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
 
 interface SkillRunOptions {
   readonly signal?: AbortSignal;
+  onDiagnostic?: SkillDiagnosticObserver;
   onUsage?: (usage: ScanTokenUsage) => void;
   dependencyReport?: DependencyReportTool;
   dependencyGraph?: DependencyGraphTools;
   dependencyCallerScope?: string;
+  dependencyDiscoveryGuidance?: string;
   dependencyCodexConfig?: JsonObject;
   inventoryServers?: JsonObject;
   inventoryInstructions?: Record<string, string>;
@@ -1806,6 +1823,18 @@ async function runCodexSkillProcess(
   input: string | undefined,
   signal: AbortSignal,
 ): Promise<number> {
+  function reportDiagnostic(
+    output: SkillCommandOutput,
+    message: string,
+    kind: "notice" | "failure",
+  ) {
+    return output.onDiagnostic
+      ? output.onDiagnostic(message, kind)
+      : writeCliOutput(
+          output.stderr,
+          `codex-security: ${diagnosticLines(message)}\n`,
+        );
+  }
   let releaseCredentialHome: (() => Promise<void>) | undefined;
   const dependencyCheck = output?.appServer?.dependencyReport !== undefined;
   const ambientHome = configuredCodexHome(processEnvironment);
@@ -2294,9 +2323,10 @@ async function runCodexSkillProcess(
         ) {
           recoveryAttempted = true;
           recovery.session.resetTurns();
-          await writeCliOutput(
-            output!.stderr,
-            "codex-security: Resuming the investigation after the Codex connection closed.\n",
+          await reportDiagnostic(
+            output!,
+            "Resuming the investigation after the Codex connection closed.",
+            "notice",
           );
           continue;
         }
@@ -2324,10 +2354,7 @@ async function runCodexSkillProcess(
             events?.error ?? (diagnostic || events?.connectionError || ""),
             authentication,
           );
-          await writeCliOutput(
-            output.stderr,
-            `codex-security: ${diagnosticLines(failure)}\n`,
-          );
+          await reportDiagnostic(output, failure, "failure");
           return status;
         }
         if (output.appServer?.dependencyReport && events?.completed) {
@@ -2339,9 +2366,10 @@ async function runCodexSkillProcess(
           events?.message === undefined ||
           events.message.trim().length === 0
         ) {
-          await writeCliOutput(
-            output.stderr,
-            `codex-security: Codex did not return a completed ${output.command} response.\n`,
+          await reportDiagnostic(
+            output,
+            `Codex did not return a completed ${output.command} response.`,
+            "failure",
           );
           return 2;
         }
@@ -3092,6 +3120,17 @@ export async function main(
       codex: SKILL_CONFIG_OPTIONS.shape.codex.describe(
         `${SKILL_CODEX_OVERRIDE_DESCRIPTION} Dependency checks also support features.multi_agent_v2.max_concurrent_threads_per_session=49 for 48 investigators plus the coordinator.`,
       ),
+      progressEvents: z
+        .string()
+        .trim()
+        .min(1)
+        .optional()
+        .describe("Write live progress as JSON Lines to a new file."),
+      reportFile: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Save the completed report as JSON to a new file."),
       vulnDescription: z
         .string()
         .trim()
@@ -3121,7 +3160,115 @@ export async function main(
       const controller = new AbortController();
       const removeSignals = listenForAbort(dependencies, controller);
       let temporary: string | undefined;
+      const directoryAtStart = dependencies.currentDirectory();
+      const interactive =
+        errorOutput.isTTY === true &&
+        dependencies.environment["TERM"] !== "dumb";
+      const display = createDependencyProgress({
+        output: errorOutput,
+        ...(options.progressEvents !== undefined && {
+          file: resolve(directoryAtStart, options.progressEvents),
+        }),
+        now: dependencies.now,
+        interactive,
+        color:
+          interactive && dependencies.environment["NO_COLOR"] === undefined,
+      });
+      const { emit } = display;
+      let displayedAccess: DependencyAccessProgram | undefined;
+      let outcome: "completed" | "blocked" | "failed" | "interrupted" =
+        "failed";
+      const reportPath =
+        options.reportFile === undefined
+          ? undefined
+          : resolve(directoryAtStart, options.reportFile);
+
+      async function finishReport(
+        report: z.infer<typeof dependencyCheckOutputSchema>,
+      ) {
+        controller.signal.throwIfAborted();
+        const verdicts = {
+          exploitable: 0,
+          potentially_exploitable: 0,
+          unknown: 0,
+          ruled_out: 0,
+        };
+        const assessments = "checks" in report ? report.checks : [report];
+        let limitations = 0;
+        for (const assessment of assessments) {
+          for (const use of assessment.uses) verdicts[use.verdict]++;
+          limitations += assessment.limitations.length;
+        }
+        if (temporary) {
+          await rm(temporary, { recursive: true, force: true });
+          temporary = undefined;
+        }
+        let staging: string | undefined;
+        try {
+          let stagedReport: string | undefined;
+          if (reportPath !== undefined) {
+            staging = await mkdtemp(join(dirname(reportPath), ".report-"));
+            stagedReport = join(staging, "report.json");
+            await writeFile(
+              stagedReport,
+              `${JSON.stringify(report, null, 2)}\n`,
+              { flag: "wx", mode: 0o600 },
+            );
+          }
+          controller.signal.throwIfAborted();
+          if (reportPath !== undefined && stagedReport !== undefined) {
+            try {
+              // Check cancellation and publish without yielding or replacing a file.
+              linkSync(stagedReport, reportPath);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "EEXIST")
+                throw new CodexSecurityError(
+                  `Report destination already exists: ${reportPath}`,
+                  { cause: error },
+                );
+              throw error;
+            }
+          }
+          outcome = "completed";
+          emit({
+            type: "report_ready",
+            subject: args.subject,
+            verdicts,
+            limitations,
+            ...(reportPath !== undefined && { path: reportPath }),
+          });
+          return report;
+        } finally {
+          if (staging)
+            await rm(staging, { recursive: true, force: true }).catch(() => {
+              // Cleanup cannot undo publication or replace the save error.
+            });
+        }
+      }
+
       try {
+        if (reportPath !== undefined) {
+          const existing = await lstat(reportPath).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code !== "ENOENT") throw error;
+              return undefined;
+            },
+          );
+          if (existing)
+            throw new CodexSecurityError(
+              `Report destination already exists: ${reportPath}`,
+            );
+          const parent = dirname(reportPath);
+          if (!(await stat(parent)).isDirectory())
+            throw new CodexSecurityError(
+              `Report destination parent is not a directory: ${parent}`,
+            );
+        }
+        emit({
+          type: "started",
+          subject: args.subject,
+          checkout: basename(directoryAtStart),
+        });
         const pkg = /^CVE-/iu.test(args.subject)
           ? undefined
           : parseDependencyPackage(args.subject);
@@ -3139,6 +3286,9 @@ export async function main(
             safeRelativePath(path, "exploitability.scope.exclude_paths"),
           );
         const dependencyConfiguration = project?.input.exploitability;
+        const productionDiscovery =
+          invocation.dependencyCallerScope === undefined &&
+          dependencyConfiguration?.scope?.caller === undefined;
         const callerScope = [
           invocation.dependencyCallerScope ??
             dependencyConfiguration?.scope?.caller ??
@@ -3164,6 +3314,9 @@ export async function main(
               ]
             : []),
         ].join("\n");
+        const discoveryGuidance = productionDiscovery
+          ? "The production discovery defaults skip conventional example, test, and documentation paths. For broad discovery prefer trace_codex_security_code so the host applies the policy, including nested SECURITY.md. For shell searches and initial assignments use known in-scope paths first. If you need a broad shell fallback, list SECURITY.md paths in those search roots before filtering, with no production exclusions on the path listing. Apply the same case-insensitive conventional path exclusions only where applicable policy is unchanged across the exclusion boundary. Retain subtrees with different or unresolved nested policy. Keep manifests, lockfiles, build files and library code. Reopen exact paths for source/build/runtime evidence linking them to production or a specific unresolved advisory, fix, or compatibility question. Never widen solely because production search was empty. Pass the effective boundary to investigators."
+          : undefined;
         const {
           servers: inventoryServers,
           catalogServers,
@@ -3275,22 +3428,82 @@ export async function main(
           let evidenceTools: ReturnType<
             typeof createDependencyInvestigationTools
           >;
-          const progress = createDependencyVerdictProgress(
+          const subject =
             "cve" in advisory
               ? advisory.cve
               : "id" in advisory
                 ? advisory.id
-                : `${advisory.package.ecosystem}:${advisory.package.name}`,
-            errorOutput,
-          );
+                : `${advisory.package.ecosystem}:${advisory.package.name}`;
+          const summaries = new Set<string>();
+          const sinks = new Set<string>();
+          function showSummary(
+            summary: string | undefined,
+            advisoryId?: string,
+          ) {
+            if (!summary || summaries.has(summary)) return;
+            summaries.add(summary);
+            emit({
+              type: "advisory_summary",
+              subject,
+              summary,
+              ...(advisoryId && { advisoryId }),
+            });
+          }
+          function showSink(
+            name: string,
+            origin: "supplied" | "advisory_record" | "advisory" | "discovered",
+            path?: string,
+            line?: number,
+          ) {
+            const key = JSON.stringify([name, path, line]);
+            if (sinks.has(key)) return;
+            sinks.add(key);
+            emit({
+              type: "proposed_sink",
+              subject,
+              function: name,
+              origin,
+              ...(path !== undefined && { path }),
+              ...(line !== undefined && { line }),
+            });
+          }
+          for (const sink of dependencyConfiguration?.sinks ?? [])
+            showSink(
+              sink.function,
+              "supplied",
+              sink.path ?? sink.file,
+              sink.line,
+            );
+          if ("advisories" in advisory) {
+            for (const entry of advisory.advisories) {
+              showSummary(entry.summary ?? entry.overview, entry.id);
+              for (const name of new Set([
+                ...(entry.vulnerableFunctions ?? []),
+                ...(entry.vulnerabilities ?? []).flatMap(
+                  (item) => item.vulnerable_functions ?? [],
+                ),
+                ...entry.affected.flatMap(({ ecosystem_specific: data }) =>
+                  !data
+                    ? []
+                    : "imports" in data
+                      ? data.imports.flatMap((item) => item.symbols ?? [])
+                      : (data.affects.functions ?? []),
+                ),
+              ]))
+                showSink(name, "advisory_record");
+            }
+          } else {
+            showSummary(advisory.vulnDescription);
+          }
+          const progress = createDependencyVerdictProgress(subject, emit);
+          let reviewStarted = false;
           const submission = createDependencyReportSubmission({
             repository,
             advisory,
             callerScope,
-            ...(invocation.dependencyCallerScope === undefined &&
-              dependencyConfiguration?.scope?.caller === undefined && {
-                callerScopeIsDefault: true,
-              }),
+            ...(productionDiscovery && {
+              callerScopeIsDefault: true,
+            }),
             candidates,
             sourceWorkCoverage: () => dependencyGraph?.sourceWorkCoverage,
             onBlocked: (failure) => scope.abort(failure),
@@ -3328,13 +3541,18 @@ export async function main(
               }),
             ),
             signal,
-            review: (prompt, schema, reviewSignal) =>
-              runHelper(
+            review: (prompt, schema, reviewSignal) => {
+              if (!reviewStarted) {
+                reviewStarted = true;
+                emit({ type: "stage", subject, stage: "review" });
+              }
+              return runHelper(
                 dependencies.reviewDependencyReport ?? runReadOnlyCodex,
                 prompt,
                 schema,
                 reviewSignal ?? signal,
-              ),
+              );
+            },
           });
           const profileTool = "profiles.stacks";
           const profileServers = Object.entries(inventoryServers).filter(
@@ -3497,7 +3715,7 @@ export async function main(
               await bundledPluginRoot(),
               repository,
               catalogServerNames.length
-                ? (requests) => {
+                ? async (requests) => {
                     if (!selectedRuntime)
                       throw new CodexSecurityError(
                         "Codex did not select a runtime for service catalog lookups.",
@@ -3516,14 +3734,27 @@ export async function main(
                       },
                       signal,
                     };
-                    if (dependencies.resolveDependencyServices)
-                      return dependencies.resolveDependencyServices({
-                        ...catalogOptions,
-                        requests,
-                      });
-                    serviceCatalog ??=
-                      createDependencyServiceCatalog(catalogOptions);
-                    return serviceCatalog.resolve(requests);
+                    const finish = display.begin(subject, "catalog");
+                    try {
+                      const answers = dependencies.resolveDependencyServices
+                        ? await dependencies.resolveDependencyServices({
+                            ...catalogOptions,
+                            requests,
+                          })
+                        : await (serviceCatalog ??=
+                            createDependencyServiceCatalog(
+                              catalogOptions,
+                            )).resolve(requests);
+                      finish(
+                        answers.some((answer) => "outcome" in answer)
+                          ? "partial"
+                          : "returned",
+                      );
+                      return answers;
+                    } catch (error) {
+                      finish("failed");
+                      throw error;
+                    }
                   }
                 : undefined,
               signal,
@@ -3534,29 +3765,247 @@ export async function main(
                   runHelper(runReadOnlyCodex, prompt, schema, signal),
                 record: submission.recordInventory,
                 isReceiptCurrent: submission.isInventoryReceiptCurrent,
+                onLookup: () => display.begin(subject, "runtime"),
                 signal,
               }),
               submission.recordInventory,
               submission.isInventoryReceiptCurrent,
               {
                 tools: evidenceTools.tools,
-                call: (name, args, rpc) =>
-                  evidenceTools.call(
-                    name,
-                    args,
-                    rpc && profileServer ? profileTransport(rpc) : undefined,
-                  ),
+                async call(name, args, rpc) {
+                  const transport =
+                    rpc && profileServer ? profileTransport(rpc) : undefined;
+                  if (name !== "collect_dependency_profiles")
+                    return evidenceTools.call(name, args, transport);
+                  const finish = display.begin(subject, "profiles");
+                  try {
+                    const result = await evidenceTools.call(
+                      name,
+                      args,
+                      transport,
+                    );
+                    const slices = result["slices"];
+                    const uncovered = result["uncovered"];
+                    finish(
+                      result["status"] === "unresolved_endpoints" ||
+                        (Array.isArray(uncovered) && uncovered.length > 0) ||
+                        (Array.isArray(slices) &&
+                          slices.some(
+                            (slice) =>
+                              isJsonObject(slice) &&
+                              ["failed", "incomplete"].some(
+                                (outcome) => slice["outcome"] === outcome,
+                              ),
+                          ))
+                        ? "partial"
+                        : "returned",
+                    );
+                    return result;
+                  } catch (error) {
+                    finish("failed");
+                    throw error;
+                  }
+                },
                 readInventoryReceipt: submission.readInventoryReceipt,
               },
               excludedSourcePaths,
               {
                 configuration: dependencyConfiguration,
+                productionDiscovery,
                 snapshotPath: join(
                   reviewDirectory,
                   "dependency-endpoints.json",
                 ),
               },
             );
+            emit({ type: "stage", subject, stage: "investigate" });
+            const searches = new Map<
+              string,
+              ReturnType<typeof display.begin>
+            >();
+            function checkoutPaths(values: unknown, cwd = repository) {
+              if (!Array.isArray(values)) return [];
+              return [
+                ...new Set(
+                  values.flatMap((value) => {
+                    if (typeof value !== "string" || !value.trim()) return [];
+                    const path = relative(repository, resolve(cwd, value));
+                    if (
+                      isAbsolute(path) ||
+                      path === ".." ||
+                      path.startsWith(`..${sep}`)
+                    )
+                      return [];
+                    return [path.split(sep).join("/") || "."];
+                  }),
+                ),
+              ];
+            }
+            function recordGraphEvent(
+              phase: "item/started" | "item/completed",
+              item: Record<string, unknown>,
+            ) {
+              submission.recordGraphEvent(phase, item);
+              const id = item["id"];
+              if (typeof id !== "string") return;
+              const tool = item["tool"];
+              const args = isJsonObject(item["arguments"])
+                ? item["arguments"]
+                : {};
+              if (phase === "item/completed") {
+                const reply = item["result"];
+                const result =
+                  isJsonObject(reply) &&
+                  isJsonObject(reply["structuredContent"])
+                    ? reply["structuredContent"]
+                    : {};
+                const coverage = isJsonObject(result["coverage"])
+                  ? result["coverage"]
+                  : {};
+                const searched = checkoutPaths(coverage["searched_paths"]);
+                searches.get(id)?.(
+                  item["status"] === "failed"
+                    ? "failed"
+                    : coverage["complete"] === false
+                      ? "partial"
+                      : "returned",
+                  searched.length ? searched : undefined,
+                );
+                searches.delete(id);
+                if (
+                  tool === "record_codex_security_endpoint" &&
+                  item["status"] === "completed" &&
+                  isJsonObject(result["endpoints"])
+                ) {
+                  const endpoint = result["endpoints"]["endpoint"];
+                  if (
+                    isJsonObject(endpoint) &&
+                    endpoint["role"] === "sink" &&
+                    typeof endpoint["function"] === "string" &&
+                    (endpoint["origin"] === "advisory" ||
+                      endpoint["origin"] === "discovered")
+                  ) {
+                    const path = endpoint["path"] ?? endpoint["file"];
+                    showSink(
+                      endpoint["function"],
+                      endpoint["origin"],
+                      typeof path === "string"
+                        ? checkoutPaths([path])[0]
+                        : undefined,
+                      typeof endpoint["line"] === "number"
+                        ? endpoint["line"]
+                        : undefined,
+                    );
+                  }
+                }
+                return;
+              }
+              if (tool === "trace_codex_security_code") {
+                const files = checkoutPaths(args["files"]);
+                const directories = checkoutPaths(
+                  args["paths"] ?? (args["files"] === undefined ? ["."] : []),
+                );
+                searches.set(
+                  id,
+                  display.begin(
+                    subject,
+                    args["rules"] === undefined ? "trace" : "opengrep",
+                    {
+                      files,
+                      directories,
+                      ...(typeof args["symbol"] === "string" && {
+                        symbol: args["symbol"],
+                      }),
+                    },
+                  ),
+                );
+              } else if (tool === "fetch_dependency_source") {
+                let target: string | undefined;
+                if (
+                  args["kind"] === "npm" &&
+                  typeof args["name"] === "string" &&
+                  typeof args["version"] === "string" &&
+                  typeof args["path"] === "string"
+                )
+                  target = `${args["name"]}@${args["version"]}/${args["path"]}`;
+                else if (
+                  (args["kind"] === "github" ||
+                    args["kind"] === "github_advisory") &&
+                  typeof args["owner"] === "string" &&
+                  typeof args["repository"] === "string"
+                ) {
+                  const path = args["path"] ?? args["advisoryId"];
+                  if (typeof path === "string")
+                    target = `${args["owner"]}/${args["repository"]}/${path}`;
+                }
+                searches.set(
+                  id,
+                  display.begin(
+                    subject,
+                    "upstream",
+                    target ? { upstream: target } : undefined,
+                  ),
+                );
+              }
+            }
+            const shellWork = new Map<
+              string,
+              ReturnType<typeof display.begin>[]
+            >();
+            function observeSearch(event: Readonly<Record<string, unknown>>) {
+              const { method, params } = event;
+              if (
+                (method !== "item/started" && method !== "item/completed") ||
+                !isJsonObject(params) ||
+                !isJsonObject(params["item"])
+              )
+                return;
+              const item = params["item"];
+              if (
+                item["type"] !== "commandExecution" ||
+                typeof item["id"] !== "string"
+              )
+                return;
+              const key = JSON.stringify([params["threadId"], item["id"]]);
+              if (method === "item/completed") {
+                for (const finish of shellWork.get(key) ?? [])
+                  finish(
+                    item["status"] === "completed" ? "returned" : "failed",
+                  );
+                shellWork.delete(key);
+                return;
+              }
+              if (
+                typeof item["cwd"] !== "string" ||
+                !checkoutPaths([item["cwd"]]).length ||
+                !Array.isArray(item["commandActions"])
+              )
+                return;
+              const finishes: ReturnType<typeof display.begin>[] = [];
+              for (const action of item["commandActions"]) {
+                if (
+                  !isJsonObject(action) ||
+                  (action["type"] !== "search" && action["type"] !== "read")
+                )
+                  continue;
+                const path = action["path"];
+                const paths = checkoutPaths([path ?? "."], item["cwd"]);
+                if (!paths.length) continue;
+                const scope: DependencyProgressScope =
+                  action["type"] === "read"
+                    ? { files: paths }
+                    : { directories: paths };
+                finishes.push(
+                  display.begin(
+                    subject,
+                    action["type"] === "read" ? "source_read" : "source_search",
+                    scope,
+                  ),
+                );
+              }
+              if (finishes.length) shellWork.set(key, finishes);
+            }
+            let childFailure: string | undefined;
             exitCode = await runSkill(
               "dependency-exploitability",
               [],
@@ -3569,14 +4018,32 @@ export async function main(
                 signal,
                 context: JSON.stringify(advisory),
                 dependencyCallerScope: callerScope,
+                dependencyDiscoveryGuidance: discoveryGuidance,
                 dependencyCodexConfig: project?.input.codex,
                 dependencyGraph,
+                onEvent: observeSearch,
+                onDiagnostic(message, kind) {
+                  if (kind === "failure") {
+                    childFailure = message;
+                    return;
+                  }
+                  display.clear();
+                  return writeCliOutput(
+                    errorOutput,
+                    `codex-security: ${diagnosticLines(message)}\n`,
+                  );
+                },
                 inventoryServers,
                 inventoryInstructions,
                 catalogServerNames,
                 shellEnvironmentPolicy:
                   project?.input.codex?.["shell_environment_policy"],
                 dependencyReport: {
+                  onAccessProgram(program) {
+                    if (displayedAccess === program) return;
+                    displayedAccess = program;
+                    emit({ type: "access_program", subject, program });
+                  },
                   bindReviewer: (
                     selectedEnvironment,
                     providerConfig,
@@ -3601,7 +4068,7 @@ export async function main(
                     await submission.refreshAcceptedReport();
                     return submission.continuationPrompt();
                   },
-                  recordGraphEvent: submission.recordGraphEvent,
+                  recordGraphEvent,
                   observeGraph: candidates.observeGraph,
                   recordInventory: submission.recordInventory,
                   recordInventoryStartup: submission.recordInventoryStartup,
@@ -3615,12 +4082,13 @@ export async function main(
             if (blocked) throw new DependencyInvestigationBlockedError(blocked);
             if (exitCode !== 0)
               throw new CodexSecurityError(
-                `Dependency assessment exited with status ${exitCode}.`,
+                childFailure ??
+                  `Dependency assessment exited with status ${exitCode}.`,
               );
             const advisoryDetails =
               "advisories" in advisory ? advisory.advisories : undefined;
             await submission.refreshAcceptedReport();
-            return reviewedDependencyCheckSchema.parse({
+            const report = reviewedDependencyCheckSchema.parse({
               ...submission.publicReport(),
               advisories: advisoryDetails?.map((entry) => entry.url) ?? [],
               ...(advisoryDetails && { advisoryDetails }),
@@ -3628,6 +4096,13 @@ export async function main(
                 ? addTokenUsage(helperUsage, investigatorUsage)
                 : helperUsage,
             });
+            progress.flush();
+            emit({
+              type: "assessment_finished",
+              subject,
+              uses: report.uses.length,
+            });
+            return report;
           } catch (failure) {
             const blocked = submission.blockedOutcome();
             if (blocked && !controller.signal.aborted)
@@ -3649,26 +4124,57 @@ export async function main(
         }
 
         if (!pkg) {
+          emit({
+            type: "stage",
+            subject: args.subject,
+            stage: dependencies.lookupDependencyAdvisory
+              ? "advisory_lookup"
+              : "osv",
+          });
           const scope = issueScope();
           const advisory = await (
             dependencies.lookupDependencyAdvisory ?? lookupDependencyAdvisory
           )(args.subject, scope.signal);
-          return { cve: advisory.cve, ...(await assess(advisory, scope)) };
+          emit({
+            type: "advisories_loaded",
+            subject: advisory.cve,
+            count: advisory.advisories.length,
+          });
+          const report = await assess(advisory, scope);
+          return await finishReport({ cve: advisory.cve, ...report });
         }
         if (options.vulnDescription !== undefined) {
           const issue = {
             package: pkg,
             vulnDescription: options.vulnDescription,
           };
-          return {
+          emit({
+            type: "stage",
+            subject: args.subject,
+            stage: "supplied_advisory",
+          });
+          const report = await assess(issue);
+          return await finishReport({
             ...issue,
-            checks: [{ advisoryId: null, ...(await assess(issue)) }],
-          };
+            checks: [{ advisoryId: null, ...report }],
+          });
         }
 
+        emit({
+          type: "stage",
+          subject: args.subject,
+          stage: dependencies.lookupPackageAdvisories
+            ? "advisory_lookup"
+            : "osv",
+        });
         const advisories = await (
           dependencies.lookupPackageAdvisories ?? lookupPackageAdvisories
         )(pkg, controller.signal);
+        emit({
+          type: "advisories_loaded",
+          subject: args.subject,
+          count: advisories.length,
+        });
         const checks = [];
         let blockedChecks = false;
         for (const advisory of advisories) {
@@ -3686,10 +4192,12 @@ export async function main(
               throw failure;
             blockedChecks = true;
             checks.push({ advisoryId: advisory.id, ...failure.outcome });
+            display.clear();
             errorOutput.write(`codex-security: ${diagnosticValue(failure)}\n`);
           }
         }
         if (blockedChecks) {
+          outcome = "blocked";
           exitCode = 2;
           return {
             package: pkg,
@@ -3698,17 +4206,25 @@ export async function main(
             code: "INVESTIGATION_BLOCKED" as const,
           };
         }
-        return dependencyPackageCheckOutputSchema.parse({
+        const report = dependencyPackageCheckOutputSchema.parse({
           package: pkg,
           checks,
         });
+        return await finishReport(report);
       } catch (error) {
         exitCode =
           interruptedExitCode(controller.signal) ??
           (error instanceof DependencyInvestigationBlockedError
             ? 2
             : exitCode || 2);
-        errorOutput.write(`codex-security: ${diagnosticValue(error)}\n`);
+        outcome =
+          exitCode === 130 || exitCode === 143
+            ? "interrupted"
+            : error instanceof DependencyInvestigationBlockedError
+              ? "blocked"
+              : "failed";
+        display.clear();
+        errorOutput.write(`codex-security: ${diagnosticLines(error)}\n`);
         if (
           error instanceof DependencyInvestigationBlockedError &&
           !controller.signal.aborted
@@ -3716,9 +4232,14 @@ export async function main(
           return error.outcome;
         throw error;
       } finally {
+        emit({ type: "finished", subject: args.subject, outcome });
+        display.close();
         removeSignals();
         controller.abort();
-        if (temporary) await rm(temporary, { recursive: true, force: true });
+        if (temporary)
+          await rm(temporary, { recursive: true, force: true }).catch(() => {
+            // Retain the original investigation outcome if cleanup fails.
+          });
       }
     },
   });
@@ -10603,6 +11124,9 @@ async function runSkill(
         ...(dependencyCheck
           ? [
               dependencyNativeCoordinatorPrompt,
+              ...(options.dependencyDiscoveryGuidance
+                ? [options.dependencyDiscoveryGuidance]
+                : []),
               ...(inventoryServerNames.length
                 ? [
                     `Configured inventory MCP server names: ${JSON.stringify(inventoryServerNames)}. Servers selected for source-to-service catalog lookup: ${JSON.stringify(options.catalogServerNames ?? [])}.`,
@@ -10793,6 +11317,7 @@ async function runSkill(
             }
           : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
+        ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
         ...(assess ? { telemetryCommand: "assess-patch-risk" as const } : {}),
         signal: options.signal,
         auth: options.auth ?? "auto",
@@ -11458,6 +11983,15 @@ export async function readSkillCommandOutput(
       (cyberAccessProgram) => {
         if (appServer?.dependencyReport?.blockedOutcome?.()) return;
         if (appServer?.dependencyReport) {
+          const access =
+            cyberAccessProgram === "daybreakBlue"
+              ? "daybreak_blue"
+              : cyberAccessProgram === "daybreakRed"
+                ? "daybreak_red"
+                : cyberAccessProgram === "standard"
+                  ? "standard"
+                  : "unconfirmed";
+          notify(() => appServer.dependencyReport?.onAccessProgram?.(access));
           if (
             cyberAccessProgram === "daybreakBlue" ||
             cyberAccessProgram === "daybreakRed"
@@ -11681,7 +12215,7 @@ export async function readSkillCommandOutput(
         turnId !== undefined &&
         params["threadId"] === threadId &&
         params["turnId"] === turnId;
-      if (currentTurn) {
+      if (currentTurn || investigationTurn) {
         try {
           appServer.onEvent?.(value);
         } catch {}

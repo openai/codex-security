@@ -475,7 +475,7 @@ export class DependencySearchAudit {
           typeof entry["excludedBy"] === "string"
         )
           details.push(
-            `Broad discovery omitted ${JSON.stringify(entry["path"])} under operator exclusion ${JSON.stringify(entry["excludedBy"])}.`,
+            `Broad discovery omitted ${JSON.stringify(entry["path"])} under ${entry["basis"] === "production_default" ? "default production exclusion" : "operator exclusion"} ${JSON.stringify(entry["excludedBy"])}.`,
           );
       }
     }

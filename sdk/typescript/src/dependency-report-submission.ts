@@ -2378,8 +2378,8 @@ export function createDependencyReportSubmission(options: {
             ...sourceWorkLimitations,
           ]);
           if (limitation) limitations.add(limitation);
-          const discoveryLimitation = coverage.discoveryLimitation();
-          if (discoveryLimitation) limitations.add(discoveryLimitation);
+          for (const scopeNote of coverage.discoveryLimitations())
+            limitations.add(scopeNote);
           for (const text of candidateSnapshot.limitations)
             limitations.add(text);
           const profiles = options.profileCoverage?.({

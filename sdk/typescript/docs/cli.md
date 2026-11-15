@@ -2333,16 +2333,56 @@ current directory.
 codex-security exploitability --help
 codex-security exploitability check CVE-2023-4863
 codex-security exploitability check CVE-2023-4863 --json
+codex-security exploitability check npm:example-package --json --report-file report.json
 codex-security exploitability check npm:example-package
 codex-security exploitability check npm:example-package \
   --vuln-description "Version 2.3.1 may skip signature verification when reading a manifest"
 ```
 
-The check writes independently reviewed callsite verdicts to stderr as they
-become available, including when stdout is redirected with `--json`. Repeated
-rule-outs with the same reason and deciding evidence are summarized with a
-representative location and a distinct callsite count. The final report on
-stdout includes every reviewed use selected for the report.
+The check shows what it is doing on stderr, including OSV lookup, source search,
+runtime evidence collection when used, and independent review. Advisory summaries and
+proposed sinks appear as the investigation identifies them. Search steps show the
+requested checkout paths or upstream source. A terminal gets
+a live status line and compact reviewed results. Redirected stderr gets the
+same milestones and results as plain text. Repeated rule-outs with the same
+reviewed proof are summarized with a representative location and a distinct
+callsite count. At the end, stderr summarizes the verdict counts for all
+completed checks. The final stdout report includes every selected reviewed use.
+Use `--report-file FILE` to also save the completed report as JSON and print its
+absolute path on stderr. Its parent directory must exist, and the destination
+must be a new file. The CLI saves it with owner-only permissions on POSIX. To
+see only the terminal summary, pass `--report-file FILE` and redirect stdout
+to `/dev/null`.
+
+Agents can pass `--progress-events FILE` to read live JSON Lines separately.
+The CLI creates a new file with owner-only permissions on POSIX. Each record
+has `schemaVersion: 1`, `elapsedMs`, `subject`, and `type`:
+
+- `started` names the checkout. `stage` and `advisories_loaded` describe
+  the current work and returned advisories.
+- `advisory_summary` carries the published summary or supplied description.
+  `proposed_sink` identifies a target and its origin (`supplied`,
+  `advisory_record`, `advisory`, or `discovered`). A proposed sink does
+  not establish that a caller can reach it.
+- `activity_started` and `activity_finished` pair by `id`. Activities include
+  `opengrep`, `trace`, `source_search`, `source_read`, `upstream`,
+  `catalog`, `runtime`, and `profiles`. When available, `scope` records
+  the directories, files, symbol, or upstream target for that action.
+  `activity_finished` records the outcome (`returned`, `partial`, or
+  `failed`) and any `searchedPaths` reported by the tracer.
+- `reviewed` carries a scoped verdict and short reason. `previousVerdict`
+  identifies a correction. `reviewed_group` updates the current callsite and
+  assessment counts for `groupId`.
+- `access_program` reports the program selected for the Codex turn. The terminal
+  warns when the program is Standard or when Daybreak access is unconfirmed.
+- `assessment_finished` gives the number of uses in a completed advisory's
+  report. `report_ready` gives the final verdict counts, the number of
+  limitations, and the saved report `path` when `--report-file` was used.
+  `finished` describes the command outcome.
+
+Progress output is best-effort. The exit status and stdout report remain the
+final result. Saving that report with `--json` allows an agent to inspect the
+selected uses and their evidence without loading the whole report.
 
 A healthy lookup with missing, empty, stale, incomplete, or mismatched records
 leaves the affected conclusion unknown. It does not prove safety or a tool outage.
@@ -2575,8 +2615,12 @@ jobs (including distributed job executors), workers, scheduled or background
 workloads, and code they deploy or import at runtime. Independent test runners
 and CI or build surfaces are outside that scope unless the production runtime
 invokes them. Packaging and build files can still establish what a production
-caller selects. When the invocation supplies an explicit caller scope, the check
-uses it instead, including CI, build or test callers when requested. The resolved
+caller selects. Broad discovery skips conventional example, test and
+documentation paths by default. Specific source, build or runtime evidence can
+reopen a path. Maintainer advisories and exact documentation or regression tests
+can still answer a specific evidence question. When the invocation supplies an explicit
+caller scope, the check uses it instead, including examples, CI, build or test
+callers when requested. The resolved
 scope appears in JSON `assumptions` and bounds discovery, leads and conclusions.
 It does not establish a running deployment or caller access.
 

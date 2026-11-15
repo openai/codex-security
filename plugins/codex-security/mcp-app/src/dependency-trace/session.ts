@@ -70,12 +70,22 @@ export async function createDependencyGraphSession(
   {
     fullTraceReply = false,
     excludedSourcePaths,
-  }: { fullTraceReply?: boolean; excludedSourcePaths?: readonly string[] } = {},
+    productionDiscovery = false,
+  }: {
+    fullTraceReply?: boolean;
+    excludedSourcePaths?: readonly string[];
+    productionDiscovery?: boolean;
+  } = {},
 ) {
   const root = await canonicalDirectory(checkout, "Dependency trace checkout");
-  const sourceScope = excludedSourcePaths?.length
-    ? await createDiscoveryScope(root, excludedSourcePaths)
-    : undefined;
+  const sourceScope =
+    productionDiscovery || excludedSourcePaths?.length
+      ? await createDiscoveryScope(
+          root,
+          excludedSourcePaths ?? [],
+          productionDiscovery,
+        )
+      : undefined;
   const tracer = createDependencyTracer(
     root,
     sourceScope ? localProvider(root, sourceScope) : undefined,

@@ -1,6 +1,6 @@
-import { stripVTControlCharacters } from "node:util";
+import type { DependencyProgressEvent } from "./dependency-progress.js";
+import { progressText as oneLine } from "./dependency-progress.js";
 import type { DependencyUse } from "./dependency-reachability.js";
-import { formatSecurityPolicyText } from "./security-policy.js";
 
 type CallSite = { path: string; line: number };
 export interface DependencyVerdictUpdate {
@@ -9,14 +9,6 @@ export interface DependencyVerdictUpdate {
   reason: string;
   evidenceKeys: string[];
   sharedEvidenceKeys: string[];
-}
-
-function oneLine(value: string) {
-  return formatSecurityPolicyText(
-    stripVTControlCharacters(value)
-      .replaceAll(/[\u0000-\u001F\u007F-\u009F\u2028\u2029\s]+/gu, " ")
-      .trim(),
-  );
 }
 
 function shortenedLine(value: string, maxLength: number): string {
@@ -31,11 +23,35 @@ function shortenedLine(value: string, maxLength: number): string {
         .trimEnd()}…`;
 }
 
+function proofGroupKey(
+  use: DependencyUse,
+  source: string,
+  sharedEvidenceKeys: string[],
+) {
+  const normalize = (value: string) =>
+    oneLine(value.replaceAll(source, "<callsite>"));
+  const conditions = use.proof?.conditions
+    .filter(({ status }) => status === "ruled_out")
+    .map(({ label, explanation, citations }) => ({
+      label,
+      explanation: normalize(explanation),
+      citations: citations.map(({ path, line }) => `${path}:${line}`).sort(),
+    }));
+  return JSON.stringify([
+    use.component,
+    [...sharedEvidenceKeys].sort(),
+    conditions?.length ? conditions : normalize(use.reason),
+  ]);
+}
+
 interface Entry {
   caller: string;
   callerKey: string | undefined;
+  locationKind: "caller" | "sink";
   scope: string;
   verdict: DependencyUse["verdict"];
+  component: string;
+  version: string | null;
   reason: string;
   signature: string;
   group: string | undefined;
@@ -44,12 +60,14 @@ interface Entry {
 interface Group {
   members: Map<string, Entry>;
   calls: Map<string, number>;
-  lastSummary?: string;
+  id: string;
+  representative: Entry;
+  lastCount?: { callsites: number; assessments: number };
 }
 
 export function createDependencyVerdictProgress(
   subject: string,
-  output: { write: (text: string) => unknown },
+  emit: (event: DependencyProgressEvent) => void,
 ) {
   // Multiple submitted IDs can name one call and selected place. Keep their
   // latest accepted opinions so withdrawing an alias doesn't erase another.
@@ -59,22 +77,30 @@ export function createDependencyVerdictProgress(
   const dirty = new Set<string>();
   let scheduled: ReturnType<typeof setImmediate> | undefined;
 
-  function write(entry: Entry, label: string, suffix = "") {
-    try {
-      output.write(
-        `[${new Date().toISOString()}] reviewed ${oneLine(subject)} ${entry.caller}${entry.scope} ${label}${suffix} — ${entry.reason}\n`,
-      );
-    } catch {
-      // Progress is best-effort and cannot change the assessment outcome.
-    }
+  let nextGroup = 0;
+
+  function publish(
+    entry: Entry,
+    group?: Group,
+    previousVerdict?: Entry["verdict"],
+  ) {
+    emit({
+      type: "reviewed",
+      subject,
+      location: entry.caller,
+      locationKind: entry.locationKind,
+      ...(entry.scope && { scope: entry.scope }),
+      verdict: entry.verdict,
+      component: entry.component,
+      ...(entry.version && { version: entry.version }),
+      ...(previousVerdict && { previousVerdict }),
+      reason: entry.reason,
+      ...(group && { groupId: group.id }),
+    });
   }
 
-  function summary(group: Group) {
-    const calls = group.calls.size;
-    const distinct = `${calls} callsite${calls === 1 ? "" : "s"}`;
-    return group.members.size === calls
-      ? distinct
-      : `${distinct}, ${group.members.size} assessments`;
+  function currentCount(group: Group) {
+    return { callsites: group.calls.size, assessments: group.members.size };
   }
 
   function flush() {
@@ -82,15 +108,27 @@ export function createDependencyVerdictProgress(
     scheduled = undefined;
     for (const key of dirty) {
       const group = groups.get(key)!;
-      const first = group.members.values().next().value;
-      if (!first) {
+      const first = group.members.values().next().value ?? group.representative;
+      if (group.members.size === 0) {
         groups.delete(key);
-        continue;
+        if (!group.lastCount) continue;
       }
-      const current = summary(group);
-      if (current === group.lastSummary) continue;
-      write(first, first.verdict, ` (${current})`);
-      group.lastSummary = current;
+      const count = currentCount(group);
+      if (
+        count.callsites === group.lastCount?.callsites &&
+        count.assessments === group.lastCount?.assessments
+      )
+        continue;
+      emit({
+        type: "reviewed_group",
+        subject,
+        location: first.caller,
+        verdict: first.verdict,
+        reason: first.reason,
+        groupId: group.id,
+        ...count,
+      });
+      group.lastCount = count;
     }
     dirty.clear();
   }
@@ -104,7 +142,12 @@ export function createDependencyVerdictProgress(
     let group = groups.get(key);
     if (!group) {
       if (!entry) return;
-      group = { members: new Map(), calls: new Map() };
+      group = {
+        id: `${subject}:${++nextGroup}`,
+        members: new Map(),
+        calls: new Map(),
+        representative: entry,
+      };
       groups.set(key, group);
     }
     const prior = group.members.get(assessment);
@@ -116,7 +159,6 @@ export function createDependencyVerdictProgress(
     }
     if (entry) group.members.set(assessment, entry);
     else group.members.delete(assessment);
-    if (!group.members.size && !dirty.has(key)) groups.delete(key);
     return group;
   }
 
@@ -144,39 +186,40 @@ export function createDependencyVerdictProgress(
       previous?.group === current?.group
     )
       return;
-    if (previous?.group !== current?.group)
+    if (previous?.group !== current?.group) {
       updateGroup(previous?.group, assessment);
+      schedule(previous?.group);
+    }
     if (!current) return;
     const anotherPlace =
       current.group !== undefined &&
       current.callerKey !== undefined &&
       groups.get(current.group)?.calls.has(current.callerKey);
     const group = updateGroup(current.group, assessment, current);
-    // Retiring an unapproved revision only changes future group counts.
+    // Retiring an unapproved revision changes the group count, without
+    // publishing a new verdict for that assessment.
     if (!entry) return;
     const prior = previous ?? previousPlace;
     if (prior?.group !== current.group) schedule(prior?.group);
     schedule(current.group);
     if (
       prior?.signature === current.signature &&
-      prior.group === current.group
-    ) {
-      if (group?.members.size === 1 && group.lastSummary === undefined)
-        group.lastSummary = summary(group);
+      prior.group === current.group &&
+      (!group || group.lastCount !== undefined)
+    )
       return;
-    }
     if (prior && prior.verdict !== current.verdict) {
-      write(current, `corrected ${prior.verdict} → ${current.verdict}`);
-      if (group?.members.size === 1) group.lastSummary = summary(group);
+      publish(current, group, prior.verdict);
+      if (group?.members.size === 1) group.lastCount = currentCount(group);
     } else if (
       !group ||
-      group.lastSummary === undefined ||
+      group.lastCount === undefined ||
       (prior && prior.group !== current.group) ||
       (!prior && anotherPlace)
     ) {
-      write(current, prior ? `updated ${current.verdict}` : current.verdict);
-      if (group && group.lastSummary === undefined)
-        group.lastSummary = summary(group);
+      publish(current, group);
+      if (group && group.lastCount === undefined)
+        group.lastCount = currentCount(group);
     }
   }
 
@@ -200,7 +243,7 @@ export function createDependencyVerdictProgress(
             .replace(source, "")
             .trim()
             .replace(/^\((.*)\)$/u, "$1")
-        : `sink, caller unresolved, submitted location: ${use.location}`;
+        : `submitted location: ${use.location}`;
       const selection = [
         place?.deploymentDetail,
         place?.environment,
@@ -231,34 +274,41 @@ export function createDependencyVerdictProgress(
         label,
         selection,
       ]);
-      const text = oneLine(reason);
+      const decisive =
+        use.verdict === "ruled_out"
+          ? "ruled_out"
+          : use.verdict === "unknown"
+            ? "unknown"
+            : "met";
       const group =
         source && use.verdict === "ruled_out" && sharedEvidenceKeys.length
-          ? JSON.stringify([
-              use.component,
-              oneLine(use.reason.replaceAll(source, "<callsite>")),
-              oneLine(reason.replaceAll(source, "<callsite>")),
-              [...sharedEvidenceKeys].sort(),
-            ])
+          ? proofGroupKey(use, source, sharedEvidenceKeys)
           : undefined;
       if (old && old.assessment !== assessment) revise(old.assessment, id);
-      const entry = {
+      const entry: Entry = {
         caller,
         callerKey: source,
-        scope: scope ? ` (${scope})` : "",
+        locationKind: callSite ? "caller" : "sink",
+        scope,
         verdict: use.verdict,
+        component: oneLine(use.component),
+        version: use.version && oneLine(use.version),
         reason: shortenedLine(
           use.proof?.conditions.find(
             ({ status, explanation }) =>
-              status === use.verdict && oneLine(explanation),
-          )?.explanation ?? reason,
+              status === decisive && oneLine(explanation),
+          )?.explanation ??
+            (use.verdict === "unknown"
+              ? place?.unresolvedQuestions.find(oneLine)
+              : undefined) ??
+            reason,
           180,
         ),
         signature: JSON.stringify([
           caller,
           use.verdict,
           use.reason,
-          text,
+          reason,
           [...evidenceKeys].sort(),
         ]),
         group,

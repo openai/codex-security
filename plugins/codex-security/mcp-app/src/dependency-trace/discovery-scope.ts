@@ -6,16 +6,33 @@ import { resolveSecurityMd } from "../helpers/resolve-security-md.js";
 export interface DiscoveryOmission {
   path: string;
   excludedBy: string;
+  basis?: "production_default";
 }
 
 const within = (prefix: string, path: string) =>
   path === prefix || path.startsWith(prefix + "/");
+
+const nonProductionDirectory =
+  /^(?:docs?|documentation|examples?|tests?|__tests__)$/iu;
+const nonProductionFile =
+  /\.(?:md|markdown|mdx|rst|adoc)$|^(?:test_.*\.py|conftest\.py)$|_test\.(?:py|go)$|\.(?:test|spec)\.[^.]+$/iu;
+
+function productionDiscoveryExclusion(file: string): string | undefined {
+  const parts = file.split("/");
+  const name = parts.pop()!;
+  const directory = parts.findIndex((part) =>
+    nonProductionDirectory.test(part),
+  );
+  if (directory >= 0) return parts.slice(0, directory + 1).join("/");
+  if (nonProductionFile.test(name)) return file;
+}
 
 /** The operator's literal discovery boundary. Repository policy can only
  * retain a location that this declaration would otherwise omit. */
 export async function createDiscoveryScope(
   root: string,
   excludedPaths: readonly string[],
+  productionDiscovery = false,
 ) {
   const paths = [
     ...new Set(
@@ -42,7 +59,7 @@ export async function createDiscoveryScope(
     }),
   );
   const reopened = new Set<string>();
-  const exclusionFor = (file: string) =>
+  const operatorExclusion = (file: string) =>
     exclusions.find(
       (region) =>
         region &&
@@ -51,28 +68,41 @@ export async function createDiscoveryScope(
 
   return {
     includeExactFile(path: string) {
-      if (exclusionFor(path)) reopened.add(path);
+      reopened.add(path);
     },
-    omit(files: readonly string[]): DiscoveryOmission[] {
+    omit(files: readonly string[], structural: boolean): DiscoveryOmission[] {
       const policies = new Map<string, string | undefined>();
-      return files.flatMap((file) => {
-        if (reopened.has(file)) return [];
-        const exclusion = exclusionFor(file);
-        if (!exclusion) return [];
-        const directory = posix.dirname(file);
+      function policy(directory: string) {
         if (!policies.has(directory)) {
-          let policy: string | undefined;
+          let value: string | undefined;
           try {
-            policy = resolveSecurityMd(root, directory, undefined, {
+            value = resolveSecurityMd(root, directory, undefined, {
               requireResolvedLinks: true,
             });
           } catch {
-            // Keep the file if the applicable policy could not be resolved.
+            // An unresolved policy cannot narrow discovery.
           }
-          policies.set(directory, policy);
+          policies.set(directory, value);
         }
-        return policies.get(directory) === exclusion.policy
-          ? [{ path: file, excludedBy: exclusion.path }]
+        return policies.get(directory);
+      }
+      return files.flatMap((file) => {
+        if (reopened.has(file)) return [];
+        const applicablePolicy = () => policy(posix.dirname(file));
+        const operator = structural ? operatorExclusion(file) : undefined;
+        if (operator) {
+          return applicablePolicy() === operator.policy
+            ? [{ path: file, excludedBy: operator.path }]
+            : [];
+        }
+        const excludedBy = productionDiscovery
+          ? productionDiscoveryExclusion(file)
+          : undefined;
+        if (!excludedBy) return [];
+        const localPolicy = applicablePolicy();
+        return localPolicy !== undefined &&
+          localPolicy === policy(posix.dirname(excludedBy))
+          ? [{ path: file, excludedBy, basis: "production_default" }]
           : [];
       });
     },

@@ -78,6 +78,7 @@ function replay(
 ) {
   const requests: Record<string, unknown>[] = [];
   const bindReviewer = mock(() => requests.length);
+  const onAccessProgram = mock(() => requests.length);
   const recordInventory = mock(
     (_name: string, _payload: unknown, _metadata?: unknown) => undefined,
   );
@@ -110,6 +111,7 @@ function replay(
         recordInventory,
         recordInventoryStartup,
         continuationPrompt,
+        onAccessProgram,
         recordGraphEvent() {},
       },
       input: new Writable({
@@ -127,6 +129,7 @@ function replay(
     result,
     requests,
     bindReviewer,
+    onAccessProgram,
     recordInventory,
     recordInventoryStartup,
     onUsage,
@@ -153,6 +156,7 @@ test("binds standard dependency helpers to the model selected by the native thre
     feedback: "Accepted.",
   }));
   expect(await run.result).toEqual({ completed: true });
+  expect(run.onAccessProgram).toHaveBeenCalledWith("standard");
   expect(run.bindReviewer).toHaveBeenCalledTimes(1);
   expect(run.bindReviewer).toHaveBeenCalledWith(
     "openai",
@@ -177,6 +181,7 @@ test("starts a fresh persistent Daybreak dependency thread and binds its reviewe
     params: { permissions: "restricted", daybreakEnabled: true },
   });
   expect(starts[0]).not.toHaveProperty("params.ephemeral", true);
+  expect(run.onAccessProgram).toHaveBeenCalledWith("daybreak_blue");
   expect(run.bindReviewer).toHaveBeenCalledTimes(1);
   expect(run.bindReviewer).toHaveBeenCalledWith(
     "openai",

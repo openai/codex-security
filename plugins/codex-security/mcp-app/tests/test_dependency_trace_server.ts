@@ -104,6 +104,7 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
   ).default;
   await mkdir(join(checkout, "examples", "runtime"), { recursive: true });
   await mkdir(join(checkout, "tests"));
+  await mkdir(join(checkout, "docs"));
   const uncertainPolicyFiles: string[] = [];
   if (process.platform !== "win32") {
     for (const [directory, target] of [
@@ -124,6 +125,9 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
     "examples/runtime/consumer.py",
     "examples/worker.py",
     "tests/test_named.py",
+    "docs/guide.py",
+    "test_fallback.py",
+    "app.py",
     ...uncertainPolicyFiles,
   ].sort();
   for (const file of allFiles)
@@ -154,9 +158,14 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
     fullTraceReply: true,
     excludedSourcePaths: ["examples"],
   });
+  const production = await createDependencyGraphSession(checkout, false, {
+    fullTraceReply: true,
+    productionDiscovery: true,
+  });
   t.after(async () => {
     await baseline.close();
     await scoped.close();
+    await production.close();
   });
   const request = {
     package: "image-package",
@@ -184,6 +193,54 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
   }
   const broad = { paths: ["."], source_terms: ["image_lib"] };
   assert.deepEqual(locations(await trace(baseline, broad)), allFiles);
+  const original = await trace(production, broad);
+  assert.deepEqual(
+    locations(original),
+    ["app.py", "examples/runtime/consumer.py", ...uncertainPolicyFiles].sort(),
+  );
+  assert.deepEqual(original.coverage.discovery_omissions, [
+    { path: "docs/guide.py", excludedBy: "docs", basis: "production_default" },
+    {
+      path: "examples/already-read.py",
+      excludedBy: "examples",
+      basis: "production_default",
+    },
+    {
+      path: "examples/demo.py",
+      excludedBy: "examples",
+      basis: "production_default",
+    },
+    {
+      path: "examples/worker.py",
+      excludedBy: "examples",
+      basis: "production_default",
+    },
+    {
+      path: "test_fallback.py",
+      excludedBy: "test_fallback.py",
+      basis: "production_default",
+    },
+    {
+      path: "tests/test_named.py",
+      excludedBy: "tests",
+      basis: "production_default",
+    },
+  ]);
+  assert.deepEqual(
+    locations(await trace(production, { files: ["examples/worker.py"] })),
+    ["examples/worker.py"],
+  );
+  production.includeDiscoveryFile("tests/test_named.py");
+  assert.deepEqual(
+    locations(await trace(production, broad)),
+    [
+      "app.py",
+      "examples/runtime/consumer.py",
+      "examples/worker.py",
+      "tests/test_named.py",
+      ...uncertainPolicyFiles,
+    ].sort(),
+  );
   assert.deepEqual(
     locations(await trace(scoped, { files: ["examples/already-read.py"] })),
     ["examples/already-read.py"],
@@ -196,6 +253,9 @@ test("operator discovery exclusions preserve nested policy and exact caller foll
       "examples/already-read.py",
       "examples/runtime/consumer.py",
       "tests/test_named.py",
+      "docs/guide.py",
+      "test_fallback.py",
+      "app.py",
       ...uncertainPolicyFiles,
     ].sort(),
   );

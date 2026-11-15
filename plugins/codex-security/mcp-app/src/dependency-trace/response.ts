@@ -1,5 +1,6 @@
 import { boundGraphResponse } from "./graph.ts";
 import { executionSummary, scopeSummary } from "./rule-config.ts";
+import type { DiscoveryOmission } from "./discovery-scope.ts";
 import type {
   TraceEntity,
   TraceResult,
@@ -65,7 +66,7 @@ export function traceResponse(result: TraceResult) {
     Omit<TextMatch, "line"> & { lines: Set<number> }
   >();
   const searched = new Set<string>();
-  const omissions = new Map<string, { path: string; excludedBy: string }>();
+  const omissions = new Map<string, DiscoveryOmission>();
   const partial = [];
   const batches = result.scopes.filter(
     ({ scope }) => scope.kind === "source_batch",
