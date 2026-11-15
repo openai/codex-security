@@ -4323,6 +4323,52 @@ describe("live scan cost tracking", () => {
     expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
   });
 
+  test("keeps parent and worker usage at their first read boundary when capturing drive aliases", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
+    const pending = new Set([parent, worker]);
+    const totals: number[] = [];
+    const tracker = costTracker(home, {
+      repository: "C:/Work/Repo",
+      activityObservations: { scanId: "scan-example" },
+      verifyActivityDirectory: () => false,
+      onUsage: (usage) => totals.push(usage.input_tokens),
+    });
+    const original = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof original>) => {
+        const handle = await original(...args);
+        const file = String(args[0]);
+        if (pending.delete(file)) {
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            await appendFile(
+              file,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "token_count",
+                  info: {
+                    total_token_usage: { input_tokens: 300, output_tokens: 10 },
+                  },
+                },
+              }) + "\n",
+            );
+            return close();
+          };
+        }
+        return handle;
+      },
+    );
+    try {
+      tracker.beginParentTurn();
+      tracker.start("scan-thread");
+      await tracker.stop();
+      expect(totals).toEqual([200, 600]);
+    } finally {
+      opening.mockRestore();
+    }
+  });
+
   test("saves only current owned drive aliases and replays the originating call", async () => {
     const { home, parent, worker, usage } = await workerSessionFixture();
     const unrelated = await writeSession(home, "other-thread", usage);

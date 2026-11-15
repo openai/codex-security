@@ -2518,14 +2518,16 @@ export class ScanCostTracker {
         )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
-            session = createSessionUsage(observeUsage, deferActivities);
+            session = createSessionUsage(observeUsage);
             this.#sessions.set(path, session);
           }
           try {
             await readSessionUsage(
               path,
               session,
-              deferActivities ? undefined : repository,
+              deferActivities && !session.observeActivityPaths
+                ? undefined
+                : repository,
               progressThread,
               undefined,
               true,
@@ -2601,27 +2603,6 @@ export class ScanCostTracker {
         }
       }
     } while (included.size !== previousSize);
-    if (deferActivities) {
-      for (const [path, session] of this.#sessions) {
-        if (
-          path.endsWith(".zst") ||
-          session.threadId === null ||
-          !included.has(session.threadId) ||
-          unreadable.has(session)
-        )
-          continue;
-        try {
-          await readSessionUsage(
-            path,
-            session,
-            session.threadId === this.#threadId ? undefined : repository,
-            progressThread,
-          );
-        } catch (error) {
-          unreadable.set(session, error);
-        }
-      }
-    }
     for (const [session, error] of unreadable) {
       if (session.threadId !== null && included.has(session.threadId)) {
         if (isBlockedLogRead(error)) blockingReadError ??= error;
@@ -2657,12 +2638,19 @@ export class ScanCostTracker {
       const observe =
         !unreadable.has(tracked) &&
         (blockingReadError === undefined || observeHealthySessions);
+      const needWorkerActivities =
+        deferActivities &&
+        threadId !== this.#threadId &&
+        !tracked.observeActivityPaths;
+      const needSessionEvents =
+        this.#options.onSessionEvent !== undefined &&
+        session.events === undefined;
       if (observe && path.endsWith(".zst") && !tracked.compressedRead) {
         // The metadata pass associates this archive with the scan. A full read
         // starts at the beginning, including when retrying a partial decode.
         const archive: SessionUsage = createSessionUsage(
           observeUsage,
-          deferActivities,
+          needWorkerActivities,
         );
         if (this.#options.onSessionEvent !== undefined) archive.events = [];
         try {
@@ -2682,26 +2670,36 @@ export class ScanCostTracker {
           session = archive;
           this.#sessions.set(path, archive);
         }
-      } else if (
-        observe &&
-        this.#options.onSessionEvent !== undefined &&
-        session.events === undefined
-      ) {
-        const replay: SessionUsage = createSessionUsage(false);
-        replay.events = [];
+      } else if (observe && (needSessionEvents || needWorkerActivities)) {
+        const replay: SessionUsage = createSessionUsage(
+          false,
+          needWorkerActivities,
+        );
+        if (needSessionEvents) replay.events = [];
         try {
-          // Replay raw events only through the tracked snapshot. Keep its progress,
-          // usage and decoder so a failed read cannot replace authoritative state.
+          // Read newly admitted observations at the exact original snapshot. Progress,
+          // usage and their source order always come from the first pass.
           await readSessionUsage(
             path,
             replay,
-            undefined,
+            needWorkerActivities ? repository : undefined,
             undefined,
             session.offset,
           );
-          if (replay.offset === session.offset) {
-            session.events = replay.events;
-            if (this.#timer === null)
+          if (
+            replay.offset === session.offset &&
+            replay.threadId === threadId
+          ) {
+            if (needWorkerActivities) {
+              session.activities = replay.activities;
+              session.calls = replay.calls;
+              session.prose = replay.prose;
+              session.reasoning = replay.reasoning;
+              session.reasoningCount = replay.reasoningCount;
+              session.observeActivityPaths = true;
+            }
+            if (needSessionEvents) session.events = replay.events;
+            if (needSessionEvents && this.#timer === null)
               await readSessionUsage(
                 path,
                 session,
@@ -2711,7 +2709,8 @@ export class ScanCostTracker {
               );
           }
         } catch (error) {
-          collectionErrors.push(error);
+          if (needSessionEvents) collectionErrors.push(error);
+          else this.#options.onObservationError?.(error);
         }
       }
       const receipt = usages.get(threadId);
@@ -2768,7 +2767,10 @@ export class ScanCostTracker {
       // A failed replay can leave activity/progress available without raw events.
       if (session.events !== undefined)
         reported.events = Math.max(reported.events, session.eventPosition);
-      if (worker !== undefined) {
+      if (
+        worker !== undefined &&
+        (!deferActivities || session.observeActivityPaths)
+      ) {
         for (const {
           position,
           value: activity,
@@ -3484,8 +3486,6 @@ async function readSessionUsage(
   metadataOnly = false,
 ): Promise<void> {
   if (session.unreadable) return;
-  const readHeaderOnly = metadataOnly && session.observeActivityPaths;
-  if (readHeaderOnly && session.threadId !== null) return;
   if (path.endsWith(".zst")) {
     if (session.compressedRead) return;
     if (metadataOnly && session.threadId !== null) return;
@@ -3523,15 +3523,11 @@ async function readSessionUsage(
         session.offset,
       );
       if (bytesRead === 0) return;
-      let chunk = buffer.subarray(0, bytesRead);
-      if (readHeaderOnly) {
-        // Leave every byte after the header for the owned session's first full read.
-        const newline = chunk.indexOf(0x0a);
-        if (newline >= 0) chunk = chunk.subarray(0, newline + 1);
-      }
-      session.offset += chunk.length;
+      session.offset += bytesRead;
       try {
-        const lines = session.decoder.write(chunk).split("\n");
+        const lines = session.decoder
+          .write(buffer.subarray(0, bytesRead))
+          .split("\n");
         session.pendingLine.push(lines[0]!);
         for (const line of lines.slice(1)) {
           readSessionEvent(
@@ -3541,7 +3537,6 @@ async function readSessionUsage(
             progressThread,
           );
           session.pendingLine = [line];
-          if (readHeaderOnly && session.threadId !== null) return;
         }
       } catch (error) {
         session.unreadable = true;
