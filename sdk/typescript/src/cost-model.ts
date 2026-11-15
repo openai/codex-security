@@ -168,6 +168,26 @@ export function tokenUsage(value: unknown): ScanTokenUsage | null {
   };
 }
 
+export function subtractTokenUsage(
+  usage: ScanTokenUsage,
+  inherited: ScanTokenUsage,
+): ScanTokenUsage | null {
+  return tokenUsage({
+    input_tokens: usage.input_tokens - inherited.input_tokens,
+    cached_input_tokens:
+      usage.cached_input_tokens - inherited.cached_input_tokens,
+    cache_write_input_tokens:
+      usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
+    ...(usage.cache_write_input_tokens_reported === false ||
+    inherited.cache_write_input_tokens_reported === false
+      ? { cache_write_input_tokens_reported: false }
+      : {}),
+    output_tokens: usage.output_tokens - inherited.output_tokens,
+    reasoning_output_tokens:
+      usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
+  });
+}
+
 export function estimateScanCost(
   model: string | undefined,
   usage: unknown,

@@ -19,6 +19,7 @@ import { errorMessage } from "./errors.js";
 import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
+  subtractTokenUsage,
   tokenUsage,
   type ScanCost,
   type ScanTokenUsage,
@@ -4146,26 +4147,6 @@ export function addTokenUsage(
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
     total_tokens: previous.total_tokens + next.total_tokens,
   };
-}
-
-function subtractTokenUsage(
-  usage: ScanTokenUsage,
-  inherited: ScanTokenUsage,
-): ScanTokenUsage | null {
-  return tokenUsage({
-    input_tokens: usage.input_tokens - inherited.input_tokens,
-    cached_input_tokens:
-      usage.cached_input_tokens - inherited.cached_input_tokens,
-    cache_write_input_tokens:
-      usage.cache_write_input_tokens - inherited.cache_write_input_tokens,
-    ...(usage.cache_write_input_tokens_reported === false ||
-    inherited.cache_write_input_tokens_reported === false
-      ? { cache_write_input_tokens_reported: false }
-      : {}),
-    output_tokens: usage.output_tokens - inherited.output_tokens,
-    reasoning_output_tokens:
-      usage.reasoning_output_tokens - inherited.reasoning_output_tokens,
-  });
 }
 
 function isBlockedLogRead(error: unknown): boolean {

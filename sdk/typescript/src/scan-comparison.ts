@@ -51,6 +51,11 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
+import {
+  subtractTokenUsage,
+  tokenUsage,
+  type ScanTokenUsage,
+} from "./cost-model.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
@@ -158,6 +163,7 @@ export function unionFindingGroups(
 /** @internal */
 interface ReadOnlyCodex {
   startThread(options: ThreadOptions): {
+    readonly id?: string | null;
     run(
       input: string,
       options: TurnOptions,
@@ -823,6 +829,7 @@ export async function createReadOnlyCodexSession(
     runtimeOptions,
   );
   let closed = false;
+  let previousUsage: { threadId: string; usage: ScanTokenUsage } | undefined;
   return {
     async run(prompt, outputSchema) {
       if (closed)
@@ -833,7 +840,23 @@ export async function createReadOnlyCodexSession(
         signal: options.signal,
       });
       if (turn.usage && options.onUsage) {
-        const usage = turn.usage;
+        let usage = turn.usage;
+        // Native exec emits the thread's cumulative counters. The injected
+        // client contract still supplies ordinary per-turn usage.
+        const threadId = options.codex === undefined ? thread.id : undefined;
+        const snapshot = threadId ? tokenUsage(usage) : null;
+        if (threadId && snapshot?.total_tokens) {
+          // Native exec emits zero when it has no usage notification. Keep the
+          // previous baseline through that case and through missing usage.
+          if (previousUsage?.threadId === threadId) {
+            const delta = subtractTokenUsage(snapshot, previousUsage.usage);
+            if (delta) {
+              const { total_tokens: _, ...turnUsage } = delta;
+              usage = turnUsage;
+            }
+          }
+          previousUsage = { threadId, usage: snapshot };
+        }
         notify(() => options.onUsage?.(usage));
       }
       const lookup = options.catalogLookup;
