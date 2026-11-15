@@ -73,6 +73,87 @@ test("three actual cumulative worker attempts retain original coverage ownership
   }
 });
 
+test("an accepted retry reconciles each occurrence of a legacy ID-less surface", async (t) => {
+  const f = await workerHistoryFixture(t, 2);
+  const single = { label: "Single review", disposition: "no_issue_found" };
+  const repeated = { ...single, label: "Repeated review" };
+  const named = { ...single, label: "Named review" };
+  const mixed = { ...single, label: "Mixed IDs" };
+  const archive = path.join(f.workerRoot, "attempts/attempt-01");
+  await mkdir(archive, { recursive: true });
+  await writeFile(
+    path.join(archive, "result.json"),
+    JSON.stringify({
+      scanId,
+      findings: [],
+      complete: false,
+      coverage: {
+        completeness: "partial",
+        surfaces: [
+          single,
+          repeated,
+          repeated,
+          { ...named, id: "prior" },
+          mixed,
+          { ...mixed, id: "known" },
+        ],
+        explicitExclusions: [],
+        deferred: [],
+      },
+    }),
+  );
+  await writeFile(
+    f.resultPath,
+    JSON.stringify(
+      workerDraft([], {
+        complete: true,
+        reviewState: {
+          surfaces: [
+            { ...single, receiptRefs: [] },
+            ...["first", "second", "third"].map((id) => ({ ...repeated, id })),
+            { ...named, id: "current" },
+            { ...mixed, id: "known" },
+            { ...mixed, id: "assigned" },
+          ],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      }),
+    ),
+  );
+  const { coverage } = await readAcceptedDiscovery(
+    createDeepScanArtifacts(f.scanRoot),
+    f.worker,
+    scanId,
+  );
+  assert.deepEqual(
+    coverage.surfaces.map(
+      (row: { label: string; provenance: { attempt: number } }) => [
+        row.label,
+        row.provenance.attempt,
+      ],
+    ),
+    [
+      [single.label, 1],
+      [repeated.label, 1],
+      [repeated.label, 1],
+      [repeated.label, 2],
+      [named.label, 2],
+      [mixed.label, 1],
+      [mixed.label, 1],
+      [named.label, 1],
+    ],
+  );
+  assert.deepEqual(
+    coverage.surfaces
+      .slice(1)
+      .map(
+        (row: { provenance: { sourceId: string } }) => row.provenance.sourceId,
+      ),
+    ["first", "second", "third", "current", "known", "assigned", "prior"],
+  );
+});
+
 for (const field of [
   "deferred",
   "explicitExclusions",

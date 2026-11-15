@@ -687,11 +687,28 @@ function sameAuthoredSurface(left: JsonObject, right: JsonObject): boolean {
   return isDeepStrictEqual(content(left), content(right));
 }
 
+// Only an accepted checkpoint or a newly submitted typed draft can bind a bare
+// receipt to scan-owned evidence when the worker has no local file.
+async function sharedReceiptFallback(
+  scanRoot: string,
+  ref: string,
+  canBind: boolean,
+): Promise<"shared" | "unbound" | undefined> {
+  try {
+    await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+    return canBind ? "shared" : "unbound";
+  } catch {
+    return undefined;
+  }
+}
+
 async function qualifyWorkerReceipts(
   context: ArtifactContext,
   input: ScanDraftInput,
   retainedSurface?: (surface: JsonObject) => JsonObject | undefined,
-): Promise<void> {
+  canBindShared = true,
+): Promise<boolean> {
+  let qualified = true;
   const workerPrefix = `artifacts/deep_discovery/workers/${basename(dirname(context.root))}/`;
   const activePrefix = `${workerPrefix}output/`;
   const archivePrefix = `${workerPrefix}attempts/`;
@@ -747,12 +764,13 @@ async function qualifyWorkerReceipts(
         });
         if (retained !== undefined) return retained;
         if (ref.startsWith(activePrefix)) return ref;
-        try {
-          await requireRegularFile(join(scanRoot, ref), scanRoot, true);
-          shared.add(ref);
-        } catch {
-          // Unrecorded references retain the existing local-first fallback.
-        }
+        const fallback = await sharedReceiptFallback(
+          scanRoot,
+          ref,
+          canBindShared,
+        );
+        if (fallback === "shared") shared.add(ref);
+        if (fallback === "unbound") qualified = false;
         return ref;
       }),
     );
@@ -766,6 +784,7 @@ async function qualifyWorkerReceipts(
       };
     }
   }
+  return qualified;
 }
 
 async function selectedReceiptPaths(
@@ -964,8 +983,19 @@ async function preserveScanDraft(
     }
   }
   if (context.layout === "worker") {
-    for (const source of current)
-      await qualifyWorkerReceipts(context, source.input, (surface) => surface);
+    const eligible: SavedScanDraft[] = [];
+    for (const source of current) {
+      if (
+        await qualifyWorkerReceipts(
+          context,
+          source.input,
+          (surface) => surface,
+          source.input !== previous,
+        )
+      )
+        eligible.push(source);
+    }
+    current = eligible;
   }
   const currentReceipts = new Set(
     current.flatMap(({ input }) =>
@@ -1427,13 +1457,9 @@ function prepareScanDraftReconciliation(
   ) => void,
 ) {
   // Older checkpoints can omit IDs already assigned in their published output.
-  const savedDeferred = sources.flatMap(
-    (source) => source.reviewState.deferred,
-  );
-  const savedSurfaces = sources.flatMap(
-    (source) => source.reviewState.surfaces,
-  );
-  for (const source of sources) {
+  const drafts = [result, ...sources];
+  const savedSurfaces = drafts.flatMap((draft) => draft.reviewState.surfaces);
+  for (const source of drafts) {
     const reservedSurfaceIds = new Set(
       source.reviewState.surfaces.flatMap((row) =>
         typeof row.id === "string" ? [row.id] : [],
@@ -1457,9 +1483,17 @@ function prepareScanDraftReconciliation(
     });
     const normalizedSurfaces = normalizeSurfaces(surfaces);
     // Retain explicit duplicate IDs so closure checks can still detect ambiguity.
-    source.reviewState.surfaces = surfaces.map((row, index) =>
-      typeof row.id === "string" ? row : normalizedSurfaces[index]!,
-    );
+    source.reviewState.surfaces = surfaces.map((row, index) => {
+      if (typeof row.id === "string") return row;
+      const normalized = normalizedSurfaces[index]!;
+      savedSurfaces.push(normalized);
+      return normalized;
+    });
+  }
+  const savedDeferred = sources.flatMap(
+    (source) => source.reviewState.deferred,
+  );
+  for (const source of sources) {
     const reservedIds = new Set(
       source.reviewState.deferred.flatMap((row) =>
         typeof row.id === "string" ? [row.id] : [],
@@ -2688,6 +2722,7 @@ export async function readArchivedWorkerCheckpoints(
         right.name.localeCompare(left.name),
     );
     for (const draft of drafts) {
+      let unboundSharedReceipt = false;
       // Archive moves receipts with their attempt; preserve the checkpoint bytes.
       for (const surface of draft.input.reviewState.surfaces as JsonObject[]) {
         if (!Array.isArray(surface.receiptRefs)) continue;
@@ -2712,8 +2747,16 @@ export async function readArchivedWorkerCheckpoints(
               } catch {
                 // An explicit shared receipt remains at the scan root.
               }
-              try {
-                await requireRegularFile(join(scanRoot, ref), scanRoot, true);
+              const fallback = await sharedReceiptFallback(
+                scanRoot,
+                ref,
+                !draft.result,
+              );
+              if (fallback === "unbound") {
+                unboundSharedReceipt = true;
+                return ref;
+              }
+              if (fallback === "shared") {
                 const provenance = isObject(surface.provenance)
                   ? surface.provenance
                   : {};
@@ -2728,15 +2771,14 @@ export async function readArchivedWorkerCheckpoints(
                   ],
                 };
                 return ref;
-              } catch {
-                // Worker-output receipts moved with this archived attempt.
               }
             }
             return `${archivePrefix}${attempt.name}/${ref.startsWith(activePrefix) ? ref.slice(activePrefix.length) : ref}`;
           }),
         );
       }
-      archived.push({ ...draft, attempt: attempt.name });
+      if (!unboundSharedReceipt)
+        archived.push({ ...draft, attempt: attempt.name });
     }
     return archived;
   }

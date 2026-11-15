@@ -181,6 +181,37 @@ def test_retry_recovery_restores_original_attempt_and_retained_deferral(
     assert all(path.read_bytes() == contents for path, contents in originals.items())
 
 
+@pytest.mark.parametrize("archived_id", [None, "separate-review"])
+def test_recovered_surface_with_assigned_id_keeps_legacy_attempt(
+    workbench_api, workbench_db, publication_scan, monkeypatch, archived_id
+):
+    scan = publication_scan()
+    worker_id, result = add_discovery_attempt(workbench_db, scan, 2)
+    surface = {"label": "Synthetic surface", "disposition": "no_issue_found", "receiptRefs": []}
+    old_surface = surface if archived_id is None else {**surface, "id": archived_id}
+    coverage = {"completeness": "complete", "explicitExclusions": [], "deferred": []}
+    archived = result.parent.parent / "attempts/attempt-01"
+    archived.mkdir(parents=True)
+    draft = {"scanId": scan.scan_id, "findings": []}
+    old = {**draft, "complete": False, "coverage": {**coverage, "surfaces": [old_surface]}}
+    (archived / "result.json").write_text(json.dumps(old))
+    checkpoint = write_checkpoint(archived / "checkpoints", old)
+    (archived / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
+    current = {**surface, "id": "surface-d148c73d937026e2"}
+    accepted = {**draft, "complete": True, "reviewState": {**coverage, "surfaces": [current]}}
+    result.write_text(json.dumps(accepted))
+    recovered = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, False)
+    (retained,) = recovered["surfaces"]
+    assert retained["provenance"] == {
+        "workerId": worker_id,
+        "attempt": 1 if archived_id is None else 2,
+        "sourceId": current["id"],
+    }
+    assert {review["attempt"] for review in recovered["reviews"]} == (
+        {1, 2} if archived_id is None else {2}
+    )
+
+
 @pytest.mark.parametrize("retry", [False, True])
 @pytest.mark.parametrize(
     "receipt_state",

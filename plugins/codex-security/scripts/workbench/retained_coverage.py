@@ -614,7 +614,7 @@ def merge_saved_results(
             and id(source_rows[index - 1]) in inferred_coverage_ids
         )
         retained = coverage_origins.retained_record(
-            field, item, index, worker, source, coverage, reviewed_attempts, inferred_id
+            field, item, index, worker, source, coverage, reviewed_attempts
         )
         if retained is not None and (field != "deferred" or "surfaceIds" not in item):
             return copy.deepcopy(retained)
@@ -803,12 +803,6 @@ def merge_saved_results(
             draft["reviewState"]["openQuestions"] = [
                 {"question": item.strip()} if isinstance(item, str) else item for item in questions
             ]
-    coverage_origins = SavedCoverageOrigins(
-        sources,
-        worker_attempts,
-        lambda relative, row, owner: coverage_receipts(row, workers_by_id[owner], relative),
-        scan_dir,
-    )
     projection_origins = {
         id(item): (worker_id, relative, field, index, draft["reviewState"])
         for relative, draft, worker_id in sources
@@ -864,6 +858,13 @@ def merge_saved_results(
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     inferred_coverage_ids = _infer_saved_coverage_ids(all_sources)
+    coverage_origins = SavedCoverageOrigins(
+        sources,
+        inferred_coverage_ids,
+        worker_attempts,
+        lambda relative, row, owner: coverage_receipts(row, workers_by_id[owner], relative),
+        scan_dir,
+    )
 
     # A discarded local surface must not fall back to another source's reused ID.
     surface_ids_by_source: dict[tuple[str, str], list[str]] = {
@@ -2778,7 +2779,6 @@ def merge_saved_results(
                         origin[4],
                         canonical,
                         reviewed_attempts,
-                        id(original_source) in inferred_coverage_ids,
                     )
                 # Bind the unmodified occurrence before applying its repaired receipt union.
                 surface = projection.repair_reviewed_surface(

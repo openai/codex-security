@@ -1,7 +1,7 @@
 import type { ScanUnion } from "../src/deep-scan/artifact-validation.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -567,6 +567,82 @@ for (const copy of [
       originalBytes,
     );
     assert.deepEqual(source.coverage.deferred, []);
+  });
+}
+
+for (const local of [false, true]) {
+  test(`archiving a direct result preserves its receipt owner, local=${local}`, async (t) => {
+    const f = await workerHistoryFixture(t, 2);
+    const ref = "artifacts/proof.txt";
+    await writeFile(path.join(f.scanRoot, ref), "scan-owned evidence");
+    const checkpoint = {
+      id: "checkpointed",
+      label: "Checkpointed review",
+      disposition: "no_issue_found",
+      receiptRefs: [ref],
+    };
+    const direct = {
+      ...checkpoint,
+      id: "direct",
+      label: "Direct review",
+      provenance: { scanReceiptRefs: [ref] },
+    };
+    const draft = (surface: typeof checkpoint, complete: boolean) =>
+      workerDraft([], {
+        complete,
+        reviewState: {
+          surfaces: [surface],
+          explicitExclusions: [],
+          deferred: [],
+        },
+      });
+    await recordCodexSecurityWorkerScanDraft(
+      f.workerContext,
+      draft(checkpoint, false),
+    );
+    if (local) {
+      await mkdir(path.dirname(path.join(f.output, ref)), { recursive: true });
+      await writeFile(path.join(f.output, ref), "worker-owned evidence");
+    }
+    await writeFile(f.resultPath, JSON.stringify(draft(direct, true)));
+    const artifacts = createDeepScanArtifacts(f.scanRoot);
+    const first = validateDiscoveryArtifacts(artifacts, f.resultPath, scanId);
+    if (local) await first;
+    else await assert.rejects(first, /artifact is unavailable/);
+    await archiveDirectory(
+      f.output,
+      path.join(f.workerRoot, "attempts/attempt-01"),
+    );
+    const terminal = workerDraft([], { complete: true });
+    await writeFile(f.resultPath, JSON.stringify(terminal));
+    for (const viaWriter of [false, true]) {
+      if (viaWriter) {
+        // A same-thread retry retains the previous output alongside its archive.
+        await cp(path.join(f.workerRoot, "attempts/attempt-01"), f.output, {
+          recursive: true,
+        });
+        await recordCodexSecurityWorkerScanDraft(f.workerContext, terminal);
+      }
+      const before = await artifactTree(f.scanRoot);
+      const { coverage } = await readAcceptedDiscovery(
+        artifacts,
+        f.worker,
+        scanId,
+      );
+      assert.deepEqual(await artifactTree(f.scanRoot), before);
+      assert.equal(coverage.surfaces.length, local ? 2 : 1);
+      for (const row of coverage.surfaces) {
+        assert.equal(row.provenance.attempt, 1);
+        const ownedByScan = row.label === checkpoint.label;
+        assert.equal(row.label, ownedByScan ? checkpoint.label : direct.label);
+        assert.equal(row.receiptRefs.length, 1);
+        assert.equal(row.receiptRefs[0] === ref, ownedByScan);
+        assert.equal(
+          await readFile(path.join(f.scanRoot, row.receiptRefs[0]), "utf8"),
+          ownedByScan ? "scan-owned evidence" : "worker-owned evidence",
+        );
+      }
+    }
   });
 }
 

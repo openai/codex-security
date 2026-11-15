@@ -315,10 +315,18 @@ def prepare_saved_coverage_projection(
 class SavedCoverageOrigins:
     """Match saved occurrences before publication assigns attempt-specific IDs."""
 
-    def __init__(self, sources, worker_attempts, receipt_resolver, scan_dir):
+    def __init__(self, sources, inferred_ids, worker_attempts, receipt_resolver, scan_dir):
         self.sources = {
             relative: (copy.deepcopy(draft["reviewState"]), owner)
             for relative, draft, owner in sources
+        }
+        # Use inferred IDs to match attempts, but preserve ID-less rows in published projections.
+        self.inferred_rows = {
+            (relative, field, index)
+            for relative, draft, _ in sources
+            for field in ("surfaces", "deferred")
+            for index, row in enumerate(_coverage_rows(draft["reviewState"], field), 1)
+            if id(row) in inferred_ids
         }
         self.paths = {id(draft["reviewState"]): relative for relative, draft, _ in sources}
         self.worker_attempts = worker_attempts
@@ -508,7 +516,7 @@ class SavedCoverageOrigins:
         if add_review(coverage, worker["id"], attempt, self.sources[origin][0]):
             reviewed.add((worker["id"], attempt))
 
-    def retained_record(self, field, item, index, worker, source, published, reviewed, inferred):
+    def retained_record(self, field, item, index, worker, source, published, reviewed):
         relative = self.paths.get(id(source))
         if relative is None or field not in {"surfaces", "deferred", "openQuestions"}:
             return None
@@ -570,9 +578,15 @@ class SavedCoverageOrigins:
                 value["receiptRefs"] = refs
             return value
 
-        expected = comparable(item, inferred_identity=inferred)
+        expected = comparable(
+            item, inferred_identity=(relative, field, index) in self.inferred_rows
+        )
         original_rows = _coverage_rows(self.sources[relative][0], field)
-        occurrence = sum(comparable(row) == expected for row in original_rows[:index])
+        occurrence = sum(
+            comparable(row, inferred_identity=(relative, field, offset) in self.inferred_rows)
+            == expected
+            for offset, row in enumerate(original_rows[:index], 1)
+        )
         matches = []
         for row in _coverage_rows(published, field):
             if not isinstance(row, dict):

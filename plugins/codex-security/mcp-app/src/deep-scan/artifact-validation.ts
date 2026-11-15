@@ -302,9 +302,19 @@ export function scanCoverage(
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
   const reviews = [provenance];
-  const history = [...archived].sort(
-    (left, right) => left.attempt - right.attempt,
-  );
+  const history: typeof archived = [...archived]
+    .sort((left, right) => left.attempt - right.attempt)
+    .map(({ attempt, coverage }) => ({
+      attempt,
+      coverage: {
+        ...coverage,
+        // Match explicit IDs before an otherwise identical unnamed occurrence.
+        surfaces: [...coverage.surfaces].sort(
+          (left, right) =>
+            Number(right.id !== undefined) - Number(left.id !== undefined),
+        ),
+      },
+    }));
   // Each occurrence in one snapshot can account for only one current record.
   const matchedRows = new Map<
     string,
