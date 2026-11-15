@@ -540,7 +540,8 @@ async function runCampaign(
         options.signal?.throwIfAborted();
         let attempt = maxAttempt;
         if (options.recoverScan === undefined) attempt = nextAttempt();
-        else if (retry === 0) attempt = recoveryAttempt;
+        else if (retry === 0)
+          attempt = recoveryAttempt || Math.max(1, maxAttempt);
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
         let checkout: string | undefined;
         let protectedRoot = join(output, "checkouts", task.id);
@@ -632,9 +633,10 @@ async function runCampaign(
             }
           }
           if (result === undefined) {
+            // A denied reservation must leave the saved attempt available for recovery.
+            const maxCostUsd = reserveBudget() ?? budget.maxCostUsd;
             if (options.recoverScan !== undefined) attempt = nextAttempt();
             scanDir = join(artifactRoot, `attempt-${attempt}`);
-            const maxCostUsd = reserveBudget() ?? budget.maxCostUsd;
             notifyProgress(options, {
               repository: task.id,
               attempt,

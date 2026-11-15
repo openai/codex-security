@@ -196,11 +196,28 @@ second,${source.path},${source.revision}
       },
       {
         id: "pending",
-        attempt: 2,
+        attempt: 1,
         status: "failed",
         error: expect.stringContaining("invocation cost limit is exhausted"),
       },
     ]);
+
+    const pendingDir = join(paths.output, "artifacts", "pending", "attempt-1");
+    const nowSealed = await completedScan(pendingDir);
+    const retried = await runMultiscan({
+      ...campaign,
+      createSecurity: () => client(completeRun),
+      recoverScan: async (scanDir) =>
+        scanDir === pendingDir
+          ? { ...nowSealed, alreadyCompleted: true }
+          : undefined,
+    });
+    expect((await results(retried.resultsPath)).at(-1)).toMatchObject({
+      id: "pending",
+      status: "completed",
+      attempt: 1,
+      outputDir: pendingDir,
+    });
   });
 
   test("prepares shared prompt files once while missing sources remain row failures", async () => {
