@@ -121,6 +121,7 @@ export async function findScanSession(codexHome: string, threadId: string) {
 }
 
 interface RolloutWindow {
+  cutoffUnfinishedTurns?: boolean;
   startedAt: string;
   completedAt: string;
 }
@@ -451,9 +452,11 @@ async function* retainedTurnEvents(
     )
       finish(timestamp);
     if (
-      inputReceipt &&
-      (!inRolloutWindow(timestamp, window) ||
-        !inRolloutWindow(timestamp, inputReceipt))
+      (inputReceipt &&
+        (!inRolloutWindow(timestamp, window) ||
+          !inRolloutWindow(timestamp, inputReceipt))) ||
+      (window.cutoffUnfinishedTurns &&
+        startsAfterCompletion(timestamp, window.completedAt))
     )
       finish(timestamp);
     const input = rolloutInput(type, payload);

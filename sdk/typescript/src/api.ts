@@ -3721,6 +3721,11 @@ export class CodexSecurity {
                 : {}),
               startedAt,
               completedAt,
+              // A disconnected attachment can keep writing the same turn after we stop observing it.
+              cutoffUnfinishedTurns:
+                scanTurnStatus !== "completed" &&
+                (typeof recordedEnd !== "string" ||
+                  compareTimestamps(recordedEnd, startedAt) < 0),
             });
             if (sessions.length > 0) {
               rolloutSessionIndexPath = await writeRolloutSessionIndex({

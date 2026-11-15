@@ -342,6 +342,8 @@ test.each([
     const startedAt = new Date().toISOString();
     const diagnostic = "diagnostic from this attempt";
     const laterTurn = "private later turn";
+    const afterCutoff =
+      "private activity from the original turn after the cutoff";
     const networkFailure = "Connection failed: error sending request";
     const commands: string[] = [];
     async function* events(): AsyncGenerator<ThreadEvent> {
@@ -358,6 +360,7 @@ test.each([
         [now, "task_started"],
         [now, "user_message", prompt],
         [now, "agent_message", diagnostic],
+        [later, "agent_message", afterCutoff],
         [later, "task_started"],
         [later, "user_message", prompt],
         [later, "agent_message", laterTurn],
@@ -429,6 +432,7 @@ test.each([
       );
       expect(retained).toContain(diagnostic);
       expect(retained).not.toContain(laterTurn);
+      expect(retained).not.toContain(afterCutoff);
     } finally {
       setSystemTime();
     }

@@ -95,6 +95,27 @@ function taskStarted(turnId: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test("withholds a coordinator prompt first observed at the interruption cutoff", async () => {
+    const home = await temporaryHome();
+    await writeSession(home, "root", [
+      task("001", "task_started"),
+      user("scan prompt", "004"),
+      commandEvent("later activity", "tail", at("005")),
+    ]);
+    const [root] = await scanRolloutSessions({
+      codexHome: home,
+      rootThreadId: "root",
+      rootPrompt: "scan prompt",
+      startedAt: at("000"),
+      completedAt: at("004"),
+      cutoffUnfinishedTurns: true,
+    });
+    expect(root?.threadId).toBe("root");
+    const events = [];
+    for await (const event of root!.events()) events.push(event);
+    expect(events).toEqual([]);
+  });
+
   test("marks a worker from a later root turn as inferred without capturing its events", async () => {
     const home = await temporaryHome();
     await writeSession(
