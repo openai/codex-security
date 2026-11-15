@@ -3,7 +3,11 @@ import { join } from "node:path";
 import type { CodexOptions, ThreadEvent, TurnOptions } from "@openai/codex-sdk";
 import { afterEach, expect, test, mock } from "bun:test";
 import { parse as parseToml } from "smol-toml";
-import { resolveCodexProfile, type JsonObject } from "../src/config.js";
+import {
+  resolveCodexProfile,
+  scanCyberAccessConfig,
+  type JsonObject,
+} from "../src/config.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
 import { codexFactory, preparedRuntime } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -15,6 +19,29 @@ const denied = "403: API key is not entitled to the requested Cyber program";
 async function* deniedEvents(): AsyncGenerator<ThreadEvent> {
   yield { type: "turn.failed", error: { message: denied } };
 }
+
+test.each([
+  [true, false, false],
+  [false, true, true],
+  [false, null, false],
+] as const)(
+  "preserves root gate %s with profile override %s",
+  (root, selected, expected) => {
+    const gate = "api_key_cyber_access_programs";
+    const config = scanCyberAccessConfig(
+      {
+        profile: "selected",
+        features: { [gate]: root },
+        profiles: { selected: { features: { [gate]: selected } } },
+      },
+      "daybreak_blue",
+    );
+    expect(config["features"]).toEqual({ [gate]: root });
+    expect(resolveCodexProfile(config)["features"]).toEqual({
+      [gate]: expected,
+    });
+  },
+);
 
 test.each([
   [undefined, {}],

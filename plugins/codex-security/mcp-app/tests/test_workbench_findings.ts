@@ -148,6 +148,11 @@ test("finding helper help exits without reading stdin", async () => {
   const commands = [
     "store-findings",
     "list-stored-findings",
+    "store-external-findings",
+    "read-external-findings",
+    "list-external-imports",
+    "record-external-finding-publications",
+    "list-external-finding-publications",
     "find-potential-duplicates",
     "store-dedupe-groups",
     "list-dedupe-groups",

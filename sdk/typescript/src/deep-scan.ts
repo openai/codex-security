@@ -1,11 +1,11 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import {
-  bundledCodexSdkEnvironment,
+  nativeCodexLaunch,
   resolveBundledCodexExecutable,
 } from "./codex-sdk-environment.js";
 import { CodexSecurityError } from "./errors.js";
@@ -18,6 +18,7 @@ import {
 import { isRecord } from "./record.js";
 import {
   executablePathForSpawn,
+  isDisconnectedChildStdin,
   PLUGIN_NAME,
   runCodexCommand,
   type CodexCommand,
@@ -29,7 +30,10 @@ import {
   withCodexPreflightLock,
 } from "./provider-profile.js";
 
+export type DeepScanDiagnostic = Readonly<Record<string, string | number>>;
+
 export interface DirectDeepScanOptions {
+  onDiagnostic?: (event: DeepScanDiagnostic) => void;
   codexOptions: CodexOptions & { nativeProfile?: string };
   preflightCommand: CodexCommand;
   pluginRoot: string;
@@ -101,6 +105,22 @@ function codeModeTable(value: JsonValue | undefined): JsonObject | undefined {
   return isRecord(value) ? value : undefined;
 }
 
+async function deepScanLaunch({
+  codexOptions,
+  preflightCommand: command,
+}: Pick<DirectDeepScanOptions, "codexOptions" | "preflightCommand">) {
+  const launch = await nativeCodexLaunch(command.command, {
+    ...codexOptions.env,
+    ...(codexOptions.apiKey === undefined
+      ? {}
+      : { CODEX_API_KEY: codexOptions.apiKey }),
+  });
+  return {
+    command: { ...command, command: launch.command },
+    environment: launch.environment!,
+  };
+}
+
 /** Read the same native layers and CLI overrides as the parent before adding its tool. */
 export async function readDeepScanParentConfig(
   options: Pick<
@@ -111,19 +131,14 @@ export async function readDeepScanParentConfig(
     pluginServers?: Record<string, unknown>;
   },
 ): Promise<JsonObject | undefined> {
-  const { codexOptions, preflightCommand: command } = options;
+  const { codexOptions } = options;
   const config = codexOptions.config ?? {};
   // The provider-profile launcher emits whole top-level tables instead.
   const overrides =
     codexOptions.nativeProfile === undefined
       ? sdkConfigFlags(config)
       : (await nativeProfileClient()).profileConfigOverrides(config);
-  const environment = bundledCodexSdkEnvironment(command.command, {
-    ...codexOptions.env,
-    ...(codexOptions.apiKey === undefined
-      ? {}
-      : { CODEX_API_KEY: codexOptions.apiKey }),
-  });
+  const { command, environment } = await deepScanLaunch(options);
   const configOverrides = [
     ...overrides,
     ...(codexOptions.configOverrides ?? []),
@@ -363,13 +378,7 @@ export async function* runDeepScan(
     pathToFileURL(join(options.pluginRoot, "scripts", "codex_profile.mjs")).href
   );
   const configured = options.codexOptions;
-  const command = options.preflightCommand;
-  const environment = bundledCodexSdkEnvironment(command.command, {
-    ...configured.env,
-    ...(configured.apiKey === undefined
-      ? {}
-      : { CODEX_API_KEY: configured.apiKey }),
-  });
+  const { command, environment } = await deepScanLaunch(options);
   const session = (await withCodexPreflightLock(
     environment,
     options.signal,
@@ -407,8 +416,13 @@ export async function* runDeepScan(
     node?.executable ?? process.execPath,
     [join(options.pluginRoot, "mcp", "server.mjs"), "--deep-scan-engine"],
     node?.environment ?? environment,
-    JSON.stringify({ scanId: options.scanId, ...session }),
+    JSON.stringify({
+      scanId: options.scanId,
+      ...session,
+      ...(options.onDiagnostic && { diagnosticsVersion: 1 }),
+    }),
     options.signal,
+    options.onDiagnostic,
   );
   const completed = JSON.parse(output);
   if (
@@ -433,12 +447,33 @@ function runEngine(
   env: NodeJS.ProcessEnv,
   request: string,
   signal: AbortSignal,
+  onDiagnostic: DirectDeepScanOptions["onDiagnostic"],
 ): Promise<string> {
   signal.throwIfAborted();
   const child = spawn(executablePathForSpawn(command), args, {
     env,
     windowsHide: true,
-  });
+    serialization: "json",
+    stdio: onDiagnostic ? ["pipe", "pipe", "pipe", "ipc"] : "pipe",
+  }) as ChildProcessWithoutNullStreams;
+  if (onDiagnostic) {
+    child.on("message", (message) => {
+      if (!isRecord(message) || typeof message["event"] !== "string") return;
+      const fields: Record<string, string | number> = {};
+      for (const [name, value] of Object.entries(message)) {
+        if (
+          /^[a-zA-Z][a-zA-Z0-9]*$/u.test(name) &&
+          (typeof value === "number" || typeof value === "string")
+        )
+          fields[name] = value;
+      }
+      try {
+        void Promise.resolve(onDiagnostic(fields)).catch(() => {});
+      } catch {
+        // The optional diagnostic sink cannot stop the scan.
+      }
+    });
+  }
   // EOF requests graceful coordinator/worker cleanup on Windows as well as Unix.
   // Keep the control pipe open until completion or explicit cancellation.
   const cancel = () => child.stdin.end();
@@ -455,12 +490,7 @@ function runEngine(
     processError = error;
   });
   child.stdin.on("error", (error: NodeJS.ErrnoException) => {
-    if (
-      !["EPIPE", "ECONNRESET", "EOF", "ERR_STREAM_DESTROYED"].includes(
-        error.code ?? "",
-      )
-    )
-      processError = error;
+    if (!isDisconnectedChildStdin(error)) processError = error;
   });
   const result = new Promise<string>((resolve, reject) => {
     child.once("close", (code) => {

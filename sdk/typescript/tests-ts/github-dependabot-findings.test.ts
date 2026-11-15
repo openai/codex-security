@@ -177,6 +177,43 @@ test("uses the matched vulnerability package when the dependency omits it", () =
   }
 });
 
+test("matches equivalent Python distribution names and retains the reported spellings", () => {
+  const alert = githubDependabotAlert();
+  alert.dependency.manifest_path = "requirements.txt";
+  alert.dependency.package = { ecosystem: "pip", name: "Example_Pkg" };
+  alert.security_vulnerability.package = {
+    ecosystem: "pip",
+    name: "example-pkg",
+  };
+  alert.security_advisory.vulnerabilities[0]!.package = {
+    ecosystem: "pip",
+    name: "EXAMPLE..pkg",
+  };
+  for (const target of ["local", "cloud"] as const) {
+    const result = normalizeGitHubDependabotAlerts(alert, target);
+    expect(result.excluded).toEqual([]);
+    expect(result.findings[0]!.evidence.packages![0]).toMatchObject(
+      alert.security_vulnerability.package,
+    );
+    expect(result.findings[0]!.evidence.source_data).toEqual(alert);
+  }
+
+  alert.dependency.package.name = "examplepkg";
+  expect(() => normalizeGitHubDependabotAlerts(alert)).toThrow(
+    /packages disagree/,
+  );
+  alert.dependency.package.name = "Example_Pkg";
+  for (const pkg of [
+    alert.dependency.package,
+    alert.security_vulnerability.package,
+    alert.security_advisory.vulnerabilities[0]!.package,
+  ])
+    pkg.ecosystem = "npm";
+  expect(() => normalizeGitHubDependabotAlerts(alert)).toThrow(
+    /packages disagree/,
+  );
+});
+
 test.each([
   "file:///etc/passwd",
   "https://example.test/lock",

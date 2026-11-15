@@ -1,3 +1,5 @@
+"""Check that scan context counts concurrent deep scans while excluding the current run."""
+
 from __future__ import annotations
 
 import uuid
@@ -21,10 +23,11 @@ def test_scan_context_reports_only_other_running_deep_scans(
         workspace_id = str(uuid.uuid4())
         now = workbench_api["now"]()
         with workbench_db:
+            target_id = workbench_api["ensure_security_target"](workbench_db, str(target))
             workbench_db.execute(
-                "INSERT INTO workspaces (id, target_path, default_mode, submitted, created_at, "
-                "updated_at) VALUES (?, ?, ?, 1, ?, ?)",
-                (workspace_id, str(target), mode, now, now),
+                "INSERT INTO workspaces (id, target_id, target_path, default_mode, submitted, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)",
+                (workspace_id, target_id, str(target), mode, now, now),
             )
         scans[name] = workbench_api["start_scan"](
             workbench_db,
@@ -47,9 +50,9 @@ def test_scan_context_reports_only_other_running_deep_scans(
             "UPDATE scans SET handoff_status = 'delivered' WHERE id IN (?, ?)",
             (scans["other"]["scanId"], scans["failed"]["scanId"]),
         )
-    current_id = scans["current"]["scanId"]
+    current = Namespace(scan_id=scans["current"]["scanId"], occurrence_id=None)
     other = scans["other"]
-    assert workbench_api["get_scan"](workbench_db, current_id)["otherRunningDeepScans"] == [
+    assert workbench_api["get_scan"](workbench_db, current)["otherRunningDeepScans"] == [
         {
             "phase": "preflight",
             "scanId": other["scanId"],
@@ -64,4 +67,4 @@ def test_scan_context_reports_only_other_running_deep_scans(
             "UPDATE scans SET status = 'failed', completed_at = updated_at WHERE id = ?",
             (other["scanId"],),
         )
-    assert workbench_api["get_scan"](workbench_db, current_id)["otherRunningDeepScans"] == []
+    assert workbench_api["get_scan"](workbench_db, current)["otherRunningDeepScans"] == []

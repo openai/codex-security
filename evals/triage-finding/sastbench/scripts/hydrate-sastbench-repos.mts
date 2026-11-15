@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMain } from "../../../../sdk/typescript/scripts/is-main.mjs";
 import { hash } from "node:crypto";
 import type { SastBenchRecord } from "../../types.ts";
 
@@ -164,7 +165,7 @@ function ensureTarget(job: ReturnType<typeof buildHydrationPlan>[number]) {
   return "hydrated";
 }
 
-if (import.meta.filename === fs.realpathSync(process.argv[1])) {
+if (isMain(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
   const records = loadDataset(args.dataset);
   const jobs = buildHydrationPlan(records, args);

@@ -10,7 +10,7 @@ inputs:
   architecture:
     description: Node.js architecture; empty selects the runner architecture.
   compile:
-    description: Compile TypeScript tools after setup.
+    description: Install the plugin dependencies and compile the native and CI tools.
 runs:
   using: composite
   steps:
@@ -31,6 +31,6 @@ runs:
       shell: ${{ runner.os == 'Windows' && 'pwsh' || 'bash' }}
       working-directory: .
       run: |
-        pnpm --dir sdk/typescript install --frozen-lockfile
+        pnpm --dir plugins/codex-security/mcp-app install --frozen-lockfile
         ${{ runner.os == 'Windows' && 'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }' || '' }}
-        pnpm --dir sdk/typescript run build:ci
+        pnpm --dir plugins/codex-security/mcp-app exec tsc -p ../../../sdk/typescript/tsconfig.ci.json --typeRoots ./node_modules/@types

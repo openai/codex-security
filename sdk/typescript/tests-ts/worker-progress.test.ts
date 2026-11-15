@@ -250,6 +250,27 @@ describe("worker progress events", () => {
         messageEvent(["Example:", "```text", dispatchMarker, "```"].join("\n")),
       ),
     ).toBeNull();
+
+    const liveDispatch = {
+      phase: "validation",
+      planned: 2,
+      started: 2,
+    } as const;
+    const message = messageEvent(
+      [
+        "~~~text",
+        progressMarker,
+        dispatchMarker,
+        "~~~",
+        liveMarker,
+        `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(liveDispatch)}`,
+      ].join("\n"),
+    );
+    expect(scanProgressUpdatesFromEvent(message)).toEqual([liveProgress]);
+    expect(workerStatusFromEvent(message)).toEqual({
+      kind: "dispatch",
+      ...liveDispatch,
+    });
   });
 
   test("rejects malformed or overstated file progress", () => {

@@ -1,9 +1,10 @@
 # GitHub Actions with Amazon Bedrock
 
-The [workflow](codex-security.yml) scans PR changes or, on manual and scheduled
-runs, the full repository. It uses short-lived AWS credentials and uploads
-completed findings to GitHub Code Scanning as SARIF. It does not install a GitHub
-App or post PR comments.
+The [workflow](codex-security.yml) runs the CLI directly with Amazon Bedrock.
+It assumes an AWS role through GitHub OIDC, scans PR changes or a full
+repository, and uploads completed findings to GitHub Code Scanning. Choose the
+[Codex Security GitHub Action](../../github-action/README.md#scan-with-amazon-bedrock)
+if you prefer a scan step with managed CLI installation and sandbox setup.
 
 ## Setup
 
@@ -32,10 +33,13 @@ App or post PR comments.
    are available. Private repositories need the appropriate GitHub Code Security
    entitlement. For downloadable reports only, remove the SARIF upload step and
    the `security-events: write` and `actions: read` permissions.
-4. Copy `codex-security.yml` into the target repository's `.github/workflows/`
+4. Check that the Ubuntu runner can start Bubblewrap. If its AppArmor policy
+   restricts user namespaces, follow the [sandbox setup](../../docs/bedrock.md#check-the-sandbox-on-an-ubuntu-ci-runner)
+   before checkout and AWS authentication.
+5. Copy `codex-security.yml` into the target repository's `.github/workflows/`
    directory, review it, and merge it into the default branch. This example does
    not enable scanning until copied.
-5. In **Actions → Codex Security (Amazon Bedrock) → Run workflow**, run a baseline
+6. In **Actions → Codex Security (Amazon Bedrock) → Run workflow**, run a baseline
    on the default branch, then open a same-repository test PR. Check coverage,
    alert locations, deduplication, and fixed-alert behavior in the destination
    repository before relying on the integration.
@@ -48,13 +52,15 @@ older ones. Uncomment the schedule for weekly full scans after setup works.
 Scans consume Bedrock inference usage.
 
 The workflow uses standard mode with high reasoning effort. See
-[scan options](../../sdk/typescript/README.md#scan-options-and-output) and
-[Bedrock configuration](../../sdk/typescript/README.md#authentication) for details.
+[scan options](../../sdk/typescript/docs/cli.md#scan-options-and-output) and
+[Bedrock configuration](../../docs/bedrock.md#select-aws-credentials-and-a-model) for details.
 
-Actions are pinned to commit SHAs, and CLI and runtime versions are pinned in the
-workflow. Node.js uses the active LTS line.
-Review and test updates before changing pins. The job and AWS session each last
-at most one hour; for longer scans, adjust both and the IAM role's session limit.
+To upgrade, change `CODEX_SECURITY_VERSION` to a reviewed CLI release and keep
+the action dependencies pinned to full commit SHAs. Repeat the sandbox check,
+manual baseline, and test PR on the workflow’s runner. Verify that the diff
+uses the PR base and that the resulting SARIF appears under the expected
+category. For scans longer than an hour, adjust the job timeout, requested AWS
+session duration, and IAM role session limit together.
 
 ## Results
 
@@ -75,7 +81,7 @@ does not replace the full-repository baseline.
 
 Reports are saved as seven-day artifacts even after a scan or SARIF upload fails
 (cancelled jobs may not save them). Only result JSON, report, coverage, findings,
-and SARIF files are uploaded—not authentication state or raw agent transcripts.
+and SARIF files are uploaded.
 Reports can contain sensitive source snippets and vulnerability details; review
 repository access and retention accordingly.
 
@@ -96,21 +102,5 @@ you are authorized to submit to the configured inference provider.
 
 ## OpenAI inference on a sample application
 
-The repository's [Invoice Desk workflow](../../.github/workflows/invoice-desk.yml)
-adapts this example to `--provider openai --auth api-key` using an
-`OPENAI_API_KEY` secret in the protected `codex-security-smoke-test` GitHub
-environment. Relevant pull requests to `main` run behavior tests without inference
-credentials. The separate
-[scan workflow](../../.github/workflows/invoice-desk-scan.yml) runs on protected
-`main`: maintainers can manually evaluate an open PR, including forks and drafts,
-by providing its number and exact current head SHA. Weekly scheduled runs evaluate
-the `main` baseline; manual baseline runs leave both inputs empty. Inference jobs
-retain the environment's approval policy.
-The Actions summary shows the PR number, source commit,
-finding counts, requested scope, elapsed time, and package-cache reuse. Reports, metrics
-JSON, and SARIF are saved as artifacts.
-Only public CLI package downloads are cached; analysis and authentication state
-are fresh for each scan. The scan does
-not create a PR status check, upload the sample's intentional vulnerabilities to
-Code Scanning, or post PR comments.
-See the [setup and reporting guide](../invoice-desk/README.md#ci-and-openai-scans).
+For an OpenAI API-key example with a protected environment, follow the
+[Invoice Desk CI guide](../invoice-desk/README.md#ci-and-openai-scans).

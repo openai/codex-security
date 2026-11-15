@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { assertNoError } from "./assertions.ts";
 import { startRpcServer } from "./support/rpc-server.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
@@ -42,7 +41,7 @@ test("installed worker MCP saves threat models without Python", async (t) => {
     },
   });
   try {
-    assertNoError(await server.initialize("threatmodel-installed"));
+    await server.initialize("threatmodel-installed");
     const content = "# Saved model\r\n\r\n    Preserve  spacing.\r\n";
     const threatModel = {
       summary: "Legacy structured model.",
@@ -57,24 +56,21 @@ test("installed worker MCP saves threat models without Python", async (t) => {
       findings: [],
       reviewState: { surfaces: [], explicitExclusions: [], deferred: [] },
     };
-    const result = await server.callTool(2, {
+    const result = await server.callSuccessfulTool(2, {
       name: "record_codex_security_scan_draft",
       arguments: { ...draft, threatModel },
     });
-    assertNoError(result);
-    assert.equal(result.result.structuredContent.warnings, undefined);
+    assert.equal(result.structuredContent.warnings, undefined);
     const documentPath = join(artifactRoot, "threatmodel.md");
     const document = await readFile(documentPath, "utf8");
     assert.ok(document.startsWith(content));
     assert.match(document, /Model origin: not recorded\n/);
     assert.match(document, /Model scope: src\/\\\[api\\\]\n/);
     assert.match(document, /provisional/);
-    assertNoError(
-      await server.callTool(3, {
-        name: "record_codex_security_scan_draft",
-        arguments: draft,
-      }),
-    );
+    await server.callSuccessfulTool(3, {
+      name: "record_codex_security_scan_draft",
+      arguments: draft,
+    });
     assert.equal(await readFile(documentPath, "utf8"), document);
     assert.deepEqual(
       JSON.parse(await readFile(join(artifactRoot, "result.json"), "utf8"))

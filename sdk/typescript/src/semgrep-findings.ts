@@ -1,7 +1,6 @@
 import {
   normalizeSemgrepPlatformFindings,
   isSemgrepPlatformFormat,
-  semgrepPlatformLegacyFormat,
   semgrepPlatformFormat,
 } from "./semgrep-platform-findings.js";
 import { isRecord } from "./record.js";
@@ -21,6 +20,7 @@ import type {
 } from "./external-findings.js";
 import {
   messageText,
+  nativeResultPath,
   parseNativeJsonResult,
   position,
   projectNativeJsonResult,
@@ -30,14 +30,15 @@ import {
 } from "./native-json-findings.js";
 import {
   array,
-  hasSarifExternalPropertyReferences,
   normalizeRecords,
+  optionalArray,
   readScannerJson,
   record,
-  relativePath,
   requiredText,
+  sarifRunRepositories,
   sarifRunResults,
   stableId,
+  readSarifRuns,
   text,
   validateSarifRuleReference,
 } from "./scanner-import.js";
@@ -53,17 +54,20 @@ function sourceRepository(options: Partial<SemgrepImportOptions>): string {
   return sourceRepositoryUrl(options?.sourceRepositoryUrl, "Semgrep");
 }
 
+const severityLevels = new Map([
+  ["CRITICAL", "critical"],
+  ["HIGH", "high"],
+  ["MEDIUM", "medium"],
+  ["LOW", "low"],
+  ["ERROR", "high"],
+  ["WARNING", "medium"],
+  ["INFO", "low"],
+]);
+
 function severity(value: unknown): string {
-  const levels: Record<string, string> = {
-    CRITICAL: "critical",
-    HIGH: "high",
-    MEDIUM: "medium",
-    LOW: "low",
-    ERROR: "high",
-    WARNING: "medium",
-    INFO: "low",
-  };
-  return typeof value === "string" ? (levels[value] ?? "unknown") : "unknown";
+  return typeof value === "string"
+    ? (severityLevels.get(value) ?? "unknown")
+    : "unknown";
 }
 
 function identity(
@@ -169,10 +173,17 @@ export function normalizeSemgrepFindings(
 ): ExternalFindings {
   const document = record(input, "Semgrep report");
   if (document["format"] === guardianSelectionFormat) {
-    if (target !== "local")
-      throw new Error("Import Guardian selections into the local workbench.");
-    return normalizeGuardianSelection(document, options.sourceRepositoryUrl);
+    return normalizeGuardianSelection(
+      document,
+      target,
+      options.sourceRepositoryUrl,
+      options.sourceRepositories,
+    );
   }
+  if (document["format"] === "semgrep-platform-findings/v1")
+    throw new Error(
+      "This Semgrep Platform export uses the retired v1 format. Recollect the findings with cs import semgrep.",
+    );
   if (isSemgrepPlatformFormat(document["format"])) {
     return normalizeSemgrepPlatformFindings(
       document,
@@ -187,23 +198,48 @@ export function normalizeSemgrepFindings(
       { ...options, sourceRepositoryUrl: options?.sourceRepositoryUrl ?? "" },
       target,
     );
+  return normalizeSemgrepJson(document, options, target);
+}
+
+function semgrepLocation(raw: string) {
+  // Semgrep retains the scanner's path spelling after validation.
+  return nativeResultPath(raw) === null ? null : raw;
+}
+
+function normalizeSemgrepJson(
+  document: Record<string, unknown>,
+  options: Partial<SemgrepImportOptions>,
+  target: ExternalImportTarget,
+): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
   requiredText(document["version"], "Semgrep version");
-  if (array(document["errors"] ?? [], "Semgrep errors").length)
+  const {
+    results,
+    paths: _paths,
+    time: _time,
+    explanations: _explanations,
+    ...context
+  } = document;
+  const rows = array(results, "Semgrep results");
+  if (!rows.length && document["errors"] === undefined)
+    throw new Error("An empty Semgrep report must include its errors array.");
+  if (optionalArray(document["errors"], "Semgrep errors").length)
     throw new Error(
       "The Semgrep report contains scan errors; supply a successful report before importing findings.",
     );
-  const { results, paths: _paths, time: _time, ...context } = document;
   return normalizeRecords(
-    array(results, "Semgrep results"),
+    rows,
     (value) =>
-      projectNativeJsonResult(parseNativeJsonResult(value, "Semgrep"), {
-        origin: "Semgrep",
-        repositoryUrl,
-        severity,
-        reportContext: context,
-        target,
-      }),
+      projectNativeJsonResult(
+        parseNativeJsonResult(value, "Semgrep", semgrepLocation),
+        {
+          origin: "Semgrep",
+          repositoryUrl,
+          severity,
+          reportContext: context,
+          target,
+        },
+      ),
     jsonIdentity,
     target,
   );
@@ -219,50 +255,27 @@ export function normalizeSemgrepSarif(
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
   const repositoryUrl = sourceRepository(options);
-  const document = record(input, "Semgrep SARIF");
-  if (document["version"] !== "2.1.0")
-    throw new Error("Expected Semgrep SARIF 2.1.0.");
-  const entries = array(document["runs"], "SARIF runs").flatMap((value) => {
-    const run = record(value, "SARIF run");
-    for (const entry of array(
-      run["versionControlProvenance"] ?? [],
-      "Version control provenance",
+  const repositoryKey = cloudRepositoryUrlKey(repositoryUrl);
+  const verifiedUrls = new Set([repositoryUrl]);
+  const entries = readSarifRuns(input, "Semgrep", (context) => {
+    for (const { url: declared } of sarifRunRepositories(
+      context.run,
+      "Semgrep",
     )) {
-      const declared = text(
-        record(entry, "Repository provenance")["repositoryUri"],
-      );
-      if (
-        declared &&
-        cloudRepositoryUrlKey(declared) !== cloudRepositoryUrlKey(repositoryUrl)
-      )
+      if (verifiedUrls.has(declared)) continue;
+      if (cloudRepositoryUrlKey(declared) !== repositoryKey)
         throw new Error(
           "SARIF source repository does not match the declared source repository URL.",
         );
+      verifiedUrls.add(declared);
     }
-    const tool = record(run["tool"], "SARIF tool");
-    const driver = record(tool["driver"], "SARIF driver");
-    if (!isSemgrepSarifDriver(requiredText(driver["name"], "SARIF producer")))
-      throw new Error("Expected a Semgrep SARIF producer.");
     if (
-      hasSarifExternalPropertyReferences(run["externalPropertyFileReferences"])
-    )
-      throw new Error("Use a self-contained Semgrep SARIF report.");
-    for (const invocation of array(
-      run["invocations"] ?? [],
-      "Semgrep invocations",
-    )) {
-      const details = record(invocation, "Semgrep invocation");
-      if (details["executionSuccessful"] === false)
-        throw new Error("Semgrep SARIF contains an unsuccessful invocation.");
-      if (
-        array(
-          details["toolExecutionNotifications"] ?? [],
-          "Semgrep scan notifications",
-        ).length
+      !isSemgrepSarifDriver(
+        requiredText(context.driver["name"], "SARIF producer"),
       )
-        throw new Error("Semgrep SARIF contains scan error notifications.");
-    }
-    return sarifRunResults(document, run, tool, driver, "Semgrep");
+    )
+      throw new Error("Expected a Semgrep SARIF producer.");
+    return sarifRunResults(context, "Semgrep");
   });
   return normalizeRecords(
     entries,
@@ -317,7 +330,7 @@ export function normalizeSemgrepSarif(
         typeof artifact["uri"] === "string" &&
         /^[a-z][a-z\d+.-]*:/iu.test(artifact["uri"]);
       const path =
-        rawPath === null || absoluteUri ? null : relativePath(rawPath);
+        rawPath === null || absoluteUri ? null : semgrepLocation(rawPath);
       return validateExternalEvidence(
         {
           title: ruleId,
@@ -364,16 +377,12 @@ export async function readSemgrepReport(path: string): Promise<unknown> {
   return readScannerJson(path, (json) => {
     // Pick a parser before allocating the findings array. Verify the root:
     // the member can be nested in a native report or escaped in a Platform one.
-    const parser = /"format"\s*:\s*"semgrep-platform-findings\/v[12]"/u.test(
-      json,
-    )
+    const parser = /"format"\s*:\s*"semgrep-platform-findings\/v2"/u.test(json)
       ? parseHostedScannerJson
       : JSON.parse;
     const parsed: unknown = parser(json);
     const requiredParser =
-      isRecord(parsed) &&
-      (parsed["format"] === semgrepPlatformLegacyFormat ||
-        parsed["format"] === semgrepPlatformFormat)
+      isRecord(parsed) && parsed["format"] === semgrepPlatformFormat
         ? parseHostedScannerJson
         : JSON.parse;
     return parser === requiredParser ? parsed : requiredParser(json);

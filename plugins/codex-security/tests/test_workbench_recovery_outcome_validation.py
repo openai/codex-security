@@ -1,3 +1,5 @@
+"""Require evidence for rejection and closure decisions before recovered scans can be sealed."""
+
 from __future__ import annotations
 
 import copy
@@ -5,7 +7,6 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import read_review_state, saved_draft, write_checkpoint
 
 

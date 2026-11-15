@@ -10,6 +10,7 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   OpenAiFindingEmbedder,
+  type EmbeddingUsageObservation,
 } from "../src/server/embeddings.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { VERSION } from "../src/version.js";
@@ -32,6 +33,7 @@ test.each(["headers", "body"])(
   async (stage) => {
     const controller = new AbortController();
     const canceled = new Error("Synthetic cancellation");
+    const observations: EmbeddingUsageObservation[] = [];
     const embedder = new OpenAiFindingEmbedder(
       "synthetic-key",
       async (_url, init) => {
@@ -49,8 +51,18 @@ test.each(["headers", "body"])(
       },
       undefined,
       controller.signal,
+      (observation) => observations.push(observation),
     );
     await expect(embedder.embed([example])).rejects.toBe(canceled);
+    expect(observations).toEqual([
+      {
+        model: EMBEDDING_MODEL,
+        inputCount: 1,
+        inputTokens: null,
+        outcome: "canceled",
+        durationMs: expect.any(Number),
+      },
+    ]);
   },
 );
 
@@ -222,6 +234,7 @@ test("splits bulk requests at the provider token budget and renews credentials p
   const finding: Finding = { ...example, summary: " evidence".repeat(8000) };
   const requests: number[][][] = [];
   let credentials = 0;
+  const observations: EmbeddingUsageObservation[] = [];
   const embedder = new OpenAiFindingEmbedder(
     async () => `synthetic-key-${++credentials}`,
     async (_url, init) => {
@@ -238,8 +251,14 @@ test("splits bulk requests at the provider token budget and renews credentials p
       return Response.json({
         model: EMBEDDING_MODEL,
         data: input.map((_, index) => ({ index, embedding: vector() })),
+        usage: {
+          prompt_tokens: input.reduce((sum, tokens) => sum + tokens.length, 0),
+        },
       });
     },
+    undefined,
+    undefined,
+    (observation) => observations.push(observation),
   );
   const result = await embedder.embed(
     Array.from({ length: 40 }, () => finding),
@@ -248,7 +267,112 @@ test("splits bulk requests at the provider token budget and renews credentials p
   expect(credentials).toBe(2);
   expect(result).toHaveLength(40);
   expect(result.every((embedding) => embedding.vector[0] === 1)).toBe(true);
+  expect(observations).toEqual(
+    requests.map((input) => ({
+      model: EMBEDDING_MODEL,
+      inputCount: input.length,
+      inputTokens: input.reduce((sum, tokens) => sum + tokens.length, 0),
+      outcome: "completed",
+      durationMs: expect.any(Number),
+    })),
+  );
 });
+
+test.each([
+  { usage: { prompt_tokens: 17 }, inputTokens: 17 },
+  { usage: { prompt_tokens: 0 }, inputTokens: 0 },
+  { usage: undefined, inputTokens: null },
+  { usage: { prompt_tokens: -1 }, inputTokens: null },
+])(
+  "reports provider token usage and missingness (%j)",
+  async ({ usage, inputTokens }) => {
+    const observations: EmbeddingUsageObservation[] = [];
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async () =>
+        Response.json({
+          model: EMBEDDING_MODEL,
+          data: [{ index: 0, embedding: vector() }],
+          usage,
+        }),
+      undefined,
+      undefined,
+      (observation) => observations.push(observation),
+    );
+    await embedder.embed([example]);
+    expect(observations).toEqual([
+      {
+        model: EMBEDDING_MODEL,
+        inputCount: 1,
+        inputTokens,
+        outcome: "completed",
+        durationMs: expect.any(Number),
+      },
+    ]);
+    expect(observations[0]!.durationMs).toBeGreaterThanOrEqual(0);
+  },
+);
+
+test.each(["throw", "reject", "pending"] as const)(
+  "embedding usage observer failures do not affect results (%s)",
+  async (failure) => {
+    const observer = mock(() => {
+      if (failure === "throw") throw new Error("Synthetic observer failure");
+      if (failure === "reject")
+        return Promise.reject(new Error("Synthetic observer rejection"));
+      return new Promise<void>(() => {});
+    });
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async () =>
+        Response.json({
+          model: EMBEDDING_MODEL,
+          data: [{ index: 0, embedding: vector() }],
+        }),
+      undefined,
+      undefined,
+      observer,
+    );
+    expect(await embedder.embed([example])).toHaveLength(1);
+    await nextTurn();
+    expect(observer).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each(["transport", "http", "vectors"] as const)(
+  "reports failed embedding batches without discarding reported usage (%s)",
+  async (failure) => {
+    const observations: EmbeddingUsageObservation[] = [];
+    const embedder = new OpenAiFindingEmbedder(
+      "synthetic-key",
+      async () => {
+        if (failure === "transport")
+          throw new Error("Synthetic transport failure");
+        if (failure === "http") return new Response(null, { status: 503 });
+        return Response.json({
+          model: EMBEDDING_MODEL,
+          data: [],
+          usage: { prompt_tokens: 23 },
+        });
+      },
+      undefined,
+      undefined,
+      (observation) => observations.push(observation),
+    );
+    await expect(embedder.embed([example])).rejects.toMatchObject({
+      code: "embedding_failed",
+    });
+    expect(observations).toEqual([
+      {
+        model: EMBEDDING_MODEL,
+        inputCount: 1,
+        inputTokens: failure === "vectors" ? 23 : null,
+        outcome: "failed",
+        durationMs: expect.any(Number),
+      },
+    ]);
+  },
+);
 
 test("does not resolve credentials for empty input or reuse a key after renewal fails", async () => {
   for (const failure of ["throw", "empty"]) {

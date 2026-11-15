@@ -90,10 +90,11 @@ export type {
   ScanAccountRateLimitWindow,
   ScanCost,
   ScanSessionEvent,
+  ScanUsageMeasurement,
   ScanUsageObservation,
   ScanWorkerEvent,
 } from "./cost.js";
-export type { ScanTokenUsage } from "./cost-model.js";
+export type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
@@ -203,10 +204,18 @@ export type {
 export type { DeduplicationRefusal } from "./deduplication/deduplication.js";
 export type { FindingEmbeddingBinding } from "./deduplication/local.js";
 export type {
+  PublicationTelemetry,
+  PublicationTelemetryObserver,
+} from "./publication-telemetry.js";
+export type {
   DeduplicationDiagnostic,
   DeduplicationDiagnosticObserver,
 } from "./deduplication/diagnostics.js";
-export type { FindingEmbedder } from "./server/embeddings.js";
+export type {
+  FindingEmbedder,
+  EmbeddingUsageObservation,
+  EmbeddingUsageObserver,
+} from "./server/embeddings.js";
 export {
   ExternalPublicationError,
   prepareExternalPublication,
@@ -223,9 +232,17 @@ export type {
 } from "./external-findings-publish.js";
 export {
   prepareNormalizedLocalImport,
+  listLocalExternalImports,
   listLocalExternalFindings,
+  listLocalFindingPublications,
+  selectLocalExternalFindings,
 } from "./external-findings-local.js";
 export type {
+  ExternalFindingProvenance,
+  LocalExternalFindingSelection,
+  SelectedLocalExternalFindings,
+  StoredExternalImport,
+  StoredFindingPublication,
   StoredExternalFinding,
   NormalizedLocalImportOptions,
   LocalExternalImportDependencies,
@@ -233,10 +250,11 @@ export type {
   LocalExternalImportResult,
   PreparedLocalExternalImport,
 } from "./external-findings-local.js";
-export type {
-  ExternalFinding,
-  ExternalFindings,
-  ExternalSourceRepository,
+export {
+  NoPublishableFindingsError,
+  type ExternalFinding,
+  type ExternalFindings,
+  type ExternalSourceRepository,
 } from "./external-findings.js";
 export type {
   ExternalFindingEvidence,
@@ -327,7 +345,27 @@ export type {
   ValidationReviewRequest,
 } from "./validation-records.js";
 
-export { prepareLocalExternalImport } from "./external-findings-import.js";
+export {
+  readOperationTelemetry,
+  summarizeOperationTelemetry,
+} from "./operation-telemetry.js";
+export type {
+  OperationTelemetryEvent,
+  OperationOutcome,
+  OperationFailureCategory,
+} from "./operation-telemetry.js";
+
+export {
+  prepareLocalExternalImport,
+  type LocalExternalImportOptions,
+} from "./external-findings-import.js";
+export {
+  prepareStoredFindingsPublication,
+  type StoredFindingsPublication,
+  type StoredFindingsPublicationGroup,
+} from "./stored-findings-publication.js";
+export { readTenableFindings } from "./tenable-findings.js";
+export { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
 export {
   normalizeOpenGrepFindings,
   readOpenGrepFindings,
@@ -342,6 +380,7 @@ export {
   normalizeVeracodeFindings,
   readVeracodeFindings,
 } from "./veracode-findings.js";
+export { normalizeTrivyFindings, readTrivyFindings } from "./trivy-findings.js";
 export {
   normalizeBlackDuckFindings,
   readBlackDuckFindings,
@@ -350,6 +389,7 @@ export {
   normalizeContinuumFindings,
   readContinuumFindings,
 } from "./continuum-findings.js";
+export { readCheckmarxFindings } from "./checkmarx-findings.js";
 export {
   normalizeInspectorFindings,
   readInspectorFindings,

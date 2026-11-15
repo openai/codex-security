@@ -1,3 +1,5 @@
+"""Check that workbench failures retain their full diagnostics through terminal updates and replay."""
+
 from __future__ import annotations
 
 import sqlite3

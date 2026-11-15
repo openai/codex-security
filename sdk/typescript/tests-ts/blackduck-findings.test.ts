@@ -138,6 +138,34 @@ test("replay keeps native occurrence identity when package coordinates and advis
   expect(finding.evidence.source_data?.["row"]).toEqual(opaque);
 });
 
+test("keeps GitHub package coordinates separate from the repository that was scanned", () => {
+  const row = {
+    ...blackDuckBomRow(),
+    componentVersionOriginName: "github",
+    componentVersionOriginId: "LibraryOrg/Library/v1.0",
+    packageUrl: "pkg:github/LibraryOrg/Library@release%2Fv1.0",
+  };
+  for (const target of ["local", "cloud"] as const) {
+    const current = normalizeBlackDuckFindings([row], repository, target);
+    expect(current.excluded).toEqual([]);
+    expect(current.findings[0]).toMatchObject({
+      evidence: {
+        packages: [
+          {
+            ecosystem: "github",
+            name: "libraryorg/library",
+            installed_version: "release/v1.0",
+          },
+        ],
+        source_data: { sourceRepositoryUrl: repository, row },
+      },
+    });
+  }
+  row.packageUrl = "pkg:github/LibraryOrg/Library@" + "v".repeat(513);
+  const bounded = normalizeBlackDuckFindings([row], repository);
+  expect(bounded.findings[0]!.evidence.source_data?.["row"]).toEqual(row);
+});
+
 test("uses the full generic package path and keeps the origin fallback for an invalid namespace", () => {
   const row = blackDuckBomRow();
   const packages = (packageUrl: string) =>

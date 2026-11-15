@@ -1,0 +1,520 @@
+import assert from "node:assert/strict";
+import { existsSync, promises as fs } from "node:fs";
+import childProcess, { type SpawnOptions } from "node:child_process";
+import {
+  copyFile,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import path from "node:path";
+import { assertFlagPair } from "./assertions.ts";
+import { readJson } from "./support/json.ts";
+import type {
+  CodexSdkWorkerExecutor as WorkerExecutor,
+  resolveCodexPath as ResolveCodexPath,
+} from "../src/deep-scan/executor.js";
+import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
+import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
+
+interface Fixture {
+  root: string;
+  markerPath: string;
+  preflightMarkerPath: string;
+  executablePath: string;
+}
+
+export async function testExecutorExecutablePinning({
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+  parentSandbox,
+  resolveCodexPath,
+}: {
+  CodexSdkWorkerExecutor: typeof WorkerExecutor;
+  fakeCodexFixture: () => Promise<Fixture>;
+  parentSandbox: DeepWorkerParentSandbox;
+  resolveCodexPath: typeof ResolveCodexPath;
+}) {
+  const originalSpawn = childProcess.spawn;
+  const nativeScripts = new Map<string, string>();
+  const nativeLaunches: string[] = [];
+  if (process.platform === "win32") {
+    // Windows needs Node to run the selected script fixture.
+    childProcess.spawn = ((
+      command: string,
+      args: readonly string[] = [],
+      options: SpawnOptions = {},
+    ) => {
+      const script = nativeScripts.get(command);
+      if (script) nativeLaunches.push(command);
+      return originalSpawn(
+        script ? command : process.execPath,
+        [script ?? command, ...args],
+        options,
+      );
+    }) as typeof childProcess.spawn;
+    syncBuiltinESMExports();
+  }
+  try {
+    await testWindowsExecutableSuffixes();
+    await testExecutorRetriesInitialMissingExecutable();
+    await testExecutorPinsCodexExecutableAcrossWorkers();
+    await testExecutorRejectsChangedPinnedExecutable();
+    await testExecutorRejectsReplacementAfterPreflight();
+    await testExecutorPinCancellation();
+    await testConcurrentPinCancellation();
+  } finally {
+    childProcess.spawn = originalSpawn;
+    syncBuiltinESMExports();
+  }
+
+  async function testWindowsExecutableSuffixes() {
+    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+      const binaryPath = path.join(fixture.root, "bin", "custom-codex");
+      await mkdir(path.dirname(binaryPath));
+      await writeFile(`${binaryPath}.exe`, "synthetic executable", {
+        mode: 0o755,
+      });
+      const resolveWindowsPath = (configured: string) =>
+        resolveCodexPath(
+          { CODEX_CLI_PATH: configured },
+          "win32",
+          process.arch,
+          fixture.root,
+        );
+      const configuredPaths = [
+        binaryPath,
+        path.relative(fixture.root, binaryPath),
+      ];
+      for (const configured of configuredPaths) {
+        assert.equal(resolveWindowsPath(configured), `${binaryPath}.exe`);
+      }
+      await writeFile(`${binaryPath}.com`, "synthetic executable", {
+        mode: 0o755,
+      });
+      for (const configured of configuredPaths) {
+        assert.equal(resolveWindowsPath(configured), `${binaryPath}.com`);
+        assert.equal(resolveWindowsPath(`${configured}.`), `${binaryPath}.com`);
+        assert.equal(
+          resolveWindowsPath(`${configured}.exe`),
+          `${binaryPath}.exe`,
+        );
+      }
+      assert.equal(
+        resolveWindowsPath(fixture.executablePath),
+        fixture.executablePath,
+      );
+      const leadingDotPath = path.join(fixture.root, ".custom-codex");
+      await writeFile(leadingDotPath, "synthetic executable", { mode: 0o755 });
+      await writeFile(`${leadingDotPath}.com`, "synthetic executable", {
+        mode: 0o755,
+      });
+      assert.equal(resolveWindowsPath(leadingDotPath), leadingDotPath);
+      if (process.platform === "win32") {
+        await rm(`${binaryPath}.com`);
+        await copyFile(process.execPath, `${binaryPath}.exe`);
+        const command = path.toNamespacedPath(`${binaryPath}.exe`);
+        nativeScripts.set(command, fixture.executablePath);
+        process.env.CODEX_CLI_PATH = binaryPath;
+        await writeFile(
+          promptPath,
+          "fixture extensionless Windows executable\n",
+        );
+        const result = await new CodexSdkWorkerExecutor({ parentSandbox }).run(
+          workerRequest(promptPath, workingDirectory),
+        );
+        assert.equal(result.threadId, "fixture-thread-id");
+        assert.deepEqual(nativeLaunches, [command, command]);
+      }
+    });
+  }
+
+  async function testExecutorRetriesInitialMissingExecutable() {
+    await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+      await writeFile(promptPath, "fixture initial missing executable\n");
+      const executor = new CodexSdkWorkerExecutor({ parentSandbox });
+      const request = workerRequest(promptPath, workingDirectory);
+      const parkedExecutable = `${fixture.executablePath}.parked`;
+      await rename(fixture.executablePath, parkedExecutable);
+      await assert.rejects(executor.run(request), {
+        name: "Error",
+        code: "ENOENT",
+      });
+      await assert.rejects(readFile(fixture.preflightMarkerPath), {
+        code: "ENOENT",
+      });
+      await rename(parkedExecutable, fixture.executablePath);
+      assert.equal((await executor.run(request)).threadId, "fixture-thread-id");
+      process.env.CODEX_CLI_PATH = parkedExecutable;
+      assert.equal(
+        (
+          await executor.run({
+            ...request,
+            resumeThreadId: "fixture-resumed-thread",
+          })
+        ).threadId,
+        "fixture-resumed-thread",
+      );
+      const invocation = await readJson(fixture.markerPath);
+      assert.equal(
+        await realpath(invocation.executablePath),
+        fixture.executablePath,
+      );
+      await writeFile(fixture.executablePath, "replaced executable");
+      await assert.rejects(executor.run(request), {
+        name: "DeepScanNonRetryableError",
+        message: /changed after this Deep Scan started/i,
+      });
+    });
+  }
+
+  async function testExecutorPinsCodexExecutableAcrossWorkers() {
+    const previousPath = process.env.CODEX_CLI_PATH;
+    const previousMarker = process.env.FAKE_CODEX_MARKER;
+    const fixtures = [await fakeCodexFixture(), await fakeCodexFixture()];
+    const executors = fixtures.map(
+      () => new CodexSdkWorkerExecutor({ parentSandbox }),
+    );
+    try {
+      const configuredPaths = fixtures.map((fixture) => fixture.executablePath);
+      if (process.platform !== "win32") {
+        const alias = path.join(
+          fixtures[0]!.root,
+          "codex with trailing space ",
+        );
+        await symlink(fixtures[0]!.executablePath, alias);
+        configuredPaths[0] = alias;
+        const other = fixtures[1]!.executablePath;
+        const bare = path.basename(other) + " ";
+        await symlink(
+          fixtures[0]!.executablePath,
+          path.join(fixtures[0]!.root, bare),
+        );
+        assert.equal(
+          resolveCodexPath(
+            {
+              PATH: [path.dirname(other), fixtures[0]!.root].join(
+                path.delimiter,
+              ),
+              CODEX_CLI_PATH: bare,
+            },
+            process.platform,
+            process.arch,
+            fixtures[0]!.root,
+          ),
+          other,
+        );
+      }
+      for (const fixture of fixtures) {
+        await writeFile(
+          path.join(fixture.root, "prompt.md"),
+          "fixture pinned executable\n",
+        );
+      }
+      for (const turn of ["discovery", "resume", "compare"] as const) {
+        const firstLaunch = turn === "discovery";
+        await Promise.all(
+          fixtures.map((fixture, index) => {
+            process.env.CODEX_CLI_PATH =
+              configuredPaths[firstLaunch ? index : 1 - index]!;
+            process.env.FAKE_CODEX_MARKER = fixture.markerPath;
+            return runTurn(
+              executors[index]!,
+              path.join(fixture.root, "prompt.md"),
+              fixture.root,
+              turn,
+            );
+          }),
+        );
+        for (const fixture of fixtures) {
+          const preflight = await readJson(fixture.preflightMarkerPath);
+          const invocation = await readJson(fixture.markerPath);
+          assert.equal(
+            await realpath(preflight.executablePath),
+            fixture.executablePath,
+          );
+          assert.deepEqual(preflight.requests, [
+            { method: "config/read", cwd: fixture.root },
+            { method: "permissionProfile/list", cwd: fixture.root },
+          ]);
+          assert.equal(
+            await realpath(invocation.executablePath),
+            fixture.executablePath,
+          );
+          assert.equal(invocation.argv.includes("resume"), turn === "resume");
+          if (turn === "resume") {
+            assertFlagPair(invocation.argv, "resume", "fixture-resumed-thread");
+          }
+          assertFlagPair(invocation.argv, "--cd", fixture.root);
+          await rm(fixture.preflightMarkerPath);
+          await rm(fixture.markerPath);
+        }
+      }
+    } finally {
+      restoreEnv("CODEX_CLI_PATH", previousPath);
+      restoreEnv("FAKE_CODEX_MARKER", previousMarker);
+    }
+  }
+
+  async function testExecutorRejectsChangedPinnedExecutable() {
+    for (const change of ["replace", "remove"]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(promptPath, "fixture changed pinned executable\n");
+        const executor = new CodexSdkWorkerExecutor({
+          parentSandbox,
+        });
+        await executor.run(workerRequest(promptPath, workingDirectory));
+        await rm(fixture.preflightMarkerPath);
+        await rm(fixture.markerPath);
+        if (change === "remove") {
+          await rm(fixture.executablePath);
+        } else {
+          const original = await readFile(fixture.executablePath, "utf8");
+          await writeFile(
+            fixture.executablePath,
+            `${original}\n// replaced after scan start\n`,
+          );
+        }
+        for (const turn of ["discovery", "resume", "compare"] as const) {
+          await assert.rejects(
+            runTurn(executor, promptPath, workingDirectory, turn),
+            {
+              name: "DeepScanNonRetryableError",
+              message: /changed after this Deep Scan started/i,
+            },
+          );
+        }
+        await assert.rejects(readFile(fixture.preflightMarkerPath), {
+          code: "ENOENT",
+        });
+        await assert.rejects(readFile(fixture.markerPath), { code: "ENOENT" });
+      });
+    }
+  }
+
+  async function testExecutorRejectsReplacementAfterPreflight() {
+    const previousReplace = process.env.FAKE_CODEX_REPLACE_AFTER_PREFLIGHT;
+    process.env.FAKE_CODEX_REPLACE_AFTER_PREFLIGHT = "1";
+    try {
+      for (const turn of ["discovery", "resume", "compare"] as const) {
+        await withWorkerFixture(
+          async (fixture, promptPath, workingDirectory) => {
+            await writeFile(
+              promptPath,
+              "fixture replacement after preflight\n",
+            );
+            await assert.rejects(
+              runTurn(
+                new CodexSdkWorkerExecutor({ parentSandbox }),
+                promptPath,
+                workingDirectory,
+                turn,
+              ),
+              {
+                name: "DeepScanNonRetryableError",
+                message: /changed after this Deep Scan started/i,
+              },
+            );
+            const preflight = await readJson(fixture.preflightMarkerPath);
+            assert.equal(
+              await realpath(preflight.executablePath),
+              fixture.executablePath,
+            );
+            await assert.rejects(readFile(fixture.markerPath), {
+              code: "ENOENT",
+            });
+          },
+        );
+      }
+    } finally {
+      restoreEnv("FAKE_CODEX_REPLACE_AFTER_PREFLIGHT", previousReplace);
+    }
+  }
+
+  async function testExecutorPinCancellation() {
+    for (const phase of ["binding", "after-preflight"]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(promptPath, "fixture executable pin cancellation\n");
+        const controller = new AbortController();
+        const reason = { message: "synthetic worker cancellation", phase };
+        const originalStat = fs.stat;
+        fs.stat = (async (...args: Parameters<typeof fs.stat>) => {
+          const result = await originalStat(...args);
+          if (
+            args[0] === fixture.executablePath &&
+            (phase === "binding" || existsSync(fixture.preflightMarkerPath))
+          ) {
+            controller.abort(reason);
+          }
+          return result;
+        }) as typeof fs.stat;
+        try {
+          await assert.rejects(
+            new CodexSdkWorkerExecutor({ parentSandbox }).run(
+              workerRequest(promptPath, workingDirectory, {
+                signal: controller.signal,
+              }),
+            ),
+            (error) => error === reason,
+          );
+        } finally {
+          fs.stat = originalStat;
+        }
+        assert.equal(
+          existsSync(fixture.preflightMarkerPath),
+          phase === "after-preflight",
+        );
+        assert.equal(existsSync(fixture.markerPath), false);
+      });
+    }
+  }
+
+  async function testConcurrentPinCancellation() {
+    for (const canceled of ["owner", "waiter"]) {
+      await withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
+        await writeFile(
+          promptPath,
+          "fixture shared executable pin cancellation\n",
+        );
+        const owner = new AbortController();
+        const waiter = new AbortController();
+        const reason = new Error(`synthetic ${canceled} cancellation`);
+        const entered = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        const waiting = Promise.withResolvers<void>();
+        const originalStat = fs.stat;
+        const originalAdd = waiter.signal.addEventListener;
+        let held = false;
+        fs.stat = (async (...args: Parameters<typeof fs.stat>) => {
+          const result = await originalStat(...args);
+          if (args[0] === fixture.executablePath && !held) {
+            held = true;
+            entered.resolve();
+            await release.promise;
+          }
+          return result;
+        }) as typeof fs.stat;
+        waiter.signal.addEventListener = function (
+          ...args: Parameters<AbortSignal["addEventListener"]>
+        ) {
+          const result = originalAdd.apply(this, args);
+          if (args[0] === "abort") waiting.resolve();
+          return result;
+        };
+        const executor = new CodexSdkWorkerExecutor({ parentSandbox });
+        const first = executor.run(
+          workerRequest(promptPath, workingDirectory, { signal: owner.signal }),
+        );
+        let second: ReturnType<typeof executor.run> | undefined;
+        try {
+          await entered.promise;
+          second = executor.run(
+            workerRequest(promptPath, workingDirectory, {
+              signal: waiter.signal,
+            }),
+          );
+          const completed = Promise.allSettled([first, second]);
+          await waiting.promise;
+          (canceled === "owner" ? owner : waiter).abort(reason);
+          release.resolve();
+          const results = await completed;
+          const rejected = results[canceled === "owner" ? 0 : 1]!;
+          const fulfilled = results[canceled === "owner" ? 1 : 0]!;
+          assert.equal(rejected.status, "rejected");
+          if (rejected.status === "rejected")
+            assert.equal(rejected.reason, reason);
+          assert.equal(fulfilled.status, "fulfilled");
+          if (fulfilled.status === "fulfilled")
+            assert.equal(fulfilled.value.threadId, "fixture-thread-id");
+          // A successful pin survives its original caller's later cancellation.
+          (canceled === "owner" ? waiter : owner).abort(
+            new Error("fixture completed"),
+          );
+          const next = await executor.run(
+            workerRequest(promptPath, workingDirectory),
+          );
+          assert.equal(next.threadId, "fixture-thread-id");
+        } finally {
+          release.resolve();
+          owner.abort(reason);
+          waiter.abort(reason);
+          fs.stat = originalStat;
+          waiter.signal.addEventListener = originalAdd;
+          await Promise.allSettled([first, ...(second ? [second] : [])]);
+        }
+      });
+    }
+  }
+
+  async function withWorkerFixture(
+    action: (
+      fixture: Fixture,
+      promptPath: string,
+      workingDirectory: string,
+    ) => Promise<void>,
+  ) {
+    const previousPath = process.env.CODEX_CLI_PATH;
+    const previousMarker = process.env.FAKE_CODEX_MARKER;
+    try {
+      const fixture = await fakeCodexFixture();
+      process.env.CODEX_CLI_PATH = fixture.executablePath;
+      const workingDirectory = path.join(fixture.root, "artifacts");
+      await mkdir(workingDirectory);
+      await action(
+        fixture,
+        path.join(fixture.root, "prompt.md"),
+        workingDirectory,
+      );
+    } finally {
+      restoreEnv("CODEX_CLI_PATH", previousPath);
+      restoreEnv("FAKE_CODEX_MARKER", previousMarker);
+    }
+  }
+}
+
+function runTurn(
+  executor: WorkerExecutor,
+  promptPath: string,
+  cwd: string,
+  turn: "discovery" | "resume" | "compare",
+) {
+  if (turn === "compare")
+    return executor.compareFindings(
+      "fixture comparison",
+      cwd,
+      new AbortController().signal,
+      { type: "object" },
+    );
+  return executor.run(
+    workerRequest(
+      promptPath,
+      cwd,
+      turn === "resume" ? { resumeThreadId: "fixture-resumed-thread" } : {},
+    ),
+  );
+}
+
+function workerRequest(
+  promptPath: string,
+  workingDirectory: string,
+  options: Partial<CodexWorkerRequest> = {},
+): CodexWorkerRequest {
+  return {
+    kind: "discovery",
+    promptPath,
+    workingDirectory,
+    subagents: 0,
+    signal: new AbortController().signal,
+    ...options,
+  };
+}
+
+function restoreEnv(name: string, value: string | undefined) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}

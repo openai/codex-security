@@ -201,6 +201,14 @@ await test("built MCP setup previews and saves the selected project before scan 
       ).setup;
       assert.deepEqual(driveRelative.deepScanConfig, preview);
     } else if (process.platform !== "win32") {
+      const homeConfigPath = "~\\repository\\selected.yaml";
+      const homeConfig = (
+        await call("inspect_codex_security_setup", {
+          ...selection,
+          projectConfigPath: homeConfigPath,
+        })
+      ).setup;
+      assert.deepEqual(homeConfig.deepScanConfig, preview);
       await mkdir(join(targetPath, "subdirectory"));
       await symlink(join(targetPath, "subdirectory"), join(root, "link"));
       await writeFile(
@@ -213,6 +221,7 @@ await test("built MCP setup previews and saves the selected project before scan 
       ).setup;
       assert.equal(throughLink.target.targetPath, targetPath);
       assert.deepEqual(throughLink.deepScanConfig, preview);
+      selection.projectConfigPath = homeConfigPath;
     }
     const workspace = (
       await call("open_codex_security_workspace", {

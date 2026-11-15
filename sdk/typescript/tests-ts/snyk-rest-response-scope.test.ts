@@ -17,7 +17,7 @@ function capture(...responses: unknown[]) {
   return collectSnykIssues(
     { ...snykOptions, token: "example-token" },
     {
-      environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1" },
+      environment: {},
       fetch: async () => {
         if (!responses.length) throw new Error("Unexpected Snyk request");
         return Response.json(responses.shift());

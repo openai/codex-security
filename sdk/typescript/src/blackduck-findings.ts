@@ -2,20 +2,20 @@ import { CodexSecurityError } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import {
   type ExternalImportTarget,
-  validateExternalEvidence,
+  validateEnrichedExternalEvidence,
 } from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import { canonicalJson, isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
-  readScannerJson,
+  scannerJsonReader,
   record,
+  reportableScannerSeverity,
   requiredText,
   stableId,
   text,
 } from "./scanner-import.js";
-import { FailureSeveritySchema } from "./scan-settings.js";
 import {
   declaredScannerRepositoryUrl,
   repositoryScopeValidator,
@@ -294,6 +294,8 @@ const nameVersionForges = new Map([
 
 function packageUrlName(ecosystem: string, parts: string[]) {
   if (parts.some((part) => !part || part.includes("/"))) return;
+  if (ecosystem === "github" && parts.length === 2)
+    return parts.join("/").toLowerCase();
   if (ecosystem === "maven" || ecosystem === "composer")
     return parts.length === 2
       ? parts.join(ecosystem === "maven" ? ":" : "/")
@@ -333,6 +335,7 @@ function originPackage(row: Record<string, unknown>) {
 
 function blackDuckPackages(row: Record<string, unknown>) {
   const origin = originPackage(row);
+  const fallback = origin ? [origin] : [];
   const purl =
     /^pkg:([a-z][a-z0-9.+-]*)\/((?:@[^/@?#]+\/)?[^@?#]+)(?:@([^@?#]+))?(?:[?#].*)?$/iu.exec(
       text(row["packageUrl"]) ?? "",
@@ -346,23 +349,25 @@ function blackDuckPackages(row: Record<string, unknown>) {
       );
       if (name) {
         if (!purl[3] && origin?.ecosystem === ecosystem && origin.name === name)
-          return [origin];
-        return [
-          {
-            name,
-            ecosystem,
-            installed_version: purl[3]
-              ? decodeURIComponent(purl[3])
-              : text(row["componentVersionName"]),
-          },
-        ];
+          return { packages: fallback };
+        const pkg = {
+          name,
+          ecosystem,
+          installed_version: purl[3]
+            ? decodeURIComponent(purl[3])
+            : text(row["componentVersionName"]),
+        };
+        // Retain the origin coordinate if the qualified owner/repository PURL exceeds a Cloud limit.
+        return ecosystem === "github" && name.includes("/")
+          ? { packages: fallback, enrichment: { packages: [pkg] } }
+          : { packages: [pkg] };
       }
     } catch {
       // A malformed escape does not invalidate the native origin coordinate.
     }
   }
 
-  return origin ? [origin] : [];
+  return { packages: fallback };
 }
 
 export function normalizeBlackDuckFindings(
@@ -411,16 +416,16 @@ export function normalizeBlackDuckFindings(
         row["componentName"],
         "Black Duck component name",
       );
-      const severity = text(vulnerability["severity"])?.toLowerCase();
       const related = text(vulnerability["relatedVulnerability"]);
-      return validateExternalEvidence(
+      const { packages, enrichment } = blackDuckPackages(row);
+      return validateEnrichedExternalEvidence(
         {
           title: `${advisory} in ${name}`,
           description: text(vulnerability["description"]),
-          severity: FailureSeveritySchema.safeParse(severity).data ?? "unknown",
+          severity: reportableScannerSeverity(vulnerability["severity"]),
           advisory_ids:
             related && related !== advisory ? [advisory, related] : [advisory],
-          packages: blackDuckPackages(row),
+          packages,
           source_data: {
             format,
             sourceRepositoryUrl: repository,
@@ -429,6 +434,7 @@ export function normalizeBlackDuckFindings(
           },
         },
         target,
+        enrichment,
       );
     },
     (entry) => occurrenceId(entry, projectVersion),
@@ -452,14 +458,6 @@ export function normalizeBlackDuckFindings(
   return result;
 }
 
-export async function readBlackDuckFindings(
-  path: string,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeBlackDuckFindings(
-    await readScannerJson(path),
-    sourceRepositoryUrl,
-    target,
-  );
-}
+export const readBlackDuckFindings = scannerJsonReader(
+  normalizeBlackDuckFindings,
+);

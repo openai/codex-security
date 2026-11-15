@@ -4,7 +4,7 @@ import { test } from "node:test";
 import type { DeepScanLogEvent } from "../src/deep-scan/types.js";
 import {
   coordinatorFixture,
-  createCoordinator,
+  startCoordinator,
   FakeExecutor,
   runCoordinator,
   temporaryDirectories,
@@ -34,6 +34,20 @@ try {
       assert.equal(terminal?.status, "succeeded", terminal?.error);
       assert.equal(executor.discoveryCalls, 1);
       assert.equal(store.iterations.length, 1);
+      assert.deepEqual(
+        events.filter(({ event }) => event === "dedup_committed"),
+        [
+          {
+            event: "dedup_committed",
+            scanId: fixture.run.scanId,
+            workerId: store.iterations[0]!.id,
+            pass: 1,
+            count: 1,
+            newFindings: 1,
+            retainedFindings: 1,
+          },
+        ],
+      );
       for (const event of [
         "coordinator_started",
         "discovery_accepted",
@@ -52,7 +66,7 @@ try {
       });
       let workerSignal: AbortSignal | undefined;
       const events: DeepScanLogEvent[] = [];
-      const coordinator = createCoordinator(
+      const coordinator = startCoordinator(
         fixture,
         store,
         {
@@ -72,7 +86,6 @@ try {
           },
         },
       );
-      coordinator.start();
       await executor.discoveryStarted.promise;
       const reason = "fixture cancellation\nwith diagnostic detail";
       try {

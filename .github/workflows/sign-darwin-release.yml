@@ -1,0 +1,159 @@
+name: Sign Darwin release addons
+
+on:
+  workflow_call:
+    secrets:
+      AKV_CODESIGN_RCODESIGN_BLOB_URI:
+        required: true
+      AKV_CODESIGN_RCODESIGN_SHA256:
+        required: true
+      AKV_CODESIGN_PKCS11_LIBRARY_BLOB_URI:
+        required: true
+      AKV_CODESIGN_PKCS11_LIBRARY_SHA256:
+        required: true
+      AKV_CODESIGN_AZURE_CLIENT_ID:
+        required: true
+      AKV_CODESIGN_TENANT:
+        required: true
+      AKV_CODESIGN_SUBSCRIPTION:
+        required: true
+      SIGNER_SERVICE_ENDPOINT:
+        required: true
+      SIGNER_SERVICE_PURPOSE:
+        required: true
+      SIGNER_SERVICE_KEY_ID:
+        required: true
+      SIGNING_CERTIFICATE_PEM:
+        required: true
+    outputs:
+      native-artifact-id:
+        description: Artifact ID of the verified universal native payload.
+        value: ${{ jobs.build.outputs.artifact-id }}
+      artifact-id:
+        description: Artifact ID of the signed Darwin addons.
+        value: ${{ jobs.sign.outputs.artifact-id }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'openai/codex-security'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout protected main and its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the release tag is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" != tag || "$GITHUB_REF" != refs/tags/npm-v?* ]] ||
+             [[ "$(git rev-parse --verify "$GITHUB_REF^{commit}")" != "$GITHUB_SHA" ]] ||
+             ! git merge-base --is-ancestor "$GITHUB_SHA" HEAD; then
+            echo "The npm release tag must point to the triggering commit on main." >&2
+            exit 1
+          fi
+
+  build:
+    needs: validate
+    cache-mode: none
+    uses: ./.github/workflows/native-artifacts.yml
+    with:
+      ref: ${{ github.sha }}
+      reuse-verified: false
+
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: codesigning
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Require both build artifact IDs
+        env:
+          ARM64_ID: ${{ needs.build.outputs.darwin-arm64-artifact-id }}
+          X64_ID: ${{ needs.build.outputs.darwin-x64-artifact-id }}
+        run: test -n "$ARM64_ID" && test -n "$X64_ID"
+      - name: Download the arm64 build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.darwin-arm64-artifact-id }}
+          path: arm64-build
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the x64 build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.darwin-x64-artifact-id }}
+          path: x64-build
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify both addon digests
+        shell: bash
+        env:
+          ARM64_SHA256: ${{ needs.build.outputs.darwin-arm64-sha256 }}
+          X64_SHA256: ${{ needs.build.outputs.darwin-x64-sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$ARM64_SHA256" arm64-build/darwin-arm64/unix.node \
+            "$X64_SHA256" x64-build/darwin-x64/unix.node | sha256sum --strict --check -
+      - name: Revalidate tag before Developer ID signing
+        uses: $/.github/actions/revalidate-release-tag
+
+      - name: Set up Developer ID signing
+        id: signing-tools
+        uses: openai/codex/.github/actions/setup-akv-pkcs11-codesigning@9ff072db8ae43d413c8d205ebf22b54b83c72cef
+        with:
+          setup-mode: tools-only
+          rcodesign-blob-uri: ${{ secrets.AKV_CODESIGN_RCODESIGN_BLOB_URI }}
+          rcodesign-sha256: ${{ secrets.AKV_CODESIGN_RCODESIGN_SHA256 }}
+          akv-pkcs11-library-blob-uri: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_BLOB_URI }}
+          akv-pkcs11-library-sha256: ${{ secrets.AKV_CODESIGN_PKCS11_LIBRARY_SHA256 }}
+          azure-client-id: ${{ secrets.AKV_CODESIGN_AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ secrets.AKV_CODESIGN_TENANT }}
+          azure-subscription-id: ${{ secrets.AKV_CODESIGN_SUBSCRIPTION }}
+          # Required action inputs, unused in tools-only mode.
+          key-vault-name: ""
+          key-name: ""
+      - name: Sign Darwin addons
+        shell: bash
+        env:
+          RCODESIGN: ${{ steps.signing-tools.outputs.rcodesign }}
+          PKCS11_LIBRARY: ${{ steps.signing-tools.outputs.pkcs11-library }}
+          AKV_PKCS11_BACKEND: signer-service
+          SIGNER_SERVICE_ENDPOINT: ${{ secrets.SIGNER_SERVICE_ENDPOINT }}
+          SIGNER_SERVICE_PURPOSE: ${{ secrets.SIGNER_SERVICE_PURPOSE }}
+          SIGNER_SERVICE_KEY_ID: ${{ secrets.SIGNER_SERVICE_KEY_ID }}
+          SIGNER_SERVICE_KEY_LABEL: Developer ID Application
+          SIGNER_SERVICE_CERTIFICATE_FILE: ${{ runner.temp }}/developer-id.pem
+          SIGNING_CERTIFICATE_PEM: ${{ secrets.SIGNING_CERTIFICATE_PEM }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SIGNING_CERTIFICATE_PEM" > "$SIGNER_SERVICE_CERTIFICATE_FILE"
+          for arch in arm64 x64; do
+            target="darwin-$arch"
+            mkdir -p "signed/$target"
+            cp "$arch-build/$target/unix.node" "signed/$target/unix.node"
+            "$RCODESIGN" sign --config-file /dev/null --shallow --for-notarization \
+              --pkcs11-library "$PKCS11_LIBRARY" \
+              --pkcs11-certificate-file "$SIGNER_SERVICE_CERTIFICATE_FILE" \
+              --pkcs11-key-label "$SIGNER_SERVICE_KEY_LABEL" \
+              --code-signature-flags runtime --binary-identifier com.openai.codex-security.unix \
+              "signed/$target/unix.node"
+          done
+      - name: Upload signed Darwin addons
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-darwin-addons-${{ github.run_attempt }}
+          path: |
+            signed/darwin-arm64/unix.node
+            signed/darwin-x64/unix.node
+          if-no-files-found: error

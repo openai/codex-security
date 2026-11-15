@@ -15,7 +15,11 @@ import finalize_scan_contract as FINALIZER
 
 
 def validate_contract(scan_dir: Path) -> dict[str, Any]:
-    """Return validated canonical documents for one sealed scan."""
+    """Validate the sealed artifacts and return the manifest, original findings, and review summary.
+
+    Legacy finding records are adapted for validation only. ContractError propagates
+    when a required artifact, digest, schema, or evidence check fails.
+    """
 
     scan_dir = FINALIZER._require_scan_directory(scan_dir.expanduser().resolve(strict=True))
     schema_dir = Path(__file__).resolve().parents[1] / "schemas"
@@ -46,6 +50,7 @@ def validate_contract(scan_dir: Path) -> dict[str, Any]:
 
 
 def receipt(validated: dict[str, Any]) -> dict[str, Any]:
+    """Return the CLI success payload with paths to the validated manifest, findings, and report."""
     scan_dir = Path(validated["scanDir"])
     scan = validated["manifest"]["scan"]
     return {
@@ -58,6 +63,7 @@ def receipt(validated: dict[str, Any]) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Print the validation receipt on success or report a validation error to stderr and return 2."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scan-dir", required=True, type=Path)
     args = parser.parse_args(argv)

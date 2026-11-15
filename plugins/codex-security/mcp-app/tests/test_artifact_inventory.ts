@@ -1,3 +1,5 @@
+import { fixturePython } from "./support/python.ts";
+import { after, test } from "node:test";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { execFile as nodeExecFile } from "node:child_process";
@@ -45,33 +47,9 @@ const EUC_JP_PERL_HEAD = Buffer.from(
   "hex",
 );
 
-try {
-  await testSchemasAreBoundAndExact();
-  await testPrepareUsesTheExistingStandardGenerator();
-  if (!["win32", "darwin"].includes(process.platform))
-    await testNonUtf8InventoryPaths();
-  await testPrepareListsIgnoredTrackedFilesOnce();
-  await testPrepareExcludesGitMetadata();
-  await testPrepareUsesOnlyAuthoritativeDiffChanges();
-  await testPrepareIncludesPerlSourceWithMixedEncodings();
-  await testPrepareIncludesStagedAndUnstagedChanges();
-  await testInventoryChildPreservesSettingsAndCwd();
-  if (process.platform !== "win32") await testInventoryChildPreservesRawPaths();
-  await testInventoryChildFailuresPreserveOutput();
-  await testWorkerReadsItsOwnBoundInventory();
-  await testCursorDoesNotExceedInventory();
-  await testEmptyInventoryIsValid();
-  await testUnsafeInventoryRowsAreRejected();
-  await testSymlinkedInventoryIsRejected();
-  await testInventoryReadErrorsAreReported();
-  await testWorkersCannotPrepareInventory();
-  await testBoundScopeFailurePreservesPreviousInventory();
-  await testInvalidDiffTargetPreservesPreviousInventory();
-} finally {
-  await temporaryDirectories.cleanup();
-}
+after(() => temporaryDirectories.cleanup());
 
-async function testSchemasAreBoundAndExact() {
+test(async function testSchemasAreBoundAndExact() {
   const scanId = "f84c8312-a602-4660-8e01-518a176cd75a";
   const prepare = inventory.prepareReviewItemsInputSchema;
   const parent = inventory.reviewItemsReaderInputSchema;
@@ -91,10 +69,12 @@ async function testSchemasAreBoundAndExact() {
   assert.equal(parent.safeParse({ scanId, limit: 0 }).success, false);
   assert.equal(parent.safeParse({ scanId, limit: 1001 }).success, false);
   assert.equal(parent.safeParse({ scanId, cursor: "-1" }).success, false);
-}
+});
 
-async function testPrepareUsesTheExistingStandardGenerator() {
+test(async function testPrepareUsesTheExistingStandardGenerator() {
   const fixture = await createFixture("standard repository");
+  // Sandbox writable roots can have empty .git placeholders above an ordinary directory.
+  await mkdir(path.join(fixture.root, ".git"));
   await fixture.writeRepositoryFile("src/a.ts", "export const a = 1;\n");
   await fixture.writeRepositoryFile("-source.py", "source\n");
   await fixture.writeRepositoryFile("src/résumé.ts", "export const b = 2;\n");
@@ -119,7 +99,7 @@ async function testPrepareUsesTheExistingStandardGenerator() {
   const result = await inventory.prepareCodexSecurityReviewItems({
     ...fixture.scan,
     pluginRoot,
-    pythonCommand: process.env.PYTHON ?? "python3",
+    pythonCommand: fixturePython,
   });
   const scripts = await readdir(path.join(pluginRoot, "scripts"), {
     recursive: true,
@@ -188,9 +168,327 @@ async function testPrepareUsesTheExistingStandardGenerator() {
     { reviewItemsTotal: 1 },
   );
   assert.equal(await readFile(fixture.scanInventory, "utf8"), "-source.py\n");
-}
+});
 
-async function testInventoryChildPreservesSettingsAndCwd() {
+test(async function testNonUtf8InventoryPaths(t) {
+  if (["win32", "darwin"].includes(process.platform)) return t.skip();
+  const fixture = await createFixture("non-UTF-8 repository names");
+  const rawPath = Buffer.concat([
+    Buffer.from(path.join(fixture.repoRoot, "name-")),
+    Buffer.from([0xff]),
+    Buffer.from(".ts"),
+  ]);
+  await writeFile(rawPath, "raw path\n");
+  await fixture.writeRepositoryFile("name-�.ts", "Unicode path\n");
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    {
+      reviewItemsTotal: 2,
+    },
+  );
+  assert.ok((await readFile(fixture.scanInventory)).includes(0xff));
+  assert.deepEqual(
+    (await inventory.listCodexSecurityReviewItems(fixture.scan)).items
+      .map((item: { path: string }) => item.path)
+      .sort(),
+    ["./name-\udcff.ts", "./name-�.ts"],
+  );
+  await unlink(rawPath);
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    {
+      reviewItemsTotal: 1,
+    },
+  );
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
+    items: [{ path: "./name-�.ts" }],
+  });
+});
+
+test(async function testPrepareWithIgnoredTrackedFiles() {
+  const fixture = await createFixture("ignored tracked files");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile(".gitignore", "-generated/\n");
+  for (const name of ["a.ts", "b.ts"]) {
+    await fixture.writeRepositoryFile(
+      `-generated/${name}`,
+      "export const value = 1;\n",
+    );
+  }
+  await runGit(fixture.repoRoot, "add", "--force", "--", "-generated");
+  const context = { ...fixture.scan, scope: "-generated" };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 2,
+  });
+  const first = await inventory.listCodexSecurityReviewItems(context, {
+    limit: 1,
+  });
+  assert.deepEqual(first, {
+    items: [{ path: "-generated/a.ts" }],
+    nextCursor: "1",
+  });
+  assert.deepEqual(
+    await inventory.listCodexSecurityReviewItems(context, {
+      cursor: first.nextCursor,
+      limit: 1,
+    }),
+    { items: [{ path: "-generated/b.ts" }] },
+  );
+
+  // Git pathspec defaults cannot override the literal scope selected by the helper.
+  for (const mode of ["GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"]) {
+    await execFile(
+      process.execPath,
+      [
+        path.join(fixture.scan.pluginRoot, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        `--repo=${fixture.repoRoot}`,
+        "--scope=-generated",
+        `--out=${fixture.scanInventory}`,
+      ],
+      { env: { ...process.env, [mode]: "1" } },
+    );
+    assert.equal(
+      await readFile(fixture.scanInventory, "utf8"),
+      "-generated/a.ts\n-generated/b.ts\n",
+    );
+  }
+
+  const previous = await readFile(fixture.scanInventory);
+  await fixture.writeRepositoryFile(".git/index", "invalid");
+  await assert.rejects(
+    inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    /git ls-files.*fatal:.*index/isu,
+  );
+  assert.deepEqual(await readFile(fixture.scanInventory), previous);
+
+  const savedGit = process.env.CODEX_SECURITY_GIT;
+  try {
+    process.env.CODEX_SECURITY_GIT = "";
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan);
+    assert.equal(
+      await readFile(fixture.scanInventory, "utf8"),
+      "./.gitignore\n",
+    );
+  } finally {
+    if (savedGit === undefined) delete process.env.CODEX_SECURITY_GIT;
+    else process.env.CODEX_SECURITY_GIT = savedGit;
+  }
+});
+
+test(async function testPrepareExcludesGitMetadata() {
+  const fixture = await createFixture("nested repositories");
+  await runGit(fixture.repoRoot, "init", "-q");
+  for (const [name, source] of [
+    ["vendor/lib/.git/HEAD", "ref: refs/heads/main\n"],
+    ["vendor/lib/.git/hooks/example.py", "pass\n"],
+    ["vendor/lib/handler.py", "pass\n"],
+    ["vendor/worktree/.git", "gitdir: ../../.git/worktrees/example\n"],
+    ["vendor/worktree/handler.py", "pass\n"],
+    [".gitignore", "*.skip\n"],
+    [".github/workflows/check.yml", "name: example\n"],
+    ["src/widget.git", "example\n"],
+  ] as const) {
+    await fixture.writeRepositoryFile(name, source);
+  }
+
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    { reviewItemsTotal: 5 },
+  );
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
+    items: [
+      { path: "./.github/workflows/check.yml" },
+      { path: "./.gitignore" },
+      { path: "./src/widget.git" },
+      { path: "./vendor/lib/handler.py" },
+      { path: "./vendor/worktree/handler.py" },
+    ],
+  });
+
+  const metadataScope = { ...fixture.scan, scope: "vendor/lib/.git/hooks" };
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(metadataScope),
+    { reviewItemsTotal: 0 },
+  );
+  assert.deepEqual(
+    await inventory.listCodexSecurityReviewItems(metadataScope),
+    {
+      items: [],
+    },
+  );
+});
+
+test(async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
+  const fixture = await createFixture("selected committed changes");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile(
+    "src/changed.ts",
+    "export const value = 1;\n",
+  );
+  await fixture.writeRepositoryFile(
+    "src/deleted.ts",
+    "export const guard = true;\n",
+  );
+  await fixture.writeRepositoryFile(
+    "src/unrelated.ts",
+    "export const unrelated = 1;\n",
+  );
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "base");
+  const baseRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
+
+  await fixture.writeRepositoryFile(
+    "src/changed.ts",
+    "export const value = 2;\n",
+  );
+  await fixture.writeRepositoryFile(
+    "src/new.ts",
+    "export const added = true;\n",
+  );
+  await fixture.writeRepositoryFile(
+    "tests/example.ts",
+    "export const testSetup = true;\n",
+  );
+  await unlink(path.join(fixture.repoRoot, "src/deleted.ts"));
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "selected changes");
+  const headRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
+  const context = {
+    ...fixture.scan,
+    mode: "diff",
+    targetContract: {
+      diffTarget: { kind: "range", baseRevision, headRevision },
+    },
+  };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 4,
+  });
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
+    items: [
+      { path: "src/changed.ts" },
+      { path: "src/deleted.ts" },
+      { path: "src/new.ts" },
+      { path: "tests/example.ts" },
+    ],
+  });
+});
+
+test(async function testPrepareIncludesPerlSourceWithMixedEncodings() {
+  const fixture = await createFixture("perl source extensions");
+  await runGit(fixture.repoRoot, "init", "-q");
+  const perlSources = [
+    "lib/Util.pm",
+    "t/basic.t",
+    "www/cgi-bin/app.pl",
+    "www/cgi-bin/index.cgi",
+  ];
+  for (const source of perlSources)
+    await fixture.writeRepositoryFile(source, "use strict;\n1;\n");
+  // Perl CGI scripts need not carry a Perl extension at all.
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/entrypoint",
+    "#!/usr/bin/env perl\nuse strict;\n1;\n",
+  );
+  await fixture.writeRepositoryFile("www/cgi-bin/legacy.cgi", EUC_JP_PERL_BASE);
+  // A NUL byte keeps this out even though `.pm` is a familiar source
+  // extension: selection is by content, not by suffix.
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/binary.pm",
+    Buffer.from([0x00, 0xff, 0x01]),
+  );
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "base");
+  const baseRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
+
+  for (const source of perlSources)
+    await fixture.writeRepositoryFile(source, "use strict;\n2;\n");
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/entrypoint",
+    "#!/usr/bin/env perl\nuse strict;\n2;\n",
+  );
+  await fixture.writeRepositoryFile("www/cgi-bin/legacy.cgi", EUC_JP_PERL_HEAD);
+  await fixture.writeRepositoryFile(
+    "www/cgi-bin/binary.pm",
+    Buffer.from([0x00, 0xff, 0x02]),
+  );
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "change");
+  const headRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
+  const context = {
+    ...fixture.scan,
+    mode: "diff",
+    targetContract: {
+      diffTarget: { kind: "range", baseRevision, headRevision },
+    },
+  };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 6,
+  });
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
+    items: [
+      { path: "lib/Util.pm" },
+      { path: "t/basic.t" },
+      { path: "www/cgi-bin/app.pl" },
+      { path: "www/cgi-bin/entrypoint" },
+      { path: "www/cgi-bin/index.cgi" },
+      { path: "www/cgi-bin/legacy.cgi" },
+    ],
+  });
+});
+
+test(async function testPrepareIncludesStagedAndUnstagedChanges() {
+  const fixture = await createFixture("selected working tree changes");
+  await runGit(fixture.repoRoot, "init", "-q");
+  await fixture.writeRepositoryFile(
+    "src/changed.ts",
+    "export const value = 1;\n",
+  );
+  await runGit(fixture.repoRoot, "add", ".");
+  await runGit(fixture.repoRoot, "commit", "-qm", "base");
+  const revision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
+
+  await fixture.writeRepositoryFile(
+    "src/changed.ts",
+    "export const value = 2;\n",
+  );
+  await fixture.writeRepositoryFile(
+    "src/staged.ts",
+    "export const staged = true;\n",
+  );
+  await runGit(fixture.repoRoot, "add", "src/staged.ts");
+  await fixture.writeRepositoryFile(
+    "src/untracked.ts",
+    "export const untracked = true;\n",
+  );
+  const context = {
+    ...fixture.scan,
+    mode: "diff",
+    targetContract: {
+      diffTarget: {
+        kind: "working_tree",
+        baseRevision: revision,
+        headRevision: revision,
+      },
+    },
+  };
+
+  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
+    reviewItemsTotal: 3,
+  });
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
+    items: [
+      { path: "src/changed.ts" },
+      { path: "src/staged.ts" },
+      { path: "src/untracked.ts" },
+    ],
+  });
+});
+
+test(async function testInventoryChildPreservesSettingsAndCwd() {
   const fixture = await createFixture("inventory child settings");
   await runGit(fixture.repoRoot, "init", "-q");
   await runGit(fixture.repoRoot, "commit", "--allow-empty", "-qm", "base");
@@ -274,9 +572,10 @@ async function testInventoryChildPreservesSettingsAndCwd() {
       else process.env[name] = value;
     }
   }
-}
+});
 
-async function testInventoryChildPreservesRawPaths() {
+test(async function testInventoryChildPreservesRawPaths(t) {
+  if (process.platform === "win32") return t.skip();
   const fixture = await createFixture("inventory raw child paths");
   await runGit(fixture.repoRoot, "init", "-q");
   await runGit(fixture.repoRoot, "commit", "--allow-empty", "-qm", "base");
@@ -346,13 +645,15 @@ async function testInventoryChildPreservesRawPaths() {
       [
         // Raw environment bytes are valid on macOS even though APFS names are UTF-8.
         'HOME=$(printf "/fixture/home-\\377"); export HOME',
-        `GIT_CONFIG_GLOBAL=$(printf '%b' '${octal(config)}'); export GIT_CONFIG_GLOBAL`,
-        `CODEX_SECURITY_GIT=$(printf '%b' '${octal(git)}'); export CODEX_SECURITY_GIT`,
+        'GIT_CONFIG_GLOBAL=$(printf "%b" "$3"); export GIT_CONFIG_GLOBAL',
+        'CODEX_SECURITY_GIT=$(printf "%b" "$4"); export CODEX_SECURITY_GIT',
         'exec "$1" "$2"',
       ].join("\n"),
       "inventory-fixture",
       process.execPath,
       driver,
+      octal(config),
+      octal(git),
     ],
     { encoding: "utf8" },
   );
@@ -362,9 +663,9 @@ async function testInventoryChildPreservesRawPaths() {
     stdin: 0,
     env: loaderSettings,
   });
-}
+});
 
-async function testInventoryChildFailuresPreserveOutput() {
+test(async function testInventoryChildFailuresPreserveOutput() {
   for (const signal of process.platform === "win32" ? [false] : [false, true]) {
     const fixture = await createFixture("inventory child failure");
     const pluginRoot = path.join(fixture.root, "failing plugin");
@@ -388,286 +689,9 @@ async function testInventoryChildFailuresPreserveOutput() {
       "previous.py\n",
     );
   }
-}
+});
 
-async function testNonUtf8InventoryPaths() {
-  const fixture = await createFixture("non-UTF-8 repository names");
-  const rawPath = Buffer.concat([
-    Buffer.from(path.join(fixture.repoRoot, "name-")),
-    Buffer.from([0xff]),
-    Buffer.from(".ts"),
-  ]);
-  await writeFile(rawPath, "raw path\n");
-  await fixture.writeRepositoryFile("name-�.ts", "Unicode path\n");
-  assert.deepEqual(
-    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
-    {
-      reviewItemsTotal: 2,
-    },
-  );
-  assert.ok((await readFile(fixture.scanInventory)).includes(0xff));
-  assert.deepEqual(
-    (await inventory.listCodexSecurityReviewItems(fixture.scan)).items
-      .map((item: { path: string }) => item.path)
-      .sort(),
-    ["./name-\udcff.ts", "./name-�.ts"],
-  );
-  await unlink(rawPath);
-  assert.deepEqual(
-    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
-    {
-      reviewItemsTotal: 1,
-    },
-  );
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
-    items: [{ path: "./name-�.ts" }],
-  });
-}
-
-async function testPrepareListsIgnoredTrackedFilesOnce() {
-  const fixture = await createFixture("ignored tracked files");
-  await runGit(fixture.repoRoot, "init", "-q");
-  await fixture.writeRepositoryFile(".gitignore", "-generated/\n");
-  for (const name of ["a.ts", "b.ts"]) {
-    await fixture.writeRepositoryFile(
-      `-generated/${name}`,
-      "export const value = 1;\n",
-    );
-  }
-  await runGit(fixture.repoRoot, "add", "--force", "--", "-generated");
-  const context = { ...fixture.scan, scope: "-generated" };
-
-  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 2,
-  });
-  const first = await inventory.listCodexSecurityReviewItems(context, {
-    limit: 1,
-  });
-  assert.deepEqual(first, {
-    items: [{ path: "-generated/a.ts" }],
-    nextCursor: "1",
-  });
-  assert.deepEqual(
-    await inventory.listCodexSecurityReviewItems(context, {
-      cursor: first.nextCursor,
-      limit: 1,
-    }),
-    { items: [{ path: "-generated/b.ts" }] },
-  );
-}
-
-async function testPrepareExcludesGitMetadata() {
-  const fixture = await createFixture("nested repositories");
-  for (const [name, source] of [
-    [".git/config", "[core]\n"],
-    ["vendor/lib/.git/HEAD", "ref: refs/heads/main\n"],
-    ["vendor/lib/.git/hooks/example.py", "pass\n"],
-    ["vendor/lib/handler.py", "pass\n"],
-    ["vendor/worktree/.git", "gitdir: ../../.git/worktrees/example\n"],
-    ["vendor/worktree/handler.py", "pass\n"],
-    [".gitignore", "*.skip\n"],
-    [".github/workflows/check.yml", "name: example\n"],
-    ["src/widget.git", "example\n"],
-  ] as const) {
-    await fixture.writeRepositoryFile(name, source);
-  }
-
-  assert.deepEqual(
-    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
-    { reviewItemsTotal: 5 },
-  );
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
-    items: [
-      { path: "./.github/workflows/check.yml" },
-      { path: "./.gitignore" },
-      { path: "./src/widget.git" },
-      { path: "./vendor/lib/handler.py" },
-      { path: "./vendor/worktree/handler.py" },
-    ],
-  });
-
-  const metadataScope = { ...fixture.scan, scope: "vendor/lib/.git/hooks" };
-  assert.deepEqual(
-    await inventory.prepareCodexSecurityReviewItems(metadataScope),
-    { reviewItemsTotal: 0 },
-  );
-  assert.deepEqual(
-    await inventory.listCodexSecurityReviewItems(metadataScope),
-    {
-      items: [],
-    },
-  );
-}
-
-async function testPrepareUsesOnlyAuthoritativeDiffChanges() {
-  const fixture = await createFixture("selected committed changes");
-  await runGit(fixture.repoRoot, "init", "-q");
-  await fixture.writeRepositoryFile(
-    "src/changed.ts",
-    "export const value = 1;\n",
-  );
-  await fixture.writeRepositoryFile(
-    "src/deleted.ts",
-    "export const guard = true;\n",
-  );
-  await fixture.writeRepositoryFile(
-    "src/unrelated.ts",
-    "export const unrelated = 1;\n",
-  );
-  await runGit(fixture.repoRoot, "add", ".");
-  await runGit(fixture.repoRoot, "commit", "-qm", "base");
-  const baseRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
-
-  await fixture.writeRepositoryFile(
-    "src/changed.ts",
-    "export const value = 2;\n",
-  );
-  await fixture.writeRepositoryFile(
-    "src/new.ts",
-    "export const added = true;\n",
-  );
-  await fixture.writeRepositoryFile(
-    "tests/example.ts",
-    "export const testSetup = true;\n",
-  );
-  await unlink(path.join(fixture.repoRoot, "src/deleted.ts"));
-  await runGit(fixture.repoRoot, "add", ".");
-  await runGit(fixture.repoRoot, "commit", "-qm", "selected changes");
-  const headRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
-  const context = {
-    ...fixture.scan,
-    mode: "diff",
-    targetContract: {
-      diffTarget: { kind: "range", baseRevision, headRevision },
-    },
-  };
-
-  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 4,
-  });
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-    items: [
-      { path: "src/changed.ts" },
-      { path: "src/deleted.ts" },
-      { path: "src/new.ts" },
-      { path: "tests/example.ts" },
-    ],
-  });
-}
-
-async function testPrepareIncludesPerlSourceWithMixedEncodings() {
-  const fixture = await createFixture("perl source extensions");
-  await runGit(fixture.repoRoot, "init", "-q");
-  const perlSources = [
-    "lib/Util.pm",
-    "t/basic.t",
-    "www/cgi-bin/app.pl",
-    "www/cgi-bin/index.cgi",
-  ];
-  for (const source of perlSources)
-    await fixture.writeRepositoryFile(source, "use strict;\n1;\n");
-  // Perl CGI scripts need not carry a Perl extension at all.
-  await fixture.writeRepositoryFile(
-    "www/cgi-bin/entrypoint",
-    "#!/usr/bin/env perl\nuse strict;\n1;\n",
-  );
-  await fixture.writeRepositoryFile("www/cgi-bin/legacy.cgi", EUC_JP_PERL_BASE);
-  // A NUL byte keeps this out even though `.pm` is a familiar source
-  // extension: selection is by content, not by suffix.
-  await fixture.writeRepositoryFile(
-    "www/cgi-bin/binary.pm",
-    Buffer.from([0x00, 0xff, 0x01]),
-  );
-  await runGit(fixture.repoRoot, "add", ".");
-  await runGit(fixture.repoRoot, "commit", "-qm", "base");
-  const baseRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
-
-  for (const source of perlSources)
-    await fixture.writeRepositoryFile(source, "use strict;\n2;\n");
-  await fixture.writeRepositoryFile(
-    "www/cgi-bin/entrypoint",
-    "#!/usr/bin/env perl\nuse strict;\n2;\n",
-  );
-  await fixture.writeRepositoryFile("www/cgi-bin/legacy.cgi", EUC_JP_PERL_HEAD);
-  await fixture.writeRepositoryFile(
-    "www/cgi-bin/binary.pm",
-    Buffer.from([0x00, 0xff, 0x02]),
-  );
-  await runGit(fixture.repoRoot, "add", ".");
-  await runGit(fixture.repoRoot, "commit", "-qm", "change");
-  const headRevision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
-  const context = {
-    ...fixture.scan,
-    mode: "diff",
-    targetContract: {
-      diffTarget: { kind: "range", baseRevision, headRevision },
-    },
-  };
-
-  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 6,
-  });
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-    items: [
-      { path: "lib/Util.pm" },
-      { path: "t/basic.t" },
-      { path: "www/cgi-bin/app.pl" },
-      { path: "www/cgi-bin/entrypoint" },
-      { path: "www/cgi-bin/index.cgi" },
-      { path: "www/cgi-bin/legacy.cgi" },
-    ],
-  });
-}
-
-async function testPrepareIncludesStagedAndUnstagedChanges() {
-  const fixture = await createFixture("selected working tree changes");
-  await runGit(fixture.repoRoot, "init", "-q");
-  await fixture.writeRepositoryFile(
-    "src/changed.ts",
-    "export const value = 1;\n",
-  );
-  await runGit(fixture.repoRoot, "add", ".");
-  await runGit(fixture.repoRoot, "commit", "-qm", "base");
-  const revision = await runGit(fixture.repoRoot, "rev-parse", "HEAD");
-
-  await fixture.writeRepositoryFile(
-    "src/changed.ts",
-    "export const value = 2;\n",
-  );
-  await fixture.writeRepositoryFile(
-    "src/staged.ts",
-    "export const staged = true;\n",
-  );
-  await runGit(fixture.repoRoot, "add", "src/staged.ts");
-  await fixture.writeRepositoryFile(
-    "src/untracked.ts",
-    "export const untracked = true;\n",
-  );
-  const context = {
-    ...fixture.scan,
-    mode: "diff",
-    targetContract: {
-      diffTarget: {
-        kind: "working_tree",
-        baseRevision: revision,
-        headRevision: revision,
-      },
-    },
-  };
-
-  assert.deepEqual(await inventory.prepareCodexSecurityReviewItems(context), {
-    reviewItemsTotal: 3,
-  });
-  assert.deepEqual(await inventory.listCodexSecurityReviewItems(context), {
-    items: [
-      { path: "src/changed.ts" },
-      { path: "src/staged.ts" },
-      { path: "src/untracked.ts" },
-    ],
-  });
-}
-
-async function testWorkerReadsItsOwnBoundInventory() {
+test(async function testWorkerReadsItsOwnBoundInventory() {
   const fixture = await createFixture("isolated worker inventory");
   await writeInventory(fixture.scanInventory, "./src/parent.ts\n");
   await writeInventory(fixture.workerInventory, "./src/worker.ts\n");
@@ -679,9 +703,9 @@ async function testWorkerReadsItsOwnBoundInventory() {
     await inventory.listCodexSecurityReviewItems(fixture.worker),
     { items: [{ path: "./src/worker.ts" }] },
   );
-}
+});
 
-async function testCursorDoesNotExceedInventory() {
+test(async function testCursorDoesNotExceedInventory() {
   const fixture = await createFixture("inventory paging");
   await writeInventory(fixture.scanInventory, "./src/a.ts\n./src/b.ts\n");
 
@@ -689,9 +713,9 @@ async function testCursorDoesNotExceedInventory() {
     inventory.listCodexSecurityReviewItems(fixture.scan, { cursor: "3" }),
     /cursor/i,
   );
-}
+});
 
-async function testEmptyInventoryIsValid() {
+test(async function testEmptyInventoryIsValid() {
   const fixture = await createFixture("empty repository");
 
   assert.deepEqual(
@@ -702,9 +726,9 @@ async function testEmptyInventoryIsValid() {
   assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
     items: [],
   });
-}
+});
 
-async function testUnsafeInventoryRowsAreRejected() {
+test(async function testUnsafeInventoryRowsAreRejected() {
   for (const unsafe of [
     "../outside.ts",
     "/absolute.ts",
@@ -718,9 +742,9 @@ async function testUnsafeInventoryRowsAreRejected() {
       /inventory row 1 has an unsafe repository path/,
     );
   }
-}
+});
 
-async function testSymlinkedInventoryIsRejected() {
+test(async function testSymlinkedInventoryIsRejected() {
   const fixture = await createFixture("symlinked artifact");
   const outside = path.join(fixture.root, "outside.txt");
   await writeFile(outside, "src/outside.ts\n");
@@ -731,9 +755,9 @@ async function testSymlinkedInventoryIsRejected() {
     inventory.listCodexSecurityReviewItems(fixture.scan),
     /safe|regular|symlink/i,
   );
-}
+});
 
-async function testInventoryReadErrorsAreReported() {
+test(async function testInventoryReadErrorsAreReported() {
   const fixture = await createFixture("missing inventory");
 
   await assert.rejects(
@@ -765,18 +789,18 @@ async function testInventoryReadErrorsAreReported() {
       },
     );
   }
-}
+});
 
-async function testWorkersCannotPrepareInventory() {
+test(async function testWorkersCannotPrepareInventory() {
   const fixture = await createFixture("worker cannot prepare");
 
   await assert.rejects(
     inventory.prepareCodexSecurityReviewItems(fixture.worker),
     /only a parent scan/i,
   );
-}
+});
 
-async function testBoundScopeFailurePreservesPreviousInventory() {
+test(async function testBoundScopeFailurePreservesPreviousInventory() {
   const fixture = await createFixture("invalid bound scope");
   await writeInventory(fixture.scanInventory, "./src/original.ts\n");
   const invalid = { ...fixture.scan, scope: "../outside" };
@@ -789,9 +813,9 @@ async function testBoundScopeFailurePreservesPreviousInventory() {
     await readFile(fixture.scanInventory, "utf8"),
     "./src/original.ts\n",
   );
-}
+});
 
-async function testInvalidDiffTargetPreservesPreviousInventory() {
+test(async function testInvalidDiffTargetPreservesPreviousInventory() {
   const fixture = await createFixture("invalid selected changes");
   await writeInventory(fixture.scanInventory, "src/original.ts\n");
 
@@ -827,7 +851,7 @@ async function testInvalidDiffTargetPreservesPreviousInventory() {
     await readFile(fixture.scanInventory, "utf8"),
     "src/original.ts\n",
   );
-}
+});
 
 async function createFixture(label: string) {
   const root = await temporaryDirectories.create(
@@ -896,5 +920,3 @@ async function runGit(repository: string, ...arguments_: string[]) {
   );
   return stdout.trim();
 }
-
-console.log("compact artifact inventory tests passed");

@@ -1,6 +1,9 @@
+"""Check how structured scan records and legacy evidence become readable Markdown reports."""
+
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 from workbench_test_support import load_script
@@ -46,6 +49,17 @@ def canonical_documents() -> tuple[dict[str, object], dict[str, object], dict[st
         "deferred": [],
     }
     return manifest, findings, coverage
+
+
+def test_report_points_to_distinct_worker_models_in_the_manifest(monkeypatch) -> None:
+    monkeypatch.syspath_prepend(Path(PROJECTION.__file__).parent)
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"].update(
+        review={},
+        reviewState={"reviews": [{"workerId": "worker", "threatModel": {"summary": "Job state"}}]},
+    )
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "scan.reviewState.reviews" in markdown
 
 
 def report_with_finding(**fields: object) -> str:
@@ -145,24 +159,21 @@ def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
 def test_projection_renders_inline_code_and_section_code_evidence() -> None:
     manifest, findings, coverage = canonical_documents()
     finding = findings["findings"][0]
-    finding["summary"] = (
-        "The `environment/add` RPC forwards `environmentId` to "
-        "`EnvironmentManager::upsert_environment()`."
-    )
+    finding["summary"] = "The `route/set` RPC forwards `routeName` to `RouteTable::set_route()`."
     finding["codeEvidence"] = [
         {
             "id": "runtime-upsert",
             "label": "Runtime upsert omits the reserved-ID check",
-            "path": "codex-rs/exec-server/src/environment.rs",
-            "startLine": 253,
-            "endLine": 281,
+            "path": "src/routes/table.rs",
+            "startLine": 25,
+            "endLine": 29,
             "language": "rust",
-            "code": "self.environments.write().insert(environment_id, environment);",
-            "explanation": "The runtime path inserts `local` without reusing the startup check.",
+            "code": "self.routes.insert(route_name, destination);",
+            "explanation": "The runtime path inserts `owner` without reusing the startup check.",
         }
     ]
     finding["rootCause"] = {
-        "summary": "`local` is reserved, but `upsert_environment()` accepts it.",
+        "summary": "`owner` is reserved, but `set_route()` accepts it.",
         "evidenceRefs": ["runtime-upsert"],
     }
     finding["validation"] = {
@@ -170,19 +181,19 @@ def test_projection_renders_inline_code_and_section_code_evidence() -> None:
         "evidenceRefs": ["runtime-upsert"],
     }
     finding["attackPath"] = {
-        "dataflow": {"summary": "`environment/add` -> shared environment map"},
+        "dataflow": {"summary": "`route/set` -> shared route map"},
         "evidenceRefs": ["runtime-upsert"],
     }
 
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
-    assert "The `environment/add` RPC forwards `environmentId`" in markdown
+    assert "The `route/set` RPC forwards `routeName`" in markdown
     assert "#### Root Cause" in markdown
     assert "**Runtime upsert omits the reserved-ID check**" in markdown
-    assert "`codex-rs/exec-server/src/environment.rs:253-281`" in markdown
+    assert "`src/routes/table.rs:25-29`" in markdown
     assert "```rust" in markdown
-    assert "self.environments.write().insert(environment_id, environment);" in markdown
-    assert "The runtime path inserts `local` without reusing the startup check." in markdown
+    assert "self.routes.insert(route_name, destination);" in markdown
+    assert "The runtime path inserts `owner` without reusing the startup check." in markdown
 
 
 @pytest.mark.parametrize("reference_key", ["evidenceRefs", "evidence_refs"])
@@ -539,6 +550,7 @@ def test_projection_groups_deep_reports_by_candidate_id(coverage_mode: str) -> N
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "| Reportable DSS findings | 1 |" in markdown
+    assert "This report omits details" not in markdown
     assert "| Report instances | 2 |" in markdown
     assert "| Findings | Reports | Severity | Confidence | Detailed write-up |" in markdown
     assert (
@@ -872,16 +884,44 @@ def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
     assert "`` file&amp;` ``" in markdown
 
 
-def test_projection_omits_informational_findings() -> None:
+@pytest.mark.parametrize("status", ["completed", "interrupted"])
+def test_projection_explains_informational_only_findings(status: str) -> None:
     manifest, findings, coverage = canonical_documents()
+    manifest["scan"]["status"] = status
     findings["findings"][0]["severity"]["level"] = "informational"
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    section = markdown.split("## Findings", 1)[1]
 
     assert "| Reportable findings | 0 |" in markdown
-    assert "### No findings" in markdown
-    assert "No findings were reported." in markdown
-    assert "Parser \\| boundary" not in markdown
+    assert "### No reportable findings" in section
+    assert "This report omits details for 1 informational finding." in section
+    assert "`findings.json`" in section and "SARIF" in section and "CSV" in section
+    assert "No findings" not in section
+    assert ("No vulnerability conclusion can be drawn." in section) == (status == "interrupted")
+    assert r"Parser \| boundary" not in markdown
+
+
+def test_deep_projection_counts_omitted_informational_findings() -> None:
+    manifest, findings, coverage = canonical_documents()
+    coverage["mode"] = "deep_repository"
+    reportable = findings["findings"][0]
+    for index in range(2):
+        findings["findings"].append(
+            {
+                **reportable,
+                "occurrenceId": f"info-{index}",
+                "title": f"Informational detail {index}",
+                "severity": {"level": "informational"},
+            }
+        )
+
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+
+    assert "| Reportable DSS findings | 1 |" in markdown
+    assert "This report omits details for 2 informational findings." in markdown
+    assert r"Parser \| boundary" in markdown
+    assert "Informational detail" not in markdown
 
 
 def test_projection_does_not_claim_completed_gates_for_stopped_scan() -> None:
@@ -891,6 +931,7 @@ def test_projection_does_not_claim_completed_gates_for_stopped_scan() -> None:
 
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
+    assert "No findings were retained before the scan stopped." in markdown
     assert "survived the canonical discovery, validation" not in markdown
     assert "No vulnerability conclusion can be drawn" in markdown
 
@@ -920,6 +961,7 @@ def test_projection_preserves_follow_up_without_classifying_its_reason(reason: s
     markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
 
     assert "No findings were reported." in markdown
+    assert "This report omits details" not in markdown
     assert "## Deferred Requested Work" in markdown
     assert "## Open Questions And Follow Up" not in markdown
     assert reason in markdown

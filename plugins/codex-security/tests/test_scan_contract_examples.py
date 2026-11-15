@@ -1,3 +1,5 @@
+"""Validate the checked-in scan examples and exercise schema boundaries for evidence and coverage."""
+
 from __future__ import annotations
 
 import copy
@@ -7,7 +9,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator, FormatChecker, ValidationError
+from jsonschema import Draft202012Validator, FormatChecker, SchemaError, ValidationError
 from referencing import Registry, Resource
 from workbench_test_support import saved_coverage
 
@@ -53,6 +55,10 @@ class ScanContractExamplesTest(unittest.TestCase):
         for schema_path in sorted(SCHEMA_DIR.glob("*.schema.json")):
             with self.subTest(schema=schema_path.name):
                 Draft202012Validator.check_schema(read_object(schema_path))
+
+    def test_schema_rejects_invalid_reference(self) -> None:
+        with self.assertRaisesRegex(SchemaError, "is not a 'uri-reference'"):
+            Draft202012Validator.check_schema({"$ref": "invalid reference"})
 
     def test_standard_draft_requires_review_state(self) -> None:
         finding = {

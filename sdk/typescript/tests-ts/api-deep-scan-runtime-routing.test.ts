@@ -10,6 +10,7 @@ import {
   type DirectDeepScanOptions,
 } from "../src/deep-scan.js";
 import { resolveCodexCommand } from "../src/runtime.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import {
@@ -456,6 +457,51 @@ test.each([
   }
 });
 
+test.skipIf(process.platform === "win32")(
+  "the native app-server filters packaged tool aliases added during a campaign",
+  async () => {
+    const home = await temporaryDirectory();
+    const source = join(home, "source");
+    const bin = join(home, "vendor", "bin");
+    const tools = join(home, "vendor", "codex-path");
+    await Promise.all(
+      [source, bin, tools].map((path) => mkdir(path, { recursive: true })),
+    );
+    const marker = join(home, "source-shell-ran");
+    await writeFile(
+      join(source, "sh"),
+      '#!/bin/sh\n: > "$SHELL_MARKER"\nexec /bin/sh "$@"\n',
+      { mode: 0o700 },
+    );
+    await symlink(join(source, "sh"), join(tools, "sh"));
+    const command = join(bin, "codex");
+    await writeFile(
+      command,
+      '#!/usr/bin/env sh\ncase "$*" in *--help*) printf "  --cd <PATH>\\n" ;; *) exit 43 ;; esac\n',
+      { mode: 0o700 },
+    );
+    await withProtectedExecutableRoots([source], async () => {
+      await expect(
+        readDeepScanParentConfig({
+          codexOptions: {
+            env: {
+              PATH: "/usr/bin:/bin",
+              CODEX_HOME: home,
+              SHELL_MARKER: marker,
+            },
+          },
+          preflightCommand: { command },
+          scanDir: home,
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toThrow(/configuration read completed with code 43/u);
+    });
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
+
+// These stock routing tests disable plugins so a background marketplace fetch
+// cannot hold the temporary Codex home open after the app-server exits.
 test("stock Codex resolves ordered profile overrides and inherited transport policy in the scan", async () => {
   const home = await temporaryDirectory();
   const scanDir = await temporaryDirectory();
@@ -472,6 +518,7 @@ test("stock Codex resolves ordered profile overrides and inherited transport pol
         config: {
           "features.code_mode.enabled": true,
           features: {
+            plugins: false,
             code_mode: {
               enabled: true,
               direct_only_tool_namespaces: ["audit"],
@@ -525,6 +572,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         env: { CODEX_HOME: home },
         config: {
           features: {
+            plugins: false,
             code_mode: {
               enabled: true,
               direct_only_tool_namespaces: ["audit"],

@@ -1,3 +1,5 @@
+"""Exercise competing finding workflow registrations and the scope of their optional evidence snapshots."""
+
 from __future__ import annotations
 
 import hashlib

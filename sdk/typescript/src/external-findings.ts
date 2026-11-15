@@ -1,6 +1,6 @@
 import { isNativeError, isNumberObject } from "node:util/types";
 import { CodexSecurityError } from "./errors.js";
-import type { ExternalPublicationOptions } from "./external-findings-publish.js";
+import type { LocalExternalImportOptions } from "./external-findings-import.js";
 import {
   checkEmittedJsonNumber,
   checkReportNumber,
@@ -38,6 +38,48 @@ export interface ExternalFindings {
     source_finding_id: string | null;
     reason: string;
   }[];
+}
+
+export function hasNoExternalRecords(input: ExternalFindings): boolean {
+  return input.read === 0 && !input.findings.length && !input.excluded.length;
+}
+
+/** Classify a reader selection before deciding whether to store, publish, or report it. */
+export function externalImportDisposition(
+  input: ExternalFindings,
+): "ready" | "empty" | "excluded" | "failed" {
+  if (input.findings.length) return "ready";
+  const errors = input.report?.["errors"];
+  if (Array.isArray(errors) && errors.length) return "failed";
+  if (hasNoExternalRecords(input)) return "empty";
+  return input.read === input.excluded.length ? "excluded" : "failed";
+}
+
+/** No findings can be imported. The selection retains every reader exclusion and diagnostic. */
+export class NoPublishableFindingsError extends CodexSecurityError {
+  readonly summary: string;
+
+  constructor(public readonly selection: ExternalFindings) {
+    const diagnostics = reportForJson(selection.report)?.["errors"];
+    const summary =
+      externalImportDisposition(selection) === "empty"
+        ? "No supported findings are ready to publish: the report is empty."
+        : `No supported findings are ready to publish (${selection.read} read, ${selection.excluded.length} excluded).${Array.isArray(diagnostics) && diagnostics.length ? ` Scanner diagnostics: ${JSON.stringify(diagnostics)}` : ""}`;
+    const reasons = selection.excluded.map(
+      (item) => `Item ${item.position}: ${item.reason}`,
+    );
+    super([summary, ...reasons].join(" "));
+    this.summary = summary;
+  }
+}
+
+export function reportForJson(report: ExternalFindings["report"]) {
+  const errors = report?.["errors"];
+  if (!Array.isArray(errors)) return report;
+  const json = JSON.stringify(errors, (_key, entry: unknown) =>
+    entry instanceof Error ? { ...entry, message: entry.message } : entry,
+  );
+  return { ...report, errors: JSON.parse(json) as unknown[] };
 }
 
 const isScannerError = Error.isError ?? isNativeError;
@@ -80,6 +122,7 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
   input: T,
   checkEvidenceNumber = (value: number) => requireJsonNumber(value, "Evidence"),
   target: ExternalImportTarget = "local",
+  provider?: string,
 ): T {
   const fields = new Map<string, unknown>();
   const errors: { path: string[]; error: Error }[] = [];
@@ -153,6 +196,19 @@ export function snapshotNormalizedFindings<T extends Partial<ExternalFindings>>(
     );
     parent[key] = error;
   }
+  // Reader scope can live on a getter. Do not evaluate enumerable getters twice.
+  if (provider !== undefined) {
+    const keys = ["sourceFormat", "semgrepPlatformScope", "snykRestContext"];
+    if (provider === "semgrep" || provider === "snyk")
+      keys.push("sourceRepositoryUrl", "sourceRepositoryPlatform");
+    for (const key of keys)
+      if (
+        !(key in result) &&
+        key in input &&
+        !Object.prototype.propertyIsEnumerable.call(input, key)
+      )
+        result[key] = structuredClone(Reflect.get(input, key));
+  }
   return result;
 }
 
@@ -165,24 +221,23 @@ export function cloneImportPreview<T extends ExternalFindings>(input: T): T {
   };
 }
 
-/** @internal Keep earlier provider projections only for immutable request replay. */
-export interface ExternalPublicationInput {
-  current: ExternalFindings;
-  legacy: ExternalFindings;
-  currentIdentity: unknown;
-  legacyIdentity: unknown;
-}
-
 /** Capture the caller's import settings before reading an export or resolving its destination. */
-export function snapshotImportOptions<
-  P extends ExternalPublicationOptions["provider"],
->({
+export function snapshotImportOptions<P extends string>({
   repository,
   provider,
   sourceKey,
   sourceRepositoryUrl,
+  trivyScanRoot,
   inspectorProjectMap,
-}: ExternalPublicationOptions & { provider: P }) {
+}: Omit<LocalExternalImportOptions, "provider"> & { provider: P }) {
+  if (provider === "trivy" && sourceRepositoryUrl !== undefined)
+    throw new CodexSecurityError(
+      "Trivy reads repository provenance from the report; do not supply --source-repository-url.",
+    );
+  if (trivyScanRoot !== undefined && provider !== "trivy")
+    throw new CodexSecurityError(
+      "--trivy-scan-root applies only to --provider trivy.",
+    );
   if (inspectorProjectMap !== undefined && provider !== "inspector")
     throw new CodexSecurityError(
       "An Inspector project map requires the inspector provider.",
@@ -192,6 +247,7 @@ export function snapshotImportOptions<
     provider,
     sourceKey,
     sourceRepositoryUrl,
+    trivyScanRoot,
     inspectorProjectMap: inspectorProjectMap && new Map(inspectorProjectMap),
   };
 }

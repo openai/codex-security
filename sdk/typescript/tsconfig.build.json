@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/retry-windows-rename.js"],
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "dist",

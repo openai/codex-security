@@ -1,9 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { workbenchCommand } from "./support/workbench-command.js";
+import {
+  scanRegistrationArguments,
+  workbenchCommand,
+} from "./support/workbench-command.js";
 import { runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
@@ -11,6 +16,8 @@ import { main } from "../src/cli.js";
 import { ScanInterruptedError } from "../src/errors.js";
 import { dependencies, fakeSecurity } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
+
+const pythonExecutable = useTestPython();
 
 type FindingsDocument = {
   findings: Array<{
@@ -66,8 +73,7 @@ async function startDraftScan(
   recipeFromStdin = false,
 ) {
   const root = await temporaryDirectory();
-  const python =
-    process.env["PYTHON"] ?? Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
 
   const target = join(
@@ -185,6 +191,53 @@ async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
 }
 
 describe("scan publication and artifact recovery", () => {
+  test("preserves recorded artifact paths when archiving a completed scan", async () => {
+    const fixture = await startDraftScan();
+    await completeScan(fixture);
+    const { scanDir, scanId } = fixture;
+    using database = new Database(join(fixture.stateDir, "workbench.sqlite3"));
+    // Older scans also registered the coverage document as an artifact.
+    database
+      .query(
+        "INSERT OR IGNORE INTO scan_artifacts (scan_id, kind, path, created_at) VALUES (?, 'coverage', ?, CURRENT_TIMESTAMP)",
+      )
+      .run(scanId, join(scanDir, "coverage.json"));
+    const archived = scanDir + ".previous-fixture";
+    await rename(scanDir, archived);
+    await mkdir(scanDir, { mode: 0o700 });
+    const registration = [
+      ...scanRegistrationArguments(fixture.repository, scanDir),
+      "--archive-existing",
+    ];
+
+    await expect(workbench(fixture, registration)).rejects.toThrow(
+      "The archived scan directory is required to preserve existing scan artifacts.",
+    );
+    expect(await readdir(scanDir)).toEqual([]);
+    await workbench(fixture, [
+      ...registration,
+      "--archived-scan-dir",
+      archived,
+    ]);
+    expect(
+      database.query("SELECT scan_dir FROM scans WHERE id = ?").get(scanId),
+    ).toEqual({
+      scan_dir: archived,
+    });
+    expect(
+      database
+        .query(
+          "SELECT kind, path FROM scan_artifacts WHERE scan_id = ? ORDER BY kind",
+        )
+        .all(scanId),
+    ).toEqual([
+      { kind: "coverage", path: join(archived, "coverage.json") },
+      { kind: "findings", path: join(archived, "findings.json") },
+      { kind: "manifest", path: join(archived, "scan-manifest.json") },
+      { kind: "markdownReport", path: join(archived, "report.md") },
+    ]);
+  });
+
   test.each(["scan", "rerun", "resume"] as const)(
     "%s full-output includes sealed findings after execution throws",
     async (command) => {

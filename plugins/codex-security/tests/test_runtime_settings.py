@@ -1,3 +1,5 @@
+"""Check Python settings against SDK conventions for home paths, TOML numbers, and parser availability."""
+
 from __future__ import annotations
 
 import runpy

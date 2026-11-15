@@ -183,6 +183,14 @@ export function draftFixture(root: string, layout: Layout) {
     context,
     draft,
     findingsDraft,
+    findingsPath: path.join(
+      root,
+      layout === "worker" ? "result.json" : "findings.json",
+    ),
+    readComplete: async () =>
+      layout === "worker"
+        ? (await readJson(root, "result.json")).complete
+        : (await readJson(root, "scan-manifest.json")).scan.complete,
     write,
     writeReviewState: (...args: Parameters<typeof draft>) =>
       write(draft(...args)),

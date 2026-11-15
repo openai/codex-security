@@ -14,11 +14,23 @@ REPO = "https://packages.wolfi.dev/os/" + ARCH
 
 
 class NoRedirect(HTTPRedirectHandler):
+    """Keep the APK downloader on the exact URLs recorded in the builder lock."""
+
     def redirect_request(self, *args):
         return None  # Only fetch the exact URLs in the lock.
 
 
 def stage_package(pkg, directory, fetch):
+    """Write one APK into the staging directory, checking each locked byte range.
+
+    Args:
+        pkg (dict): Package record from the apko lock, including component checksums.
+        directory (Path): Existing staging directory for x86_64 APKs.
+        fetch (callable): Open the package URL with a timeout and return a binary stream.
+
+    Raises:
+        ValueError: The source, architecture, byte ranges, or digests differ from the lock.
+    """
     name, version = pkg["name"], pkg["version"]
     filename = f"{name}-{version}.apk"
     if not all(re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9.+_~-]*", s) for s in (name, version)):
@@ -47,6 +59,16 @@ def stage_package(pkg, directory, fetch):
 
 
 def snapshot(lock, output, fetch):
+    """Publish the locked APKs under output/x86_64 after every package verifies.
+
+    Args:
+        lock (dict): Nonempty apko v1 builder lock.
+        output (Path): New or empty repository directory.
+        fetch (callable): URL opener passed to stage_package for each locked package.
+
+    Raises:
+        ValueError: The lock or destination is invalid, or a package fails verification.
+    """
     if lock["version"] != "v1" or not lock["contents"]["packages"]:
         raise ValueError("Expected a nonempty apko v1 builder lock")
     output.mkdir(parents=True, exist_ok=True)

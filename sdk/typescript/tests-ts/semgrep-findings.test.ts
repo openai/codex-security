@@ -5,6 +5,7 @@ import {
 } from "../src/index.js";
 import {
   semgrepJson,
+  semgrepPercentPathReports,
   semgrepSarif,
 } from "./support/semgrep-import-fixtures.js";
 
@@ -65,6 +66,8 @@ test.each([
   ["MEDIUM", "medium"],
   ["LOW", "low"],
   ["EXPERIMENT", "unknown"],
+  ["constructor", "unknown"],
+  ["__proto__", "unknown"],
 ] as const)("maps severity %s to %s", (inputLevel, expected) => {
   const input = semgrepJson();
   input.results[0]!.extra.severity = inputLevel!;
@@ -118,6 +121,17 @@ test.each([
     expect(input).toEqual(original);
   },
 );
+
+test("a zero-result Semgrep report must retain its errors array", () => {
+  const { errors, ...input } = semgrepJson();
+  expect(normalizeSemgrepFindings(input).findings).toHaveLength(1);
+  expect(() => normalizeSemgrepFindings({ ...input, results: [] })).toThrow(
+    "errors array",
+  );
+  expect(normalizeSemgrepFindings({ ...input, results: [], errors }).read).toBe(
+    0,
+  );
+});
 
 test("failed scans and unrelated SARIF producers fail before publishing partial results", () => {
   const input: any = semgrepJson();
@@ -420,23 +434,8 @@ test.each([true, false])(
 );
 
 test("native SARIF keeps CE percent paths distinct after reordering", () => {
-  const paths = [
-    "src/my file.ts",
-    "src/my%20file.ts",
-    "src/100%.ts",
-    "src/100%25.ts",
-  ];
-  const json: any = semgrepJson();
-  const sarif: any = semgrepSarif();
-  delete json.results[0].extra.fingerprint;
-  delete sarif.runs[0].results[0].fingerprints;
-  json.results = paths.map((path) => ({ ...json.results[0], path }));
-  const run = sarif.runs[0];
-  run.results = paths.map((path) => {
-    const result = structuredClone(run.results[0]);
-    result.locations[0].physicalLocation.artifactLocation.uri = path;
-    return result;
-  });
+  const { paths, json, sarif } = semgrepPercentPathReports();
+  const run = sarif.runs[0]!;
   const expected = normalizeSemgrepFindings(json).findings;
   expect(expected).toHaveLength(paths.length);
   for (const results of [run.results, run.results.toReversed()]) {
@@ -450,6 +449,38 @@ test("native SARIF keeps CE percent paths distinct after reordering", () => {
     expect(
       output.findings.map((x) => x.evidence.locations?.[0]?.path).sort(),
     ).toEqual(paths.toSorted());
+  }
+});
+
+test("native JSON and SARIF retain the scanner's path spelling on both platforms", () => {
+  const json = semgrepJson();
+  const sarif = semgrepSarif();
+  const paths = [
+    "src/example.ts",
+    "src\\example.ts",
+    ".\\C:\\outside.ts",
+  ] as const;
+  json.results = paths.map((path, index) => {
+    const result = structuredClone(json.results[0]!);
+    result.path = path;
+    result.extra.fingerprint += index;
+    return result;
+  });
+  const run = sarif.runs[0]!;
+  run.results = paths.map((path, index) => {
+    const result = structuredClone(run.results[0]!);
+    result.locations[0]!.physicalLocation.artifactLocation.uri = path;
+    result.fingerprints["matchBasedId/v1"] += index;
+    return result;
+  });
+  for (const input of [json, sarif]) {
+    const output = normalizeSemgrepFindings(input);
+    expect(output.excluded).toEqual([]);
+    expect(output.findings.map((row) => row.evidence.locations)).toEqual([
+      [{ path: paths[0], line: 3 }],
+      [{ path: paths[1], line: 3 }],
+      [],
+    ]);
   }
 });
 
@@ -852,6 +883,25 @@ test("large scan inventories and timing tables do not exclude a small finding", 
     JSON.stringify(output.findings[0]!.evidence.source_data),
   ).not.toContain("path-inventory-entry-");
   expect(input.paths.scanned).toHaveLength(10000);
+});
+
+test("native JSON keeps other files' matching explanations outside each finding", () => {
+  const report = semgrepJson();
+  const expected = normalizeSemgrepFindings(report);
+  const explanation = {
+    op: "And",
+    matches: [{ ...report.results[0], path: "src/other.ts" }],
+    children: [],
+  };
+  // Either run-wide inventory would include another file's match. The larger
+  // one would also exceed the per-finding Cloud budget.
+  for (const explanations of [[explanation], Array(1000).fill(explanation)]) {
+    const input = { ...report, explanations };
+    for (const target of ["cloud", "local"] as const) {
+      expect(normalizeJson(input, options, target)).toEqual(expected);
+    }
+    expect(input.explanations).toBe(explanations);
+  }
 });
 
 test.each([undefined, "sast"])(

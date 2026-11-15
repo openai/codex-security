@@ -28,6 +28,7 @@ export async function copyCredentialTestPlugin(root: string): Promise<string> {
     "scripts/launch_codex_security_mcp",
     "scripts/launch_codex_security_mcp.cmd",
     "skills/security-scan/SKILL.md",
+    "skills/deep-security-scan/SKILL.md",
   ]) {
     await cp(new URL(file, bundledPlugin), join(plugin, file));
   }

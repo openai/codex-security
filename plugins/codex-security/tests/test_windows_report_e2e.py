@@ -1,3 +1,5 @@
+"""Complete and export a scan through the native Windows filesystem backend."""
+
 from __future__ import annotations
 
 import json

@@ -21,6 +21,7 @@ function runHydrator(args: string[]) {
     {
       cwd: evalDir,
       encoding: "utf8",
+      stdio: "pipe",
     },
   );
 }
@@ -196,6 +197,26 @@ try {
     gitfile,
   );
   assert.equal(git(worktreeTarget, "rev-parse", "HEAD"), expectedHead);
+
+  git(source, "update-ref", "refs/heads/--all", expectedHead);
+  fixture.cases[0].variants[0].checkout_ref = "--all";
+  fs.writeFileSync(dataset, JSON.stringify(fixture));
+  assert.match(
+    runHydrator(["--dataset", dataset, "--repo-root", repoRoot]),
+    /hydrated: case\/variant/,
+  );
+
+  fixture.cases[0].variants[0].checkout_ref = "HEAD:refs/tags/calibration-copy";
+  fs.writeFileSync(dataset, JSON.stringify(fixture));
+  const [job] = plannedJobs(fixture as Parameters<typeof plannedJobs>[0], {
+    repoRoot: worktreeRoot,
+  });
+  git(legacyTarget, "worktree", "add", "--detach", job.targetDir, expectedHead);
+  assert.throws(
+    () => runHydrator(["--dataset", dataset, "--repo-root", worktreeRoot]),
+    /invalid refspec/,
+  );
+  assert.equal(git(legacyTarget, "tag", "--list", "calibration-copy"), "");
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });
 }

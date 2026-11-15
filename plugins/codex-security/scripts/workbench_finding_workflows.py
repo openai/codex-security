@@ -95,6 +95,7 @@ def _recorded_cost(value: str | None) -> dict[str, Any] | None:
 
 
 def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str, Any] | None:
+    """Return the stored stages, scope, and available scan cost, or None if the workflow ID is unknown."""
     row = connection.execute(
         """SELECT w.*, s.cost_json FROM finding_workflows AS w
            LEFT JOIN scans AS s ON s.id = w.scan_id AND s.scan_dir = w.scan_dir
@@ -128,6 +129,7 @@ def read_workflow(connection: sqlite3.Connection, workflow_id: str) -> dict[str,
 
 
 def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timestamp: str) -> None:
+    """Insert or update the workflow bindings, scope, stage statuses, and saved results in the caller’s connection."""
     values = {"id": state["id"]}
     values.update({column: state.get(field) for field, column in WORKFLOW_BINDINGS.items()})
     scope = state.get("scope", {})
@@ -160,6 +162,7 @@ def save_workflow(connection: sqlite3.Connection, state: dict[str, Any], timesta
 
 
 def bind_workflow(state: dict[str, Any], binding: dict[str, Any]) -> None:
+    """Add bindings to the supplied state in place, raising SystemExit for unknown or conflicting fields."""
     for field, value in binding.items():
         if field not in WORKFLOW_BINDINGS and field != "scope":
             raise SystemExit("Unknown workflow binding.")
@@ -206,6 +209,7 @@ def register_workflow_scan(
 def finding_workflow(
     connection: sqlite3.Connection, payload: dict[str, Any], timestamp: str
 ) -> dict[str, Any]:
+    """Dispatch a workflow request by ID and return its state, source snapshot, or review as the action specifies."""
     workflow_id = payload["id"]
     if not isinstance(workflow_id, str) or not workflow_id.strip():
         raise SystemExit("workflowId must be a nonempty string.")

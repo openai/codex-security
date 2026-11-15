@@ -388,7 +388,10 @@
             "blackduck",
             "veracode",
             "sonar",
-            "continuum"
+            "continuum",
+            "checkmarx",
+            "trivy",
+            "armorcode"
           ],
           "title": "Provider",
           "type": "string"

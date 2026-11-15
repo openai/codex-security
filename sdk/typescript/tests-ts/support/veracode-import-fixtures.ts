@@ -47,3 +47,20 @@ export function veracodePolicyPage(
     page: { size, number, total_elements: total, total_pages: pages },
   };
 }
+
+export function veracodeMixedPolicyPage() {
+  const first = veracodePolicyRow(1);
+  const second = veracodePolicyRow(2);
+  const scalar = {
+    ...second,
+    finding_details: {
+      ...second.finding_details,
+      cwe: second.finding_details.cwe.id,
+      finding_category: second.finding_details.finding_category.name,
+    },
+  };
+  return {
+    ...veracodePolicyPage([first, second]),
+    _embedded: { findings: [first, scalar] },
+  };
+}

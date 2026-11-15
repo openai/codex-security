@@ -10,9 +10,9 @@ For Cloud preview, approval, upload, and recovery, follow the [Cloud publication
 
 ### Package vulnerabilities
 
-Supported inputs include a vulnerability finding, an array, `data.vulnerabilityFindings.nodes`, a downloaded vulnerability report, and JSONL package records. Keep `id`, `name`, `detailedName`, `vendorSeverity` (or `severity`), and `vulnerableAsset.id`, with available package and source metadata. Existing package occurrence IDs are unchanged.
+Supported inputs include a vulnerability finding, an array, `data.vulnerabilityFindings.nodes`, a downloaded vulnerability report, and JSONL package records. Keep `id`, `name`, `detailedName`, `vendorSeverity` (or `severity`), and `vulnerableAsset.id`, with available package and source metadata. Use the bare Wiz finding ID for a package occurrence.
 
-For a UI export, use **Vulnerability Findings → Save as → Report**, retaining repository and finding filters. Select **Repository Branch** instead of the default Virtual Machine selection, **JSON** or comma-separated **CSV**, and **Detailed** columns. Pass supported CSV reports directly to the command. Download the completed report; gzip is supported regardless of the filename extension. **Raw Event** on Code & Build Scans contains scan metadata, not findings. Do not create scheduled reports, notifications, or external storage unless requested.
+For a UI export, use **Vulnerability Findings → Save as → Report**, retaining repository and finding filters. Select **Repository Branch**, **JSON** or comma-separated **CSV**, and **Detailed** columns. Pass supported CSV reports directly to the command. Download the completed report; gzip is supported regardless of the filename extension. **Raw Event** on Code & Build Scans contains scan metadata, not findings. Do not create scheduled reports, notifications, or external storage unless requested.
 
 The CSV profile requires `ID`, `Name`, `DetailedName`, `AssetID`, `WizURL`, `CloudPlatform`, and `CloudProviderURL`. `CloudPlatform` must identify GitHub, and `CloudProviderURL` must be a repository-branch URL. Its repository must match the selected Cloud repository or, for local import, a Git remote when parseable remotes are available. The importer uses the reported `ID` as occurrence identity and retains every original cell, including unknown columns, in `source_data.row`. It does not derive a branch or revision from the tree URL. Review excluded rows in the preview before importing.
 
@@ -34,7 +34,7 @@ Resolve conflicting platform or URL metadata for a repository ID before publishi
 
 Normalized JSONL has one record per line with `source_finding_id` and `evidence` containing `title`, `severity`, and the original record in `source_data`. For SAST, secrets, and IaC, also set `evidence.details.kind` to `sast`, `secret`, or `iac` and set the verified `evidence.details.repository.url`. Use the same prefixed occurrence IDs as raw API imports.
 
-SAST, repository-secret, and IaC CSV reports still require a reviewed mapping of their actual headers into that profile. Preserve these family-specific details when present:
+SAST, repository-secret, and IaC CSV reports require a reviewed mapping of their actual headers into that profile. Preserve these family-specific details when present:
 
 | Family             | Evidence to retain                                                                                                                 |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |

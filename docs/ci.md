@@ -1,80 +1,25 @@
-# Continuous integration
+# How this repository tests pull requests
 
-The `node-ci` workflow selects checks from the complete pull request diff. An
-ordinary documentation-only change runs static checks and the final `ci` gate.
-Static checks format the tracked Markdown in this route. The Action README also
-runs Action CI to check generated input documentation and usage examples.
-Plugin skills, references, schemas, examples, and unrecognized paths receive
-full qualification because plugin Markdown is part of the product.
+To scan your own repository in CI, follow the [GitHub Action guide](../github-action/README.md). For contributions to Codex Security, [`node-ci`](../.github/workflows/node-ci.yml) selects jobs from the complete PR diff. Static checks and the final `ci` gate run on every path. The [selection rules](../.github/scripts/select-ci-checks.mjs) define the individual paths and matrices.
 
-PRs limited to the SDK package manifest's Markdown files, optionally mixed with
-ordinary docs or `RELEASING.md`, require the native payload, the real package
-build and archive inspection, and one Ubuntu Node 24 installation. Removing or
-renaming a required guide must still pass archive inspection. The static job
-validates the canonical recovery example in `RELEASING.md` on docs-only PRs too.
-Mixing the release guide with product source selects full qualification.
+## Which checks run
 
-Product source changes run the complete SDK suite on Linux, macOS, and Windows,
-plus MCP, standalone-plugin, native-runtime, and installed-package checks. Tests
-are discovered from the source tree, including new files without timing data.
-Platform-specific filesystem, credential, process, cancellation, and resumed
-worker cases remain enabled.
+| Changes in the pull request                                                                                                       | Checks selected                                                                                                                                                                                                                             | Exceptions                                                                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repository README, contributing guide, `docs/**/*.md`, Action or Docker README, or release guide                                  | Static checks, including Markdown formatting and the release guide’s recovery example.                                                                                                                                                      | The Action README also selects Action CI to verify generated inputs and examples.                                                                                                               |
+| Markdown listed in the [SDK package manifest](../sdk/typescript/package.json), optionally with ordinary docs or the release guide | Build with the universal native payload, inspect the archive and install it on Ubuntu with Node 24.                                                                                                                                         | Removing or renaming a required guide still runs archive inspection.                                                                                                                            |
+| TypeScript sources or tests in the SDK or MCP app, optionally with ordinary or packaged docs                                      | Full SDK suite on Linux, macOS and Windows. MCP, standalone plugin, native, deterministic eval and container checks also run. Installation covers the minimum supported Node majors and current Node 24 on Linux, plus macOS and Windows.   | Python runs its full suite on Linux 3.12 and native subsets on macOS and Windows. The shared SDK Git remote parser also selects Action CI.                                                      |
+| Only top-level `sdk/typescript/tests-ts/*.test.ts` modules                                                                        | All SDK shards, native builds, packaging and an Ubuntu Node 24 installation with the Action adapter.                                                                                                                                        | Skips containers and plugin suites. The Codex dependency pin test additionally selects deterministic evals.                                                                                     |
+| Action metadata, wrapper sources, tests, npm manifests, locks or checked-in bundles                                               | Action CI checks a clean rebuild, runs the published CLI integration, and audits wrapper and runtime dependencies. It tests the PR-built package on Ubuntu Node 24 and runs focused SDK Action release tests when the SDK suite is skipped. | Fork PRs run validation and both audits. Same-repository PRs also run a hosted dry run.                                                                                                         |
+| Standard time-budget eval modules, configuration or README, or triage eval scripts, assertions, README, manifest or lock          | Build the SDK and host plugin, verify the shared Codex version and run deterministic triage, secret-discovery, time-budget and workflow-routing tests.                                                                                      | Mixing these paths with product code selects full qualification.                                                                                                                                |
+| Only edits to existing top-level `plugins/codex-security/tests/test_*.py` modules                                                 | All five Python jobs, workflow checks, MCP, plugin host, native builds, packaging and Unix installation checks.                                                                                                                             | Adding, deleting or renaming modules, or changing helpers, selects full qualification.                                                                                                          |
+| Other paths or changes outside these combinations                                                                                 | Full qualification adds workflow checks, containers, current Node 26, Windows Node 24, and the full Linux Python matrix.                                                                                                                    | Includes plugin skills, references, examples, schemas, build tooling and dependency configuration. Mixing the release guide or Action implementation with product source also takes this route. |
 
-SDK shards wait for static checks and a successful package build. A failing
-static check skips the shards when a PR opens, reopens, or receives new commits.
-Pushes to `main`, nightly and manual runs, and PR edits that need full
-qualification still run the shards.
+SDK shards wait for static checks and a successful package build on opening, reopening or updating a PR. Pushes to `main`, nightly and manual runs, and PR edits requiring full qualification still run the shards after a static-check failure if the package build succeeded. Tests are discovered from the source tree, so a new test runs even before it has recorded timing data.
 
-The two Linux MCP jobs discover the same test files as local MCP testing. CI
-assigns files by observed runtimes and starts the longest files first on each
-job's two Node workers. Refresh the
-slow-file estimates in `run-mcp-test-shard.mts` when the jobs drift apart.
+The two Linux MCP jobs split the same test files as local MCP testing. Each starts the longest files first on its two Node workers. Refresh the slow-file estimates in [the MCP shard runner](../sdk/typescript/scripts/run-mcp-test-shard.mts) when shard durations drift apart.
 
-Pull requests limited to `.ts` files under `sdk/typescript/src/`,
-`sdk/typescript/tests-ts/`, `plugins/codex-security/mcp-app/src/`, and
-`plugins/codex-security/mcp-app/tests/`, plus any ordinary docs or packaged SDK guides,
-use reduced version matrices. They test the minimum Node 22, 24, and 26 versions,
-current Node 24 for the Action adapter, macOS installation, and Windows Node 22
-installation. When selected, Python runs the full suite on 3.12 and the native
-subsets on macOS and Windows. Product source changes select container validation.
-
-PRs limited to top-level `sdk/typescript/tests-ts/*.test.ts` keep all SDK shards,
-static checks, native builds, and packaging. Docker excludes these top-level
-test modules, so these PRs skip container validation. Test support files used by
-package inspection remain in the build context. The test modules are outside the
-npm package, so one Ubuntu Node 24 install checks it and the Action adapter.
-These PRs skip the plugin suites and run evals only for `codex-dependency-pins.test.ts`.
-Mixed changes follow the usual source or full route.
-
-PRs limited to Action metadata, wrapper implementation, tests, npm manifests,
-locks, or checked-in bundles run Action CI. It verifies a clean rebuild, runs
-the published CLI integration, audits the wrapper and pinned runtime, and
-exercises the local Action on eligible events. Fork PRs run validation and
-both audits. Same-repository PRs also run the hosted dry-run smoke. Changes to
-these Action files keep the Linux Node 24 integration against the package built
-from the PR. The focused SDK Action release contracts run when the rest of the
-SDK suite is skipped. Changes to the shared SDK Git remote parser also select
-Action CI.
-
-PRs limited to Standard time-budget eval modules, experiment configuration or
-README, or to the triage eval's scripts, assertions, README, manifest or lock,
-run the deterministic eval job and static checks. The eval job builds the SDK
-and host plugin, checks the Codex version across the SDK, MCP and triage
-lockfiles, and runs the triage, secret-discovery, Standard time-budget and
-workflow-routing suites.
-
-Edits limited to existing top-level `plugins/codex-security/tests/test_*.py`
-modules keep all five Python jobs, static and workflow checks, MCP, plugin host,
-native builds, packaging, and Unix installs. Docker excludes these modules from
-the image. Adding, removing, or renaming modules, editing shared helpers, or
-including any other path selects full qualification.
-
-Inputs outside these routes select full qualification, including workflow checks,
-containers, current Node 26, Windows Node 24 installation, and Python 3.10 and
-3.14 Linux suites. This includes dependency configuration such as `.npmrc` and
-`pnpm-workspace.yaml`, build tooling, Python and native code, and unknown paths
-even when mixed with ordinary source or documentation. Mixing Action
-implementation or eval changes with product code also selects full qualification.
+## Reusing checks after a PR edit
 
 Every push to `main`, nightly run, manual `node-ci` dispatch, and pull-request
 retarget runs the complete version matrices. Release automation still requires
@@ -87,10 +32,11 @@ merge whose first parent is the current tip of that same branch. A stale merge
 or a retarget with different parents needs a fresh PR event after the merge ref
 updates. Reopening the PR or pushing a commit starts one.
 Only the original source run and an uninterrupted sequence of successful edits
-can carry a green result. A cancelled or retried run, a changed target, missing
-evidence or conflicting results require full qualification. Use **Re-run all
-jobs** to retry an edit. A partial retry cannot refresh a previous attempt's
-required checks.
+can carry a green result. A failed source run stays red if all subsequent edits
+failed or were cancelled for that same target. A cancelled source run, a retry,
+a changed target, missing evidence or conflicting results require full
+qualification. Use **Re-run all jobs** to retry an edit. A partial retry cannot
+refresh a previous attempt's required checks.
 
 ## Required gate
 

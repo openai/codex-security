@@ -5,14 +5,21 @@ Each new scanner release includes a Linux amd64 Wolfi image.
 [apko](https://github.com/chainguard-dev/apko) assembles it
 with packages from the [public Wolfi repository](https://github.com/wolfi-dev/os).
 The image uses the same entrypoint, UID/GID 10001, and `/input`, `/output`, and
-`/state` directories as the [Debian image](../README.md). The local build below
-uses the scanner version pinned in [payload/package.json](payload/package.json).
+`/state` directories as the Debian image.
+
+To run a published version on amd64, select the Wolfi digest for your scanner
+version in the container release summary. Use
+`ghcr.io/openai/codex-security@sha256:…` with that digest as the image
+`reference` in the [Compose runner](../README.md#workflow-runner).
+To test a local change, [build the image](#build-and-inspect), then
+[run the offline smoke test](#run-the-offline-smoke-test).
 
 ## Build and inspect
 
-Use a Linux amd64 builder with user namespaces and Bubblewrap, apko 1.4.13,
-melange 0.61.1, Python 3.9 or later, Node.js with npm 11, OpenSSL,
-and Docker for runtime testing. From the repository root:
+The local build uses the scanner version in [payload/package.json](payload/package.json).
+Use a Linux amd64 builder with user namespaces, Bubblewrap, OpenSSL, and the
+tool versions listed by [`build.sh --help`](build.sh). Runtime tests also
+require Docker. Run these commands from the repository root:
 
 ```sh
 docker/wolfi/build.sh /tmp/codex-security-wolfi
@@ -35,17 +42,6 @@ Each run generates a local signing key, adds its public half to the APK keyring,
 and removes the private key at exit. The key identifies that build; it is not
 an upstream release signature. A new key changes the APK and image digests.
 
-To test that the melange guest can be built without access to Wolfi, run a
-build with the [offline melange wrapper](tests/offline-melange.sh) on a Linux
-builder that permits `unshare --net`:
-
-```sh
-MELANGE="$PWD/docker/wolfi/tests/offline-melange.sh" docker/wolfi/build.sh /tmp/codex-security-offline-guest
-```
-
-The wrapper disconnects melange before it installs the guest packages. Staging
-the inputs and resolving the runtime lock still need the network.
-
 ## Run the offline smoke test
 
 On a native Linux amd64 Docker host with AppArmor and user namespaces, load
@@ -59,12 +55,26 @@ docker/wolfi/tests/smoke.sh codex-security:wolfi-amd64
 sudo apparmor_parser --skip-cache --remove docker/codex-security.apparmor
 ```
 
-The test uses the repository's seccomp profile with a read-only root filesystem,
-no capabilities, and no external network. It exercises the CLI, the native plugin,
+A successful smoke test exits with status 0. It uses the repository's seccomp
+profile with a read-only root filesystem, no capabilities, and no external
+network. It exercises the CLI, the native plugin,
 artifact and SARIF output, saved history, and a model turn against a loopback
 fixture. It also checks that a sandboxed child can read the test repository but
 cannot modify it. A real scan needs a compatible model endpoint; the image
 does not include a model.
+
+### Test an offline melange build
+
+To test that the melange guest can be built without access to Wolfi, run a
+build with the [offline melange wrapper](tests/offline-melange.sh) on a Linux
+builder that permits `unshare --net`:
+
+```sh
+MELANGE="$PWD/docker/wolfi/tests/offline-melange.sh" docker/wolfi/build.sh /tmp/codex-security-offline-guest
+```
+
+The wrapper disconnects melange before it installs the guest packages. Staging
+the inputs and resolving the runtime lock still need the network.
 
 ## Publish the amd64 variant
 

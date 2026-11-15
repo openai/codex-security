@@ -3,6 +3,12 @@ import type { ZodType, ZodError } from "zod/v4";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+
+export interface DiscoveryBoardContext {
+  root: string;
+  author: string;
+}
 
 /**
  * Host-bound artifact state. Never construct this object from model tool input.
@@ -11,6 +17,7 @@ export interface ArtifactContext {
   root: string;
   repoRoot: string;
   layout: "scan" | "worker";
+  discoveryBoard?: DiscoveryBoardContext;
   scanId?: string;
   scope?: string;
   includePaths?: readonly string[];
@@ -20,6 +27,7 @@ export interface ArtifactContext {
   targetContract?: Readonly<Record<string, unknown>>;
   targetRevision?: string;
   handoffClaimToken?: string;
+  modelThreadId?: string;
   status?: string;
   mode?: string;
 }
@@ -223,6 +231,33 @@ export async function artifactDestination(
   return destination;
 }
 
+const WINDOWS_RENAME_RETRY_MS = [10, 25, 50, 100, 200, 400];
+
+async function publishArtifact(
+  temporary: string,
+  destination: string,
+): Promise<void> {
+  // Windows can deny replacement while a reader or another publisher still
+  // holds the previous file. Retry the same rename, keeping the old file visible.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fs.rename(temporary, destination);
+      return;
+    } catch (error) {
+      const delay = WINDOWS_RENAME_RETRY_MS[attempt];
+      if (
+        process.platform !== "win32" ||
+        delay === undefined ||
+        !isNodeError(error) ||
+        !["EPERM", "EBUSY", "EACCES"].includes(error.code ?? "")
+      ) {
+        throw error;
+      }
+      await sleep(delay);
+    }
+  }
+}
+
 export async function replaceArtifactText(
   path: string,
   content: string,
@@ -244,7 +279,7 @@ export async function replaceArtifactText(
         throw writeError;
       },
     );
-    await fs.rename(temporary, path);
+    await publishArtifact(temporary, path);
   } catch (error) {
     await fs.rm(temporary, { force: true });
     throw error;

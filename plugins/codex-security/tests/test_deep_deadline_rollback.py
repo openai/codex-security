@@ -1,3 +1,5 @@
+"""Check which parent observations and worker evidence survive rollback of a deadline publication."""
+
 from __future__ import annotations
 
 import copy

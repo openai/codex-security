@@ -10,7 +10,7 @@ import { isRecord } from "./record.js";
 import {
   array,
   normalizeRecords,
-  readScannerJson,
+  scannerJsonReader,
   record,
   requiredText,
   stableId,
@@ -362,6 +362,25 @@ function readPage(input: unknown) {
   return { rows, scope, query, filter, number, size, total, pages };
 }
 
+function findingDetails(row: Record<string, unknown>) {
+  return record(row["finding_details"], "Veracode finding_details");
+}
+
+// The Findings API schema uses a numeric CWE and a category name. HAL exports
+// can expand either field to a descriptor containing its ID and name.
+function expandedDetails(
+  details: Record<string, unknown>,
+): Record<string, unknown> {
+  const { cwe, finding_category: category } = details;
+  if (typeof cwe !== "number" && typeof category !== "string") return details;
+  return {
+    ...details,
+    cwe: typeof cwe === "number" ? { id: cwe } : cwe,
+    finding_category:
+      typeof category === "string" ? { name: category } : category,
+  };
+}
+
 function rowSelectionValidator(query: URLSearchParams) {
   const staticOnly = query.has("scan_type");
   const violates = query.get("violates_policy");
@@ -399,10 +418,7 @@ function rowSelectionValidator(query: URLSearchParams) {
         "Veracode finding contradicts the include_annot selection.",
       );
     if (idFilters.length || scoreFilters.length) {
-      const details = record(
-        row["finding_details"],
-        "Veracode finding_details",
-      );
+      const details = expandedDetails(findingDetails(row));
       for (const { field, ids } of idFilters) {
         if (row["scan_type"] !== "STATIC") continue;
         const entry = record(details[field], `Veracode ${field}`);
@@ -499,10 +515,7 @@ export function normalizeVeracodeFindings(
   return normalizeRecords(
     rows,
     (row) => {
-      const details = record(
-        row["finding_details"],
-        "Veracode finding_details",
-      );
+      const details = expandedDetails(findingDetails(row));
       const status = record(row["finding_status"], "Veracode finding_status");
       const cwe = record(details["cwe"], "Veracode CWE");
       const weakness = `CWE-${integer(cwe["id"], "CWE ID", 1)}`;
@@ -542,14 +555,6 @@ export function normalizeVeracodeFindings(
   );
 }
 
-export async function readVeracodeFindings(
-  path: string,
-  sourceRepositoryUrl: string,
-  target: ExternalImportTarget = "cloud",
-): Promise<ExternalFindings> {
-  return normalizeVeracodeFindings(
-    await readScannerJson(path),
-    sourceRepositoryUrl,
-    target,
-  );
-}
+export const readVeracodeFindings = scannerJsonReader(
+  normalizeVeracodeFindings,
+);

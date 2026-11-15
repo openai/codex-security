@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { runProcess, safeLogLines } from '../src/process.js';
+import { runProcess, safeLogLines } from '../src/process.ts';
 
 test('child receives only supplied environment and literal arguments', async () => {
   process.env.ACTION_TEST_SECRET = 'must-not-inherit';

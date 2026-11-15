@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
+import { renderProgress } from "../../../.github/scripts/release-progress.mjs";
 
 const workflow = Bun.YAML.parse(
   readFileSync(
@@ -80,6 +81,39 @@ function identify(
   );
   return { output: output.join(""), calls };
 }
+
+test("release verification reports a failed Darwin signer when publication is skipped", () => {
+  const release = Bun.YAML.parse(
+    readFileSync(
+      new URL("../../../.github/workflows/node-release.yml", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    jobs: Record<string, { name?: string }>;
+  };
+  const jobName = release.jobs["sign-darwin"]?.name ?? "sign-darwin";
+  const progress = renderProgress(
+    { "node-release": { status: "completed", conclusion: "failure" } },
+    {
+      "node-release": [
+        { name: "native / bundle", status: "completed", conclusion: "success" },
+        {
+          name: `${jobName} / sign`,
+          status: "completed",
+          conclusion: "failure",
+        },
+        { name: "verify", status: "completed", conclusion: "skipped" },
+        {
+          name: "Publish npm and container images",
+          status: "completed",
+          conclusion: "skipped",
+        },
+      ],
+    },
+    false,
+  );
+  expect(progress).toContain("| Release verification | Failed |");
+});
 
 test("main CI completions report independently of cutting a release", () => {
   expect(workflow.on).toHaveProperty("workflow_call");

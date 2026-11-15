@@ -56,23 +56,30 @@ def _source_digests(value: Any, error: str) -> dict[str, str]:
     return value
 
 
-def _retained_source_state(value: Any) -> tuple[dict[str, str], str | None]:
-    if isinstance(value, dict) and isinstance(value.get("sources"), dict):
-        sources = _source_digests(
-            value["sources"], "Saved stopped-scan source digests are malformed."
-        )
-        model_source = value.get("threatModelSource")
-        if "threatModelSource" in value and (
-            not isinstance(model_source, str) or model_source not in sources
-        ):
-            raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
-        return sources, model_source
-    return _source_digests(value, "Saved stopped-scan source digests are malformed."), None
+def _retained_source_state(raw: str | None) -> dict[str, Any]:
+    """Decode stopped-scan sources, preserving the distinction between absent and frozen empty."""
+    if raw is None:
+        return {}
+    state = json.loads(raw)
+    if not isinstance(state, dict) or not isinstance(state.get("sources"), dict):
+        state = {"sources": state}  # Legacy rows store only the path-to-digest map.
+    sources = _source_digests(state["sources"], "Saved stopped-scan source digests are malformed.")
+    model_source = state.get("threatModelSource")
+    if "threatModelSource" in state and (
+        not isinstance(model_source, str) or model_source not in sources
+    ):
+        raise ContractError("Saved stopped-scan model source is outside its checkpoint set.")
+    return state
 
 
 def _retained_checkpoint_state(
     scan: Any,
 ) -> tuple[dict[str, str | None] | None, dict[str, Any] | None]:
+    """Return selected checkpoint heads and any pending recovery record.
+
+    Older scans can store the head map directly. Recovery records also bind
+    the selection to a sealed manifest digest. A conflicting digest raises ContractError.
+    """
     raw = scan["retained_checkpoint_heads_json"]
     if raw is None:
         return None, None
@@ -125,6 +132,7 @@ def _checkpoint_paths(scan_dir: Path, directory: str) -> list[str]:
 
 
 def _checkpoint_head_directory(relative: str) -> Path | None:
+    """Return the owner directory of a current or archived checkpoint head path, or None for another file."""
     path = Path(relative)
     if path.name == "checkpoint-head.json":
         return path.parent
@@ -162,6 +170,7 @@ def _capture_saved_source(
     checkpoint_heads: dict[str, str | None] | None = None,
     expected_digest: str | None = None,
 ) -> dict[str, tuple[str, int]]:
+    """Capture digests and observation times for a saved source and its selected checkpoint or receipt inputs."""
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result(scan_dir, relative, scan_id, kind=kind)
         return capture_receipt_checkpoints(
@@ -241,14 +250,18 @@ def _read_saved_result(
         return draft, _digest(draft), int(observed)
     if draft.get("scanId") != scan_id:
         raise ContractError("checkpoint belongs to a different scan")
-    if not _is_source_order_snapshot(relative) and (
-        not isinstance(draft.get("findings"), list)
-        or not isinstance(
-            draft.get("reviewState", draft.get("coverage", {} if kind == "dedup" else None)), dict
-        )
+    if _is_source_order_snapshot(relative):
+        return draft, _digest(draft), metadata.st_mtime_ns
+    if not isinstance(draft.get("findings"), list) or not isinstance(
+        draft.get("reviewState", draft.get("coverage", {} if kind == "dedup" else None)), dict
     ):
         raise ContractError("checkpoint has no semantic findings or coverage")
     digest = _digest(draft)
+    if kind == "dedup" and normalize_review:
+        # The host keeps grouping state in iteration checkpoints for resume only.
+        for finding in draft["findings"]:
+            if isinstance(finding, dict) and isinstance(finding.get("provenance"), dict):
+                finding["provenance"].pop("deepScanRepairGroups", None)
     if normalize_review and "coverage" in draft and "reviewState" not in draft:
         draft["reviewState"] = draft.pop("coverage")
     return draft, digest, metadata.st_mtime_ns
@@ -388,6 +401,7 @@ def _restore_checkpoint_head(
     sources: dict[str, str],
     relative: str,
 ) -> None:
+    """Restore the prior selection for a checkpoint directory, allowing legacy evidence with no selected head."""
     path = Path(relative)
     if path.name != "checkpoint-head.json":
         return
@@ -651,13 +665,15 @@ if __name__ == "__main__":
     argparse.ArgumentParser(description=__doc__).parse_args()
 
 
-def _latest_iteration(workers: Iterable[Any]) -> Any | None:
-    def iteration_order(worker: Any) -> tuple[int, str, str]:
-        output = Path(worker["result_manifest_path"]).parent
-        label = output.parent.name if output.name == "output" else output.name
-        match = re.fullmatch(r"dedup-([0-9]+)", label)
-        return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
+def _iteration_order(worker: Any) -> tuple[int, str, str]:
+    result = worker["result_manifest_path"]
+    output = Path(result).parent if result else Path(worker["artifact_dir"])
+    label = output.parent.name if output.name == "output" else output.name
+    match = re.fullmatch(r"dedup-([0-9]+)", label)
+    return (int(match[1]) if match else 0, worker["completed_at"] or "", worker["id"])
 
+
+def _latest_iteration(workers: Iterable[Any]) -> Any | None:
     return max(
         (
             worker
@@ -666,7 +682,7 @@ def _latest_iteration(workers: Iterable[Any]) -> Any | None:
             and worker["status"] == "succeeded"
             and worker["result_manifest_path"]
         ),
-        key=iteration_order,
+        key=_iteration_order,
         default=None,
     )
 

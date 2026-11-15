@@ -16,7 +16,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
-import { bundledCodexSdkEnvironment } from "./codex-sdk-environment.js";
+import { nativeCodexLaunch } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
   acquireCodexSecurityCredentialHomeLock,
@@ -35,7 +35,7 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
-/** Native no-turn commands need provider metadata when managed policy selects it. */
+/** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
 export async function providerPreflightCommand(
   command: CodexCommand,
   config: JsonObject,
@@ -54,6 +54,12 @@ export async function providerPreflightCommand(
   }
   if (resolved["model_provider"] !== undefined)
     overrides.push(`model_provider=${inlineToml(resolved["model_provider"])}`);
+  // These commands cannot load a private profile while preserving their auth
+  // home. Exporter headers stay in native configuration, never copied into argv.
+  for (const key of ["analytics", "responses_api_metadata"]) {
+    const value = resolved[key];
+    if (value !== undefined) overrides.push(`${key}=${inlineToml(value)}`);
+  }
   if (overrides.length === 0) return command;
   return {
     ...command,
@@ -179,17 +185,17 @@ export async function createProfileCodex(
   profileName: string,
   requestedPermissionProfile?: string,
 ): Promise<Codex> {
-  const command =
-    options.codexPathOverride ?? resolveCodexCommand(options.env).command;
+  const { command, environment } = await nativeCodexLaunch(
+    options.codexPathOverride ?? resolveCodexCommand(options.env).command,
+    options.env,
+  );
   const client = await nativeProfileClient();
   return client.createCodexProfileClient({
     ...options,
     codexPathOverride: executablePathForSpawn(command),
     profileName,
     requestedPermissionProfile,
-    ...(options.env === undefined
-      ? {}
-      : { env: bundledCodexSdkEnvironment(command, options.env) }),
+    env: environment,
   }) as Codex;
 }
 
@@ -209,17 +215,15 @@ export async function preflightReadOnlyProfileCodex(
     `default_permissions=${JSON.stringify(permissionProfileId)}`,
     `permissions.${permissionProfileId}=${inlineToml(expectedProfile)}`,
   ];
-  const command =
-    options.codexPathOverride ?? resolveCodexCommand(options.env).command;
+  const { command, environment: env } = await nativeCodexLaunch(
+    options.codexPathOverride ?? resolveCodexCommand(options.env).command,
+    options.env,
+  );
   const client = await nativeProfileClient();
   const providers = resolveCodexProfile(providerConfig)["model_providers"];
   const definitions = isRecord(providers)
     ? (client.preflightProviderDefinitions(providers) as JsonObject)
     : {};
-  const env =
-    options.env === undefined
-      ? undefined
-      : bundledCodexSdkEnvironment(command, options.env);
   await withCodexPreflightLock(env, signal, async () => {
     await preflight.preflightDeepScanWorkerPermissionProfile({
       codexPath: executablePathForSpawn(command),

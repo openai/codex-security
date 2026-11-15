@@ -2,7 +2,6 @@ import {
   snapshotSourceRepositories,
   type ExternalSourceRepository,
 } from "./external-findings.js";
-import { requireExternalImports } from "./external-imports-feature.js";
 import {
   hostedScannerToken,
   hostedRepositoryUrl,
@@ -55,7 +54,6 @@ export async function collectSemgrepPlatformFindings(
   dependencies: HostedScannerHttpOptions = {},
 ): Promise<SemgrepPlatformReport> {
   const environment = dependencies.environment ?? process.env;
-  requireExternalImports(environment);
   const token = requiredText(
     hostedScannerToken(
       environment,

@@ -5,9 +5,14 @@ import { test } from "node:test";
 import { importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
+const helperUrl = new URL(
+  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
+  import.meta.url,
+);
 const { normalizeCandidateBatch, normalizeCandidatesCommand } =
   await importSource(
     join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
+    { define: { "import.meta.url": JSON.stringify(helperUrl.href) } },
   );
 
 const cases = [
@@ -41,7 +46,7 @@ const cases = [
     files: ["file"],
     inventory: "deleted\nfile\n",
     candidate: "file",
-    error: /ENOENT/,
+    error: /in-scope file row 1:.*(?:ENOENT|Windows filesystem error 2:)/u,
   },
 ];
 

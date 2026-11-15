@@ -1,3 +1,5 @@
+"""Check coordinator ownership and receipt validation when publishing or replaying a deep scan."""
+
 from __future__ import annotations
 
 import copy
@@ -12,7 +14,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 from workbench_test_support import read_review_state
 
 

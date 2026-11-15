@@ -35,11 +35,20 @@ test.each([
   "a running skill child honors controller abort (%s)",
   async (reason, status) => {
     const controller = new AbortController();
-    using observed = spyOn(childProcess, "spawn");
+    const spawned = Promise.withResolvers<ReturnType<typeof spawn>>();
+    const originalSpawn = childProcess.spawn;
+    using _observer = spyOn(childProcess, "spawn").mockImplementation(((
+      ...args: Parameters<typeof originalSpawn>
+    ) => {
+      const child = originalSpawn(...args);
+      spawned.resolve(child);
+      return child;
+    }) as typeof originalSpawn);
     const run = runCodexSkillCommand(
       [
         "-e",
         "process.on('SIGTERM', () => {}); process.stdout.write('{}\\n'); setTimeout(() => process.exit(1), 4000);",
+        "--",
       ],
       {
         command: "verify-fix",
@@ -48,8 +57,9 @@ test.each([
         stderr: process.stderr,
       },
       { command: node },
+      { ...process.env, CODEX_SECURITY_STATE_DIR: await temporaryDirectory() },
     );
-    const child = observed.mock.results[0]!.value as ReturnType<typeof spawn>;
+    const child = await spawned.promise;
     try {
       await once(child.stdout!, "data");
       controller.abort(reason === "SIGINT" ? reason : undefined);
@@ -115,7 +125,7 @@ for (const mode of [
         },
         undefined,
         controller.signal,
-        mode.startsWith("archive-"),
+        { registrationHandshake: mode.startsWith("archive-") },
       );
     } finally {
       observer.mockRestore();

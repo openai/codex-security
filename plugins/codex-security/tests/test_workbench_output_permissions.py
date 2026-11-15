@@ -1,3 +1,5 @@
+"""Check private output creation under permissive umasks and reuse of existing directories."""
+
 from __future__ import annotations
 
 import os

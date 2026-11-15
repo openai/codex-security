@@ -5,8 +5,8 @@ import { createServer } from 'node:http';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { uploadReports } from '../src/artifacts.js';
-import { parseInputs } from '../src/inputs.js';
+import { uploadReports } from '../src/artifacts.ts';
+import { parseInputs } from '../src/inputs.ts';
 
 test('enterprise artifacts use the runner results service through the real client', async t => {
   const root = await mkdtemp(join(tmpdir(), 'action-artifact-'));

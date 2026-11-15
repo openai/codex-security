@@ -51,7 +51,6 @@ test.each([
     ) =>
       collectSnykIssues(options, {
         environment: {
-          CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "1",
           SNYK_TOKEN: "synthetic",
         },
         sourceRepositories,

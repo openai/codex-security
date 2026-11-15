@@ -1,4 +1,4 @@
-import { importEnvironmentSetting } from "./external-imports-feature.js";
+import { scannerEnvironmentValue } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
 
 function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
@@ -15,7 +15,7 @@ function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
           if (!match.endsWith("}")) return match;
           const requested =
             process.platform === "win32" ? reference.toUpperCase() : reference;
-          const value = importEnvironmentSetting(environment, requested)?.value;
+          const value = scannerEnvironmentValue(environment, requested);
           if (value === undefined)
             throw new Error(
               `${name} references missing environment variable ${reference}.`,
@@ -26,7 +26,7 @@ function endpointSetting(environment: NodeJS.ProcessEnv, name: string) {
     }
     return undefined;
   }
-  return importEnvironmentSetting(environment, name)?.value;
+  return scannerEnvironmentValue(environment, name);
 }
 
 function endpointOrigin(value: string, snykBase: boolean): string | undefined {
@@ -75,10 +75,7 @@ export function snykApiToken(
     "SNYK_API",
     "SNYK_CFG_ENDPOINT",
   ];
-  const environmentToken = importEnvironmentSetting(
-    environment,
-    tokenName,
-  )?.value;
+  const environmentToken = scannerEnvironmentValue(environment, tokenName);
   const token = explicitToken ?? environmentToken;
   // HTTP trims trailing whitespace from the Authorization header.
   if (token && token.trim() === environmentToken?.trim()) {

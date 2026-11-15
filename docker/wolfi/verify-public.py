@@ -7,11 +7,14 @@ import json
 import re
 import tarfile
 from pathlib import Path
+from urllib.parse import quote
 
 WOLFI = "https://packages.wolfi.dev/os"
 REGISTRY = "https://registry.npmjs.org/"
 APP = "usr/lib/codex-security/"
 ENTRYPOINT = "/usr/local/bin/codex-security-entrypoint"
+SCANNER = "node_modules/@openai/codex-security"
+TOKENIZER_BOM = APP + SCANNER + "/dist/server/embedding-tokenizer.cdx.json"
 SOURCES = "usr/share/licenses/codex-security/SOURCES.json"
 APK_DATABASES = {"lib/apk/db/installed", "usr/lib/apk/db/installed"}
 # A package can contain other package.json files (for example, in examples/).
@@ -22,10 +25,12 @@ GPL-2.0-only GPL-2.0-or-later GPL-3.0-or-later LGPL-2.0-or-later LGPL-2.1 LGPL-2
 LGPL-2.1-or-later LGPL-3.0-or-later GCC-exception-3.1 libselinux-1.0 blessing CC-PDDC AND OR WITH""".split())
 
 def check(ok, message):
+    """Exit with the supplied verification message when a release invariant fails."""
     if not ok:
         raise SystemExit(message)
 
 def check_license(name, expression):
+    """Exit if the declared expression is empty or contains an unreviewed license term."""
     terms = set(re.findall(r"[\w.+-]+", expression or ""))
     check(terms and not (terms - LICENSES), f"Unreviewed license for {name}: {expression}")
 
@@ -43,10 +48,12 @@ class HashingReader:
 
     @property
     def digest(self):
+        """Return the OCI-style SHA-256 digest of the bytes read so far."""
         return "sha256:" + self.hash.hexdigest()
 
 
 def read_blob(tar, descriptor):
+    """Return a parsed OCI JSON blob after checking its byte length and SHA-256."""
     data = tar.extractfile(descriptor["digest"]).read()
     check(len(data) == descriptor["size"] and "sha256:" + hashlib.sha256(data).hexdigest() == descriptor["digest"],
           f"OCI blob does not match descriptor: {descriptor['digest']}")
@@ -54,6 +61,19 @@ def read_blob(tar, descriptor):
 
 
 def inspect_layer(fs):
+    """Collect release evidence in one pass through the root filesystem.
+
+    Args:
+        fs (tarfile.TarFile): Open layer tar positioned for streaming reads.
+
+    Returns:
+        tuple: Raw package metadata by image path, npm manifests by install path,
+            public APK keys by filename, and native file SHA-256 hashes by image path.
+
+    Raises:
+        SystemExit: The layer contains a melange.rsa file name or a non-file APK key,
+            or lacks a regular entrypoint executable by the configured runtime user.
+    """
     raw, manifests, keys, native = {}, {}, {}, {}
     executable = False
     for ent in fs:
@@ -66,7 +86,7 @@ def inspect_layer(fs):
             check(ent.isfile(), f"Unexpected public key format: {path}")
             keys[path.removeprefix("etc/apk/keys/")] = fs.extractfile(ent).read()
         elif ent.isfile():
-            if path in APK_DATABASES or path in {"etc/apk/repositories", APP + "package-lock.json", SOURCES}:
+            if path in APK_DATABASES or path in {"etc/apk/repositories", APP + "package-lock.json", SOURCES, TOKENIZER_BOM}:
                 raw[path] = fs.extractfile(ent).read()
             elif path.startswith(APP) and NPM_MANIFEST.fullmatch(path[len(APP):]):
                 manifests[path[len(APP):-len("/package.json")]] = json.load(fs.extractfile(ent))
@@ -81,6 +101,7 @@ def inspect_layer(fs):
 
 
 def inventory_apks(database, packages):
+    """Return installed APK records sorted by name after checking them against the lock."""
     apks = []
     lock = {p["name"]:p for p in packages}
     for record in database.decode().strip().split("\n\n"):
@@ -99,6 +120,7 @@ def inventory_apks(database, packages):
 
 
 def inventory_npm(manifests, packages, sources):
+    """Match manifests to lockfile and attribution entries by install path and return the npm inventory."""
     paths = {p["path"] for p in sources}
     check(len(paths) == len(sources) and paths == manifests.keys(),
           "Installed npm package paths differ from SOURCES.json")
@@ -121,7 +143,51 @@ def inventory_npm(manifests, packages, sources):
     return npm
 
 
+def inventory_tokenizer(manifests, bom):
+    """Return the bundled tokenizer's verified CycloneDX components.
+
+    When a legacy image has no tokenizer BOM, verify that the installed
+    js-tiktoken package matches the SDK dependency pin. Return an empty list
+    because the npm inventory already includes that installation.
+    """
+    scanner = manifests[SCANNER]
+    if bom is None:
+        # Older releases installed the pinned tokenizer as an ordinary npm dependency.
+        pin = scanner["dependencies"].get("js-tiktoken")
+        installed = next((manifests[p] for p in (SCANNER + "/node_modules/js-tiktoken", "node_modules/js-tiktoken")
+                          if p in manifests), {})
+        check(pin and installed.get("name") == "js-tiktoken" and installed.get("version") == pin,
+              "Missing tokenizer BOM or verified legacy SDK dependency")
+        return []
+
+    document = json.loads(bom)
+    items = document["components"]
+    check(document.get("bomFormat") == "CycloneDX" and len(items) == 2 and
+          {item["name"] for item in items} == {"js-tiktoken", "base64-js"}, "Incomplete tokenizer BOM")
+    for item in items:
+        name, version = item["name"], item["version"]
+        check(item.get("type") == "library" and isinstance(version, str) and
+              re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?", version) and
+              item.get("purl") == f"pkg:npm/{name}@{quote(version, safe='')}" and
+              item.get("licenses") == [{"license": {"id": "MIT"}}], f"Invalid tokenizer BOM component: {name}")
+        if name == "js-tiktoken":
+            check(version == scanner["devDependencies"]["js-tiktoken"], "Tokenizer BOM differs from SDK build pin")
+    return items
+
+
 def verify(archive, lock):
+    """Verify a local Linux/amd64 image and assemble its two release reports.
+
+    Args:
+        archive (Path): The apko image tar containing Docker and OCI manifests.
+        lock (dict): The apko lock contents with the expected packages and keyring.
+
+    Returns:
+        dict: Report payloads keyed by verification.json and public-components.json.
+
+    Raises:
+        SystemExit: An explicit image, package, or source verification check fails.
+    """
     with tarfile.open(archive) as tar:
         manifest, = json.load(tar.extractfile("manifest.json"))
         index, = json.load(tar.extractfile("index.json"))["manifests"]
@@ -173,6 +239,9 @@ def verify(archive, lock):
         "public_upstream_packages":len(apks)-local, "local_scanner_packages":local,
         "keyring_sha256":{k:"sha256:"+v for k,v in key_hashes.items()},
         "signed_build_manifest":"SHA256SUMS", "manifest_signature":"SHA256SUMS.sig"}
+    tokenizer = inventory_tokenizer(manifests, raw.get(TOKENIZER_BOM))
+    if tokenizer:
+        components["bundled_tokenizer"] = tokenizer
     return {"verification.json": verification, "public-components.json": components}
 
 

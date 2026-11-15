@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
 import { join, relative } from "node:path";
-import { Codex } from "../../sdk/typescript/node_modules/@openai/codex-sdk/dist/index.js";
 import * as sdk from "../../sdk/typescript/dist/api.js";
 import { deepScanOptions } from "../../sdk/typescript/dist/deep-config.js";
-import { createProfileCodex } from "../../sdk/typescript/dist/provider-profile.js";
 import {
   codexExecutableReadPaths,
   resolveCodexCommand,
@@ -19,7 +17,7 @@ import {
   type Variant,
 } from "./experiment.mts";
 
-const { CodexSecurity, scanAuthentication } =
+const { CodexSecurity, DEFAULT_DEPENDENCIES, scanAuthentication } =
   sdk as unknown as typeof import("../../sdk/typescript/src/api.js");
 type Dependencies = NonNullable<ConstructorParameters<typeof CodexSecurity>[1]>;
 
@@ -69,10 +67,7 @@ export function createStandardRunner({
   environment = process.env,
   createClient = (config, dependencies) =>
     new CodexSecurity(config, dependencies, { surface: "sdk" }),
-  createCodex = ({ nativeProfile, ...settings }) =>
-    nativeProfile === undefined
-      ? new Codex(settings)
-      : createProfileCodex(settings, nativeProfile),
+  createCodex = DEFAULT_DEPENDENCIES.createCodex,
 }: {
   stateRoot: string;
   outputRoot: string;

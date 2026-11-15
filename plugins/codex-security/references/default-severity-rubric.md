@@ -5,15 +5,20 @@ Judge the attacker's actual starting access, the security boundary crossed, and 
 ## Critical
 
 Reserve Critical for consequential, strongly supported compromise meeting all three conditions:
-- Access: an unauthenticated internet attacker, ordinary external user, or publicly admitted untrusted workload can exploit the interface without employee-only access, an invitation, an approved business relationship, or compromise of a trusted supplier.
-- Impact: crossing an important security boundary enables consequential access to protected data, privileged actions, meaningful code execution, workload escape, or comparable compromise of the affected system.
-- Evidence: demonstrated exploitation or strong source-backed validation establishes the complete attack path.
+
+- **Access.** An unauthenticated internet attacker, ordinary external user, or publicly admitted untrusted workload can exploit the interface without employee-only access, an invitation, an approved business relationship, or compromise of a trusted supplier.
+- **Impact.** Crossing an important security boundary enables consequential access to protected data, privileged actions, meaningful code execution, workload escape, or comparable compromise of the affected system.
+- **Evidence.** Demonstrated exploitation or strong source-backed validation establishes the complete attack path.
 
 Second-order attacks can qualify: an external attacker plants data that a trusted user or system later processes, causing consequential unauthorized access or privileged actions.
 
 ## High
 
-Assign High when a realistic, evidenced path gives a lower-trust attacker a substantial unauthorized capability they did not already possess. Internal users, partners, invited collaborators, and admitted untrusted workloads can qualify; unauthenticated internet access is not required. Consequences include sensitive customer or business data or reusable credentials, account takeover, meaningful cross-tenant access or actions as another user, control of production workloads or deployments, privileged identities, encryption keys or important isolation boundaries, or significant repeatable disruption of a critical or shared service. A dangerous function, production label, internal access, or the existence of a privileged credential alone is insufficient: identify the lower-trust actor, boundary crossing, and consequential new capability.
+Assign High when the evidence establishes all three conditions:
+
+- **Access.** A lower-trust actor can reach the affected operation. Internal users, partners, invited collaborators, and admitted untrusted workloads can qualify.
+- **Impact.** Crossing the boundary grants a substantial new capability. Examples include access to sensitive customer or business data or reusable credentials, account takeover, meaningful cross-tenant access or actions as another user, control of production workloads or deployments, privileged identities, encryption keys or important isolation boundaries, and significant repeatable disruption of a critical or shared service.
+- **Evidence.** Identify a realistic path from the actor's existing access to the new capability. A dangerous function, production label, internal access, or privileged credential alone leaves that path unproven.
 
 ## Medium
 

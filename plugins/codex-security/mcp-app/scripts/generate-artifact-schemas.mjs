@@ -123,13 +123,18 @@ for (const [path, { title, schema, definitions = {} }] of Object.entries(
 // Run after Zod resolves reused branches. Only explicitly marked canonical
 // unions use this historical representation; other anyOf schemas stay intact.
 function legacyTypeArrays(_key, schema) {
-  if (!Array.isArray(schema?.type) || !schema.anyOf) return schema;
-  const { anyOf, ...rest } = schema;
-  return Object.assign(
-    {},
-    ...anyOf.map((part) => legacyTypeArrays("", part)),
-    rest,
-  );
+  if (schema?.legacyTypeArray !== true) return schema;
+  const { legacyTypeArray, anyOf, ...rest } = schema;
+  const parts = anyOf?.map((part) => legacyTypeArrays("", part)) ?? [];
+  const types = parts.flatMap((part) => part.type);
+  if (
+    types.length === 0 ||
+    types.some((type) => typeof type !== "string") ||
+    new Set(types).size !== types.length
+  ) {
+    throw new Error("Cannot publish this union as a JSON Schema type array.");
+  }
+  return Object.assign({}, ...parts, { ...rest, type: types });
 }
 async function save(path, schema, replacer) {
   const contents = await format(JSON.stringify(schema, replacer), {

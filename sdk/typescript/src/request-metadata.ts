@@ -8,6 +8,9 @@ interface RequestContextOptions {
   surface: CodexSecuritySurface;
   command: string;
   pluginVersion?: string;
+  operationId?: string;
+  attemptId?: string;
+  parentAttemptId?: string;
   mode?: ScanMode;
   /** False when this caller leaves provider selection to native config layers. */
   providerResolved?: boolean;
@@ -26,6 +29,15 @@ export function codexSecurityRequestContext(
     codex_security_surface: context.surface,
     codex_security_command: context.command,
     codex_security_package_version: VERSION,
+    ...(context.operationId === undefined
+      ? {}
+      : { codex_security_operation_id: context.operationId }),
+    ...(context.attemptId === undefined
+      ? {}
+      : { codex_security_attempt_id: context.attemptId }),
+    ...(context.parentAttemptId === undefined
+      ? {}
+      : { codex_security_parent_attempt_id: context.parentAttemptId }),
     ...(context.pluginVersion === undefined
       ? {}
       : { codex_security_plugin_version: context.pluginVersion }),

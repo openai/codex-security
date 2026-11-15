@@ -16,6 +16,73 @@ const errorMediaTypes = [
   "Application/vnd.synthetic.findings+JSON; charset=utf-8",
 ];
 
+test.each([301, 302, 303, 307, 308])(
+  "follows a same-origin HTTP %i with Fetch's method and body",
+  async (status) => {
+    const controller = new AbortController();
+    const request = mock(async (url: URL, init: RequestInit) => {
+      expect(init.redirect).toBe("manual");
+      expect(init.signal).toBe(controller.signal);
+      if (url.pathname.endsWith("/bulk/findings")) {
+        return new Response(null, {
+          status,
+          headers: { Location: Buffer.from("../reçu").toString("latin1") },
+        });
+      }
+      expect(url.href).toBe("https://service.test/v1/re%C3%A7u");
+      expect(init.method ?? "GET").toBe(status >= 307 ? "POST" : "GET");
+      expect(init.body).toBe(
+        status >= 307
+          ? JSON.stringify({ findings: [], repositoryId: scope.repositoryId })
+          : undefined,
+      );
+      expect(new Headers(init.headers).get("content-type")).toBe(
+        status >= 307 ? "application/json" : null,
+      );
+      return Response.json([]);
+    });
+    const client = new FindingsClient(
+      "https://service.test",
+      controller.signal,
+      request,
+    );
+    await expect(client.publish([], scope.repositoryId)).resolves.toEqual([]);
+    expect(request).toHaveBeenCalledTimes(2);
+  },
+);
+
+test.each(["lookup", "publish", "groups"] as const)(
+  "%s stops when a redirect chain leaves the findings service origin",
+  async (operation) => {
+    const request = mock(async (url: URL, init: RequestInit) => {
+      expect(url.origin).toBe("https://service.test");
+      expect(init.redirect).toBe("manual");
+      return new Response(new ReadableStream(), {
+        status: 308,
+        headers: {
+          "Content-Type": "application/json",
+          Location:
+            url.pathname === "/next" ? "//service.test:8443/result" : "/next",
+        },
+      });
+    });
+    const client = new FindingsClient(
+      "https://service.test",
+      undefined,
+      request,
+      { wait: rejecting("Unexpected retry") },
+    );
+    const result =
+      operation === "lookup"
+        ? client.potentialDuplicates("synthetic", scope)
+        : operation === "publish"
+          ? client.publish([], scope.repositoryId)
+          : client.storeDedupeGroups([["a", "b"]]);
+    await expect(result).rejects.toMatchObject({ status: 308 });
+    expect(request).toHaveBeenCalledTimes(2);
+  },
+);
+
 test.each(errorMediaTypes)("lookup retains %s errors", async (mediaType) => {
   const message = "No current embedding exists in the requested repository. 🧪";
   const client = new FindingsClient(

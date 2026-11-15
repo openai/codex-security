@@ -9,8 +9,8 @@ import { findingDetailSchemas } from "../src/finding-detail-schemas.ts";
 
 // Generator-only definitions: canonical runtime validation uses the selected
 // plugin's exported JSON Schemas in AJV and Python, including legacy type arrays.
-function typeArray<T extends z.ZodType>(schema: T, types: string[]): T {
-  z.globalRegistry.add(schema, { ...schema.meta(), type: types });
+function typeArray<T extends z.ZodType>(schema: T): T {
+  z.globalRegistry.add(schema, { ...schema.meta(), legacyTypeArray: true });
   return schema;
 }
 function pattern(source: string) {
@@ -50,15 +50,11 @@ const validation = findingValidation.extend({
   evidence_refs: textList.optional(),
 });
 for (const schema of [findingAssessment, textOrSummary, findingReachability])
-  typeArray(schema, ["string", "object"]);
+  typeArray(schema);
 for (const field of ["status", "disposition", "result"] as const)
-  typeArray(validation.shape[field].unwrap(), ["string", "null"]);
-typeArray(validation.shape.evidence.unwrap(), ["string", "array"]);
-const assessment = typeArray(findingAttackPath.shape.impact.unwrap(), [
-  "string",
-  "object",
-  "null",
-]);
+  typeArray(validation.shape[field].unwrap());
+typeArray(validation.shape.evidence.unwrap());
+const assessment = typeArray(findingAttackPath.shape.impact.unwrap());
 const attackPath = findingAttackPath.extend({
   dataFlow: textOrSummary.optional(),
   data_flow: textOrSummary.optional(),
@@ -95,14 +91,8 @@ const finding = z.looseObject({
     })
     .optional(),
   codeEvidence: z.array(codeEvidence).optional(),
-  code_evidence: typeArray(z.array(legacyCodeEvidence).nullable(), [
-    "array",
-    "null",
-  ]).optional(),
-  rootCause: typeArray(z.union([rootCause, z.string()]), [
-    "object",
-    "string",
-  ]).optional(),
+  code_evidence: typeArray(z.array(legacyCodeEvidence).nullable()).optional(),
+  rootCause: typeArray(z.union([rootCause, z.string()])).optional(),
   root_cause: typeArray(
     z.union([
       z.looseObject({
@@ -115,11 +105,10 @@ const finding = z.looseObject({
       z.string(),
       z.null(),
     ]),
-    ["object", "string", "null"],
   ).optional(),
   remediation: text,
-  validation: typeArray(validation.nullable(), ["object", "null"]).optional(),
-  attackPath: typeArray(attackPath.nullable(), ["object", "null"]).optional(),
+  validation: typeArray(validation.nullable()).optional(),
+  attackPath: typeArray(attackPath.nullable()).optional(),
   remediationTests: textList.optional(),
   preventiveControls: textList.optional(),
   provenance: z.looseObject({ source: text }),

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMain } from "../../../sdk/typescript/scripts/is-main.mjs";
 import type { CalibrationCase, CalibrationVariant } from "../types.ts";
 
 import fs from "node:fs";
@@ -184,11 +185,7 @@ export function generateTests(
   );
 }
 
-if (
-  process.argv[1] &&
-  fs.existsSync(process.argv[1]) &&
-  import.meta.filename === fs.realpathSync(process.argv[1])
-) {
+if (isMain(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
   const tests = generateTests({ ...args, datasetPath: args.dataset });
   fs.mkdirSync(path.dirname(args.output), { recursive: true });

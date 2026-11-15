@@ -1,4 +1,4 @@
-import { cleanupRuntime } from './runtime-cleanup.js';
+import { cleanupRuntime } from './runtime-cleanup.ts';
 
 // GitHub exposes saved action state to the post entrypoint through STATE_ variables.
 const root = process.env['STATE_runtime-root'];

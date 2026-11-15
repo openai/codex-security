@@ -1,77 +1,92 @@
 # Import Endor Labs findings
 
-Import findings from one Endor Labs project and scan context. Native Finding
-JSON preserves the scanned commit, severity, and dependency and location
-details reported by Endor.
+Prefer Endor's native Finding JSON. It keeps the scanned commit,
+severity, package and advisory details, and primary SAST or AI SAST locations
+that Endor reports. You can also import self-contained `endorctl` SARIF 2.1.0
+with finding UUIDs. A later SARIF import for the same UUID, destination
+and source key can replace the stored commit, package and
+advisory details, and leave severity `unknown`. Use native JSON for updates
+when you need those fields. If the Cloud repository publisher requires a
+reported severity, the preview lists unscored findings under exclusions. Local
+imports and the private inbox can retain findings with an unreported severity.
+
+Native JSON keeps vulnerability and malware advisory IDs and aliases. When
+Endor supplies only the fully qualified dependency name, the import preserves
+that name, including its ecosystem and version. A branch scan uses its REF
+context ID. The source version's ref can also identify a tag or commit. If
+optional package or advisory details exceed Cloud's field or finding size
+limits, private imports use `security.findings.v1` to upload the reviewed
+fields and original Endor record together. The service must support that
+format for these findings. Retrying a saved import reuses its original upload.
 
 ## Quick start
 
-[Enable external imports](README.md#preview-a-report) and
-[export the native findings](#native-finding-json) from the intended project
-and context. From the matching checkout root, preview the saved file. Replace
-the file path, namespace, and project UUID.
+In Endor, verify that the project and scan context match your checkout. A project UUID alone doesn't
+establish that link. From the checkout root, set the namespace and project
+UUID for this default-branch example.
 
 ```sh
-codex-security publish findings /private/path/endor-findings.json \
-  --to local --repository . --provider endor \
-  --source-key "YOUR_NAMESPACE/PROJECT_UUID/main" --dry-run --format json
+namespace=YOUR_NAMESPACE
+project=PROJECT_UUID
+source_key="$namespace/$project/main"
 ```
 
-## Import and verify
+For repeat imports, reuse the previous preview's exact source key. Choose a
+saved report or export one in the same shell.
 
-Confirm the project and context belong to this repository. The importer retains
-the project UUID but does not look up its Git repository.
-[Save or publish and verify](README.md#save-or-publish-and-verify) using the same
-source key for later exports from this context.
-
-## Reference
-
-### Native Finding JSON
-
-Authenticate `endorctl` for the namespace that owns the project. Replace
-`YOUR_NAMESPACE` and `PROJECT_UUID`, then export the findings.
+**Saved report.** Set `report` to a private file outside the checkout. It can
+contain one Finding, an array of Findings, or a complete JSON response with
+`list.objects`. For selected UUIDs, save just those complete Findings in an array.
 
 ```sh
+report=/private/path/endor-findings.json
+```
+
+**Export from Endor.** Sign in to your namespace with `endorctl`. Use a
+private temporary directory outside the checkout. For another scan context,
+change both the filter and the source key. The Endor Labs Agent Kit can find
+UUIDs for a selection.
+[Agent Kit](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit) · [Filter syntax](https://docs.endorlabs.com/developers-api/rest-api/using-the-rest-api/filters#values)
+
+```sh
+filter="context.type==CONTEXT_TYPE_MAIN and spec.project_uuid==\"$project\""
+# For selected UUIDs, uncomment and replace the example IDs.
+# filter="$filter"' and uuid in ["UUID_A","UUID_B"]'
+report=
 out=$(mktemp -d) &&
-  endorctl api list --resource Finding --namespace "YOUR_NAMESPACE" \
-    --filter 'context.type==CONTEXT_TYPE_MAIN and spec.project_uuid=="PROJECT_UUID"' \
-    --list-all --output-type json > "$out/endor-findings.tmp" &&
-  mv "$out/endor-findings.tmp" "$out/endor-findings.json"
+  endorctl api list --resource Finding --namespace "$namespace" \
+    --filter "$filter" --list-all --output-type json > "$out/endor-findings.tmp" &&
+  mv "$out/endor-findings.tmp" "$out/endor-findings.json" &&
+  report="$out/endor-findings.json"
 ```
 
-The filter selects default-branch findings. For another context, change both
-the filter and source key. Keep `--list-all` and omit `--field-mask` to export
-complete Finding objects. The saved file is `$out/endor-findings.json`.
+Keep `--list-all` to fetch every page. Omit `--field-mask` to keep every field.
+[Endor CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api)
 
-The importer accepts a single Finding, an array, or a `ListFindingsResponse`
-containing `list.objects`. An unfinished paginated response is rejected. Native
-JSON retains the complete Finding and maps severity, dependency and advisory
-details, scanned commit SHA, and primary SAST or AI SAST locations when
-available. See the [Endor CLI API](https://docs.endorlabs.com/developers-api/cli/commands/api)
-and [Finding model](https://github.com/endorlabs/endorlabs-sdk/blob/8a41756890c2dee3bb089fee881cae4f2adbde03/src/endorlabs/generated/models/finding_service.py).
+**Preview the report.**
 
-The [Endor Labs Agent Kit for Codex](https://github.com/endorlabs/ai-plugins/tree/main/plugins/codex/endor-labs-agent-kit)
-can identify UUIDs. For a fresh export, append `and uuid in ["UUID_A","UUID_B"]`
-to the project and context filter above, using the requested UUIDs. For a saved
-export, select their complete objects from `list.objects`. Before import, verify
-the preview contains each requested UUID once, no other IDs, and no exclusions.
-[Endor filter syntax](https://docs.endorlabs.com/developers-api/rest-api/using-the-rest-api/filters#values)
+```sh
+codex-security publish findings "$report" --to local --repository . \
+  --provider endor --source-key "$source_key" --dry-run --format json
+```
 
-### SARIF and repeat imports
+Check the repository, source key, findings and exclusions. For selected UUIDs,
+verify that `findings[].source_finding_id` lists each requested UUID once and
+no others, and that `excluded` is empty. If the preview matches,
+[save locally or publish to Cloud and verify the result](README.md#save-or-publish-and-verify).
+New findings start as `not_assessed`. Upgrade recommendations, reachability
+and dismissals come from Endor.
 
-Self-contained `endorctl` SARIF 2.1.0 reports preserve finding UUIDs, links,
-direct repository paths, and reported SAST or Secrets lines. Native severity
-and scanned revision are unavailable. Diagnostic levels, CVSS, and indexed or
-base-relative artifact references stay in the original evidence. Unrelated run
-artifact inventories are omitted. For a new Cloud submission, declared
-repository URLs must match the selected repository. For local imports, they
-must match a comparable configured Git remote when one is available.
+## SARIF and repeat imports
 
-Both formats identify a record by finding UUID within the repository and source
-key. Reimporting replaces its evidence snapshot. Importing SARIF after native
-JSON can clear commit, package, and advisory details and make severity unknown.
-For ongoing imports use native JSON and the same source key. Local records
-omitted from later imports remain stored.
+The local workbench keeps findings omitted from later exports. Use a separate
+source key if you want to retain both formats' evidence for a finding.
+[Imported finding identity and evidence](schema-guide.md)
 
-Upgrades, reachability, and dismissals remain Endor’s claims. Imported findings
-start unassessed and are separate from completed scans.
+For SARIF, `source_finding_id` is the Endor finding UUID and `evidence.url`
+is the vendor's `finding-url` when supplied. Use the URL to open the finding in
+Endor. Use `locations` for direct repository paths and reported SAST or
+Secrets lines. Look in the original evidence for diagnostic levels, CVSS and
+indexed or base-relative artifact references. If the report includes repository
+URLs, they must match a comparable local Git remote when available, or the
+selected repository for a new Cloud submission.

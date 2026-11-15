@@ -1,3 +1,5 @@
+"""Check which saved sources a stopped scan selects when timestamps tie or publication is retried."""
+
 from __future__ import annotations
 
 import json
@@ -46,6 +48,39 @@ def test_latest_iteration_uses_its_number_when_completion_times_tie() -> None:
     previous = iteration("dedup-0009", "z")
     latest = iteration("dedup-0010", "a")
     assert saved_sources._latest_iteration([latest, previous]) == latest
+
+
+def test_stopped_scan_prefers_latest_iteration_over_older_reducer_checkpoint(
+    tmp_path: Path,
+) -> None:
+    state, home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    finding = standard_finding(tmp_path, scan_id, target)
+    # An upgraded scan can contain both a legacy reducer checkpoint and a host iteration.
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        for label, worker_id in (("dedup-0009", "z"), ("dedup-0010", "a")):
+            output = scan_dir / "artifacts" / "deep_discovery" / "dedup" / label / "output"
+            output.mkdir(parents=True)
+            result = output / "result.json"
+            draft = {
+                "scanId": scan_id,
+                "findings": [{**finding, "summary": label}],
+                "threatModel": {"summary": label},
+            }
+            result.write_text(json.dumps(draft))
+            if label == "dedup-0009":
+                write_checkpoint(output / "checkpoints", draft)
+            connection.execute(
+                """INSERT INTO deep_scan_workers (
+                    id, scan_id, kind, status, prompt_path, artifact_dir, result_manifest_path,
+                    created_at, completed_at, updated_at
+                ) VALUES (?, ?, 'dedup', 'succeeded', ?, ?, ?, '2026-10-27', '2026-10-27', '2026-10-27')""",
+                (worker_id, scan_id, str(result), str(output), str(result)),
+            )
+    fail_deep_scan(state, home, scan_id, message="Stopped before parent publication.")
+    findings = json.loads((scan_dir / "findings.json").read_text())["findings"]
+    assert [row["summary"] for row in findings] == ["dedup-0010"]
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["threatModel"]["summary"] == "dedup-0010"
 
 
 def call_workbench(monkeypatch, state, codex_home, *args):

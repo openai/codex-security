@@ -32,6 +32,16 @@ AVIT_FINDING_FIELDS = (
 
 
 def read_template(path: Path) -> tuple[list[str], dict[str, str]]:
+    """Read the application defaults for a ServiceNow AVIT export from a UTF-8 CSV.
+
+    Returns:
+        tuple: The original column headings and a mapping of stripped, case-folded
+            headings to values from the single application row.
+
+    Raises:
+        ValueError: The file is unreadable, required columns are missing or
+            duplicated, or application values are empty or too long.
+    """
     try:
         with path.open(encoding="utf-8-sig", newline="") as source:
             rows = (row for row in csv.reader(source, strict=True) if row)
@@ -62,6 +72,11 @@ def _narrative(text: str) -> str:
 
 
 def finding_fields(finding: dict[str, Any], location: dict[str, Any], steps: str) -> dict[str, str]:
+    """Return AVIT columns for a finding at the selected location with the recorded steps.
+
+    Use the first recognized CWE as the category, or the finding ID as the
+    vulnerability ID when no CWE qualifies. Both narrative fields fit in 1,000 characters.
+    """
     details = (
         f"{finding['findingId']} | {location['path']}:{location['startLine']}\n"
         f"{finding['title']}\n{finding['summary']}\n{finding['remediation']}"
@@ -85,6 +100,11 @@ def finding_fields(finding: dict[str, Any], location: dict[str, Any], steps: str
 
 
 def render(template: Path, rows: Iterable[dict[str, str]]) -> bytes:
+    """Return UTF-8 CSV bytes with the template's header and one row per finding.
+
+    The template supplies application fields and column order. For nonempty input,
+    write the count of findings missing reproduction steps to stderr.
+    """
     headers, row = read_template(template)
     output = io.StringIO(newline="")
     writer = csv.writer(output)

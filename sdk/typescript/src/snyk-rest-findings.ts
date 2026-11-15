@@ -1,4 +1,5 @@
 import {
+  canonicalNumber,
   validateExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
@@ -10,15 +11,10 @@ import {
 } from "./external-findings.js";
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import {
-  SNYK_REST_ISSUES_FORMAT,
-  encodeSnykV1File,
   isSnykRestFormat,
-  SNYK_REST_ISSUES_V1,
-  originalSnykEvidence,
-  readSnykRestDocument,
-} from "./snyk-rest-v1.js";
-import { snykRepositoryUrls } from "./snyk-findings.js";
-import { requireExternalImports } from "./external-imports-feature.js";
+  SNYK_REST_ISSUES_FORMAT,
+  snykRepositoryUrls,
+} from "./snyk-findings.js";
 import { isGitHubCloudHost } from "./git-remote.js";
 import {
   gitPathToHttpPath,
@@ -39,7 +35,6 @@ import {
   type HostedScannerHttpOptions,
 } from "./hosted-scanner-http.js";
 import { isRecord } from "./record.js";
-import { legacyDecimalInteger } from "./hosted-scanner-v1.js";
 import { isSafeNonNegativeInteger } from "./value.js";
 import { checkSnykTokenOrigin, snykApiToken } from "./snyk-token-origin.js";
 import { regexes } from "zod/v4/core";
@@ -48,6 +43,7 @@ import {
   normalizeRecords,
   record as scannerRecord,
   hostedRepositoryPath,
+  repositoryFilePath,
   requiredText,
   scannerSeverity,
   stableId,
@@ -60,13 +56,16 @@ export interface SnykIssuesFindings extends ExternalFindings {
   sourceRepositoryPlatform?: "github" | "other";
   snykRestContext?: Record<string, unknown>;
 }
-export { SNYK_REST_ISSUES_FORMAT, isSnykRestFormat } from "./snyk-rest-v1.js";
+export { isSnykRestFormat, SNYK_REST_ISSUES_FORMAT };
 const issueTimestamp = new RegExp(
   regexes.datetime({ offset: true }).source,
   "i",
 );
-const apiVersion = "2026-03-25";
-const formatVersion = { format: SNYK_REST_ISSUES_FORMAT, apiVersion } as const;
+export const snykRestApiVersion = "2026-03-25";
+const formatVersion = {
+  format: SNYK_REST_ISSUES_FORMAT,
+  apiVersion: snykRestApiVersion,
+} as const;
 const defaultOrigin = "https://api.snyk.io";
 const origins = new Set([
   defaultOrigin,
@@ -145,7 +144,7 @@ type Resource = Record<string, unknown>;
 
 export interface SnykIssuesExport extends SnykScope {
   format: typeof SNYK_REST_ISSUES_FORMAT;
-  apiVersion: typeof apiVersion;
+  apiVersion: typeof snykRestApiVersion;
   apiOrigin: string;
   complete: true;
   projectJson: string;
@@ -194,7 +193,7 @@ function endpoint(selected: Scope, route: string) {
     `/rest/orgs/${selected.organizationId}/${route}`,
     selected.apiOrigin,
   );
-  url.searchParams.set("version", apiVersion);
+  url.searchParams.set("version", snykRestApiVersion);
   return url;
 }
 
@@ -356,8 +355,6 @@ function trustedScmBinding(
   return { url };
 }
 
-class SnykTargetRepositoryMismatch extends Error {}
-
 function checkRemote(
   remote: unknown,
   selected: Scope,
@@ -394,7 +391,7 @@ function checkRemote(
           gitlab,
         };
   if (!snykRestRepositoryMatches(binding, url))
-    throw new SnykTargetRepositoryMismatch(
+    throw new Error(
       "Snyk target URL does not match the selected source repository URL.",
     );
   return {
@@ -717,7 +714,6 @@ export async function collectSnykIssues(
   } = {},
 ): Promise<SnykIssuesExport> {
   const environment = dependencies.environment ?? process.env;
-  requireExternalImports(environment);
   const { getJson, signal } = hostedScannerHttp(dependencies, options.signal);
   const { product = "open-source" } = options;
   const selected = scope(options, options.apiOrigin ?? defaultOrigin, product);
@@ -790,10 +786,10 @@ function savedContext(
 ) {
   if (
     document["format"] !== SNYK_REST_ISSUES_FORMAT ||
-    document["apiVersion"] !== apiVersion
+    document["apiVersion"] !== snykRestApiVersion
   )
     throw new Error(
-      `Expected ${SNYK_REST_ISSUES_FORMAT} for API version ${apiVersion}.`,
+      `Expected ${SNYK_REST_ISSUES_FORMAT} for API version ${snykRestApiVersion}.`,
     );
   const selected = scope(document, document["apiOrigin"]);
   const project = record(
@@ -880,7 +876,7 @@ function linkedSnykResources(
     )
       return { issue };
   }
-  if (!hosted && data["apiVersion"] !== apiVersion) return;
+  if (!hosted && data["apiVersion"] !== snykRestApiVersion) return;
   const project = originalSnykResource(data, "project", json);
   const attributes = project?.["attributes"];
   const nativeProject =
@@ -904,161 +900,61 @@ function linkedSnykResources(
   return {};
 }
 
-function retainedRelationship(
-  resource: Resource | undefined,
-  name: "target" | "integration" | "organization",
-) {
-  const links = resource?.["relationships"];
-  const relation = isRecord(links) ? links[name] : undefined;
-  const data = isRecord(relation) ? relation["data"] : undefined;
-  if (data === null) return null;
-  if (
-    isRecord(data) &&
-    (data["type"] === name ||
-      (name === "organization" && data["type"] === "org"))
-  )
-    return data;
-}
-
-/** Read only vendor-typed claims still present in an already-approved request. */
-function retainedSnykAssets(data: Resource) {
-  const assets = [];
-  const id = (resource?: Resource | null) => {
-    const value = resource?.["id"];
-    return isUuid(value) ? value.toLowerCase() : undefined;
-  };
-  for (const json of [false, true]) {
-    const project = originalSnykResource(data, "project", json);
-    let expanded;
-    if (project?.["type"] === "project") {
-      const attributes = project["attributes"];
-      const origin = isRecord(attributes) ? attributes["origin"] : undefined;
-      expanded = retainedRelationship(project, "target");
-      assets.push({
-        projectId: id(project),
-        product: projectProduct(
-          isRecord(attributes) ? attributes["type"] : undefined,
-        ),
-        targetId: expanded === null ? null : undefined,
-        organizationId: id(retainedRelationship(project, "organization")),
-        origin:
-          typeof origin === "string" && scmOrigins.has(origin)
-            ? origin
-            : undefined,
-      });
-    }
-    for (const target of [
-      expanded,
-      originalSnykResource(data, "target", json),
-    ]) {
-      if (target?.["type"] !== "target") continue;
-      const attributes = target["attributes"];
-      const url = isRecord(attributes) ? attributes["url"] : undefined;
-      const integration = retainedRelationship(target, "integration");
-      const integrationAttributes = integration?.["attributes"];
-      const type = isRecord(integrationAttributes)
-        ? integrationAttributes["integration_type"]
-        : undefined;
-      assets.push({
-        url: typeof url === "string" ? url : undefined,
-        targetId: id(target),
-        integrationId: id(integration),
-        deployment:
-          typeof type === "string"
-            ? concreteDeployment(scmOrigins.get(type))
-            : undefined,
-        organizationId: id(retainedRelationship(target, "organization")),
-      });
-    }
-  }
-  return assets;
-}
-
 function snykRowEvidence(finding: ExternalFinding, hostedReport = false) {
   const retained = finding.evidence.source_data;
   const marked =
     snykRestId.test(finding.source_finding_id) ||
     isSnykRestFormat(retained?.["format"]);
   const hosted = hostedReport || marked;
-  const v1 = retained && linkedSnykResources(retained, false, hosted);
-  const v2 = retained && linkedSnykResources(retained, true, hosted);
-  if (v1 || v2 || marked) return { v1, v2 };
+  const original = retained && linkedSnykResources(retained, true, hosted);
+  const retired = retained && linkedSnykResources(retained, false, hosted);
+  if (original || retired || marked) return { ...original, retired };
 }
 
 export function isSnykRestFinding(finding: ExternalFinding): boolean {
   return snykRowEvidence(finding) !== undefined;
 }
 
-/** Recover the native occurrence from an earlier normalized submission with a caller-assigned ID. */
-export function snykRestCheckpointFindingId(
-  finding: ExternalFinding,
-  references: readonly ExternalSourceRepository[],
-) {
-  const data = finding.evidence.source_data;
-  const evidence = snykRowEvidence(finding);
-  if (!data || (!evidence?.v1?.issue && !evidence?.v2?.issue)) return;
-  const format = evidence.v2?.issue
-    ? SNYK_REST_ISSUES_FORMAT
-    : SNYK_REST_ISSUES_V1;
-  const document = readSnykRestDocument({
-    ...data,
-    format: data["format"] ?? format,
-  });
-  const { source } = savedContext(document, references);
-  const issue = parseHostedScannerJson(
-    requiredText(document["issueJson"], "Snyk original issue"),
-  );
-  const { attributes } = selectedIssue(scopedIssue(issue, source), source);
-  return snykIssueId(attributes, source, data["snykRestIssueKey"]);
-}
-
-export function snykRestFindingRepository(
-  finding: ExternalFinding,
-  references: readonly ExternalSourceRepository[] = [],
-) {
-  return bindSnykFinding(finding, references, snykRowEvidence(finding));
-}
-
 function bindSnykFinding(
   finding: ExternalFinding,
   references: readonly ExternalSourceRepository[],
   originals: ReturnType<typeof snykRowEvidence>,
-  report?: Resource,
+  report?: { fields: Resource; asset: ReturnType<typeof savedContext> },
   retain?: (finding: ExternalFinding, source: Resource) => void,
 ) {
   const retained = record(
     finding.evidence.source_data,
     "Original Snyk REST issue evidence",
   );
-  const format =
-    retained["format"] === undefined
-      ? originals?.v1
-        ? SNYK_REST_ISSUES_V1
-        : SNYK_REST_ISSUES_FORMAT
-      : retained["format"];
-  if (
-    isSnykRestFormat(format) &&
-    (format === SNYK_REST_ISSUES_V1 ? originals?.v2 : originals?.v1)
-  )
+  if (originals?.retired)
     throw new Error(
-      "A normalized Snyk row cannot claim both v1 and v2 native representations.",
+      "A Snyk REST finding must use the current collector's original JSON evidence.",
     );
-  const document = readSnykRestDocument({ ...retained, format }, report);
+  const format = retained["format"] ?? SNYK_REST_ISSUES_FORMAT;
+  const document: Resource = { ...retained, format };
   const issue =
-    (format === SNYK_REST_ISSUES_FORMAT ? originals?.v2?.issue : undefined) ??
+    originals?.issue ??
     parseHostedScannerJson(
       requiredText(document["issueJson"], "Snyk original issue"),
     );
   // A selected issue can retain any of its original monitor fields. Fill only those it omitted.
   let projected = false;
-  if (report && (originals?.v1?.issue || originals?.v2?.issue)) {
-    for (const [field, value] of Object.entries(report)) {
+  if (report && originals?.issue) {
+    for (const [field, value] of Object.entries(report.fields)) {
       if (document[field] !== undefined) continue;
       document[field] = value;
       projected = true;
     }
   }
-  const asset = savedContext(document, references);
+  // Complete v2 selections normally carry the same verified monitor and native assets on every row.
+  const asset =
+    format === SNYK_REST_ISSUES_FORMAT &&
+    report &&
+    Object.entries(report.fields).every(
+      ([key, value]) => document[key] === value,
+    )
+      ? report.asset
+      : savedContext(document, references);
   const { source, repository } = asset;
   const { id: issueId, attributes } = selectedIssue(
     scopedIssue(issue, source),
@@ -1066,28 +962,7 @@ function bindSnykFinding(
   );
   verifySnykFindingId(finding, attributes, source);
   projectSnykIssue(attributes, asset, { ...retained, format }, "local");
-  if (retain && format === SNYK_REST_ISSUES_V1) {
-    // The legacy witness stores the original decimal token, including its spelling.
-    const context: Resource = projected
-      ? encodeSnykV1File({
-          ...repository.scope,
-          apiVersion: source.apiVersion,
-          format,
-          project: asset.project,
-          target: asset.target,
-        })
-      : { format };
-    retain(finding, {
-      ...retained,
-      ...context,
-      ...(isRecord(context["numericFields"]) && {
-        numericFields: {
-          ...context["numericFields"],
-          ...(isRecord(retained["numericFields"]) && retained["numericFields"]),
-        },
-      }),
-    });
-  } else if (retain && format === SNYK_REST_ISSUES_FORMAT) {
+  if (retain) {
     retain(finding, {
       ...retained,
       ...(projected && source),
@@ -1099,16 +974,6 @@ function bindSnykFinding(
     });
   }
   return { ...repository, issueId };
-}
-
-/** Recognize a retained hosted report before verifying its selected issues. */
-export function isSnykRestReport(
-  input: ExternalFindings & Partial<SnykIssuesFindings>,
-): boolean {
-  return (
-    input.snykRestContext !== undefined ||
-    input.findings.some(isSnykRestFinding)
-  );
 }
 
 function readIssues(document: Resource, selected: Scope) {
@@ -1163,18 +1028,17 @@ function problemIds(entries: Resource[], type?: string) {
   return [...ids];
 }
 
-function findingFilePath(value: unknown, v2: boolean) {
+function findingFilePath(value: unknown) {
   const path = hostedRepositoryPath(value);
-  const filename = path?.split("/").at(-1);
-  return v2 && (!filename || filename === ".") ? null : path;
+  if (path?.endsWith("/.") || !repositoryFilePath(path)) return null;
+  return path;
 }
 
 function packageEvidence(
   coordinates: Resource[],
   { manager, targetFile }: ReturnType<typeof projectContext>,
-  v2: boolean,
 ) {
-  const manifest = findingFilePath(targetFile, v2);
+  const manifest = findingFilePath(targetFile);
   const packages: ImportedPackage[] = [];
   for (const coordinate of coordinates) {
     const fixed = records(coordinate, "remedies").flatMap((remedy) => {
@@ -1211,11 +1075,16 @@ function packageEvidence(
 function codeStartLine(region: unknown): number | null {
   const start = isRecord(region) ? region["start"] : undefined;
   const token = isRecord(start) ? hostedNumberToken(start["line"]) : undefined;
-  const line = token && Number(legacyDecimalInteger(token));
-  return isSafeNonNegativeInteger(line) && line > 0 ? line : null;
+  const line = Number(token);
+  return token &&
+    isSafeNonNegativeInteger(line) &&
+    line > 0 &&
+    String(line) === canonicalNumber(token)
+    ? line
+    : null;
 }
 
-function codeEvidence(coordinates: Resource[], scm: boolean, v2: boolean) {
+function codeEvidence(coordinates: Resource[], scm: boolean) {
   const locations: { path: string; line?: number | null }[] = [];
   const revisions = new Set<string | null>();
   for (const coordinate of coordinates) {
@@ -1225,11 +1094,9 @@ function codeEvidence(coordinates: Resource[], scm: boolean, v2: boolean) {
       if (value === undefined) continue;
       const location = record(value, "Snyk source location");
       revisions.add(text(location["commit_id"]));
-      const path = findingFilePath(location["file"], v2);
+      const path = findingFilePath(location["file"]);
       if (scm && path)
-        locations.push(
-          v2 ? { path, line: codeStartLine(location["region"]) } : { path },
-        );
+        locations.push({ path, line: codeStartLine(location["region"]) });
     }
   }
   return {
@@ -1245,7 +1112,6 @@ function projectSnykIssue(
   target: ExternalImportTarget,
 ) {
   const code = source.product === "code";
-  const v2 = sourceData["format"] !== SNYK_REST_ISSUES_V1;
   const status = attributes["status"];
   if (
     (status !== "open" && status !== "resolved") ||
@@ -1280,9 +1146,9 @@ function projectSnykIssue(
         severity === "info" ? "informational" : scannerSeverity(severity),
       advisory_ids: code ? [] : problemIds(problems),
       ...(code
-        ? codeEvidence(activeCoordinates, context.scm, v2)
+        ? codeEvidence(activeCoordinates, context.scm)
         : {
-            packages: packageEvidence(activeCoordinates, context, v2),
+            packages: packageEvidence(activeCoordinates, context),
           }),
       source_updated_at: Math.floor(updated / 1000),
       source_data: sourceData,
@@ -1306,32 +1172,28 @@ export function normalizeSnykIssues(
   target: ExternalImportTarget = "local",
   references: readonly ExternalSourceRepository[] = [],
 ): SnykIssuesFindings {
-  const wire = record(input, "Snyk REST Issues export");
-  const document = readSnykRestDocument(wire);
+  const document = record(input, "Snyk REST Issues export");
   const asset = savedContext(document, references);
   const { source, repository } = asset;
   const issues = readIssues(document, source);
-  const legacy = originalSnykEvidence(wire, source);
   // normalizeRecords identifies every row before projecting any evidence.
   const resourceCounts = new Map<string, number>();
   const result = normalizeRecords(
-    issues.map((issue, index) => ({ issue, original: legacy?.rows[index] })),
-    ({ issue, original }) => {
+    issues,
+    (issue) => {
       if (resourceCounts.get(resourceId(issue, "issue"))! > 1)
         throw new Error(
           "The saved Snyk report contains overlapping issue IDs.",
         );
       const attributes = record(issue["attributes"], "Snyk issue attributes");
-      const sourceData = original
-        ? structuredClone(original)
-        : {
-            ...source,
-            snykRestIssueKey: attributes["key"],
-            issueJson: stringifyHostedEvidence(issue),
-          };
+      const sourceData = {
+        ...source,
+        snykRestIssueKey: attributes["key"],
+        issueJson: stringifyHostedEvidence(issue),
+      };
       return projectSnykIssue(attributes, asset, sourceData, target);
     },
-    ({ issue }) => {
+    (issue) => {
       const identifier = resourceIdentifier(issue, "issue");
       const raw = issue["attributes"];
       const product = isRecord(raw) ? raw["type"] : undefined;
@@ -1353,7 +1215,7 @@ export function normalizeSnykIssues(
     ...(repository.platform && {
       sourceRepositoryPlatform: repository.platform,
     }),
-    snykRestContext: legacy ? structuredClone(legacy.context) : source,
+    snykRestContext: source,
   };
 }
 
@@ -1364,15 +1226,12 @@ export function snykRestImportRepository(
   urls: Iterable<string> = [],
   trustedSources: readonly ExternalSourceRepository[] = [],
   retain?: (finding: ExternalFinding, source: Resource) => void,
-  allowOpaqueLegacyRows = false,
   declaredCloudRepository?: string,
 ): RepositoryBinding | undefined {
   const project =
     input.snykRestContext !== undefined
       ? savedContext(
-          readSnykRestDocument(
-            record(input.snykRestContext, "Snyk report context"),
-          ),
+          record(input.snykRestContext, "Snyk report context"),
           trustedSources,
         )
       : undefined;
@@ -1384,37 +1243,17 @@ export function snykRestImportRepository(
     project !== undefined || rows.some(({ originals }) => originals);
   if (!hosted && !declaredCloudRepository) return;
   const context = project && {
-    ...project.source,
-    projectJson: JSON.stringify(project.project),
-    targetJson: JSON.stringify(project.target),
+    asset: project,
+    fields: {
+      ...project.source,
+      projectJson: JSON.stringify(project.project),
+      targetJson: JSON.stringify(project.target),
+    },
   };
-  const retainedIssues: { finding: ExternalFinding; issue: Resource }[] = [];
-  const retainedRows: Resource[] = [];
   const boundRows = hosted
-    ? rows.flatMap(({ finding, originals }) => {
-        try {
-          return [
-            bindSnykFinding(
-              finding,
-              trustedSources,
-              originals,
-              context,
-              retain,
-            ),
-          ];
-        } catch (error) {
-          if (
-            !allowOpaqueLegacyRows ||
-            error instanceof SnykTargetRepositoryMismatch
-          )
-            throw error;
-          for (const issue of [originals?.v1?.issue, originals?.v2?.issue])
-            if (issue) retainedIssues.push({ finding, issue });
-          if (originals && finding.evidence.source_data)
-            retainedRows.push(finding.evidence.source_data);
-          return [];
-        }
-      })
+    ? rows.map(({ finding, originals }) =>
+        bindSnykFinding(finding, trustedSources, originals, context, retain),
+      )
     : [];
   const selected = project?.repository.scope ?? boundRows[0]?.scope;
   const bindings = project ? [...boundRows, project.repository] : boundRows;
@@ -1434,20 +1273,9 @@ export function snykRestImportRepository(
     throw new Error(
       "The selected Snyk finding is missing the report's native target. Keep its full project or omit the project to use the report context.",
     );
-  const retainedAssets = retainedRows.flatMap(retainedSnykAssets);
-  const monitorBindings: {
-    targetId?: string | null;
-    integrationId?: string;
-    deployment?: string;
-  }[] = [...bindings, ...retainedAssets];
   for (const key of ["targetId", "integrationId", "deployment"] as const) {
-    // Sparse targets can contradict a verified SCM deployment but cannot establish one.
-    if (key === "deployment" && !bindings.some((binding) => binding.deployment))
-      continue;
     const ids = new Set(
-      monitorBindings
-        .map((binding) => binding[key])
-        .filter((id) => id !== undefined),
+      bindings.map((binding) => binding[key]).filter((id) => id !== undefined),
     );
     if (ids.size > 1)
       throw new Error(
@@ -1456,46 +1284,6 @@ export function snykRestImportRepository(
   }
   const scopes = boundRows.map(({ scope }) => scope);
   const claims = new Set(bindings.map((binding) => binding.url));
-  const retainedScms = [];
-  for (const {
-    url,
-    origin,
-    product,
-    projectId,
-    organizationId,
-  } of retainedAssets) {
-    if (url) claims.add(url);
-    if (origin) retainedScms.push(reportedScm(repositoryUrl, origin));
-    if (selected)
-      scopes.push({
-        ...selected,
-        projectId: projectId ?? selected.projectId,
-        organizationId: organizationId ?? selected.organizationId,
-        product: product ?? selected.product,
-      });
-  }
-  // Already-approved rows can lack the original project while retaining a
-  // monitored issue, partial scope, or source URL that contradicts a new claim.
-  if (selected) {
-    for (const { finding, issue } of retainedIssues) {
-      const { attributes } = selectedIssue(
-        scopedIssue(issue, selected),
-        selected,
-      );
-      if (snykRestId.test(finding.source_finding_id))
-        verifySnykFindingId(finding, attributes, selected);
-    }
-  }
-  for (const { sourceRepositoryUrl, ...fields } of retainedRows) {
-    if (sourceRepositoryUrl !== undefined)
-      claims.add(
-        requiredText(sourceRepositoryUrl, "Snyk source repository URL"),
-      );
-    if (selected) {
-      const supplied = { ...selected, ...fields };
-      scopes.push(scope(supplied, supplied.apiOrigin));
-    }
-  }
   if (
     bindings.some((binding) => binding.scm !== bindings[0]?.scm) ||
     (selected &&
@@ -1535,12 +1323,10 @@ export function snykRestImportRepository(
     repositoryUrl,
     trustedSources,
     input.sourceRepositoryPlatform !== "other" &&
-      retainedScms.every(({ github }) => github) &&
       bindings.every(
         (binding) => binding.platform !== "other" && !binding.gitlab,
       ),
     input.sourceRepositoryPlatform !== "github" &&
-      retainedScms.every(({ gitlab }) => gitlab) &&
       bindings.every(
         (binding) => binding.gitlab || binding.platform === undefined,
       ),

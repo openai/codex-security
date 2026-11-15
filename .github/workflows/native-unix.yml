@@ -7,6 +7,19 @@ on:
         description: Source commit to build; defaults to the calling workflow commit.
         type: string
         default: ""
+    outputs:
+      darwin-arm64-artifact-id:
+        description: Artifact ID of the verified macOS arm64 build.
+        value: ${{ jobs.primitives.outputs.darwin-arm64-artifact-id }}
+      darwin-arm64-sha256:
+        description: SHA-256 of the addon of the verified macOS arm64 build.
+        value: ${{ jobs.primitives.outputs.darwin-arm64-sha256 }}
+      darwin-x64-artifact-id:
+        description: Artifact ID of the verified macOS x64 build.
+        value: ${{ jobs.primitives.outputs.darwin-x64-artifact-id }}
+      darwin-x64-sha256:
+        description: SHA-256 of the addon of the verified macOS x64 build.
+        value: ${{ jobs.primitives.outputs.darwin-x64-sha256 }}
 
 permissions:
   contents: read
@@ -16,6 +29,11 @@ jobs:
     name: primitives / ${{ matrix.artifact }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    outputs:
+      darwin-arm64-artifact-id: ${{ steps.darwin.outputs.darwin-arm64-artifact-id }}
+      darwin-arm64-sha256: ${{ steps.darwin.outputs.darwin-arm64-sha256 }}
+      darwin-x64-artifact-id: ${{ steps.darwin.outputs.darwin-x64-artifact-id }}
+      darwin-x64-sha256: ${{ steps.darwin.outputs.darwin-x64-sha256 }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,6 +72,7 @@ jobs:
         uses: ./.github/actions/setup-tools
         with:
           compile: true
+          cache-dependency-path: plugins/codex-security/mcp-app/pnpm-lock.yaml
       - name: Set up Rust
         run: |
           # Rustup 1.29 retries component downloads, but not manifest checksums.
@@ -132,6 +151,7 @@ jobs:
           native_node="$(command -v node)"
           PATH='' "$native_node" proof.mjs
       - name: Upload verified native artifact
+        id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-platform-${{ matrix.artifact }}-${{ inputs.ref || github.sha }}
@@ -143,3 +163,15 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+      - name: Record Darwin build outputs
+        if: matrix.platform == 'darwin'
+        id: darwin
+        env:
+          DARWIN_TARGET: ${{ matrix.artifact }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          digest="$(shasum -a 256 "dist/$DARWIN_TARGET/unix.node")"
+          {
+            echo "$DARWIN_TARGET-artifact-id=$ARTIFACT_ID"
+            echo "$DARWIN_TARGET-sha256=${digest%% *}"
+          } >> "$GITHUB_OUTPUT"

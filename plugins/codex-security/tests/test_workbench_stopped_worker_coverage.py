@@ -1,3 +1,5 @@
+"""Rebuild stopped scan coverage from worker surfaces, deferred links, and matching artifact receipts."""
+
 from __future__ import annotations
 
 import json

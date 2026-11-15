@@ -9,6 +9,18 @@ from urllib.parse import quote
 
 
 def enrich(sbom, components):
+    """Add installed npm packages, bundled tokenizer libraries, and native files to an SPDX document.
+
+    Args:
+        sbom (dict): apko's single-image SPDX document, updated in place.
+        components (dict): public-components.json inventory produced for the same image.
+
+    Returns:
+        dict: The input document with containment relationships and a new document namespace.
+
+    Raises:
+        ValueError: The image manifest in the inventory differs from the one in the SBOM.
+    """
     packages = sbom["packages"]
     image, = (p for p in packages if p["SPDXID"] in sbom["documentDescribes"])
     if image["name"] != components["image_manifest"]:
@@ -36,6 +48,15 @@ def enrich(sbom, components):
             "checksums": [{"algorithm": "SHA512", "checksumValue": checksum}],
             "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
                               "referenceLocator": purl}],
+        })
+
+    for i, item in enumerate(components.get("bundled_tokenizer", [])):
+        add(npm_ids[PurePosixPath("node_modules/@openai/codex-security")], {
+            "SPDXID": f"SPDXRef-tokenizer-{i}", "name": item["name"], "versionInfo": item["version"],
+            "downloadLocation": "NOASSERTION", "licenseDeclared": item["licenses"][0]["license"]["id"],
+            "filesAnalyzed": False, "sourceInfo": "Bundled in the SDK embedding tokenizer.",
+            "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
+                              "referenceLocator": item["purl"]}],
         })
 
     for i, item in enumerate(components["bundled_native"]):

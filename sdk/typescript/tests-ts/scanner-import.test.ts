@@ -8,6 +8,7 @@ import {
   readScannerText,
   relativePath,
   sarifRunContextSelector,
+  validateSarifRun,
 } from "../src/scanner-import.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
 
@@ -77,6 +78,103 @@ test("scanner readers preserve UTF-8 and JSON parse diagnostics", async () => {
     message: `Scanner JSON could not be parsed. ${syntax.message}`,
     cause: { name: "SyntaxError", message: syntax.message },
   });
+});
+
+test.each(["toolExecutionNotifications", "toolConfigurationNotifications"])(
+  "SARIF %s warnings preserve a successful invocation",
+  (property) => {
+    const invocation = {
+      executionSuccessful: true,
+      [property]: [
+        { level: "warning", message: { text: "Synthetic scan warning" } },
+        { level: "note", message: { text: "Synthetic scan note" } },
+      ],
+    };
+    const run = { invocations: [invocation], conversion: { invocation } };
+    expect(() => validateSarifRun(run, "Example")).not.toThrow();
+  },
+);
+
+test("SARIF extension descriptors retain error severity across index, ID and GUID references", () => {
+  const guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const componentGuid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+  const tool = {
+    extensions: [
+      {
+        guid: componentGuid,
+        notifications: [
+          { id: "coverage", guid, defaultConfiguration: { level: "error" } },
+        ],
+      },
+    ],
+  };
+  for (const reference of [
+    { index: 0 },
+    { id: "coverage" },
+    { guid: guid.toUpperCase() },
+  ]) {
+    const notification = {
+      descriptor: {
+        ...reference,
+        toolComponent: { guid: componentGuid.toUpperCase() },
+      },
+      message: { text: "Synthetic descriptor failure" },
+    };
+    const invocation = {
+      executionSuccessful: true,
+      toolConfigurationNotifications: [notification],
+    };
+    const validate = (overrides = {}) =>
+      validateSarifRun(
+        {
+          tool,
+          invocations: [{ ...invocation, ...overrides }],
+        },
+        "Example",
+      );
+    expect(() => validate()).toThrow("Synthetic descriptor failure");
+    expect(() =>
+      validate({
+        notificationConfigurationOverrides: [
+          {
+            descriptor: notification.descriptor,
+            configuration: { level: "warning" },
+          },
+        ],
+      }),
+    ).not.toThrow();
+  }
+});
+
+test("malformed SARIF notifications cannot hide a scanner error", () => {
+  for (const [notifications, message] of [
+    [{ level: "error" }, "must be an array"],
+    [[null], "must be an object"],
+  ] as const) {
+    const invocation = {
+      executionSuccessful: true,
+      toolConfigurationNotifications: notifications,
+    };
+    const run = { invocations: [invocation] };
+    expect(() => validateSarifRun(run, "Example")).toThrow(message);
+  }
+});
+
+test("SARIF validates converter failures separately from scanner invocations", () => {
+  const converted = (invocation: unknown) =>
+    validateSarifRun({ conversion: { invocation } }, "Example");
+  expect(() => converted({ executionSuccessful: false })).toThrow(
+    "unsuccessful invocation",
+  );
+  const failedConversion = {
+    toolExecutionNotifications: [
+      { level: "error", message: { text: "Synthetic conversion failure" } },
+    ],
+  };
+  for (const executionSuccessful of [true, false])
+    expect(() =>
+      converted({ ...failedConversion, executionSuccessful }),
+    ).toThrow("Synthetic conversion failure");
 });
 
 test("scanner repository paths retain colons outside Windows drive prefixes", () => {
