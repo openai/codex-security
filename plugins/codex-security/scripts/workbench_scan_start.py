@@ -160,7 +160,7 @@ def scan_output_overlaps_target(scan_dir: Path, repository: Path) -> bool:
 
 
 def _archive_owner(
-    connection: sqlite3.Connection, spellings: tuple[Path, ...]
+    connection: sqlite3.Connection, spellings: tuple[Path, ...], *, for_registration: bool = False
 ) -> sqlite3.Row | None:
     name = str(spellings[0])
     if os.name == "nt":
@@ -192,9 +192,8 @@ def _archive_owner(
         if not owners:
             return None
         name = owners[0]
-    return connection.execute(
-        "SELECT id, status, scan_dir FROM scans WHERE scan_dir = ?", (name,)
-    ).fetchone()
+    columns = "id, status, scan_dir" if for_registration else "id"
+    return connection.execute(f"SELECT {columns} FROM scans WHERE scan_dir = ?", (name,)).fetchone()
 
 
 @contextmanager
@@ -220,7 +219,7 @@ def archive_scan(
     ):
         raise SystemExit("The archived scan must be a previous sibling of the scan directory.")
 
-    previous_scan = _archive_owner(connection, spellings)
+    previous_scan = _archive_owner(connection, spellings, for_registration=True)
     if previous_scan is not None:
         if not args.archive_existing:
             raise SystemExit(

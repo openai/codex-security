@@ -70,14 +70,13 @@ def scan_directory_spellings(directory: Path) -> tuple[Path, ...]:
         if server in {".", "?"}:
             return (directory,)
         parts = (server, share, *parts)
-    for name in parts:
-        if not _ordinary_windows_name(name):
-            # DOS may name a different object. Accept an alias only if both handles agree.
-            try:
-                if directory.samefile(alternate):
-                    break
-            except OSError:
-                pass
+    if not all(_ordinary_windows_name(name) for name in parts):
+        # DOS may name a different object. Accept an alias only if both handles agree.
+        try:
+            equivalent = directory.samefile(alternate)
+        except OSError:
+            equivalent = False
+        if not equivalent:
             return (directory,)
     # Safe components identify the same destination even when legacy policy prevents
     # opening the ordinary spelling or the original leaf is absent during restoration.

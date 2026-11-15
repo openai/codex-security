@@ -751,8 +751,16 @@ def test_mixed_worker_paths_preserve_file_identity_through_archive(
     assert storage.worker_contract_relative_path(extended / "result.json", ordinary) == Directory(
         "result.json"
     )
-    same_namespace = Directory(extended.anchor.swapcase()).joinpath(*extended.parts[1:])
-    assert storage.worker_contract_relative_path(literal, same_namespace) == Directory(literal.name)
+    swapped_anchor = extended.anchor.swapcase()
+    # Python 3.10 requires the canonical UNC marker to recognize the extended share.
+    anchors = {swapped_anchor.replace("\\unc\\", "\\UNC\\", 1)}
+    if Directory(swapped_anchor).is_absolute():
+        anchors.add(swapped_anchor)
+    for anchor in anchors:
+        same_namespace = Directory(anchor).joinpath(*extended.parts[1:])
+        assert storage.worker_contract_relative_path(literal, same_namespace) == Directory(
+            literal.name
+        )
     with pytest.raises(ValueError, match="Verbatim-only"):
         storage.worker_contract_relative_path(literal, ordinary)
 
