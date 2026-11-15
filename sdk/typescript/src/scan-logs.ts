@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
 import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
-import { sessionFiles, readWorkerReceipts } from "./cost.js";
+import { sessionFiles, workerUsageReceipts } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -362,6 +362,10 @@ interface TurnMatch {
   inputs: Map<string, string | null>;
 }
 
+function newTurnMatch(): TurnMatch {
+  return { count: 0, windows: new Map(), inputs: new Map() };
+}
+
 interface WorkerInputReceipt extends RolloutWindow {
   attemptId: string;
   turnId?: string;
@@ -389,18 +393,13 @@ async function* retainedTurnEvents(
   let turnStart: string | undefined;
   let turnId: string | undefined;
   let awaitingWorkerInput = false;
-  let inputReceipt: WorkerInputReceipt | undefined;
-  const begin = (timestamp: string) => {
+  let workerInputWindow: RolloutWindow | undefined;
+  const begin = (startedAt: string, completedAt = window.completedAt) => {
+    const turnWindow = { startedAt, completedAt };
     match.count++;
-    match.windows.set(turnId, {
-      startedAt: timestamp,
-      completedAt:
-        inputReceipt &&
-        compareTimestamps(inputReceipt.completedAt, window.completedAt) < 0
-          ? inputReceipt.completedAt
-          : window.completedAt,
-    });
+    match.windows.set(turnId, turnWindow);
     active = true;
+    return turnWindow;
   };
   const finish = (timestamp: unknown) => {
     const childWindow = active && match.windows.get(turnId);
@@ -415,7 +414,7 @@ async function* retainedTurnEvents(
         childWindow.completedAt = timestamp;
     }
     eligible = active = awaitingWorkerInput = false;
-    inputReceipt = undefined;
+    workerInputWindow = undefined;
   };
   for await (const event of ownSessionEvents(session, true)) {
     const payload = event["payload"];
@@ -438,13 +437,12 @@ async function* retainedTurnEvents(
           : undefined;
       awaitingWorkerInput = !!turnId && !!worker?.inputs.size;
       eligible =
-        typeof turnStart === "string" &&
         inRolloutWindow(turnStart, window) &&
         (!worker || (turnId !== undefined && worker.ids.has(turnId)));
       if (eligible && prompt === undefined) begin(turnStart!);
     }
     if (
-      (awaitingWorkerInput || inputReceipt) &&
+      (awaitingWorkerInput || workerInputWindow) &&
       (task === "thread_rolled_back" ||
         type === "compacted" ||
         ("turn_id" in payload && payload["turn_id"] !== turnId) ||
@@ -452,9 +450,7 @@ async function* retainedTurnEvents(
     )
       finish(timestamp);
     if (
-      (inputReceipt &&
-        (!inRolloutWindow(timestamp, window) ||
-          !inRolloutWindow(timestamp, inputReceipt))) ||
+      (workerInputWindow && !inRolloutWindow(timestamp, workerInputWindow)) ||
       (window.cutoffUnfinishedTurns &&
         startsAfterCompletion(timestamp, window.completedAt))
     )
@@ -493,46 +489,40 @@ async function* retainedTurnEvents(
           inRolloutWindow(timestamp, window) &&
           compareTimestamps(timestamp, turnStart) >= 0
         ) {
-          inputReceipt = { ...proof, startedAt: timestamp };
           match.inputs.set(proof.attemptId, turnId);
-          begin(timestamp);
+          workerInputWindow = begin(
+            timestamp,
+            compareTimestamps(proof.completedAt, window.completedAt) < 0
+              ? proof.completedAt
+              : window.completedAt,
+          );
         }
-      } else if (inputReceipt) finish(timestamp);
+      } else if (workerInputWindow) finish(timestamp);
       if (task === "item_completed") awaitingWorkerInput = false;
       // Never export the event's copy of the submitted worker prompt.
       continue;
     }
-    if (
-      awaitingWorkerInput &&
-      ((type === "response_item" &&
-        input === undefined &&
+    const workerOutput =
+      (type === "response_item" &&
         payload["role"] !== "developer" &&
         payload["role"] !== "system") ||
-        task === "agent_message" ||
-        task === "agent_reasoning")
-    )
+      task === "agent_message" ||
+      task === "agent_reasoning";
+    if (awaitingWorkerInput && input === undefined && workerOutput)
       awaitingWorkerInput = false;
     if (input !== undefined) {
       if (prompt === undefined) {
         // Backends can emit several user-role setup records before a worker's
         // first reply. Its input is unknown; omit it and stop at subsequent input.
-        if (inputReceipt || workerResponded) finish(timestamp);
+        if (workerInputWindow || workerResponded) finish(timestamp);
         continue;
       }
       if (active && input !== prompt) {
         finish(timestamp);
       } else if (!active && input === prompt) {
         if (eligible && turnStart !== undefined) {
-          begin(
-            typeof timestamp === "string" && inRolloutWindow(timestamp, window)
-              ? timestamp
-              : turnStart,
-          );
-        } else if (
-          !sawStart &&
-          typeof timestamp === "string" &&
-          inRolloutWindow(timestamp, window)
-        ) {
+          begin(inRolloutWindow(timestamp, window) ? timestamp : turnStart);
+        } else if (!sawStart && inRolloutWindow(timestamp, window)) {
           // Direct Deep Scan injects one known user item without starting a model turn.
           match.count++;
           match.windows.set(undefined, undefined);
@@ -541,14 +531,7 @@ async function* retainedTurnEvents(
       }
     }
     if (active) {
-      if (
-        (type === "response_item" &&
-          payload["role"] !== "developer" &&
-          payload["role"] !== "system") ||
-        task === "agent_message" ||
-        task === "agent_reasoning"
-      )
-        workerResponded = true;
+      if (workerOutput) workerResponded = true;
       yield event;
     }
     if (task === "task_complete" || task === "turn_aborted") finish(timestamp);
@@ -578,18 +561,22 @@ export async function scanRolloutSessions(
   ]);
   const workerTurns = new Map<string, WorkerTurns>();
   if (options.workerReceipts) {
-    await readWorkerReceipts(options.workerReceipts, new Map(), (receipt) => {
-      const threadId = receipt["threadId"];
-      if (
-        typeof threadId !== "string" ||
-        !inRolloutWindow(receipt["startedAt"], options)
-      )
-        return;
-      // Comparisons start standalone SDK threads, while discovery retries can
-      // resume one registered thread for several scan-owned turns.
-      if (receipt["kind"] === "compare" || receipt["kind"] === "discovery")
+    try {
+      for await (const [attemptId, receipt] of workerUsageReceipts(
+        options.workerReceipts,
+      )) {
+        const threadId = receipt["threadId"];
+        const kind = receipt["kind"];
+        if (
+          (kind !== "compare" && kind !== "discovery") ||
+          typeof threadId !== "string" ||
+          !inRolloutWindow(receipt["startedAt"], options)
+        )
+          continue;
+        // A comparison receipt identifies a standalone session. Discovery retries
+        // also need proof of the individual turns in a reused thread.
         registered.add(threadId);
-      if (receipt["kind"] === "discovery") {
+        if (kind === "compare") continue;
         const previous = workerTurns.get(threadId);
         const worker = previous ?? {
           ids: new Set<string>(),
@@ -610,15 +597,13 @@ export async function scanRolloutSessions(
         else if (
           typeof receipt["inputSha256"] === "string" &&
           /^[a-f0-9]{64}$/u.test(receipt["inputSha256"]) &&
-          typeof receipt["attemptId"] === "string" &&
-          typeof receipt["startedAt"] === "string" &&
           typeof receipt["observedAt"] === "string" &&
           ["failed", "succeeded", "canceled"].includes(
             String(receipt["outcome"]),
           )
         ) {
           worker.inputs.set(receipt["inputSha256"], {
-            attemptId: receipt["attemptId"],
+            attemptId,
             ...(typeof nativeId === "string" &&
               nativeId && { turnId: nativeId }),
             startedAt: receipt["startedAt"],
@@ -627,7 +612,9 @@ export async function scanRolloutSessions(
         }
         workerTurns.set(threadId, worker);
       }
-    });
+    } catch {
+      // A later unreadable receipt must not discard threads already identified.
+    }
   }
   const sessions = await selectSessionCopies(
     {
@@ -640,11 +627,8 @@ export async function scanRolloutSessions(
   );
   const byId = new Map(sessions.map((copies) => [copies[0].threadId, copies]));
   type Capture = {
-    session: SessionLog;
-    prompt?: string;
-    window: RolloutWindow;
-    worker?: WorkerTurns;
     match: TurnMatch;
+    events(match: TurnMatch): AsyncIterable<Record<string, unknown>>;
   };
   const captures = new Map<string, Promise<Capture | null>>();
   function capture(id: string): Promise<Capture | null> {
@@ -694,24 +678,16 @@ export async function scanRolloutSessions(
         compareTimestamps(session.timestamp, options.startedAt) > 0
           ? { ...options, startedAt: session.timestamp }
           : options;
-      const match: TurnMatch = {
-        count: 0,
-        windows: new Map(),
-        inputs: new Map(),
-      };
+      const events = (match: TurnMatch) =>
+        retainedTurnEvents(session, window, prompt, match, proofs);
+      const match = newTurnMatch();
       // Establish uniqueness without keeping whole rollouts in memory.
-      for await (const _ of retainedTurnEvents(
-        session,
-        window,
-        prompt,
-        match,
-        proofs,
-      )) {
+      for await (const _ of events(match)) {
         /* drain */
       }
       // Duplicate starts for one ID (including the legacy no-ID case) are ambiguous.
       return match.count > 0 && match.count === match.windows.size
-        ? { session, prompt, window, match, worker: proofs }
+        ? { match, events }
         : null;
     })();
     captures.set(id, result);
@@ -729,18 +705,8 @@ export async function scanRolloutSessions(
     async *events() {
       const selected = await capture(session.threadId);
       if (!selected) return;
-      const match: TurnMatch = {
-        count: 0,
-        windows: new Map(),
-        inputs: new Map(),
-      };
-      yield* retainedTurnEvents(
-        selected.session,
-        selected.window,
-        selected.prompt,
-        match,
-        selected.worker,
-      );
+      const match = newTurnMatch();
+      yield* selected.events(match);
       if (!isDeepStrictEqual(match, selected.match))
         throw new CodexSecurityError(
           "The selected rollout turn changed before export.",

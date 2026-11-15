@@ -1,7 +1,10 @@
 /// <reference lib="esnext.disposable" preserve="true" />
 import { workbenchArgs } from "./workbench-arguments.js";
 
-import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
+import {
+  isNonEmptyString,
+  isSafeNonNegativeInteger as safeInteger,
+} from "./value.js";
 import {
   explicitlyCanceled,
   hostedScanFailureStatus,
@@ -3697,9 +3700,7 @@ export class CodexSecurity {
           if (completedAt === undefined) return;
           const recorded = saved["executionThreadIds"];
           const executionThreadIds = Array.isArray(recorded)
-            ? recorded.filter(
-                (id): id is string => typeof id === "string" && id.length > 0,
-              )
+            ? recorded.filter(isNonEmptyString)
             : [];
           if (validationThreadId !== undefined)
             executionThreadIds.push(validationThreadId);
@@ -3734,9 +3735,7 @@ export class CodexSecurity {
                 startedAt,
                 scanDir,
                 scanId,
-                rootThreadIds: [
-                  ...new Set([rootThreadId, ...executionThreadIds]),
-                ],
+                rootThreadIds: [rootThreadId, ...executionThreadIds],
                 sessions,
                 retainEvents: options.retainRolloutSessions === true,
                 signal,
