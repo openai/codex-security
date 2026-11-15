@@ -11230,6 +11230,8 @@ async function patchPreflightRemoteSettings(
     repository,
     dependencies,
   );
+  if (entries.length < 3) return [];
+  const directories = await patchTransportDirectories(repository, dependencies);
   const settings: string[] = [];
   for (let index = 0; index + 2 < entries.length; index += 3) {
     const setting = entries[index + 2]!.slice("remote.origin.".length);
@@ -11247,7 +11249,7 @@ async function patchPreflightRemoteSettings(
       !(await operatorPatchConfig(
         entries[index]!,
         entries[index + 1]!,
-        repository,
+        directories,
       ))
     )
       throw new CodexSecurityError(
@@ -11471,17 +11473,18 @@ function isSshPatchRemote(remote: string): boolean {
 async function operatorPatchConfig(
   scope: string,
   origin: string,
-  repository: string,
+  { root, caller }: { root: string; caller: string },
 ): Promise<boolean> {
-  return (
-    (scope === "system" || scope === "global" || scope === "command") &&
-    (!origin.startsWith("file:") ||
-      isOutsidePath(
-        relative(
-          await realpath(repository),
-          await realpath(resolve(repository, origin.slice(5))),
-        ),
-      ))
+  if (scope !== "system" && scope !== "global" && scope !== "command")
+    return false;
+  if (!origin.startsWith("file:")) return true;
+  // A global include retains global scope even when its file is in the checkout.
+  const path = resolve(caller, origin.slice(5));
+  const physical = await realpath(path);
+  return [root, caller].every(
+    (directory) =>
+      isOutsidePath(relative(directory, path)) &&
+      isOutsidePath(relative(directory, physical)),
   );
 }
 
@@ -11634,7 +11637,10 @@ async function runPatchTransport(
       rules.push({ command, suffix, executable: command });
     } else {
       if (
-        !(await operatorPatchConfig(entries[i]!, entries[i + 1]!, repository))
+        !(await operatorPatchConfig(entries[i]!, entries[i + 1]!, {
+          root,
+          caller,
+        }))
       ) {
         throw new CodexSecurityError(
           "Patch publication cannot run checkout-selected core.gitProxy. Select the Git proxy through your user Git configuration or GIT_PROXY_COMMAND.",
@@ -11798,6 +11804,8 @@ async function patchTransportEnvironment(
   );
   set("credential.helper", "");
   set("core.askPass", "");
+  if (entries.length < 3) return pinned;
+  const directories = await patchTransportDirectories(repository, dependencies);
   for (let i = 0; i + 2 < entries.length; i += 3) {
     const entry = entries[i + 2]!;
     const newline = entry.indexOf("\n");
@@ -11806,7 +11814,7 @@ async function patchTransportEnvironment(
     const trusted = await operatorPatchConfig(
       entries[i]!,
       entries[i + 1]!,
-      repository,
+      directories,
     );
     if (
       key === "core.askpass" ||
@@ -11859,7 +11867,11 @@ async function publicationSshCommand(
   if (
     !scope ||
     !origin ||
-    !(await operatorPatchConfig(scope, origin, repository))
+    !(await operatorPatchConfig(
+      scope,
+      origin,
+      await patchTransportDirectories(repository, dependencies),
+    ))
   )
     throw new CodexSecurityError(
       "Patch publication cannot run checkout-selected core.sshCommand. Select the SSH command through your user Git configuration or GIT_SSH_COMMAND.",
