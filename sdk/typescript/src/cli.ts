@@ -1420,6 +1420,7 @@ interface SkillPermissions {
   readonly name: string;
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
+  readonly externalConfigPaths?: readonly string[];
   readonly externalCachePaths?: readonly string[];
 }
 
@@ -15475,6 +15476,7 @@ async function runSkill(
                       permissions: {
                         name: patchPermissions,
                         readOnlyPaths: gitControls!.readOnlyPaths,
+                        externalConfigPaths: gitControls!.externalConfigPaths,
                         ...(gitControls!.externalCachePaths.length
                           ? {
                               externalCachePaths:
@@ -15808,6 +15810,28 @@ export async function readSkillCommandOutput(
             const modelReadOnlyPaths = new Set(
               appServer.permissions.modelOnlyReadOnlyPaths,
             );
+            const parentProtected = [...modelReadOnlyPaths].filter((path) =>
+              Object.hasOwn(profile.filesystem, dirname(path)),
+            );
+            if (parentProtected.length) {
+              const roots = await Promise.all(
+                Object.keys(profile.workspace_roots).map((root) =>
+                  canonicalConfigPath(root),
+                ),
+              );
+              // A second read mount for an absent child cannot be created
+              // below a read-only parent. Keep it only for an overlapping
+              // workspace grant that could override the parent's restriction.
+              for (const path of parentProtected)
+                if (
+                  !roots.some(
+                    (root) =>
+                      relative(dirname(path), root) === "" ||
+                      !isOutsidePath(relative(path, root)),
+                  )
+                )
+                  modelReadOnlyPaths.delete(path);
+            }
             if (appServer.permissions.externalCachePaths?.length) {
               for (const root of Object.keys(profile.workspace_roots)) {
                 const canonical = await realpath(root).catch(
@@ -15823,7 +15847,8 @@ export async function readSkillCommandOutput(
                     modelReadOnlyPaths.add(path);
               }
             }
-            // Cache restrictions for the model do not change snapshot access.
+            // Snapshot Git still needs the operator configuration. The model
+            // must not read those files through its inherited workspace policy.
             startThread({
               ...workspaceOverride,
               default_permissions: permissionProfile!,
@@ -15837,6 +15862,11 @@ export async function readSkillCommandOutput(
                         path,
                         { ".": "read" },
                       ]),
+                    ),
+                    ...Object.fromEntries(
+                      (appServer.permissions.externalConfigPaths ?? []).map(
+                        (path) => [path, { ".": "deny" }],
+                      ),
                     ),
                   },
                 },

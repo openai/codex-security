@@ -190,6 +190,7 @@ export interface PatchGitControls {
   readonly nestedCheckouts: readonly string[];
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths: readonly string[];
+  readonly externalConfigPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
   readonly snapshotConfigPaths: readonly string[];
@@ -832,6 +833,7 @@ export async function capturePatchGitControls(
   >();
   const snapshotStoragePaths = new Set<string>();
   const snapshotConfigPaths = new Set<string>();
+  const configurationFiles = new Set<string>();
   const modelOnlyReadOnlyPaths = new Set<string>();
   const externalCachePaths = new Set<string>();
   const inaccessibleIncludes = new Set<string>();
@@ -878,6 +880,7 @@ export async function capturePatchGitControls(
     const control = controlPaths.get(path)!;
     if (control.contents !== undefined) return;
     if (!(await stat(control.canonical).catch(missing))?.isFile()) return;
+    configurationFiles.add(control.canonical);
     try {
       control.contents = await readFile(control.canonical);
       unreadableConfigurations.delete(path);
@@ -2114,6 +2117,9 @@ export async function capturePatchGitControls(
     ],
     nestedCheckouts: [...nestedDirectories.keys()],
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
+    externalConfigPaths: [...configurationFiles].filter(
+      (path) => !insideSelectedRoots(path),
+    ),
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
     snapshotConfigPaths: [...snapshotConfigPaths],

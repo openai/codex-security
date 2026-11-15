@@ -2762,6 +2762,8 @@ The assessment does not change the patch or merge state.
 Git snapshots, including snapshots of initialized submodules, run configured Git
 filters with the workspace permissions from your Codex configuration. Configure
 additional writable roots and network access in your user configuration.
+Snapshot Git retains access to external Git configuration files selected by the
+operator. The patch model’s filesystem profile denies access to those files.
 An external Git administration directory must belong to a registered worktree or
 be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git
 directory points to a separate external common directory, select that common

@@ -757,6 +757,9 @@ test.each([
           expect(output!.appServer!.permissions!.readOnlyPaths).toContain(
             selected,
           );
+          expect(output!.appServer!.permissions!.externalConfigPaths).toContain(
+            selected,
+          );
           const permissions = output!.appServer!.permissions!.readOnlyPaths;
           expect(permissions).not.toContain(await realpath(root));
           expect(permissions).not.toContain(await realpath(unselected));
