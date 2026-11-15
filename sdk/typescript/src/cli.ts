@@ -1738,6 +1738,13 @@ interface PatchRiskAssessment extends PatchRiskReport {
   tree?: string;
 }
 
+type PatchTransportFile = {
+  target: string;
+  stamp: string;
+  digest?: string;
+  kind: "executable" | "file" | "known-hosts";
+};
+
 interface CliDependencies {
   sparsePatchSnapshots?: Map<
     string,
@@ -1753,7 +1760,7 @@ interface CliDependencies {
   createPolicySecurity?: (config: CodexSecurityConfig) => PolicySecurity;
   policyPrompt?: PolicyPrompt;
   environment: NodeJS.ProcessEnv;
-  patchTransportExecutables?: Map<string, string>;
+  patchTransportFiles?: Map<string, PatchTransportFile>;
   patchCallerDirectory?: string;
   patchTransportContext?: { root: string; caller: string; directory: string };
   hasStoredChatGPTSignIn?: (signal?: AbortSignal) => Promise<boolean>;
@@ -3288,7 +3295,7 @@ export async function main(
   onInterruptedSignIn?: () => void,
 ): Promise<number> {
   const parentDependencies = dependencies;
-  const patchTransportExecutables = new Map<string, string>();
+  const patchTransportFiles = new Map<string, PatchTransportFile>();
   let patchSandbox: PatchSnapshotSandbox | undefined;
   let publicationHooks: PatchPublicationHooks | undefined;
   let snapshotConfigPaths: readonly string[] | undefined;
@@ -3296,7 +3303,7 @@ export async function main(
   let patchPreparationSignal: AbortSignal | undefined;
   dependencies = {
     ...parentDependencies,
-    patchTransportExecutables,
+    patchTransportFiles,
     sparsePatchSnapshots: new Map(),
     runCodex(args, output, environment, input) {
       if (output?.appServer !== undefined) {
@@ -3471,12 +3478,8 @@ export async function main(
           args[1]?.startsWith("alias.codex-security-ssh-config=!") &&
           args[2] === "codex-security-ssh-config")
       ) {
-        for (const [launcher, selected] of patchTransportExecutables) {
-          if ((await patchTransportIdentity(launcher)) !== selected)
-            throw new CodexSecurityError(
-              "Patch transport executable changed before publication.",
-            );
-        }
+        for (const [path, selected] of patchTransportFiles)
+          await patchTransportIdentity(path, selected.kind, selected);
       }
       return parentDependencies.runRepositoryCommand(
         command,
@@ -11682,11 +11685,65 @@ async function patchScopedConfig(
   ).split("\0");
 }
 
-// Compare both the selected launcher target and the file behind that path.
-async function patchTransportIdentity(launcher: string): Promise<string> {
-  const target = await realpath(launcher);
+async function patchTransportIdentity(
+  path: string,
+  kind: PatchTransportFile["kind"],
+  selected?: PatchTransportFile,
+  updatedHostKeys = false,
+): Promise<PatchTransportFile> {
+  const changed = () =>
+    new CodexSecurityError(
+      "Patch transport " +
+        (kind === "executable" ? "executable" : "file") +
+        " changed before publication. Inspect the selected transport settings and files before resuming.",
+    );
+  const target = await realpath(path);
+  if (selected && target !== selected.target) throw changed();
   const entry = await stat(target, { bigint: true });
-  return JSON.stringify([target, `${entry.dev}:${entry.ino}:${entry.ctimeNs}`]);
+  const stamp = [entry.dev, entry.ino, entry.ctimeNs].join(":");
+  if (selected && !updatedHostKeys && selected.stamp !== stamp) throw changed();
+  if (
+    kind === "executable" ||
+    (target === "/dev/null" && entry.isCharacterDevice())
+  )
+    return { target, stamp, kind };
+  // A pipe or device can supply different bytes without changing metadata.
+  // Open nonblocking so a replaced operand cannot leave publication waiting on a FIFO.
+  const file = await open(target, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    if (!(await file.stat()).isFile())
+      throw new CodexSecurityError(
+        "Patch publication requires regular files for SSH transport operands.",
+      );
+    const digest = await hashPatchFile(
+      file.createReadStream({ autoClose: false }),
+    );
+    if (
+      selected?.digest !== undefined &&
+      !updatedHostKeys &&
+      selected.digest !== digest
+    )
+      throw changed();
+    return { target, stamp, kind, digest };
+  } finally {
+    await file.close();
+  }
+}
+
+async function bindPatchTransportFile(
+  path: string,
+  kind: PatchTransportFile["kind"],
+  dependencies: CliDependencies,
+): Promise<void> {
+  const files = dependencies.patchTransportFiles;
+  if (!files) return;
+  const selected = files.get(path);
+  if (!selected) {
+    files.set(path, await patchTransportIdentity(path, kind));
+  } else if (selected.kind !== kind && selected.kind !== "file") {
+    // A path that is also used as a launcher, config or script must stay fixed.
+    files.set(path, await patchTransportIdentity(path, "file", selected));
+  }
 }
 
 async function inspectPatchGitExecutable(
@@ -11722,12 +11779,8 @@ async function inspectPatchGitExecutable(
       gitTransportDirectory: transportDirectory,
     },
   );
-  const launchers = dependencies.patchTransportExecutables;
-  if (launchers && result.executable && !launchers.has(result.executable))
-    launchers.set(
-      result.executable,
-      await patchTransportIdentity(result.executable),
-    );
+  if (result.executable)
+    await bindPatchTransportFile(result.executable, "executable", dependencies);
   return result;
 }
 
@@ -11754,12 +11807,34 @@ async function runPatchTransport(
   )
     ? ["-c", "protocol.file.allow=never", ...args]
     : args;
-  const run = (overrides: NodeJS.ProcessEnv = {}) =>
-    dependencies.runRepositoryCommand("git", transportArgs, repository, {
-      ...options,
-      patchTransport: true,
-      environment: { ...environment, ...overrides },
-    });
+  const run = async (overrides: NodeJS.ProcessEnv = {}) => {
+    const result = await dependencies.runRepositoryCommand(
+      "git",
+      transportArgs,
+      repository,
+      {
+        ...options,
+        patchTransport: true,
+        environment: { ...environment, ...overrides },
+      },
+    );
+    if (
+      transportEnvironment["GIT_SSH_COMMAND"] &&
+      remotes.some(isSshPatchRemote)
+    ) {
+      // The authorized SSH connection can itself add or rotate host keys.
+      const files = dependencies.patchTransportFiles;
+      if (files)
+        for (const [path, selected] of files) {
+          if (selected.kind !== "known-hosts") continue;
+          files.set(
+            path,
+            await patchTransportIdentity(path, selected.kind, selected, true),
+          );
+        }
+    }
+    return result;
+  };
   if (!remotes.some((remote) => remote.startsWith("git://"))) return run();
   const override = environmentEntry(
     dependencies.environment,
@@ -12054,7 +12129,7 @@ async function pinPublicationSshCommand(
     directory,
   );
   if (!executable) throw unsupported();
-  const bindFile = async (file: string | undefined) => {
+  const bindFile = async (file: string | undefined, knownHosts = false) => {
     if (!file || !isAbsolute(file)) throw unsupported();
     const physical = await realpath(file).catch(() => undefined);
     if (
@@ -12064,6 +12139,11 @@ async function pinPublicationSshCommand(
       )
     )
       throw unsupported();
+    await bindPatchTransportFile(
+      physical,
+      knownHosts ? "known-hosts" : "file",
+      dependencies,
+    );
     return physical;
   };
   if (/^ssh(?:\.exe)?$/iu.test(basename(program))) {
@@ -12086,7 +12166,10 @@ async function pinPublicationSshCommand(
           if (pathSetting[2]!.toLowerCase() === "none") continue;
           // OpenSSH parses -o as another configuration line. A path with
           // whitespace could name more than one known-hosts file there.
-          const physical = await bindFile(pathSetting[2]);
+          const physical = await bindFile(
+            pathSetting[2],
+            pathSetting[1]!.toLowerCase() === "userknownhostsfile",
+          );
           const literal =
             process.platform === "win32"
               ? physical.replaceAll("\\", "/")

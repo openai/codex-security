@@ -45,16 +45,17 @@ for (const policy of ["set", "exclude", "control"] as const) {
         const { directory, remote } = await publicationRepository(fixtures);
         const home = await fixtures.create("patch-policy-home-");
         await chmod(home, 0o700);
-        const emptyConfig = join(home, "empty.gitconfig");
-        await writeFile(emptyConfig, "");
+        // The sandbox reads the operator's filter and configuration outside its private Codex home.
+        const filterDirectory = await fixtures.create("patch-policy-filter-");
+        const globalConfig = join(filterDirectory, "gitconfig");
         const environment = patchSnapshotEnvironment(
           await fixtures.create("patch-policy-temp-"),
           {
             ...process.env,
             CODEX_HOME: home,
             GIT_CONFIG: undefined,
-            GIT_CONFIG_GLOBAL: emptyConfig,
-            GIT_CONFIG_SYSTEM: emptyConfig,
+            GIT_CONFIG_GLOBAL: globalConfig,
+            GIT_CONFIG_SYSTEM: globalConfig,
             GIT_CONFIG_NOSYSTEM: "1",
             SNAPSHOT_STYLE: "host",
           },
@@ -65,10 +66,7 @@ for (const policy of ["set", "exclude", "control"] as const) {
           join(home, "config.toml"),
           `${patchSnapshotWindowsConfig()}[shell_environment_policy]\ninherit="all"\n${policy === "exclude" ? 'exclude=["SNAPSHOT_STYLE"]\n' : ""}${policy === "set" ? '[shell_environment_policy.set]\nSNAPSHOT_STYLE="policy"\n' : ""}`,
         );
-        const clean = join(
-          await fixtures.create("patch-policy-filter-"),
-          "clean.cjs",
-        );
+        const clean = join(filterDirectory, "clean.cjs");
         const outsideWrite = join(home, "filter-write.txt");
         await writeFile(
           clean,
@@ -88,7 +86,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
         git([
           "config",
           "--file",
-          emptyConfig,
+          globalConfig,
           "filter.synthetic.clean",
           `node ${JSON.stringify(clean.replaceAll("\\", "/"))}`,
         ]);
@@ -215,6 +213,7 @@ process.stdout.write(input+(process.env.SNAPSHOT_STYLE??"unset")+"\\n"+(input.st
                   network: { enabled: false },
                   workspace_roots: {},
                   filesystem: {
+                    [filterDirectory]: { ".": "read" },
                     ...Object.fromEntries(
                       output!.appServer!.permissions!.readOnlyPaths.map(
                         (path) => [path, { ".": "read" }],
