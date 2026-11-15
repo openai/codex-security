@@ -42,7 +42,7 @@ function fixture() {
   );
   const scopesFile = join(root, "scopes.json");
   const env = { ...process.env };
-  delete env.CODEX_SECURITY_TARGET_PATHS_FILE;
+  delete env["CODEX_SECURITY_TARGET_PATHS_FILE"];
   const run = (...args: string[]) => {
     const result = spawnSync(
       nodeCommand().command,
@@ -90,7 +90,7 @@ for (const prepared of [true, false]) {
   test(`Standard matches the SDK's registered paths, prepared=${prepared}`, () => {
     const { repo, scan, scopesFile, env, run, build } = fixture();
     writeFileSync(scopesFile, JSON.stringify(["src", "src/explicit.txt"]));
-    env.CODEX_SECURITY_TARGET_PATHS_FILE = scopesFile;
+    env["CODEX_SECURITY_TARGET_PATHS_FILE"] = scopesFile;
     if (prepared) {
       run(
         "make-repo-scope-input",
@@ -134,7 +134,7 @@ test("the prepared inventory cannot widen an explicitly requested scope", () => 
 test("a managed host's scope file restricts a prepared native inventory", () => {
   const { repo, discovery, env, scopesFile, run, build } = fixture();
   writeFileSync(scopesFile, JSON.stringify(["src", "src/explicit.txt"]));
-  env.CODEX_SECURITY_TARGET_PATHS_FILE = scopesFile;
+  env["CODEX_SECURITY_TARGET_PATHS_FILE"] = scopesFile;
   run(
     "generate-in-scope-files",
     "--repo",
@@ -156,7 +156,7 @@ test("a managed host's scope file restricts a prepared native inventory", () => 
 test("read prepared JSONL a row at a time across a split UTF-8 name", () => {
   const { repo, scan, env, scopesFile, build } = fixture();
   writeFileSync(scopesFile, JSON.stringify(["src"]));
-  env.CODEX_SECURITY_TARGET_PATHS_FILE = scopesFile;
+  env["CODEX_SECURITY_TARGET_PATHS_FILE"] = scopesFile;
   const name = "src/α.ts";
   writeFileSync(join(repo, name), "source");
   const prefix = '{"preview":"prepared-';
@@ -177,7 +177,7 @@ Buffer.prototype.toString = function (...args) {
   return toString.apply(this, args);
 };`,
   );
-  env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`;
+  env["NODE_OPTIONS"] = `--require ${JSON.stringify(preload)}`;
   expect(build(".")).toEqual([name]);
 });
 
