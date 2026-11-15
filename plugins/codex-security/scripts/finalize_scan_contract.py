@@ -3075,6 +3075,7 @@ class PreparedScanFinalization(NamedTuple):
     findings: dict[str, Any]
     coverage: dict[str, Any]
     was_sealed: bool
+    converted_legacy_coverage: bool
     report_markdown_bytes: bytes
     warnings: list[str]
 
@@ -3184,8 +3185,17 @@ def _prepare_scan_finalization(
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
     _validate_coverage(manifest, coverage, scan_dir)
-    if not was_sealed and completion_binding is not None:
-        scan.pop("coverageRef", None)
+    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
+    # Recovery owns frozen checkpoint heads. Keep historical coverage selected
+    # when substituting a new checkpoint would invalidate that provenance.
+    converted_legacy_coverage = (
+        not was_sealed
+        and completion_binding is not None
+        and "coverageRef" in scan
+        and "preservedSources" not in scan
+    )
+    if converted_legacy_coverage:
+        del scan["coverageRef"]
     provisional_manifest = copy.deepcopy(manifest)
     provisional_manifest["scan"]["artifacts"] = [
         {"path": "findings.json", "sha256": "0" * 64, "mediaType": "application/json"},
@@ -3198,7 +3208,6 @@ def _prepare_scan_finalization(
     validate_against_schema(provisional_manifest, schema_dir / "scan-manifest.schema.json")
     del provisional_manifest
     validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
-    validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
     if finding_scope is not None:
         # Accepted worker/reducer files remain immutable; only the new parent
@@ -3244,6 +3253,15 @@ def _prepare_scan_finalization(
     else:
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
+        if converted_legacy_coverage:
+            # Legacy reports included scan-wide deferred reasons. Carry those limitations
+            # into the compact report while retaining task-specific records in the checkpoint.
+            for row in coverage["deferred"]:
+                if any(row.get(key) for key in ("candidateId", "workerId", "paths", "surfaceIds")):
+                    continue
+                limitations = scan["scope"].setdefault("limitations", [])
+                if row["reason"] not in limitations:
+                    limitations.append(row["reason"])
         if inline_review:
             scan.update(inline_review)
             scan.pop("reviewState", None)
@@ -3271,6 +3289,7 @@ def _prepare_scan_finalization(
         findings=findings,
         coverage=coverage,
         was_sealed=was_sealed,
+        converted_legacy_coverage=converted_legacy_coverage,
         report_markdown_bytes=report_markdown_bytes,
         warnings=warnings,
     )
@@ -3289,11 +3308,18 @@ def _write_prepared_scan_finalization(
     if not prepared.was_sealed:
         # Capture warnings before the first seal; later operation diagnostics must
         # not change an existing scan's portable results.
+        # Legacy SARIF listed deferred reasons before other run warnings.
+        legacy_reasons = (
+            [item["reason"] for item in prepared.coverage["deferred"]]
+            if prepared.converted_legacy_coverage
+            else []
+        )
         # Escape surrogate-escaped filesystem bytes for the Unicode JSON contract.
         warnings = list(
             dict.fromkeys(
                 warning.encode("utf-8", errors="backslashreplace").decode("utf-8")
                 for warning in [
+                    *legacy_reasons,
                     *scan.get("warnings", []),
                     *(projection_warnings or []),
                     *prepared.warnings,
@@ -3308,7 +3334,11 @@ def _write_prepared_scan_finalization(
         _write_scan_local_json(scan_dir, "findings.json", prepared.findings)
         if "coverageRef" in scan:
             _write_scan_local_json(scan_dir, "coverage.json", prepared.coverage)
-        elif "preservedSources" not in scan and not (scan_dir / "checkpoint-head.json").exists():
+        elif "preservedSources" not in scan and (
+            prepared.converted_legacy_coverage or not (scan_dir / "checkpoint-head.json").exists()
+        ):
+            # A legacy file draft can supersede an earlier checkpoint. Select the
+            # accepted result before retiring the only other copy of its review.
             checkpoint = {
                 "scanId": scan["id"],
                 "complete": scan["status"] == "completed",
@@ -3321,8 +3351,8 @@ def _write_prepared_scan_finalization(
             name = hashlib.sha256(contents).hexdigest() + ".json"
             write_scan_local_bytes(scan_dir, "checkpoints/" + name, contents)
             _write_scan_local_json(scan_dir, "checkpoint-head.json", {"checkpoint": name})
-    if not prepared.was_sealed and "coverageRef" not in scan:
-        _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
+        if "coverageRef" not in scan and not prepared.converted_legacy_coverage:
+            _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
     sealed_paths = (
         [artifact["path"] for artifact in scan["artifacts"]] if prepared.was_sealed else []
     )
@@ -3333,6 +3363,14 @@ def _write_prepared_scan_finalization(
     if not prepared.was_sealed:
         _write_scan_local_json(scan_dir, "scan-manifest.json", prepared.manifest)
         _validate_existing_seal(scan_dir, scan)
+        if prepared.converted_legacy_coverage:
+            try:
+                _remove_scan_local_file_if_exists(scan_dir, "coverage.json")
+            except (OSError, ContractError) as exc:
+                warning = f"Sealed the scan but could not remove the obsolete coverage.json: {exc}"
+                print(f"codex-security: warning: {warning}", file=sys.stderr)
+                if projection_warnings is not None:
+                    projection_warnings.append(warning)
     _write_sarif_projection_if_possible(
         scan_dir, source_root, prepared.schema_dir, sealed_paths=sealed_paths
     )
