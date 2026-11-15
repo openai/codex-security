@@ -39,6 +39,21 @@ def test_filesystem_path_counts_utf16_units_and_preserves_spelling(windows_paths
         ) == PureWindowsPath("child")
 
 
+@pytest.mark.parametrize("root", ["C:/", "//server/share/"])
+def test_sqlite_uses_an_equivalent_filename_within_the_win32_pager_budget(windows_paths, root):
+    directory = PureWindowsPath(root, *(["界" * 80] * 4))
+    filename = "workbench.sqlite3"
+    base_bytes = len(str(directory / filename).encode("utf-8")) + 1
+    ordinary = directory / ("s" * (1030 - base_bytes)) / filename
+    extended = windows_paths.filesystem_path(ordinary)
+    assert len(str(ordinary).encode("utf-8")) == 1030 < len(str(extended).encode("utf-8"))
+    assert windows_paths.sqlite_filename(extended) == ordinary
+    smaller = windows_paths.filesystem_path(directory / filename)
+    assert windows_paths.sqlite_filename(smaller) == smaller
+    literal = extended.with_name("workbench.sqlite3.")
+    assert windows_paths.sqlite_filename(literal) == literal
+
+
 @pytest.mark.parametrize(
     "value",
     [

@@ -9,6 +9,8 @@ import string
 from pathlib import Path
 
 WINDOWS_DIRECTORY_PATH_LIMIT = 248
+# The default Win32 VFS allows MAX_PATH * 4 UTF-8 bytes; the pager needs eight for "-journal".
+_WIN32_SQLITE_FILENAME_BYTES = 260 * 4 - 8
 _NAMESPACE_PREFIXES = ("\\\\?\\", "\\\\.\\")
 _DOS_DEVICE = re.compile(r"(?:AUX|CON|CONIN\$|CONOUT\$|NUL|PRN|(?:COM|LPT)[1-9¹²³])", re.ASCII)
 
@@ -57,6 +59,20 @@ def portable_path(path: Path) -> Path:
         tail = value[7:]
         if not tail or all(_ordinary_component(part) for part in tail.split("\\")):
             return Path(value[4:])
+    return path
+
+
+def sqlite_filename(path: Path) -> Path:
+    """Keep a usable ordinary filename when its equivalent prefix alone exceeds SQLite's limit."""
+    if os.name == "nt" and len(str(path).encode("utf-8", errors="surrogatepass")) > (
+        _WIN32_SQLITE_FILENAME_BYTES
+    ):
+        ordinary = portable_path(path)
+        if (
+            len(str(ordinary).encode("utf-8", errors="surrogatepass"))
+            <= _WIN32_SQLITE_FILENAME_BYTES
+        ):
+            return ordinary
     return path
 
 

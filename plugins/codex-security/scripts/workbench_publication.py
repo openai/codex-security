@@ -28,7 +28,7 @@ from finalize_scan_contract import (
     write_sarif_projection,
 )
 from validate_scan_contract import validate_contract
-from windows_paths import portable_path
+from windows_paths import portable_path, sqlite_filename
 
 
 def destination_key(destination: Any) -> str:
@@ -226,7 +226,7 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         except PermissionError:
             pass  # Let SQLite report the open failure used by the host's state fallback.
     if payload["action"] == "inspect":
-        database_uri = f"file:{quote(str(path), safe='')}?mode=ro"
+        database_uri = f"file:{quote(str(sqlite_filename(path)), safe='')}?mode=ro"
         try:
             connection = sqlite3.connect(database_uri, uri=True, timeout=5)
         except sqlite3.OperationalError as exc:

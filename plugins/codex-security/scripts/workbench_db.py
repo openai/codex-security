@@ -60,6 +60,7 @@ from windows_paths import (
     portable_is_relative_to,
     portable_path,
     portable_relative_path,
+    sqlite_filename,
 )
 from workbench import handoff
 from workbench.storage import (
@@ -272,7 +273,7 @@ def connect(*, deferred: bool = False) -> sqlite3.Connection:
         raise
     for attempt in range(SQLITE_RETRY_ATTEMPTS):
         try:
-            connection = sqlite3.connect(path, timeout=5)
+            connection = sqlite3.connect(sqlite_filename(path), timeout=5)
         except sqlite3.OperationalError:
             print(guidance, file=sys.stderr)
             raise
