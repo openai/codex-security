@@ -262,3 +262,52 @@ def test_damaged_nested_checkout_does_not_supply_ignored_content(
     cache.unlink()
     with pytest.raises(ValueError, match="target is empty"):
         check_targets(root, ["selected"], [])
+
+
+@pytest.mark.cross_platform
+def test_selected_scope_in_a_damaged_gitlink_reports_its_checkout_error(tmp_path, check_targets):
+    import workbench_target
+
+    root = tmp_path / "repo"
+    initialize_git_repository(root)
+    nested = root / "nested"
+    initialize_git_repository(nested)
+    child = nested / "src"
+    child.mkdir()
+    (child / "source.py").touch()
+    subprocess.run(["git", "-C", root, "add", "nested"], check=True)
+    scopes = ["nested", "nested/src"]
+    for scope in scopes:
+        check_targets(root, [scope], [])
+
+    (nested / ".git" / "HEAD").unlink()
+    for scope in scopes:
+        # The outer index cannot enumerate files at or underneath its gitlink.
+        assert workbench_target.git_directory_snapshot_paths(root / scope) == []
+        with pytest.raises(OSError, match="git repository"):
+            check_targets(root, [scope], [])
+        check_targets(root, [scope, "README.md"], ["README.md"])
+
+    (nested / ".git").rename(tmp_path / "saved-metadata")
+    for scope in scopes:
+        with pytest.raises(ValueError, match="target is empty"):
+            check_targets(root, [scope], [])
+
+
+@pytest.mark.cross_platform
+def test_selected_scope_allows_an_empty_git_marker_or_a_valid_gitfile_alias(
+    tmp_path, check_targets
+):
+    root = tmp_path / "repo"
+    initialize_git_repository(root)
+    selected = root / "selected"
+    selected.mkdir()
+    (selected / "visible.py").touch()
+    subprocess.run(["git", "-C", root, "add", "selected/visible.py"], check=True)
+    marker = selected / ".git"
+    marker.mkdir()
+    check_targets(root, ["selected"], [])
+    marker.rmdir()
+    subprocess.run(["git", "-C", root, "config", "core.worktree", root.as_posix()], check=True)
+    marker.write_text("gitdir: ../.git\n")
+    check_targets(root, ["selected"], [])

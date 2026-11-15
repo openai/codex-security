@@ -1197,11 +1197,26 @@ def _windows_inventory_query(
     return result
 
 
-def _nested_worktree_error(path: Path) -> OSError | None:
+def _nested_worktree_error(path: Path, *, selected_ancestor: bool = False) -> OSError | None:
     """Diagnose a nested marker when Git failed to identify this directory as its worktree."""
     marker = path / ".git"
     try:
-        marker.lstat()
+        info = marker.lstat()
+        if selected_ancestor and (
+            not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+            or getattr(info, "st_reparse_tag", 0) & 0x20000000
+        ):
+            return None
+        if selected_ancestor and stat.S_ISDIR(info.st_mode):
+            # An ordinary directory may contain an empty .git placeholder.
+            for name in ("HEAD", "config"):
+                try:
+                    if stat.S_ISREG((marker / name).lstat().st_mode):
+                        break
+                except FileNotFoundError:
+                    continue
+            else:
+                return None
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -1210,6 +1225,9 @@ def _nested_worktree_error(path: Path) -> OSError | None:
     probe = git_command(
         path, "rev-parse", "--show-toplevel", git_dir=marker, work_tree=path, text=False
     )
+    if selected_ancestor and not probe.returncode:
+        # A valid gitfile can refer to the enclosing worktree.
+        return None
     detail = _git_diagnostic(probe.stderr).rstrip() if probe.returncode else ""
     return OSError(detail or f"Could not inspect the nested Git working tree: {path}")
 
@@ -1238,6 +1256,14 @@ def git_directory_snapshot_paths(
                 return []
             return None
         repository, pathspec = git_worktree_context(target, root=root)
+        if onerror is not None:
+            # Git can skip a damaged checkout at the selection or between it and this root.
+            directory = repository
+            for part in Path(pathspec).parts:
+                directory /= part
+                if (error := _nested_worktree_error(directory, selected_ancestor=True)) is not None:
+                    onerror(error)
+                    return []
     else:
         # The temporary copy of an unborn repository uses the selected Git config and index.
         repository, pathspec = target, "."
