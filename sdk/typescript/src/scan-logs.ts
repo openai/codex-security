@@ -328,19 +328,23 @@ async function* attributedSessionEvents(
   attribution: ScanExecutionAttribution | null | undefined,
 ): AsyncGenerator<Record<string, unknown>> {
   let replaying = false;
+  let finishingOwnerTurn = false;
+  const completedAt = sessionStartedAt(attribution?.completedAt);
   let turnId: string | null = null;
   for await (const event of sessionEvents(path)) {
     const payload = event["payload"];
+    const turnMarker =
+      event["type"] === "turn_context" ||
+      (isRecord(payload) && payload["type"] === "task_started");
     if (
+      turnMarker &&
       isRecord(payload) &&
-      (event["type"] === "turn_context" ||
-        payload["type"] === "task_started") &&
       typeof payload["turn_id"] === "string"
-    ) {
+    )
       turnId = payload["turn_id"];
-    }
     if (event["type"] === "session_meta" && isRecord(payload)) {
       replaying = payload["id"] !== session.threadId;
+      finishingOwnerTurn = false;
     }
     if (replaying) {
       if (
@@ -353,9 +357,30 @@ async function* attributedSessionEvents(
       }
       replaying = false;
     }
+    const time = sessionStartedAt(event["timestamp"]);
+    if (turnMarker) {
+      finishingOwnerTurn =
+        completedAt !== null &&
+        time !== null &&
+        (finishingOwnerTurn || time <= completedAt) &&
+        attribution?.owner.threadId === session.threadId &&
+        typeof attribution.owner.turnId === "string" &&
+        isRecord(payload) &&
+        payload["turn_id"] === attribution.owner.turnId;
+    }
+    // Publication can precede the completion tool response and final message.
+    // Extend the log only for the already-active, explicitly bound owner turn.
+    const ownerTail =
+      finishingOwnerTurn &&
+      time !== null &&
+      completedAt !== null &&
+      time > completedAt &&
+      isRecord(payload) &&
+      (payload["turn_id"] === undefined || payload["turn_id"] === turnId);
     if (
       !attribution ||
       event["type"] === "session_meta" ||
+      ownerTail ||
       isAttributedScanEvent(
         attribution,
         session.threadId,
@@ -369,6 +394,13 @@ async function* attributedSessionEvents(
     ) {
       yield event;
     }
+    if (
+      event["type"] === "event_msg" &&
+      isRecord(payload) &&
+      (payload["type"] === "task_complete" ||
+        payload["type"] === "turn_aborted")
+    )
+      finishingOwnerTurn = false;
   }
 }
 
