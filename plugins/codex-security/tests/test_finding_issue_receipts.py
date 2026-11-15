@@ -86,6 +86,43 @@ def legacy_database(path: Path, validated: dict, destination: dict) -> None:
         connection.commit()
 
 
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows SQLite")
+def test_record_and_inspect_at_the_windows_sqlite_filename_limit(tmp_path: Path) -> None:
+    scan_dir, validated = source(tmp_path)
+    name = "workbench.sqlite3"
+    state = tmp_path
+    # Keep each directory component short while crossing SQLite's limit with the prefix.
+    while 1030 - len(str(state / name).encode("utf-8")) > 180:
+        state /= "界" * 40
+    padding = 1030 - len(str(state / name).encode("utf-8")) - 1
+    state /= "s" * padding
+    path = state / name
+    assert len(str(path).encode("utf-8")) == 1030
+    native_path = load_script("windows_paths").extended_path(path)
+    native_path.parent.mkdir(parents=True)
+
+    # Establish that this SQLite build can write the ordinary filename with WAL.
+    try:
+        with closing(sqlite3.connect(path)) as control:
+            assert control.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+    except sqlite3.OperationalError as exc:
+        if str(exc) == "unable to open database file":
+            pytest.skip("native SQLite cannot write the ordinary 1,030-byte control filename")
+        raise
+
+    receipt = receipt_for(validated)
+    expected = [{**receipt, "scanId": validated["manifest"]["scan"]["id"]}]
+    assert issues(state, scan_dir, "record", receipts=[receipt])["receipts"] == expected
+    with closing(sqlite3.connect(path)) as control:
+        assert control.execute("SELECT external_id FROM finding_issue_receipts").fetchall() == [
+            ("SEC-101",)
+        ]
+    written = native_path.read_bytes()
+    assert issues(state, scan_dir, "inspect")["receipts"] == expected
+    assert native_path.read_bytes() == written
+
+
 def test_inspection_of_portable_source_does_not_create_state(tmp_path: Path) -> None:
     scan_dir, validated = source(tmp_path)
     state = tmp_path / "state"
