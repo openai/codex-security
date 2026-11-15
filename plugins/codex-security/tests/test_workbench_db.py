@@ -998,6 +998,72 @@ def test_reviewed_patch_matches_unversioned_checkout_bytes(
     assert workbench_api["require_reviewed_patch_applied"](scan, remediation, patch_name) == applied
 
 
+def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    occurrence = scan_command(state_dir, "complete-scan", scan_id)["scan"]["findings"][0][
+        "occurrenceId"
+    ]
+
+    def close(*extra: str) -> dict[str, object]:
+        return set_triage(
+            state_dir, occurrence, "closed", "--close-reason", "already_fixed", *extra
+        )["scan"]["findings"][0]["triage"]
+
+    note = "Regression test passed.\nOutput: --literal [verified]"
+    sha1 = "ab" * 20
+    sha256 = "cd" * 32
+    legacy = close()
+    assert "fixedRevision" not in legacy
+    # Reopen a v72 database containing an already_fixed decision.
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        db.execute("ALTER TABLE finding_triage DROP COLUMN fixed_revision")
+        db.execute("ALTER TABLE finding_decisions DROP COLUMN fixed_revision")
+        db.execute("DELETE FROM schema_migrations WHERE version = 73")
+    assert close() == legacy
+    for reason, revision, rationale, diagnostic in (
+        (None, sha1, note, "already_fixed"),
+        ("wont_fix", sha1, note, "already_fixed"),
+        ("already_fixed", sha1, "  ", "note"),
+        ("already_fixed", "HEAD", note, "full Git commit OID"),
+        ("already_fixed", sha1[:12], note, "full Git commit OID"),
+    ):
+        flags = ["--fixed-revision", revision, "--note", rationale]
+        status = "open"
+        if reason:
+            flags.extend(("--close-reason", reason))
+            status = "closed"
+        rejected = set_triage(state_dir, occurrence, status, *flags, check=False)
+        assert rejected["returncode"] != 0
+        assert diagnostic in rejected["stderr"]
+
+    bound = close("--fixed-revision", sha1.upper(), "--note", note)
+    assert bound["fixedRevision"] == sha1
+    assert bound["note"] == note
+    assert close("--fixed-revision", sha1, "--note", note) == bound
+    assert close("--note", note) == bound
+    assert close() == bound
+    assert close("--fixed-revision", sha256, "--note", note)["fixedRevision"] == sha256
+    assert "fixedRevision" not in close("--note", "Updated unbound rationale")
+    close("--fixed-revision", sha256, "--note", note)
+    reopened = set_triage(state_dir, occurrence, "open")["scan"]["findings"][0]["triage"]
+    assert reopened["status"] == "open"
+    assert "fixedRevision" not in reopened
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        assert db.execute(
+            "SELECT status, close_reason, note, fixed_revision FROM finding_decisions "
+            "WHERE occurrence_id = ? ORDER BY rowid",
+            (occurrence,),
+        ).fetchall() == [
+            ("closed", "already_fixed", None, None),
+            ("closed", "already_fixed", note, sha1),
+            ("closed", "already_fixed", note, sha256),
+            ("closed", "already_fixed", "Updated unbound rationale", None),
+            ("closed", "already_fixed", note, sha256),
+            ("open", None, None, None),
+        ]
+
+
 def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_autocrlf) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"

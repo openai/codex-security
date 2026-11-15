@@ -2336,8 +2336,20 @@ The older `scans match BEFORE AFTER` spelling is also supported.
 Use `scans match --all` to match completed scans in this repository generation, including linked worktrees.
 Comparisons classify findings as new, persisting, reopened, not observed, resolved,
 or unknown. An absent finding in the later scope is not observed; absence alone
-does not verify remediation. A finding is resolved only after it was explicitly
-closed as already fixed. Excluded paths and uncertain matches remain unknown.
+does not verify remediation. To record a verified fix, close the occurrence as
+`already_fixed` through `set_codex_security_finding_triage`, supplying the full
+Git commit ID in `fixedRevision` and the verification evidence in `note`.
+Comparison reports a covered absence as resolved when every earlier occurrence
+in the group has that decision for the exact commit scanned. The later scan must
+cover committed contents, such as a clean checkout or a committed diff.
+A different revision, local changes, or a legacy closure without revision
+evidence leaves a covered absence not observed. An affected path explicitly
+deferred in the later scan's saved coverage also stays not observed. Excluded
+paths and uncertain matches remain unknown. For an absent group, `beforeTriage` in the JSON output
+lists the recorded closure decisions and their evidence. The workbench can read
+the same saved pair with `get_codex_security_scan_comparison` using
+`beforeScanId` and `afterScanId`. Run the CLI comparison first to save any
+required matches.
 One comparison ID is compared with the latest completed scan.
 
 ```bash

@@ -1,10 +1,11 @@
-"""Load reviewed false-positive feedback for a security scan."""
+"""Persist finding triage decisions and load reviewed false-positive feedback for a scan."""
 
 from __future__ import annotations
 
 import argparse
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,56 @@ from workbench_constants import (
 from workbench_native_indexes import _indexed_findings, _legacy_generations
 from workbench_target_state import RepositoryIdentityCache
 from workbench_validation import bounded_output_text
+
+
+def record_finding_decision(
+    connection: sqlite3.Connection,
+    occurrence_id: str,
+    status: str,
+    close_reason: str | None,
+    note: str | None,
+    fixed_revision: str | None,
+    timestamp: str,
+) -> None:
+    """Record a change to the current triage state and append its audit entry in the caller's transaction."""
+    previous_triage = connection.execute(
+        "SELECT status, close_reason, note, fixed_revision FROM finding_triage WHERE occurrence_id = ?",
+        (occurrence_id,),
+    ).fetchone()
+    # A client that only knows the legacy fields can replay a close after evidence was added.
+    if (
+        fixed_revision is None
+        and close_reason == "already_fixed"
+        and previous_triage is not None
+        and previous_triage["fixed_revision"] is not None
+        and note in (None, previous_triage["note"])
+    ):
+        fixed_revision = previous_triage["fixed_revision"]
+        note = previous_triage["note"]
+    decision = (status, close_reason, note, fixed_revision)
+    if previous_triage is not None and tuple(previous_triage) == decision:
+        return
+    connection.execute(
+        """
+        INSERT INTO finding_decisions (
+            id, occurrence_id, status, close_reason, note, fixed_revision, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (str(uuid.uuid4()), occurrence_id, *decision, timestamp),
+    )
+    connection.execute(
+        """
+        INSERT INTO finding_triage (occurrence_id, status, close_reason, note, fixed_revision, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(occurrence_id) DO UPDATE SET
+            status = excluded.status,
+            close_reason = excluded.close_reason,
+            note = excluded.note,
+            fixed_revision = excluded.fixed_revision,
+            updated_at = excluded.updated_at
+        """,
+        (occurrence_id, *decision, timestamp),
+    )
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:

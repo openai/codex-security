@@ -115,7 +115,7 @@ A Deep parent retains the configured paths and notes from accepted reviews. Work
 
 For file-authored drafts, put `reviewState` inside `scan` in the unsealed manifest. Finalization preserves recovery details in checkpoints and replaces the draft state with the small `scan.review` summary. For tool-authored drafts, pass `reviewState` to `record_codex_security_scan_draft`.
 
-Comparison uses the later scan's execution status, configured scope and additional exclusions before classifying an absent finding as resolved.
+Comparison uses the later scan's execution status, configured scope and additional exclusions. A covered absence is resolved only when every earlier occurrence has an already-fixed decision with verification evidence for the exact scanned commit. Decisions without a verified revision remain available as triage history.
 
 ### Scan modes and inventory
 

@@ -217,6 +217,7 @@ describe("scan history renderer", () => {
           repository: "/demo/juice-shop",
           beforeScanId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           afterScanId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          afterRevision: "8".repeat(40),
           summary: {
             new: 1,
             persisting: 2,
@@ -260,6 +261,13 @@ describe("scan history renderer", () => {
               title: "Login SQL injection bypasses authentication",
               path: "routes/login.ts",
               beforeOccurrenceId: "before-resolved",
+              beforeTriage: [
+                {
+                  closeReason: "already_fixed",
+                  fixedRevision: "9".repeat(40),
+                  note: "Verified with the regression test.",
+                },
+              ],
             },
             {
               status: "unknown",
@@ -299,6 +307,10 @@ describe("scan history renderer", () => {
       "CRITICAL",
       "2 → 1",
       "Both routes share the same unchecked basket lookup.",
+      `Later scan revision: ${"8".repeat(40)}`,
+      "Earlier finding closed as already fixed",
+      "9".repeat(40),
+      "Verified with the regression test.",
     ]) {
       expect(text).toContain(expected);
     }

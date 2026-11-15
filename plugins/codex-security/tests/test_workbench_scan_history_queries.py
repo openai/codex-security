@@ -361,7 +361,10 @@ def test_cached_group_status_follows_coverage_uncertainty_and_confirmed_links(
     assert json.loads(stored) == payload
 
     db.execute("DELETE FROM scan_comparison_matches WHERE after_scan_id='scan-latest'")
-    assert compare() == unlinked
+    unlinked_again = compare()
+    (decision,) = unlinked_again["findings"][0].pop("beforeTriage")
+    assert decision["occurrenceId"] == "a1"
+    assert unlinked_again == unlinked
 
 
 def test_matching_reuses_repository_membership_for_repeated_scans(

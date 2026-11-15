@@ -234,11 +234,15 @@ def create_cli_scan(
         "scoped_path" if paths else "deep_repository" if mode == "deep" else "repository"
     )
     snapshot_digest = None
+    target_kind = "directory_snapshot"
     if target_revision is not None:
         with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-            snapshot_digest = connection.execute(
-                "SELECT target_snapshot_digest FROM scans WHERE id = ?", (launched["scanId"],)
-            ).fetchone()[0]
+            connection.row_factory = sqlite3.Row
+            scan = connection.execute(
+                "SELECT * FROM scans WHERE id = ?", (launched["scanId"],)
+            ).fetchone()
+            snapshot_digest = scan["target_snapshot_digest"]
+            target_kind = load_script("workbench_source_scopes").expected_target_kinds(scan)[0]
     write_completed_contract(
         scan_dir,
         launched["scanId"],
@@ -247,7 +251,7 @@ def create_cli_scan(
         include_paths=paths,
         coverage_mode=coverage_mode,
         inventory_strategy="scoped_path" if paths else "repository",
-        target_kind="git_revision" if target_revision is not None else "directory_snapshot",
+        target_kind=target_kind,
         target_revision=target_revision,
         snapshot_digest=snapshot_digest,
     )
@@ -918,6 +922,17 @@ def test_reading_empty_history_leaves_state_uninitialized(tmp_path: Path) -> Non
     for scan_id, message in (("short", "eight characters"), (str(uuid.uuid4()), "scan not found")):
         missing = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
         assert missing["returncode"] != 0 and message in missing["stderr"]
+    missing_pair = run_workbench(
+        state_dir,
+        "compare-scans",
+        "--require-matches",
+        "--before-scan-id",
+        str(uuid.uuid4()),
+        "--after-scan-id",
+        str(uuid.uuid4()),
+        check=False,
+    )
+    assert missing_pair["returncode"] != 0 and "scan not found" in missing_pair["stderr"]
     assert not state_dir.exists()
 
 
@@ -1048,10 +1063,71 @@ def test_cli_scan_comparison_tracks_stable_findings_without_copying_triage(tmp_p
     assert resolved["summary"]["not_observed"] == 1
     after_occurrence = persisted["findings"][0]["afterOccurrenceId"]
     set_triage(state_dir, after_occurrence, "closed", "--close-reason", "already_fixed")
-    assert compare_scan_pair(state_dir, after, fixed)["summary"]["resolved"] == 1
+    legacy = compare_scan_pair(state_dir, after, fixed)
+    assert legacy["summary"]["not_observed"] == 1
+    assert legacy["findings"][0]["beforeTriage"] == [
+        {
+            "occurrenceId": after_occurrence,
+            "closeReason": "already_fixed",
+            "status": "closed",
+            "note": None,
+        }
+    ]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM findings").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone() == (2,)
+
+
+def test_verified_revision_applies_only_to_covered_committed_contents(tmp_path: Path) -> None:
+    state, root, repo = tmp_path / "state", tmp_path / "results", tmp_path / "repository"
+    original_revision = initialize_git_repository(repo)
+    before = create_cli_scan(state, root, repo, target_revision=original_revision)
+    unchanged = create_cli_scan(state, root, repo, target_revision=original_revision, finding=False)
+    (repo / "README.md").write_text("updated fixture\n")
+    subprocess.run(["git", "commit", "-qam", "Update fixture"], cwd=repo, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    corrected = create_cli_scan(state, root, repo, target_revision=revision, finding=False)
+    excluded = create_cli_scan(
+        state, root, repo, target_revision=revision, finding=False, paths=["README.md"]
+    )
+    deferred = create_cli_scan(
+        state, root, repo, target_revision=revision, finding=False, follow_up=True
+    )
+    (repo / "README.md").write_text("local edit\n")
+    dirty = create_cli_scan(state, root, repo, target_revision=revision, finding=False)
+    row = compare_scan_pair(state, before, corrected)["findings"][0]
+    assert row["status"] == "not_observed"
+    note = "Confirmed the corrected behavior in a regression test."
+    set_triage(
+        state,
+        row["beforeOccurrenceId"],
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        "--fixed-revision",
+        revision,
+        "--note",
+        note,
+    )
+    for later, status in (
+        (unchanged, "not_observed"),
+        (corrected, "resolved"),
+        (excluded, "unknown"),
+        (deferred, "not_observed"),
+        (dirty, "not_observed"),
+    ):
+        result = compare_scan_pair(state, before, later)
+        finding = result["findings"][0]
+        assert finding["status"] == status
+        assert finding["beforeTriage"] == [
+            {
+                "occurrenceId": row["beforeOccurrenceId"],
+                "status": "closed",
+                "closeReason": "already_fixed",
+                "fixedRevision": revision,
+                "note": note,
+            }
+        ]
 
 
 def create_ordered_history(root: Path, anchors: tuple[str, ...]):

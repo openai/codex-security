@@ -29,6 +29,7 @@ from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX, PRIMARY_FINDING_LO
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_source_scopes import public_scan_recipe
 from workbench_target import (
+    clean_worktree_content_digest,
     require_remediation_target,
     require_scan_target_identity,
     verified_windows_checkout,
@@ -45,8 +46,10 @@ from workbench_validation import timestamp_key
 
 def reads_missing_history(args: argparse.Namespace, path: Path) -> bool:
     """Select an in-memory database only for history reads on a fresh profile."""
-    if args.command not in {"list-scans", "list-repositories", "list-global-findings"} and not (
-        args.command == "get-scan" and not (args.request_id or args.action_token)
+    if not (
+        args.command in {"list-scans", "list-repositories", "list-global-findings"}
+        or (args.command == "get-scan" and not (args.request_id or args.action_token))
+        or (args.command == "compare-scans" and args.require_matches)
     ):
         return False
     try:
@@ -815,6 +818,16 @@ def compare_scans(
         backfill_finding_details(connection, before)
         backfill_finding_details(connection, after)
     after_coverage = read_coverage(after)
+    # A commit identifies the checked contents only for committed diffs and clean worktrees.
+    after_revision = (
+        after["target_revision"]
+        if after["diff_target_kind"] in {"commit", "range"}
+        or after["target_snapshot_digest"] == clean_worktree_content_digest()
+        else None
+    )
+    deferred_paths = [
+        path for task in after_coverage.get("deferred", []) for path in task.get("paths", [])
+    ]
     before_findings = _scan_findings(connection, before["id"])
     after_findings = _scan_findings(connection, after["id"])
     matches = json.loads(cached["result_json"]) if cached is not None else None
@@ -883,14 +896,37 @@ def compare_scans(
         ):
             status = "unknown"
             item["reason"] = "The affected path was excluded or outside the later scope."
-        elif all(
-            row["triage_status"] == "closed" and row["close_reason"] == "already_fixed"
+        elif any(
+            _path_matches(row["relative_path"], path)
+            for row in previous_rows
+            for path in deferred_paths
+        ):
+            status = "not_observed"
+            item["reason"] = "Review of the affected path was deferred in the later scan."
+        elif after_revision and all(
+            row["triage_status"] == "closed"
+            and row["close_reason"] == "already_fixed"
+            and row["fixed_revision"] == after_revision
             for row in previous_rows
         ):
             status = "resolved"
         else:
             status = "not_observed"
             item["reason"] = "Not observed in the later scan; remediation has not been verified."
+        if not current_rows:
+            decisions = [
+                {
+                    "occurrenceId": row["id"],
+                    "status": row["triage_status"],
+                    "closeReason": row["close_reason"],
+                    "note": row["note"],
+                    **({"fixedRevision": row["fixed_revision"]} if row["fixed_revision"] else {}),
+                }
+                for row in previous_rows
+                if row["triage_status"] == "closed"
+            ]
+            if decisions:
+                item["beforeTriage"] = decisions
         if len(previous_rows) == 1:
             item["beforeOccurrenceId"] = previous_rows[0]["id"]
         elif previous_rows:
@@ -910,6 +946,7 @@ def compare_scans(
 
     result = {
         "afterScanId": after["id"],
+        "afterRevision": after["target_revision"],
         "beforeScanId": before["id"],
         "findings": findings,
         "repository": before["target_path"],
@@ -1240,13 +1277,14 @@ def finding_management_updated_at(connection: sqlite3.Connection, scan_id: str) 
 
 def finding_triage_result(connection: sqlite3.Connection, occurrence_id: str) -> dict[str, Any]:
     row = connection.execute(
-        "SELECT status, close_reason, note, updated_at FROM finding_triage WHERE occurrence_id = ?",
+        "SELECT status, close_reason, note, updated_at, fixed_revision FROM finding_triage WHERE occurrence_id = ?",
         (occurrence_id,),
     ).fetchone()
     if row is None:
         return {"status": "open"}
     return {
         "closeReason": row["close_reason"],
+        **({"fixedRevision": row["fixed_revision"]} if row["fixed_revision"] is not None else {}),
         "note": row["note"],
         "status": row["status"],
         "updatedAt": row["updated_at"],
@@ -1460,6 +1498,7 @@ def _scan_findings(connection: sqlite3.Connection, scan_id: str) -> dict[str, sq
         f"""
         SELECT occurrences.*,
             COALESCE(triage.status, 'open') AS triage_status, triage.close_reason,
+            triage.note, triage.fixed_revision,
             (SELECT relative_path {PRIMARY_FINDING_LOCATION_SQL}) AS relative_path
         FROM finding_occurrences AS occurrences
         LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
