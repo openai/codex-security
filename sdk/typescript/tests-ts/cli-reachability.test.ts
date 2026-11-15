@@ -9,6 +9,7 @@ import { parse as parseToml } from "smol-toml";
 import { main } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import { DependencyReportCoverage } from "../src/dependency-report-coverage.js";
+import { canonicalJson } from "../src/record.js";
 import { bundledPluginRoot } from "../src/runtime.js";
 import { dependencies, type OnCodex } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
@@ -1480,6 +1481,12 @@ test("the CLI captures upstream receipts and reuses sink profiles through its gr
           ],
         })),
       });
+      const largeDiagnostic = "fixture backend details ".repeat(8192);
+      const failedResult = {
+        is_error: true,
+        content: [{ type: "text", text: largeDiagnostic }],
+      };
+      let profileRequests = 0;
       const call = mock(
         async (server: string, tool: string, args: JsonObject) => {
           expect([server, tool, args]).toEqual([
@@ -1487,6 +1494,9 @@ test("the CLI captures upstream receipts and reuses sink profiles through its gr
             "profiles.stacks",
             query,
           ]);
+          profileRequests++;
+          if (profileRequests === 1) return failedResult;
+          if (profileRequests === 2) throw new Error(largeDiagnostic);
           return {
             structuredContent: {
               graph_evidence: {
@@ -1512,6 +1522,37 @@ test("the CLI captures upstream receipts and reuses sink profiles through its gr
         call,
         read: async () => ({ contents: [{ uri, text: resource }] }),
       };
+      const report = output!.appServer!.dependencyReport!;
+      for (const original of [failedResult, { error: largeDiagnostic }]) {
+        const reply = await callGraph(
+          "collect_dependency_profiles",
+          query,
+          rpc,
+        );
+        expect(reply).toMatchObject({
+          uncovered: [window],
+          slices: [
+            { outcome: "failed", cached: false, receiptId: expect.any(String) },
+          ],
+        });
+        expect(JSON.stringify(reply)).not.toContain("fixture backend details");
+        const { inventoryReceipts } = await report.status!({
+          inventoryReceipts: true,
+        });
+        expect(inventoryReceipts).toContainEqual(
+          expect.objectContaining({
+            id: (reply["slices"] as JsonObject[])[0]!["receiptId"],
+            server: "profiles",
+            tool: "profiles.stacks",
+            arguments: query,
+            originalPayloadSha256: createHash("sha256")
+              .update(canonicalJson(original))
+              .digest("hex"),
+            outcome: "failed",
+            current: true,
+          }),
+        );
+      }
       const profiles = await callGraph(
         "collect_dependency_profiles",
         query,
@@ -1527,7 +1568,7 @@ test("the CLI captures upstream receipts and reuses sink profiles through its gr
         uncovered: [],
         slices: [{ outcome: "found_stacks", cached: true }],
       });
-      expect(call).toHaveBeenCalledTimes(1);
+      expect(call).toHaveBeenCalledTimes(3);
       const collectionId = (profiles["slices"] as JsonObject[])[0]![
         "collectionId"
       ];
@@ -1539,7 +1580,6 @@ test("the CLI captures upstream receipts and reuses sink profiles through its gr
       const receiptSelection = (witnesses["stacks"] as JsonObject[])[0]![
         "receiptSelection"
       ];
-      const report = output!.appServer!.dependencyReport!;
       const use = {
         ...unresolvedDecoder.uses[0]!,
         observations: [

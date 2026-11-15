@@ -195,7 +195,17 @@ function inventoryRecords(
   return records;
 }
 
-function inventoryOutcome(
+function reportedOmissions(truncation: unknown): boolean {
+  if (!isRecord(truncation)) return false;
+  const omittedByKey = truncation["omitted_by_key"];
+  const positive = (value: unknown) => typeof value === "number" && value > 0;
+  return (
+    positive(truncation["omitted_top_level"]) ||
+    (isRecord(omittedByKey) && Object.values(omittedByKey).some(positive))
+  );
+}
+
+export function inventoryOutcome(
   result: unknown,
   metadata: DependencyInventoryReceiptMetadata,
 ): Pick<DependencySearch, "result" | "completeness" | "details"> {
@@ -234,6 +244,7 @@ function inventoryOutcome(
       (record) =>
         record["partial"] === true ||
         record["truncated"] === true ||
+        reportedOmissions(record["truncation"]) ||
         (isPodTable &&
           isRecord(record["stats"]) &&
           record["stats"]["truncated"] === true) ||

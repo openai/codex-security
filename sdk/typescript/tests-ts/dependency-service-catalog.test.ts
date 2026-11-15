@@ -262,6 +262,96 @@ test("distinguishes a scoped no-service conclusion from an unresolved search", a
   ]);
 });
 
+test("rejects explicitly incomplete catalog results as no-service evidence", async () => {
+  const { services: _services, ...selected } = lookup;
+  const notFound = { ...selected, coverageField: ["rows"] };
+  for (const result of [
+    {
+      structured_content: { rows: [], metadata: { partial: true } },
+      content: [],
+    },
+    {
+      structured_content: null,
+      content: [
+        { type: "text", text: JSON.stringify({ rows: [], hasMore: true }) },
+      ],
+    },
+    {
+      structured_content: { rows: [], complete: false },
+      content: [],
+    },
+    {
+      structured_content: {
+        rows: [],
+        metadata: { truncation: { omitted_top_level: 1 } },
+      },
+      content: [],
+    },
+    {
+      structured_content: null,
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            rows: [],
+            metadata: { truncation: { omitted_by_key: { rows: 1 } } },
+          }),
+        },
+      ],
+    },
+  ]) {
+    expect(
+      await resolveDependencyServices({
+        ...options,
+        run: runReturning(
+          [],
+          [receipt({ result })],
+          repository,
+          [],
+          [{ ...notFound, textBlock: result.structured_content ? null : 0 }],
+        ),
+      }),
+    ).toEqual([
+      {
+        path: request.path,
+        status: "unresolved",
+        reason: expect.stringContaining("incomplete coverage"),
+      },
+    ]);
+  }
+  for (const result of [
+    {
+      rows: [],
+      complete: true,
+      metadata: { truncation: { omitted_top_level: 0 } },
+    },
+    { rows: [catalogRecord], complete: false },
+    {
+      rows: [catalogRecord],
+      metadata: { truncation: { omitted_by_key: { rows: 1 } } },
+    },
+  ] as const) {
+    const { rows } = result;
+    const resolved = await resolveDependencyServices({
+      ...options,
+      run: runReturning(
+        rows.length ? [lookup] : [],
+        [
+          receipt({
+            result: { structured_content: result, content: [] },
+          }),
+        ],
+        repository,
+        [],
+        rows.length ? [] : [notFound],
+      ),
+    });
+    expect(resolved[0]).toMatchObject({
+      services: rows.length ? [{ name: "catalog-worker" }] : [],
+    });
+  }
+});
+
 test("the read-only runtime forwards terminal selected catalog items for search auditing", async () => {
   const onResult = mock((_item: McpToolCallItem) => {});
   const valid = receipt();

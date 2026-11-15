@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { JsonObject } from "./config.js";
+import { z } from "zod";
+import type { JsonObject, JsonValue } from "./config.js";
 import { CodexSecurityError } from "./errors.js";
 import { canonicalJson, cloneWithoutGetters, isRecord } from "./record.js";
 
@@ -19,11 +20,24 @@ export interface DependencyInventoryReceiptMetadata {
   /** Tool receipt that supplied this immutable evidence resource. */
   parentReceiptId?: string;
 }
-export interface DependencyInventoryReceiptSelection {
-  receiptId: string;
-  textBlock: number | null;
-  record: (string | number)[];
-}
+export const inventoryReceiptSelectionSchema = z.strictObject({
+  receiptId: z.string().trim().min(1),
+  textBlock: z.number().int().nonnegative().nullable(),
+  record: z.array(z.union([z.string(), z.number().int().nonnegative()])),
+});
+export type DependencyInventoryReceiptSelection = z.infer<
+  typeof inventoryReceiptSelectionSchema
+>;
+export const inventoryReceiptQuerySchema = z.union([
+  inventoryReceiptSelectionSchema,
+  z.strictObject({
+    receiptId: inventoryReceiptSelectionSchema.shape.receiptId,
+    original: z.literal(true).optional(),
+  }),
+]);
+export type DependencyInventoryReceiptQuery = z.infer<
+  typeof inventoryReceiptQuerySchema
+>;
 export interface BoundDependencyInventoryReceipt {
   key: string;
   receiptId: string;
@@ -99,6 +113,36 @@ export function inventoryResultPayload(
   } catch {
     return undefined;
   }
+}
+
+function describeResult(result: unknown): JsonObject {
+  if (Array.isArray(result)) return { length: result.length };
+  if (!isRecord(result))
+    return { type: result === null ? "null" : typeof result };
+  const structured = inventoryResultPayload(result, null);
+  const content = result["content"] ?? result["contents"];
+  return {
+    fields: Object.keys(result),
+    ...(Array.isArray(structured)
+      ? { structuredLength: structured.length }
+      : isRecord(structured)
+        ? { structuredFields: Object.keys(structured) }
+        : {}),
+    ...(Array.isArray(content) ? { contentBlockCount: content.length } : {}),
+  };
+}
+
+function checkResourceProof(bound: readonly BoundDependencyInventoryReceipt[]) {
+  const resourceProof = bound.filter(
+    (value) => value.origin.parentReceiptId !== undefined,
+  );
+  if (
+    resourceProof.length &&
+    Buffer.byteLength(canonicalJson(resourceProof), "utf8") > 32 * 1024
+  )
+    throw new CodexSecurityError(
+      "The selected resource evidence exceeds the review context budget. Use the graph's exact frame and witness-scope receiptSelections for the deciding path; the complete collection remains retained outside model context.",
+    );
 }
 
 /** Scan-owned original receipts. A projection is an exact value, never a summary. */
@@ -180,6 +224,16 @@ export function createDependencyInventory() {
       ...(value.outcome ? { outcome: value.outcome } : {}),
     };
   }
+  const describe = (value: Receipt) => ({
+    id: value.id,
+    server: value.server,
+    ...value.origin,
+    ...(value.itemId ? { itemId: value.itemId } : {}),
+    ...(value.outcome ? { outcome: value.outcome } : {}),
+    originalPayloadSha256: value.payloadSha256,
+    payloadCharacters: value.payloadCharacters,
+    current: superseded(value.id) === undefined,
+  });
   return {
     isReceiptCurrent(id: string) {
       return superseded(id) === undefined;
@@ -245,17 +299,21 @@ export function createDependencyInventory() {
     servers: () => [
       ...new Set([...receipts.values()].map((value) => value.server)),
     ],
-    snapshot: () =>
-      [...receipts.values()].map((value) => ({
-        id: value.id,
-        server: value.server,
-        ...value.origin,
-        ...(value.itemId ? { itemId: value.itemId } : {}),
-        ...(value.outcome ? { outcome: value.outcome } : {}),
-        originalPayloadSha256: value.payloadSha256,
-        payloadCharacters: value.payloadCharacters,
-        current: superseded(value.id) === undefined,
-      })),
+    snapshot: () => [...receipts.values()].map(describe),
+    read(query: DependencyInventoryReceiptQuery): JsonObject {
+      const value = receipt(query.receiptId);
+      const metadata = describe(value) as JsonObject;
+      if (!("record" in query) && !query.original)
+        return { ...metadata, resultShape: describeResult(value.result) };
+      const selection = "record" in query ? query : undefined;
+      const bound = bindOne(value, selection);
+      checkResourceProof([bound]);
+      return {
+        ...metadata,
+        ...(selection && { selection }),
+        result: bound.result as JsonValue,
+      };
+    },
     bind(
       servers: readonly string[],
       receiptIds?: readonly string[],
@@ -295,13 +353,7 @@ export function createDependencyInventory() {
       const selected = [
         ...new Map(bound.map((value) => [value.key, value])).values(),
       ].sort((a, b) => a.key.localeCompare(b.key));
-      const resourceProof = selected.filter(
-        (value) => value.origin.parentReceiptId !== undefined,
-      );
-      if (Buffer.byteLength(canonicalJson(resourceProof), "utf8") > 32 * 1024)
-        throw new CodexSecurityError(
-          "The selected resource evidence exceeds the review context budget. Use the graph's exact frame and witness-scope receiptSelections for the deciding path; the complete collection remains retained outside model context.",
-        );
+      checkResourceProof(selected);
       return selected;
     },
     staleReason,

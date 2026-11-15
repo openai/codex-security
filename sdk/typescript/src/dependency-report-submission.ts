@@ -14,6 +14,7 @@ import {
 } from "./dependency-investigation-tools.js";
 import {
   createDependencyInventory,
+  inventoryReceiptSelectionSchema,
   type BoundDependencyInventoryReceipt,
   type DependencyInventoryReceiptMetadata,
 } from "./dependency-inventory.js";
@@ -45,11 +46,6 @@ const candidateIds = z
     (ids) => new Set(ids).size === ids.length,
     "A candidate must appear only once in an item's candidateIds.",
   );
-const receiptSelection = z.strictObject({
-  receiptId: identity,
-  textBlock: z.number().int().nonnegative().nullable(),
-  record: z.array(z.union([z.string(), z.number().int().nonnegative()])),
-});
 const itemIdentity = {
   id: identity,
   candidateIds,
@@ -60,7 +56,7 @@ const itemIdentity = {
       "Host-issued inventory IDs for complete original results used by this assessment. Discover them in review status. Select deciding originals, not every receipt from a server.",
     ),
   receiptSelections: z
-    .array(receiptSelection)
+    .array(inventoryReceiptSelectionSchema)
     .optional()
     .describe(
       "Exact records from original inventory receipts. Use textBlock=null for structured content or a zero-based JSON text-block index; record is a key/index path within that data. The host authenticates the selected value and original payload hash. Prefer a precise returned record to an oversized bulk result.",
@@ -903,6 +899,7 @@ export function createDependencyReportSubmission(options: {
       audit.observeGraph(phase, item);
     },
     isInventoryReceiptCurrent: inventory.isReceiptCurrent,
+    readInventoryReceipt: inventory.read,
     recordSourceExcerpt(excerpt: JsonObject) {
       const { sourceId, startLine, endLine } = {
         sourceId: excerpt["sourceId"],

@@ -10,7 +10,11 @@ import {
   type GraphEvidenceObservations,
   type RecordGraphInventory,
 } from "./dependency-graph-evidence.js";
-import type { DependencyInventoryRpc } from "./dependency-inventory.js";
+import {
+  inventoryReceiptQuerySchema,
+  type DependencyInventoryReceiptQuery,
+  type DependencyInventoryRpc,
+} from "./dependency-inventory.js";
 import { readDependencyEvidence } from "./dependency-reachability.js";
 import { createDependencySourceIdentityReader } from "./dependency-source-identity.js";
 import { errorMessage } from "./errors.js";
@@ -75,6 +79,9 @@ export async function openDependencyGraph(
   supplemental?: {
     tools: DependencyGraphTools["tools"];
     call: DependencyGraphTools["call"];
+    readInventoryReceipt?: (
+      query: DependencyInventoryReceiptQuery,
+    ) => JsonObject;
   },
 ): Promise<DependencyGraphTools> {
   const sourceRoot = await realpath(repository);
@@ -180,7 +187,10 @@ export async function openDependencyGraph(
               ...tool,
               description:
                 tool.description +
-                " Use evidence:{} to list shared source-note IDs and questions, evidence:{id} to read host-captured excerpts, or evidence:{search} to search notes. Note claims and scope associations are investigator assertions.",
+                " Use evidence:{} to list shared source-note IDs and questions, evidence:{id} to read host-captured excerpts, or evidence:{search} to search notes. Note claims and scope associations are investigator assertions." +
+                (supplemental?.readInventoryReceipt
+                  ? " Use inventory:{receiptId} for original runtime receipt metadata and shape, or inventory:{receiptId,textBlock,record} for an exact value. textBlock=null selects structured content. Set original:true for an explicit whole ordinary result when necessary."
+                  : ""),
               inputSchema: {
                 ...tool.inputSchema,
                 properties: {
@@ -188,6 +198,11 @@ export async function openDependencyGraph(
                     ? tool.inputSchema["properties"]
                     : {}),
                   evidence: z.toJSONSchema(evidenceQuerySchema) as JsonObject,
+                  ...(supplemental?.readInventoryReceipt && {
+                    inventory: z.toJSONSchema(
+                      inventoryReceiptQuerySchema,
+                    ) as JsonObject,
+                  }),
                 },
               },
             }
@@ -266,6 +281,17 @@ export async function openDependencyGraph(
             })),
             warnings,
           }),
+        });
+      }
+      if (
+        name === "query_codex_security_graph" &&
+        supplemental?.readInventoryReceipt &&
+        isRecord(args) &&
+        args["inventory"] !== undefined
+      ) {
+        const query = inventoryReceiptQuerySchema.parse(args["inventory"]);
+        return focusedReply({
+          inventory: supplemental.readInventoryReceipt(query),
         });
       }
       if (

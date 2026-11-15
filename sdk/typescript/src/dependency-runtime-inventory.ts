@@ -2,9 +2,10 @@ import Ajv from "ajv";
 import { z } from "zod";
 import type { JsonObject, JsonValue } from "./config.js";
 import type { DependencyCatalogAnswer } from "./dependency-graph-tools.js";
-import type {
-  DependencyInventoryReceiptMetadata,
-  DependencyInventoryRpc,
+import {
+  inventoryResultPayload,
+  type DependencyInventoryReceiptMetadata,
+  type DependencyInventoryRpc,
 } from "./dependency-inventory.js";
 import { errorMessage } from "./errors.js";
 import { canonicalJson, isRecord } from "./record.js";
@@ -41,13 +42,12 @@ const statusSchema = z.object({
   ),
 });
 
+type InventoryOutcome =
+  | { receiptId: string; outcome: "captured" | "empty" | "failed" }
+  | { outcome: "unavailable"; reason: string };
 type InventoryLookup = {
   receiptId?: string;
-  response: Promise<{
-    receiptId?: string;
-    result: JsonValue;
-    outcome?: "failed";
-  }>;
+  response: Promise<InventoryOutcome>;
 };
 
 export function createDependencyRuntimeInventory(options: {
@@ -192,10 +192,10 @@ export function createDependencyRuntimeInventory(options: {
             (lookup.receiptId &&
               options.isReceiptCurrent?.(lookup.receiptId) === false)
           ) {
-            const response = (async () => {
+            const response = (async (): Promise<InventoryOutcome> => {
               const startedAt = new Date().toISOString();
               let result: JsonValue;
-              let outcome: "failed" | undefined;
+              let outcome: "failed" | "empty" | undefined;
               try {
                 result = (await rpc.call(server, tool, args)) as JsonValue;
                 if (
@@ -203,6 +203,14 @@ export function createDependencyRuntimeInventory(options: {
                   (result["isError"] === true || result["is_error"] === true)
                 )
                   outcome = "failed";
+                else if (
+                  result === null ||
+                  (isRecord(result) &&
+                    Array.isArray(result["content"]) &&
+                    result["content"].length === 0 &&
+                    inventoryResultPayload(result, null) === undefined)
+                )
+                  outcome = "empty";
               } catch (error) {
                 options.signal.throwIfAborted();
                 result = { error: errorMessage(error) };
@@ -215,15 +223,16 @@ export function createDependencyRuntimeInventory(options: {
                 finishedAt: new Date().toISOString(),
                 ...(outcome && { outcome }),
               });
-              return {
-                result,
-                ...(receiptId && { receiptId }),
-                ...(outcome && { outcome }),
-              };
+              return receiptId
+                ? { receiptId, outcome: outcome ?? "captured" }
+                : {
+                    outcome: "unavailable",
+                    reason: "The original tool result could not be recorded.",
+                  };
             })();
             const entry: InventoryLookup = {
               response: response.then((result) => {
-                if (result.receiptId) entry.receiptId = result.receiptId;
+                if ("receiptId" in result) entry.receiptId = result.receiptId;
                 return result;
               }),
             };

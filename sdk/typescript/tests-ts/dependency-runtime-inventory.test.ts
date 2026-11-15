@@ -126,15 +126,31 @@ test("refreshes a superseded runtime receipt and shares the refresh across calle
   expect(calls).toBe(2);
   for (const [outcome] of outcomes) {
     expect(outcome).toMatchObject({
-      result: refreshed,
       receiptId: refreshedId,
+      outcome: "captured",
     });
+    expect(outcome).not.toHaveProperty("result");
   }
 });
 
-test.each(["isError", "is_error"])(
-  "preserves the original %s response as a failed runtime receipt",
-  async (errorField) => {
+test.each([
+  ["isError", { isError: true, content: [] }, "failed"],
+  ["is_error", { is_error: true, content: [] }, "failed"],
+  ["empty MCP envelope", { structuredContent: null, content: [] }, "empty"],
+  ["null result", null, "empty"],
+  [
+    "structured empty list",
+    { structured_content: [], content: [] },
+    "captured",
+  ],
+  [
+    "JSON text containing an empty list",
+    { structuredContent: null, content: [{ type: "text", text: "[]" }] },
+    "captured",
+  ],
+] as const)(
+  "preserves %s as the appropriate runtime receipt outcome",
+  async (_shape, response, expectedOutcome) => {
     const inventory = createDependencyInventory();
     const lookup = createDependencyRuntimeInventory({
       servers: { inventory: {} },
@@ -143,10 +159,6 @@ test.each(["isError", "is_error"])(
       record: inventory.record,
       signal: new AbortController().signal,
     });
-    const response = {
-      [errorField]: true,
-      structuredContent: { message: "No reliable inventory result" },
-    };
     const [outcome] = await lookup(paths.slice(0, 1), {
       list: async () => ({
         data: [
@@ -159,13 +171,15 @@ test.each(["isError", "is_error"])(
       call: async () => response,
     });
     expect(outcome).toMatchObject({
-      outcome: "failed",
+      outcome: expectedOutcome,
       receiptId: "inventory-1",
-      result: response,
     });
-    expect(inventory.bind(["inventory"], ["inventory-1"])).toMatchObject([
-      { receiptId: "inventory-1", outcome: "failed", result: response },
-    ]);
+    expect(outcome).not.toHaveProperty("result");
+    const [bound] = inventory.bind(["inventory"], ["inventory-1"]);
+    expect(bound?.result).toEqual(response);
+    expect(bound?.outcome).toBe(
+      expectedOutcome === "captured" ? undefined : expectedOutcome,
+    );
   },
 );
 
@@ -289,9 +303,10 @@ test("uses server guidance for extra arguments and preserves partial inventory r
     },
   ]);
   expect(outcomes[0]).toMatchObject({
-    result: partial,
     receiptId: "partial-receipt",
+    outcome: "captured",
   });
+  expect(outcomes[0]).not.toHaveProperty("result");
 });
 
 test("does not call a tool when additional arguments violate its schema", async () => {

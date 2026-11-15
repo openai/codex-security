@@ -150,6 +150,7 @@ import {
   createDependencyInvestigationTools,
   type DependencyProfileTransport,
 } from "./dependency-investigation-tools.js";
+import { DependencyProfileLookupError } from "./dependency-profile-evidence.js";
 import { createDependencyNativeSession } from "./dependency-native-session.js";
 import {
   inventoryResultPayload,
@@ -3302,18 +3303,36 @@ export async function main(
                   throw new Error(
                     "The configured read-only profiling tool is unavailable.",
                   );
-                const result = await rpc.call(
-                  profileServer,
-                  profileTool,
-                  query,
-                );
+                const startedAt = new Date().toISOString();
+                const failedLookup = (original: unknown) => {
+                  const receiptId = submission.recordInventory(
+                    profileServer,
+                    original,
+                    {
+                      tool: profileTool,
+                      arguments: query,
+                      startedAt,
+                      finishedAt: new Date().toISOString(),
+                      outcome: "failed",
+                    },
+                  );
+                  return new DependencyProfileLookupError(
+                    "The configured profile lookup failed.",
+                    receiptId,
+                  );
+                };
+                let result: unknown;
+                try {
+                  result = await rpc.call(profileServer, profileTool, query);
+                } catch (error) {
+                  signal.throwIfAborted();
+                  throw failedLookup({ error: errorMessage(error) });
+                }
                 if (
                   isJsonObject(result) &&
                   (result["isError"] === true || result["is_error"] === true)
                 )
-                  throw new Error(
-                    `Profile lookup failed: ${JSON.stringify(result)}`,
-                  );
+                  throw failedLookup(result);
                 return (
                   inventoryResultPayload(result, null) ??
                   inventoryResultPayload(result, 0)
@@ -3397,6 +3416,7 @@ export async function main(
                     args,
                     rpc && profileServer ? profileTransport(rpc) : undefined,
                   ),
+                readInventoryReceipt: submission.readInventoryReceipt,
               },
             );
             exitCode = await runSkill(

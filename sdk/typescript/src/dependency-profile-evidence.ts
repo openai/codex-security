@@ -106,6 +106,14 @@ const collectionSchema = z.looseObject({
 });
 
 export type DependencyProfileQuery = z.infer<typeof querySchema>;
+export class DependencyProfileLookupError extends Error {
+  constructor(
+    message: string,
+    readonly receiptId: string | undefined,
+  ) {
+    super(message);
+  }
+}
 type Selector = DependencyProfileQuery["selector"];
 type Window = DependencyProfileQuery["window"];
 type Collection = z.infer<typeof collectionSchema>;
@@ -377,6 +385,9 @@ export function createDependencyProfileEvidence(options: ProfileOptions) {
           window: slice,
           outcome: "failed",
           cached: false,
+          ...(error instanceof DependencyProfileLookupError && error.receiptId
+            ? { receiptId: error.receiptId }
+            : {}),
           error: String(error),
         });
         continue;

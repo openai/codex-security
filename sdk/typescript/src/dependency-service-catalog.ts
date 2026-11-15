@@ -9,6 +9,7 @@ import {
   type DependencyInventoryReceiptMetadata,
   type DependencyInventoryReceiptSelection,
 } from "./dependency-inventory.js";
+import { inventoryOutcome } from "./dependency-search-audit.js";
 import {
   createReadOnlyCodexSession,
   type ReadOnlyCodexSession,
@@ -249,17 +250,24 @@ function checkedNotFound(
   for (const receipt of matchingReceipts(lookup, servers, receipts)) {
     const data = payload(receipt, lookup.textBlock);
     if (
-      data !== undefined &&
-      jsonField(data, lookup.coverageField) !== undefined
+      data === undefined ||
+      jsonField(data, lookup.coverageField) === undefined
     )
-      return {
-        source: `${receipt.server}/${receipt.tool}`,
-        receiptSelections: receiptSelection(
-          receipt,
-          lookup.textBlock,
-          lookup.coverageField,
-        ),
-      };
+      continue;
+    const coverage = inventoryOutcome(receipt.result, {
+      tool: receipt.tool,
+      arguments: receipt.arguments,
+    });
+    if (coverage.completeness === "partial")
+      throw new Error("The cited catalog result reports incomplete coverage.");
+    return {
+      source: `${receipt.server}/${receipt.tool}`,
+      receiptSelections: receiptSelection(
+        receipt,
+        lookup.textBlock,
+        lookup.coverageField,
+      ),
+    };
   }
   throw new Error(
     "No successful catalog receipt contains the cited coverage data for these arguments.",

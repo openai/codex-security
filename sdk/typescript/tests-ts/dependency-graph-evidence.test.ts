@@ -278,7 +278,7 @@ test("refreshing a collection invalidates its previous resource evidence for cur
   ).toBe(false);
 });
 
-test("review binding rejects whole collections and oversized projections instead of loading them into another agent", async () => {
+test("receipt reads and review binding require narrow selections from bulk collection resources", async () => {
   const data = fixture(2500);
   const state = setup(data);
   state.ingestion.observe(
@@ -294,16 +294,28 @@ test("review binding rejects whole collections and oversized projections instead
   expect(() => state.inventory.bind(["profiles"], [receiptId])).toThrow(
     "exact receiptSelections",
   );
-  expect(() =>
-    state.inventory.bind(["profiles"], undefined, [
-      { receiptId, textBlock: 0, record: ["observations", 0] },
-    ]),
-  ).toThrow("review context budget");
-  const narrow = state.inventory.bind(["profiles"], undefined, [
+  expect(() => state.inventory.read({ receiptId, original: true })).toThrow(
+    "exact receiptSelections",
+  );
+  const wide = {
+    receiptId,
+    textBlock: 0,
+    record: ["observations", 0],
+  };
+  expect(() => state.inventory.read(wide)).toThrow("review context budget");
+  expect(() => state.inventory.bind(["profiles"], undefined, [wide])).toThrow(
+    "review context budget",
+  );
+  const selections = [
     { receiptId, textBlock: 0, record: ["observations", 0, "scope"] },
     { receiptId, textBlock: 0, record: ["observations", 0, "frames", 25] },
     { receiptId, textBlock: 0, record: ["observations", 0, "frames", 26] },
-  ]);
+  ];
+  const narrow = state.inventory.bind(["profiles"], undefined, selections);
   expect(narrow).toHaveLength(3);
   expect(JSON.stringify(narrow).length).toBeLessThan(4096);
+  expect(state.inventory.read(selections[1]!)).toMatchObject({
+    originalPayloadSha256: narrow[0]!.originalPayloadSha256,
+    selection: selections[1],
+  });
 });

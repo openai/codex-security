@@ -9,6 +9,7 @@ import {
   type DependencyGraphTools,
 } from "../src/dependency-graph-tools.js";
 import { createDependencyInventory } from "../src/dependency-inventory.js";
+import { createDependencyRuntimeInventory } from "../src/dependency-runtime-inventory.js";
 
 type ResolveCatalog = NonNullable<Parameters<typeof openDependencyGraph>[2]>;
 type CatalogRequest = Parameters<ResolveCatalog>[0][number];
@@ -23,6 +24,10 @@ async function withGraph(
     repository: string,
   ) => Promise<void>,
   queryPayload: JsonObject = {},
+  inventory?: {
+    lookup: Parameters<typeof openDependencyGraph>[4];
+    read: ReturnType<typeof createDependencyInventory>["read"];
+  },
 ) {
   const root = await mkdtemp(join(tmpdir(), "catalog-cache-test-"));
   try {
@@ -62,9 +67,16 @@ async function withGraph(
       root,
       resolveCatalog,
       undefined,
-      undefined,
+      inventory?.lookup,
       undefined,
       isReceiptCurrent,
+      inventory && {
+        tools: [],
+        call: async () => {
+          throw new Error("Unexpected supplemental tool");
+        },
+        readInventoryReceipt: inventory.read,
+      },
     );
     try {
       await run(
@@ -105,6 +117,130 @@ function mapping(
 const first = "workers/parser.ts";
 const second = "workers/decoder.ts";
 const project = "workers";
+
+test("automatic runtime lookups share receipt references and the graph reads exact current evidence on demand", async () => {
+  const inventory = createDependencyInventory();
+  const lookup = createDependencyRuntimeInventory({
+    servers: { runtime: {} },
+    plan: async () =>
+      JSON.stringify({
+        bindings: [
+          {
+            kind: "running_build",
+            server: "runtime",
+            tool: "lookup",
+            serviceArgument: "service",
+            serviceValue: "id",
+            pathArgument: null,
+            argumentsJson: "{}",
+          },
+        ],
+      }),
+    record: inventory.record,
+    isReceiptCurrent: inventory.isReceiptCurrent,
+    signal: new AbortController().signal,
+  });
+  const records = [{ revision: "fixture-revision" }];
+  const calls: JsonObject[] = [];
+  const bulk = "large-runtime-response ".repeat(8192);
+  const result = { structuredContent: { records, context: bulk } };
+  const rpc = {
+    list: async () => ({
+      data: [
+        {
+          name: "runtime",
+          tools: {
+            lookup: {
+              name: "lookup",
+              inputSchema: {
+                type: "object",
+                properties: { service: { type: "string" } },
+                required: ["service"],
+              },
+              annotations: { readOnlyHint: true },
+            },
+          },
+        },
+      ],
+    }),
+    call: async (_server: string, _tool: string, args: JsonObject) => {
+      calls.push(args);
+      return result;
+    },
+  };
+  await withGraph(
+    async (requests) => requests.map(({ path }) => mapping(path, "catalog-1")),
+    (id) => id === "catalog-1" || inventory.isReceiptCurrent(id),
+    async (_resolve, _trace, graph) => {
+      const automatic = await graph.call(
+        "resolve_codex_security_services",
+        { paths: [first, second], project },
+        rpc,
+      );
+      const receiptId = "inventory-1";
+      expect(calls).toEqual([{ service: "worker" }]);
+      expect(automatic["runtime_lookups"]).toContainAllValues(
+        [first, second].flatMap((path) => [
+          {
+            kind: "running_build",
+            path,
+            service: "worker",
+            serviceScope: "catalog:worker",
+            server: "runtime",
+            tool: "lookup",
+            receiptId,
+            outcome: "captured",
+          },
+          expect.objectContaining({ path, kind: "caller_access" }),
+        ]),
+      );
+      expect(JSON.stringify(automatic)).not.toContain("large-runtime-response");
+      const read = async (inventory: JsonObject) =>
+        (await graph.call("query_codex_security_graph", { inventory }))[
+          "inventory"
+        ];
+      const saved = inventory.snapshot()[0]!;
+      const selection = { receiptId, textBlock: null, record: ["records", 0] };
+      const shape = await read({ receiptId });
+      expect(shape).toMatchObject({
+        current: true,
+        originalPayloadSha256: saved.originalPayloadSha256,
+        resultShape: { structuredFields: ["records", "context"] },
+      });
+      expect(shape).not.toHaveProperty("result");
+      expect(await read(selection)).toMatchObject({
+        selection,
+        result: records[0],
+        originalPayloadSha256: saved.originalPayloadSha256,
+      });
+      expect(await read({ receiptId, original: true })).toMatchObject({
+        result,
+      });
+      await expect(
+        read({ ...selection, record: ["records", 2] }),
+      ).rejects.toThrow("does not exist");
+      const failed = { isError: true, content: [{ type: "text", text: bulk }] };
+      const failureId = inventory.record("runtime", failed, {
+        tool: "lookup",
+        arguments: { service: "worker" },
+        outcome: "failed",
+      })!;
+      await expect(read(selection)).rejects.toThrow("was superseded");
+      expect(await read({ receiptId: failureId })).toMatchObject({
+        outcome: "failed",
+      });
+      expect(
+        await read({ receiptId: failureId, original: true }),
+      ).toMatchObject({
+        outcome: "failed",
+        result: failed,
+      });
+      expect(calls).toHaveLength(1);
+    },
+    {},
+    { lookup, read: inventory.read },
+  );
+});
 
 test("graph reuses verified mappings and only dispatches distinct misses for the exact project", async () => {
   const batches: (readonly CatalogRequest[])[] = [];
