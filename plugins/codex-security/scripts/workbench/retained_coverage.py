@@ -73,6 +73,7 @@ from workbench.saved_sources import (
     _freeze_source_times,
     _frozen_checkpoint_heads,
     _frozen_source_times,
+    _has_accepted_discovery_result,
     _is_source_order_snapshot,
     _iteration_order,
     _latest_iteration,
@@ -313,14 +314,16 @@ def merge_saved_results(
         if worker["kind"] != "discovery":
             continue
         output, attempt = outputs[0]
-        head = (checkpoint_heads or {}).get(output)
+        has_accepted_result = _has_accepted_discovery_result(worker)
+        head = None if has_accepted_result else (checkpoint_heads or {}).get(output)
         if head is not None and _checkpoint_head_directory(head) is not None:
             head = None
         if head is not None:
             paths[head] = worker["id"]
             current_results.add(head)
-        paths[f"{output}/result.json"] = worker["id"]
-        registered_heads[f"{output}/result.json"] = head
+        if not has_accepted_result:
+            paths[f"{output}/result.json"] = worker["id"]
+            registered_heads[f"{output}/result.json"] = head
         for archived, archived_attempt in outputs[1:]:
             archived_head = (checkpoint_heads or {}).get(archived)
             if archived_head is not None and _checkpoint_head_directory(archived_head) is None:
@@ -328,7 +331,10 @@ def merge_saved_results(
                 current_results.add(archived_head)
             paths[f"{archived}/result.json"] = worker["id"]
             checkpoints(f"{archived}/checkpoints", worker["id"], archived_attempt)
-        checkpoints(f"{output}/checkpoints", worker["id"], attempt)
+        if has_accepted_result:
+            worker_attempts[output] = (worker["id"], attempt)
+        else:
+            checkpoints(f"{output}/checkpoints", worker["id"], attempt)
         if worker["result_manifest_path"]:
             try:
                 current_path = Path(worker["result_manifest_path"]).relative_to(scan_dir).as_posix()
@@ -417,7 +423,9 @@ def merge_saved_results(
                 # The host projects coverage separately from the reducer findings.
                 draft = {**draft, "reviewState": draft["sourceCoverage"]}
             sources.append((relative, {"reviewState": {}, **draft}, worker_id))
-            if frozen_source_digests is None:
+            if frozen_source_digests is None and str(scan_dir / relative) not in (
+                accepted_source_digests or {}
+            ):
                 pending.extend(
                     receipt_checkpoints(
                         relative, worker_id, paths, partial(_checkpoint_paths, scan_dir)

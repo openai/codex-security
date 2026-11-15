@@ -5,8 +5,9 @@ import json
 from argparse import Namespace
 
 import pytest
+from publication_fixtures import worker_finding
 from test_deep_scan_publication_authority import stage_publication
-from workbench_test_support import read_review_state
+from workbench_test_support import read_review_state, select_checkpoint, write_checkpoint
 
 
 def accept_reducer(connection, scan):
@@ -126,3 +127,83 @@ def test_stopped_recovery_uses_accepted_bytes_after_replaceable_output_disappear
     )
     assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
     assert accepted.read_bytes() == contents
+
+
+@pytest.mark.parametrize("source", ["frozen", "alias", "both", "neither", "legacy"])
+def test_stopped_discovery_retains_only_bound_attempt_output(
+    workbench_db, publication_scan, source
+):
+    scan = publication_scan()
+    result = scan.add_worker()
+    worker_id = result.parent.name
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+
+    def draft(label):
+        return scan.worker_draft(
+            [worker_finding(scan, label)],
+            deferred=[{"id": label, "reason": label}],
+        )
+
+    contents = json.dumps(draft("accepted-review")).encode()
+    digest = hashlib.sha256(contents).hexdigest()
+    frozen = result.parent / f"accepted-{digest}.json"
+    frozen.write_bytes(contents if source in {"frozen", "both"} else b"{}")
+    result.write_bytes(
+        contents if source in {"alias", "both"} else json.dumps(draft("changed-alias")).encode()
+    )
+    with workbench_db:
+        workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
+        if source != "legacy":
+            workbench_db.execute(
+                "INSERT INTO deep_scan_attempts (scan_id, worker_id, attempt, status, started_at, "
+                "completed_at, accepted_result_path, accepted_result_sha256) "
+                "VALUES (?, ?, 2, 'succeeded', ?, ?, ?, ?)",
+                (scan.scan_id, worker_id, scan.timestamp, scan.timestamp, str(frozen), digest),
+            )
+    current = write_checkpoint(result.parent / "checkpoints", draft("changed-checkpoint"))
+    select_checkpoint(result.parent, current)
+    previous = result.parent / "attempts" / "attempt-1"
+    prior = write_checkpoint(previous / "checkpoints", draft("previous-attempt"))
+    with workbench_db:
+        workbench_db.execute(
+            "INSERT INTO deep_scan_attempts (scan_id, worker_id, attempt, status, started_at, "
+            "completed_at, accepted_result_path, accepted_result_sha256) "
+            "VALUES (?, ?, 1, 'succeeded', ?, ?, ?, ?)",
+            (scan.scan_id, worker_id, scan.timestamp, scan.timestamp, str(prior), prior.stem),
+        )
+    _, partial = scan.canceled_discovery_output()
+    write_checkpoint(partial / "checkpoints", draft("independent-partial"))
+
+    scan.fail()
+
+    assert (
+        json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]["status"] == "failed"
+    )
+    findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+    titles = {finding["title"] for finding in findings}
+    reasons = {
+        item["reason"] for item in read_review_state(workbench_db, scan.scan_dir)["deferred"]
+    }
+    expected = {"previous-attempt", "independent-partial"}
+    if source in {"frozen", "alias", "both"}:
+        expected.add("accepted-review")
+    if source == "legacy":
+        expected.update({"changed-alias", "changed-checkpoint"})
+    assert titles == expected
+    assert "independent-partial" in reasons
+    assert ("accepted-review" in reasons) == (source in {"frozen", "alias", "both"})
+    assert ("changed-alias" in reasons) == (source == "legacy")
+    assert ("changed-checkpoint" in reasons) == (source == "legacy")
+    manifest = (scan.scan_dir / "scan-manifest.json").read_bytes()
+    scan.preserve()
+    assert (scan.scan_dir / "scan-manifest.json").read_bytes() == manifest
+
+    if source == "both":
+        sources = json.loads(manifest)["scan"]["preservedSources"]
+        assert frozen.relative_to(scan.scan_dir).as_posix() in sources
+        assert result.relative_to(scan.scan_dir).as_posix() not in sources
+        result.write_text(json.dumps(draft("changed-after-stop")))
+        write_checkpoint(partial / "checkpoints", draft("new-partial"))
+        scan.recover()
+        recovered = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
+        assert {finding["title"] for finding in recovered} == expected | {"new-partial"}

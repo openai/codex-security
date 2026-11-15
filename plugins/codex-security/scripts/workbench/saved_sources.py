@@ -188,6 +188,8 @@ def _capture_saved_source(
     )
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = read(relative, kind=kind)
+        if str(scan_dir / relative) in (accepted_source_digests or {}):
+            return {relative: (digest, observed)}
         return capture_receipt_checkpoints(
             relative,
             kind,
@@ -294,7 +296,7 @@ def _read_saved_result(
     path = Path(relative)
     if expected is not None and (
         (path.parent.name == "checkpoints" and path.name == f"{expected}.json")
-        or path.name == f"accepted-{expected}.json"
+        or path.name in {f"accepted-{expected}.json", "result.json"}
     ):
         # Direct snapshots retain their accepted bytes, but supply no host receipt ownership.
         clear_scan_receipt_refs(draft)
@@ -964,20 +966,52 @@ def _saved_workers(connection: Any, scan: Any) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
-    return archived_worker_paths(workers, scan_dir)
+    workers = archived_worker_paths(workers, scan_dir)
+    for worker in workers:
+        if not _has_accepted_discovery_result(worker):
+            continue
+        accepted = worker["accepted_result_path"]
+        try:
+            _read_saved_result(
+                scan_dir,
+                Path(accepted).relative_to(scan_dir).as_posix(),
+                scan["id"],
+                accepted_source_digests={accepted: worker["accepted_result_sha256"]},
+            )
+        except (ContractError, OSError, ValueError):
+            # Reads of this alternative must still verify the same acceptance digest.
+            worker["result_manifest_path"] = str(Path(worker["artifact_dir"]) / "result.json")
+    return workers
 
 
 def _accepted_source_digests(connection: Any, scan: Any) -> dict[str, str]:
     scan_dir = Path(scan["scan_dir"])
-    return {
-        archived_deep_path(scan_dir, row["accepted_result_path"]): row["accepted_result_sha256"]
-        for row in connection.execute(
-            "SELECT accepted_result_path, accepted_result_sha256 FROM deep_scan_attempts "
-            "WHERE scan_id = ? AND accepted_result_path IS NOT NULL "
-            "AND accepted_result_sha256 IS NOT NULL",
-            (scan["id"],),
-        )
-    }
+    digests = {}
+    for row in connection.execute(
+        "SELECT attempt.accepted_result_path, attempt.accepted_result_sha256, worker.artifact_dir "
+        "FROM deep_scan_attempts AS attempt LEFT JOIN deep_scan_workers AS worker "
+        "ON worker.id = attempt.worker_id AND worker.attempt = attempt.attempt "
+        "AND worker.kind = 'discovery' AND worker.status = 'succeeded' "
+        "WHERE attempt.scan_id = ? AND attempt.accepted_result_path IS NOT NULL "
+        "AND attempt.accepted_result_sha256 IS NOT NULL",
+        (scan["id"],),
+    ):
+        digest = row["accepted_result_sha256"]
+        digests[archived_deep_path(scan_dir, row["accepted_result_path"])] = digest
+        if row["artifact_dir"]:
+            output = Path(archived_deep_path(scan_dir, row["artifact_dir"]))
+            digests[str(output / "result.json")] = digest
+    return digests
+
+
+def _has_accepted_discovery_result(worker: Any) -> bool:
+    """Return whether the current discovery attempt recorded the bytes it accepted."""
+    return (
+        worker["kind"] == "discovery"
+        and worker["status"] == "succeeded"
+        and "accepted_result_sha256" in worker.keys()
+        and bool(worker["accepted_result_sha256"] and worker["accepted_result_path"])
+    )
 
 
 def _iteration_order(worker: Any) -> tuple[int, str, str]:
@@ -1013,6 +1047,8 @@ def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
     attempt = int(worker["attempt"] or 0) if "attempt" in worker.keys() else 0
     if worker["kind"] == "discovery" and not attempt:
         attempt = max((attempt for _, attempt in archived), default=0) + 1
+    if _has_accepted_discovery_result(worker):
+        archived = [(directory, number) for directory, number in archived if number < attempt]
     return [(output.as_posix(), attempt), *archived]
 
 
@@ -1050,6 +1086,9 @@ def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[st
                 result, checkpoints = _reducer_output_paths(scan_dir, worker, directory, attempt)
                 if result is not None:
                     yield result, worker["kind"]
+            elif _has_accepted_discovery_result(worker) and attempt == worker["attempt"]:
+                # Only the selected path below represents this accepted attempt.
+                continue
             else:
                 yield f"{directory}/checkpoint-head.json", worker["kind"]
                 yield from (
