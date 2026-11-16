@@ -1,7 +1,7 @@
 import { gitText } from "./support/shell.js";
 import { loopbackProxy, loopbackTls } from "./support/loopback-git-proxy.js";
 import { afterEach, describe, expect, test, mock } from "bun:test";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   mkdir,
   readFile,
@@ -1779,9 +1779,19 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     },
   );
 
-  test.each([false, true])(
-    "preserves the operator's proxy, HTTPS cookie and TLS key with collision=%j",
-    async (collision) => {
+  const libcurl = /^libcurl: (\d+\.\d+\.\d+)/mu.exec(
+    execFileSync("git", ["version", "--build-options"], { encoding: "utf8" }),
+  )?.[1];
+  test.each([
+    { collision: false, credentials: "home netrc" },
+    { collision: true, credentials: "home netrc" },
+    { collision: false, credentials: "askpass" },
+    ...(libcurl && Bun.semver.satisfies(libcurl, ">=8.16.0")
+      ? [{ collision: false, credentials: "selected netrc" }]
+      : []),
+  ])(
+    "preserves the operator's proxy, HTTPS credentials, cookie and TLS key with %j",
+    async ({ collision, credentials }) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
       git("init", "--bare", secondary);
@@ -1790,16 +1800,78 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       if (collision) git("push", secondary, "HEAD:refs/heads/codex-security");
       let requests = 0;
       const environment = { ...process.env };
+      const home = await fixtures.create("patch-transport-home-");
+      environment["HOME"] = home;
+      if (process.platform === "win32") environment["USERPROFILE"] = home;
+      for (const key of Object.keys(environment))
+        if (/^(?:NETRC|GIT_ASKPASS|SSH_ASKPASS)$/iu.test(key))
+          delete environment[key];
+      environment["GIT_CONFIG_NOSYSTEM"] = "1";
+      environment["GIT_TERMINAL_PROMPT"] = "0";
+      const username = "fixture";
+      const askPass = join(home, "askpass");
+      const password =
+        credentials === "askpass"
+          ? "synthetic-askpass-only"
+          : "synthetic-netrc-only";
+      if (credentials === "askpass") {
+        environment["LC_ALL"] = "C";
+        await writeFile(
+          askPass,
+          [
+            "#!/bin/sh",
+            'case "$1" in',
+            `  Username*) echo username >> "$0.calls"; echo ${username} ;;`,
+            `  Password*) echo password >> "$0.calls"; echo ${password} ;;`,
+            "  *) exit 1 ;;",
+            "esac",
+            "",
+          ].join("\n"),
+          { mode: 0o700 },
+        );
+      } else {
+        const netrcFile = join(
+          home,
+          credentials === "selected netrc"
+            ? "selected credentials"
+            : process.platform === "win32"
+              ? "_netrc"
+              : ".netrc",
+        );
+        if (credentials === "selected netrc")
+          environment["NETRC"] = relative(directory, netrcFile);
+        await writeFile(
+          netrcFile,
+          `machine 127.0.0.2 login ${username} password ${password}\n`,
+          { mode: 0o600 },
+        );
+      }
+      const authorization =
+        "Basic " + Buffer.from(`${username}:${password}`).toString("base64");
       for (const key of Object.keys(environment))
         if (/^(?:https?|all|no)_proxy$/iu.test(key)) delete environment[key];
       const config = join(
         await fixtures.create("patch-proxy-config-"),
         "gitconfig",
       );
+      if (credentials === "askpass") {
+        git("config", "--file", config, "credential.helper", "");
+        git(
+          "config",
+          "--file",
+          config,
+          "core.askPass",
+          askPass.replaceAll("\\", "/"),
+        );
+      }
       const client = await loopbackTls(config, git, "client");
+      const serverTls = await loopbackTls(config, git);
+      const proxyClient = collision
+        ? undefined
+        : await loopbackTls(config, git, "proxy-client");
       const origin = Bun.serve({
         tls: {
-          ...(await loopbackTls(config, git)),
+          ...serverTls,
           ca: client.cert,
           requestCert: true,
           rejectUnauthorized: true,
@@ -1808,6 +1880,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         port: 0,
         async fetch(request) {
           requests++;
+          if (request.headers.get("authorization") !== authorization)
+            return new Response(null, {
+              status: 401,
+              headers: { "WWW-Authenticate": 'Basic realm="fixture"' },
+            });
           if (request.headers.get("cookie") !== "patch-session=synthetic")
             return new Response(null, { status: 403 });
           const url = new URL(request.url);
@@ -1865,7 +1942,17 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           `http.https://127.0.0.2:${origin.port}/.cookieFile`,
           cookieFile,
         );
-        using proxy = await loopbackProxy(origin.port!);
+        using proxy = await loopbackProxy(
+          origin.port!,
+          proxyClient
+            ? {
+                ...serverTls,
+                ca: proxyClient.cert,
+                requestCert: true,
+                rejectUnauthorized: true,
+              }
+            : undefined,
+        );
         git(
           "remote",
           "set-url",
@@ -1882,21 +1969,47 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             `https://127.0.0.2:${origin.port}/${destination.split(/[\\/]/u).at(-1)!}`,
           );
         git("config", "--file", config, "remote.origin.proxy", proxy.url);
+        if (proxyClient)
+          git(
+            "config",
+            "--file",
+            config,
+            "http.proxySSLCAInfo",
+            git("config", "--file", config, "http.sslCAInfo"),
+          );
         environment["GIT_CONFIG_GLOBAL"] = config;
-        // A public certificate alone cannot complete the client handshake.
-        await expect(
-          promisify(execFile)(
-            "git",
-            [
-              "-c",
-              `http.sslKey=${join(dirname(config), "missing.key")}`,
-              "ls-remote",
-              "origin",
-            ],
-            { cwd: directory, env: environment },
-          ),
-        ).rejects.toThrow();
-        expect(requests).toBe(0);
+        // The proxy and origin require their own client keys.
+        for (const option of proxyClient
+          ? ["http.proxySSLKey", "http.sslKey"]
+          : ["http.sslKey"]) {
+          await expect(
+            promisify(execFile)(
+              "git",
+              [
+                "-c",
+                `${option}=${join(dirname(config), "missing.key")}`,
+                "ls-remote",
+                "origin",
+              ],
+              { cwd: directory, env: environment },
+            ),
+          ).rejects.toThrow();
+          if (option === "http.proxySSLKey") expect(proxy.tunnels).toBe(0);
+          expect(requests).toBe(0);
+        }
+        if (credentials === "askpass") {
+          await expect(
+            promisify(execFile)(
+              "git",
+              ["-c", "core.askPass=", "ls-remote", "origin"],
+              {
+                cwd: directory,
+                env: environment,
+              },
+            ),
+          ).rejects.toThrow(/terminal prompts disabled/u);
+          expect(requests).toBeGreaterThan(0);
+        }
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
         const outcome = await runWorkflow(
@@ -1924,6 +2037,8 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
             },
             onCodex: async (_args, output) => {
               models++;
+              if (credentials === "askpass")
+                await writeFile(askPass + ".calls", "");
               await writeFile(join(directory, "src/finding-1.ts"), "fixed\n");
               output?.stdout.write("Fixed and verified.");
               return 0;
@@ -1932,19 +2047,33 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         );
         expect(outcome.exitCode, outcome.stderr).toBe(collision ? 2 : 0);
         expect(models).toBe(collision ? 0 : 1);
+        expect(proxy.tunnels).toBeGreaterThan(0);
         expect(requests).toBeGreaterThanOrEqual(2);
         expect(git("config", "--get-regexp", "^remote\\.")).toBe(remoteConfig);
+        if (credentials === "askpass") {
+          const prompts = (await readFile(askPass + ".calls", "utf8")).split(
+            /\r?\n/u,
+          );
+          expect(prompts).toContain("username");
+          expect(prompts).toContain("password");
+        }
         if (collision) expect(outcome.stderr).toContain("already exists");
-        else
-          for (const destination of [remote, secondary])
+        else {
+          const branch = `refs/heads/${git("branch", "--show-current")}`;
+          for (const destination of [remote, secondary]) {
+            expect(git("--git-dir", destination, "rev-parse", branch)).toBe(
+              git("rev-parse", "HEAD"),
+            );
             expect(
               git(
                 "--git-dir",
                 destination,
                 "show",
-                `${git("branch", "--show-current")}:src/finding-1.ts`,
+                `${branch}:src/finding-1.ts`,
               ),
             ).toBe("fixed");
+          }
+        }
       } finally {
         origin.stop(true);
       }

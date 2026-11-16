@@ -129,6 +129,167 @@ test.each([
 );
 
 test.each([
+  "external file",
+  "conditional branch",
+  "unselected filter",
+  "empty setting",
+  "unset setting",
+  "command scope",
+])(
+  "isolates operator askpass from a snapshot filter: %s",
+  async (mode) => {
+    const { directory, git } = await publicationRepository(fixtures);
+    const home = await fixtures.create("patch-askpass-home-");
+    const profile = await fixtures.create("patch-askpass-profile-");
+    const global = join(home, "gitconfig");
+    const included = join(home, "branch.gitconfig");
+    const objectDirectory = join(directory, ".git", "objects");
+    const helper = join(directory, ".git", "fixture-askpass.sh").replaceAll(
+      "\\",
+      "/",
+    );
+    const blocked = mode === "external file" || mode === "conditional branch";
+    await writeFile(global, "");
+    await writeFile(join(profile, "config.toml"), patchSnapshotWindowsConfig());
+    await writeFile(
+      helper,
+      "#!/bin/sh\nprintf called > .git/objects/askpass-called\nprintf '%s\\n' fixture-askpass-answer\n",
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(directory, ".git", "fixture-clean.sh"),
+      [
+        "unset GIT_ASKPASS SSH_ASKPASS",
+        "answer=$(printf 'protocol=https\\nhost=example.invalid\\nusername=fixture\\n\\n' | GIT_TERMINAL_PROMPT=0 git -c credential.helper= credential fill 2>/dev/null) || answer=",
+        'case "$answer" in',
+        "  *password=fixture-askpass-answer*) printf returned ;;",
+        "  *) printf unavailable ;;",
+        "esac > .git/objects/askpass-result",
+        "cat",
+        "",
+      ].join("\n"),
+    );
+    if (mode === "conditional branch") {
+      git(
+        "config",
+        "--file",
+        global,
+        "includeIf.onbranch:askpass-fixture.path",
+        "branch.gitconfig",
+      );
+      git("config", "--file", included, "core.askPass", helper);
+    } else if (
+      mode === "external file" ||
+      mode === "unselected filter" ||
+      mode === "empty setting"
+    ) {
+      git(
+        "config",
+        "--file",
+        global,
+        "core.askPass",
+        mode === "empty setting" ? "" : helper,
+      );
+    }
+    git("config", "filter.fixture.clean", "sh .git/fixture-clean.sh");
+    git("config", "filter.fixture.required", "true");
+    await writeFile(
+      join(directory, ".gitattributes"),
+      "*.probe filter=fixture\n",
+    );
+    git("add", ".gitattributes");
+    git("commit", "-qm", "Set a synthetic filter for new probe files");
+    if (mode === "conditional branch") git("branch", "askpass-fixture");
+
+    const environment = patchSnapshotEnvironment(
+      await fixtures.create("patch-askpass-tmp-"),
+      {
+        PATH: process.env["PATH"],
+        SYSTEMROOT: process.env["SYSTEMROOT"],
+        CODEX_CLI_PATH: process.env["CODEX_CLI_PATH"],
+        CODEX_HOME: profile,
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: home,
+        GIT_CONFIG_GLOBAL: global,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_COUNT: mode === "command scope" ? "1" : "0",
+        GIT_CONFIG_KEY_0: "core.askPass",
+        GIT_CONFIG_VALUE_0: helper,
+        GIT_CONFIG_PARAMETERS: "",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    );
+    // No probe exists during baseline capture. Activating the branch changes which
+    // external configuration Git sees after the controls have already been captured.
+    const edit = mode === "unselected filter" ? "ordinary.txt" : "new.probe";
+    let changed = false;
+    const outcome = await runWorkflow(["patch", "Synthetic issue", "--json"], {
+      currentDirectory: directory,
+      environment,
+      manualCodexPreparation: true,
+      onRepositoryCommand(command, args, cwd, options) {
+        const commandOptions = {
+          ...options,
+          environment: { ...environment, ...options?.environment },
+        };
+        if (changed && options?.sandbox)
+          return runRepositoryCommand(command, args, cwd, commandOptions);
+        return runGitRepositoryCommand(command, args, cwd, commandOptions);
+      },
+      async onCodex(_args, output) {
+        output!.appServer!.onPermissions!({
+          directory,
+          environment,
+          profile: {
+            extends: ":workspace",
+            network: { enabled: false },
+            filesystem: {
+              [home]: { ".": "read" },
+              ":tmpdir": {},
+              ":slash_tmp": {},
+            },
+          },
+        });
+        await output!.appServer!.onBeforeTurn?.();
+        if (mode === "conditional branch") {
+          git("switch", "askpass-fixture");
+          expect(git("check-attr", "filter", "--", edit)).toContain(
+            "filter: fixture",
+          );
+        }
+        await writeFile(join(directory, edit), "synthetic edit\n");
+        changed = true;
+        output!.stdout.write("Synthetic patch complete.\n");
+        return 0;
+      },
+    });
+    const readMarker = (name: string) =>
+      readFile(join(objectDirectory, name), "utf8").catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+          return undefined;
+        },
+      );
+    expect({
+      askpass: await readMarker("askpass-called"),
+      filter: await readMarker("askpass-result"),
+    }).toEqual({
+      askpass: undefined,
+      filter:
+        blocked || mode === "unselected filter" ? undefined : "unavailable",
+    });
+    expect(outcome.exitCode, outcome.stderr).toBe(blocked ? 2 : 0);
+    if (blocked) expect(outcome.stderr).toContain("Cannot run Git filter");
+    expect(changed).toBe(true);
+    expect(await readFile(join(directory, edit), "utf8")).toBe(
+      "synthetic edit\n",
+    );
+  },
+  process.platform === "win32" ? 120_000 : 30_000,
+);
+
+test.each([
   "unused",
   "activated",
   "disabled",

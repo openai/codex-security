@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import {
@@ -332,85 +332,159 @@ process.stdout.write(input === "model edit\\n" ? Buffer.from(fs.readFileSync(${J
   },
 );
 
-test("host publication cannot rerun an operator filter edited by the patch", async () => {
-  const { directory, git, remote } = await publicationRepository(fixtures);
-  const support = await fixtures.create("patch-host-filter-");
-  const config = join(support, "gitconfig");
-  const marker = join(support, "host-filter-ran");
-  const file = "src/finding-1.ts";
-  const script = join(directory, "clean.sh");
-  const query = "protocol=https\nhost=example.invalid\n\n";
-  const environment = {
-    HOME: support,
-    USERPROFILE: support,
-    GIT_CONFIG_GLOBAL: config,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_TERMINAL_PROMPT: "0",
-  };
-  await writeFile(
-    join(support, ".git-credentials"),
-    "https://fixture:synthetic@example.invalid\n",
-  );
-  git("config", "--file", config, "credential.helper", "store");
-  git("config", "--file", config, "filter.synthetic.clean", "sh ./clean.sh");
-  expect(
-    await runGitRepositoryCommand("git", ["credential", "fill"], directory, {
-      environment,
-      input: query,
-    }),
-  ).toContain("password=synthetic");
-  await writeFile(
-    join(directory, ".gitattributes"),
-    file + " filter=synthetic\n",
-  );
-  await writeFile(script, "cat\n");
-  git("add", ".");
-  git("commit", "-m", "Configure the synthetic filter");
-  const outcome = await runWorkflow(
-    ["patch", "Synthetic issue", "--create-pr", "--json"],
-    {
-      currentDirectory: directory,
-      environment,
-      onRepositoryCommand(command, args, cwd, options) {
-        if (command !== "git")
-          return args[1] === "list"
-            ? "[]"
-            : "https://github.example.test/example/repository/pull/1";
-        // Mark the host publication commands so the filter can distinguish them
-        // from its intended execution while capturing the verified tree.
-        const publishing = args.includes("switch") || args.includes("commit");
-        return runGitRepositoryCommand(command, args, cwd, {
-          ...options,
-          environment: {
-            ...environment,
-            ...options?.environment,
-            SYNTHETIC_HOST_MARKER:
-              publishing && !options?.sandbox
+test.each([
+  "configured Git store",
+  "existing netrc",
+  "late netrc",
+  "no credentials",
+  "unavailable filter input",
+])(
+  "host publication cannot rerun an operator filter edited by the patch: %s",
+  async (scenario) => {
+    const { directory, git, remote } = await publicationRepository(fixtures);
+    const support = await fixtures.create("patch-host-filter-");
+    const config = join(support, "gitconfig");
+    const marker = join(support, "host-filter-ran");
+    const file = "src/finding-1.ts";
+    const script = join(directory, "clean.sh");
+    const missingInput = scenario === "unavailable filter input";
+    const filterRules = join(support, "filter-rules");
+    const transform = missingInput
+      ? 'sed -f "$SYNTHETIC_FILTER_RULES"'
+      : "sed 's/model edit/filtered edit/'";
+    const writeNetrc = () =>
+      writeFile(
+        join(support, ".netrc"),
+        "machine example.invalid login fixture password synthetic\n",
+        { mode: 0o600 },
+      );
+    const environment = {
+      HOME: support,
+      USERPROFILE: support,
+      GIT_CONFIG_GLOBAL: config,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+      SYNTHETIC_FILTER_RULES: filterRules.replaceAll("\\", "/"),
+    };
+    if (scenario === "configured Git store") {
+      await writeFile(
+        join(support, ".git-credentials"),
+        "https://fixture:synthetic@example.invalid\n",
+        { mode: 0o600 },
+      );
+      git("config", "--file", config, "credential.helper", "store");
+      expect(
+        await runGitRepositoryCommand(
+          "git",
+          ["credential", "fill"],
+          directory,
+          {
+            environment,
+            input: "protocol=https\nhost=example.invalid\n\n",
+          },
+        ),
+      ).toContain("password=synthetic");
+    } else if (scenario === "existing netrc") {
+      await writeNetrc();
+    }
+    git("config", "--file", config, "filter.synthetic.clean", "sh ./clean.sh");
+    await writeFile(
+      join(directory, ".gitattributes"),
+      file + " filter=synthetic\n",
+    );
+    if (missingInput) {
+      await writeFile(
+        filterRules,
+        "s/baseline input/filtered baseline/\ns/model edit/filtered edit/\n",
+      );
+      git("config", "--file", config, "filter.synthetic.required", "false");
+      await writeFile(join(directory, file), "baseline input\n");
+    }
+    await writeFile(script, (missingInput ? transform : "cat") + "\n");
+    const setupGit = (...args: string[]) =>
+      runGitRepositoryCommand("git", args, directory, { environment });
+    await setupGit("add", ".");
+    await setupGit("commit", "-m", "Configure the synthetic filter");
+    const head = git("rev-parse", "HEAD");
+    const indexPath = join(directory, ".git", "index");
+    const index = await readFile(indexPath);
+    if (missingInput)
+      expect(
+        await runGitRepositoryCommand(
+          "git",
+          ["cat-file", "blob", "HEAD:" + file],
+          directory,
+          { trim: false },
+        ),
+      ).toBe("filtered baseline\n");
+    const outcome = await runWorkflow(
+      ["patch", "Synthetic issue", "--create-pr", "--json"],
+      {
+        currentDirectory: directory,
+        environment,
+        onRepositoryCommand(command, args, cwd, options) {
+          if (command !== "git")
+            return args[1] === "list"
+              ? "[]"
+              : "https://github.example.test/example/repository/pull/1";
+          // Exercise the production host Git command boundary for publication.
+          const hostPublication =
+            !options?.sandbox &&
+            (args.includes("switch") || args.includes("commit"));
+          const runGit = hostPublication
+            ? runRepositoryCommand
+            : runGitRepositoryCommand;
+          return runGit(command, args, cwd, {
+            ...options,
+            environment: {
+              ...environment,
+              ...options?.environment,
+              SYNTHETIC_HOST_MARKER: hostPublication
                 ? marker.replaceAll("\\", "/")
                 : undefined,
-          },
-        });
+            },
+          });
+        },
+        async onCodex(_args, output) {
+          if (scenario === "late netrc") await writeNetrc();
+          // Simulate the external filter input becoming unavailable after baseline capture.
+          if (missingInput) await unlink(filterRules);
+          await writeFile(
+            script,
+            [
+              'if test -n "${SYNTHETIC_HOST_MARKER-}"; then',
+              '  printf invoked > "$SYNTHETIC_HOST_MARKER"',
+              "fi",
+              transform,
+              "",
+            ].join("\n"),
+          );
+          await writeFile(join(directory, file), "model edit\n");
+          output!.stdout.write("Synthetic patch complete.\n");
+          return 0;
+        },
       },
-      async onCodex(_args, output) {
-        await writeFile(
-          script,
-          [
-            'if test -n "${SYNTHETIC_HOST_MARKER-}"; then',
-            "  printf 'protocol=https\\nhost=example.invalid\\n\\n' | git credential fill > \"$SYNTHETIC_HOST_MARKER\"",
-            "fi",
-            "sed 's/model edit/filtered edit/'",
-            "",
-          ].join("\n"),
-        );
-        await writeFile(join(directory, file), "model edit\n");
-        output!.stdout.write("Synthetic patch complete.\n");
-        return 0;
-      },
-    },
-  );
-  expect(outcome.exitCode, outcome.stderr).toBe(0);
-  await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
-  const receiver = repositoryGit(remote);
-  const branch = receiver("for-each-ref", "--format=%(refname)");
-  expect(receiver("show", branch + ":" + file)).toBe("filtered edit");
-});
+    );
+    expect(outcome.exitCode, outcome.stderr).toBe(missingInput ? 2 : 0);
+    await expect(readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    const receiver = repositoryGit(remote);
+    const branch = receiver("for-each-ref", "--format=%(refname)");
+    if (missingInput) {
+      expect(branch).toBe("");
+      expect(git("rev-parse", "HEAD")).toBe(head);
+      expect(await readFile(indexPath)).toEqual(index);
+      expect(await readFile(join(directory, file), "utf8")).toBe(
+        "model edit\n",
+      );
+      return;
+    }
+    expect(
+      await runGitRepositoryCommand(
+        "git",
+        ["show", branch + ":" + file],
+        remote,
+        { trim: false },
+      ),
+    ).toBe("filtered edit\n");
+  },
+);

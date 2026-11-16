@@ -21,6 +21,8 @@ export interface WindowsHandle {
 
 /** Paths are UTF-16LE code units without a terminator, including lone surrogates. */
 export interface WindowsBinding {
+  createWindowsHookMessageStage(path: Buffer): { close(): void };
+  readWindowsHookMessage(path: Buffer): Buffer;
   windowsArguments(): Buffer[];
   runWindowsProcess(
     executable: Buffer,

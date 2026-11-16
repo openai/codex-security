@@ -2784,25 +2784,31 @@ Git's built-in `store` helper can authenticate the host publication transport.
 The patch model, snapshot filters, and publication hooks have filesystem deny
 rules for Git's standard credential stores and for operator-selected
 `store --file` commands with a literal absolute file path. Use forward slashes
-and a drive letter for an explicit store on Windows. The same rules cover files
-selected by the operator's Git `http.cookieFile` and `http.sslKey` settings,
-including URL-specific values. The host HTTPS transport retains access to them.
+and a drive letter for an explicit store on Windows. The same rules cover
+`.netrc` and `_netrc` in the host user's effective home directory, the file
+selected by libcurl's `NETRC` environment variable, and files selected by Git's
+`http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
+URL-specific values. The host HTTPS transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can
 represent with ordinary drive or UNC syntax.
-Other helpers, including
-shell commands and OS credential managers, can use storage outside those
-files. A nonregular credential source such as a named pipe is handled the same
-way. When an operator configuration names one of these helpers, a patch
-stops before running a publication hook that could call it. Configured filters
-can stay installed. If a file's attributes select one, Git reports the
-incompatible helper before processing the file. An empty helper reset controls
+Other helpers, including shell commands and OS credential managers, can use
+storage outside those files. An operator Git configuration file can also
+select a `core.askPass` program to supply credentials to the HTTPS transport.
+A nonregular credential source such as a named pipe is handled the same way.
+When an operator configuration names one of these sources, a patch stops
+before running a publication hook that could call it. Configured filters can
+stay installed. If a file's attributes select one, Git reports the incompatible
+credential source before processing the file. An empty helper reset controls
 Git's lookup order. A filter can still read and invoke an earlier helper named
 in the same configuration. For patching with those delegates, select a
-configuration that omits the opaque helper. When a file-backed store is in use,
-the host commit reuses the captured filtered blobs so it can authenticate the
-push without re-running the filters outside the snapshot sandbox.
+configuration that omits the opaque helper. When the CLI manages the patch
+sandbox for automatic publication, a configured clean or process filter selected
+for a file must succeed during snapshot staging. If the filter fails, the CLI
+keeps the local edits for review. In this mode, host Git reuses the captured
+blobs during publication. The delegated commit hooks retain their existing
+filter configuration and permissions.
 
 An external Git administration directory must belong to a registered worktree or
 be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git

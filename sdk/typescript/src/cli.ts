@@ -354,6 +354,7 @@ import {
   withCredentialHomeLock,
   requirePrivateSnapshotProfileHome,
   requirePrivateSnapshotProfileFile,
+  createWindowsHookMessageStage,
   requireSecureOutputAncestry,
   writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
@@ -1833,6 +1834,7 @@ interface PatchTransportAccess {
 }
 
 interface CliDependencies {
+  requireSnapshotFilters?: boolean;
   sparsePatchSnapshots?: Map<
     string,
     {
@@ -1916,6 +1918,7 @@ interface CliDependencies {
       patchTransport?: true;
       publicationHooks?: PatchPublicationHooks;
       hookSandbox?: PatchSnapshotSandbox;
+      hostRefreshFilters?: readonly string[];
       hookWritePaths?: readonly string[];
       hookMessagePath?: string;
       sandbox?: PatchSnapshotSandbox;
@@ -2055,7 +2058,10 @@ export async function runRepositoryCommand(
   let profileFile: string | undefined;
   let hookDirectory: string | undefined;
   let hookDataDirectory: string | undefined;
-  let messageDirectory: string | undefined;
+  const messageDirectories: Record<string, string> = {};
+  const windowsMessageStages: Awaited<
+    ReturnType<typeof createWindowsHookMessageStage>
+  >[] = [];
   let hostArgs = args;
   try {
     const home = sandbox && configuredCodexHome(sandbox.environment);
@@ -2168,13 +2174,35 @@ export async function runRepositoryCommand(
         hookDataDirectory = await mkdtemp(
           join(hooks.gitDirectory, "codex-security-hook-data-"),
         );
-        if (
-          options?.hookMessagePath &&
-          (hooks.events.has("prepare-commit-msg") ||
-            hooks.events.has("commit-msg"))
-        ) {
-          messageDirectory = join(hookDataDirectory, "message");
-          await mkdir(messageDirectory, { mode: 0o700 });
+        for (const event of ["prepare-commit-msg", "commit-msg"]) {
+          if (!options?.hookMessagePath || !hooks.events.has(event)) continue;
+          // A later message hook gets a fresh grant. Reprovisioning a directory
+          // already edited by an earlier hook could reach its links.
+          if (process.platform === "win32") {
+            const temp = await realpath(tmpdir());
+            for (const denied of [
+              canonicalHome,
+              await realpath(hooks.gitDirectory),
+              ...(hooks.commonDirectory ? [hooks.commonDirectory] : []),
+            ]) {
+              if (!isOutsidePath(relative(denied, temp)))
+                throw new CodexSecurityError(
+                  "The Windows hook message needs temporary storage outside Git administration and the private Codex home.",
+                );
+            }
+            const outer = join(
+              temp,
+              "codex-security-hook-message-" + randomUUID(),
+            );
+            windowsMessageStages.push(
+              await createWindowsHookMessageStage(outer),
+            );
+            messageDirectories[event] = join(outer, "message");
+          } else {
+            const directory = join(hookDataDirectory, event);
+            await mkdir(directory, { mode: 0o700 });
+            messageDirectories[event] = directory;
+          }
         }
       }
       const path = join(home, `${profile}.config.toml`);
@@ -2201,10 +2229,12 @@ export async function runRepositoryCommand(
           };
         }
         const profiles = { [profile]: permissions };
-        if (messageDirectory) {
+        for (const [event, messageDirectory] of Object.entries(
+          messageDirectories,
+        )) {
           // Native hooks and editors can replace their message by rename.
           // Grant the private message directory while keeping Git controls read-only.
-          profiles[profile + "_message"] = {
+          profiles[profile + "_" + event] = {
             ...permissions,
             filesystem: {
               ...(permissions["filesystem"] as JsonObject),
@@ -2251,10 +2281,27 @@ export async function runRepositoryCommand(
         : []),
     ];
     let bindings: Buffer | undefined;
+    const hookMarker = hookDirectory
+      ? "codexsecurity.hookbridge" + randomUUID().replaceAll("-", "")
+      : undefined;
+    if (options?.hostRefreshFilters?.length) {
+      // The private index already holds the filtered blobs. A host index refresh
+      // must not run a checkout program, even if a credential appears mid-turn.
+      // The sandboxed hook restores its own effective driver configuration.
+      environment["GIT_CONFIG_PARAMETERS"] = [
+        environmentEntry(environment, "GIT_CONFIG_PARAMETERS"),
+        hookMarker && `'${hookMarker}=begin'`,
+        patchFilterParameters(options.hostRefreshFilters, false),
+        hookMarker && `'${hookMarker}=end'`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
     if (hooks && hookDirectory && sandbox && codex) {
       hostArgs = [
         ...(await writePublicationHooks(hookDirectory, hooks, {
           runtime: bridgeRuntime?.executable ?? process.execPath,
+          marker: hookMarker!,
           git: executable.executable,
           codex: executablePathForSpawn(codex.command),
           codexArgs: codex.args ?? [],
@@ -2263,7 +2310,8 @@ export async function runRepositoryCommand(
           profile,
           message: options?.hookMessagePath,
           data: hookDataDirectory!,
-          messageDirectory,
+          messageDirectories,
+          windowsMessageBinding: windowsMessageStages[0]?.binding,
           runner: PATCH_GIT_ENVIRONMENT_RUNNER,
           credentialNames,
           stripAwsCredentials: sandbox.stripAwsCredentials === true,
@@ -2456,11 +2504,17 @@ export async function runRepositoryCommand(
       : stdout;
     return options?.trim === false ? output : output.trim();
   } finally {
-    if (profileFile !== undefined) await rm(profileFile);
-    if (hookDirectory !== undefined)
-      await rm(hookDirectory, { recursive: true, force: true });
-    if (hookDataDirectory !== undefined)
-      await rm(hookDataDirectory, { recursive: true, force: true });
+    try {
+      await Promise.all(
+        windowsMessageStages.map(async (stage) => stage.close()),
+      );
+    } finally {
+      if (profileFile !== undefined) await rm(profileFile);
+      if (hookDirectory !== undefined)
+        await rm(hookDirectory, { recursive: true, force: true });
+      if (hookDataDirectory !== undefined)
+        await rm(hookDataDirectory, { recursive: true, force: true });
+    }
   }
 }
 
@@ -11451,6 +11505,7 @@ interface PatchPublication {
   parent: string;
   verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
+  hostRefreshFilters?: readonly string[];
   sshCommand?: PatchTransportCommand;
   transportBindings: PatchTransportBindings;
   context: GitPatchState["context"];
@@ -14011,6 +14066,7 @@ async function preparePatchPublication(
     ignoredFiles,
     ignoredDigests,
     hostFilterSettings: gitControls?.hostFilterSettings,
+    hostRefreshFilters: gitControls?.hostRefreshFilters,
     nestedRepositoryDigests,
     stagedBlobs,
     sshCommand,
@@ -14820,6 +14876,7 @@ async function createPatchPullRequest(
       : (branchFilters ??= await publication.hostFilterSettings?.(false));
     return dependencies.runRepositoryCommand("git", args, repository, {
       ...options,
+      hostRefreshFilters: publication.hostRefreshFilters,
       environment: {
         ...options?.environment,
         ...(keys?.length
@@ -16293,6 +16350,49 @@ function sparseIndexEntries(output: string): Map<string, string> {
   return entries;
 }
 
+async function requiredSnapshotFilterEnvironment(
+  run: Parameters<typeof withPatchGitIndex>[0],
+  inherited: NodeJS.ProcessEnv,
+): Promise<NodeJS.ProcessEnv | undefined> {
+  const records = await run(
+    [
+      "config",
+      "--includes",
+      "--null",
+      "--get-regexp",
+      "^filter\\..+\\.(clean|process)$",
+    ],
+    { environment: { GIT_CONFIG: undefined } },
+  ).catch((error: unknown) => {
+    if (isJsonObject(error) && (error["code"] === 1 || error["status"] === 1))
+      return "";
+    throw error;
+  });
+  const commands = new Map<string, boolean>();
+  for (const record of records.split("\0")) {
+    if (!record) continue;
+    const newline = record.indexOf("\n");
+    const key = newline < 0 ? record : record.slice(0, newline);
+    commands.set(key, newline >= 0 && newline + 1 < record.length);
+  }
+  const required = new Set<string>();
+  for (const [key, nonempty] of commands)
+    if (nonempty)
+      required.add(
+        quoteGitArgument(key.slice(0, key.lastIndexOf(".")) + ".required") +
+          "='true'",
+      );
+  if (!required.size) return undefined;
+  return {
+    GIT_CONFIG_PARAMETERS: [
+      environmentEntry(inherited, "GIT_CONFIG_PARAMETERS"),
+      ...required,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
 async function snapshotPatchTree(
   repository: string,
   dependencies: CliDependencies,
@@ -16354,9 +16454,16 @@ async function snapshotPatchTree(
         { environment: { GIT_CONFIG: undefined } },
       );
       const sparse = sparseSetting.trim() === "true";
+      // An optional clean/process failure otherwise stages the unfiltered bytes.
+      // Only the publication snapshot add needs to turn failures into errors.
+      const addEnvironment = dependencies.requireSnapshotFilters
+        ? await requiredSnapshotFilterEnvironment(run, dependencies.environment)
+        : undefined;
       // In a sparse checkout Git refuses a full add if an untracked path
       // exists outside the cone. Stage new files through the inventory below.
-      await run(["add", sparse ? "--update" : "--all", ...sourcePathspecs]);
+      await run(["add", sparse ? "--update" : "--all", ...sourcePathspecs], {
+        environment: addEnvironment,
+      });
       if (sparse) {
         // A sparse private index must retain absent out-of-cone entries, but
         // also capture tracked or new files the turn materialized outside it.
@@ -16469,6 +16576,7 @@ async function snapshotPatchTree(
               "--pathspec-file-nul",
             ],
             {
+              environment: addEnvironment,
               input: Buffer.from(
                 [...toStage]
                   .map((path) => ":(top,literal)" + path + "\0")
@@ -17043,6 +17151,8 @@ async function readPatchGitControls(
     mode,
     options.credentialStorePaths,
     environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
+    environmentEntry(dependencies.environment, "USERPROFILE") ?? null,
+    environmentEntry(dependencies.environment, "NETRC") ?? null,
   );
 }
 
@@ -17324,6 +17434,9 @@ async function runSkill(
           options,
         )))
       : undefined;
+    // Saved scans prepare publication once, then snapshot each subsequent finding.
+    if (gitControls?.hostRefreshFilters.length)
+      dependencies.requireSnapshotFilters = true;
     const patchPermissions =
       gitControls === undefined || options.externalSandbox
         ? undefined

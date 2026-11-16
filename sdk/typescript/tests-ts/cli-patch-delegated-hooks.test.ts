@@ -1,6 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { chmod, readFile, writeFile } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { randomUUID } from "node:crypto";
+import { chmod, readFile, realpath, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, relative, sep } from "node:path";
 import { runRepositoryCommand } from "../src/cli.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import {
@@ -98,6 +100,7 @@ for (const outside of [true, false])
               trustedHostPush = options.sandbox === undefined;
             return runRepositoryCommand(cmd, args, cwd, {
               ...options,
+              hostRefreshFilters: ["filter.fixture=driver.clean"],
               environment: {
                 ...environment,
                 ...options.environment,
@@ -107,6 +110,7 @@ for (const outside of [true, false])
                   "http://synthetic:SYNTHETIC_HOOK_PROXY@proxy.invalid",
                 GIT_CONFIG_PARAMETERS:
                   "'http.extraheader'='Authorization: SYNTHETIC_HOOK_SECRET' 'demo.sentinel'='benign preserved' " +
+                  "'filter.fixture=driver.clean'='git hash-object --stdin' " +
                   "'url.https://synthetic:SYNTHETIC_HOOK_SECRET@unused.invalid/.insteadof'='https://unused.invalid/old' " +
                   "'remote.unused.pushurl'='https://SYNTHETIC_HOOK_SECRET@unused.invalid/' " +
                   "'url.ssh://git@benign.invalid/.insteadof'='ssh://git@old.invalid/'",
@@ -143,6 +147,7 @@ for (const outside of [true, false])
                 "set -eu",
                 'test -z "${GIT_ASKPASS+x}${SSH_ASKPASS+x}"',
                 'test "$(git config --get demo.sentinel)" = "benign preserved"',
+                'test "$(git config --get filter.fixture=driver.clean)" = "git hash-object --stdin"',
                 "if git config --get http.extraheader >/dev/null; then exit 15; fi",
                 "if git config --list | grep -Fq SYNTHETIC_HOOK_SECRET; then exit 15; fi",
                 'test "$(git config --get url.ssh://git@benign.invalid/.insteadof)" = "ssh://git@old.invalid/"',
@@ -292,9 +297,13 @@ test.each(["workspace", "read-only", "named", "danger-full-access"])(
   process.platform === "win32" ? 300000 : 90000,
 );
 
-for (const linked of [false, true]) {
-  test(
-    `the commit-message hook veto keeps only validated edits (linked: ${linked})`,
+for (const mode of ["veto", "hardlink", "junction"]) {
+  const linked = mode === "hardlink";
+  const junction = mode === "junction";
+  test.skipIf(junction && process.platform !== "win32")(
+    junction
+      ? "Windows commit-message copyback rejects a redirected staging directory"
+      : `the commit-message hook veto keeps only validated edits (linked: ${linked})`,
     async () => {
       const { directory, git } = await publicationRepository(fixtures);
       const home = await fixtures.create("hook-veto-home-");
@@ -330,27 +339,77 @@ for (const linked of [false, true]) {
       const admin = join(directory, ".git");
       const message = join(admin, "COMMIT_EDITMSG");
       const hook = join(admin, "hooks", "commit-msg");
+      const subject = junction
+        ? "Synthetic candidate " + randomUUID()
+        : "Synthetic candidate";
+      const hostTemp = await realpath(tmpdir());
+      const stagePath =
+        /^codex-security-hook-message-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}[\\/]message[\\/]COMMIT_EDITMSG$/iu;
+      const outside = junction
+        ? await fixtures.create("hook-junction-target-")
+        : undefined;
+      if (outside) {
+        await writeFile(
+          join(outside, "COMMIT_EDITMSG"),
+          "Outside fixture sentinel\n",
+        );
+        // Only move the fixture's nonce-marked message stage into its disposable checkout.
+        await writeFile(
+          join(admin, "redirect-message.cjs"),
+          `
+const fs = require("node:fs"), path = require("node:path");
+const [message, root, target, subject] = process.argv.slice(2);
+const stage = path.dirname(path.resolve(message));
+if (!${stagePath}.test(path.relative(root, path.resolve(message))) ||
+    path.relative(stage, fs.realpathSync.native(stage)) ||
+    !fs.lstatSync(message).isFile() || !fs.readFileSync(message, "utf8").includes(subject))
+  throw new Error("Unexpected message stage");
+const record = status => fs.writeFileSync("junction-progress", status);
+record("attempted");
+let syscall = "rename";
+try {
+  fs.renameSync(stage, "displaced-stage");
+  syscall = "symlink";
+  fs.symlinkSync(target, stage, "junction");
+  record("redirected");
+} catch (e) {
+  if (e.syscall !== syscall || !["EPERM", "EACCES", "EBUSY"].includes(e.code) ||
+      path.relative(stage, syscall === "rename" ? e.path : e.dest)) throw e;
+  record("denied " + syscall);
+  process.exitCode = 7;
+}
+`,
+        );
+      }
       await writeFile(
         hook,
         [
           "#!/bin/sh",
           "set -eu",
-          ...(linked
+          ...(outside
             ? [
-                `node -e 'const fs = require("node:fs"); const message = process.argv[1]; fs.linkSync(message, message + ".link"); fs.appendFileSync(message, "Reviewed-by: synthetic\\n");' "$1"`,
+                'exec node .git/redirect-message.cjs "$1" ' +
+                  [hostTemp, outside, subject].map(shell).join(" "),
               ]
-            : [
-                'printf "\\nReviewed-by: synthetic\\n" >> "$1"',
-                'cat "$1" > veto-progress',
-                "exit 7",
-              ]),
+            : linked
+              ? [
+                  `node -e 'const fs = require("node:fs"); const message = process.argv[1]; fs.linkSync(message, message + ".link"); fs.appendFileSync(message, "Reviewed-by: synthetic\\n");' "$1"`,
+                ]
+              : [
+                  'printf "\\nReviewed-by: synthetic\\n" >> "$1"',
+                  'cat "$1" > veto-progress',
+                  'printf "%s" "$1" > veto-stage-path',
+                  'echo "Synthetic veto stdout"',
+                  'echo "Synthetic veto stderr" >&2',
+                  "exit 7",
+                ]),
         ].join("\n") + "\n",
         { mode: 0o755 },
       );
       const head = git("rev-parse", "HEAD");
       const result = runRepositoryCommand(
         "git",
-        ["commit", "--allow-empty", "-m", "Synthetic candidate"],
+        ["commit", "--allow-empty", "-m", subject],
         directory,
         {
           environment,
@@ -375,7 +434,27 @@ for (const linked of [false, true]) {
           },
         },
       );
-      if (linked)
+      if (outside) {
+        const failure = await result.then(
+          () => undefined,
+          (error: Error) => error,
+        );
+        expect(failure).toBeInstanceOf(Error);
+        const receipt = await readFile(
+          join(directory, "junction-progress"),
+          "utf8",
+        );
+        expect(
+          ["redirected", "denied rename", "denied symlink"],
+          failure?.message,
+        ).toContain(receipt);
+        expect(await readFile(join(outside, "COMMIT_EDITMSG"), "utf8")).toBe(
+          "Outside fixture sentinel\n",
+        );
+        expect(await readFile(message, "utf8")).not.toContain(
+          "Outside fixture sentinel",
+        );
+      } else if (linked)
         await expect(result).rejects.toThrow(
           // The native Windows sandbox can deny creating the link before copyback.
           process.platform === "win32"
@@ -388,6 +467,15 @@ for (const linked of [false, true]) {
           (error: Error) => error,
         );
         expect(failure).toBeInstanceOf(Error);
+        expect(failure?.message).toContain("Synthetic veto stdout");
+        expect(failure?.message).toContain("Synthetic veto stderr");
+        if (process.platform === "win32") {
+          const staged = await readFile(
+            join(directory, "veto-stage-path"),
+            "utf8",
+          );
+          expect(relative(hostTemp, staged)).toMatch(stagePath);
+        }
         // Record the bytes before vetoing, independently of Git's diagnostic.
         const edited = await readFile(
           join(directory, "veto-progress"),
@@ -401,7 +489,7 @@ for (const linked of [false, true]) {
       expect(git("rev-parse", "HEAD")).toBe(head);
       const retained = await readFile(message, "utf8");
       expect(retained).toContain("Synthetic candidate");
-      expect(retained.includes("Reviewed-by: synthetic")).toBe(!linked);
+      expect(retained.includes("Reviewed-by: synthetic")).toBe(mode === "veto");
     },
     process.platform === "win32" ? 120000 : 30000,
   );
