@@ -201,6 +201,7 @@ export interface PatchGitControls {
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
   readonly snapshotConfigPaths: readonly string[];
+  readonly hostRefreshFilters: readonly string[];
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
 }
@@ -2457,6 +2458,8 @@ export async function capturePatchGitControls(
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
     snapshotConfigPaths: [...snapshotConfigPaths],
+    hostRefreshFilters:
+      mode === "sandbox" && automaticPublication ? protectedFilterKeys() : [],
     async hostFilterSettings(switchingBranch) {
       // The commit reuses the verified native snapshot's blobs. An external
       // filter can still run a model-edited script during the host index refresh.

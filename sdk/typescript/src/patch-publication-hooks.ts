@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import type { PatchPublicationHooks } from "./patch-git-controls.js";
@@ -463,6 +462,7 @@ export async function writePublicationHooks(
     runtime: string;
     codex: string;
     codexArgs: readonly string[];
+    marker: string;
     git: string;
     directory: string;
     home: string;
@@ -475,16 +475,15 @@ export async function writePublicationHooks(
     stripAwsCredentials: boolean;
   },
 ): Promise<string[]> {
-  const marker = "codexsecurity.hookbridge" + randomUUID().replaceAll("-", "");
+  const { marker } = plan;
   const runner = join(directory, "run.cjs");
   const shell = (value: string) =>
     "'" + value.split(sep).join("/").replaceAll("'", "'\"'\"'") + "'";
   await writeFile(runner, dispatcher, { flag: "wx", mode: 0o600 });
-  await writeFile(
-    join(directory, "plan.json"),
-    JSON.stringify({ ...plan, marker }),
-    { flag: "wx", mode: 0o600 },
-  );
+  await writeFile(join(directory, "plan.json"), JSON.stringify(plan), {
+    flag: "wx",
+    mode: 0o600,
+  });
   await Promise.all(
     [...hooks.events].map((event) =>
       writeFile(

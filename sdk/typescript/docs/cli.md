@@ -2797,9 +2797,11 @@ can stay installed. If a file's attributes select one, Git reports the
 incompatible helper before processing the file. An empty helper reset controls
 Git's lookup order. A filter can still read and invoke an earlier helper named
 in the same configuration. For patching with those delegates, select a
-configuration that omits the opaque helper. When a file-backed store is in use,
-the host commit reuses the captured filtered blobs so it can authenticate the
-push without re-running the filters outside the snapshot sandbox.
+configuration that omits the opaque helper. For automatic publication, a
+configured clean or process filter selected for a file must succeed during
+snapshot staging. If the filter fails, the CLI keeps the local edits for
+review. Host Git reuses the captured blobs during publication. The delegated
+commit hooks retain their existing filter configuration and permissions.
 
 An external Git administration directory must belong to a registered worktree or
 be selected with `GIT_DIR` or `GIT_COMMON_DIR`. If an explicitly selected Git

@@ -98,6 +98,7 @@ for (const outside of [true, false])
               trustedHostPush = options.sandbox === undefined;
             return runRepositoryCommand(cmd, args, cwd, {
               ...options,
+              hostRefreshFilters: ["filter.fixture=driver.clean"],
               environment: {
                 ...environment,
                 ...options.environment,
@@ -107,6 +108,7 @@ for (const outside of [true, false])
                   "http://synthetic:SYNTHETIC_HOOK_PROXY@proxy.invalid",
                 GIT_CONFIG_PARAMETERS:
                   "'http.extraheader'='Authorization: SYNTHETIC_HOOK_SECRET' 'demo.sentinel'='benign preserved' " +
+                  "'filter.fixture=driver.clean'='git hash-object --stdin' " +
                   "'url.https://synthetic:SYNTHETIC_HOOK_SECRET@unused.invalid/.insteadof'='https://unused.invalid/old' " +
                   "'remote.unused.pushurl'='https://SYNTHETIC_HOOK_SECRET@unused.invalid/' " +
                   "'url.ssh://git@benign.invalid/.insteadof'='ssh://git@old.invalid/'",
@@ -143,6 +145,7 @@ for (const outside of [true, false])
                 "set -eu",
                 'test -z "${GIT_ASKPASS+x}${SSH_ASKPASS+x}"',
                 'test "$(git config --get demo.sentinel)" = "benign preserved"',
+                'test "$(git config --get filter.fixture=driver.clean)" = "git hash-object --stdin"',
                 "if git config --get http.extraheader >/dev/null; then exit 15; fi",
                 "if git config --list | grep -Fq SYNTHETIC_HOOK_SECRET; then exit 15; fi",
                 'test "$(git config --get url.ssh://git@benign.invalid/.insteadof)" = "ssh://git@old.invalid/"',

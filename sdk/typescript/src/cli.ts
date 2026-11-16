@@ -1827,6 +1827,7 @@ interface PatchTransportAccess {
 interface CliDependencies {
   patchTransportFiles?: Map<string, PatchTransportFile>;
   patchTransportAccess?: PatchTransportAccess;
+  requireSnapshotFilters?: boolean;
   sparsePatchSnapshots?: Map<
     string,
     {
@@ -1904,6 +1905,7 @@ interface CliDependencies {
       patchTransport?: true;
       publicationHooks?: PatchPublicationHooks;
       hookSandbox?: PatchSnapshotSandbox;
+      hostRefreshFilters?: readonly string[];
       hookWritePaths?: readonly string[];
       hookMessagePath?: string;
       sandbox?: PatchSnapshotSandbox;
@@ -2234,10 +2236,27 @@ export async function runRepositoryCommand(
         : []),
     ];
     let bindings: Buffer | undefined;
+    const hookMarker = hookDirectory
+      ? "codexsecurity.hookbridge" + randomUUID().replaceAll("-", "")
+      : undefined;
+    if (options?.hostRefreshFilters?.length) {
+      // The private index already holds the filtered blobs. A host index refresh
+      // must not run a checkout program, even if a credential appears mid-turn.
+      // The sandboxed hook restores its own effective driver configuration.
+      environment["GIT_CONFIG_PARAMETERS"] = [
+        environmentEntry(environment, "GIT_CONFIG_PARAMETERS"),
+        hookMarker && `'${hookMarker}=begin'`,
+        patchFilterParameters(options.hostRefreshFilters, false),
+        hookMarker && `'${hookMarker}=end'`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
     if (hooks && hookDirectory && sandbox && codex) {
       hostArgs = [
         ...(await writePublicationHooks(hookDirectory, hooks, {
           runtime: bridgeRuntime?.executable ?? process.execPath,
+          marker: hookMarker!,
           git: executable.executable,
           codex: executablePathForSpawn(codex.command),
           codexArgs: codex.args ?? [],
@@ -11356,6 +11375,7 @@ interface PatchTransportCommand {
 interface PatchPublication {
   verified?: SavedPatchPublication;
   hostFilterSettings?: PatchGitControls["hostFilterSettings"];
+  hostRefreshFilters?: readonly string[];
   branch: string;
   parent: string;
   sshCommand?: PatchTransportCommand;
@@ -13267,6 +13287,7 @@ async function preparePatchPublication(
     ignoredFiles,
     ignoredDigests,
     hostFilterSettings: gitControls?.hostFilterSettings,
+    hostRefreshFilters: gitControls?.hostRefreshFilters,
     nestedRepositoryDigests,
     stagedBlobs,
     sshCommand,
@@ -14023,6 +14044,7 @@ async function createPatchPullRequest(
       : (branchFilters ??= await publication.hostFilterSettings?.(false));
     return dependencies.runRepositoryCommand("git", args, repository, {
       ...options,
+      hostRefreshFilters: publication.hostRefreshFilters,
       environment: {
         ...options?.environment,
         ...(keys?.length
@@ -15235,6 +15257,49 @@ function sparseIndexEntries(output: string): Map<string, string> {
   return entries;
 }
 
+async function requiredSnapshotFilterEnvironment(
+  run: Parameters<typeof withPatchGitIndex>[0],
+  inherited: NodeJS.ProcessEnv,
+): Promise<NodeJS.ProcessEnv | undefined> {
+  const records = await run(
+    [
+      "config",
+      "--includes",
+      "--null",
+      "--get-regexp",
+      "^filter\\..+\\.(clean|process)$",
+    ],
+    { environment: { GIT_CONFIG: undefined } },
+  ).catch((error: unknown) => {
+    if (isJsonObject(error) && (error["code"] === 1 || error["status"] === 1))
+      return "";
+    throw error;
+  });
+  const commands = new Map<string, boolean>();
+  for (const record of records.split("\0")) {
+    if (!record) continue;
+    const newline = record.indexOf("\n");
+    const key = newline < 0 ? record : record.slice(0, newline);
+    commands.set(key, newline >= 0 && newline + 1 < record.length);
+  }
+  const required = new Set<string>();
+  for (const [key, nonempty] of commands)
+    if (nonempty)
+      required.add(
+        quoteGitArgument(key.slice(0, key.lastIndexOf(".")) + ".required") +
+          "='true'",
+      );
+  if (!required.size) return undefined;
+  return {
+    GIT_CONFIG_PARAMETERS: [
+      environmentEntry(inherited, "GIT_CONFIG_PARAMETERS"),
+      ...required,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
 async function snapshotPatchTree(
   repository: string,
   dependencies: CliDependencies,
@@ -15316,9 +15381,16 @@ async function snapshotPatchTree(
         { environment: { GIT_CONFIG: undefined } },
       );
       const sparse = sparseSetting.trim() === "true";
+      // An optional clean/process failure otherwise stages the unfiltered bytes.
+      // Only the publication snapshot add needs to turn failures into errors.
+      const addEnvironment = dependencies.requireSnapshotFilters
+        ? await requiredSnapshotFilterEnvironment(run, dependencies.environment)
+        : undefined;
       // In a sparse checkout Git refuses a full add if an untracked path
       // exists outside the cone. Stage new files through the inventory below.
-      await run(["add", sparse ? "--update" : "--all", ...sourcePathspecs]);
+      await run(["add", sparse ? "--update" : "--all", ...sourcePathspecs], {
+        environment: addEnvironment,
+      });
       if (sparse) {
         // A sparse private index must retain absent out-of-cone entries, but
         // also capture tracked or new files the turn materialized outside it.
@@ -15431,6 +15503,7 @@ async function snapshotPatchTree(
               "--pathspec-file-nul",
             ],
             {
+              environment: addEnvironment,
               input: Buffer.from(
                 [...toStage]
                   .map((path) => ":(top,literal)" + path + "\0")
@@ -16201,6 +16274,9 @@ async function runSkill(
           options.externalSandbox ? "external" : "sandbox",
         )
       : undefined;
+    // Saved scans prepare publication once, then snapshot each subsequent finding.
+    if (gitControls?.hostRefreshFilters.length)
+      dependencies.requireSnapshotFilters = true;
     const patchPermissions =
       gitControls === undefined || options.externalSandbox
         ? undefined
