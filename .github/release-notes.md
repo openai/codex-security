@@ -13,6 +13,7 @@
 - clarify Deep Scan preflight sandbox limits ([#2611](https://github.com/openai/codex-security/pull/2611))
 - preserve Windows helper exit codes ([#2651](https://github.com/openai/codex-security/pull/2651))
 - keep repository links usable in standalone copies ([#2664](https://github.com/openai/codex-security/pull/2664))
+- preserve symlink parent traversal in component paths ([#2692](https://github.com/openai/codex-security/pull/2692))
 
 </details>
 
