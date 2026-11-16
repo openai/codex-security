@@ -1763,6 +1763,7 @@ describe("CLI workbench", () => {
               recipe: {
                 repository,
                 target: { kind: "paths", paths: ["src", "packages/core"] },
+                excludePaths: ["src/examples"],
                 mode: "deep",
                 pluginVersion: "1.2.3",
                 failOnSeverity: "high",
@@ -1784,6 +1785,7 @@ describe("CLI workbench", () => {
       expect(onTurn.mock.lastCall?.[0]).toBe(repository);
       expect(onTurn.mock.lastCall?.[1]).toMatchObject({
         target: ["src", "packages/core"],
+        excludePaths: ["src/examples"],
         mode: "deep",
         parentScanId: "scan-original",
         expectedPluginVersion: "1.2.3",
