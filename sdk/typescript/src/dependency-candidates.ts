@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
-import { readRegularInputFile } from "./prompt-files.js";
+import { readRegularInputFileBytes } from "./prompt-files.js";
 import { isRecord } from "./record.js";
 import { relativePathIsOutside } from "./targets.js";
 
@@ -21,6 +21,8 @@ export interface DependencyCandidate {
   sourceSha256?: string;
   /** UTF-8 byte length of that source line, excluding its newline terminator. */
   sourceBytes?: number;
+  /** Fingerprint of the captured raw file for comparison with historical Git evidence. */
+  sourceFileSha256?: string;
   /** Filename convention only. Callers and build selection decide scope. */
   testCandidate?: true;
   observations: DependencyCandidateObservation[];
@@ -160,9 +162,11 @@ export async function createDependencyCandidates(
       const file = await realpath(path);
       const local = relative(root, file);
       if (relativePathIsOutside(local)) return;
+      const bytes = await readRegularInputFileBytes(file, root);
       return {
         path: local.split(sep).join("/"),
-        lines: sourceLines(await readRegularInputFile(file, root)),
+        lines: sourceLines(bytes.toString("utf8")),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
       };
     } catch {
       // Only verified repository files become candidates. Discovery coverage
@@ -214,15 +218,21 @@ export async function createDependencyCandidates(
             ...(location.line === undefined ? {} : { line: location.line }),
             ...(sourceSha256 === undefined
               ? {}
-              : { sourceSha256, sourceBytes }),
+              : { sourceSha256, sourceBytes, sourceFileSha256: file.sha256 }),
             ...(testCandidate && { testCandidate: true }),
             observations: [],
           };
           candidates.set(key, candidate);
           generation++;
-        } else if (candidate.sourceSha256 !== sourceSha256) {
+        } else if (
+          candidate.sourceSha256 !== sourceSha256 ||
+          (sourceSha256 !== undefined &&
+            candidate.sourceFileSha256 !== file.sha256)
+        ) {
           candidate.sourceSha256 = sourceSha256;
           candidate.sourceBytes = sourceBytes;
+          candidate.sourceFileSha256 =
+            sourceSha256 === undefined ? undefined : file.sha256;
           generation++;
         }
         if (!candidate.observations.some((previous) => previous.tool === tool))

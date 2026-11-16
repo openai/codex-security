@@ -266,7 +266,13 @@ type Decision = Omit<
 > & { evidenceKeys: string[] };
 type BoundCandidate = Pick<
   DependencyCandidate,
-  "path" | "line" | "package" | "sourceSha256" | "sourceBytes" | "testCandidate"
+  | "path"
+  | "line"
+  | "package"
+  | "sourceSha256"
+  | "sourceBytes"
+  | "sourceFileSha256"
+  | "testCandidate"
 >;
 interface PreparedItem {
   input: ReviewItem;
@@ -370,6 +376,31 @@ function covers(
     range.startLine <= site.line &&
     range.endLine >= site.line
   );
+}
+
+function historicalCandidateMismatch(
+  candidates: readonly BoundCandidate[],
+  excerpts: readonly DependencyExcerpt[],
+): string | undefined {
+  for (const candidate of candidates) {
+    if (candidate.line === undefined) continue;
+    const site = { path: candidate.path, line: candidate.line };
+    const ranges = excerpts.filter((excerpt) => covers(excerpt, site));
+    if (
+      ranges.length &&
+      ranges.every(
+        (excerpt) =>
+          excerpt.commit &&
+          excerpt.sourceIdentity?.contentSha256 !== candidate.sourceFileSha256,
+      )
+    )
+      return (
+        "The historical citation for " +
+        callLocation(site) +
+        " does not match the current graph candidate's source. Assess the historical use with its own source evidence."
+      );
+  }
+  return undefined;
 }
 
 function reviewedDependencyCallSite(
@@ -678,6 +709,7 @@ export function createDependencyReportSubmission(options: {
           }),
           sourceSha256: candidate.sourceSha256,
           sourceBytes: candidate.sourceBytes,
+          sourceFileSha256: candidate.sourceFileSha256,
         };
       })
       .sort((a, b) => canonical(a).localeCompare(canonical(b)));
@@ -703,26 +735,10 @@ export function createDependencyReportSubmission(options: {
       (excerpt) => excerpts.set(excerptKey(excerpt), excerpt),
       readSourceIdentity,
     );
-    for (const candidate of boundCandidates) {
-      if (candidate.line === undefined) continue;
-      const site = { path: candidate.path, line: candidate.line };
-      const ranges = [...excerpts.values()].filter((excerpt) =>
-        covers(excerpt, site),
-      );
-      if (
-        ranges.length &&
-        ranges.every(
-          (excerpt) =>
-            excerpt.commit &&
-            excerpt.sourceIdentity?.contentSha256 !== candidate.sourceSha256,
-        )
-      )
-        throw new CodexSecurityError(
-          "The historical citation for " +
-            callLocation(site) +
-            " does not match the current graph candidate's source. Assess the historical use with its own source evidence.",
-        );
-    }
+    const mismatch = historicalCandidateMismatch(boundCandidates, [
+      ...excerpts.values(),
+    ]);
+    if (mismatch) throw new CodexSecurityError(mismatch);
     if (input.kind !== "use" && input.classification) {
       const ranges = Map.groupBy(
         [...excerpts.values()].filter(({ commit }) => !commit),
@@ -1453,21 +1469,30 @@ export function createDependencyReportSubmission(options: {
             item.input.kind === "use"
               ? item.input.use.evidence
               : item.input.evidence;
-          const citesCurrentSource = () =>
-            resultItem.evidenceIds.some((id) => {
-              const excerpt = batchPacket.value.excerpts[id];
-              return (
-                excerpt &&
+          const decidingSource = resultItem.evidenceIds
+            .map((id) => batchPacket.value.excerpts[id])
+            .filter(
+              (excerpt): excerpt is DependencyExcerpt =>
+                excerpt !== undefined &&
                 currentEvidence.some(
                   ({ path, commit, startLine, endLine }) =>
                     path === excerpt.path &&
                     commit === excerpt.commit &&
                     startLine === excerpt.startLine &&
                     endLine >= excerpt.endLine,
-                )
-              );
-            });
-          if (valid && item.input.kind === "use" && !citesCurrentSource()) {
+                ),
+            );
+          if (valid) {
+            const mismatch = historicalCandidateMismatch(
+              item.candidates,
+              decidingSource,
+            );
+            if (mismatch) {
+              valid = false;
+              reason += " " + mismatch;
+            }
+          }
+          if (valid && item.input.kind === "use" && !decidingSource.length) {
             valid = false;
             reason +=
               " This application still needs a deciding citation to its own bound caller/sink source; an approved premise alone cannot approve a later use.";
@@ -1476,7 +1501,7 @@ export function createDependencyReportSubmission(options: {
             valid &&
             item.input.kind !== "use" &&
             (item.input.classification || item.previousSourceGap) &&
-            !citesCurrentSource()
+            !decidingSource.length
           ) {
             valid = false;
             reason += item.input.classification

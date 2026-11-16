@@ -487,3 +487,150 @@ test("reviews the historical caller at its exact commit and refuses a lookalike 
     await state.close();
   }
 });
+
+test.each([
+  {
+    name: "rejects a deciding historical mismatch with a current excerpt offered as context",
+    currentCall: "decode(uncheckedInput);",
+    ranges: [
+      { line: 1, historical: false, deciding: false },
+      { line: 1, historical: true, deciding: true },
+    ],
+    accepted: false,
+  },
+  {
+    name: "accepts a deciding current caller with separate historical metadata",
+    currentCall: "decode(uncheckedInput);",
+    ranges: [
+      { line: 1, historical: false, deciding: true },
+      { line: 2, historical: true, deciding: true },
+    ],
+    accepted: true,
+  },
+  {
+    name: "accepts a deciding historical caller with the same captured file bytes",
+    currentCall: "decode(checkedInput);",
+    ranges: [{ line: 1, historical: true, deciding: true }],
+    accepted: true,
+  },
+  {
+    name: "rejects a historical caller whose line matches but file bytes differ",
+    currentCall: "decode(checkedInput);",
+    currentRelease: 2,
+    ranges: [
+      { line: 1, historical: false, deciding: false },
+      { line: 1, historical: true, deciding: true },
+    ],
+    accepted: false,
+  },
+])("$name", async ({ currentCall, currentRelease = 1, ranges, accepted }) => {
+  await using root = await scopedTemporaryDirectory("historical-candidate-");
+  const pinned = await initialize(
+    root.path,
+    "decode(checkedInput);\nconst historicalRelease = 1;\n",
+  );
+  const current = Buffer.from(
+    currentCall + "\nconst historicalRelease = " + currentRelease + ";\n",
+  );
+  await writeFile(join(root.path, "codec.ts"), current);
+  git(root.path, "add", "codec.ts");
+  git(root.path, "commit", "--allow-empty", "-qm", "Current caller");
+
+  const candidates = await createDependencyCandidates(root.path);
+  const [candidate] = await candidates.observeGraph(
+    "query_codex_security_graph",
+    { paths: [{ relation: "candidate_call", source: "codec.ts", line: 1 }] },
+  );
+  expect(candidate).toMatchObject({
+    sourceSha256: sha256(Buffer.from(currentCall)),
+    sourceFileSha256: sha256(current),
+  });
+  const evidence = ranges.map(({ line, historical }) => ({
+    path: "codec.ts",
+    ...(historical && { commit: pinned.commit }),
+    startLine: line,
+    endLine: line,
+    supports: [],
+  }));
+  const selectedRanges = ranges.filter(({ deciding }) => deciding);
+  const state = createDependencyReportSubmission({
+    repository: root.path,
+    advisory: { cve: "CVE-2024-1000", advisories: [] },
+    candidates,
+    review: async (prompt) => {
+      const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+      const [item] = packet.items;
+      const evidenceIds = (item.excerptIds as string[]).filter((id) => {
+        const excerpt = packet.excerpts[id] as DependencyExcerpt;
+        return selectedRanges.some(
+          ({ line, historical }) =>
+            excerpt.startLine === line &&
+            excerpt.commit === (historical ? pinned.commit : undefined),
+        );
+      });
+      expect(evidenceIds).toHaveLength(selectedRanges.length);
+      return JSON.stringify({
+        items: [
+          {
+            id: item.id,
+            revision: item.revision,
+            hash: item.hash,
+            accepted: true,
+            reason: "The selected excerpts support the submitted source claim.",
+            citedVersion: null,
+            evidenceIds,
+          },
+        ],
+      });
+    },
+  });
+  try {
+    const queued = await state.queue({
+      items: [
+        {
+          id: "caller",
+          kind: "use",
+          candidateIds: [candidate!.id],
+          use: {
+            location: "codec.ts:1",
+            component: "codec",
+            version: null,
+            verdict: "unknown",
+            deployment: "unknown",
+            reason:
+              "The source call is known. The selected native copy is open.",
+            evidence,
+            observations: [],
+          },
+        },
+      ],
+    });
+    expect(queued.queued).toBe(true);
+    if (!queued.queued) throw new Error(queued.feedback);
+    const submitted = await state.submit({
+      reviewItems: queued.items,
+      candidateGeneration: state.readStatus().candidateGeneration,
+      limitations: [],
+    });
+    expect(submitted.accepted, submitted.feedback).toBe(accepted);
+    if (accepted) {
+      expect(state.publicReport().uses[0]!.decidingEvidence).toEqual(
+        expect.arrayContaining(
+          selectedRanges.map(({ line, historical }) => ({
+            kind: "source",
+            path: "codec.ts",
+            ...(historical && { commit: pinned.commit }),
+            startLine: line,
+            endLine: line,
+          })),
+        ),
+      );
+    } else {
+      expect(submitted.feedback).toContain(
+        "does not match the current graph candidate's source",
+      );
+    }
+  } finally {
+    await state.close();
+  }
+});
