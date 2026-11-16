@@ -560,6 +560,14 @@ jobs:
           node --experimental-strip-types --test --test-reporter=tap
           --test-name-pattern="^(testAbortKillsPreflightChild|testDiscoveryDeadlineReducesSingleBufferedFinding)$"
           tests/test_deep_scan_permission_profile_preflight.ts tests/test_deep_scan_coordinator.ts
+      - name: Test Deep Scan worker settings and executable selection on Windows
+        if: matrix.shard == 3
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        run: >-
+          node --experimental-strip-types --test --test-reporter=tap
+          --test-name-pattern="^Deep worker (runtime settings|executable selection)$"
+          tests/test_deep_scan_executor.ts
       - name: Test MCP helper paths on Windows
         if: matrix.shard == 1
         working-directory: plugins/codex-security/mcp-app
