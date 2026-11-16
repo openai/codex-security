@@ -43,15 +43,44 @@ for (const outside of [true, false])
           "[sandbox_workspace_write]\nexclude_slash_tmp=true\nexclude_tmpdir_env_var=true\n" +
           '[shell_environment_policy.set]\nGIT_ASKPASS="unused-git-prompt"\nSSH_ASKPASS="unused-ssh-prompt"\n',
       );
+      const operator = await fixtures.create("hook-operator-config-");
+      const global = join(operator, "operator.gitconfig");
+      const branchConfig = join(directory, ".git", "branch.gitconfig");
+      const credential = join(operator, "selected-netrc");
+      await writeFile(
+        credential,
+        "machine example.invalid login fixture password synthetic\n",
+      );
+      git(
+        "config",
+        "--file",
+        global,
+        "filter.fixture=driver.clean",
+        "git hash-object --stdin",
+      );
+      git("config", "filter.checkout.clean", "cat");
+      git("config", "--file", branchConfig, "filter.branchonly.clean", "cat");
+      git(
+        "config",
+        "--file",
+        global,
+        "includeIf.onbranch:codex-security/**.path",
+        branchConfig,
+      );
       const environment = patchSnapshotEnvironment(tmp, {
         ...process.env,
         CODEX_HOME: home,
+        NETRC: credential,
         GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+        GIT_CONFIG_GLOBAL: global,
       });
+      await writeFile(
+        join(directory, ".gitattributes"),
+        "hook-check-input filter=fixture=driver\n",
+      );
       const delegate = join(directory, "check.sh");
       await writeFile(delegate, "exit 0\n");
-      git("add", "check.sh");
+      git("add", "check.sh", ".gitattributes");
       git("commit", "-m", "Synthetic delegated validator");
       for (const [name, body] of [
         ["pre-commit", "exec sh ./check.sh"],
@@ -95,12 +124,14 @@ for (const outside of [true, false])
                 ? "[]"
                 : "https://github.example.test/example/repository/pull/1";
             if (!options?.hookSandbox)
-              return runGitRepositoryCommand(cmd, args, cwd, options);
+              return runGitRepositoryCommand(cmd, args, cwd, {
+                ...options,
+                environment: { ...environment, ...options?.environment },
+              });
             if (args.includes("push"))
               trustedHostPush = options.sandbox === undefined;
             return runRepositoryCommand(cmd, args, cwd, {
               ...options,
-              hostRefreshFilters: ["filter.fixture=driver.clean"],
               environment: {
                 ...environment,
                 ...options.environment,
@@ -108,17 +139,24 @@ for (const outside of [true, false])
                 SSH_ASKPASS: "unused-host-ssh-prompt",
                 HTTPS_PROXY:
                   "http://synthetic:SYNTHETIC_HOOK_PROXY@proxy.invalid",
-                GIT_CONFIG_PARAMETERS:
+                GIT_CONFIG_PARAMETERS: [
                   "'http.extraheader'='Authorization: SYNTHETIC_HOOK_SECRET' 'demo.sentinel'='benign preserved' " +
-                  "'filter.fixture=driver.clean'='git hash-object --stdin' " +
-                  "'url.https://synthetic:SYNTHETIC_HOOK_SECRET@unused.invalid/.insteadof'='https://unused.invalid/old' " +
-                  "'remote.unused.pushurl'='https://SYNTHETIC_HOOK_SECRET@unused.invalid/' " +
-                  "'url.ssh://git@benign.invalid/.insteadof'='ssh://git@old.invalid/'",
+                    "'demo.command=setting.value'='preserve quoted key' " +
+                    "'url.https://synthetic:SYNTHETIC_HOOK_SECRET@unused.invalid/.insteadof'='https://unused.invalid/old' " +
+                    "'remote.unused.pushurl'='https://SYNTHETIC_HOOK_SECRET@unused.invalid/' " +
+                    "'url.ssh://git@benign.invalid/.insteadof'='ssh://git@old.invalid/'",
+                  options.environment?.["GIT_CONFIG_PARAMETERS"],
+                ]
+                  .filter(Boolean)
+                  .join(" "),
               },
             });
           },
           onCodex: async (_args, output) => {
             const server = output!.appServer!;
+            expect(server.permissions!.credentialStorePaths).toContain(
+              credential,
+            );
             server.onPermissions!({
               directory,
               environment,
@@ -137,6 +175,7 @@ for (const outside of [true, false])
                   ":tmpdir": {},
                   ":slash_tmp": {},
                   [allowed]: { ".": "write" },
+                  [credential]: { ".": "deny" },
                 },
               },
             });
@@ -147,7 +186,15 @@ for (const outside of [true, false])
                 "set -eu",
                 'test -z "${GIT_ASKPASS+x}${SSH_ASKPASS+x}"',
                 'test "$(git config --get demo.sentinel)" = "benign preserved"',
+                'test "$(git config --get demo.command=setting.value)" = "preserve quoted key"',
                 'test "$(git config --get filter.fixture=driver.clean)" = "git hash-object --stdin"',
+                'test "$(git config --get filter.checkout.clean)" = ""',
+                'test "$(git config --get filter.branchonly.clean)" = ""',
+                "expected=$(printf ordinary | git hash-object --stdin | git hash-object --stdin)",
+                'test "$(printf ordinary | git hash-object --path=hook-check-input --stdin)" = "$expected"',
+                "if cat " +
+                  shell(credential) +
+                  " >/dev/null 2>&1; then exit 17; fi",
                 "if git config --get http.extraheader >/dev/null; then exit 15; fi",
                 "if git config --list | grep -Fq SYNTHETIC_HOOK_SECRET; then exit 15; fi",
                 'test "$(git config --get url.ssh://git@benign.invalid/.insteadof)" = "ssh://git@old.invalid/"',

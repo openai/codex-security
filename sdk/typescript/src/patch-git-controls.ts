@@ -2612,13 +2612,8 @@ export async function capturePatchGitControls(
     hostRefreshFilters:
       mode === "sandbox" && automaticPublication ? protectedFilterKeys() : [],
     async hostFilterSettings(switchingBranch) {
-      // The commit reuses the verified native snapshot's blobs. An external
-      // filter can still run a model-edited script during the host index refresh.
-      if (
-        mode === "sandbox" &&
-        (hostMayReadStore || unisolatedCredentialHelper)
-      )
-        return protectedFilterKeys();
+      // These overrides also reach delegated hooks. The host-only refresh
+      // overrides above are removed when the dispatcher enters the sandbox.
       if (!hasConditionalFilters) return [...activeHostFilters];
       // Switching can activate a conditional config before Git calls post-checkout.
       if (switchingBranch)
