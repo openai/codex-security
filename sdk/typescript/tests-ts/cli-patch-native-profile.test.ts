@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, matchesGlob, relative } from "node:path";
+import { delimiter, dirname, join, matchesGlob, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -62,6 +62,7 @@ async function resolvePatchProfile(
     inspectModel: (source: string) => Promise<string>,
   ) => Promise<void>,
   capturePermissions?: (repository: string) => Promise<PatchPermissions>,
+  shellPolicy?: { set: Record<string, string>; paths: readonly string[] },
 ): Promise<PatchProfileContext> {
   const root = await fixtures.create("patch-native-profile-");
   const home = join(root, "home");
@@ -215,7 +216,17 @@ network_access = ${configured}
 writable_roots = ${JSON.stringify(configured ? [extra] : [])}
 exclude_tmpdir_env_var = ${configured}
 exclude_slash_tmp = ${configured}
-`,
+` +
+      (shellPolicy
+        ? "[shell_environment_policy.set]\n" +
+          Object.entries(shellPolicy.set)
+            .map(
+              ([key, value]) =>
+                `${JSON.stringify(key)}=${JSON.stringify(value)}`,
+            )
+            .join("\n") +
+          "\n"
+        : ""),
   );
   await writeFile(
     join(repository, ".codex", "config.toml"),
@@ -397,15 +408,6 @@ glob_scan_max_depth = 8
       ([, access]) =>
         access === "deny" || (access as RpcMessage)["."] === "deny",
     );
-    const stores = permissions.credentialStorePaths ?? [];
-    expect(storeDenies).toHaveLength(stores.length);
-    for (const store of stores) {
-      expect(
-        storeDenies.filter(([key, access]) =>
-          access === "deny" ? matchesGlob(store, key) : key === store,
-        ),
-      ).toHaveLength(1);
-    }
     const snapshotFilesystem = {
       ...Object.fromEntries(
         permissions.readOnlyPaths.map((path) => [path, { ".": "read" }]),
@@ -473,6 +475,18 @@ glob_scan_max_depth = 8
         );
         return result["stdout"] as string;
       });
+    }
+    const stores = new Set([
+      ...(permissions.credentialStorePaths ?? []),
+      ...(shellPolicy?.paths ?? []),
+    ]);
+    expect(storeDenies).toHaveLength(stores.size);
+    for (const store of stores) {
+      expect(
+        storeDenies.filter(([key, access]) =>
+          access === "deny" ? matchesGlob(store, key) : key === store,
+        ),
+      ).toHaveLength(1);
     }
     // Resolve the selected policy after exercising the normal snapshot/turn order.
     const selected = await rpc("thread/start", {
@@ -763,11 +777,38 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
   );
 }, 60_000);
 
-test("patch model and clean filters cannot read HTTP cookie files and TLS keys or netrc credentials", async () => {
+test("patch model and clean filters cannot read selected authentication files", async () => {
   const operator = await fixtures.create("patch-http-auth-files-");
   const config = join(operator, "selected.gitconfig");
   const selectedNetrc = join(operator, "selected credentials");
+  const clusterFiles = [
+    join(
+      operator,
+      process.platform === "win32" ? "cluster;one" : "cluster one",
+    ),
+    join(operator, "cluster two"),
+  ];
+  const policyCluster = join(operator, "policy cluster");
+  const registry = join(operator, "selected registry");
+  const npm = join(operator, "selected npmrc");
+  await mkdir(registry);
+  const clusterList = (files: string[]) =>
+    files
+      .map((file) => (process.platform === "win32" ? `"${file}"` : file))
+      .join(delimiter);
+  const pointers = {
+    KUBECONFIG: clusterList(clusterFiles),
+    DOCKER_CONFIG: registry,
+    NPM_CONFIG_USERCONFIG: npm,
+  };
+  const policySet = {
+    ...pointers,
+    KUBECONFIG: clusterList([...clusterFiles, policyCluster]),
+    FILTER_FIXTURE_SETTING: "from shell policy",
+  };
   const environment = {
+    ...pointers,
+    FILTER_FIXTURE_SETTING: "from host",
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
@@ -803,12 +844,16 @@ test("patch model and clean filters cannot read HTTP cookie files and TLS keys o
     scopedProxyKey,
     proxyCert,
     selectedNetrc,
+    ...clusterFiles,
+    policyCluster,
+    join(registry, "config.json"),
+    npm,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
   const createInput = (i: number) =>
     writeFile(protectedPaths[i]!, contents[i]!, { mode: 0o600, flag: "wx" });
   for (const i of existing.keys()) await createInput(i);
-  const neighbor = join(operator, "ordinary-sibling.txt");
+  const neighbor = join(registry, "ordinary-sibling.txt");
   await writeFile(neighbor, "ordinary sibling");
   const readFiles = `const fs = require("node:fs");
 if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
@@ -843,7 +888,9 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       await writeFile(
         join(repo, program),
         readFiles +
-          '\nprocess.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "utf8").toLowerCase());\n',
+          `\nprocess.stdout.write(process.env.FILTER_FIXTURE_SETTING + "\\n");
+for (const name of ${JSON.stringify(Object.keys(pointers))}) if (name in process.env) contents.push(name);
+process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "utf8").toLowerCase());\n`,
       );
       const git = (args: string[], extra: NodeJS.ProcessEnv = {}) =>
         execFileSync("git", args, {
@@ -854,7 +901,9 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       const add = ["add", "--", "candidate.txt"];
       const staged = ["cat-file", "blob", ":candidate.txt"];
       git(add);
-      expect(git(staged)).toBe(contents.join(""));
+      expect(git(staged)).toBe(
+        "from host\n" + contents.join("") + Object.keys(pointers).join(""),
+      );
       const snapshot = {
         GIT_INDEX_FILE: join(repo, "snapshot-index"),
         GIT_OBJECT_DIRECTORY: join(repo, "snapshot-objects"),
@@ -869,7 +918,15 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
             ...environment,
             CODEX_HOME: context.home,
           }),
-          gitEnvironment: { ...environment, ...snapshot },
+          gitEnvironment: {
+            ...snapshot,
+            GIT_CONFIG_GLOBAL: config,
+            GIT_CONFIG_NOSYSTEM: "1",
+            HOME: operator,
+            USERPROFILE: operator,
+            XDG_CONFIG_HOME: environment.XDG_CONFIG_HOME,
+            NETRC: environment.NETRC,
+          },
           profile: context.snapshotProfile,
         },
       });
@@ -877,9 +934,12 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
         readFiles + "\nprocess.stdout.write(JSON.stringify(contents));",
       );
       expect({ staged: git(staged, snapshot), modelReads }).toEqual({
-        staged: "intended patch bytes\n",
+        staged: "from shell policy\nintended patch bytes\n",
         modelReads: "[]",
       });
+      expect(
+        git(["hash-object", "--path=candidate.txt", "candidate.txt"]),
+      ).toBe(git(["rev-parse", ":candidate.txt"]));
     },
     async (repository) => {
       const literalTilde = join(repository, "~");
@@ -919,6 +979,7 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
         program,
       );
     },
+    { set: policySet, paths: [policyCluster] },
   );
 }, 60_000);
 

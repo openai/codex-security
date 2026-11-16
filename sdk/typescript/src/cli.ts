@@ -1426,6 +1426,7 @@ interface SkillPermissions {
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
   readonly credentialStorePaths?: readonly string[];
+  readonly protectShellCredentialFiles?: PatchGitControls["protectShellCredentialFiles"];
   readonly unavailableFilters?: readonly string[];
   readonly externalConfigPaths?: readonly string[];
   readonly externalCachePaths?: readonly string[];
@@ -1634,11 +1635,20 @@ function publicationHookCommand(args: readonly string[]): boolean {
   return false;
 }
 
+function shellEnvironmentSettings(config: JsonObject): JsonObject | undefined {
+  const policy = config["shell_environment_policy"];
+  return isJsonObject(policy) && isJsonObject(policy["set"])
+    ? policy["set"]
+    : undefined;
+}
+
 async function resumeHookSandbox(
   directory: string,
   environment: NodeJS.ProcessEnv,
   gitDirectories: string[],
-  credentialStorePaths: readonly string[],
+  readCredentialStorePaths: (
+    configuration: JsonObject,
+  ) => Promise<readonly string[]>,
   signal: AbortSignal,
 ): Promise<PatchSnapshotSandbox> {
   const operator = resolveCodexCommand(environment);
@@ -1691,7 +1701,7 @@ async function resumeHookSandbox(
     profile: patchWorkspaceProfile(
       workspace,
       gitDirectories,
-      credentialStorePaths,
+      await readCredentialStorePaths(config),
     ),
     configuration: {
       sandbox_workspace_write: {
@@ -8796,18 +8806,9 @@ export async function main(
                   });
                 publicationHooks = await activePatchPublicationHooks(read);
                 if (!publicationHooks.events.size) return;
-                const credentialStorePaths = new Set<string>();
-                if (
+                const inspectCredentials =
                   publicationHooks.events.has("pre-push") ||
-                  publicationHooks.events.has("reference-transaction")
-                )
-                  await readPatchGitControls(
-                    directory,
-                    dependencies,
-                    false,
-                    "resumed-hook",
-                    credentialStorePaths,
-                  );
+                  publicationHooks.events.has("reference-transaction");
                 const gitDirectories = (
                   await read([
                     "rev-parse",
@@ -8825,7 +8826,19 @@ export async function main(
                     directory,
                     dependencies.environment,
                     gitDirectories,
-                    [...credentialStorePaths],
+                    async (config) => {
+                      const paths = new Set<string>();
+                      if (inspectCredentials)
+                        await readPatchGitControls(
+                          directory,
+                          dependencies,
+                          false,
+                          "resumed-hook",
+                          paths,
+                          shellEnvironmentSettings(config),
+                        );
+                      return [...paths];
+                    },
                     controller.signal,
                   );
                   await addPatchTransportWriters(
@@ -15970,6 +15983,7 @@ async function readPatchGitControls(
   automaticPublication: boolean | undefined,
   mode: PatchGitControlMode,
   credentialStorePaths?: Set<string>,
+  shellSettings?: JsonObject,
 ) {
   const selectedGitDirectory = environmentValue(
     dependencies.environment,
@@ -16033,6 +16047,15 @@ async function readPatchGitControls(
     environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
     environmentEntry(dependencies.environment, "USERPROFILE") ?? null,
     environmentEntry(dependencies.environment, "NETRC") ?? null,
+    dependencies.environment,
+    mode === "external"
+      ? undefined
+      : (shellSettings ??
+          shellEnvironmentSettings(
+            resolveCodexProfile(
+              await readCodexHomeConfig(dependencies.environment),
+            ),
+          )),
   );
 }
 
@@ -16444,6 +16467,8 @@ async function runSkill(
                         name: patchPermissions,
                         readOnlyPaths: gitControls!.readOnlyPaths,
                         credentialStorePaths: gitControls!.credentialStorePaths,
+                        protectShellCredentialFiles:
+                          gitControls!.protectShellCredentialFiles,
                         unavailableFilters: gitControls!.unavailableFilters,
                         externalConfigPaths: gitControls!.externalConfigPaths,
                         ...(gitControls!.externalCachePaths.length
@@ -16769,7 +16794,10 @@ export async function readSkillCommandOutput(
             const profile = patchWorkspaceProfile(
               workspace,
               appServer.permissions.readOnlyPaths,
-              appServer.permissions.credentialStorePaths,
+              (await appServer.permissions.protectShellCredentialFiles?.(
+                shellEnvironmentSettings(config),
+                shellEnvironmentSettings(resolvedConfig),
+              )) ?? appServer.permissions.credentialStorePaths,
             );
             appServer.onPermissions?.(profile, {
               ...config,
