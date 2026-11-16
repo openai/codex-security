@@ -2579,20 +2579,18 @@ async function checkoutRevision(
           parts.slice(0, parent).join(sep) || sep,
           visited,
         );
-        // A retained file in place of the directory must fail before Git writes.
-        const physicalParent = await realpath(`${directory}${sep}..`).catch(
+        // Looking up "." requires a directory even on systems where realpath
+        // collapses "file/..". Reject an obstruction before Git restores paths.
+        const entry = await lstat(`${directory}${sep}.`).catch(
           undefinedIfMissingFile,
         );
         if (
-          physicalParent === undefined &&
+          entry === undefined &&
           !relativePathIsOutside(relative(path, directory))
         )
           requiredDirectories.add(directory);
         return canonicalTrackedPath(
-          join(
-            physicalParent ?? dirname(directory),
-            ...parts.slice(parent + 1),
-          ),
+          join(dirname(directory), ...parts.slice(parent + 1)),
           visited,
         );
       }
