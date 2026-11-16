@@ -5,7 +5,9 @@ import type {
 } from "./external-findings.js";
 import { readScannerJson, sarifRunRepositories } from "./scanner-import.js";
 import type { Provider } from "./external-import-models.js";
+import { CodexSecurityError } from "./errors.js";
 import { readTenableFindings } from "./tenable-findings.js";
+import { readCrowdStrikeFindings } from "./crowdstrike-findings.js";
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { dependabotRepository } from "./github-dependabot-findings.js";
 import {
@@ -36,6 +38,14 @@ import { isRecord } from "./record.js";
 import { readWizSelection, wizFindingRepository } from "./wiz-findings.js";
 import { normalizeArmorCodeFindings } from "./armorcode-findings.js";
 
+/** Readers whose findings Cloud does not accept, with their display names. */
+export const LOCAL_ONLY_PROVIDERS = {
+  crowdstrike: "CrowdStrike",
+} as const;
+type LocalOnlyProvider = keyof typeof LOCAL_ONLY_PROVIDERS;
+
+export type LocalFindingProvider = Provider | LocalOnlyProvider;
+
 /** File reader names mapped to the provider stored with each finding. */
 export const EXTERNAL_FINDINGS_PROVIDERS = {
   wiz: "wiz",
@@ -54,14 +64,31 @@ export const EXTERNAL_FINDINGS_PROVIDERS = {
   continuum: "continuum",
   checkmarx: "checkmarx",
   tenable: "tenable",
-} as const satisfies Record<string, Provider>;
+  crowdstrike: "crowdstrike",
+} as const satisfies Record<string, LocalFindingProvider>;
 
 export type ExternalFindingsReader = keyof typeof EXTERNAL_FINDINGS_PROVIDERS;
+export type CloudFindingsReader = Exclude<
+  ExternalFindingsReader,
+  LocalOnlyProvider
+>;
+
+export function requireCloudReader(
+  options: ExternalFindingsReaderOptions,
+): asserts options is ExternalFindingsReaderOptions & {
+  provider: CloudFindingsReader;
+} {
+  if (Object.hasOwn(LOCAL_ONLY_PROVIDERS, options.provider))
+    throw new CodexSecurityError(
+      `${LOCAL_ONLY_PROVIDERS[options.provider as LocalOnlyProvider]} findings require a local import (--to local).`,
+    );
+}
+
 export const EXTERNAL_FINDINGS_READERS = Object.keys(
   EXTERNAL_FINDINGS_PROVIDERS,
 ) as ExternalFindingsReader[];
 
-/** File readers available for local and Cloud imports. */
+/** File readers available in this SDK. Cloud supports a subset of these readers. */
 export interface ExternalFindingsReaderOptions {
   provider: ExternalFindingsReader;
   sourceRepositoryUrl?: string;
@@ -169,6 +196,15 @@ export async function readExternalFindings(
   const url = options.sourceRepositoryUrl ?? "";
   if (provider === "tenable")
     return { findings: await readTenableFindings(path, url, target) };
+  if (provider === "crowdstrike") {
+    if (target === "cloud") requireCloudReader(options);
+    return {
+      findings: await readCrowdStrikeFindings(
+        path,
+        options.sourceRepositoryUrl,
+      ),
+    };
+  }
   if (provider === "sonar") {
     const findings = await readSonarFindings(path, url, target);
     const binding = findings.report?.["repositoryUrl"];

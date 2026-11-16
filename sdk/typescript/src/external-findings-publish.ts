@@ -34,6 +34,7 @@ import {
   tenableReportFormat,
   tenableSourceRepository,
 } from "./tenable-findings.js";
+import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -50,9 +51,10 @@ import {
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
+  requireCloudReader,
   semgrepSarifRepositories,
   snykFileRepositories,
-  type ExternalFindingsReader,
+  type CloudFindingsReader,
 } from "./external-findings-read.js";
 import { canonicalJson, isRecord } from "./record.js";
 import { notify } from "./value.js";
@@ -153,7 +155,7 @@ export interface NormalizedExternalPublicationOptions {
 
 /** File readers accepted by the Cloud publisher. */
 export interface ExternalPublicationOptions extends LocalExternalImportOptions {
-  provider: ExternalFindingsReader;
+  provider: CloudFindingsReader;
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
@@ -613,6 +615,8 @@ function checkFindingProvider(
       throw new CodexSecurityError(
         "Retained Tenable evidence requires the tenable provider.",
       );
+    if (format === crowdstrikeReportFormat)
+      requireCloudReader({ provider: "crowdstrike" });
     if (format === guardianSelectionFormat && provider !== "semgrep")
       throw new CodexSecurityError(
         "Use the semgrep provider for Guardian findings.",
@@ -632,6 +636,7 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
+  requireCloudReader(settings);
   const readerSources = snapshotSourceRepositories(
     dependencies.sourceRepositories,
   );
@@ -738,6 +743,7 @@ export async function prepareNormalizedPublication(
   workbench?: WorkbenchPublication | "preview",
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
+  requireCloudReader(settings);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,

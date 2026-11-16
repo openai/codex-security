@@ -81,10 +81,7 @@ import {
 import { readTenableFindings } from "../src/tenable-findings.js";
 import { tenableReport } from "./support/tenable-import-fixtures.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import {
-  EXTERNAL_FINDINGS_READERS,
-  type ExternalFindingsReader,
-} from "../src/external-findings-read.js";
+import type { CloudFindingsReader } from "../src/external-findings-read.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -9400,10 +9397,10 @@ const readerReports = {
       vulnerableAsset: { id: "asset-1" },
     },
   ],
-} satisfies Record<ExternalFindingsReader, unknown>;
+} satisfies Record<CloudFindingsReader, unknown>;
 
 const scannerReports = [
-  ...EXTERNAL_FINDINGS_READERS.map((reader) => ({
+  ...(Object.keys(readerReports) as CloudFindingsReader[]).map((reader) => ({
     name: reader,
     reader,
     report: readerReports[reader],
