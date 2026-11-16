@@ -164,6 +164,13 @@ async function resolvePatchProfile(
         objectDirectory: undefined,
         alternateObjectDirectories: undefined,
       },
+      false,
+      "sandbox",
+      undefined,
+      undefined,
+      home,
+      null,
+      gitEnvironment,
     );
     expect(controls).toBeDefined();
     expect([...controls!.externalConfigPaths].sort()).toEqual(
@@ -882,6 +889,9 @@ test("patch model and clean filters cannot read selected authentication files", 
   const operator = await fixtures.create("patch-http-auth-files-");
   const config = join(operator, "selected.gitconfig");
   const selectedNetrc = join(operator, "selected credentials");
+  const awsDirectory = join(operator, ".aws");
+  const awsConfig = join(operator, "selected aws config");
+  const awsCredentials = join(operator, "selected aws credentials");
   const clusterFiles = [
     join(
       operator,
@@ -910,6 +920,8 @@ test("patch model and clean filters cannot read selected authentication files", 
   const environment = {
     ...pointers,
     FILTER_FIXTURE_SETTING: "from host",
+    AWS_CONFIG_FILE: awsConfig,
+    AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
@@ -945,6 +957,10 @@ test("patch model and clean filters cannot read selected authentication files", 
     scopedProxyKey,
     proxyCert,
     selectedNetrc,
+    join(awsDirectory, "config"),
+    join(awsDirectory, "credentials"),
+    awsConfig,
+    awsCredentials,
     ...clusterFiles,
     policyCluster,
     join(registry, "config.json"),
@@ -957,6 +973,7 @@ test("patch model and clean filters cannot read selected authentication files", 
   const neighbor = join(registry, "ordinary-sibling.txt");
   await writeFile(neighbor, "ordinary sibling");
   const readFiles = `const fs = require("node:fs");
+if (fs.readFileSync(${JSON.stringify(join(awsDirectory, "ordinary.txt"))}, "utf8") !== "AWS sibling") throw new Error("Cannot read the ordinary AWS sibling");
 if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
   throw new Error("Cannot read the ordinary sibling");
 const contents = [];
@@ -970,6 +987,10 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
     false,
     false,
     async (context, inspectModel) => {
+      // An operator may have no AWS profile directory when the first model tool runs.
+      expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
+      await mkdir(awsDirectory);
+      await writeFile(join(awsDirectory, "ordinary.txt"), "AWS sibling");
       // These files change after profile selection and before the two commands launch.
       for (let i = existing.length; i < protectedPaths.length; i++)
         await createInput(i);
@@ -1031,6 +1052,14 @@ process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "u
           profile: context.snapshotProfile,
         },
       });
+      const sharedCredentials = join(awsDirectory, "credentials");
+      const replacementCredentials = join(awsDirectory, "replacement");
+      await writeFile(
+        replacementCredentials,
+        contents[protectedPaths.indexOf(sharedCredentials)]!,
+        { mode: 0o600 },
+      );
+      await rename(replacementCredentials, sharedCredentials);
       const modelReads = await inspectModel(
         readFiles + "\nprocess.stdout.write(JSON.stringify(contents));",
       );

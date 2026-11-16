@@ -31,6 +31,7 @@ import {
   proxyUserinfo,
   withoutUrlCredentials,
 } from "./patch-publication-hooks.js";
+import { awsAccountHome, awsProfileFiles } from "./continuum-aws.js";
 import { gitAlternatePathBytes, gitMarkerRoot } from "./targets.js";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
@@ -493,13 +494,20 @@ function credentialPointerFiles(
   inherited: Readonly<Record<string, unknown>>,
   settings?: Readonly<Record<string, unknown>>,
 ): Set<string> {
-  const environment: Record<string, unknown> = Object.create(null);
+  const environment: NodeJS.ProcessEnv = Object.create(null);
   const key = (name: string) =>
     process.platform === "win32" ? name.toUpperCase() : name;
   for (const source of [inherited, settings ?? {}])
     for (const [name, value] of Object.entries(source))
-      environment[key(name)] = value;
+      if (typeof value === "string") environment[key(name)] = value;
   const selected = new Set<string>();
+  for (const { defaultPath, path } of awsProfileFiles(
+    awsAccountHome(environment),
+    environment,
+  )) {
+    selected.add(defaultPath);
+    if (path) selected.add(path);
+  }
   for (const [name, value] of Object.entries(environment)) {
     if (typeof value !== "string" || !value) continue;
     switch (name.toUpperCase()) {
