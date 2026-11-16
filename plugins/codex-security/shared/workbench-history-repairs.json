@@ -1,5 +1,13 @@
 [
   [
+    "SELECT 'error' AS operation,",
+    "    'Unsupported workbench migration 73: expected ' || quote(json_extract(migration.value, '$.name'))",
+    "    || ', found ' || quote(receipt.name) || '. Open this database with the build that created it.' AS value",
+    "FROM schema_migrations AS receipt JOIN json_each(:history) AS migration",
+    "    ON receipt.version = json_extract(migration.value, '$.version')",
+    "WHERE receipt.version = 73 AND receipt.name != json_extract(migration.value, '$.name');"
+  ],
+  [
     "WITH input AS (SELECT :history AS history),",
     "previews AS (",
     "    SELECT version, CASE",

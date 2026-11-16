@@ -7,6 +7,7 @@ import uuid
 from argparse import Namespace
 from contextlib import closing
 
+import pytest
 from workbench_test_support import (
     empty_target_scan,
     read_draft_documents,
@@ -279,3 +280,70 @@ def test_feed_append_failure_preserves_completion_and_replays_its_terminal_chang
         ]
         == []
     )
+
+
+@pytest.fixture
+def scan_before_finding_updates(tmp_path):
+    state, _, scan_id, _ = empty_target_scan(tmp_path)
+    with sqlite3.connect(state / "workbench.sqlite3") as db:
+        db.execute("DROP TABLE scan_finding_updates")
+        db.execute("DELETE FROM schema_migrations WHERE version = 73")
+    return state, scan_id
+
+
+@pytest.mark.parametrize(
+    ("name", "statement"),
+    [
+        (
+            "preserve finding decision append chronology",
+            "ALTER TABLE finding_decisions ADD COLUMN decision_sequence INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "retain deep scan attempts and exact merge inputs",
+            "ALTER TABLE deep_scan_dedup_inputs ADD COLUMN attempt INTEGER",
+        ),
+    ],
+)
+def test_finding_updates_reject_conflicting_migration_73_without_changes(
+    scan_before_finding_updates, name, statement
+):
+    state, scan_id = scan_before_finding_updates
+    database = state / "workbench.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.execute(statement)
+        db.execute("INSERT INTO schema_migrations VALUES (73, ?, 'preview-time')", (name,))
+        before = list(db.iterdump())
+
+    failure = scan_command(state, "list-finding-updates", scan_id, check=False)
+    assert failure["returncode"] != 0
+    assert "Unsupported workbench migration 73" in failure["stderr"]
+    assert name in failure["stderr"]
+    assert "Standard scan reviewed finding updates" in failure["stderr"]
+    with sqlite3.connect(database) as db:
+        assert list(db.iterdump()) == before
+
+
+@pytest.mark.parametrize("has_later_phase_migration", [False, True])
+def test_finding_updates_upgrade_without_a_migration_73_receipt(
+    scan_before_finding_updates, has_later_phase_migration
+):
+    state, scan_id = scan_before_finding_updates
+    database = state / "workbench.sqlite3"
+    if has_later_phase_migration:
+        with sqlite3.connect(database) as db:
+            db.execute("ALTER TABLE scan_progress ADD COLUMN last_observed_phase_json TEXT")
+            db.execute(
+                "INSERT INTO schema_migrations VALUES (74, ?, 'preview-time')",
+                ("retain the last observed phase of stopped Standard scans",),
+            )
+
+    for _ in range(2):
+        assert scan_command(state, "list-finding-updates", scan_id)["updates"] == []
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT name FROM schema_migrations WHERE version = 73").fetchone() == (
+            "Standard scan reviewed finding updates",
+        )
+        if has_later_phase_migration:
+            assert db.execute(
+                "SELECT applied_at FROM schema_migrations WHERE version = 74"
+            ).fetchone() == ("preview-time",)
