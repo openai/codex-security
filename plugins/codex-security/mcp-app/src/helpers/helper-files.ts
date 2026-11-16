@@ -103,7 +103,11 @@ export function readFile(path: string | number, label?: string): Buffer {
   }
 }
 
-export function* readChunks(path: string, label?: string): Iterable<Buffer> {
+export function* readChunks(
+  path: string,
+  label?: string,
+  size = 64 * 1024,
+): Iterable<Buffer> {
   if (process.platform === "win32") {
     yield readFile(path, label);
     return;
@@ -112,7 +116,7 @@ export function* readChunks(path: string, label?: string): Iterable<Buffer> {
   try {
     descriptor = openSync(encodePosixPath(path), "r");
     while (true) {
-      const chunk = Buffer.allocUnsafe(64 * 1024);
+      const chunk = Buffer.allocUnsafe(size);
       const length = readSync(descriptor, chunk, 0, chunk.length, null);
       if (length === 0) return;
       yield chunk.subarray(0, length);

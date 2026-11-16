@@ -1,5 +1,15 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { cp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import * as files from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import * as timers from "node:timers/promises";
 import * as executable from "../src/codex-sdk-environment.js";
@@ -57,6 +67,7 @@ const fakeCli = `
     process.exit(step.exit);
   }
   const installedPath = join(home, "installed");
+  fs.rmSync(installedPath, { recursive: true, force: true });
   fs.cpSync(staged, installedPath, { recursive: true });
   if (step.stale) fs.writeFileSync(join(installedPath, "marker.txt"), "previous");
   if (step.extraSkill === "installed") addSkill(installedPath, "skills/unselected");
@@ -118,6 +129,7 @@ async function fixture(
   const command = nodeCommand().command;
   return {
     command,
+    selected,
     previous,
     record,
     previousReceipt,
@@ -204,9 +216,271 @@ test
       result.installedRoot,
     );
     expect(await f.remaining()).toHaveLength(0);
+    expect((await f.install()).installedRoot).toBe(result.installedRoot);
     expect(resolver).toHaveBeenCalled();
   },
 );
+
+test("only the bundled installer reuses its regenerated command output", async () => {
+  const f = await fixture([{}, {}, {}], "regenerated");
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.previous);
+  await f.install();
+  expect(await f.remaining()).toHaveLength(2);
+
+  resolver.mockReturnValue(f.command);
+  const installed = await f.install();
+  expect(await f.remaining()).toHaveLength(1);
+  expect((await f.install()).installedRoot).toBe(installed.installedRoot);
+  expect(await f.remaining()).toHaveLength(1);
+
+  resolver.mockReturnValue(f.previous);
+  await f.install();
+  expect(await f.remaining()).toHaveLength(0);
+});
+
+test("rechecks the full marketplace selection and the recovered installed files", async () => {
+  const f = await fixture([{}, {}, {}], "regenerated");
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const staleSkill = join(
+    f.selected,
+    ".codex-plugin",
+    "migrated-command-skills",
+    "source-command-retired",
+    "SKILL.md",
+  );
+  await writeFile(staleSkill, "revised stale source");
+  await f.install();
+  expect(await f.remaining()).toHaveLength(1);
+
+  await mkdir(join(installedRoot, "skills", "other-selection"), {
+    recursive: true,
+  });
+  await writeFile(
+    join(installedRoot, "skills", "other-selection", "SKILL.md"),
+    "other",
+  );
+  await f.install();
+  expect(await f.remaining()).toHaveLength(0);
+  expect(resolver).toHaveBeenCalled();
+});
+
+test("preserves runtime files when the selection already contains the native command output", async () => {
+  const f = await fixture([{}, {}, {}, {}]);
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const migration = join(".codex-plugin", "migrated-command-skills");
+  const generated = join(installedRoot, migration);
+  await cp(generated, join(f.selected, migration), { recursive: true });
+  await f.install();
+  const receipt = await readFile(f.record, "utf8");
+  expect(JSON.parse(receipt).nativeCommandMigration).toMatch(/^sha256:/u);
+  const bytecode = join(installedRoot, "scripts", "__pycache__");
+  await mkdir(bytecode, { recursive: true });
+  const cached = join(bytecode, "helper.cpython-312.pyc");
+  await writeFile(cached, "runtime-generated");
+
+  expect((await f.install()).installedRoot).toBe(installedRoot);
+  expect(await f.remaining()).toHaveLength(2);
+  expect(await readFile(cached, "utf8")).toBe("runtime-generated");
+  expect(await readFile(f.record, "utf8")).toBe(receipt);
+
+  const skill = join(generated, "source-command-sample", "SKILL.md");
+  await rm(skill);
+  await f.install();
+  expect(await f.remaining()).toHaveLength(1);
+  expect(await readFile(skill, "utf8")).toBe("synthetic skill");
+  await mkdir(join(generated, "foreign-command"));
+  await writeFile(join(generated, "foreign-command", "SKILL.md"), "foreign");
+  await f.install();
+  expect(await f.remaining()).toHaveLength(0);
+  expect(await readdir(generated)).toEqual(["source-command-sample"]);
+  expect(resolver).toHaveBeenCalled();
+});
+
+test("a link replacing the installed command migration directory requires reinstall", async () => {
+  const f = await fixture([{}, {}], "regenerated");
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const migration = join(
+    installedRoot,
+    ".codex-plugin",
+    "migrated-command-skills",
+  );
+  const outside = await temporaryDirectory();
+  await writeFile(join(outside, "marker.txt"), "unrelated");
+  await rm(migration, { recursive: true });
+  await symlink(
+    outside,
+    migration,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await f.install();
+  expect(await f.remaining()).toHaveLength(0);
+  expect(await readFile(join(outside, "marker.txt"), "utf8")).toBe("unrelated");
+  expect(resolver).toHaveBeenCalled();
+});
+
+test.each([
+  "missing file",
+  "changed bytes",
+  "renamed skill",
+  "changed file type",
+  "restored source with changed output",
+  "extra output",
+  "missing directory",
+  "nested link",
+  "previously absent",
+] as const)(
+  "repairs %s in a recorded native command migration",
+  async (damage) => {
+    const absent = damage === "previously absent";
+    const f = await fixture([{}, {}], absent ? "removed" : "regenerated");
+    using resolver = spyOn(
+      executable,
+      "resolveBundledCodexExecutable",
+    ).mockReturnValue(f.command);
+    const { installedRoot } = await f.install();
+    const migration = join(
+      installedRoot,
+      ".codex-plugin",
+      "migrated-command-skills",
+    );
+    const skill = join(migration, "source-command-sample");
+    const file = join(skill, "SKILL.md");
+    const outside = await temporaryDirectory();
+    const sentinel = join(outside, "SKILL.md");
+    await writeFile(sentinel, "outside");
+    switch (damage) {
+      case "missing file":
+        await rm(file);
+        break;
+      case "restored source with changed output":
+        await cp(
+          join(f.selected, ".codex-plugin", "migrated-command-skills"),
+          migration,
+          { recursive: true },
+        );
+        await writeFile(file, "different skill");
+        break;
+      case "changed bytes":
+        await writeFile(file, "different skill");
+        break;
+      case "renamed skill":
+        await rename(skill, join(migration, "other-command-name"));
+        break;
+      case "changed file type":
+        await rm(file);
+        await mkdir(file);
+        break;
+      case "extra output":
+        await writeFile(join(skill, "extra.md"), "unselected");
+        break;
+      case "missing directory":
+        await rm(migration, { recursive: true });
+        break;
+      case "nested link":
+        await rm(skill, { recursive: true });
+        await symlink(
+          outside,
+          skill,
+          process.platform === "win32" ? "junction" : "dir",
+        );
+        break;
+      case "previously absent":
+        await mkdir(migration);
+        break;
+    }
+    await f.install();
+    expect(await f.remaining()).toHaveLength(0);
+    if (absent) {
+      await expect(readdir(migration)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } else {
+      expect(await readdir(migration)).toEqual(["source-command-sample"]);
+      expect(await readdir(skill)).toEqual(["SKILL.md"]);
+      expect(await readFile(file, "utf8")).toBe("synthetic skill");
+    }
+    expect(await readFile(sentinel, "utf8")).toBe("outside");
+    expect(resolver).toHaveBeenCalled();
+  },
+);
+
+test("canceling a generated skill read leaves its native receipt and caller reason intact", async () => {
+  const f = await fixture([{}], "regenerated");
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const generated = join(
+    installedRoot,
+    ".codex-plugin",
+    "migrated-command-skills",
+    "source-command-sample",
+    "SKILL.md",
+  );
+  const receipt = await readFile(f.record);
+  const controller = new AbortController();
+  const reason = new Error(
+    "synthetic cancellation while reading generated skill",
+  );
+  const prior = files.open;
+  using opening = spyOn(files, "open").mockImplementation(async (...args) => {
+    const result = await prior(...args);
+    if (String(args[0]) === generated) controller.abort(reason);
+    return result;
+  });
+  await expect(f.install(controller.signal)).rejects.toBe(reason);
+  expect(await f.remaining()).toHaveLength(0);
+  expect(await readFile(f.record)).toEqual(receipt);
+  expect(opening).toHaveBeenCalled();
+  expect(resolver).toHaveBeenCalled();
+});
+
+test("checks the generated output and selected files in the same installation", async () => {
+  const f = await fixture([{}, {}], "regenerated");
+  using resolver = spyOn(
+    executable,
+    "resolveBundledCodexExecutable",
+  ).mockReturnValue(f.command);
+  const { installedRoot } = await f.install();
+  const previous = join(await temporaryDirectory(), "previous");
+  const original = files.realpath;
+  let replaced = false;
+  using resolving = spyOn(files, "realpath").mockImplementation((async (
+    ...args: Parameters<typeof original>
+  ) => {
+    if (!replaced && args[0] === installedRoot) {
+      replaced = true;
+      await rename(installedRoot, previous);
+      await cp(previous, installedRoot, { recursive: true });
+      await writeFile(join(installedRoot, "marker.txt"), "other selection");
+    }
+    return original(...args);
+  }) as typeof original);
+  await f.install();
+  expect(replaced).toBe(true);
+  expect(await f.remaining()).toHaveLength(0);
+  expect(await readFile(join(installedRoot, "marker.txt"), "utf8")).toBe(
+    "selected",
+  );
+  expect(resolving).toHaveBeenCalled();
+  expect(resolver).toHaveBeenCalled();
+});
 
 test.skipIf(process.platform !== "win32").each([
   [

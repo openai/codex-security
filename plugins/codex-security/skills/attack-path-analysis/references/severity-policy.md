@@ -1,6 +1,6 @@
 # Severity and Policy Guidance
 
-Apply this policy after establishing the attack path, scope, and counterevidence. Start from the candidate's severity hypothesis and adjust it using repository-supported impact, likelihood, prerequisites, and mitigations. Do not reopen discovery during calibration.
+Apply this policy after establishing the attack path, scope, and counterevidence. Start from the candidate's severity hypothesis and adjust it using the impact, likelihood, prerequisites, and mitigations supported by the repository and supplied validation evidence. Do not reopen discovery during calibration.
 
 Grade reportable findings with the scan's rubric or, when none is supplied, the [default severity rubric](../../../references/default-severity-rubric.md).
 
@@ -12,7 +12,7 @@ For SSRF, a documented outbound-request feature or optional operator filter does
 - Do not discard a real, reportable finding solely because its impact or likelihood is low; use the corresponding lower severity.
 - Apply hard suppression to self-only impact or unachievable/highly unrealistic prerequisites.
 - Privileged-only, operator-only, developer-only, physical-access-only, or protected-write-path prerequisites imply `ignore` unless a privilege-escalation delta is the issue.
-- If repository evidence does not establish a realistic lower-privileged in-scope attacker path, set `ignore`.
+- A realistic lower-privileged, in-scope attacker path can be established by repository evidence, supplied validation evidence, or both. Set `ignore` if the evidence does not support such a path.
 
 Private or internal exposure alone does not suppress a supported authorization, identity, trust-boundary, or security-control failure in a real product or production workflow. Missing deployment or ingress evidence can lower confidence or leave facts unknown without defeating an otherwise supported finding.
 

@@ -42,6 +42,7 @@ async function fixture() {
   const plugin = join(root, "plugin");
   const paths = [
     "scripts/workbench_scan_usage.py",
+    "scripts/snapshot_sqlite.py",
     "scripts/windows_scan_local_files.py",
     "scripts/read_codex_session.mjs",
     "scripts/workbench/__init__.py",

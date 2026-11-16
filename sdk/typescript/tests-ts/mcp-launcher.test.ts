@@ -17,7 +17,7 @@ import { PLUGIN_ROOT } from "./plugin-root.js";
 import { removeTemporaryDirectory } from "./support/temporary-directories.js";
 
 test.skipIf(process.platform !== "win32")(
-  "runs the documented policy command with long and literal paths and preserves the selected launcher's exit code",
+  "runs the documented policy command with long and literal paths and preserves exit codes with inherited ERRORLEVEL",
   async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "policy-launch-")),
@@ -101,6 +101,8 @@ test.skipIf(process.platform !== "win32")(
                 SystemRoot: process.env["SystemRoot"],
                 PATH: system,
                 PATHEXT: pathExtensions,
+                // Both successful and failing helpers must override this inherited value.
+                ERRORLEVEL: "7",
                 CODEX_MCP_NODE_PATH: Bun.which("node")!,
                 CODEX_SECURITY_PLUGIN_ROOT: plugin,
                 CODEX_SECURITY_REPOSITORY: repo,

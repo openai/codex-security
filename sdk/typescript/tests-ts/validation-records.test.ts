@@ -102,7 +102,7 @@ test.each([undefined, "", "\t", " synthetic-effort "])(
     deps.runCodex = mock(throwing("Local execution is forbidden"));
     const stderr = capture(true);
     const completion = main(
-      ["validate", "--records"],
+      ["validate", "--records=true"],
       stdout,
       stderr.stream,
       deps,
@@ -171,7 +171,7 @@ test("alternate records flag syntax cannot start local validation", async () => 
       deps,
     ),
   ).toBe(2);
-  expect(stderr.text()).toContain("Use validate --records alone");
+  expect(stderr.text()).toContain("must be used alone with validate");
   expect(deps.runCodex).not.toHaveBeenCalled();
 });
 

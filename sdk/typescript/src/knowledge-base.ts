@@ -15,8 +15,10 @@ import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { SaxesParser } from "saxes";
 import { ConfigurationError, errorMessage } from "./errors.js";
+import { checkDocumentPath, type DocumentRootSource } from "./prompt-files.js";
 import { expandHome } from "./runtime.js";
 import {
+  documentSourceRoot,
   gitMarkerRoot,
   isGitMetadataDirectory,
   nullIfMissingFile,
@@ -61,11 +63,11 @@ export async function knowledgeBaseProtectedRoots(
 export async function readKnowledgeBaseSnapshot(
   paths: readonly string[],
   signal?: AbortSignal,
+  roots: string | DocumentRootSource = [],
 ): Promise<KnowledgeBaseSnapshot> {
   try {
     const sources = new Set<string>();
     const documents = new Set<string>();
-
     for (const requested of paths) {
       signal?.throwIfAborted();
       if (!requested.trim())
@@ -84,6 +86,11 @@ export async function readKnowledgeBaseSnapshot(
       }
 
       const source = await realpath(path);
+      if (path !== source) {
+        if (typeof roots === "string")
+          roots = [await documentSourceRoot(roots, signal)];
+        await checkDocumentPath(path, source, roots, signal);
+      }
       const selected = metadata.isDirectory()
         ? (await discover(source, signal)).sort()
         : [source];
@@ -146,15 +153,16 @@ export async function prepareKnowledgeBase(
   input: readonly string[] | KnowledgeBaseSnapshot,
   signal?: AbortSignal,
   directory?: string,
+  repository?: string,
 ): Promise<PreparedKnowledgeBase> {
   try {
     const snapshot =
       "documents" in input
         ? input
-        : await readKnowledgeBaseSnapshot(input, signal);
+        : await readKnowledgeBaseSnapshot(input, signal, repository);
     const protectedRoots = await knowledgeBaseProtectedRoots(snapshot, signal);
     const path = await mkdtemp(
-      join(directory ?? tmpdir(), "codex-security-knowledge-"),
+      join(await realpath(directory ?? tmpdir()), "codex-security-knowledge-"),
     );
     try {
       for (const [filename, text] of Object.entries(snapshot.documents)) {
@@ -179,17 +187,6 @@ export async function prepareKnowledgeBase(
     if (signal?.aborted || error instanceof ConfigurationError) throw error;
     throw new ConfigurationError(errorMessage(error), { cause: error });
   }
-}
-
-/** @internal Read the same extracted document text used by scans. */
-export async function readKnowledgeBaseDocuments(
-  paths: readonly string[],
-  signal?: AbortSignal,
-): Promise<string[]> {
-  const { documents } = await readKnowledgeBaseSnapshot(paths, signal);
-  return Object.keys(documents)
-    .sort()
-    .map((name) => documents[name]!);
 }
 
 async function discover(

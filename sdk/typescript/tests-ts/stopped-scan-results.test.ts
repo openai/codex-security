@@ -2,8 +2,10 @@ import { createTemporaryDirectoriesSync } from "./support/temporary-directories.
 import { afterEach, expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runNodePython } from "./support/python-probe.js";
+import { useTestPython } from "./support/python.js";
 
 const temporaryDirectories = createTemporaryDirectoriesSync();
+const pythonExecutable = useTestPython();
 
 afterEach(temporaryDirectories.cleanup);
 
@@ -171,7 +173,7 @@ function runStoppedScanProbe(
   prefix: string,
   terminalStatus?: string,
 ) {
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
   const root = temporaryDirectories.create(prefix);
   const result = runNodePython(python!, [

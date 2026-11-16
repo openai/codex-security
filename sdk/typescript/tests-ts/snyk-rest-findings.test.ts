@@ -5,10 +5,7 @@ import {
   normalizeSnykIssues,
   type CollectSnykIssuesOptions,
 } from "../src/snyk-rest-findings.js";
-import {
-  createAndReplayFinding,
-  updateStoredFinding,
-} from "./external-findings-local-helpers.js";
+import { createAndReplayFinding } from "./external-findings-local-helpers.js";
 
 import {
   snykLocalFixture,
@@ -828,31 +825,13 @@ test.each(["git+ssh", "ssh+git"])(
   },
 );
 
-test("a v1 Code location stays unchanged until v2 adds its reported source line to the same row", async () => {
-  const { projectJson, targetJson, pages, ...scope } = snykRestFixture("code");
-  const v1 = {
-    ...scope,
-    format: "snyk-rest-issues/v1",
-    project: JSON.parse(projectJson),
-    target: JSON.parse(targetJson),
-    pages: pages.map(({ startingAfter, responseJson }) => ({
-      startingAfter,
-      response: JSON.parse(responseJson),
-    })),
-  };
-  await using fixture = await snykLocalFixture({
-    remote: options.sourceRepositoryUrl,
-  });
-  await fixture.writeJson(v1);
-  const stored = await createAndReplayFinding(fixture);
-  expect(stored.evidence.locations).toEqual([
-    { path: "src/app.ts", line: null },
-  ]);
-  await fixture.writeJson(snykRestFixture("code"));
-  const updated = await updateStoredFinding(fixture, stored);
-  expect(updated.evidence.locations).toEqual([{ path: "src/app.ts", line: 3 }]);
-  expect((await (await fixture.prepare()).import()).counts.unchanged).toBe(1);
-
+test("the Snyk reader requires the current collection format and a numeric source line", () => {
+  expect(() =>
+    normalizeSnykIssues({
+      ...snykRestFixture("code"),
+      format: "snyk-rest-issues/v1",
+    }),
+  ).toThrow("snyk-rest-issues/v2");
   const v2 = snykRestFixture("code");
   v2.pages[0]!.responseJson = v2.pages[0]!.responseJson.replace(
     '"line":3',

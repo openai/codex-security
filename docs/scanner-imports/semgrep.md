@@ -3,12 +3,13 @@
 Choose the route that matches your report or account. Each route uses a different
 source of finding IDs.
 
-| Starting point                                                   | What to collect                                                                                                                                                                                | Destination    |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
-| [CLI or CI report](#quick-start)                                 | A Code-only JSON or self-contained SARIF 2.1.0 file, optionally gzipped. Native JSON keeps Semgrep severity and available snippets.                                                            | Local or Cloud |
-| [Guardian in Codex](#import-selected-guardian-findings)          | Selected Code or Supply Chain findings through the connected Guardian account.                                                                                                                 | Local or Cloud |
-| [Selected Web API IDs](#existing-platform-findings)              | Original project response and SAST findings pages for one full Git ref. Use the SDK to save a selection or [import it directly](#import-selected-semgrep-platform-sast-findings-with-the-sdk). | Local or Cloud |
-| [Whole Platform project](#collect-a-platform-project-and-branch) | All findings for one project, full ref and product using a Web API token.                                                                                                                      | Local or Cloud |
+| Starting point                                                                   | What to collect                                                                                                                                                                                | Destination    |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| [CLI or CI report](#quick-start)                                                 | A Code-only JSON or self-contained SARIF 2.1.0 file, optionally gzipped. Native JSON keeps Semgrep severity and available snippets.                                                            | Local or Cloud |
+| [Hosted AppSec Platform MCP](#import-selected-code-findings-from-the-hosted-mcp) | Selected rule-based Code (SAST) findings from a verified project and Git ref.                                                                                                                  | Local or Cloud |
+| [Guardian in Codex](#import-selected-guardian-findings)                          | Selected Code or Supply Chain findings through the connected Guardian account.                                                                                                                 | Local or Cloud |
+| [Selected Web API IDs](#existing-platform-findings)                              | Original project response and SAST findings pages for one full Git ref. Use the SDK to save a selection or [import it directly](#import-selected-semgrep-platform-sast-findings-with-the-sdk). | Local or Cloud |
+| [Whole Platform project](#collect-a-platform-project-and-branch)                 | All findings for one project, full ref and product using a Web API token.                                                                                                                      | Local or Cloud |
 
 ## Quick start
 
@@ -75,6 +76,109 @@ If you call the JSON or SARIF normalizer from the SDK, pass `sourceRepositoryUrl
 When calling `prepareNormalizedLocalImport` directly, pass the original SARIF
 repository references in the third argument's `sourceRepositories`. Use
 `{ url, platform: "github" }` for a verified custom GitHub host.
+
+## Import selected Code findings from the hosted MCP
+
+Use Semgrep’s hosted AppSec Platform MCP (beta) at `semgrep.dev` to import
+existing rule-based Code (SAST) findings. You can save the same capture to a
+local workbench. Workspaces with Semgrep import enabled in Codex Security
+Cloud can also publish to a private findings inbox or a connected repository.
+
+### Connect and capture
+
+Add the read-only server to Codex. Sign in to the Teams or Enterprise
+organization (including trials) that owns the project. If adding the server
+completes browser sign-in, skip the second command.
+
+```sh
+codex mcp add semgrep --url https://semgrep.dev/api/mcp/read-only
+codex mcp login semgrep
+```
+
+Reload MCP servers or start a new Codex session. Ask Codex to list open
+Code findings for your repository and full Git ref, then choose the IDs you
+want to import. For example, give Codex this request with your own values:
+
+> Use the hosted Semgrep MCP to capture rule-based Code findings `101` and
+> `103` from `https://github.com/example/project` on `refs/heads/main`.
+> Save the capture to `/path/to/private/capture.json` for the Codex Security
+> hosted MCP import example.
+
+For the capture, use `semgrep_account` to identify the organization and
+`ProjectsService_ListProjects` to match the project by its SCM URL. Its
+display name can differ from the repository path. Call
+`ProjectsService_GetProject` for that project and `IssuesService_ListIssues`
+with `body.issueTypes: ["ISSUE_TYPE_SAST"]` and the project ID, full ref
+and requested string IDs in `body.filter.repositoryIds`, `refs` and `ids`.
+Follow the cursor until every selected ID is accounted for. Save the
+original selected `structuredContent.issues` rows programmatically, including
+the nested `issue` and sibling fields. This captures list-level evidence.
+For snippets or dataflow traces, inspect the issue with `IssuesService_GetIssue`. The capture contains `deploymentId`
+(string), `ref`, `findingIds` (requested strings), `project` (from
+`structuredContent.project`) and `issues` (the selected rows).
+[Semgrep connection and authentication guide](https://docs.semgrep.dev/semgrep-appsec-platform/mcp)
+
+### Preview, save and verify
+
+Copy the [import example](examples/semgrep-hosted-mcp.mjs) and capture into
+a private directory outside the checkout. From that directory, install the
+SDK used by the example:
+
+```sh
+npm install @openai/codex-security@0.9.1
+```
+
+**Local workbench.** In your own terminal, compare the intended remote's
+effective fetch URL (`git -C /path/to/checkout remote get-url origin`)
+with the capture’s `project.url`. A remote URL can contain credentials.
+Keep it out of the Codex transcript. For a custom transport helper, verify
+its configured target. Preview using the root of that worktree.
+
+```sh
+node semgrep-hosted-mcp.mjs capture.json /path/to/checkout
+```
+
+After checking the source URL, checkout and selected findings, save the
+same capture and read back the records.
+
+```sh
+node semgrep-hosted-mcp.mjs capture.json /path/to/checkout --save
+./node_modules/.bin/codex-security findings imported /path/to/checkout --format json
+```
+
+**Codex Security Cloud.** Your Cloud workspace must support the Semgrep
+provider separately from your Semgrep MCP access. The SDK also needs a
+file-backed ChatGPT sign-in. If you need one, run these commands from the
+private example directory and choose the intended account. Keep the same state directory for previews,
+saves and retries.
+
+```sh
+export CODEX_SECURITY_STATE_DIR="$PWD/cloud-state"
+mkdir -p -m 700 "$CODEX_SECURITY_STATE_DIR" "$CODEX_SECURITY_STATE_DIR/codex-home"
+CODEX_HOME="$CODEX_SECURITY_STATE_DIR/codex-home" codex login -c 'cli_auth_credentials_store="file"'
+```
+
+Pass `cloud` and the connected repository’s SCM URL. If several connectors
+share the URL, use the intended Cloud repository ID instead. Check the
+account, repository, selected findings and exclusions before confirming.
+
+```sh
+node semgrep-hosted-mcp.mjs capture.json cloud https://github.com/example/project
+```
+
+If the repository resolves but the preview reports HTTP 400 for the Semgrep
+source, check that Cloud import is enabled for Semgrep in that workspace.
+You can use the same capture locally while waiting for access. After a
+successful Cloud preview, save and review the receipt.
+
+```sh
+node semgrep-hosted-mcp.mjs capture.json cloud https://github.com/example/project --save
+```
+
+If the preview shows `privateImport`, check the completed private job and
+its counts. If it shows repository requests, check the receipts and verified
+count for the selected reports. Keep the capture and source key for retries.
+[Verify the Cloud import](README.md#verify-the-import) · [Resume an interrupted submission](schema-guide.md#retry-a-cloud-submission)
 
 ## Import selected Guardian findings
 
@@ -319,8 +423,8 @@ leaves earlier exports available for replay.
 
 ```sh
 report=$(mktemp ./semgrep-backlog.XXXXXX) &&
-  codex-security import semgrep example/project --semgrep-deployment example \
-    --semgrep-ref refs/heads/topic --semgrep-product sast --format json > "$report" &&
+  codex-security import semgrep example/project --deployment example \
+    --ref refs/heads/topic --semgrep-product sast --format json > "$report" &&
   codex-security publish findings "$report" --to local --repository /path/to/project \
     --provider semgrep --source-key example/project/topic --dry-run --format json
 ```
@@ -342,7 +446,7 @@ when the project has no repository URL. The report records that mapping in
 For SSH projects, the report stores the original address in `nativeProjectUrl` and the resolved HTTP(S) address in `project.url`.
 It records any supplied mapping separately. Save the complete output from a successful
 command. The importer checks the recorded finding count and repository/ref
-claims. It retains each original finding as JSON text so large IDs survive replay. The reader also accepts saved v1 project exports with native object rows and decimal type witnesses.
+claims. It retains each original finding as JSON text so large IDs survive replay.
 
 A finding that identifies its repository only by name can use the project name,
 the Git URL path, or the final path component of either. For any other name,
@@ -379,18 +483,14 @@ and advisory IDs when Semgrep supplies them. With the same source key, importing
 selection reports them as unchanged when switching between a selection and a full collection.
 See the [Semgrep Findings API](https://docs.semgrep.dev/api-reference/v1/findingsservice/list-code-supply-chain-or-ai-powered-detection-findings).
 
-When replaying v1 exports whose findings were stored as objects, the first
-replay converts the stored finding to JSON text and increments its version.
-Its local and source IDs stay the same.
+For an older `semgrep-platform-findings/v1` export, rerun `cs import semgrep`
+with the selected deployment, project, product and ref to collect a current export.
+Check its IDs and scope before saving or publishing it.
 
 ## Replay saved Platform findings
 
 Semgrep's native signed 64-bit finding IDs match across file and SDK imports.
-For synthetic IDs above that range, repeat the original workflow and preserve
-the ID's spelling and JSON type. A saved selection keeps its literal ref,
-including older short refs. For a row without a URL but with a matching
-project ID and ref, saved files also accept the complete percent-encoded
-repository path. New selections require the decoded path.
+Keep the original spelling and JSON type of each selected ID and the full Git ref in the saved capture.
 
 **Repository mapping.** Local preview compares the project URL with the checkout's
 named fetch URLs. For an IP address, use its canonical spelling, such as
@@ -409,14 +509,8 @@ evidence unchanged. Use a separate source key for CLI scans.
 **Normalized SDK records.** Keep each generated `source_finding_id` with its
 native row and original deployment, project, ref and product. If you assign
 your own opaque ID, retain that scope in a marked Platform batch. The SDK checks
-the serialized native row when present. In legacy v1 `source_data.finding`,
-repository fields, `ref` (even `null`), recognized `product` or `issue_type`,
-and non-null `found_dependency` or `vulnerability_identifier` can establish
-scope. Put unrelated metadata under a different key, such as
-`source_data.ticket`, or submit it in a batch without a Platform marker.
+the serialized native row. Keep unrelated metadata in a separate field.
 
 **Cloud retries.** Cloud checks the original project's repository, including
-for Supply Chain findings without a typed repository field. New approvals
-retain the collection scope of caller-managed rows. Older approvals check
-the repository and the scope retained in their evidence. Retry the original
-input with the same account and destination. [Retry a Cloud submission](schema-guide.md#retry-a-cloud-submission).
+for Supply Chain findings without a typed repository field. Retry the original
+selection with the same account and destination. [Retry a Cloud submission](schema-guide.md#retry-a-cloud-submission).

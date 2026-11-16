@@ -1,7 +1,7 @@
 # Import SonarQube Cloud findings
 
 Use `import sonar` to collect security issues for one project and branch or
-pull request. A live `--dry-run` writes a private capture and returns its path.
+pull request. A `--dry-run` with either live issues or a saved capture writes a private evidence copy and returns its path. Pass that path to confirm the reviewed selection.
 Replay it without signing in to Sonar. If you already have issue-search JSON,
 [preview the native export](#use-a-native-json-export).
 

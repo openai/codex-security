@@ -36,15 +36,20 @@ test.each(
 
 test("a legacy disabled setting still allows reading imported findings", async () => {
   const cli = createCliTest(main);
-  const listLocalExternalFindings = mock(async () => []);
+  const readLocalExternalFindings = mock(
+    async ({ repository }: { repository: string }) => ({
+      repository,
+      findings: [],
+    }),
+  );
   const code = await cli.runCli(["findings", "imported", ".", "--json"], {
     ...dependencies({
       environment: { CODEX_SECURITY_ENABLE_EXTERNAL_IMPORTS: "0" },
     }),
-    listLocalExternalFindings,
+    readLocalExternalFindings,
   });
   expect(code).toBe(0);
-  expect(listLocalExternalFindings).toHaveBeenCalledTimes(1);
+  expect(readLocalExternalFindings).toHaveBeenCalledTimes(1);
   expect(JSON.parse(cli.stdout.text()).findings).toEqual([]);
 });
 
@@ -63,6 +68,35 @@ test("Semgrep import advertises its saved report format and native finding JSON 
       findings: { type: "array", items: { type: "string" } },
     },
   });
+});
+
+test("publish validation names the missing CLI options and preserves machine error fields", async () => {
+  const args = [
+    "publish",
+    "findings",
+    "report.json",
+    "--provider",
+    "wiz",
+    "--repository",
+    ".",
+    "--dry-run",
+  ];
+  for (const flags of [[], ["--json"], ["--format=jsonl", "--full-output"]]) {
+    const cli = createCliTest(main);
+    expect(await cli.runCli([...args, ...flags], dependencies())).toBe(2);
+    expect(cli.stderr.text()).toContain(
+      "Missing required option --source-key.",
+    );
+    if (flags.length === 0) continue;
+    const parsed = JSON.parse(cli.stdout.text());
+    const error = flags.includes("--full-output") ? parsed.error : parsed;
+    expect(error.code).toBe("VALIDATION_ERROR");
+    expect(error.message).toContain("Missing required option --to.");
+    expect(error.message).toContain("Missing required option --source-key.");
+    expect(
+      error.fieldErrors.map((field: { path: string }) => field.path),
+    ).toEqual(["to", "sourceKey"]);
+  }
 });
 
 test("a closed diagnostic pipe preserves the Sonar error envelope", async () => {
@@ -113,7 +147,8 @@ test("rejects unsupported Sonar full-output formats before collecting findings",
   expect(collectSonarIssues).not.toHaveBeenCalled();
 });
 
-const installedSkills = "stale installed skills preserve collector output";
+const installedSkills =
+  "stale installed skills preserve raw result objects and arrays";
 test(installedSkills, async () => {
   if (runTestInSubprocess(import.meta.path, installedSkills)) return;
   const root = await temporaryDirectory("import-skills-");
@@ -149,6 +184,13 @@ test(installedSkills, async () => {
     const yaml = createCliTest(main);
     expect(await yaml.runCli([...args, "--format=yaml"], deps)).toBe(0);
     expect(Bun.YAML.parse(yaml.stdout.text())).toEqual(advisories);
+    const scan = createCliTest(main);
+    expect(await scan.runCli(["scan", ".", "--dry-run", "--json"], deps)).toBe(
+      0,
+    );
+    const preflight = JSON.parse(scan.stdout.text());
+    expect(preflight.dryRun).toBe(true);
+    expect(preflight).not.toHaveProperty("cta");
   } finally {
     await removeTemporaryDirectory(root);
   }

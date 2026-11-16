@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
 import {
@@ -31,6 +31,7 @@ import {
   gitMarkerRoot,
   isGitMetadataDirectory,
   gitProtectionRoots,
+  validateCommittedDiffCheckout,
 } from "../src/targets.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runCommand } from "./support/shell.js";
@@ -161,7 +162,10 @@ function git(repo: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 }
 
-function validateCommittedDiffWithCredentialConfig(repo: string) {
+function validateCommittedDiffWithCredentialConfig(
+  repo: string,
+  environment: NodeJS.ProcessEnv = {},
+) {
   return spawnSync(
     process.execPath,
     [
@@ -174,6 +178,7 @@ function validateCommittedDiffWithCredentialConfig(repo: string) {
       encoding: "utf8",
       env: {
         ...process.env,
+        ...environment,
         GIT_CONFIG_COUNT: "1",
         GIT_CONFIG_KEY_0: "http.extraHeader",
         GIT_CONFIG_VALUE_0: "SYNTHETIC_GIT_CREDENTIAL",
@@ -569,6 +574,42 @@ describe("scan target normalization", () => {
     }
   });
 
+  test("checks assumed-unchanged files against a committed diff without changing index flags", async () => {
+    const repo = await repository();
+    const name = "src/app.ts";
+    const file = join(repo, name);
+    const original = await readFile(file);
+    const target = await normalizeTarget(
+      repo,
+      DiffTarget.refs({ base: "HEAD" }),
+    );
+    git(repo, "update-index", "--assume-unchanged", "--", name);
+    const hook = join(repo, ".git", "hooks", "post-index-change");
+    await writeFile(
+      hook,
+      '#!/bin/sh\nif test -n "$GIT_INDEX_FILE"; then echo ran >.git/refresh-hook-ran; fi\n',
+      { mode: 0o755 },
+    );
+    await validateCommittedDiffCheckout(repo, target);
+
+    await writeFile(file, "export const changed = true;\n");
+    expect(git(repo, "status", "--porcelain")).toBe("");
+    await expect(validateCommittedDiffCheckout(repo, target)).rejects.toThrow(
+      "clean repository checkout",
+    );
+    if (process.platform !== "win32") {
+      const child = validateCommittedDiffWithCredentialConfig(repo, {
+        TMPDIR: relative(process.cwd(), join(repo, "..")),
+      });
+      expect(child.status).toBe(1);
+      expect(child.stderr).toContain("clean repository checkout");
+    }
+    expect(git(repo, "ls-files", "-v", "--", name)).toBe(`h ${name}`);
+    await writeFile(file, original);
+    await validateCommittedDiffCheckout(repo, target);
+    expect(existsSync(join(repo, ".git", "refresh-hook-ran"))).toBe(false);
+  });
+
   test("does not expose Git configuration to repository fsmonitor hooks", async () => {
     const repo = await repository();
     const root = join(repo, "..");
@@ -943,6 +984,21 @@ test("finds Git boundaries through directory aliases and file inputs", async () 
   ).toBe(repo);
 });
 
+test.skipIf(process.platform === "win32")(
+  "protects the enclosing checkout when a saved component becomes a symlink loop",
+  async () => {
+    const repo = await repository();
+    const component = join(repo, "component");
+    await symlink("component", component);
+    expect(await gitProtectionRoots(component)).toContain(repo);
+    await expect(
+      gitMarkerRoot(component, undefined, "nearest"),
+    ).rejects.toMatchObject({
+      code: "ELOOP",
+    });
+  },
+);
+
 test("ordinary storage folders with malformed config are not Git metadata", async () => {
   const root = await temporaryDirectory();
   await mkdir(join(root, "objects"));
@@ -987,4 +1043,21 @@ test("executable protection retains lexical and canonical checkout roots", async
   expect(await gitProtectionRoots(join(alias, "missing", "child"))).toEqual(
     expect.arrayContaining([lexical, canonical]),
   );
+});
+
+test("executable protection follows native parent traversal before finding Git roots", async () => {
+  const stored = await repository("stored");
+  const physical = await repository("physical");
+  const link = join(stored, "child");
+  await symlink(
+    join(physical, "src"),
+    link,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  const expected = process.platform === "win32" ? [stored] : [physical, stored];
+  for (const suffix of [".git", "missing/child"]) {
+    expect((await gitProtectionRoots(`${link}/../${suffix}`)).sort()).toEqual(
+      expected.toSorted(),
+    );
+  }
 });

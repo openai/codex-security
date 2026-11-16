@@ -236,6 +236,25 @@ test(async function testPrepareWithIgnoredTrackedFiles() {
     { items: [{ path: "-generated/b.ts" }] },
   );
 
+  // Git pathspec defaults cannot override the literal scope selected by the helper.
+  for (const mode of ["GIT_GLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"]) {
+    await execFile(
+      process.execPath,
+      [
+        path.join(fixture.scan.pluginRoot, "mcp", "helpers.mjs"),
+        "generate-in-scope-files",
+        `--repo=${fixture.repoRoot}`,
+        "--scope=-generated",
+        `--out=${fixture.scanInventory}`,
+      ],
+      { env: { ...process.env, [mode]: "1" } },
+    );
+    assert.equal(
+      await readFile(fixture.scanInventory, "utf8"),
+      "-generated/a.ts\n-generated/b.ts\n",
+    );
+  }
+
   const previous = await readFile(fixture.scanInventory);
   await fixture.writeRepositoryFile(".git/index", "invalid");
   await assert.rejects(
