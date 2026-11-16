@@ -99,8 +99,19 @@ function readReport(value: unknown) {
   );
 }
 
-const citationKey = ({ path, startLine, endLine }: Citation) =>
-  JSON.stringify([path, startLine, endLine]);
+const citationKey = ({
+  path,
+  commit,
+  startLine,
+  endLine,
+}: Pick<Citation, "path" | "commit" | "startLine" | "endLine">) =>
+  JSON.stringify(
+    commit ? [path, commit, startLine, endLine] : [path, startLine, endLine],
+  );
+
+const sourceRevision = (commit?: string) =>
+  commit ? " · Git <code>" + escapeHtml(commit) + "</code>" : "";
+
 const useId = (check: number, use: number) => `use-${check}-${use}`;
 
 /** Read only the cited ranges from the explicitly supplied checkout. */
@@ -123,10 +134,7 @@ export async function readDependencyReportCode(
     await realpath(checkout),
     undefined,
     (excerpt) => {
-      snippets.set(
-        JSON.stringify([excerpt.path, excerpt.startLine, excerpt.endLine]),
-        excerpt.text,
-      );
+      snippets.set(citationKey(excerpt), excerpt.text);
     },
   );
   return snippets;
@@ -409,7 +417,7 @@ function renderWalkthrough(
             cite.startLine === cite.endLine
               ? cite.startLine
               : `${cite.startLine}–${cite.endLine}`;
-          const reference = `<code>${escapeHtml(cite.path)}:${lines}</code>`;
+          const reference = `<code>${escapeHtml(cite.path)}:${lines}</code>${sourceRevision(cite.commit)}`;
           return snippet === undefined
             ? `<li>${reference}</li>`
             : `<li><details class="snippet"${position === 0 ? " open" : ""}><summary>${reference}</summary>${renderSnippet(cite, snippet, title, terms, callSite)}</details></li>`;
@@ -560,7 +568,7 @@ function renderUse(
   const decidingEvidence = use.decidingEvidence
     .map((ref) =>
       ref.kind === "source"
-        ? `<li><code>${escapeHtml(ref.path)}:${ref.startLine}${ref.endLine === ref.startLine ? "" : `–${ref.endLine}`}</code></li>`
+        ? `<li><code>${escapeHtml(ref.path)}:${ref.startLine}${ref.endLine === ref.startLine ? "" : `–${ref.endLine}`}</code>${sourceRevision(ref.commit)}</li>`
         : `<li><code>${escapeHtml(ref.receiptId)}</code><p class="report-text">SHA-256 ${escapeHtml(ref.originalPayloadSha256)}${ref.selection ? ` · ${escapeHtml(JSON.stringify(ref.selection))}` : ""}</p></li>`,
     )
     .join("");
@@ -661,7 +669,7 @@ function renderCoverage(
               ? cite.startLine
               : `${cite.startLine}–${cite.endLine}`;
           const snippet = code?.get(citationKey(cite));
-          return `<li><code>${escapeHtml(cite.path)}:${lines}</code>${snippet === undefined ? "" : renderDependencyCode(snippet, cite.path, cite.startLine)}</li>`;
+          return `<li><code>${escapeHtml(cite.path)}:${lines}</code>${sourceRevision(cite.commit)}${snippet === undefined ? "" : renderDependencyCode(snippet, cite.path, cite.startLine)}</li>`;
         })
         .join("");
       const observations = item.observations

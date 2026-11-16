@@ -6,6 +6,10 @@ import {
   readDependencyEvidence,
   type DependencyExcerpt,
 } from "../src/dependency-reachability.js";
+import { createDependencyCandidates } from "../src/dependency-candidates.js";
+import { readDependencyReportCode } from "../src/dependency-report-renderer.js";
+import { createDependencyReportSubmission } from "../src/dependency-report-submission.js";
+import { createDependencySourceEvidence } from "../src/dependency-source-evidence.js";
 import { createDependencySourceIdentityReader } from "../src/dependency-source-identity.js";
 import {
   readRegularInputFile,
@@ -283,4 +287,203 @@ test("propagates cancellation instead of turning it into unavailable provenance"
       AbortSignal.abort(reason),
     ),
   ).rejects.toBe(reason);
+});
+
+test("captures historical Git objects and exact range receipts without changing the checkout", async () => {
+  await using root = await scopedTemporaryDirectory(
+    "dependency-historical-git-",
+  );
+  const original = Buffer.from("const fix = true;\n");
+  const pinned = await initialize(root.path, original);
+  const file = join(root.path, "codec.ts");
+  await writeFile(file, "const fix = false;\n");
+  git(root.path, "add", "codec.ts");
+  git(root.path, "commit", "-qm", "A different tree");
+  const current = git(root.path, "rev-parse", "HEAD");
+  const requests: object[] = [];
+  const source = createDependencySourceEvidence({
+    repository: root.path,
+    directory: join(root.path, "receipts"),
+    fetcher: async () => {
+      throw new Error("A local source lookup must not use the network.");
+    },
+    recordExcerpt(excerpt) {
+      requests.push(excerpt);
+      return "receipt";
+    },
+  });
+  const request = { kind: "git", ...pinned, path: "codec.ts" };
+  const { sourceId } = await source.fetch({
+    kind: request.kind,
+    commit: request.commit,
+    path: request.path,
+  });
+  expect(await source.excerpt({ sourceId, search: "fix" })).toMatchObject({
+    matchingLines: [1],
+  });
+  expect(requests).toHaveLength(0);
+  expect(
+    await source.excerpt({ sourceId, startLine: 1, endLine: 1 }),
+  ).toMatchObject({
+    git: { repositoryRoot: root.path, blob: pinned.blob },
+    request: { kind: "git", commit: pinned.commit, path: "codec.ts" },
+    sha256: sha256(original),
+    text: original.toString("utf8"),
+    receiptId: "receipt",
+  });
+  expect(requests).toHaveLength(1);
+  const range = { path: "codec.ts", startLine: 1, endLine: 1, supports: [] };
+  const excerpts: DependencyExcerpt[] = [];
+  await readDependencyEvidence(
+    [range, { ...range, commit: pinned.commit }],
+    root.path,
+    undefined,
+    (excerpt) => excerpts.push(excerpt),
+  );
+  expect(excerpts[0]).toMatchObject({
+    text: "const fix = false;",
+    sourceIdentity: { commit: current },
+  });
+  expect(excerpts[1]).toMatchObject({
+    text: "const fix = true;",
+    commit: pinned.commit,
+    sourceIdentity: {
+      ...pinned,
+      status: "verified",
+      contentSha256: sha256(original),
+    },
+  });
+  expect(git(root.path, "rev-parse", "HEAD")).toBe(current);
+  await expect(
+    source.fetch({ kind: "git", commit: "HEAD", path: "codec.ts" }),
+  ).rejects.toThrow();
+  await expect(
+    source.fetch({ kind: "git", commit: pinned.blob, path: "codec.ts" }),
+  ).rejects.toThrow();
+  await expect(
+    source.fetch({ kind: "git", commit: pinned.commit, path: "../codec.ts" }),
+  ).rejects.toThrow();
+  await expect(
+    source.fetch({ kind: "git", commit: pinned.commit, path: "absent.ts" }),
+  ).rejects.toThrow();
+});
+
+test("reviews the historical caller at its exact commit and refuses a lookalike graph candidate", async () => {
+  await using root = await scopedTemporaryDirectory("historical-review-");
+  const historical = await initialize(root.path, "decode(checkedInput);\n");
+  await writeFile(join(root.path, "codec.ts"), "decode(uncheckedInput);\n");
+  const item = {
+    id: "immutable-caller",
+    kind: "use",
+    candidateIds: [],
+    use: {
+      location: "Historical caller codec.ts:1",
+      component: "codec",
+      version: null,
+      verdict: "ruled_out",
+      deployment: "unknown",
+      reason: "The historical caller enforces the check.",
+      evidence: [
+        {
+          path: "codec.ts",
+          commit: historical.commit,
+          startLine: 1,
+          endLine: 1,
+          supports: [],
+        },
+      ],
+      observations: [],
+    },
+  };
+  const advisory = { cve: "CVE-2024-1000", advisories: [] };
+  const candidates = await createDependencyCandidates(root.path);
+  const [candidate] = await candidates.observeGraph(
+    "query_codex_security_graph",
+    {
+      paths: [{ relation: "candidate_call", source: "codec.ts", line: 1 }],
+    },
+  );
+  expect(candidate).toBeDefined();
+  const rejected = createDependencyReportSubmission({
+    repository: root.path,
+    advisory,
+    candidates,
+    review: async () => {
+      throw new Error("Mismatched source must not enter the reviewer.");
+    },
+  });
+  try {
+    expect(
+      await rejected.queue({
+        items: [{ ...item, candidateIds: [candidate!.id] }],
+      }),
+    ).toMatchObject({
+      queued: false,
+      feedback: expect.stringContaining(
+        "does not match the current graph candidate",
+      ),
+    });
+  } finally {
+    await rejected.close();
+  }
+  const state = createDependencyReportSubmission({
+    repository: root.path,
+    advisory,
+    review: async (prompt) => {
+      const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
+      const [reviewed] = packet.items;
+      expect(packet.excerpts[reviewed.excerptIds[0]]).toMatchObject({
+        text: "decode(checkedInput);",
+        commit: historical.commit,
+        sourceIdentity: { ...historical, status: "verified" },
+      });
+      return JSON.stringify({
+        items: [
+          {
+            id: reviewed.id,
+            revision: reviewed.revision,
+            hash: reviewed.hash,
+            accepted: true,
+            reason: "The bound source shows a checked input.",
+            citedVersion: null,
+            evidenceIds: reviewed.excerptIds,
+          },
+        ],
+      });
+    },
+  });
+  try {
+    expect(await state.queue({ items: [item] })).toMatchObject({
+      queued: true,
+    });
+    expect(
+      await state.submit({
+        reviewItems: [{ id: item.id, revision: 1 }],
+        candidateGeneration: state.readStatus().candidateGeneration,
+        limitations: [],
+      }),
+    ).toMatchObject({ accepted: true });
+    const saved = state.publicReport();
+    expect(saved.uses[0]!.decidingEvidence).toEqual([
+      {
+        kind: "source",
+        path: "codec.ts",
+        commit: historical.commit,
+        startLine: 1,
+        endLine: 1,
+      },
+    ]);
+    const code = await readDependencyReportCode(
+      {
+        ...saved,
+        cve: advisory.cve,
+        advisories: [],
+        usage: null,
+      },
+      root.path,
+    );
+    expect([...code.values()]).toEqual(["decode(checkedInput);"]);
+  } finally {
+    await state.close();
+  }
 });

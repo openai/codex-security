@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import { z } from "zod";
 import type { JsonValue } from "./config.js";
 import {
@@ -68,6 +69,7 @@ export const dependencyClaimProposalSchema = z.strictObject({
       z
         .strictObject({
           path: identity,
+          commit: dependencyGitCommitSchema.optional(),
           startLine: z.number().int().positive(),
           endLine: z.number().int().positive(),
         })

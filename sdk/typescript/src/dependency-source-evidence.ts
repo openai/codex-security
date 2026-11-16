@@ -11,6 +11,10 @@ import {
   readSavedEvidence,
   saveEvidence,
 } from "./dependency-evidence-store.js";
+import {
+  dependencyGitCommitSchema,
+  readDependencyGitSource,
+} from "./dependency-source-identity.js";
 import { errorMessage } from "./errors.js";
 import { resolvePluginPython } from "./runtime.js";
 
@@ -35,14 +39,26 @@ const githubAdvisory = z.strictObject({
   repository: github.shape.repository,
   advisoryId: z.string().regex(/^GHSA-(?:[a-z0-9]{4}-){2}[a-z0-9]{4}$/u),
 });
+const localGit = z.strictObject({
+  kind: z.literal("git"),
+  commit: dependencyGitCommitSchema,
+  path: z.string(),
+});
 const requestSchema = z.discriminatedUnion("kind", [
+  localGit,
   github,
   githubAdvisory,
   npm,
 ]);
 const savedSchema = z.strictObject({
   request: requestSchema,
-  url: z.url(),
+  url: z.url().optional(),
+  git: z
+    .strictObject({
+      repositoryRoot: z.string(),
+      blob: z.string(),
+    })
+    .optional(),
   archiveIntegrity: z.string().optional(),
   sha256: z.string().regex(evidenceDigest),
   capturedAt: z.iso.datetime(),
@@ -248,10 +264,26 @@ export function createDependencySourceEvidence(options: SourceOptions) {
         throw new Error("Saved source reference does not match the request.");
       return { sourceId: savedId, artifact };
     }
-    let url: string;
+    let url: string | undefined;
+    let git: z.infer<typeof savedSchema>["git"];
     let archiveIntegrity: string | undefined;
     let bytes: Buffer;
-    if (request.kind === "github" || request.kind === "github_advisory") {
+    if (request.kind === "git") {
+      const captured = await readDependencyGitSource(
+        options.repository,
+        request.commit,
+        request.path,
+        signal,
+      );
+      bytes = captured.bytes;
+      git = {
+        repositoryRoot: captured.identity.repositoryRoot,
+        blob: captured.identity.blob,
+      };
+    } else if (
+      request.kind === "github" ||
+      request.kind === "github_advisory"
+    ) {
       if (request.repository === "." || request.repository === "..")
         throw new Error("Expected a GitHub repository name.");
       if (request.kind === "github") {
@@ -313,7 +345,8 @@ export function createDependencySourceEvidence(options: SourceOptions) {
     }).decode(bytes);
     const artifact = {
       request,
-      url,
+      ...(url && { url }),
+      ...(git && { git }),
       ...(archiveIntegrity && { archiveIntegrity }),
       sha256: evidenceHash(bytes),
       capturedAt: new Date().toISOString(),
@@ -335,10 +368,7 @@ export function createDependencySourceEvidence(options: SourceOptions) {
       signal?.throwIfAborted();
       const request = requestSchema.parse(input);
       if (request.kind !== "github_advisory")
-        request.path = portableRelativePath(
-          request.path,
-          "External source path",
-        );
+        request.path = portableRelativePath(request.path, "Source path");
       const requestId = evidenceKey(request);
       let task = pending.get(requestId);
       if (!task) {

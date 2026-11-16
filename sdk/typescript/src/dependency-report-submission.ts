@@ -104,7 +104,7 @@ const reviewEvidenceContract =
   "Review-evidence contract: Judge each item only from its submitted claim, host-read excerpts, selected original receipts and bound candidate locations. Memory, graph-note assertions, shell claims and another item's unbound proof are not substitutes. Exact host-attached approvedClaims may establish their verified proposition within their scope; do not re-review unchanged approved premises. Independently check every new caller, implementation, mode, copy, access and application binding that makes the premise apply to this use. Different callers or services may share a verified invariant, never an assumed binding. Preserve cited UTF-8 text; support binary or artifact facts with bound identity, hashes of the original bytes or inspection records, not lossy text decoding. Retain evidence establishing the reported caller, selected component, version, artifact, verdict and material gaps. For a fix- or backport-based exclusion, cite the selected implementation and its fix. Check its installed manifest or matching artifact evidence for the selected version, and retain that version with its citation when verified. A source guard or mode can decide independently of copy. Retain any version and selection already bound by a manifest, lock or artifact record for that configured operation. Skip further version, build, runtime or comparison research when immaterial. Use null for an unbound version. Preserve necessary selections, bindings, alternate paths, integrity and deciding unknowns; reject unsupported claims that remain. Apply shared-proof feedback to other pending items that rely on that proof; preserve independent accepted and unrelated items. Another item's review state alone is not a blocker: name the missing fact in this item's own claims.";
 export const dependencyReviewQueueDescription = [
   "Queue assessed uses or candidate dispositions for background evidence review. Group related candidateIds, use a stable item id, and revise that same id when its claim or evidence changes. Include proof with the known sink call site and advisory-condition statuses, bound to this use's cited lines. Reviews start in the background without a fixed waiting period; continue investigating while they run. Dismissals and unresolved candidates need specific reasons and supporting evidence.",
-  "Queue use fields: location, component, version (string or null), verdict, deployment (confirmed, configured or unknown), reason, evidence [{path,startLine,endLine,supports}], observations [{server,record,supports}] or []. Use a nonempty string for observation.record, such as a returned record identifier or a description of the returned record or scoped lookup result. Select original evidence separately with receiptIds or receiptSelections on the item. Within proof, sink is {function,callSite:{path,line}}. Each condition uses status met, unknown, or ruled_out and citations [{path,line}]. See the skill's example for place.",
+  "Queue use fields: location, component, version (string or null), verdict, deployment (confirmed, configured or unknown), reason, evidence [{path,startLine,endLine,supports,commit?}]. Give commit as the full local Git commit ID for a historical range, and omit it for working-tree ranges. Include observations [{server,record,supports}] or []. Use a nonempty string for observation.record, such as a returned record identifier or a description of the returned record or scoped lookup result. Select original evidence separately with receiptIds or receiptSelections on the item. Within proof, sink is {function,callSite:{path,line}}. Each condition uses status met, unknown, or ruled_out and citations [{path,line}]. See the skill's example for place.",
   "Cite source or a matching original receipt that binds this caller to the advisory component's ordinary operation. For a dispatcher, bind this caller's selector, arguments or defaults to an evidenced route through the effective dispatcher that can select that operation. The chosen backend, copy or trigger may still be unknown. A bound operation on the relevant component within the resolved caller scope can be ruled_out by its verified incompatible mode or enforced dispatch even without a downstream affected call. Keep a material handoff without that binding as an unresolved disposition with its exact location, checked evidence and deciding gap. Queue an explicitly requested caller blocked before a bound operation by its selected configuration or source guard as a ruled_out use. Bind the guard and operation. Cite and keep an established configured version for the downstream operation even when the caller is blocked. Use null if the downstream version is unbound. Record unrelated dependency activity in search coverage, or dismiss it if an observed candidate needs accounting. Group equivalent calls or dispositions only with evidence covering each member. Research the copy or runtime only when it can decide a relevant use.",
   "A test_only_outside_scope dismissal is groupable under one exact selected production boundary. Attach every candidate ID and cite deciding test membership and that caller or build boundary. Filename hints do not establish it.",
   "Include place on each assessed use. State the exact scope that the evidence establishes and use null for unverified environment, revision, artifact, observation time, copy selection or patch. Keep an explicit assumption about deployment separate from a verified observation. Include deciding unresolved questions for each place, and preserve independent verified exclusions.",
@@ -326,7 +326,7 @@ const batchInstructions = [
   "A release recipe can also establish the packaged copy for a named immutable artifact when original receipts identify that exact artifact and platform and trusted publisher provenance verifies its source revision. Require this item's source evidence at that revision tracing the applicable release target to the packaged executable and linked dependency, selected version and applicable patch. Check relevant overrides, bypasses, alternate build paths and conflicting evidence. Cite the deciding receipts and source excerpts in evidenceIds. This complete chain is sufficient copy evidence without a separate build attestation, binary inspection or profile. When the chain proves a fix, require a ruled_out verdict scoped to the artifact or separately matched workload. Reject a claimed deciding copy uncertainty that this item's own evidence has already resolved. Describe the release-recipe basis and require a separate matching workload observation for a running claim. A source revision, version or declared patch alone does not establish the packaged copy, and a configuration-only recipe or sampled image label cannot inherit another artifact's proof. An unknown verdict still requires its own evidence for known artifact/source/build facts. A complete identity-matched row in a partial or truncated collection may establish that scoped fact without establishing collection completeness, absence, or a current fleet.",
   "For a captured deployment, accept a complete, internally consistent evidence chain from process and loaded file identity to installed-package transaction and applicable package recipe. Scope the conclusion to the recorded process. A version label or replacement file alone is insufficient. Do not require a current live lookup or binary attestation when the cited records already establish the deciding copy for that scope.",
   "inventoryServers lists configured evidence providers and any explicit tool allowlists. Only catalogServerNames identifies providers selected for source-to-service discovery. With a catalog, a potentially_exploitable use needs bound evidence of the scoped checks or their blockers. With runtime-only providers, require a lookup for a missing fact only when the provider has a suitable tool and the item establishes its required target identifier. Do not demand a service lookup from runtime-only providers, invented targets, or receipts for checks that cannot be performed. Verify the scope and purpose of actual lookups from original arguments and results. Accept source-backed potentially_exploitable when deployment or access remains unknown and the item explains the gap.",
-  "Check that the use or disposition covers each bound candidate, including its package and scope when supplied. Keep assessments per use: one exact scoped caller/operation/place application, with its own sink and deciding binding. Sharing a premise never merges distinct caller locations, modes, copies, places or unresolved exceptions into one use. Multiple candidate IDs may describe the same bound operation chain; separate independent applications even when their deciding invariant is shared. Group non-use dispositions only when their deciding scope covers every member. A source-only use without candidate IDs still retains its exact sink and source evidence. If a member remains unresolved, request a separate use or scoped disposition that preserves independent exclusions and every location. For a dispatcher use or grouped disposition, shared entrypoint or package identity alone does not establish shared implementation coverage. Verify the claimed branch/copy selection from this item's evidence. Accept a proved exclusion only for the paths it covers; reject broader coverage claims that omit a material alternate path shown in that evidence. A dismissed item needs a cited reason why those candidates are not applicable; unresolved needs a concrete remaining uncertainty. If previousUse is supplied, this disposition must also account for that previously reported use; its original evidence is included in this item's bindings. A location's mere presence in candidateIds does not establish that the assessment covers it. For non-use items return citedVersion null.",
+  "Check that the use or disposition covers each bound candidate, including its package and scope when supplied. Keep assessments per use: one exact scoped caller/operation/place application, with its own sink and deciding binding. Sharing a premise never merges distinct caller locations, modes, copies, places or unresolved exceptions into one use. Multiple candidate IDs may describe the same bound operation chain; separate independent applications even when their deciding invariant is shared. Group non-use dispositions only when their deciding scope covers every member. A source-only use without candidate IDs still retains its exact sink and source evidence. Source ranges may be at different revisions. Keep candidates from the working tree distinct from a historical use unless the cited exact file bytes match the candidate's captured source. If a member remains unresolved, request a separate use or scoped disposition that preserves independent exclusions and every location. For a dispatcher use or grouped disposition, shared entrypoint or package identity alone does not establish shared implementation coverage. Verify the claimed branch/copy selection from this item's evidence. Accept a proved exclusion only for the paths it covers; reject broader coverage claims that omit a material alternate path shown in that evidence. A dismissed item needs a cited reason why those candidates are not applicable; unresolved needs a concrete remaining uncertainty. If previousUse is supplied, this disposition must also account for that previously reported use; its original evidence is included in this item's bindings. A location's mere presence in candidateIds does not establish that the assessment covers it. For non-use items return citedVersion null.",
   "Return exactly one decision for every supplied id, revision and hash, no extras. Give deciding evidenceIds from that item's own excerptIds/receiptIds or claim:<id> from its exact approved dependency closure. Cite every premise actually used; irrelevant proposed context must not become this use's verified evidence. An accepted application still needs its own deciding caller/sink source citation, even when a shared premise decides the exclusion. Also name the actual source path or inventory record in the brief reason so feedback remains understandable outside this packet. Do not judge discovery completeness beyond these bound candidates; the host separately checks candidate accounting and aggregate consistency.",
   "If previousSourceGap is supplied, check that the current finding addresses that same source scope and cite current source evidence explaining the resolved handoff or exclusion. A candidate-less dismissal can close that gap when the exact selected route has no applicable operation. Keep material uncovered branches unresolved.",
 ].join("\n");
@@ -344,8 +344,17 @@ function canonical(value: unknown): string {
 function digest(value: unknown): string {
   return createHash("sha256").update(canonical(value)).digest("hex");
 }
+function sourceFileKey(range: Pick<DependencyExcerpt, "path" | "commit">) {
+  return JSON.stringify([range.path, range.commit]);
+}
+
 function excerptKey(range: Omit<DependencyExcerpt, "text">): string {
-  return `${range.path}:${range.startLine}-${range.endLine}`;
+  return JSON.stringify([
+    range.path,
+    range.commit,
+    range.startLine,
+    range.endLine,
+  ]);
 }
 type CallSite = NonNullable<DependencyVerdictUpdate["callSite"]>;
 
@@ -694,8 +703,31 @@ export function createDependencyReportSubmission(options: {
       (excerpt) => excerpts.set(excerptKey(excerpt), excerpt),
       readSourceIdentity,
     );
+    for (const candidate of boundCandidates) {
+      if (candidate.line === undefined) continue;
+      const site = { path: candidate.path, line: candidate.line };
+      const ranges = [...excerpts.values()].filter((excerpt) =>
+        covers(excerpt, site),
+      );
+      if (
+        ranges.length &&
+        ranges.every(
+          (excerpt) =>
+            excerpt.commit &&
+            excerpt.sourceIdentity?.contentSha256 !== candidate.sourceSha256,
+        )
+      )
+        throw new CodexSecurityError(
+          "The historical citation for " +
+            callLocation(site) +
+            " does not match the current graph candidate's source. Assess the historical use with its own source evidence.",
+        );
+    }
     if (input.kind !== "use" && input.classification) {
-      const ranges = Map.groupBy(excerpts.values(), ({ path }) => path);
+      const ranges = Map.groupBy(
+        [...excerpts.values()].filter(({ commit }) => !commit),
+        ({ path }) => path,
+      );
       for (const candidate of boundCandidates) {
         if (
           !ranges
@@ -851,10 +883,7 @@ export function createDependencyReportSubmission(options: {
       dependencies: prepared.input.supportingClaims ?? [],
       excerpts: prepared.excerpts.filter((excerpt) =>
         currentRanges.some(
-          (range) =>
-            range.path === excerpt.path &&
-            range.startLine === excerpt.startLine &&
-            range.endLine === excerpt.endLine,
+          (range) => excerptKey(range) === excerptKey(excerpt),
         ),
       ),
       receipts: prepared.receipts.filter((receipt) => !receipt.historical),
@@ -1056,10 +1085,10 @@ export function createDependencyReportSubmission(options: {
     const ranges = new Map<string, Map<string, DependencyExcerpt>>();
     for (const record of all.values())
       for (const excerpt of record.excerpts) {
-        const file =
-          ranges.get(excerpt.path) ?? new Map<string, DependencyExcerpt>();
+        const key = sourceFileKey(excerpt);
+        const file = ranges.get(key) ?? new Map<string, DependencyExcerpt>();
         file.set(excerptKey(excerpt), excerpt);
-        ranges.set(excerpt.path, file);
+        ranges.set(key, file);
       }
     const current = new Map<string, DependencyExcerpt>();
     const errors = new Map<string, string>();
@@ -1084,9 +1113,9 @@ export function createDependencyReportSubmission(options: {
         record.excerpts
           .map(
             (excerpt) =>
-              errors.get(excerpt.path) ??
+              errors.get(sourceFileKey(excerpt)) ??
               (digest(current.get(excerptKey(excerpt))) !== digest(excerpt)
-                ? `Deciding source ${excerptKey(excerpt)} changed from its reviewed snapshot.`
+                ? `Deciding source ${excerpt.path}:${excerpt.startLine}-${excerpt.endLine}${excerpt.commit ? " at " + excerpt.commit : ""} changed from its reviewed snapshot.`
                 : undefined),
           )
           .find((reason) => reason !== undefined);
@@ -1224,6 +1253,7 @@ export function createDependencyReportSubmission(options: {
               {
                 kind: "source" as const,
                 path: excerpt.path,
+                ...(excerpt.commit && { commit: excerpt.commit }),
                 startLine: excerpt.startLine,
                 endLine: excerpt.endLine,
               },
@@ -1429,8 +1459,9 @@ export function createDependencyReportSubmission(options: {
               return (
                 excerpt &&
                 currentEvidence.some(
-                  ({ path, startLine, endLine }) =>
+                  ({ path, commit, startLine, endLine }) =>
                     path === excerpt.path &&
+                    commit === excerpt.commit &&
                     startLine === excerpt.startLine &&
                     endLine >= excerpt.endLine,
                 )
@@ -2550,8 +2581,14 @@ export function createDependencyReportSubmission(options: {
               );
               for (const excerpt of premise.excerpts) {
                 if (!deciding.has(`excerpt:${digest(excerpt)}`)) continue;
-                const { path, startLine, endLine } = excerpt;
-                sharedEvidence.push({ path, startLine, endLine, supports: [] });
+                const { path, commit, startLine, endLine } = excerpt;
+                sharedEvidence.push({
+                  path,
+                  ...(commit && { commit }),
+                  startLine,
+                  endLine,
+                  supports: [],
+                });
               }
             }
             const ranges = new Map(

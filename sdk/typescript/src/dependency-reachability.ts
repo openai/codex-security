@@ -14,6 +14,8 @@ import {
 } from "./dependency-report-proof.js";
 import {
   createDependencySourceIdentityReader,
+  dependencyGitCommitSchema,
+  readDependencyGitSource,
   type DependencySourceIdentity,
   type DependencySourceIdentityReader,
 } from "./dependency-source-identity.js";
@@ -31,6 +33,7 @@ const inventoryFact = z.enum(["affected_copy", "running", "access"]);
 const fact = z.enum([...inventoryFact.options, "affected_use"]);
 const evidence = z.strictObject({
   path: z.string().min(1).describe("Repository-relative source path."),
+  commit: dependencyGitCommitSchema.optional(),
   startLine: z.number().int().positive(),
   endLine: z.number().int().positive(),
   supports: z
@@ -104,6 +107,7 @@ const reviewReference = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("source"),
     path: z.string(),
+    commit: dependencyGitCommitSchema.optional(),
     startLine: z.number().int().positive(),
     endLine: z.number().int().positive(),
   }),
@@ -247,6 +251,7 @@ export function aggregateDependencyVerdict(
 
 export interface DependencyExcerpt {
   path: string;
+  commit?: string;
   startLine: number;
   endLine: number;
   text: string;
@@ -266,23 +271,37 @@ export async function readDependencyEvidence(
     endLine: number,
   ) => void,
 ): Promise<void> {
-  // Read each cited file once and retain only its submitted ranges.
-  const citations = Map.groupBy(evidence, (cite) => cite.path);
-  for (const [path, ranges] of citations) {
+  // A working file and an immutable blob at the same path are distinct.
+  const citations = Map.groupBy(evidence, ({ path, commit }) =>
+    JSON.stringify([path, commit]),
+  );
+  for (const ranges of citations.values()) {
     signal?.throwIfAborted();
-    const file = await realpath(
-      join(repository, portableRelativePath(path, "Evidence path")),
-    );
-    if (relativePathIsOutside(relative(repository, file))) {
-      throw new CodexSecurityError(
-        `Evidence path leaves the checkout: ${path}`,
+    const { path, commit } = ranges[0]!;
+    let bytes: Buffer;
+    let sourceIdentity: DependencySourceIdentity | undefined;
+    if (commit) {
+      const captured = await readDependencyGitSource(
+        repository,
+        commit,
+        path,
+        signal,
       );
+      bytes = captured.bytes;
+      sourceIdentity = captured.identity;
+    } else {
+      const file = await realpath(
+        join(repository, portableRelativePath(path, "Evidence path")),
+      );
+      if (relativePathIsOutside(relative(repository, file)))
+        throw new CodexSecurityError(
+          "Evidence path leaves the checkout: " + path,
+        );
+      bytes = await readRegularInputFileBytes(file, repository);
+      if (onExcerpt)
+        sourceIdentity = await readSourceIdentity(file, bytes, signal);
     }
-    const bytes = await readRegularInputFileBytes(file, repository);
     const source = bytes.toString("utf8");
-    const sourceIdentity = onExcerpt
-      ? await readSourceIdentity(file, bytes, signal)
-      : undefined;
     // A trailing newline terminates the last line; it does not add a line.
     const lines = source ? source.replace(/\n$/u, "").split("\n") : [];
     for (const { startLine, endLine: requestedEnd } of ranges) {
@@ -298,6 +317,7 @@ export async function readDependencyEvidence(
         onShortSourceNote?.(path, startLine, requestedEnd, endLine);
       onExcerpt?.({
         path,
+        ...(commit && { commit }),
         startLine,
         endLine,
         text: lines.slice(startLine - 1, endLine).join("\n"),

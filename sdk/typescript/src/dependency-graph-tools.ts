@@ -21,6 +21,7 @@ import {
   type DependencyInventoryReceiptQuery,
   type DependencyInventoryRpc,
 } from "./dependency-inventory.js";
+import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import { readDependencyEvidence } from "./dependency-reachability.js";
 import { createDependencySourceIdentityReader } from "./dependency-source-identity.js";
 import {
@@ -44,6 +45,7 @@ export const dependencyGraphNamespace = "codex_security_dependency";
 
 const sourceReferenceSchema = z.strictObject({
   path: z.string().trim().min(1),
+  commit: dependencyGitCommitSchema.optional(),
   startLine: z.number().int().positive(),
   endLine: z.number().int().positive(),
 });
@@ -154,6 +156,7 @@ export async function openDependencyGraph(
       };
       excerpts: {
         path: string;
+        commit?: string;
         startLine: number;
         endLine: number;
         text: string;
@@ -311,6 +314,7 @@ export async function openDependencyGraph(
         } = sourceEvidenceSchema.parse(args);
         const excerpts: {
           path: string;
+          commit?: string;
           startLine: number;
           endLine: number;
           text: string;
@@ -340,8 +344,9 @@ export async function openDependencyGraph(
         return sourceEvidenceReply({
           id,
           ...(warnings.length && {
-            ranges: excerpts.map(({ path, startLine, endLine }) => ({
+            ranges: excerpts.map(({ path, commit, startLine, endLine }) => ({
               path,
+              ...(commit && { commit }),
               startLine,
               endLine,
             })),

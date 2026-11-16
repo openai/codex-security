@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { relative, sep } from "node:path";
+import { z } from "zod";
+import { portableRelativePath } from "./contract-values.js";
 import { gitOutput, relativePathIsOutside } from "./targets.js";
 
 /** Host-captured identity of the complete file underlying a source excerpt. */
@@ -40,6 +42,79 @@ const gitEnvironment = {
   GIT_OPTIONAL_LOCKS: "0",
   GIT_LITERAL_PATHSPECS: "1",
 };
+
+export const dependencyGitCommitSchema = z
+  .string()
+  .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u)
+  .describe("Full Git commit ID already present in the target repository.");
+
+const sourceObjectBytes = 8 * 1024 * 1024;
+
+function sourceObjectHash(blob: string, bytes: Buffer) {
+  return createHash(blob.length === 64 ? "sha256" : "sha1")
+    .update("blob " + bytes.length + "\0")
+    .update(bytes)
+    .digest("hex");
+}
+
+/** Read a local Git object without fetching or changing the checkout. */
+export async function readDependencyGitSource(
+  repository: string,
+  revision: string,
+  relativePath: string,
+  signal?: AbortSignal,
+) {
+  const commit = dependencyGitCommitSchema.parse(revision);
+  const path = portableRelativePath(relativePath, "Git source path");
+  function git(args: readonly string[], cwd = repository) {
+    return gitOutput(repository, args, signal, gitEnvironment, cwd, "buffer");
+  }
+  const repositoryRoot = await realpath(
+    (await git(["rev-parse", "--show-toplevel"]))
+      .toString("utf8")
+      .replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, ""),
+  );
+  const resolved = (await git(["rev-parse", "--verify", commit + "^{commit}"]))
+    .toString("utf8")
+    .trim();
+  if (resolved !== commit)
+    throw new Error("Expected an exact Git commit object.");
+  const tree = await git(
+    ["ls-tree", "-z", "--full-tree", commit, "--", path],
+    repositoryRoot,
+  );
+  const entry = tree
+    .toString("utf8")
+    .split("\0")
+    .find((value) => value.slice(value.indexOf("\t") + 1) === path);
+  const blob = entry?.match(/^100(?:644|755) blob ([0-9a-f]+)\t/u)?.[1];
+  if (!blob)
+    throw new Error(
+      "Git source is not a regular file at " + commit + ":" + path + ".",
+    );
+  const size = Number(
+    (await git(["cat-file", "-s", blob], repositoryRoot))
+      .toString("utf8")
+      .trim(),
+  );
+  if (!Number.isSafeInteger(size) || size < 0 || size > sourceObjectBytes)
+    throw new Error(
+      "Git source exceeds the " + sourceObjectBytes + " byte limit.",
+    );
+  const bytes = await git(["cat-file", "blob", blob], repositoryRoot);
+  if (bytes.length !== size || sourceObjectHash(blob, bytes) !== blob)
+    throw new Error("The local Git bytes do not match the tree's blob ID.");
+  const identity = {
+    kind: "git" as const,
+    status: "verified" as const,
+    repositoryRoot,
+    repositoryPath: path,
+    commit,
+    blob,
+    contentSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+  return { bytes, identity };
+}
 
 /** Freeze one investigation's commit and reuse its per-file object lookups. */
 export function createDependencySourceIdentityReader(
@@ -115,11 +190,7 @@ export function createDependencySourceIdentityReader(
         reason: error instanceof Error ? error.message : String(error),
       };
     }
-    const objectId = createHash(blob.length === 64 ? "sha256" : "sha1")
-      .update(`blob ${bytes.length}\0`)
-      .update(bytes)
-      .digest("hex");
-    if (objectId !== blob) {
+    if (sourceObjectHash(blob, bytes) !== blob) {
       return {
         blob,
         status: "unavailable",
