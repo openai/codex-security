@@ -762,6 +762,7 @@ export async function capturePatchGitControls(
   commandParameters: string | null = process.env["GIT_CONFIG_PARAMETERS"] ??
     null,
   userProfile: string | null = process.env["USERPROFILE"] ?? null,
+  netrc: string | null = process.env["NETRC"] ?? null,
 ): Promise<PatchGitControls | undefined> {
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
@@ -1328,6 +1329,10 @@ export async function capturePatchGitControls(
       .map(([key]) => key);
   };
   const captureReferences = async (checkout: string): Promise<void> => {
+    if (mode !== "external" && netrc) {
+      hostMayReadStore = true;
+      await protectTransportFile(checkout, netrc);
+    }
     filterCheckouts.add(checkout);
     const records = await runConfigFields(checkout, [
       "config",

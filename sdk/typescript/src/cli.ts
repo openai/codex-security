@@ -15997,6 +15997,7 @@ async function readPatchGitControls(
     credentialStorePaths,
     environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
     environmentEntry(dependencies.environment, "USERPROFILE") ?? null,
+    environmentEntry(dependencies.environment, "NETRC") ?? null,
   );
 }
 

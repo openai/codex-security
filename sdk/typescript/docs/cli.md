@@ -2780,10 +2780,10 @@ The patch model, snapshot filters, and publication hooks have filesystem deny
 rules for Git's standard credential stores and for operator-selected
 `store --file` commands with a literal absolute file path. Use forward slashes
 and a drive letter for an explicit store on Windows. The same rules cover
-`.netrc` and `_netrc` in the host user's effective home directory and files
-selected by the operator's Git `http.cookieFile`, `http.sslKey`, and
-`http.proxySSLKey` settings, including URL-specific values. The host HTTPS
-transport retains access to these files.
+`.netrc` and `_netrc` in the host user's effective home directory, the file
+selected by libcurl's `NETRC` environment variable, and files selected by Git's
+`http.cookieFile`, `http.sslKey`, and `http.proxySSLKey` settings, including
+URL-specific values. The host HTTPS transport retains access to these files.
 The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can

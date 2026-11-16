@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, mock } from "bun:test";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
   mkdir,
@@ -1107,9 +1107,18 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
     },
   );
 
-  test.each([false, true])(
-    "preserves the operator's proxy, netrc credentials, HTTPS cookie and TLS key with collision=%j",
-    async (collision) => {
+  const libcurl = /^libcurl: (\d+\.\d+\.\d+)/mu.exec(
+    execFileSync("git", ["version", "--build-options"], { encoding: "utf8" }),
+  )?.[1];
+  test.each([
+    { collision: false, customNetrc: false },
+    { collision: true, customNetrc: false },
+    ...(libcurl && Bun.semver.satisfies(libcurl, ">=8.16.0")
+      ? [{ collision: false, customNetrc: true }]
+      : []),
+  ])(
+    "preserves the operator's proxy, netrc credentials, HTTPS cookie and TLS key with %j",
+    async ({ collision, customNetrc }) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
       git("init", "--bare", secondary);
@@ -1126,8 +1135,14 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       environment["GIT_TERMINAL_PROMPT"] = "0";
       const netrcFile = join(
         home,
-        process.platform === "win32" ? "_netrc" : ".netrc",
+        customNetrc
+          ? "selected credentials"
+          : process.platform === "win32"
+            ? "_netrc"
+            : ".netrc",
       );
+      if (customNetrc) environment["NETRC"] = relative(directory, netrcFile);
+      else delete environment["NETRC"];
       const username = "fixture";
       const password = "synthetic-netrc-only";
       await writeFile(

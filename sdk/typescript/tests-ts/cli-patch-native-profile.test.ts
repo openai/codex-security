@@ -766,7 +766,9 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
 test("patch model and clean filters cannot read HTTP cookie files and TLS keys or netrc credentials", async () => {
   const operator = await fixtures.create("patch-http-auth-files-");
   const config = join(operator, "selected.gitconfig");
+  const selectedNetrc = join(operator, "selected credentials");
   const environment = {
+    NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
     XDG_CONFIG_HOME: join(operator, ".config"),
@@ -797,6 +799,7 @@ test("patch model and clean filters cannot read HTTP cookie files and TLS keys o
     ...paths.slice(2),
     join(operator, "_netrc"),
     scopedProxyKey,
+    selectedNetrc,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
   const createInput = (i: number) =>
@@ -876,6 +879,7 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       });
     },
     (repository) => {
+      environment.NETRC = relative(repository, selectedNetrc);
       const scopedCookie = relative(repository, paths[2]!).replaceAll(
         "\\",
         "/",
