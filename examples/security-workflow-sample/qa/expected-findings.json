@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "application": "../app",
+  "findings": [
+    {
+      "id": "SW-001",
+      "category": "Broken object authorization",
+      "cwe": ["CWE-639"],
+      "title": "Order lookup omits customer ownership",
+      "locations": [
+        {"path": "data.py", "symbol": "lookup_order"},
+        {"path": "server.py", "symbol": "route_request"}
+      ],
+      "boundary": "An authenticated customer reads another customer's order by ID.",
+      "expectedEvidence": "The unscoped lookup returns both beacon and cedar orders to acme.",
+      "expectedFix": "Enforce tenant ownership in the lookup while preserving same-tenant reads.",
+      "disposition": "developer_review"
+    },
+    {
+      "id": "SW-002",
+      "category": "SQL injection",
+      "cwe": ["CWE-89"],
+      "title": "Reporting query interpolates the region parameter",
+      "locations": [
+        {"path": "reports.py", "symbol": "orders_by_region"},
+        {"path": "server.py", "symbol": "route_request"}
+      ],
+      "boundary": "A signed-in customer changes the report predicate and sees another customer's rows.",
+      "expectedEvidence": "A synthetic region value returns rows outside the caller's tenant.",
+      "expectedFix": "Bind tenant and region as query parameters while retaining ordinary region filtering.",
+      "disposition": "policy_gated_merge"
+    }
+  ],
+  "environmentCheck": {
+    "id": "SW-003",
+    "expectedCoverage": [
+      "order-report-api",
+      "billing-api",
+      "analytics-worker"
+    ],
+    "expectedReachability": {
+      "order-report-api": "public_authenticated",
+      "billing-api": "private",
+      "analytics-worker": "no_http_route"
+    },
+    "expectedFindingIds": ["SW-001", "SW-002"],
+    "negativeControls": [
+      "No unsubstantiated finding for the scoped billing balance function.",
+      "Do not describe analytics legacy_region_export as reachable."
+    ]
+  }
+}

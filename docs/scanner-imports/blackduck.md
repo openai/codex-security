@@ -143,11 +143,12 @@ print(json.dumps({"_meta": {"href": url}, "totalCount": total, "items": items}))
 ```
 
 Run the script in isolated mode so Python loads packages from the trusted
-environment. Point `TMPDIR` to a private directory outside the checkout.
+environment. The example creates a private report directory under `TMPDIR`
+or, if unset, under `/tmp`.
 
 ```sh
 report=
-out=$(mktemp -d) &&
+out=$(mktemp -d "${TMPDIR:-/tmp}/blackduck.XXXXXX") &&
   /path/to/venv/bin/python -I /private/path/export.py > "$out/blackduck.tmp" &&
   mv "$out/blackduck.tmp" "$out/blackduck.json" &&
   report="$out/blackduck.json"

@@ -221,6 +221,16 @@ jobs:
       - name: Install ripgrep
         if: matrix.os == 'ubuntu-latest'
         run: .github/scripts/install-ripgrep.sh
+      - name: Warm campaign executable lookup
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: sdk/typescript
+        # The first campaign reads tool headers across PATH on a cold runner.
+        # Do that I/O before Bun starts the first campaign test's timeout.
+        run: |
+          bun --eval '
+            import helpers from "./_bundled_plugin/mcp/helpers.mjs";
+            helpers.inventoryToolPath(process.env.PATH, process.cwd(), [], "campaign").cleanup();
+          '
       - name: Test
         working-directory: sdk/typescript
         env:
@@ -550,6 +560,14 @@ jobs:
           node --experimental-strip-types --test --test-reporter=tap
           --test-name-pattern="^(testAbortKillsPreflightChild|testDiscoveryDeadlineReducesSingleBufferedFinding)$"
           tests/test_deep_scan_permission_profile_preflight.ts tests/test_deep_scan_coordinator.ts
+      - name: Test Deep Scan worker settings and executable selection on Windows
+        if: matrix.shard == 3
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        run: >-
+          node --experimental-strip-types --test --test-reporter=tap
+          --test-name-pattern="^Deep worker (runtime settings|executable selection)$"
+          tests/test_deep_scan_executor.ts
       - name: Test MCP helper paths on Windows
         if: matrix.shard == 1
         working-directory: plugins/codex-security/mcp-app

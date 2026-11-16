@@ -333,7 +333,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             finally:
                 os.umask(previous_umask)
             for path in (self.scan_dir / "threatmodel.md", exported):
-                with self.subTest(path=path):
+                with self.subTest(path=str(path)):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                     content = path.read_text()
                     self.assertIn("Queue ownership", content)

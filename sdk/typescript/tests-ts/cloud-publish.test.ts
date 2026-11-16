@@ -15,6 +15,7 @@ import {
 import {
   codexSecurityCredentialHome,
   setCodexSecurityCredentialLogout,
+  writeCredentialHomeConfig,
 } from "../src/runtime.js";
 import { copyCompletedScanFixture } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -608,10 +609,9 @@ describe("Cloud publication", () => {
       }),
       { mode: 0o600 },
     );
-    await writeFile(
-      join(home, "config.toml"),
-      'cli_auth_credentials_store = "auto"\n',
-    );
+    await writeCredentialHomeConfig(home, {
+      cli_auth_credentials_store: "auto",
+    });
 
     const send = mock(async (_url: string, options: RequestInit) => {
       expect(new Headers(options!.headers).get("ChatGPT-Account-ID")).toBe(
@@ -626,6 +626,27 @@ describe("Cloud publication", () => {
     ).rejects.toThrow("ChatGPT login already available to Codex Security");
     expect(send).toHaveBeenCalledTimes(1);
   });
+
+  test.each(["auto", "keyring", "ephemeral"])(
+    "does not publish an ambient account copied into the dedicated %s store",
+    async (store) => {
+      const { scan, home: ambient, environment } = await fixture();
+      const home = codexSecurityCredentialHome(environment);
+      await mkdir(home, { recursive: true, mode: 0o700 });
+      await writeCredentialHomeConfig(home, {
+        cli_auth_credentials_store: store,
+      });
+      // A successful native keyring login removed the old file. Account status
+      // can subsequently import a different account's ambient credentials.
+      await setCodexSecurityCredentialLogout(home, false);
+      await fs.copyFile(join(ambient, "auth.json"), join(home, "auth.json"));
+      const send = mock(receiptResponse);
+      await expect(
+        publishScanToCloud(scan, { environment, fetch: send }),
+      ).rejects.toThrow("ChatGPT login already available to Codex Security");
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
 
   test("resolves missing or empty CODEX_HOME through the existing user-home helper", async () => {
     const { scan, home, environment } = await fixture();
@@ -719,7 +740,7 @@ describe("Cloud publication", () => {
 
     await writeFile(
       join(home, "config.toml"),
-      'cli_auth_credentials_store = "file"\n',
+      'cli_auth_credentials_store = "file"\n[ghost_snapshot]\nignore_large_untracked_files = 9223372036854775807\n',
     );
     await publishScanToCloud(scan, {
       environment,

@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
-import { dirname } from "node:path";
-import { expect, test } from "bun:test";
+import * as os from "node:os";
+import { dirname, isAbsolute, relative } from "node:path";
+import { expect, spyOn, test } from "bun:test";
 import { MAX_CODEX_INPUT_CHARACTERS } from "../src/codex-prompt.js";
 import { prepareFindingPrompt } from "../src/finding-prompt.js";
 
@@ -20,6 +21,8 @@ test.each([false, true])(
       evidence: '"\\\n🦞'.repeat(200_000),
       tail: "Final evidence",
     });
+    const temporaryRoot = relative(process.cwd(), os.tmpdir()) || ".";
+    using _temporary = spyOn(os, "tmpdir").mockReturnValue(temporaryRoot);
     let path = "";
     const run = async () => {
       await using prepared = await prepareFindingPrompt(
@@ -28,6 +31,7 @@ test.each([false, true])(
       );
       expect(prepared.prompt.length).toBeLessThan(MAX_CODEX_INPUT_CHARACTERS);
       path = JSON.parse(prepared.prompt.match(/^".*finding\.json"$/m)![0]);
+      expect(isAbsolute(path)).toBe(true);
       expect(await readFile(path, "utf8")).toBe(finding);
       if (process.platform !== "win32") {
         expect((await stat(path)).mode & 0o777).toBe(0o600);

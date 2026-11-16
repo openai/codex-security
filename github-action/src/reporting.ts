@@ -43,6 +43,9 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     ...(inputs.maxCost !== undefined ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : []),
     'Applicable root and nested SECURITY.md policy is discovered by the scanner.',
   ];
+  if (result.scopeLimitations?.length) {
+    parts.push('**Scope limitations**\n\n' + result.scopeLimitations.map(note => `- ${esc(note)}`).join('\n'));
+  }
   if (result.reportStatus === 'partial') parts.push('SARIF report is unavailable; scan results and other reports are still available.');
   if (result.scanStatus !== 'completed') parts.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
   for (const error of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error)}</pre>`);

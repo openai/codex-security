@@ -74,7 +74,7 @@ export function tenableSourceRepository(
   input: ExternalFindings,
   declared: string | undefined,
   references: readonly ExternalSourceRepository[],
-) {
+): ExternalSourceRepository {
   const url = declaredScannerRepositoryUrl(declared, "Tenable", "local");
   const asset = asRecord(input.report?.["asset"]);
   if (

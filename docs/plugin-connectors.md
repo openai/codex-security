@@ -9,12 +9,12 @@ publishing completed scans, and exporting files for other systems.
 Connect the app you need in the account and workspace that hold the data.
 Local scans and saved-report imports work without an app connection.
 
-| App                  | What you can do in Codex                                         | Setup                                                                              |
-| -------------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| Codex Security Cloud | Read saved findings, their evidence, and scan status.            | [Connect Cloud in Codex](../sdk/typescript/README.md#read-existing-cloud-findings) |
-| Linear               | Read tickets for triage and track findings in a team or project. | [Linear setup](#linear-setup)                                                      |
-| GitHub               | Read repository source and alerts, and track findings in issues. | [GitHub setup](#github-setup)                                                      |
-| Atlassian            | Read Jira Cloud issues and track findings in a project.          | [Jira setup](#jira-setup)                                                          |
+| App                  | What you can do in Codex                                         | Setup                                                                                |
+| -------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Codex Security Cloud | Read saved findings, their evidence, and scan status.            | [Connect Cloud in Codex](../sdk/typescript/docs/sdk.md#read-existing-cloud-findings) |
+| Linear               | Read tickets for triage and track findings in a team or project. | [Linear setup](#linear-setup)                                                        |
+| GitHub               | Read repository source and alerts, and track findings in issues. | [GitHub setup](#github-setup)                                                        |
+| Atlassian            | Read Jira Cloud issues and track findings in a project.          | [Jira setup](#jira-setup)                                                            |
 
 ### Linear setup
 

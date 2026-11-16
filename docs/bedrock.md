@@ -43,7 +43,7 @@ identities from the scan process.
 
 Bedrock uses AWS credentials for inference. [Daybreak Blue and Red](#daybreak-blue-and-red)
 require separate approval and provisioning. Saved reports, `scans show`, and
-`export` are local. [Publishing to Cloud](../sdk/typescript/README.md#publish-findings-to-cloud)
+`export` are local. [Publishing to Cloud](../sdk/typescript/docs/cli.md#publish-completed-scans)
 requires ChatGPT credentials and access to the destination.
 
 If Codex reports missing model metadata, record the bundled Codex version from

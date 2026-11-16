@@ -17,7 +17,8 @@ export type Provider =
   | "sonar"
   | "continuum"
   | "checkmarx"
-  | "trivy";
+  | "trivy"
+  | "armorcode";
 export type SourceKey = string;
 export type ClientId = string;
 export type SourceFindingId = string;

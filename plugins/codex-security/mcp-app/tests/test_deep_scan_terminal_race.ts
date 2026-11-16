@@ -268,7 +268,7 @@ for (const ordering of [
         failureCommit.release();
         await fail(
           { scanId: run.scanId, message: "synthetic no-op failure" },
-          {},
+          { _meta: { "openai/threadId": "fixture-owner" } },
         );
         assert.equal(
           (await runWorkbench(["get-scan", "--scan-id", run.scanId])).workspace
@@ -309,7 +309,7 @@ for (const ordering of [
       if (ordering !== "lost cancellation response") {
         failure = fail(
           { scanId: run.scanId, message: "synthetic committed parent failure" },
-          {},
+          { _meta: { "openai/threadId": "fixture-owner" } },
         );
         void failure!.catch(() => {});
         await failureCommit.entered;

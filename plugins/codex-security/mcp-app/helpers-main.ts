@@ -9,6 +9,11 @@ export {
   readSealedScanFile,
   requireSealedScanFile,
 } from "./src/sealed-contract.js";
+import { withInventoryToolPaths } from "./src/helpers/inventory-git.js";
+export {
+  inventoryToolPath,
+  protectedHostPathResolver,
+} from "./src/helpers/inventory-git.js";
 export { validateTrackingSource } from "./src/helpers/validate-tracking-source.js";
 import { parseArgs } from "node:util";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
@@ -80,8 +85,14 @@ function runHelper(): void {
       "Usage: list-stored-findings\nReads a JSON object from stdin with an absolute stateDirectory, positive payload.limit and non-negative payload.offset.",
     "store-external-findings":
       "Usage: store-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload containing repository, provider, sourceKey and findings with source_finding_id and evidence.",
-    "list-external-findings":
-      "Usage: list-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.repository; payload.id optionally selects one external finding.",
+    "read-external-findings":
+      "Usage: read-external-findings\nReads a JSON object from stdin with an absolute stateDirectory and payload.repository. Select an id, an importId, or a list of findings with id and version.",
+    "list-external-imports":
+      "Usage: list-external-imports\nReads a JSON object from stdin with an absolute stateDirectory and payload.repository.",
+    "record-external-finding-publications":
+      "Usage: record-external-finding-publications\nReads a JSON object from stdin with an absolute stateDirectory and publication receipts for stored finding versions.",
+    "list-external-finding-publications":
+      "Usage: list-external-finding-publications\nReads a JSON object from stdin with an absolute stateDirectory and payload.repository. Select an optional finding id.",
     "find-potential-duplicates":
       "Usage: find-potential-duplicates\nReads a JSON object from stdin with an absolute stateDirectory, payload.findingId and payload.scope containing either repositoryId or allRepositories: true.",
     "store-dedupe-groups":
@@ -99,9 +110,11 @@ function runHelper(): void {
     command === "make-hosted-repo-scope-input" ||
     command === "make-diff-rank-input"
   ) {
-    void inventoryCommand(command, args).then((code) => {
-      process.exitCode = code;
-    });
+    void withInventoryToolPaths(() => inventoryCommand(command, args)).then(
+      (code) => {
+        process.exitCode = code;
+      },
+    );
   } else if (command === "resolve-security-md") {
     process.exitCode = resolveSecurityMdCommand(args, posixHome);
   } else if (command === "normalize-candidates") {

@@ -1,5 +1,8 @@
-import { readFile } from "node:fs/promises";
+import { isUtf8 } from "node:buffer";
+import { existsSync, statSync } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
 import {
+  basename,
   dirname,
   extname,
   isAbsolute,
@@ -16,14 +19,14 @@ import {
 } from "./config.js";
 import { ConfigurationError, errorMessage } from "./errors.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "./deep-scan-defaults.js";
-import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
+import type { AbsolutePath } from "./config-path.js";
 import { deepScanOptions, type DeepScanSources } from "./deep-config.js";
 import {
   projectConfigJsonSchema,
   type ProjectConfigInput,
   type ProjectScope,
 } from "./project-config-schema.js";
-import { expandHome } from "./runtime.js";
+import { expandHomeForLookup, resolveInputPath } from "./runtime.js";
 import {
   DEFAULT_SCAN_AUTH,
   DEFAULT_SCAN_MODE,
@@ -132,10 +135,24 @@ export async function readProjectConfig(
   file: string,
   directory = process.cwd(),
 ): Promise<ProjectConfigSource> {
-  const path = resolve(directory, expandHome(file));
+  const selected = expandHomeForLookup(file);
+  const requested = isAbsolute(selected)
+    ? selected
+    : `${directory || "."}${sep}${selected}`;
+  const traversesParent = sep === "/" && requested.split("/").includes("..");
+  let path = traversesParent ? requested : resolve(directory, selected);
   const extension = projectConfigExtension(path);
   let text: string;
   try {
+    // Resolve the parent through the filesystem while retaining the selected filename.
+    if (traversesParent) {
+      const parent = await realpath(dirname(path), { encoding: "buffer" });
+      if (!isUtf8(parent))
+        throw new Error(
+          "The resolved configuration directory is not a valid UTF-8 path.",
+        );
+      path = resolve(parent.toString(), basename(path));
+    }
     text = await readFile(path, "utf8");
   } catch (error) {
     throw new ConfigurationError(
@@ -191,11 +208,14 @@ export function projectConfigStarter(
     : `${relativeSchema.startsWith(".") ? "" : "./"}${encodeURI(
         relativeSchema.split(sep).join("/"),
       ).replace(/[#?]/gu, encodeURIComponent)}`;
+  const hasSchema = existsSync(schemaPath);
   if (projectConfigExtension(path) === ".json")
-    return `${JSON.stringify({ $schema: schema }, null, 2)}\n`;
+    return `${JSON.stringify(hasSchema ? { $schema: schema } : {}, null, 2)}\n`;
   return [
     "# This file is trusted like CLI options. Keep it outside untrusted inputs.",
-    `$schema: ${schema}`,
+    ...(hasSchema
+      ? [`$schema: ${schema}`]
+      : ["# Replace the empty mapping below when enabling settings.", "{}"]),
     "",
     "# Uncomment the settings you want to override. Defaults remain unpinned.",
     `# auth: ${DEFAULT_SCAN_AUTH}`,
@@ -244,6 +264,33 @@ function requireProjectConfig(
   }
 }
 
+function outputPath(
+  value: string | undefined,
+  directory: string,
+): AbsolutePath | undefined {
+  if (value === undefined) return;
+  const requested = resolveInputPath(value, directory);
+  const parts = requested.split(sep);
+  const parent = parts.lastIndexOf("..");
+  if (parent < 0) return requested;
+  const prefix = parts.slice(0, parent + 1).join(sep);
+  try {
+    // Keep a redirected traversal intact for output validation.
+    const selected = statSync(prefix, { bigint: true, throwIfNoEntry: false });
+    if (selected !== undefined) {
+      const lexical = statSync(resolve(prefix), {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      if (selected.dev !== lexical?.dev || selected.ino !== lexical.ino)
+        return requested;
+    }
+  } catch {
+    return requested;
+  }
+  return resolve(requested) as AbsolutePath;
+}
+
 export function resolveScanSettings(
   project: ProjectConfigSource | undefined,
   overrides: Partial<ScanSettings> & { codexOverrides?: JsonObject },
@@ -269,11 +316,9 @@ export function resolveScanSettings(
   };
   const projectDirectory = project?.directory ?? directory;
   const filePath = (value: string | undefined): AbsolutePath | undefined =>
-    value === undefined
-      ? undefined
-      : resolveConfigPath(projectDirectory, value);
+    value === undefined ? undefined : resolveInputPath(value, projectDirectory);
   const cliPath = (value: string | undefined): AbsolutePath | undefined =>
-    value === undefined ? undefined : resolveConfigPath(directory, value);
+    value === undefined ? undefined : resolveInputPath(value, directory);
 
   const mode =
     choose("scan.mode", file?.scan?.mode, overrides.mode) ?? DEFAULT_SCAN_MODE;
@@ -357,10 +402,10 @@ export function resolveScanSettings(
     choose(
       "scan.knowledge_base",
       file?.scan?.knowledge_base?.map((value) =>
-        resolveConfigPath(projectDirectory, value),
+        resolveInputPath(value, projectDirectory),
       ),
       overrides.knowledgeBasePaths?.map((value) =>
-        resolveConfigPath(directory, value),
+        resolveInputPath(value, directory),
       ),
     ) ?? [];
   const settings: ResolvedScanSettings = {
@@ -393,8 +438,8 @@ export function resolveScanSettings(
     postScanPromptFile: cliPath(overrides.postScanPromptFile),
     outputDir: choose(
       "output.directory",
-      filePath(file?.output?.directory),
-      cliPath(overrides.outputDir),
+      outputPath(file?.output?.directory, projectDirectory),
+      outputPath(overrides.outputDir, directory),
     ),
     failureSeverity: choose(
       "policy.fail_on_severity",

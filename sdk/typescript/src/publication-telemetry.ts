@@ -66,6 +66,16 @@ export class PublicationTelemetryRecorder {
     });
   }
 
+  notifyFailure(options: { signal?: AbortSignal }): void {
+    const outcome =
+      this.outcome === "indeterminate"
+        ? "indeterminate"
+        : options.signal?.aborted
+          ? "canceled"
+          : "failed";
+    this.notify(this.snapshot(outcome));
+  }
+
   notify(telemetry: PublicationTelemetry): void {
     void Promise.resolve()
       .then(() => this.observer?.(telemetry))

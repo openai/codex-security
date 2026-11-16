@@ -1608,7 +1608,7 @@ describe("live scan dashboard", () => {
       { length: 20 },
       (_, index) => ({
         id: `c${index}`,
-        name: `Component ${index}`,
+        name: `Component\u0085${index}`,
         paths: [`src/${index}`],
         status: "pending",
         outputDir: `/synthetic/${index}`,
@@ -1634,6 +1634,7 @@ describe("live scan dashboard", () => {
         .every((line) => line.length <= 80),
     ).toBe(true);
     input.emit("data", "\r");
+    expect(frame()).toContain("project  ·  Component 19");
     expect(frame()).not.toContain("COST");
     input.emit("data", "\u0003");
     expect(onInterrupt).toHaveBeenCalled();
@@ -1783,14 +1784,14 @@ describe("live scan dashboard", () => {
     dashboard.stop();
   });
 
-  test("handles asynchronous dashboard stream failures while a scan is active", async () => {
+  test("keeps dashboard stream errors protected through a restart and the final write", async () => {
     let redraw: (() => void) | undefined;
     let failRedraw = false;
     const stream = new Writable({
       autoDestroy: false,
       write(_chunk, _encoding, callback) {
         if (failRedraw) {
-          queueMicrotask(() => callback(new Error("Dashboard output failed.")));
+          setImmediate(() => callback(new Error("Dashboard output failed.")));
         } else {
           callback();
         }
@@ -1808,18 +1809,23 @@ describe("live scan dashboard", () => {
     });
 
     dashboard.start();
+    dashboard.stop();
+    dashboard.start();
     expect(stream.listenerCount("error")).toBe(1);
-    const failure = new Promise<Error>((resolve) =>
-      stream.once("error", resolve),
+    const failure = new Promise<[Error, number]>((resolve) =>
+      stream.once("error", (error) =>
+        resolve([error, stream.listenerCount("error")]),
+      ),
     );
     failRedraw = true;
     redraw?.();
     dashboard.stop();
     expect(stream.listenerCount("error")).toBe(2);
 
-    await expect(failure).resolves.toMatchObject({
-      message: "Dashboard output failed.",
-    });
+    await expect(failure).resolves.toEqual([
+      new Error("Dashboard output failed."),
+      1,
+    ]);
     await new Promise<void>((resolve) => queueMicrotask(resolve));
     expect(stream.listenerCount("error")).toBe(0);
   });

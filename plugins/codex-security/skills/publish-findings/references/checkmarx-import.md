@@ -32,6 +32,6 @@ Use native Java, a released CxFlow JAR (1.6.37+), and a trusted SAST-only profil
 
 ## Preview and import
 
-Pass the successful helper's printed path as the quoted file argument to `codex-security publish findings` in the next tool call. Use `--provider checkmarx`, the requested destination, verified `--source-repository-url`, a stable product/tenant/project/ref `--source-key`, and `--dry-run --format json`. Review the scope, findings and exclusions. Verify native paths against the checkout before opening source files.
+Pass the successful helper's printed path as the quoted file argument to `codex-security publish findings` in the next tool call. Use `--provider checkmarx --to local --repository CHECKOUT`, the verified `--source-repository-url`, a stable product/tenant/project/ref `--source-key`, and `--dry-run --format json`. Review the scope, findings and exclusions. Verify native paths against the checkout before opening source files.
 
-After confirmation, reuse that file and those options for [local import](../SKILL.md#import-locally), [Cloud publication](../SKILL.md#publish-to-cloud) and retries. Remove the helper’s temporary directory after readback unless the operator wants it retained. Keep operator-supplied files. [User guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)
+After confirmation, reuse that file and those options for the [local import](../SKILL.md#import-locally). Use its stored selection for [Cloud publication](../SKILL.md#publish-to-cloud) and retries. Remove the helper’s temporary directory after readback unless the operator wants it retained. Keep operator-supplied files. [User guide](https://github.com/openai/codex-security/blob/main/docs/scanner-imports/checkmarx.md)

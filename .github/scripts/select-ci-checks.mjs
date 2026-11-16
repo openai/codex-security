@@ -69,7 +69,9 @@ export function selectLockfileAudits(paths, { event, baseChanged }) {
 
 export function selectChecks(paths, options) {
   const scope = scopeFor(paths, options);
-  const full = scope === "full" || scope === "python-tests";
+  const full = scope === "full";
+  const pythonTestsOnly = scope === "python-tests";
+  const allUbuntuVersions = full || pythonTestsOnly;
   const source = full || scope === "source";
   const sdkTestsOnly =
     scope === "source" && paths.every((path) => sdkTest.test(path));
@@ -81,16 +83,16 @@ export function selectChecks(paths, options) {
         actionFiles.test(path) || path === "sdk/typescript/src/git-remote.ts",
     );
   const compatibility = ["22.13.0", "24.0.0", "24", "26.0.0", "26"]
-    .filter((version) => full || version !== "26")
+    .filter((version) => allUbuntuVersions || version !== "26")
     .map((version) => ({ os: "ubuntu-latest", node: version }));
   compatibility.push({ os: "macos-latest", node: "22.13.0" });
-  if (scope !== "python-tests") {
+  if (!pythonTestsOnly) {
     compatibility.push({ os: "windows-latest", node: "22.13.0" });
     if (full) compatibility.push({ os: "windows-latest", node: "24" });
   }
   const pythonMatrix = [
     ...["3.10", "3.12", "3.14"]
-      .filter((version) => full || version === "3.12")
+      .filter((version) => allUbuntuVersions || version === "3.12")
       .map((version) => ({
         os: "ubuntu-latest",
         python: version,
@@ -107,20 +109,18 @@ export function selectChecks(paths, options) {
       markers: "cross_platform or native_windows",
     },
   ];
-  const selected = {
+  return {
     "source-required": String(source),
-    "container-required": String(
-      sourceBeyondSdkTests && scope !== "python-tests",
-    ),
-    "plugin-tests-required": String(sourceBeyondSdkTests),
-    "package-required": String(source || scope === "action"),
+    "container-required": String(sourceBeyondSdkTests),
+    "plugin-tests-required": String(sourceBeyondSdkTests || pythonTestsOnly),
+    "package-required": String(source || pythonTestsOnly || scope === "action"),
     "action-ci": String(action),
     "eval-contracts": String(
       sourceBeyondSdkTests ||
         scope === "evals" ||
         paths.includes("sdk/typescript/tests-ts/codex-dependency-pins.test.ts"),
     ),
-    "workflow-quality": String(full),
+    "workflow-quality": String(full || pythonTestsOnly),
     "compatibility-matrix": JSON.stringify({
       include:
         scope === "action" || sdkTestsOnly
@@ -129,11 +129,6 @@ export function selectChecks(paths, options) {
     }),
     "python-matrix": JSON.stringify({ include: pythonMatrix }),
   };
-  if (scope === "python-tests") {
-    for (const name of ["source-required", "action-ci", "eval-contracts"])
-      selected[name] = "false";
-  }
-  return selected;
 }
 
 if (

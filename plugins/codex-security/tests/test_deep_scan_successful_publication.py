@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import os
 import shutil
 from argparse import Namespace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -183,18 +185,45 @@ def reviewed_deep_scan(publication_scan, request):
     return scan
 
 
-def test_deep_prepare_and_complete_preserve_the_same_aggregate(workbench_db, reviewed_deep_scan):
+def test_deep_prepare_and_complete_preserve_the_same_aggregate(
+    workbench_db, reviewed_deep_scan, monkeypatch
+):
     scan = reviewed_deep_scan
+    clock = datetime.fromisoformat(scan.timestamp.replace("Z", "+00:00")) + timedelta(minutes=1)
+
+    def now():
+        return clock.isoformat().replace("+00:00", "Z")
+
+    monkeypatch.setitem(scan.api["complete_scan_locked"].__globals__, "now", now)
+    scan.api["set_scan_thread"](
+        workbench_db, Namespace(scan_id=scan.scan_id, thread_id="thread-prepared-resume")
+    )
     count = "SELECT terminal_reviewed_surface_count FROM deep_scan_runs WHERE scan_id = ?"
     assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] is None
     prepared = scan.complete(prepare_only=True)
     assert prepared["progress"]["status"] == "running"
+    assert prepared["logCompletedAt"] is None
     assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
     names = ("scan-manifest.json", "findings.json")
     published = {name: (scan.scan_dir / name).read_bytes() for name in names}
 
-    scan.complete(prepare_only=True)
-    scan.complete()
+    clock += timedelta(minutes=1)
+    current = scan.api["require_scan"](workbench_db, scan.scan_id)
+    resumed = scan.api["scan_history"].cli_scan_resume(
+        scan.api["_WORKBENCH_DB_CONTEXT"],
+        workbench_db,
+        current,
+        scan.api["require_workspace"](workbench_db, current["workspace_id"]),
+    )
+    assert resumed["threadId"] == "thread-prepared-resume"
+    assert scan.complete(prepare_only=True)["logCompletedAt"] is None
+
+    clock += timedelta(minutes=1)
+    terminal_at = now()
+    assert scan.complete()["logCompletedAt"] == terminal_at
+    history = scan.api["scan_history"].list_scans(workbench_db)
+    assert history["scans"][0]["logCompletedAt"] == terminal_at
+    clock += timedelta(minutes=1)
     # A capped scan with a failed worker cannot publish anew, but its sealed result can be read.
     scan.add_worker(status="failed")
     with workbench_db:
@@ -204,6 +233,7 @@ def test_deep_prepare_and_complete_preserve_the_same_aggregate(workbench_db, rev
         )
     repeated = scan.complete()
 
+    assert repeated["logCompletedAt"] == terminal_at
     assert repeated["progress"]["status"] == "complete"
     assert workbench_db.execute(count, (scan.scan_id,)).fetchone()[0] == 1
     assert {name: (scan.scan_dir / name).read_bytes() for name in names} == published
@@ -320,7 +350,12 @@ def test_completion_captures_target_warnings_before_first_seal(
 @pytest.mark.parametrize("mode", ["standard", "deep"])
 def test_completion_preserves_non_utf8_filename_warning(publication_scan, tmp_path, mode):
     scan = publication_scan(mode=mode)
-    os.mkfifo(os.fsencode(tmp_path / "target") + b"/new-pipe-\xff")
+    try:
+        os.mkfifo(os.fsencode(tmp_path / "target") + b"/new-pipe-\xff")
+    except OSError as exc:
+        if exc.errno == errno.EILSEQ:
+            pytest.skip("Filesystem rejects non-UTF-8 filenames")
+        raise
 
     completed = scan.complete()
 

@@ -265,15 +265,7 @@ export async function publishScanInternal(
     telemetry.notify(result.telemetry);
     return result;
   } catch (error) {
-    telemetry.notify(
-      telemetry.snapshot(
-        telemetry.outcome === "indeterminate"
-          ? "indeterminate"
-          : options.signal?.aborted
-            ? "canceled"
-            : "failed",
-      ),
-    );
+    telemetry.notifyFailure(options);
     throw error;
   }
 }

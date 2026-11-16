@@ -60,17 +60,7 @@ function assertPublicBrotli(bytes, path) {
   assertPublicText(result.buffer.toString("utf8"));
 }
 
-export function assertPublicText(contents, binaryRanges = []) {
-  const pattern = new RegExp(internalMarker.source, "giu");
-  let match;
-  while ((match = pattern.exec(contents)) !== null) {
-    if (
-      !binaryRanges.some(
-        ({ start, end }) =>
-          match.index >= start && match.index + match[0].length <= end,
-      )
-    )
-      throw new Error("npm tarball contains an internal reference.");
-    pattern.lastIndex = match.index + 1;
-  }
+export function assertPublicText(contents) {
+  if (internalMarker.test(contents))
+    throw new Error("npm tarball contains an internal reference.");
 }

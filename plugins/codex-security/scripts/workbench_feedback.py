@@ -15,7 +15,10 @@ from workbench_constants import (
     FINDING_LOCATION_PATH_BYTES,
     FINDING_SUMMARY_BYTES,
     FINDING_TITLE_BYTES,
+    PRIMARY_FINDING_LOCATION_SQL,
 )
+from workbench_native_indexes import _indexed_findings, _legacy_generations
+from workbench_target_state import RepositoryIdentityCache
 from workbench_validation import bounded_output_text
 
 
@@ -25,19 +28,51 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
     For each finding, include the latest decision only if it closes the finding as a
     false positive with a nonblank reason. Prefer the root-control location in its preview.
     """
+    identities = RepositoryIdentityCache(connection)
+    scope = identities.scope_for_scan(scan)
+    if not scope.available:
+        return {"scanId": scan["id"], "targetId": scan["target_id"], "falsePositives": []}
+
+    legacy_generations = _legacy_generations(connection, identities)
+    indexed_findings = {
+        occurrence_id: finding
+        for finding in _indexed_findings(
+            connection,
+            identities=identities,
+            scan_scope=scope,
+            legacy_generations=legacy_generations,
+        )
+        for occurrence_id in finding["matched_occurrence_ids"]
+    }
+    source_filter, source_values = scope.sql(
+        "source_scans", supports_generation=identities.supports_generation
+    )
+    source_generation = (
+        "source_scans.repository_generation" if identities.supports_generation else "NULL"
+    )
+    legacy_generation = legacy_generations.get(scope.target_id)
+    decision_generation = (
+        f"COALESCE({source_generation}, ?)" if legacy_generation is not None else source_generation
+    )
+    decision_values = (
+        (legacy_generation, legacy_generation) if legacy_generation is not None else ()
+    )
     rows = connection.execute(
-        """
+        f"""
         WITH ranked_decisions AS (
-            SELECT findings.id AS finding_id, findings.fingerprint, findings.rule_id,
+            SELECT occurrences.id AS occurrence_id, findings.id AS finding_id, findings.fingerprint, findings.rule_id,
                 findings.identity_anchor, findings.identity_instance, occurrences.title,
                 occurrences.summary, COALESCE(triage.status, 'open') AS triage_status,
                 triage.close_reason, triage.note,
                 COALESCE(triage.updated_at, source_scans.completed_at) AS updated_at,
                 source_scans.id AS source_scan_id,
+                source_scans.target_id,
+                {source_generation} AS repository_generation,
                 source_scans.completed_at AS source_completed_at,
                 locations.relative_path, locations.start_line, locations.end_line, locations.role,
                 ROW_NUMBER() OVER (
-                    PARTITION BY findings.id
+                    PARTITION BY findings.id, {decision_generation},
+                        CASE WHEN {decision_generation} IS NULL THEN source_scans.target_id END
                     ORDER BY
                         julianday(upper(COALESCE(triage.updated_at, source_scans.completed_at))) DESC,
                         julianday(upper(source_scans.completed_at)) DESC,
@@ -48,14 +83,9 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             JOIN scans AS source_scans ON source_scans.id = occurrences.scan_id
             LEFT JOIN finding_triage AS triage ON triage.occurrence_id = occurrences.id
             JOIN finding_locations AS locations ON locations.id = (
-                SELECT candidate.id
-                FROM finding_locations AS candidate
-                WHERE candidate.occurrence_id = occurrences.id
-                ORDER BY CASE WHEN candidate.role = 'root_control' THEN 0 ELSE 1 END,
-                    candidate.sort_order
-                LIMIT 1
+                SELECT id {PRIMARY_FINDING_LOCATION_SQL}
             )
-            WHERE source_scans.target_id = ?
+            WHERE {source_filter}
                 AND source_scans.id != ?
                 AND source_scans.status = 'complete'
         )
@@ -70,10 +100,21 @@ def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict
             julianday(upper(source_completed_at)) DESC,
             source_scan_id DESC, finding_id DESC
         """,
-        (scan["target_id"], scan["id"]),
+        (*decision_values, *source_values, scan["id"]),
     )
     false_positives = []
+    reviewed_components: set[str] = set()
     for row in rows:
+        finding = indexed_findings.get(row["occurrence_id"])
+        if (
+            finding is None
+            or finding["status"] != "closed"
+            or finding["close_reason"] != "false_positive"
+            or finding["occurrence_id"] in reviewed_components
+        ):
+            continue
+        reviewed_components.add(finding["occurrence_id"])
+
         identity = {"anchor": row["identity_anchor"]}
         if row["identity_instance"] is not None:
             identity["instance"] = row["identity_instance"]

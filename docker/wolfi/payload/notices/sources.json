@@ -23,6 +23,10 @@
     "source": "https://raw.githubusercontent.com/scalar/scalar/71c72fbc1c3860ac741812617057141db2033fcd/LICENSE",
     "sha256": "380cd0a6ad700e1f821f2a509f0dd9ff835041cee2d43daf5dedc1adb2bcc620"
   },
+  "SKIA-LICENSE": {
+    "source": "https://raw.githubusercontent.com/google/skia/b94213a11b3a2edadfae89f0c57a7f4ab72772c9/LICENSE",
+    "sha256": "5f787c1dee3c56547f09ccc2906ab5f5293c4d8dd6c8654e573216c38e908dbd"
+  },
   "YOGA-LICENSE": {
     "source": "https://raw.githubusercontent.com/react/yoga/042f5013152eb81c1552dec945b88f7b95ca350f/LICENSE",
     "sha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85"

@@ -4,8 +4,10 @@ import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures(
   "workbench-compressed-usage-",
@@ -40,6 +42,7 @@ async function fixture() {
   const plugin = join(root, "plugin");
   const paths = [
     "scripts/workbench_scan_usage.py",
+    "scripts/snapshot_sqlite.py",
     "scripts/windows_scan_local_files.py",
     "scripts/read_codex_session.mjs",
     "scripts/workbench/__init__.py",

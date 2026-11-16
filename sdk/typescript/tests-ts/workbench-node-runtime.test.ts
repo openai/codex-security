@@ -6,8 +6,10 @@ import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { pythonExecutable } from "./support/python.js";
+import { useTestPython } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+
+const pythonExecutable = useTestPython();
 
 const { temporaryDirectory, cleanup } =
   createApiTestFixtures("workbench-node-");

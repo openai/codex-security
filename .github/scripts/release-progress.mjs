@@ -269,6 +269,22 @@ async function awaitingEnvironment(github, run, environment) {
   );
 }
 
+async function progressBody(github, runs) {
+  const jobs = Object.fromEntries(
+    await Promise.all(
+      Object.entries(runs).map(async ([name, run]) => [
+        name,
+        await runJobs(github, run.id),
+      ]),
+    ),
+  );
+  const [awaitingNpm, awaitingContainer] = await Promise.all([
+    awaitingEnvironment(github, runs["node-release"], "npm"),
+    awaitingEnvironment(github, runs["node-github-release"], "container"),
+  ]);
+  return renderProgress(runs, jobs, awaitingNpm, awaitingContainer);
+}
+
 export async function updateReleaseProgress(
   github,
   runId,
@@ -352,19 +368,7 @@ export async function updateReleaseProgress(
           incoming.id >= last.id)))
   )
     runs[name] = incoming;
-  const jobs = Object.fromEntries(
-    await Promise.all(
-      Object.entries(runs).map(async ([name, run]) => [
-        name,
-        await runJobs(github, run.id),
-      ]),
-    ),
-  );
-  const [awaitingNpm, awaitingContainer] = await Promise.all([
-    awaitingEnvironment(github, runs["node-release"], "npm"),
-    awaitingEnvironment(github, runs["node-github-release"], "container"),
-  ]);
-  const body = renderProgress(runs, jobs, awaitingNpm, awaitingContainer);
+  const body = await progressBody(github, runs);
   if (previous?.body === body)
     return { action: "unchanged", pull: pull.number };
   await github.request(
@@ -383,18 +387,7 @@ export async function watchReleaseProgress(github, runId, wait = setTimeout) {
     const run = await github.request("GET", `actions/runs/${runId}`);
     const name = workflowName(run);
     if (name === "node-ci" || !(await releaseCommit(github, run))) return;
-    const jobs = await runJobs(github, run.id);
-    const awaitingApproval = await awaitingEnvironment(
-      github,
-      run,
-      name === "node-release" ? "npm" : "container",
-    );
-    const current = renderProgress(
-      { [name]: run },
-      { [name]: jobs },
-      name === "node-release" && awaitingApproval,
-      name === "node-github-release" && awaitingApproval,
-    );
+    const current = await progressBody(github, { [name]: run });
     if (current !== previous) {
       await github.request(
         "POST",

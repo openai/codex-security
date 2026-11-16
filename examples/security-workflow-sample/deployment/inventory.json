@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "kind": "synthetic-deployment-inventory",
+  "environment": "sample-production",
+  "services": [
+    {
+      "name": "order-report-api",
+      "source": "app",
+      "revision": "order-report-r1",
+      "deployment": "eks/order-report",
+      "ingress": {
+        "internetExposed": true,
+        "route": "/api/*",
+        "authentication": "bearer-token",
+        "target": "eks/order-report"
+      }
+    },
+    {
+      "name": "billing-api",
+      "source": "deployment/services/billing",
+      "revision": "billing-r1",
+      "deployment": "eks/billing",
+      "ingress": {
+        "internetExposed": false,
+        "route": "/api/balance",
+        "authentication": "bearer-token",
+        "target": "eks/billing"
+      }
+    },
+    {
+      "name": "analytics-worker",
+      "source": "deployment/services/analytics",
+      "revision": "analytics-r1",
+      "deployment": "scheduled/analytics",
+      "ingress": null
+    }
+  ]
+}

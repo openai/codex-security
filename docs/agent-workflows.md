@@ -20,7 +20,7 @@ security context:
 
 The [task map](#choose-a-task) below also gives explicit skill names. Local scans
 do not require the optional Cloud connection. To read existing Cloud findings,
-follow the separate [Cloud setup](../sdk/typescript/README.md#read-existing-cloud-findings).
+follow the separate [Cloud setup](../sdk/typescript/docs/sdk.md#read-existing-cloud-findings).
 
 The terminal package includes the plugin used by its own scans. You can follow
 [the CLI quick start](../README.md#quick-start) without setting up an interactive
@@ -91,7 +91,7 @@ For automation, scan exit codes distinguish these outcomes:
 
 Coverage gaps and investigation notes do not by themselves fail a completed
 scan. See [scan output](../sdk/typescript/docs/cli.md#scan-options-and-output)
-and [SDK results](../sdk/typescript/README.md#read-results) for the saved fields
+and [SDK results](../sdk/typescript/docs/sdk.md#read-results) for the saved fields
 and failure output.
 
 ### Check a revision-range scan for missing files
@@ -161,10 +161,10 @@ cs scans logs SCAN_ID
 ```
 
 Without an ID, `scans show` selects the latest completed scan, while `scans logs`
-selects the latest scan of any status. An interrupted Deep Scan still marked
+selects the latest scan of any status. An interrupted Standard or Deep Scan still marked
 `running` can use `cs scans resume SCAN_ID` with its original checkout, output,
 session, and state directory. Completed, failed, and canceled scans need a new
 attempt with `cs scans rerun SCAN_ID`. A rerun uses the current checkout and may
 need the original custom prompt files supplied again. See
-[resume requirements](../sdk/typescript/docs/cli.md#resuming-an-interrupted-deep-scan)
+[resume requirements](../sdk/typescript/docs/cli.md#resuming-an-interrupted-scan)
 and [runtime troubleshooting](../sdk/typescript/docs/cli.md#troubleshooting).

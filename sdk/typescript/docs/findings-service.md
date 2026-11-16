@@ -44,13 +44,21 @@ select logical findings using their current stored bodies; dedupe does not
 replace newer bodies with old scan artifacts. A local database does not include
 findings stored only in a separate Docker volume or remote service.
 
-A scan or workflow selector is required. `--scan` also accepts a unique ID
-prefix. The scan must have sealed artifacts and a local checkout available.
-Local `latest` lookup matches the exact checkout path without Git. Matching
-across worktrees or clones additionally requires a Git executable outside all
-saved scan targets. If an unrelated historical target includes the available
-Git installation, use `codex-security dedupe --scan SCAN_ID` with an explicit
-saved scan ID instead.
+A scan or workflow selector is required. Use a full scan ID, a unique prefix, or
+`latest` for the current repository. The scan must be complete and its artifacts
+sealed. Reviews that read source also require the local checkout.
+
+Local `latest` verifies the checkout generation and component scope. Non-Git
+targets match by exact path. Git history, including matches across worktrees or
+clones, requires a Git executable outside all saved checkout directories. For a
+legacy Git target without a recorded checkout directory, set `CODEX_SECURITY_GIT`
+to an absolute, trusted Git executable. If a saved checkout contains the
+available Git installation, select the scan by its explicit ID.
+
+For older history, use an absolute `PYTHON` path when selecting system Python.
+If Bun cannot locate a trusted Node.js helper, run local deduplication with
+Node.js.
+
 By default, candidates come from its manifest's `scan.target.targetId`. Use
 `--all-repositories` to search the whole selected database or service.
 
@@ -132,6 +140,7 @@ The CLI and SDK return the same result:
 {
   "scanId": "scan_example_001",
   "uniqueFindingIds": ["csf_852f90d6e1177502ff113d4a"],
+  "scanRepresentativeFindingIds": ["csf_852f90d6e1177502ff113d4a"],
   "duplicateGroups": [],
   "deduplicationStatus": "completed"
 }
@@ -140,8 +149,12 @@ The CLI and SDK return the same result:
 `uniqueFindingIds` contains one representative for each selected finding after
 accepted groups are collapsed. A representative can come from outside the scan.
 Each group lists its canonical finding first: highest reported severity, then
-finding ID to break ties. Group associations are saved before returning success;
-the original findings and scan artifacts remain unchanged.
+finding ID to break ties. `scanRepresentativeFindingIds` gives the highest-ranked
+member from the selected scan for each canonical ID in the same order, including
+ungrouped findings. Pass these IDs to severity classification or Linear publication
+for that scan. The SDK also returns them when resuming older saved workflows.
+Dedupe saves the group associations separately from the original findings and
+scan artifacts before returning success.
 
 If a model refuses a review, the result uses `completed_with_refusals` and adds
 `refusals`. Each entry contains `decision: "NO_DECISION"`, `stage`, `model`,
@@ -357,6 +370,8 @@ results, and these callbacks add no network destination or separate files.
 ## Compatible endpoint contract
 
 The HTTP client appends these paths to the configured base URL, preserving any base path.
+It follows redirects within that origin (scheme, host, and port). If the service
+moves to another origin, set `--findings-url` to its new base URL.
 
 | Method | Path                                    | Response                                                                 |
 | ------ | --------------------------------------- | ------------------------------------------------------------------------ |

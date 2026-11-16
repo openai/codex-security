@@ -337,6 +337,36 @@ describe("Codex configuration", () => {
     );
   });
 
+  test("uses the sign-in settings from the user's Codex config below explicit overrides", async () => {
+    const home = await temporaryDirectory();
+    expect(
+      (await mergedCodexConfig({}, home))["cli_auth_credentials_store"],
+    ).toBe("auto");
+    await writeFile(
+      join(home, "config.toml"),
+      [
+        'cli_auth_credentials_store = "file"',
+        'forced_login_method = "chatgpt"',
+        'model = "ambient-model"',
+      ].join("\n"),
+    );
+
+    const config = await mergedCodexConfig({}, home);
+    expect(config).toMatchObject({
+      cli_auth_credentials_store: "file",
+      forced_login_method: "chatgpt",
+    });
+    expect(config["model"]).toBe(DEFAULT_CODEX_CONFIG["model"]);
+    expect(
+      (
+        await mergedCodexConfig(
+          { codexOverrides: { cli_auth_credentials_store: "keyring" } },
+          home,
+        )
+      )["cli_auth_credentials_store"],
+    ).toBe("keyring");
+  });
+
   test("resolves selected profile model and effort before root settings", async () => {
     const scenarios = [
       {
@@ -411,7 +441,7 @@ describe("Codex configuration", () => {
       "sqlite_home",
       "log_dir",
     ].flatMap((key) =>
-      [undefined, "explicit.md"].map((explicit) => ({ key, explicit })),
+      [undefined, "explicit.md", null].map((explicit) => ({ key, explicit })),
     ),
   )(
     "resolves file-profile paths before explicit overrides: %j",
@@ -429,7 +459,14 @@ describe("Codex configuration", () => {
         { codexOverrides: overrides },
         home,
       );
-      expect(config[key]).toBe(explicit ?? join(home, "instructions.md"));
+      const expected =
+        explicit === undefined ? join(home, "instructions.md") : explicit;
+      expect(config[key]).toBe(expected);
+      const path = join(home, "worker.toml");
+      await writeCodexConfig(path, resolveCodexProfile(config));
+      expect(parse(await readFile(path, "utf8"))[key]).toBe(
+        expected ?? undefined,
+      );
       expect(overrides).toEqual({
         profile: "review",
         ...(explicit === undefined ? {} : { [key]: explicit }),

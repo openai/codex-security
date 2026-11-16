@@ -71,7 +71,7 @@ opens the repository alert. Severity comes from the matched package vulnerabilit
 which can differ from the advisory’s overall severity. The native alert retains
 GitHub’s state and timestamps. The reader requires
 repository-relative manifest paths and rejects conflicting alert identities,
-packages or ranges.
+packages or ranges. For `pip`, it matches [Python distribution names](https://packaging.python.org/en/latest/specifications/name-normalization/) across the three records and retains GitHub’s reported spellings.
 
 Use the saved alert and checkout to check the installed version and trace
 whether the vulnerable code is used. An alert alone supplies no affected line

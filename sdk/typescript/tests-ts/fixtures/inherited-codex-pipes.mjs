@@ -1,5 +1,11 @@
 import { spawn } from "node:child_process";
-import { existsSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readSync,
+  renameSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -45,12 +51,10 @@ if (role === "holder") {
       await new Promise(() => {});
     }
     if (mode === "archive-committed") {
-      const lines = createInterface({ input: process.stdin });
-      let receivedInput = false;
-      for await (const _line of lines) {
-        if (receivedInput) break;
-        receivedInput = true;
-        process.stdout.write("codex-security-archive-ready\n");
+      writeSync(3, Buffer.from("?"));
+      const answer = Buffer.alloc(1);
+      if (readSync(3, answer) !== 1 || answer.toString() !== "!") {
+        throw new Error("Registration was not acknowledged");
       }
       await new Promise((resolve) =>
         process.stdout.write("committed\n", resolve),

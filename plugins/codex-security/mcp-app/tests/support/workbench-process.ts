@@ -11,7 +11,7 @@ export async function loadWorkbenchProcess(
   const file = path.join(applicationRoot, "src", "workbench-client.ts");
   return importModule({
     stdin: {
-      contents: `${transform(await readFile(file, "utf8"))}\nexport { executeWorkbench };`,
+      contents: `${transform(await readFile(file, "utf8"))}\nexport { executeWorkbench, workbenchTimeout };`,
       loader: "ts",
       resolveDir: path.dirname(file),
     },

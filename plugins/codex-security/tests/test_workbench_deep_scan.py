@@ -26,6 +26,7 @@ from workbench_test_support import (
     finish_deep_scan,
     get_deep_scan,
     get_scan,
+    load_script,
     mark_deep_coordinator_succeeded,
     read_fixture_deep_scan,
     read_review_state,
@@ -78,8 +79,6 @@ def begin_target_scan(
         ".",
         "--scan-root",
         str(scan_root),
-        "--available-parallelism",
-        "16",
         *(("--user-context-stdin",) if user_context is not None else ()),
         *(("--service-tier", service_tier) if service_tier is not None else ()),
         environment=deep_environment(codex_home),
@@ -135,10 +134,30 @@ def restore_v53_schema(state_dir: Path) -> None:
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN worker_usage_gap")
         connection.execute("DROP TRIGGER classify_legacy_scan_recipe")
         connection.execute("DROP VIEW scan_lifecycles")
+        connection.execute("ALTER TABLE scans DROP COLUMN windows_resume_target_identity")
+        connection.execute("ALTER TABLE scans DROP COLUMN windows_resume_output_identity")
+        connection.execute("ALTER TABLE scans DROP COLUMN log_completed_at")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_kind")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_plugin_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_package_version")
         connection.execute("ALTER TABLE scans DROP COLUMN launch_surface")
+        connection.executescript("""
+            DROP TABLE external_finding_publications;
+            DROP TABLE external_finding_import_members;
+            DROP TABLE external_finding_imports;
+            DROP TRIGGER scans_assign_inserted_completion_sequence;
+            DROP TRIGGER scans_assign_updated_completion_sequence;
+            DROP INDEX scans_completion_sequence;
+            DROP INDEX scans_by_target_path;
+            DROP INDEX scans_by_repository_generation;
+            DROP INDEX security_targets_by_repository_identity;
+            ALTER TABLE scans DROP COLUMN completion_sequence;
+            ALTER TABLE scans DROP COLUMN repository_generation;
+            ALTER TABLE security_targets DROP COLUMN repository_identity;
+            ALTER TABLE security_targets DROP COLUMN git_checkout_root;
+            ALTER TABLE workspaces DROP COLUMN rejected_checkout_roots_json;
+            ALTER TABLE workspaces DROP COLUMN target_path_unvalidated;
+        """)
         connection.execute(
             "ALTER TABLE scan_severity_classifications DROP COLUMN rubric_binding_json"
         )
@@ -475,6 +494,7 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         schema_version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+        assert schema_version == (load_script("workbench_schema").MIGRATIONS[-1][0],)
     assert claim()["deepScan"]["coordinatorGeneration"] == 2
     assert claim()["coordinatorDisposition"] == "observing"
     expire_deep_scan_coordinator(state_dir, scan_id)
@@ -1185,8 +1205,6 @@ def test_deep_scan_prefers_explicit_config_path(tmp_path: Path) -> None:
         ".",
         "--scan-root",
         str(tmp_path / "scans"),
-        "--available-parallelism",
-        "16",
         environment={
             **deep_environment(codex_home),
             "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH": str(isolated_config_path),
@@ -1314,11 +1332,28 @@ def test_sdk_scan_begin_claims_its_existing_scan(tmp_path: Path) -> None:
     )
     assert "orchestration must finish and persist its manifest" in str(premature["stderr"])
 
+    def model_begin(thread: str) -> dict[str, object]:
+        return begin_deep_scan(
+            state_dir,
+            thread,
+            "--scan-id",
+            scan_id,
+            "--model-thread-id",
+            thread,
+            environment=deep_environment(codex_home),
+            check=False,
+        )
+
+    assert "awaiting its owning Codex thread" in str(model_begin("other-thread")["stderr"])
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "sdk-thread")
+    assert "owning Codex thread" in str(model_begin("other-thread")["stderr"])
     begun = begin_deep_scan(
         state_dir,
         "sdk-thread",
         "--scan-id",
         scan_id,
+        "--model-thread-id",
+        "sdk-thread",
         "--service-tier",
         "priority",
         environment=deep_environment(codex_home),
@@ -1567,8 +1602,6 @@ def assert_rejected_config(tmp_path: Path, setting: str, value: str, requirement
         "thread-deep-scan",
         "--target-path",
         str(target),
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
         check=False,
     )
@@ -2025,8 +2058,6 @@ def test_app_scan_begin_validates_mode_and_owner(tmp_path: Path) -> None:
         scan_id,
         "--claim-token",
         claim_token,
-        "--available-parallelism",
-        "8",
         environment=deep_environment(codex_home),
     )
     assert begun["startDisposition"] == "created"
@@ -3150,6 +3181,7 @@ def test_saturated_run_without_manifest_can_be_marked_failed_or_interrupted(
     assert scan["progress"]["status"] == "failed"
     assert scan["progress"]["independentReviews"]["consolidating"] is False
     assert scan["failureMessage"] == terminal["error"]
+    assert scan["logCompletedAt"] == terminal["completedAt"]
 
 
 def test_succeeded_run_with_manifest_cannot_be_marked_interrupted(tmp_path: Path) -> None:

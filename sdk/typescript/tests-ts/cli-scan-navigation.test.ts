@@ -2,6 +2,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { main } from "../src/cli.js";
+import { ScanResult } from "../src/result.js";
 import type { JsonObject } from "../src/config.js";
 import { dependencies, fakeResult } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -58,20 +59,26 @@ describe("scan navigation", () => {
           environment: { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: root },
           onWorkbench: (args): JsonObject => {
             calls.push([...args]);
-            if (args[0] === "list-scans")
+            if (args[0] === "list-scans") {
+              if (!args.includes("--prefer-worktree"))
+                return { scans: [{ scanId: "newer-sibling-scan" }] };
               return {
                 scans: args.includes("complete")
                   ? [completed]
                   : [latest, completed],
               };
+            }
             return {
               scan: completedId.startsWith(args[2]!) ? completed : latest,
             };
           },
         });
         for (const interactive of [false, true]) {
+          const selection = interactive ? ["latest"] : [];
           const show = createCliTest(main, { stdout: interactive });
-          expect(await show.runCli(["scans", "show"], deps)).toBe(0);
+          expect(await show.runCli(["scans", "show", ...selection], deps)).toBe(
+            0,
+          );
           expect(show.stderr.text()).toContain(
             `Scan ${completedId} · complete`,
           );
@@ -81,11 +88,13 @@ describe("scan navigation", () => {
           expect(show.stderr.text()).toContain(
             `updated ${completed.updatedAt}`,
           );
-          expect(show.stderr.text()).toContain(`scans logs ${completedId}`);
+          expect(show.stderr.text()).not.toContain(`scans logs ${completedId}`);
           expect(show.stderr.text()).not.toContain(latestId);
 
           const logs = createCliTest(main, { stdout: interactive });
-          expect(await logs.runCli(["scans", "logs"], deps)).toBe(0);
+          expect(await logs.runCli(["scans", "logs", ...selection], deps)).toBe(
+            0,
+          );
           expect(logs.stderr.text()).toContain(`Scan ${latestId} · ${status}`);
           expect(logs.stderr.text()).toContain(
             "including failed and active runs",
@@ -129,7 +138,7 @@ describe("scan navigation", () => {
   });
 
   test("completion navigation uses the complete scan ID without changing JSON", async () => {
-    const result = fakeResult(["high"]);
+    const result = new ScanResult({ ...fakeResult(["high"]), threadId: "" });
     result.manifest.scan.id = completedId;
     const cli = createCliTest(main);
     expect(await cli.runCli(["scan", "--json"], dependencies({ result }))).toBe(
@@ -143,6 +152,19 @@ describe("scan navigation", () => {
     expect(cli.stderr.text()).toContain(`scans show ${completedId}`);
     expect(cli.stderr.text()).toContain(`scans logs ${completedId}`);
     expect(cli.stderr.text()).toContain(result.scanDir);
+  });
+
+  test("mock scan completion points to its saved result without offering session logs", async () => {
+    const result = new ScanResult({ ...fakeResult(), threadId: "" });
+    result.manifest.scan.scope.runtimeStatus = "mock";
+    const cli = createCliTest(main);
+    expect(await cli.runCli(["scan", "--mock"], dependencies({ result }))).toBe(
+      0,
+    );
+    expect(cli.stderr.text()).toContain(
+      `scans show ${result.manifest.scan.id}`,
+    );
+    expect(cli.stderr.text()).not.toContain("scans logs");
   });
 
   test.each([false, true])(

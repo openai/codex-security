@@ -208,14 +208,14 @@ export function readSeverityClassification(
   try {
     database.exec("PRAGMA busy_timeout = 5000");
     return transaction(database, "BEGIN", () => {
-      if (
-        !database
-          .prepare(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_classifications'",
-          )
-          .get()
-      )
-        return {};
+      const tables = database
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'table'
+           AND name IN ('scan_severity_classifications', 'scan_severity_assessments')`,
+        )
+        .all()
+        .map((row) => row.name);
+      if (!tables.includes("scan_severity_classifications")) return {};
       const columns = database
         .prepare("PRAGMA table_info(scan_severity_classifications)")
         .all()
@@ -234,18 +234,13 @@ export function readSeverityClassification(
       const classification = parseJson(String(row.value)) as {
         findingIds: string[];
       };
-      const hasScanAssessments = database
-        .prepare(
-          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_assessments'",
-        )
-        .get();
       return {
         scanId,
         ...classification,
         assessments: assessments(
           database,
           classification.findingIds,
-          hasScanAssessments ? scanId : undefined,
+          tables.includes("scan_severity_assessments") ? scanId : undefined,
         ),
       };
     });

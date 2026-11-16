@@ -11,8 +11,8 @@ async function launch() {
     throw new Error("Cannot resolve CLI entrypoint.");
   }
   const cli = join(dirname(realpathSync(entrypoint)), "..", "dist", "cli.js");
-  const { main } = await import(pathToFileURL(cli).href);
-  return await main();
+  const { runCli } = await import(pathToFileURL(cli).href);
+  return await runCli();
 }
 
 void launch().then(

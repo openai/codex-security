@@ -186,6 +186,45 @@ describe("scan import", () => {
     },
   );
 
+  test.each([
+    [["report.CSV"], "csv"],
+    [["report.JSON"], "json"],
+    [["report", "--input-format=json"], "json"],
+    [["report.json", "--input-format", "csv"], "csv"],
+    [["--json", "report"], "json"],
+    [["--csv=--report.csv"], "csv"],
+  ] as const)(
+    "selects the input format for %j and emits JSON",
+    async (args, format) => {
+      const { deps, calls } = importDependencies();
+      const { stdout, runCli } = createCliTest(main);
+      expect(
+        await runCli(["scan", "import", ...args, "--dry-run", "--json"], deps),
+      ).toBe(0);
+      expect(calls[0]?.format).toBe(format);
+      expect(JSON.parse(stdout.text())).toMatchObject({ dryRun: true, format });
+    },
+  );
+
+  test.each([
+    { input: ["--", "--findings.json"], file: "--findings.json" },
+    { input: ["--json", "findings"], file: "findings" },
+  ])(
+    "keeps JSON output before the import verb with $input",
+    async ({ input, file }) => {
+      const { deps, calls } = importDependencies();
+      const { stdout, runCli } = createCliTest(main);
+      expect(
+        await runCli(["scan", "--json", "import", "--dry-run", ...input], deps),
+      ).toBe(0);
+      expect(calls[0]).toMatchObject({
+        sourcePath: resolve("workspace", file),
+        format: "json",
+      });
+      expect(JSON.parse(stdout.text())).toMatchObject({ dryRun: true });
+    },
+  );
+
   test("accepts equals input syntax and validates without saving", async () => {
     const { deps, calls } = importDependencies();
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -224,10 +263,18 @@ describe("scan import", () => {
   });
 
   test.each([
-    [[], "exactly one"],
-    [["--csv", "findings.csv", "--json", "findings.json"], "exactly one"],
-    [["--json"], "Missing value for flag: --json"],
-    [["--json", "--dry-run"], "Missing value for flag: --json"],
+    [[], "file"],
+    [
+      ["--csv", "findings.csv", "--json", "findings.json"],
+      "Conflicting values for --input-format",
+    ],
+    [["--json"], "file"],
+    [["--json", "--dry-run"], "file"],
+    [["report"], "Use --input-format"],
+    [
+      ["--csv", "report", "--input-format", "json"],
+      "Conflicting values for --input-format",
+    ],
     [["--csv"], "Missing value for flag: --csv"],
     [["--json="], "--json must not be empty"],
     [
@@ -246,41 +293,44 @@ describe("scan import", () => {
     expect(stderr.text()).toContain(message);
   });
 
-  test("exposes both source flags in help and schemas", async () => {
+  test("exposes a positional file, an input format, and a separate JSON output option", async () => {
     const { deps, calls } = importDependencies();
     const help = captureCli(main, "stdout");
     expect(await help.run(["scan", "import", "--help"], deps)).toBe(0);
-    expect(help.text()).toContain("--csv <file>");
-    expect(help.text()).toContain("--json <file>");
+    expect(help.text()).toContain("FILE [options]");
+    expect(help.text()).toContain("--input-format");
     expect(help.text()).toContain("--format json");
     const schema = captureCli(main, "stdout");
     expect(
-      await schema.run(
-        ["scan", "import", "--schema", "--format", "json"],
-        deps,
-      ),
+      await schema.run(["scan", "import", "--schema", "--json"], deps),
     ).toBe(0);
     expect(JSON.parse(schema.text())).toMatchObject({
-      options: {
-        properties: { csv: { type: "string" }, json: { type: "string" } },
-      },
+      args: { required: ["file"] },
+      options: { properties: { inputFormat: { enum: ["csv", "json"] } } },
     });
     expect(calls).toHaveLength(0);
   });
 
-  test("ordinary scan retains repository arguments and the --json output shortcut", async () => {
-    const { stdout, runCli } = createCliTest(main);
+  test.each([
+    ["./import", "--json"],
+    ["imports", "--json"],
+    ["--json", "./import"],
+  ])(
+    "ordinary scan retains repository arguments and the JSON output shortcut (%s, %s)",
+    async (first, second) => {
+      const { stdout, runCli } = createCliTest(main);
 
-    const onRun = mock();
-    const deps = dependencies({
-      onRun,
-    });
-    expect(await runCli(["scan", "./import", "--json"], deps)).toBe(0);
-    expect(onRun).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(stdout.text())).toMatchObject({
-      manifest: { scan: { id: "scan" } },
-    });
-  });
+      const onRun = mock();
+      const deps = dependencies({
+        onRun,
+      });
+      expect(await runCli(["scan", first, second], deps)).toBe(0);
+      expect(onRun).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        manifest: { scan: { id: "scan" } },
+      });
+    },
+  );
 
   test("preserves the global JSON shortcut before the scan command", async () => {
     const { deps, calls } = importDependencies();

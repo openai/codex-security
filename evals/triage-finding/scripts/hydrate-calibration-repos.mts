@@ -96,7 +96,10 @@ function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
     return "already current";
   }
 
-  runGit(["fetch", "--depth", "1", "origin", job.checkoutRef], job.targetDir);
+  runGit(
+    ["fetch", "--depth", "1", "--", "origin", `${job.checkoutRef}:`],
+    job.targetDir,
+  );
   runGit(["checkout", "--detach", "FETCH_HEAD"], job.targetDir);
   return "hydrated";
 }

@@ -1,6 +1,7 @@
 import { nodeCommand, gitText } from "./support/shell.js";
 import { execFileSync } from "node:child_process";
 import {
+  chmod,
   cp,
   mkdir,
   readFile,
@@ -397,6 +398,63 @@ describe("security policy generation", () => {
     expect(inventory.policyPaths).toEqual(["objects/SECURITY.md"]);
     expect(inventory.gitMetadataPaths).toEqual([]);
   });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "inventories policies when an unrelated leaf directory only permits listing",
+    async () => {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const leaf = join(f.repository, "data");
+      await mkdir(leaf);
+      await writeFile(join(leaf, "sample.txt"), "fixture\n");
+      await writeFile(join(f.repository, "SECURITY.md"), POLICY);
+      const target = await resolveSecurityPolicyTarget(f.repository);
+      try {
+        await chmod(leaf, 0o400);
+        expect(
+          (await inspectSecurityPolicySources(target)).policyPaths,
+        ).toEqual(["SECURITY.md"]);
+        await chmod(leaf, 0o700);
+        await writeFile(join(leaf, "SECURITY.md"), POLICY);
+        await chmod(leaf, 0o400);
+        await expect(
+          inspectSecurityPolicySources(target),
+        ).rejects.toMatchObject({
+          code: "EACCES",
+        });
+      } finally {
+        await chmod(leaf, 0o700);
+      }
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "keeps a tracked policy distinct from an ignored non-UTF-8 filename",
+    async () => {
+      const f = await fixture();
+      policyGit(f.repository, "init", "--quiet");
+      const directory = "dependency-\uFFFD";
+      const policy = `${directory}/SECURITY.md`;
+      await mkdir(join(f.repository, directory));
+      await writeFile(join(f.repository, policy), POLICY);
+      policyGit(f.repository, "add", "--", policy);
+      await writeFile(join(f.repository, ".gitignore"), "dependency-*\n");
+
+      const ignored = Buffer.concat([
+        Buffer.from(join(f.repository, "dependency-")),
+        Buffer.from([0xff]),
+      ]);
+      await writeFile(ignored, "ignored file\n");
+      try {
+        const inventory = await inspectSecurityPolicySources(
+          await resolveSecurityPolicyTarget(f.repository),
+        );
+        expect(inventory.policyPaths).toEqual([policy]);
+      } finally {
+        await rm(ignored);
+      }
+    },
+  );
 
   test("leaves Git-ignored dependencies out of the policy inventory", async () => {
     const f = await fixture();

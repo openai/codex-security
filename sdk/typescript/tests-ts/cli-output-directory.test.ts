@@ -1,8 +1,14 @@
 import { chmod, mkdir, stat, symlink, writeFile } from "node:fs/promises";
+import * as fsPromises from "node:fs/promises";
+import * as moduleApi from "node:module";
 import { join } from "node:path";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { main } from "../src/cli.js";
-import { validateOutputDir } from "../src/runtime.js";
+import {
+  bundledPluginRoot,
+  createWindowsOutputDirectory,
+  validateOutputDir,
+} from "../src/runtime.js";
 import { dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -40,7 +46,122 @@ async function scanFixture() {
   return { root, output, started, deps };
 }
 
+async function mockWindowsOutputBinding(load: () => unknown) {
+  const binding = join(
+    await bundledPluginRoot(),
+    "mcp",
+    "native",
+    `win32-${process.arch}`,
+    "windows.node",
+  );
+  const createRequire = moduleApi.createRequire;
+  return spyOn(moduleApi, "createRequire").mockImplementation((from) => {
+    const require = createRequire(from);
+    return Object.assign(
+      (id: string) => (id === binding ? load() : require(id)),
+      require,
+    );
+  });
+}
+
 describe("CLI output directory permissions", () => {
+  test.skipIf(process.platform !== "win32").each([
+    [
+      "Node policy block",
+      "An Application Control policy has blocked this file.\r\nC:\\synthetic-install\\windows.node",
+      true,
+    ],
+    [
+      "Bun policy block",
+      "LoadLibrary failed: An Application Control policy has blocked this file.",
+      true,
+    ],
+    [
+      "another load failure",
+      "Invalid image in C:\\An Application Control policy has blocked this file.\\windows.node",
+      false,
+    ],
+  ] as const)(
+    "identifies a Windows module load failure (%s)",
+    async (_label, detail, blocked) => {
+      const { output, started, deps } = await scanFixture();
+      const cause = Object.assign(new Error(detail), {
+        code: "ERR_DLOPEN_FAILED",
+      });
+      using _loader = await mockWindowsOutputBinding(() => {
+        throw cause;
+      });
+      const { runCli, stdout } = createCliTest(main);
+      expect(
+        await runCli(["scan", ".", "--json", "--output-dir", output], deps),
+      ).toBe(2);
+      const message = blocked
+        ? "Windows Application Control blocked the bundled Codex Security filesystem module (windows.node). Check the CodeIntegrity Operational log in Event Viewer."
+        : "Could not load the bundled Codex Security filesystem module (windows.node) on Windows.";
+      expect(JSON.parse(stdout.text())).toEqual({
+        status: "failed",
+        code: "SCAN_FAILED",
+        message,
+      });
+      await mkdir(output);
+      await expect(validateOutputDir(output)).rejects.toMatchObject({
+        message,
+        cause,
+      });
+      await expect(createWindowsOutputDirectory(output, false)).rejects.toBe(
+        cause,
+      );
+      expect(started).not.toHaveBeenCalled();
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "preserves the Windows output ACL error after loading the module",
+    async () => {
+      const { output } = await scanFixture();
+      using _loader = await mockWindowsOutputBinding(() => ({
+        validateWindowsOutputPath: () => 5,
+      }));
+      await expect(validateOutputDir(output)).rejects.toThrow(
+        "could not be trusted (Windows error 5)",
+      );
+    },
+  );
+
+  test.skipIf(process.platform !== "win32")(
+    "preserves other output inspection failures",
+    async () => {
+      const { output } = await scanFixture();
+      const cause = Object.assign(
+        new Error("An Application Control policy has blocked this file."),
+        { code: "EACCES" },
+      );
+      const load = mock(() => {
+        throw cause;
+      });
+      using _loader = await mockWindowsOutputBinding(load);
+      await expect(validateOutputDir(output)).rejects.toMatchObject({
+        message: `Unable to inspect scan output directory: ${output}`,
+        cause,
+      });
+      const unrelated = Object.assign(new Error("Other module"), {
+        code: "ERR_DLOPEN_FAILED",
+      });
+      using _lstat = spyOn(fsPromises, "lstat").mockRejectedValueOnce(
+        unrelated,
+      );
+      await expect(validateOutputDir(output)).rejects.toMatchObject({
+        message: `Unable to inspect scan output directory: ${output}`,
+        cause: unrelated,
+      });
+      await writeFile(output, "existing file");
+      await expect(validateOutputDir(output)).rejects.toThrow(
+        `Scan output is not a directory: ${output}`,
+      );
+      expect(load).toHaveBeenCalledTimes(1);
+    },
+  );
+
   test.skipIf(process.platform === "win32").each([
     ["standard", [], 0o755],
     ["deep", [], 0o775],
