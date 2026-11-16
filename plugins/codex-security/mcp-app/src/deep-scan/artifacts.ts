@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { publishArtifact } from "../artifact-io.js";
 import { errorMessage } from "./errors.js";
 export type DeepScanArtifacts = ReturnType<typeof createDeepScanArtifacts>;
 
@@ -46,11 +47,16 @@ export async function writeJsonAtomic(
 ): Promise<void> {
   await fs.mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
-  await fs.writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await fs.rename(temporaryPath, path);
+  try {
+    await fs.writeFile(temporaryPath, `${JSON.stringify(payload, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await publishArtifact(temporaryPath, path);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true });
+    throw error;
+  }
 }
 
 export async function readJsonObject(

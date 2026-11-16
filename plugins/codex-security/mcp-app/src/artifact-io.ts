@@ -233,7 +233,7 @@ export async function artifactDestination(
 
 const WINDOWS_RENAME_RETRY_MS = [10, 25, 50, 100, 200, 400];
 
-async function publishArtifact(
+export async function publishArtifact(
   temporary: string,
   destination: string,
 ): Promise<void> {
