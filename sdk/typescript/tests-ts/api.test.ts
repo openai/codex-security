@@ -14455,13 +14455,27 @@ if __name__ == "__main__":
       "OPENAI_API_KEY",
       undefined,
     ],
+    [
+      "post-scan inference needs a declared Azure header",
+      "AZURE_OPENAI_API_KEY",
+      undefined,
+    ],
+    [
+      "Azure command auth needs a declared OpenAI header for post-scan inference",
+      "azure-command",
+      undefined,
+    ],
     ["relative model files preserve scan origin", "model-files", undefined],
   ] as const)(
     "keeps a completed scan when %s",
     async (_scenario, variant, warning) => {
+      const azureCommand = variant === "azure-command";
+      const header = azureCommand ? "OPENAI_API_KEY" : variant;
       const nativeHeader =
-        variant === "OPENAI_API_KEY" || variant === "CODEX_API_KEY"
-          ? variant
+        header === "OPENAI_API_KEY" ||
+        header === "CODEX_API_KEY" ||
+        header === "AZURE_OPENAI_API_KEY"
+          ? header
           : undefined;
       const failure = nativeHeader ? "managed" : variant;
       const gatewayEnvironment: Record<string, string> = nativeHeader
@@ -14521,21 +14535,24 @@ if __name__ == "__main__":
         if (failure === "model-files")
           await writeFile(join(root, name!), contents!);
       }
+      const providerId = azureCommand ? "azure" : "synthetic.provider";
       const providerConfig = {
         ...modelFiles,
         features: { shell_tool: false, unified_exec: false, view_image: false },
         windows: { sandbox: "unelevated" },
-        model_provider: "synthetic.provider",
+        model_provider: providerId,
         model_providers: {
-          "synthetic.provider": {
+          [providerId]: {
             name: "Synthetic provider",
-            base_url: "https://provider.example.test/v1",
+            base_url: azureCommand
+              ? "https://provider.example.test/openai/v1"
+              : "https://provider.example.test/v1",
             wire_api: "responses",
             env_http_headers: {
               "X-Synthetic-Context": "SYNTHETIC_MATCH_HEADER",
               ...(nativeHeader ? { "X-Gateway-Header": nativeHeader } : {}),
             },
-            ...(nativeHeader
+            ...(nativeHeader && !azureCommand
               ? { env_key: "GATEWAY_TOKEN" }
               : { auth: { command: "synthetic-auth" } }),
           },
@@ -14565,6 +14582,8 @@ if __name__ == "__main__":
           if (${Boolean(nativeHeader)}) {
             call.credentials = {
               GATEWAY_TOKEN: process.env.GATEWAY_TOKEN,
+              AZURE_OPENAI_API_KEY: process.env.AZURE_OPENAI_API_KEY,
+              ...(${azureCommand} ? { comparisonHeader: process.env.SYNTHETIC_MATCH_HEADER } : {}),
               OPENAI_API_KEY: process.env.OPENAI_API_KEY,
               CODEX_API_KEY: process.env.CODEX_API_KEY,
             };
@@ -14597,7 +14616,7 @@ if __name__ == "__main__":
             const request = JSON.parse(line);
             if (request.id === undefined) continue;
             const result = request.method === "config/read"
-              ? { config: { ...config, model_provider: ${JSON.stringify(nativeHeader ? "synthetic.provider" : "synthetic.managed")} } }
+              ? { config: { ...config, model_provider: ${JSON.stringify(nativeHeader ? providerId : "synthetic.managed")} } }
               : request.method === "permissionProfile/list"
                 ? { data: [{ id: config.default_permissions, allowed: true }], nextCursor: null }
                 : {};
@@ -14732,7 +14751,7 @@ if __name__ == "__main__":
                 codex_security_integration: "github_action",
                 codex_security_command: "scan",
                 codex_security_scan_mode: "standard",
-                codex_security_provider: "custom",
+                codex_security_provider: azureCommand ? "azure" : "custom",
               },
             });
             if (failure !== "managed")
@@ -14973,7 +14992,7 @@ if __name__ == "__main__":
             ownerSpy ? [...startup, ...startup] : startup,
           );
           const metadata = {
-            "synthetic.provider": {
+            [providerId]: {
               name: "Synthetic provider",
               wire_api: "responses",
             },
@@ -14988,10 +15007,17 @@ if __name__ == "__main__":
               if (call.kind === "exec") {
                 expect(call.credentials).toEqual({
                   GATEWAY_TOKEN: "synthetic-gateway-primary",
+                  ...(azureCommand
+                    ? { comparisonHeader: "synthetic-comparison-header" }
+                    : {}),
                   [nativeHeader]: " synthetic-required-header ",
                 });
               } else {
+                expect(call.credentials).not.toHaveProperty("comparisonHeader");
                 expect(call.credentials).not.toHaveProperty("OPENAI_API_KEY");
+                expect(call.credentials, call.kind).not.toHaveProperty(
+                  "AZURE_OPENAI_API_KEY",
+                );
                 expect(call.credentials).not.toHaveProperty("CODEX_API_KEY");
               }
             }
@@ -14999,7 +15025,7 @@ if __name__ == "__main__":
           expect(calls[0].metadata).toEqual(metadata);
           expect(calls[1].metadata).toEqual(metadata);
           expect(calls[2]).toMatchObject({
-            providers: ["synthetic.provider", "synthetic.managed"],
+            providers: [providerId, "synthetic.managed"],
             privateSecretLoaded: true,
             permissions: {
               filesystem: { [codexHome]: { ".": "deny" } },

@@ -6092,6 +6092,7 @@ describe("runtime directories and plugin Python boundary", () => {
           "assert os.environ.get('OPENROUTER_API_KEY') is None",
           "assert os.environ.get('FIREWORKS_API_KEY') is None",
           "assert os.environ.get('HF_TOKEN') is None",
+          "assert os.environ.get('AZURE_OPENAI_API_KEY') is None",
           'payload = sys.stdin.buffer.read().decode("utf-8")',
           String.raw`assert payload == "\n\0" + "出力" * (32 * 1024)`,
           "print(json.dumps({'ok': True, 'label': '出力', 'inputLength': len(payload), 'details': 'x' * (5 * 1024 * 1024)}, ensure_ascii=False))",
@@ -6109,6 +6110,7 @@ describe("runtime directories and plugin Python boundary", () => {
             OPENROUTER_API_KEY: "openrouter-must-not-reach-python",
             FIREWORKS_API_KEY: "fireworks-must-not-reach-python",
             HF_TOKEN: "huggingface-must-not-reach-python",
+            AZURE_OPENAI_API_KEY: "azure-must-not-reach-python",
           },
         },
         args,
@@ -7411,14 +7413,18 @@ describe("runtime directories and plugin Python boundary", () => {
     const configured = join(root, "configured-python");
     await writeFile(
       configured,
-      '#!/bin/sh\n[ "$1" = "-I" ] || exit 1\n[ "$2" = "-c" ] || exit 1\ncase "$3" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$3" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
+      '#!/bin/sh\n[ -z "$AZURE_OPENAI_API_KEY" ] || exit 1\n[ "$1" = "-I" ] || exit 1\n[ "$2" = "-c" ] || exit 1\ncase "$3" in *"raise SystemExit(1)"*) ;; *) exit 1 ;; esac\ncase "$3" in *assert*) exit 1 ;; esac\nprintf "codex-security-python-ok\\n"\n',
     );
     await chmod(configured, 0o700);
     const canonicalConfigured = await realpath(configured);
     expect(
       await resolvePluginPython({
         configuredPath: relative(process.cwd(), configured),
-        environment: { PATH: "", PYTHONOPTIMIZE: "1" },
+        environment: {
+          PATH: "",
+          PYTHONOPTIMIZE: "1",
+          AZURE_OPENAI_API_KEY: "fixture-azure-key",
+        },
       }),
     ).toBe(canonicalConfigured);
     expect(

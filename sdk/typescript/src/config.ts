@@ -1,10 +1,12 @@
 import type { ScanPricingContext } from "./cost-model.js";
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { isIP } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
 import { ConfigurationError } from "./errors.js";
+import { childEnvironmentEntry, environmentEntry } from "./value.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
@@ -44,13 +46,182 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const AZURE_CODEX_PROVIDER = {
+  name: "Azure OpenAI",
+  env_key: "AZURE_OPENAI_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
+  azure: AZURE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
+
+export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
+  Object.values(EXTERNAL_CODEX_PROVIDERS).map(({ env_key }) => env_key),
+);
+
+type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
+
+function azureTableCredential(
+  native: JsonObject,
+  environment?: ProviderEnvironment,
+): string | undefined {
+  if (typeof native["experimental_bearer_token"] === "string")
+    return "experimental_bearer_token";
+  const defaultKey =
+    environment &&
+    environmentEntry(environment, AZURE_CODEX_PROVIDER.env_key)?.trim();
+  for (const field of ["http_headers", "env_http_headers"] as const) {
+    const headers = native[field];
+    if (!isObject(headers)) continue;
+    const names = Object.keys(headers);
+    if (names.some((name) => /^(?:authorization|api-key)$/iu.test(name)))
+      return field;
+    // A gateway can authenticate with its own header name. Ancillary headers
+    // still allow an explicitly supplied Azure resource key to use the preset.
+    if (names.length && !defaultKey) return field;
+  }
+  return undefined;
+}
+
+/** Only declared header variables belong in the selected Azure model process. */
+export function azureHeaderEnvironment(
+  environment: ProviderEnvironment,
+  config: Readonly<JsonObject>,
+): Record<string, string> {
+  if (scanModelProvider(config) !== "azure") return {};
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const azure = isObject(providers) ? providers["azure"] : undefined;
+  const headers = isObject(azure) ? azure["env_http_headers"] : undefined;
+  if (!isObject(headers)) return {};
+  return Object.fromEntries(
+    Object.values(headers).flatMap((name) => {
+      if (typeof name !== "string") return [];
+      const value = childEnvironmentEntry(environment, name);
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
+}
+
+/** Local helper processes do not consume the selected Azure model headers. */
+export function withoutAzureHeaders<Value extends string | undefined>(
+  environment: Readonly<Record<string, Value>>,
+  config: Readonly<JsonObject>,
+): Record<string, Value> {
+  const declared = Object.keys(azureHeaderEnvironment(environment, config));
+  if (!declared.length) return environment;
+  const name = (key: string) =>
+    process.platform === "win32" ? key.toUpperCase() : key;
+  const headers = new Set(declared.map(name));
+  return Object.fromEntries(
+    Object.entries(environment).filter(([key]) => !headers.has(name(key))),
+  );
+}
+
+/** Keep the Azure key only for a model configuration that names it. */
+export function azureProviderEnvironment(
+  environment: ProviderEnvironment,
+  config: JsonObject,
+): Record<string, string | undefined> {
+  const isAzureKey = (name: unknown) =>
+    typeof name === "string" &&
+    name.toUpperCase() === AZURE_CODEX_PROVIDER.env_key;
+  if (!Object.keys(environment).some(isAzureKey)) return environment;
+  const selected = scanModelProvider(config);
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const provider =
+    typeof selected === "string" && isObject(providers)
+      ? providers[selected]
+      : undefined;
+  const native = isObject(provider) ? provider : {};
+  if (
+    (selected === "azure" &&
+      native["env_key"] === undefined &&
+      native["auth"] == null &&
+      azureTableCredential(native, environment) === undefined) ||
+    isAzureKey(native["env_key"]) ||
+    (isObject(native["env_http_headers"]) &&
+      Object.values(native["env_http_headers"]).some(isAzureKey))
+  )
+    return environment;
+  return Object.fromEntries(
+    Object.entries(environment).filter(([name]) => !isAzureKey(name)),
+  );
+}
+
+export function azureBaseUrl(
+  environment: ProviderEnvironment,
+  baseUrl?: unknown,
+): string {
+  const configured =
+    baseUrl === undefined
+      ? environmentEntry(environment, "AZURE_OPENAI_BASE_URL")?.trim() ||
+        environmentEntry(environment, "AZURE_OPENAI_ENDPOINT")?.trim()
+      : baseUrl;
+  if (configured === undefined || configured === "") {
+    throw new ConfigurationError(
+      "Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_ENDPOINT to the Azure OpenAI resource endpoint.",
+    );
+  }
+  if (
+    typeof configured !== "string" ||
+    !/^https?:\/\//iu.test(configured.trim()) ||
+    !URL.canParse(configured)
+  ) {
+    throw new ConfigurationError(
+      "The Azure OpenAI endpoint must be an absolute HTTP(S) URL.",
+    );
+  }
+  const url = new URL(configured);
+  const path = url.pathname.replace(/\/+$/u, "");
+  if (
+    url.username ||
+    url.password ||
+    /[?#]/u.test(url.href) ||
+    (path !== "" && path !== "/openai/v1")
+  ) {
+    throw new ConfigurationError(
+      "Use the Azure resource origin or /openai/v1 without credentials, a query, or a fragment.",
+    );
+  }
+  if (
+    url.protocol === "http:" &&
+    url.hostname !== "localhost" &&
+    url.hostname !== "[::1]" &&
+    !(isIP(url.hostname) === 4 && url.hostname.startsWith("127."))
+  ) {
+    throw new ConfigurationError(
+      "The Azure OpenAI endpoint requires HTTPS except on loopback.",
+    );
+  }
+  return `${url.origin}/openai/v1`;
+}
+
+export function externalProviderTable(
+  provider: ExternalModelProvider,
+  environment: ProviderEnvironment,
+  configured?: unknown,
+): JsonObject {
+  const table = EXTERNAL_CODEX_PROVIDERS[provider];
+  if (provider !== "azure") return { ...table };
+  const native = isObject(configured) ? configured : {};
+  const preset: JsonObject = { ...table };
+  if (
+    native["auth"] != null ||
+    azureTableCredential(native, environment) !== undefined
+  )
+    delete preset["env_key"];
+  return {
+    ...preset,
+    ...native,
+    base_url: azureBaseUrl(environment, native["base_url"]),
+  };
+}
 
 export function isExternalModelProvider(
   provider: unknown,
@@ -188,6 +359,7 @@ export function scanPricingContext(
   environment: Readonly<Record<string, string | undefined>>,
 ): ScanPricingContext | undefined {
   const selected = scanModelProvider(config) ?? "openai";
+  if (selected === "azure") return { provider: "azure" };
   if (typeof selected !== "string") return undefined;
   const resolved = selectedScanProfile(config)
     ? resolveCodexProfile(config)
@@ -230,6 +402,18 @@ export function scanPricingContext(
   return { provider: "gcp", managedEndpoint };
 }
 
+/** Codex reads header and bearer credentials from the private provider table. */
+export function azureCredentialSource(
+  config: Readonly<JsonObject>,
+): string | undefined {
+  if (scanModelProvider(config) !== "azure") return undefined;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const azure = isObject(providers) ? providers["azure"] : undefined;
+  return isObject(azure) && azure["auth"] == null && azure["env_key"] == null
+    ? azureTableCredential(azure)
+    : undefined;
+}
+
 /** @internal Use the selected native provider's configured credential key. */
 export function scanProviderEnvKey(
   config: Readonly<JsonObject>,
@@ -237,6 +421,7 @@ export function scanProviderEnvKey(
   const selected = scanModelProvider(config);
   if (
     typeof selected !== "string" ||
+    azureCredentialSource(config) !== undefined ||
     ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
   )
     return undefined;
@@ -346,6 +531,14 @@ function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+/** @internal A named profile reloads from disk unless an inline table supplies it. */
+export function codexFileProfileName(config: JsonObject): string | undefined {
+  const name = config["profile"];
+  return typeof name === "string" && selectedScanProfile(config) === undefined
+    ? name
+    : undefined;
+}
+
 export function resolveCodexProfile(config: JsonObject): JsonObject {
   const normalized = parse(stringify(config)) as JsonObject;
   const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
@@ -378,15 +571,14 @@ export async function readCodexFileProfile(
   profileHome?: string,
 ): Promise<JsonObject> {
   let nativeProfile: JsonObject = {};
-  const profileName = overrides["profile"];
-  if (profileName != null && typeof profileName !== "string") {
+  if (
+    overrides["profile"] != null &&
+    typeof overrides["profile"] !== "string"
+  ) {
     throw new ConfigurationError("Codex profile must be a name.");
   }
-  if (
-    profileHome !== undefined &&
-    typeof profileName === "string" &&
-    selectedScanProfile(overrides) === undefined
-  ) {
+  const profileName = codexFileProfileName(overrides);
+  if (profileHome !== undefined && profileName !== undefined) {
     if (!/^[A-Za-z0-9_-]+$/u.test(profileName)) {
       throw new ConfigurationError("Codex profile must be a plain name.");
     }
@@ -473,7 +665,8 @@ export function resolveNestedConfigPaths(
 export async function mergedCodexConfig(
   config: CodexSecurityConfig,
   profileHome?: string,
-  purpose: "scan" | "login" = "scan",
+  environment: ProviderEnvironment = process.env,
+  purpose: "scan" | "login" | "read-only" = "scan",
 ): Promise<JsonObject> {
   if (config.codexOverrides !== undefined && !isObject(config.codexOverrides)) {
     throw new ConfigurationError("codexOverrides must be an object.");
@@ -501,7 +694,17 @@ export async function mergedCodexConfig(
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
-  if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
+  const provider = scanModelProvider(effectiveOverrides);
+  if (provider === "azure" && purpose !== "read-only") {
+    const tables = resolveCodexProfile(effectiveOverrides)["model_providers"];
+    const providers = isObject(tables) ? tables : {};
+    (selectedScanProfile(effectiveOverrides) ?? effectiveOverrides)[
+      "model_providers"
+    ] = {
+      ...providers,
+      azure: externalProviderTable(provider, environment, providers["azure"]),
+    };
+  } else if (provider === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
   }

@@ -4,6 +4,7 @@ import { isRecord } from "./record.js";
 import { isSafeNonNegativeInteger } from "./value.js";
 
 export type ScanPricingContext =
+  | { provider: "azure" }
   | { provider: "amazon-bedrock"; region: string | null }
   | { provider: "gcp"; managedEndpoint?: boolean };
 

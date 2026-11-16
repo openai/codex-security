@@ -30,6 +30,11 @@ import {
 } from "./auth.js";
 import {
   DEFAULT_CODEX_CONFIG,
+  AZURE_CODEX_PROVIDER,
+  azureProviderEnvironment,
+  azureHeaderEnvironment,
+  withoutAzureHeaders,
+  externalProviderTable,
   deepMerge,
   hasCommandAuth,
   isExternalModelProvider,
@@ -566,7 +571,12 @@ async function startReadOnlyCodexThread(
   const config =
     options.config === undefined
       ? undefined
-      : await mergedCodexConfig(options.config, configuredCodexHome(source));
+      : await mergedCodexConfig(
+          options.config,
+          configuredCodexHome(source),
+          source,
+          options.codex === undefined ? "read-only" : "scan",
+        );
   const configuredModel =
     config === undefined ? undefined : scanModelConfiguration(config);
   const model = options.model ?? configuredModel?.model;
@@ -642,14 +652,24 @@ async function startReadOnlyCodexThread(
   );
   delete sdkConfig["responses_api_metadata"];
   delete sdkConfig["default_permissions"];
-  const providerSettings = commandAuth ? providerConfig : (config ?? {});
+  const modelProvider = scanModelProvider(providerConfig);
+  const providerSettings =
+    commandAuth || modelProvider === "azure" ? providerConfig : (config ?? {});
+  if (modelProvider === "azure") {
+    const tables = providerConfig["model_providers"];
+    const providers = isRecord(tables) ? tables : {};
+    providerConfig["model_providers"] = {
+      ...providers,
+      azure: externalProviderTable(modelProvider, source, providers["azure"]),
+    };
+  }
   const effectiveFeatures = resolveCodexProfile(
     scanCyberAccessConfig(providerConfig, options.cyberAccessProgram),
   )["features"] as JsonObject | undefined;
-  const modelProvider = scanModelProvider(providerConfig);
+  const providerKey = scanProviderEnvKey(providerConfig);
   const nativeKey =
     !commandAuth && !isExternalModelProvider(modelProvider)
-      ? scanProviderEnvKey(providerConfig)
+      ? providerKey
       : undefined;
   const environment = await comparisonEnvironment(
     source,
@@ -660,14 +680,23 @@ async function startReadOnlyCodexThread(
     nativeKey,
     options.auth,
   );
+  // MCP discovery and permission preflight read provider metadata only.
+  const startupSource =
+    modelProvider === "azure"
+      ? withoutAzureHeaders(withoutOpenAiApiKeys(environment), providerConfig)
+      : environment;
+  const startupEnvironment =
+    !commandAuth && providerKey?.toUpperCase() === AZURE_CODEX_PROVIDER.env_key
+      ? startupSource
+      : definedEnvironment(azureProviderEnvironment(startupSource, {}));
   const command = resolveCodexCommand(environment);
   const codexOptions: CodexOptions = {
     configOverrides: [requestContext.configOverride],
     codexPathOverride: executablePathForSpawn(command.command),
-    env: environment,
+    env: { ...environment, ...azureHeaderEnvironment(source, providerConfig) },
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
     apiKey:
-      nativeKey !== undefined
+      nativeKey !== undefined || modelProvider === "azure"
         ? undefined
         : environmentEntry(environment, "OPENAI_API_KEY")?.trim() ||
           environmentEntry(environment, "CODEX_API_KEY")?.trim() ||
@@ -678,7 +707,7 @@ async function startReadOnlyCodexThread(
       mcp_servers: await disabledMcpServers(
         await providerPreflightCommand(command, providerSettings),
         config,
-        environment,
+        startupEnvironment,
         options,
       ),
       allow_login_shell: false,
@@ -721,7 +750,7 @@ async function startReadOnlyCodexThread(
     if (profile !== undefined) {
       delete threadOptions.sandboxMode;
       const permissions = await preflightReadOnlyProfileCodex(
-        codexOptions,
+        { ...codexOptions, env: startupEnvironment },
         {
           extends: ":read-only",
           filesystem: {
@@ -1263,10 +1292,9 @@ export async function comparisonEnvironment(
   auth: ScanAuthMode = "api-key",
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
-  const environment = Object.fromEntries(
-    Object.entries(source).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
+  const configuration = config ?? (await readCodexHomeConfig(source, signal));
+  const environment = definedEnvironment(
+    azureProviderEnvironment(source, configuration),
   );
   const home = configuredCodexHome(environment);
   for (const key of Object.keys(environment)) {
@@ -1282,10 +1310,30 @@ export async function comparisonEnvironment(
       selectedScanEnvironment(environment, auth, provider, nativeKey, config),
     );
   }
-  if (
-    hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
-  ) {
+  if (hasCommandAuth(configuration)) {
     return withoutOpenAiApiKeys(environment);
+  }
+  const provider = scanModelProvider(configuration);
+  if (provider === "azure") {
+    const key = scanProviderEnvKey(configuration);
+    scanAuthentication(
+      environment,
+      "api-key",
+      provider,
+      false,
+      false,
+      key,
+      configuration,
+    );
+    return definedEnvironment(
+      selectedScanEnvironment(
+        environment,
+        "api-key",
+        provider,
+        key,
+        configuration,
+      ),
+    );
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;

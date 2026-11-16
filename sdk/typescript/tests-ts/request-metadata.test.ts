@@ -18,6 +18,7 @@ test.each([
   [undefined, "openai"],
   ["openai", "openai"],
   ["amazon-bedrock", "amazon-bedrock"],
+  ["azure", "azure"],
   ["cheaperinference", "cheaperinference"],
   ["openrouter", "openrouter"],
   ["fireworks", "fireworks"],

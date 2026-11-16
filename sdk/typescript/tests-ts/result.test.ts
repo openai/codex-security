@@ -203,6 +203,23 @@ describe("ScanResult", () => {
     });
   });
 
+  test("retains Azure deployment and usage without inferring its price", () => {
+    const turnResult = {
+      pricingContext: { provider: "azure" as const },
+      model: "gpt-5.6-sol",
+      usage: { input_tokens: 1250, output_tokens: 30 },
+    };
+    const result = new ScanResult({
+      manifest,
+      findings,
+      coverage,
+      scanDir: "/scan",
+      threadId: "thread",
+      turnResult,
+    });
+    expect(result.toJSON()).toMatchObject({ cost: null, turn: turnResult });
+  });
+
   test("discovers SARIF at its canonical scan path", async () => {
     const scanDir = await mkdtemp(join(tmpdir(), "codex-security-result-"));
     try {

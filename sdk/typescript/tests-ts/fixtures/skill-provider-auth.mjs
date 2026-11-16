@@ -14,6 +14,7 @@ record({
   config: existsSync(configPath) ? readFileSync(configPath, "utf8") : "",
   environment: {
     GATEWAY_API_KEY: process.env.GATEWAY_API_KEY,
+    AZURE_OPENAI_API_KEY: process.env.AZURE_OPENAI_API_KEY,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     CODEX_API_KEY: process.env.CODEX_API_KEY,
   },
