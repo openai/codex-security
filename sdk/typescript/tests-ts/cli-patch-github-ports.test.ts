@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
@@ -80,6 +82,13 @@ describe("GitHub patch endpoint ports", () => {
         git("branch", branch);
         git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
       }
+      const fullUrlOverride = resume && matches && Boolean(new URL(base).port);
+      const selector = `${host}${basePort}/example/repository`;
+      const override = fullUrlOverride
+        ? `${base}.git`
+        : matches && !basePort
+          ? `${resume ? "ssh" : "http"}://synthetic-user:fixture@${host}:2222/example/repository.git`
+          : selector;
       const selectorHost = new URL(base).host;
       const selectors: string[] = [];
       let pushes = 0;
@@ -90,7 +99,7 @@ describe("GitHub patch endpoint ports", () => {
           : ["patch", "--scan", "scan-1", "--create-pr", "--json"],
         {
           currentDirectory: directory,
-          environment: { GH_REPO: `${host}${basePort}/example/repository` },
+          environment: { GH_REPO: override },
           onWorkbench: () =>
             savedScan(resultWithFindings(["high"]), "scan-1", directory),
           onCodex: async (args, output) => {
@@ -120,7 +129,10 @@ describe("GitHub patch endpoint ports", () => {
               return runGitRepositoryCommand(command, args, cwd, options);
             }
             expect(command).toBe("gh");
-            if (args[1] === "list")
+            if (args[1] === "list") {
+              expect(args[args.indexOf("--repo") + 1]).toBe(
+                `${host}${basePort}/example/repository`,
+              );
               return JSON.stringify(
                 existing
                   ? [
@@ -134,7 +146,11 @@ describe("GitHub patch endpoint ports", () => {
                     ]
                   : [],
               );
-            if (args.at(-1) === ".url") return base;
+            }
+            if (args.at(-1) === ".url") {
+              expect(args[2]).toBe(`${host}${basePort}/example/repository`);
+              return base;
+            }
             if (args[0] === "repo") {
               const selectedRemote = await runGitRepositoryCommand(
                 "git",
@@ -170,6 +186,9 @@ describe("GitHub patch endpoint ports", () => {
               });
             }
             expect(args[1]).toBe("create");
+            expect(args[args.indexOf("--repo") + 1]).toBe(
+              `${host}${basePort}/example/repository`,
+            );
             expect(args[args.indexOf("--head") + 1]).toBe(
               `synthetic-user:${branch}`,
             );
@@ -209,4 +228,136 @@ describe("GitHub patch endpoint ports", () => {
       }
     },
   );
+
+  for (const account of [
+    "registered",
+    "push-only",
+    "unregistered",
+    "malformed default",
+  ] as const) {
+    test.skipIf(!Bun.which("gh"))(
+      `checks the ${account} authority of an enterprise upstream before using it`,
+      async () => {
+        const { directory, git } = await publicationRepository(fixtures);
+        const config = await fixtures.create("gh-patch-account-");
+        const host = "forge.example.test";
+        const authority = `${host}:8443`;
+        const base = `${authority}/upstream/repository`;
+        const branch = "codex-security/patch-scan-1";
+        const commit = git("rev-parse", "HEAD");
+        git("branch", branch);
+        git("config", `branch.${branch}.codexSecurityPatchCommit`, commit);
+        git("remote", "set-url", "origin", `git@${host}:fork/repository.git`);
+        const remoteUrl = `https://${authority}/mirror/repository.git`;
+        if (account === "push-only")
+          git("config", "remote.enterprise.pushurl", remoteUrl);
+        else git("remote", "add", "enterprise", remoteUrl);
+        const registered = account === "registered" || account === "push-only";
+        git(
+          "config",
+          "remote.enterprise.gh-resolved",
+          account === "malformed default"
+            ? "invalid"
+            : account === "push-only"
+              ? `https://synthetic-user:fixture@${authority}/upstream/repository`
+              : "upstream/repository",
+        );
+        git("config", "remote.empty.gh-resolved", "base");
+        git("remote", "add", "unused", "https://%/nothing");
+        const environment = {
+          GH_CONFIG_DIR: config,
+          GH_ENTERPRISE_TOKEN: "synthetic-enterprise-token",
+          GH_NO_UPDATE_NOTIFIER: "1",
+          GH_PROMPT_DISABLED: "1",
+        };
+        await writeFile(
+          join(config, "hosts.yml"),
+          `"${host}":\n  user: synthetic\n  oauth_token: synthetic-token\n` +
+            (registered
+              ? `"${authority}":\n  user: synthetic\n  oauth_token: synthetic-token\n`
+              : ""),
+        );
+        const lists: string[][] = [];
+        const status: string[][] = [];
+        const outcome = await runWorkflow(
+          ["patch", "--resume-pr", branch, "--json"],
+          {
+            currentDirectory: directory,
+            environment,
+            onRepositoryCommand: async (command, args, cwd, options) => {
+              expect(args.join(" ")).not.toContain("synthetic-user:fixture@");
+              if (command === "git") {
+                expect(args[0]).not.toBe("push");
+                return runGitRepositoryCommand(command, args, cwd, options);
+              }
+              expect(command).toBe("gh");
+              if (args[0] === "auth") {
+                if (args.includes("--help")) return "--active";
+                status.push([...args]);
+                if (account === "unregistered")
+                  throw new Error("No account on the selected endpoint");
+                return "";
+              }
+              if (args[1] === "set-default") {
+                const result = await promisify(execFile)(
+                  Bun.which("gh")!,
+                  [...args],
+                  {
+                    cwd: options?.directory ?? cwd,
+                    env: {
+                      ...process.env,
+                      ...environment,
+                      ...options?.environment,
+                    },
+                  },
+                );
+                return result.stdout.trim();
+              }
+              if (args[1] === "list") {
+                lists.push([...args]);
+                return JSON.stringify([
+                  {
+                    url: `https://${base}/pull/7`,
+                    head: commit,
+                    state: "OPEN",
+                    repositoryId: "R_fork",
+                    crossRepository: true,
+                  },
+                ]);
+              }
+              expect(args.slice(0, 3)).toEqual([
+                "repo",
+                "view",
+                `${authority}/fork/repository`,
+              ]);
+              return JSON.stringify({
+                id: "R_fork",
+                url: `https://${authority}/fork/repository`,
+              });
+            },
+          },
+          { localHosting: false },
+        );
+        expect(status, outcome.stderr).toEqual(
+          account === "malformed default"
+            ? []
+            : [["auth", "status", "--hostname", authority, "--active"]],
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(registered ? 0 : 2);
+        if (registered) {
+          expect(lists).toHaveLength(1);
+          expect(lists[0]!.slice(-2)).toEqual(["--repo", base]);
+          expect(JSON.parse(outcome.stdout).pullRequest.url).toBe(
+            `https://${base}/pull/7`,
+          );
+        } else {
+          expect(lists).toHaveLength(0);
+          if (account === "unregistered")
+            expect(outcome.stderr).toContain(
+              "No account on the selected endpoint",
+            );
+        }
+      },
+    );
+  }
 });

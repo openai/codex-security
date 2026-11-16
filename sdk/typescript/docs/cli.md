@@ -2885,6 +2885,12 @@ the saved commit.
 
 `--create-pr` commits generated patch files and opens a draft GitHub PR with `gh`
 or a GitLab merge request with `glab`. Authenticate the appropriate CLI first.
+For GitHub, `GH_REPO` selects the base repository. Otherwise, publication uses
+the repository selected by `gh`. For an enterprise endpoint on a custom HTTPS
+port, use the account configured for that endpoint or select the base explicitly
+with `GH_REPO=HOST:PORT/OWNER/REPO`. The `origin` push destination identifies
+the repository that supplies the head branch.
+
 The `origin` push URL selects GitLab.com, including SSH and subgroup projects.
 For self-hosted GitLab, set `GITLAB_HOST` to that host and authenticate with
 `glab auth login --hostname HOST`. `GITLAB_URI` and `GL_HOST` are fallback aliases.

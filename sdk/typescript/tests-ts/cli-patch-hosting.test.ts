@@ -2738,6 +2738,9 @@ process.exit(result.status ?? 1);
                 "url,state,headRefOid,headRepository,isCrossRepository",
                 "--jq",
                 "map({url, head: .headRefOid, state, repositoryId: .headRepository.id, crossRepository: .isCrossRepository}) | tojson",
+                ...(environment["GH_REPO"]
+                  ? ["--repo", environment["GH_REPO"]]
+                  : []),
               ]);
               return JSON.stringify(
                 transport === "no-candidates"

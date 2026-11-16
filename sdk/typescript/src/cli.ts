@@ -166,7 +166,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
-import { isGitSsh } from "./git-remote.js";
+import { isGitSsh, parseGitRemote } from "./git-remote.js";
 import {
   collectContinuumFinding,
   collectContinuumIssues,
@@ -11740,6 +11740,10 @@ async function patchPublicationDestination(
       "--jq",
       ".id",
     ]);
+  const githubBase = gitlab
+    ? undefined
+    : await githubPatchBase(fetchRemote, repository, dependencies);
+  const githubRepoArgs = githubBase ? ["--repo", githubBase] : [];
   const requestArguments = gitlab
     ? [
         "mr",
@@ -11765,6 +11769,7 @@ async function patchPublicationDestination(
         "url,state,headRefOid,headRepository,isCrossRepository",
         "--jq",
         "map({url, head: .headRefOid, state, repositoryId: .headRepository.id, crossRepository: .isCrossRepository}) | tojson",
+        ...githubRepoArgs,
       ];
   const existing = await run(command, requestArguments);
   type ExistingRequest = {
@@ -11822,6 +11827,7 @@ async function patchPublicationDestination(
     gitlab,
     command,
     existing: found,
+    githubBase,
     getSshCommand,
   };
 }
@@ -13022,6 +13028,246 @@ async function patchSshHostname(
     throw error;
   });
   return /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
+}
+
+function githubPatchSelector(value: string): string {
+  if (!value.includes("://")) return value;
+  if (!URL.canParse(value))
+    throw new CodexSecurityError(
+      "The GitHub repository selector must be a valid URL.",
+    );
+  const url = new URL(value);
+  if (
+    !["https:", "http:", "ssh:", "git:", "git+ssh:", "git+https:"].includes(
+      url.protocol,
+    ) ||
+    !url.hostname
+  )
+    throw new CodexSecurityError(
+      "The GitHub repository selector must be a valid URL.",
+    );
+  const path = decodeURIComponent(url.pathname)
+    .replace(/^\/+|\/+$/gu, "")
+    .replace(/\.git$/u, "");
+  if (!/^[^/]+\/[^/]+$/u.test(path))
+    throw new CodexSecurityError(
+      "The GitHub repository selector must include an owner and repository.",
+    );
+  // Only an HTTPS endpoint selects the corresponding HTTPS API port.
+  // Userinfo and other URL components never belong in gh command arguments.
+  return `${url.protocol === "https:" ? url.host : url.hostname}/${path}`;
+}
+
+async function githubPatchBase(
+  fetchRemote: string,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string | undefined> {
+  const override = environmentEntry(dependencies.environment, "GH_REPO");
+  if (override) return githubPatchSelector(override);
+  const host = environmentEntry(dependencies.environment, "GH_HOST");
+  if (host && /[\/@?#\\]/u.test(host))
+    throw new CodexSecurityError(
+      "GH_HOST must select a GitHub hostname and optional port.",
+    );
+  const apiHost = host ? new URL(`https://${host}`) : undefined;
+  if (apiHost && !apiHost.port) return undefined;
+  const customAuthority = (remote: string) => {
+    if (!remote.startsWith("https://") || !URL.canParse(remote))
+      return undefined;
+    const url = new URL(remote);
+    // gh accepts GitHub fetch URLs with exactly an owner and repository.
+    return url.port && /^\/+[^/]+\/[^/]+\/*$/u.test(url.pathname)
+      ? url.host
+      : undefined;
+  };
+  const run = (
+    command: "git" | "gh",
+    args: string[],
+    environment?: NodeJS.ProcessEnv,
+  ) =>
+    dependencies.runRepositoryCommand(command, args, repository, {
+      environment,
+    });
+  // gh uses Git's expanded remote -v output, preferring a usable fetch URL
+  // and otherwise taking the last push URL. A push-only remote has no fetch
+  // URL even though Git can list its push destination.
+  const listed = await run("git", ["remote", "-v"]);
+  const remotes = new Map<string, { fetch?: string; push?: string }>();
+  for (const line of listed.split("\n")) {
+    const entry = /^([^\t]+)\t(.+) \((fetch|push)\)/u.exec(line);
+    if (!entry) continue;
+    const [, name, url, direction] = entry;
+    let parsed;
+    try {
+      parsed = parseGitRemote(url!);
+    } catch {
+      continue;
+    }
+    if (
+      !parsed?.url.hostname ||
+      !/^[^/]+\/[^/]+$/u.test(parsed.path.replace(/^\/+|\/+$/gu, ""))
+    )
+      continue;
+    const remote = remotes.get(name!) ?? {};
+    if (direction === "fetch") remote.fetch = url;
+    else remote.push = url;
+    remotes.set(name!, remote);
+  }
+  const names = [...remotes.keys()];
+  const urls = [...remotes.values()].map(
+    (remote) => remote.fetch ?? remote.push!,
+  );
+  if (!apiHost && !urls.some(customAuthority)) return undefined;
+  const hosts = new Set(urls.map((url) => patchRemoteHost(url)));
+  // A port in GH_HOST prevents gh from matching a remote locally. Keep the
+  // complete authority for API calls and use just the hostname for discovery.
+  const hostname =
+    apiHost?.hostname ?? (hosts.size === 1 ? [...hosts][0] : undefined);
+  const environment = {
+    GH_REPO: "",
+    ...(hostname ? { GH_HOST: hostname } : {}),
+  };
+  // gh reads these markers with git config, including a caller's GIT_CONFIG.
+  const config = await run("git", [
+    "config",
+    "--null",
+    "--get-regexp",
+    "^remote\\..*\\.gh-resolved$",
+  ]).catch((error: unknown) => {
+    if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+      return "";
+    throw error;
+  });
+  const resolutions = new Map<string, string>();
+  for (const entry of config.split("\0").filter(Boolean)) {
+    const split = entry.indexOf("\n");
+    resolutions.set(
+      entry.slice("remote.".length, split - ".gh-resolved".length),
+      entry.slice(split + 1),
+    );
+  }
+  // gh gives configured defaults priority, then picks a remote according to
+  // its own host and fork rules. Tag those remotes so its choice retains the
+  // fetch authority even when several remotes use the same hostname.
+  const discover = async (
+    namesToMark: string[],
+    mark: (name: string) => string,
+    validate?: string,
+  ) => {
+    const quoted = await run("git", [
+      "rev-parse",
+      "--sq-quote",
+      ...names.map(
+        (name) =>
+          `remote.${name}.gh-resolved=${namesToMark.includes(name) ? mark(name) : ""}`,
+      ),
+    ]);
+    return run(
+      "gh",
+      ["repo", "set-default", "--view", ...(validate ? ["--", validate] : [])],
+      {
+        ...environment,
+        GIT_CONFIG: undefined,
+        GIT_CONFIG_PARAMETERS: [
+          environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS"),
+          quoted,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      },
+    );
+  };
+  const marked = names.filter((name) => resolutions.get(name));
+  const tag = (name: string) => `codex-security-target/${names.indexOf(name)}`;
+  let selected = marked.length ? await discover(marked, tag) : "";
+  if (!selected) selected = await discover(names, tag);
+  const index = names.findIndex((name) => tag(name) === selected);
+  if (index < 0)
+    throw new CodexSecurityError(
+      "Set GH_REPO to the GitHub host, owner and repository to select the patch destination.",
+    );
+  const remote = urls[index]!;
+  const authority = apiHost?.host ?? customAuthority(remote);
+  if (!authority) return undefined;
+  const name = names[index]!;
+  if (!apiHost) {
+    // Git's line-based remote display cannot delimit embedded newlines in a
+    // URL. Confirm the selected authority against Git's actual expanded URL.
+    const listedRemote = remotes.get(name)!;
+    let actual: string;
+    if (listedRemote.fetch) {
+      actual =
+        name === "origin"
+          ? fetchRemote
+          : await run("git", ["remote", "get-url", "--", name]);
+    } else {
+      const format = { trim: false, environment: { GIT_CONFIG: undefined } };
+      const values = await dependencies
+        .runRepositoryCommand(
+          "git",
+          ["config", "--null", "--get-all", `remote.${name}.pushurl`],
+          repository,
+          format,
+        )
+        .catch((error: unknown) => {
+          if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+            return "";
+          throw error;
+        });
+      const args = ["remote", "get-url", "--push", "--all", "--", name];
+      if (values) args.unshift("-c", `remote.${name}.url=.`);
+      const result = await dependencies.runRepositoryCommand(
+        "git",
+        args,
+        repository,
+        format,
+      );
+      const expanded = result.replace(/\n$/u, "").split("\n");
+      if (expanded.length !== (values ? values.split("\0").length - 1 : 1))
+        throw new CodexSecurityError(
+          "Set GH_REPO to disambiguate the GitHub patch destination.",
+        );
+      actual = expanded.at(-1)!;
+    }
+    if (actual !== remote)
+      throw new CodexSecurityError(
+        "Set GH_REPO to disambiguate the GitHub patch destination.",
+      );
+  }
+  const resolution = githubPatchSelector(resolutions.get(name) || "base");
+  // Without a positional argument, set-default --view silently falls back to
+  // the fetch repository when the stored owner/repository cannot be parsed.
+  if (
+    resolution !== "base" &&
+    names.includes(resolution) &&
+    !/^(?:[^/]+\/)?[^/]+\/[^/]+$/u.test(resolution)
+  )
+    throw new CodexSecurityError(
+      "The configured GitHub default must select an owner and repository.",
+    );
+  const slug = await discover(
+    [name],
+    () => resolution,
+    resolution === "base" ? undefined : resolution,
+  );
+  if (!slug)
+    throw new CodexSecurityError(
+      "Set GH_REPO to the GitHub host, owner and repository to select the patch destination.",
+    );
+  if (!apiHost) {
+    // An enterprise token can authenticate any hostname. gh checks whether
+    // this exact account host is configured before sending its status request.
+    const help = await run("gh", ["auth", "status", "--help"]);
+    await run("gh", [
+      "auth",
+      "status",
+      "--hostname",
+      authority,
+      ...(help.includes("--active") ? ["--active"] : []),
+    ]);
+  }
+  return `${authority}/${slug}`;
 }
 
 async function githubPatchRepository(
@@ -14393,6 +14639,7 @@ async function publishPatchBranch(
       gitlab,
       command,
       existing,
+      githubBase,
       getSshCommand,
     } = await patchPublicationDestination(
       repository,
@@ -14401,6 +14648,7 @@ async function publishPatchBranch(
       approvedSshCommand,
     );
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
+
     let url = existing?.url;
     if (existing) {
       if (
@@ -14418,7 +14666,15 @@ async function publishPatchBranch(
       let head = branch;
       if (!gitlab) {
         const base = new URL(
-          await run("gh", ["repo", "view", "--json", "url", "--jq", ".url"]),
+          await run("gh", [
+            "repo",
+            "view",
+            ...(githubBase ? [githubBase] : []),
+            "--json",
+            "url",
+            "--jq",
+            ".url",
+          ]),
         );
         let headRepository: URL | undefined;
         for (const pushRemote of remotes.filter(isNetworkPatchRemote)) {
@@ -14557,6 +14813,7 @@ async function publishPatchBranch(
               PATCH_PR_TITLE,
               "--body",
               body,
+              ...(githubBase ? ["--repo", githubBase] : []),
             ],
       );
     }
