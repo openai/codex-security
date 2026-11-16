@@ -14,6 +14,7 @@
 - preserve Windows helper exit codes ([#2651](https://github.com/openai/codex-security/pull/2651))
 - keep repository links usable in standalone copies ([#2664](https://github.com/openai/codex-security/pull/2664))
 - preserve symlink parent traversal in component paths ([#2692](https://github.com/openai/codex-security/pull/2692))
+- preserve Daybreak enrollment link attribution ([#2656](https://github.com/openai/codex-security/pull/2656))
 
 </details>
 
