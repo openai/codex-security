@@ -27,6 +27,7 @@ ${script}`,
       encoding: "utf8",
       env: {
         PATH: process.env["PATH"],
+        GIT_CONFIG_SYSTEM: process.env["GIT_CONFIG_SYSTEM"],
         SYSTEMROOT: process.env["SYSTEMROOT"],
         BEDROCK_MODEL_ID: "example.model",
         MOCK_EXIT_CODE: "0",
