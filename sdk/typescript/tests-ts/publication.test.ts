@@ -150,64 +150,61 @@ describe("scan publication preparation", () => {
     expect(issue.description).not.toContain("/blob/deadbeef/");
   });
 
-  test.each([
-    { category: "credential-exposure", cwe: ["CWE-312"], status: "" },
-    { category: "configuration", cwe: ["CWE-798"], status: "" },
-    { category: "hardcodedProviderToken", cwe: ["CWE-312"], status: "" },
-    { category: "deployment configuration", cwe: ["CWE-312"], status: "" },
-    {
-      category: "information exposure",
-      cwe: ["CWE-200"],
-      status: "Validity unchecked.",
-    },
-  ])(
-    "keeps credential evidence in the sealed scan for $category",
-    async ({ category, cwe, status }) => {
-      const scanDirectory = await copyExample();
-      const path = join(scanDirectory, "findings.json");
-      const findings = await readJson<FindingsDocument>(path);
-      const finding = findings.findings[0]!;
-      const token = "synthetic-provider-token-for-publication-check";
-      const assignment = `SERVICE_TOKEN="${token}"`;
-      finding.taxonomy = { category, cwe: [...cwe] };
-      const label =
-        category === "deployment configuration"
-          ? "Hardcoded provider token"
-          : "Provider token";
-      finding.title = `${label} ${token}`;
-      finding.summary =
-        `A source reader can obtain ${assignment}. ${status}`.trim();
-      finding.locations = [{ path: "config/release.env", startLine: 7 }];
-      finding.rootCause = { summary: assignment, code: assignment };
-      finding.codeEvidence = [
-        {
-          id: "token-assignment",
-          label: "Provider token assignment",
-          ...finding.locations[0]!,
-          code: assignment,
-          explanation: "The assignment contains the provider credential.",
-        },
-      ];
-      finding.code_evidence = [{ id: "legacy-copy", code: assignment }];
-      await writeJson(path, findings);
-      await reseal(scanDirectory);
-      const saved = await readFile(path, "utf8");
-      const prepared = await prepareScanPublication(
-        scanDirectory,
-        publicationOptions(scanDirectory),
-      );
-      const payload = linearPublicationArguments(
-        prepared.destination,
-        prepared.issues[0]!,
-      );
-      expect(JSON.stringify(payload)).not.toContain(token);
-      expect(payload.description).toContain("config/release.env:7");
-      expect(payload.description).toContain(finding.fingerprints.primary);
-      expect(payload.title).toBe("[Codex Security][HIGH] Token exposure");
-      expect(await readFile(path, "utf8")).toBe(saved);
-      expect(saved).toContain(token);
-    },
-  );
+  test("publishes original credential diagnostics and issuer retirement guidance", async () => {
+    const scanDirectory = await copyExample();
+    const path = join(scanDirectory, "findings.json");
+    const findings = await readJson<FindingsDocument>(path);
+    const finding = findings.findings[0]!;
+    finding.taxonomy = { category: "credential-exposure", cwe: ["CWE-798"] };
+    finding.title = "Example Registry token in release configuration";
+    finding.summary =
+      "The release job reads a token from the checked-in configuration.";
+    finding.remediation =
+      "Revoke the old token in Example Registry, update the release job, and confirm retirement with its owner.";
+    const validation = {
+      summary: "Source review traced the token to the release job.",
+      limitations: ["The token's validity was not checked."],
+    };
+    finding.validation = validation;
+    finding.locations = [{ path: "config/release.env", startLine: 7 }];
+    const code = 'SERVICE_TOKEN="synthetic-example-only"';
+    finding.codeEvidence = [
+      {
+        id: "token-assignment",
+        label: "Release configuration",
+        ...finding.locations[0]!,
+        code,
+        explanation: "The release job reads this assignment.",
+      },
+    ];
+    await writeJson(path, findings);
+    await reseal(scanDirectory);
+    const saved = await readFile(path, "utf8");
+
+    const prepared = await prepareScanPublication(
+      scanDirectory,
+      publicationOptions(scanDirectory),
+    );
+    const issue = prepared.issues[0]!;
+    const payload = linearPublicationArguments(prepared.destination, issue);
+    expect(payload).toMatchObject({
+      title: issue.title,
+      description: issue.description,
+    });
+    expect(issue.title).toBe(`[Codex Security][HIGH] ${finding.title}`);
+    for (const detail of [
+      finding.summary,
+      finding.remediation,
+      validation.summary,
+      ...validation.limitations,
+      code,
+      "config/release.env:7",
+      finding.fingerprints.primary,
+    ]) {
+      expect(payload.description).toContain(detail);
+    }
+    expect(await readFile(path, "utf8")).toBe(saved);
+  });
 
   test("keeps ordinary evidence for password reset authorization bugs", async () => {
     const scanDirectory = await copyExample();
