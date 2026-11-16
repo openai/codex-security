@@ -49,7 +49,6 @@ import {
   mkdir,
   readFile,
   realpath,
-  stat,
   symlink,
   utimes,
   writeFile,
