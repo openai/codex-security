@@ -12986,19 +12986,28 @@ async function captureHiddenPatchContent(
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv,
   digests: Set<string>,
+  selection: "flagged" | "ident",
   signal?: AbortSignal,
 ): Promise<void> {
   const source = ["-C", checkout, "-c", "core.fsmonitor=false"];
+  // With the built-in ident conversion, git add can leave both the worktree
+  // and the index looking clean after an expanded $Id$ was edited.
+  const ident = selection === "ident";
+  const pathspecs = ident ? ["--", ":(attr:ident)"] : [];
   const tracked = await patchGitRecords(
     root,
-    [...source, "ls-files", "-v", "--stage", "-z"],
+    [...source, "ls-files", "-v", "--stage", "-z", ...pathspecs],
     dependencies,
-    { environment, patchSnapshot: [] },
+    {
+      environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
+      patchSnapshot: [],
+    },
   );
   const materialized = new Map<string, string>();
   for (const entry of tracked) {
     // Lowercase tags mean assume-unchanged and S means skip-worktree.
-    const header = /^[a-zS] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
+    if (entry.startsWith("H ") !== ident) continue;
+    const header = /^[a-zSH] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
       entry,
     );
     if (!header) continue;
@@ -13015,6 +13024,57 @@ async function captureHiddenPatchContent(
     if (digest !== undefined) materialized.set(path, digest);
   }
   if (!materialized.size) return;
+  let renderEnvironment = environment;
+  if (ident) {
+    // A staged attributes file can differ from the worktree attributes used
+    // by ls-files. Never run a new external driver to render these entries.
+    const keys = await patchGitRecords(
+      root,
+      [...source, "config", "--includes", "--null", "--name-only", "--list"],
+      dependencies,
+      {
+        environment: { ...environment, GIT_CONFIG: undefined },
+        patchSnapshot: [],
+      },
+    );
+    const drivers = new Set<string>();
+    const filters: string[] = [];
+    for (const key of keys) {
+      const driver = /^filter\.(.+)\.(smudge|process|required)$/su.exec(key);
+      if (!driver) continue;
+      filters.push(patchPathText(key));
+      if (driver[2] !== "required") drivers.add(driver[1]!);
+    }
+    if (drivers.size) {
+      // A copy transformed by an external smudge or process driver cannot be
+      // verified by the built-in checkout representation. The checkout can
+      // consult indexed attributes even when worktree attributes have changed.
+      const input = Buffer.from(
+        [...materialized.keys()].join("\0") + "\0",
+        "latin1",
+      );
+      for (const direction of [[], ["--cached"]]) {
+        const attributes = await patchGitRecords(
+          root,
+          [...source, "check-attr", ...direction, "-z", "--stdin", "filter"],
+          dependencies,
+          { environment, patchSnapshot: [], input },
+        );
+        for (let i = 0; i + 2 < attributes.length; i += 3)
+          if (drivers.has(attributes[i + 2]!))
+            materialized.delete(attributes[i]!);
+      }
+      if (!materialized.size) return;
+    }
+    renderEnvironment = {
+      ...environment,
+      GIT_CONFIG_PARAMETERS: patchFilterParameters(
+        filters,
+        false,
+        currentGitParameters(environment, dependencies.environment),
+      ),
+    };
+  }
   const directory = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-patch-checkout-"),
   );
@@ -13034,7 +13094,7 @@ async function captureHiddenPatchContent(
       root,
       {
         patchSnapshot: [directory],
-        environment,
+        environment: renderEnvironment,
         input: Buffer.from(
           [...materialized.keys()].join("\0") + "\0",
           "latin1",
@@ -13304,14 +13364,16 @@ async function preparePatchPublication(
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
-      await captureHiddenPatchContent(
-        root,
-        checkout,
-        dependencies,
-        environment,
-        nestedRepositoryDigests,
-        signal,
-      );
+      for (const selection of ["ident", "flagged"] as const)
+        await captureHiddenPatchContent(
+          root,
+          checkout,
+          dependencies,
+          environment,
+          nestedRepositoryDigests,
+          selection,
+          signal,
+        );
       // A conflict can also be reported as DD (both sides deleted).
       if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);

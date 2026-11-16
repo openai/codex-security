@@ -121,6 +121,8 @@ for (const kind of [
   "initialized submodule",
   "untracked file in initialized submodule",
   "tracked edit in initialized submodule",
+  "ident edit in initialized submodule",
+  "encoded ident edit in initialized submodule",
   "assume-unchanged edit in initialized submodule",
   "skip-worktree edit in initialized submodule",
   "staged-only edit in initialized submodule",
@@ -166,20 +168,31 @@ for (const kind of [
           : kind.startsWith("skip-worktree")
             ? "--skip-worktree"
             : undefined;
+        const ordinaryIdent = kind.endsWith(
+          "ident edit in initialized submodule",
+        );
+        const encodedIdent =
+          kind === "encoded ident edit in initialized submodule";
+        const encoding = encodedIdent ? "utf16le" : "utf8";
         const trackedEdit =
+          ordinaryIdent ||
           hiddenFlag !== undefined ||
           stagedEdit ||
           unmergedEdit ||
           kind === "tracked edit in initialized submodule";
         // Git's ident conversion can hide changes inside an expanded $Id$.
-        const ident = hiddenFlag === "--assume-unchanged";
+        const ident = ordinaryIdent || hiddenFlag === "--assume-unchanged";
         const committedContent = ident
-          ? "$Id$\n"
+          ? (encodedIdent ? "# Résumé 雪\n" : "") + "$Id$\n"
           : "Committed fixture baseline\n";
         if (ident) {
           await writeFile(
             join(nested, ".gitattributes"),
-            "local.txt ident -text\n.gitignore ident -text\n",
+            "local.txt ident " +
+              (encodedIdent
+                ? "-text working-tree-encoding=UTF-16LE"
+                : "-text") +
+              "\n.gitignore ident -text\n",
           );
           nestedGit("add", ".gitattributes");
         }
@@ -231,7 +244,7 @@ for (const kind of [
           source = join(nested, "linked", "local.txt");
         } else await writeFile(source, content);
         if (kind === "committed" || trackedEdit) {
-          if (trackedEdit) await writeFile(source, committedContent);
+          if (trackedEdit) await writeFile(source, committedContent, encoding);
           nestedGit("add", "-f", "local.txt");
           nestedGit("commit", "-m", "Synthetic nested content");
           if (hiddenFlag)
@@ -242,7 +255,26 @@ for (const kind of [
               "local.txt",
               ".gitignore",
             );
-          if (trackedEdit) await writeFile(source, content);
+          if (ordinaryIdent) {
+            const output = await runGitRepositoryCommand(
+              "git",
+              ["cat-file", "--filters", "HEAD:local.txt"],
+              nested,
+              { encoding: "base64" },
+            );
+            const rendered = Buffer.from(output, "base64").toString(encoding);
+            const expansion =
+              "$Id: " + nestedGit("rev-parse", ":local.txt") + " $";
+            expect(rendered).toContain(expansion);
+            if (encodedIdent) expect(rendered).toContain("Résumé 雪");
+            content = copied
+              ? rendered.replace(
+                  expansion,
+                  "$Id: SYNTHETIC_LOCAL_ONLY_CONTENT $",
+                )
+              : rendered;
+          }
+          if (trackedEdit) await writeFile(source, content, encoding);
           if (ident) {
             expect(nestedGit("hash-object", "--", "local.txt")).toBe(
               nestedGit("rev-parse", ":local.txt"),
@@ -257,6 +289,14 @@ for (const kind of [
               `$Id: ${nestedGit("rev-parse", ":.gitignore")} $`,
             );
             await writeFile(join(nested, ".gitignore"), rendered);
+            if (ordinaryIdent) {
+              nestedGit("add", "--", "local.txt", ".gitignore");
+              expect(nestedGit("status", "--porcelain=v1")).toBe("");
+              expect(nestedGit("diff", "--cached", "--name-only")).toBe("");
+              expect(nestedGit("ls-files", "-v", "--", "local.txt")).toBe(
+                "H local.txt",
+              );
+            }
           }
           if (unmergedEdit) {
             // A DD conflict has only stage 1, with no stage-0 worktree match.
@@ -303,16 +343,18 @@ for (const kind of [
             ).toBe("local.txt");
           }
         }
-        // A flagged file with unchanged, committed content remains publishable.
-        const independentContent = hiddenFlag
-          ? await readFile(join(nested, ".gitignore"), "utf8")
-          : "New independent content\n";
+        // Git’s normal checked-out representation remains publishable.
+        const independentContent =
+          hiddenFlag || ordinaryIdent
+            ? await readFile(join(nested, ".gitignore"), "utf8")
+            : "New independent content\n";
         const copiedPrivateContent = copied && kind !== "directory link";
         const blocked = copiedPrivateContent || kind === "scrubbed";
         const assessed =
           kind === "scrubbed" || (kind === "untracked" && !copied);
         expect(git("status", "--porcelain=v1", "--untracked-files=all")).toBe(
           hiddenFlag ||
+            ordinaryIdent ||
             kind.startsWith("ignored") ||
             kind === "initialized submodule"
             ? ""
@@ -347,7 +389,11 @@ for (const kind of [
               if (command === "git") {
                 if (args.includes("push")) {
                   pushes++;
-                  if ((ordinarySubmoduleFile || trackedEdit) && copied)
+                  if (
+                    !ordinaryIdent &&
+                    (ordinarySubmoduleFile || trackedEdit) &&
+                    copied
+                  )
                     throw new Error("Unexpected push of pre-existing content");
                 }
                 return runGitRepositoryCommand(command, args, cwd, options);
@@ -373,7 +419,7 @@ for (const kind of [
               index = await readFile(join(directory, ".git", "index"));
               await writeFile(
                 join(directory, "selected.txt"),
-                copied
+                copied || ordinaryIdent
                   ? stagedEdit || unmergedEdit
                     ? nestedGit(
                         "show",
@@ -427,9 +473,19 @@ for (const kind of [
           );
           expect(repositoryGit(remote)("for-each-ref")).toBe("");
         } else {
-          expect(git("show", "HEAD:selected.txt")).toBe(
-            copied ? content.trim() : independentContent.trim(),
-          );
+          if (ordinaryIdent) {
+            const blob = await runGitRepositoryCommand(
+              "git",
+              ["show", "HEAD:selected.txt"],
+              directory,
+              { encoding: "base64" },
+            );
+            expect(Buffer.from(blob, "base64")).toEqual(await readFile(source));
+          } else {
+            expect(git("show", "HEAD:selected.txt")).toBe(
+              copied ? content.trim() : independentContent.trim(),
+            );
+          }
           expect(git("ls-tree", "HEAD", "nested")).toBe(originalGitlink);
         }
         expect(nestedGit("rev-parse", "HEAD")).toBe(nestedHead);
@@ -439,16 +495,16 @@ for (const kind of [
         expect(await readFile(join(nestedStorage, "config"))).toEqual(
           configuration,
         );
-        expect(await readFile(source, "utf8")).toBe(
+        expect(await readFile(source, encoding)).toBe(
           stagedEdit || unmergedEdit ? committedContent : content,
         );
         if (stagedEdit)
           expect(nestedGit("show", ":local.txt")).toBe(content.trim());
         expect(assessments).toBe(assessed ? 1 : 0);
-        expect(await readFile(join(directory, "selected.txt"), "utf8")).toBe(
+        expect(await readFile(join(directory, "selected.txt"), encoding)).toBe(
           kind === "scrubbed"
             ? "Synthetic scrubbed working copy\n"
-            : copied
+            : copied || ordinaryIdent
               ? content
               : independentContent,
         );
