@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from publication_fixtures import assert_published_aggregate
 from workbench_test_support import (
+    read_review_state,
     saved_coverage,
     saved_draft,
     write_checkpoint,
@@ -117,10 +118,13 @@ def test_deep_publication_keeps_configured_scope_without_worker_observations(
     assert completed["progress"]["status"] == "complete"
     assert_published_aggregate(scan)
     assert result.read_bytes() == source_bytes
-    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["mode"] == ("deep_repository" if scope == "." else "scoped_path")
-    assert coverage["includePaths"] == [scope]
-    assert coverage["excludePaths"] == []
+    summary = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert summary["mode"] == ("deep_repository" if scope == "." else "scoped_path")
+    assert summary["scope"]["includePaths"] == [scope]
+    assert summary["scope"]["excludePaths"] == []
+    review = read_review_state(scan.connection, scan.scan_dir)
+    for field in worker_coverage:
+        assert not review.get(field)
     report = (scan.scan_dir / "report.md").read_text()
     assert f"- Included paths: {scope}" in report
     assert "- Excluded paths: none" in report
@@ -817,14 +821,17 @@ def test_resumed_sealed_out_of_scope_deep_scan_is_not_rewritten(
             row, workbench_api["now"]()
         ),
     )
-    names = ["scan-manifest.json", "findings.json", "coverage.json", "report.md"]
-    original = {name: (scan.scan_dir / name).read_bytes() for name in names}
+
+    def snapshot():
+        return {path: path.read_bytes() for path in scan.scan_dir.rglob("*") if path.is_file()}
+
+    original = snapshot()
     with pytest.raises(SystemExit, match="sealed Deep scan contains findings outside"):
         scan.complete()
-    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == original
+    assert snapshot() == original
     # Historical sealed reads are retained; this change is not a migration.
     workbench_api["finalize_scan"](scan.scan_dir)
-    assert {name: (scan.scan_dir / name).read_bytes() for name in names} == original
+    assert snapshot() == original
 
 
 def test_deep_scope_filter_does_not_hide_unsafe_finding_locations(publication_scan):

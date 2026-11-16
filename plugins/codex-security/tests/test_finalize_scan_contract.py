@@ -18,7 +18,12 @@ from unittest import main, mock, skipIf
 
 import pytest
 from finalize_sarif_cases import FINALIZER, FinalizerSarifCases
-from workbench_test_support import ScanFixtureTestCase, windows_file_backend
+from workbench_test_support import (
+    ScanFixtureTestCase,
+    select_checkpoint,
+    windows_file_backend,
+    write_checkpoint,
+)
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "legacy-completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
@@ -2443,7 +2448,8 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     )
                 )
                 self.assertEqual(self.read_json("findings.json"), findings)
-                self.assertEqual(self.read_json("coverage.json"), coverage)
+                self.assertEqual(manifest["scan"]["mode"], coverage["mode"])
+                self.assertFalse((self.scan_dir / "coverage.json").exists())
 
     def test_sealed_findings_keep_authored_identity_mismatches_strict(self) -> None:
         findings = self.seal_and_read_json("findings.json")
@@ -2771,7 +2777,14 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(manifest["scan"]["startedAt"], "2026-05-31T18:00:00Z")
         self.assertEqual(manifest["scan"]["completedAt"], "2026-05-31T18:10:00Z")
         self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:10:00Z")
-        self.assertEqual(manifest["scan"]["coverageRef"], "coverage.json")
+        self.assertNotIn("coverageRef", manifest["scan"])
+        self.assertEqual(manifest["scan"]["mode"], "repository")
+        self.assertEqual(manifest["scan"]["review"], {"excludedPaths": []})
+        self.assertNotIn("coverage.json", [item["path"] for item in manifest["scan"]["artifacts"]])
+        self.assertFalse((self.scan_dir / "coverage.json").exists())
+        checkpoint_head = self.read_json("checkpoint-head.json")
+        checkpoint = self.read_json(f"checkpoints/{checkpoint_head['checkpoint']}")
+        self.assertEqual(checkpoint["reviewState"]["surfaces"], coverage["surfaces"])
         self.assertEqual(manifest["scan"]["findingsRef"], "findings.json")
         self.assertEqual(manifest["scan"]["target"]["targetId"], "target_sha256_example")
         self.assertEqual(manifest["scan"]["target"]["displayName"], "example/repo")
@@ -2790,6 +2803,84 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(coverage["mode"], "repository")
         self.assertEqual(coverage["includePaths"], ["src/"])
         self.assertEqual(coverage["excludePaths"], [])
+
+    def test_bound_legacy_draft_can_retry_a_failed_manifest_write(self) -> None:
+        self.manifest["scan"]["scope"]["limitations"] = ["Offline review."]
+        self.manifest["scan"]["warnings"] = ["Optional file unavailable.", "Offline review."]
+        self.coverage["deferred"] = [
+            {"id": "offline", "reason": "Offline review."},
+            {"id": "time-limit", "reason": "The deadline elapsed."},
+            {"id": "retry-online", "reason": "Offline review."},
+            {
+                "id": "inspect-parser",
+                "reason": "Inspect parser output.",
+                "paths": ["src/parser.py"],
+            },
+        ]
+        self.write_scan()
+        original_coverage = (self.scan_dir / "coverage.json").read_bytes()
+        write_json = FINALIZER._write_scan_local_json
+
+        def fail_manifest_write(scan_dir, name, document):
+            if name == "scan-manifest.json":
+                raise OSError("manifest write failed")
+            write_json(scan_dir, name, document)
+
+        with (
+            mock.patch.object(FINALIZER, "_write_scan_local_json", side_effect=fail_manifest_write),
+            self.assertRaisesRegex(OSError, "manifest write failed"),
+        ):
+            FINALIZER.finalize_scan(self.scan_dir, completion_binding=self.completion_binding())
+
+        self.assertEqual(self.read_json("scan-manifest.json"), self.manifest)
+        self.assertEqual((self.scan_dir / "coverage.json").read_bytes(), original_coverage)
+        manifest, _, _ = FINALIZER.finalize_scan(
+            self.scan_dir, completion_binding=self.completion_binding()
+        )
+        self.assertEqual(
+            manifest["scan"]["scope"]["limitations"], ["Offline review.", "The deadline elapsed."]
+        )
+        self.assertFalse((self.scan_dir / "coverage.json").exists())
+        head = self.read_json("checkpoint-head.json")
+        checkpoint = self.read_json(f"checkpoints/{head['checkpoint']}")
+        self.assertEqual(checkpoint["reviewState"]["deferred"], self.coverage["deferred"])
+        sarif = FINALIZER.build_sarif_projection(self.scan_dir)
+        notifications = sarif["runs"][0]["invocations"][0]["toolExecutionNotifications"]
+        self.assertEqual(
+            [notice["message"]["text"] for notice in notifications],
+            [
+                "Offline review.",
+                "The deadline elapsed.",
+                "Inspect parser output.",
+                "Optional file unavailable.",
+            ],
+        )
+
+    def test_invalid_legacy_exclusions_are_rejected_before_building_the_review_summary(
+        self,
+    ) -> None:
+        self.coverage["explicitExclusions"] = ["unsupported"]
+        self.write_scan()
+        with self.assertRaisesRegex(FINALIZER.ContractError, "explicitExclusions"):
+            FINALIZER.finalize_scan(self.scan_dir, completion_binding=self.completion_binding())
+        self.assertEqual(self.read_json("scan-manifest.json"), self.manifest)
+        self.assertEqual(self.read_json("coverage.json"), self.coverage)
+
+    def test_bound_legacy_draft_with_frozen_sources_preserves_its_review(self) -> None:
+        self.manifest["scan"]["preservedSources"] = {}
+        self.write_scan()
+        previous = write_checkpoint(
+            self.scan_dir / "checkpoints",
+            {"scanId": "scan_001", "findings": [], "reviewState": {"deferred": []}},
+        )
+        head = select_checkpoint(self.scan_dir, previous)
+        previous_head = head.read_bytes()
+        manifest, _, coverage = FINALIZER.finalize_scan(
+            self.scan_dir, completion_binding=self.completion_binding()
+        )
+        self.assertEqual(manifest["scan"]["coverageRef"], "coverage.json")
+        self.assertEqual(self.read_json("coverage.json")["surfaces"], coverage["surfaces"])
+        self.assertEqual(head.read_bytes(), previous_head)
 
     def test_completion_binding_rejects_sealed_wrong_producer_without_rewriting(self) -> None:
         manifest, _, _ = self.write_sealed_scan()
