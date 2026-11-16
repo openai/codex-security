@@ -1020,7 +1020,8 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
         db.execute("ALTER TABLE finding_triage DROP COLUMN fixed_revision")
         db.execute("ALTER TABLE finding_decisions DROP COLUMN fixed_revision")
         db.execute("DELETE FROM schema_migrations WHERE version = 73")
-    assert close() == legacy
+    migrated = close()
+    assert migrated == legacy
     for reason, revision, rationale, diagnostic in (
         (None, sha1, note, "already_fixed"),
         ("wont_fix", sha1, note, "already_fixed"),
@@ -1040,11 +1041,16 @@ def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> Non
     bound = close("--fixed-revision", sha1.upper(), "--note", note)
     assert bound["fixedRevision"] == sha1
     assert bound["note"] == note
-    assert close("--fixed-revision", sha1, "--note", note) == bound
-    assert close("--note", note) == bound
-    assert close() == bound
-    assert close("--fixed-revision", sha256, "--note", note)["fixedRevision"] == sha256
-    assert "fixedRevision" not in close("--note", "Updated unbound rationale")
+    repeated_decision = close("--fixed-revision", sha1, "--note", note)
+    assert repeated_decision == bound
+    repeated_note = close("--note", note)
+    assert repeated_note == bound
+    repeated_close = close()
+    assert repeated_close == bound
+    rebound = close("--fixed-revision", sha256, "--note", note)
+    assert rebound["fixedRevision"] == sha256
+    unbound = close("--note", "Updated unbound rationale")
+    assert "fixedRevision" not in unbound
     close("--fixed-revision", sha256, "--note", note)
     reopened = set_triage(state_dir, occurrence, "open")["scan"]["findings"][0]["triage"]
     assert reopened["status"] == "open"
