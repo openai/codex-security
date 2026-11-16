@@ -203,6 +203,37 @@ describe("dependency report renderer", () => {
     expect(text).toContain("export const output");
   });
 
+  test("opens unresolved coverage when there are no reviewed places", () => {
+    const report = { ...cveReport, uses: [], limitations: [] };
+    const coverage = {
+      reason: "The consumer implementation is unavailable.",
+      evidence: [
+        { path: "src/dispatch.ts", startLine: 8, endLine: 8, supports: [] },
+      ],
+      observations: [],
+    };
+    const html = renderDependencyReport({
+      ...report,
+      coverage: [{ ...coverage, kind: "unresolved" }],
+    });
+    expect(visibleText(html)).toContain(
+      "0 reviewed places · 1 unresolved item",
+    );
+    expect(html).toMatch(
+      /<details class="coverage" open>[\s\S]*The consumer implementation is unavailable\.[\s\S]*src\/dispatch.ts:8/u,
+    );
+    expect(html).not.toContain("data-use-row data-verdict=");
+
+    const dismissed = renderDependencyReport({
+      ...report,
+      coverage: [
+        { ...coverage, kind: "dismissed", reason: "The route is unused." },
+      ],
+    });
+    expect(visibleText(dismissed)).not.toContain("unresolved item");
+    expect(dismissed).toContain('<details class="coverage">');
+  });
+
   test("renders a CVE report with separate source and runtime evidence", () => {
     const text = visibleText(renderDependencyReport(cveReport));
 

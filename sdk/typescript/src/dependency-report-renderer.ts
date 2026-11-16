@@ -588,7 +588,11 @@ function renderUse(
   </article>`;
 }
 
-function renderPlaceSummary(check: Check, title: string) {
+function renderPlaceSummary(
+  check: Check,
+  title: string,
+  unresolvedCount: number,
+) {
   const counts = verdictOrder.map((verdict) => ({
     verdict,
     count: check.uses.filter((use) => use.verdict === verdict).length,
@@ -600,8 +604,11 @@ function renderPlaceSummary(check: Check, title: string) {
         `<span class="decision-count tone" data-verdict="${verdict}"><strong>${count}</strong> ${verdicts[verdict].toLowerCase()}</span>`,
     )
     .join("");
+  const unresolved = unresolvedCount
+    ? ` · ${quantity(unresolvedCount, "unresolved item")}`
+    : "";
   return `<section class="decision">
-    <div><h2>${escapeHtml(title)}</h2><p>${quantity(check.uses.length, "reviewed place")}</p></div>
+    <div><h2>${escapeHtml(title)}</h2><p>${quantity(check.uses.length, "reviewed place")}${unresolved}</p></div>
     <div class="scope">${breakdown ? `<p class="breakdown">${breakdown}</p>` : ""}</div>
   </section>`;
 }
@@ -642,6 +649,7 @@ function renderSearchAudit(check: Check): string {
 function renderCoverage(
   coverage: Check["coverage"],
   code: ReadonlyMap<string, string> | undefined,
+  open: boolean,
 ): string {
   if (!coverage?.length) return "";
   const decisions = coverage
@@ -670,7 +678,7 @@ function renderCoverage(
     </section>`;
     })
     .join("");
-  return `<details class="coverage"><summary>Other checked code <span>${coverage.length}</span></summary>${decisions}</details>`;
+  return `<details class="coverage"${open ? " open" : ""}><summary>Other checked code <span>${coverage.length}</span></summary>${decisions}</details>`;
 }
 
 function renderCheck(
@@ -683,6 +691,8 @@ function renderCheck(
   useProof: ReadonlyMap<string, DependencyReportProof>,
 ) {
   const indexId = `index-${number}`;
+  const unresolvedCount =
+    check.coverage?.filter((item) => item.kind === "unresolved").length ?? 0;
   const advisoryDetails = new Map(
     (check.advisoryDetails ?? []).map((entry) => [entry.url, entry]),
   );
@@ -762,7 +772,7 @@ function renderCheck(
     </dl></details>`
     : "";
   return `<section class="check" id="check-${number}">
-    ${renderPlaceSummary(check, title)}
+    ${renderPlaceSummary(check, title, unresolvedCount)}
     ${renderAdvisory(details)}
     ${
       rows
@@ -781,7 +791,7 @@ function renderCheck(
     </section>`
         : '<p class="empty">No reviewed places were recorded for this check.</p>'
     }
-    ${renderCoverage(check.coverage, code)}
+    ${renderCoverage(check.coverage, code, check.uses.length === 0 && unresolvedCount > 0)}
     ${renderSearchAudit(check)}
     ${assumptions}
     ${limitations}
