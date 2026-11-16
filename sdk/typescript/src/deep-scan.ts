@@ -8,7 +8,7 @@ import {
   nativeCodexLaunch,
   resolveBundledCodexExecutable,
 } from "./codex-sdk-environment.js";
-import { CodexSecurityError } from "./errors.js";
+import { CodexSecurityError, ScanInterruptedError } from "./errors.js";
 import {
   deepMerge,
   inlineToml,
@@ -426,6 +426,16 @@ export async function* runDeepScan(
   );
   const completed = JSON.parse(output);
   if (
+    completed.scanId === options.scanId &&
+    completed.status === "interrupted"
+  ) {
+    throw new DeepScanInterruptedError(
+      completed.error ?? "Deep Scan was interrupted.",
+      options.scanId,
+      options.scanDir,
+    );
+  }
+  if (
     completed.scanId !== options.scanId ||
     completed.manifestPath !== join(options.scanDir, "scan-manifest.json")
   ) {
@@ -439,6 +449,16 @@ export async function* runDeepScan(
     type: "turn.completed",
     usage: { ...DIRECT_DEEP_SCAN_CONTROL_USAGE },
   };
+}
+
+/** @internal The engine retained an unfinished scan for same-ID continuation. */
+export class DeepScanInterruptedError extends ScanInterruptedError {
+  constructor(diagnostic: string, scanId: string, scanDir: string) {
+    super(
+      `${diagnostic}\nResume the saved scan with codex-security scans resume ${scanId} after usage allowance is available.`,
+      scanDir,
+    );
+  }
 }
 
 function runEngine(

@@ -18,12 +18,17 @@ export class DeepScanCoordinatorRegistry {
   private readonly observers = new Set<DeepScanCoordinator>();
   private closed = false;
 
-  get(scanId: string): DeepScanCoordinator | undefined {
-    return this.coordinators.get(scanId);
+  get(scan: string | DeepScanRunState): DeepScanCoordinator | undefined {
+    if (typeof scan === "string") return this.coordinators.get(scan);
+    const coordinator = this.coordinators.get(scan.scanId);
+    return coordinator?.snapshot().coordinatorGeneration ===
+      scan.coordinatorGeneration
+      ? coordinator
+      : undefined;
   }
 
   start(options: CoordinatorOptions): DeepScanCoordinator {
-    const existing = this.coordinators.get(options.run.scanId);
+    const existing = this.get(options.run);
     if (existing) return existing;
     if (this.closed) throw new Error("Deep Scan coordinator host has closed.");
     let coordinator!: DeepScanCoordinator;
@@ -147,7 +152,7 @@ export class DeepScanRemoteCoordinator {
             Date.now() - heartbeat >= COORDINATOR_LEASE_MS) &&
           Date.now() >= this.nextClaimAt
         ) {
-          const local = registry.get(run.scanId);
+          const local = registry.get(run);
           if (local) {
             return deadline === undefined
               ? await local.wait(signal)
@@ -159,6 +164,7 @@ export class DeepScanRemoteCoordinator {
               scanId: run.scanId,
               threadId,
               handoffClaimToken: options.handoffClaimToken,
+              ...options.adoptionSettings,
             });
           } catch (error) {
             if (!isTransientPersistenceError(error)) {
@@ -200,7 +206,7 @@ export async function startOrJoinDeepScanCoordinator(
   coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
   joined: boolean;
 }> {
-  const existing = input.registry.get(input.run.scanId);
+  const existing = input.registry.get(input.run);
   if (existing) return { coordinator: existing, joined: true };
   const threadId = input.options.threadId;
   if (!threadId) {
@@ -212,6 +218,7 @@ export async function startOrJoinDeepScanCoordinator(
     scanId: input.run.scanId,
     threadId,
     handoffClaimToken: input.options.handoffClaimToken,
+    ...input.options.adoptionSettings,
   });
   if (!claim.acquired) {
     return {

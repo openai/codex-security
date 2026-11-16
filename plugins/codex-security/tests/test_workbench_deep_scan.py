@@ -65,7 +65,7 @@ def begin_target_scan(
     codex_home: Path,
     target: Path,
     scan_root: Path,
-    *,
+    *options: str,
     thread_id: str = "thread-deep-scan",
     user_context: str | None = None,
     service_tier: str | None = None,
@@ -79,6 +79,7 @@ def begin_target_scan(
         ".",
         "--scan-root",
         str(scan_root),
+        *options,
         *(("--user-context-stdin",) if user_context is not None else ()),
         *(("--service-tier", service_tier) if service_tier is not None else ()),
         environment=deep_environment(codex_home),
@@ -86,14 +87,14 @@ def begin_target_scan(
     )
 
 
-def start_empty_target_scan(tmp_path: Path, *, config: str | None = None) -> DeepScan:
+def start_empty_target_scan(tmp_path: Path, *options: str, config: str | None = None) -> DeepScan:
     state_dir = tmp_path / "state"
     codex_home = tmp_path / "codex-home"
     if config is not None:
         write_deep_config(codex_home, config)
     target = tmp_path / "target"
     target.mkdir()
-    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans")["deepScan"]
+    run = begin_target_scan(state_dir, codex_home, target, tmp_path / "scans", *options)["deepScan"]
     return DeepScan(state_dir, codex_home, str(run["scanId"]), Path(str(run["scanDir"])))
 
 
@@ -521,11 +522,32 @@ def test_existing_generation_safely_claims_and_reclaims_without_schema_migration
         )
     )
     with ThreadPoolExecutor(max_workers=4) as executor:
-        results = list(executor.map(lambda _: claim(), range(4)))
+
+        def competing_claim(index: int) -> dict[str, object]:
+            return scan_command(
+                state_dir,
+                "claim-deep-scan-coordinator",
+                scan_id,
+                "--thread-id",
+                "thread-deep-scan",
+                "--model",
+                f"replacement-{index}",
+                "--reasoning-effort",
+                "max",
+                environment=deep_environment(codex_home),
+            )
+
+        results = list(executor.map(competing_claim, range(4)))
 
     assert sum(result["coordinatorDisposition"] == "adopted" for result in results) == 1
     assert sum(result["coordinatorDisposition"] == "observing" for result in results) == 3
     assert {result["deepScan"]["coordinatorGeneration"] for result in results} == {3}
+    winner = next(
+        i for i, result in enumerate(results) if result["coordinatorDisposition"] == "adopted"
+    )
+    assert {
+        (result["deepScan"]["model"], result["deepScan"]["reasoningEffort"]) for result in results
+    } == {(f"replacement-{winner}", "max")}
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert (
             connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
@@ -1003,6 +1025,158 @@ def test_worker_failure_diagnostic_survives_coordinator_adoption(
         ]
         assert final["error"] == (expected or "Cleanup failed.")
     assert final["workers"][0]["error"] == message
+
+
+@pytest.mark.cross_platform
+def test_usage_limit_pause_retains_reviews_and_resumes_same_scan(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(
+        tmp_path, "--model", "original-model", "--reasoning-effort", "medium"
+    )
+    claimed = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
+    generation = claimed["coordinatorGeneration"]
+    accepted, _, _, result = deep.dispatch_discovery_worker(
+        name="accepted", coordinator_generation=generation
+    )
+    saved = result.read_bytes()
+    deep.dispatch_discovery_worker(
+        name="unfinished", succeed=False, coordinator_generation=generation
+    )
+    message = "You’ve hit your usage limit. Try again later."
+
+    def pause(worker_name: str, generation: int) -> dict[str, object]:
+        worker, prompt, artifacts, _ = deep.dispatch_discovery_worker(
+            name=worker_name, succeed=False, coordinator_generation=generation
+        )
+        deep.upsert_worker(
+            worker_id=worker,
+            prompt_path=prompt,
+            artifact_dir=artifacts,
+            status="failed",
+            error=message,
+            terminal_failure=True,
+            coordinator_generation=generation,
+        )
+        args = (
+            "--deep-status",
+            "usage_limit",
+            "--message",
+            message,
+            "--coordinator-generation",
+            str(generation),
+        )
+        paused = deep.command("fail-deep-scan", *args)["deepScan"]
+        assert deep.command("fail-deep-scan", *args)["deepScan"] == paused
+        return paused
+
+    paused = pause("quota", generation)
+    assert paused["status"] == "interrupted"
+    assert paused["resumeAvailable"] is True
+    assert paused["error"] == message
+    assert paused["manifestPath"] is None
+    assert result.read_bytes() == saved
+    assert not (deep.directory / "scan-manifest.json").exists()
+    assert next(w for w in paused["workers"] if w["id"] == accepted)["status"] == "succeeded"
+    scan = get_scan(deep.state_dir, deep.id, environment=deep_environment(deep.codex_home))["scan"]
+    assert scan["progress"]["status"] == "running"
+    assert scan["progress"]["independentReviews"]["active"] == 0
+    assert scan["progress"]["independentReviews"]["consolidating"] is False
+    sealed = deep.command("complete-scan", "--thread-id", "thread-deep-scan", check=False)
+    assert sealed["returncode"] != 0
+
+    for _ in range(2):
+        resumed = deep.command(
+            "begin-deep-scan",
+            "--thread-id",
+            "thread-deep-scan",
+            "--model",
+            "later-turn-model",
+            "--reasoning-effort",
+            "high",
+        )["deepScan"]
+        assert resumed["model"] == "original-model"
+        assert resumed["reasoningEffort"] == "medium"
+    assert resumed["scanId"] == deep.id
+    assert resumed["status"] == "running"
+    assert resumed["error"] is None
+    assert resumed["config"] == paused["config"]
+    assert resumed["createdAt"] == paused["createdAt"]
+    recovered = claim_deep_scan_coordinator(deep.state_dir, deep.codex_home, deep.id)["deepScan"]
+    assert recovered["dispatchedCount"] == 1
+    assert recovered["completionSequence"] == 1
+    assert result.read_bytes() == saved
+    stale = deep.command(
+        "fail-deep-scan",
+        "--message",
+        "stale cleanup",
+        "--coordinator-generation",
+        str(generation),
+        check=False,
+    )
+    assert "newer generation" in stale["stderr"]
+
+    # Another quota cycle refunds only its unfinished attempt, not earlier ones.
+    pause("quota-again", recovered["coordinatorGeneration"])
+    continued = deep.command("begin-deep-scan", "--thread-id", "thread-deep-scan")["deepScan"]
+    assert continued["dispatchedCount"] == 1
+    assert continued["completionSequence"] == 1
+    assert continued["createdAt"] == paused["createdAt"]
+    assert continued["config"] == paused["config"]
+    assert result.read_bytes() == saved
+
+
+@pytest.mark.cross_platform
+def test_usage_limit_pause_rejects_changed_target_on_resume(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    deep.command(
+        "fail-deep-scan",
+        "--deep-status",
+        "usage_limit",
+        "--message",
+        "You’ve hit your usage limit. Try again later.",
+    )
+    paused = deep.read("thread-deep-scan")
+    by_target = begin_target_scan(
+        deep.state_dir,
+        deep.codex_home,
+        tmp_path / "target",
+        tmp_path / "scans",
+        user_context="a different review request",
+    )
+    assert by_target["deepScan"] == paused
+    (tmp_path / "target" / "changed.py").write_text("print('changed')\n")
+    rejected = resume_deep_scan(
+        deep.state_dir,
+        deep.id,
+        "thread-deep-scan",
+        "--model",
+        "rejected-model",
+        "--reasoning-effort",
+        "high",
+        environment=deep_environment(deep.codex_home),
+        check=False,
+    )
+    assert "checkout revision or contents changed" in rejected["stderr"]
+    assert deep.read("thread-deep-scan")["status"] == "interrupted"
+    with sqlite3.connect(deep.state_dir / "workbench.sqlite3") as connection:
+        model = connection.execute(
+            "SELECT model, reasoning_effort FROM scans WHERE id = ?", (deep.id,)
+        ).fetchone()
+    assert model == (None, None)
+    deep.command("cancel-scan", "--thread-id", "thread-deep-scan")
+    canceled = deep.read("thread-deep-scan")
+    assert canceled["status"] == "canceled"
+    assert "resumeAvailable" not in canceled
+
+
+@pytest.mark.cross_platform
+def test_parent_failure_terminates_a_paused_deep_scan(tmp_path: Path) -> None:
+    deep = start_empty_target_scan(tmp_path)
+    deep.command("fail-deep-scan", "--deep-status", "usage_limit", "--message", "Quota exceeded.")
+    deep.command("fail-scan", "--message", "Owner session failed.")
+    run = deep.read("thread-deep-scan")
+    assert run["status"] == "failed"
+    assert run["error"] == "Owner session failed."
+    assert "resumeAvailable" not in run
 
 
 @pytest.mark.cross_platform

@@ -1050,10 +1050,10 @@ export function createCodexSecurityServer(): McpServer {
         };
         const started = await startDeepScanEngine({
           run: begun,
+          adoptionSettings: modelSettings,
           registry: deepScanCoordinators,
           store: deepScanStore,
           runWorkbench,
-          ...modelSettings,
           parentSandbox,
           parentTurn: codexParentTurnFromExtra(extra),
           pythonCommand: await resolvePythonCommand(),
@@ -2244,6 +2244,28 @@ function deepScanTerminalResult(
     );
   }
   if (run.status === "failed" || run.status === "interrupted") {
+    if (run.resumeAvailable) {
+      const instructions = [
+        run.error ?? "Deep Scan was interrupted.",
+        `Deep Scan ${run.scanId} is paused. Resume reuses accepted reviews. An unfinished worker's draft may remain only in its saved artifacts. A replacement starts a new review.`,
+        `After usage allowance is available, resume start_codex_security_deep_scan with the same scanId and the original handoffClaimToken if one was supplied. For a CLI-owned scan, use codex-security scans resume ${run.scanId}.`,
+        "The original discovery deadline continues during the pause. After it expires, resume publishes available evidence without starting another review.",
+        "Do not retry in this response, start a replacement scan, or call complete_codex_security_scan.",
+      ].join("\n");
+      return {
+        ...scanActionResult(
+          {
+            status: "interrupted",
+            scanId: run.scanId,
+            scanDir: run.scanDir,
+            resumeAvailable: true,
+            instructions,
+          },
+          instructions,
+        ),
+        isError: true,
+      };
+    }
     return toolErrorResult(deepScanFailureMessage(run));
   }
   return undefined;

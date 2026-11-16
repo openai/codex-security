@@ -16,9 +16,91 @@ import {
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { writeSession } from "./support/usage-rollout.js";
+import { DeepScanInterruptedError } from "../src/deep-scan.js";
+import type { JsonObject } from "../src/config.js";
 
 const { temporaryDirectory, cleanup } = createApiTestFixtures();
 afterEach(cleanup);
+
+test.each([true, false])(
+  "quota interruption keeps the scan resumable and skips follow-ups (direct: %p)",
+  async (direct) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository");
+    const codexHome = join(root, "codex-home");
+    const scanDir = join(root, "scan");
+    await mkdir(repository);
+    await mkdir(codexHome);
+    await mkdir(scanDir, { mode: 0o700 });
+    const commands: string[] = [];
+    const diagnostic = "Quota exceeded. Check your plan and billing details.";
+    const followUp = mock(async () => ({ events: completedEvents("owner") }));
+    const client = new TestClient(
+      {},
+      {
+        ...scanRuntimeDependencies(codexHome, scanDir),
+        canRunDirectDeepScan: () => direct,
+        environment: {
+          CODEX_API_KEY: "synthetic-quota-test-key",
+          CODEX_SECURITY_STATE_DIR: join(root, "state"),
+        },
+        createCodex: () => ({
+          startThread: () => ({
+            id: null,
+            runStreamed: async () => ({ events: completedEvents("owner") }),
+          }),
+          resumeThread: (id) => ({ id, runStreamed: followUp }),
+        }),
+        runDeepScan: async function* () {
+          yield { type: "thread.started", thread_id: "owner" };
+          throw new DeepScanInterruptedError(
+            diagnostic,
+            "scan_example_001",
+            scanDir,
+          );
+        },
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
+          commands.push(args[0]!);
+          if (args[0] === "get-scan")
+            return {
+              scan: {
+                mode: "deep",
+                continuationThreadId: "owner",
+                progress: { status: "running" },
+              },
+            };
+          if (args[0] === "get-deep-scan")
+            return {
+              deepScan: {
+                status: "interrupted",
+                resumeAvailable: true,
+                error: diagnostic,
+              },
+            };
+          return mockWorkbench(args, input);
+        },
+      },
+    );
+    try {
+      const failure = await client
+        .run(repository, {
+          mode: "deep",
+          postScanPrompt: "Summarize the completed scan.",
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(DeepScanInterruptedError);
+      expect((failure as Error).message).toContain(diagnostic);
+      expect((failure as Error).message).toContain(
+        "scans resume scan_example_001",
+      );
+      expect(commands).not.toContain("fail-scan");
+      expect(commands).not.toContain("complete-scan");
+      expect(followUp).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+    }
+  },
+);
 
 test.each([undefined, "Summarize the completed scan."])(
   "Deep Scan preserves worker usage and the finalized report with post-scan prompt %p",

@@ -25,6 +25,14 @@ export class DeepScanNonRetryableError extends Error {
   }
 }
 
+/** Usage exhaustion stops this attempt, but the saved scan can be continued. */
+export class DeepScanUsageLimitError extends DeepScanNonRetryableError {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeepScanUsageLimitError";
+  }
+}
+
 const USAGE_LIMIT_MESSAGES = new Set([
   "Quota exceeded. Check your plan and billing details.",
   "To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus.",
@@ -38,13 +46,14 @@ const USAGE_LIMIT_MESSAGES = new Set([
 export function codexWorkerTurnError(message: string): Error {
   const reason = message.replace(/^Error running remote compact task: /, "");
   if (
-    CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message) ||
     USAGE_LIMIT_MESSAGES.has(reason) ||
     reason.startsWith("You’ve hit your usage limit.") ||
     reason.startsWith("You’ve hit your usage limit for ")
   ) {
-    return new DeepScanNonRetryableError(message);
+    return new DeepScanUsageLimitError(message);
   }
+  if (CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message))
+    return new DeepScanNonRetryableError(message);
   return new Error(message);
 }
 
