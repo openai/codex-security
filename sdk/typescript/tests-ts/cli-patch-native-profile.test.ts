@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, matchesGlob, relative } from "node:path";
+import { delimiter, dirname, join, matchesGlob, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -62,6 +62,7 @@ async function resolvePatchProfile(
     inspectModel: (source: string) => Promise<string>,
   ) => Promise<void>,
   capturePermissions?: (repository: string) => Promise<PatchPermissions>,
+  shellPolicy?: { set: Record<string, string>; paths: readonly string[] },
 ): Promise<PatchProfileContext> {
   const root = await fixtures.create("patch-native-profile-");
   const home = join(root, "home");
@@ -164,6 +165,13 @@ async function resolvePatchProfile(
         objectDirectory: undefined,
         alternateObjectDirectories: undefined,
       },
+      false,
+      "sandbox",
+      undefined,
+      undefined,
+      home,
+      null,
+      gitEnvironment,
     );
     expect(controls).toBeDefined();
     expect([...controls!.externalConfigPaths].sort()).toEqual(
@@ -216,7 +224,17 @@ network_access = ${configured}
 writable_roots = ${JSON.stringify(configured ? [extra] : [])}
 exclude_tmpdir_env_var = ${configured}
 exclude_slash_tmp = ${configured}
-`,
+` +
+      (shellPolicy
+        ? "[shell_environment_policy.set]\n" +
+          Object.entries(shellPolicy.set)
+            .map(
+              ([key, value]) =>
+                `${JSON.stringify(key)}=${JSON.stringify(value)}`,
+            )
+            .join("\n") +
+          "\n"
+        : ""),
   );
   await writeFile(
     join(repository, ".codex", "config.toml"),
@@ -398,15 +416,6 @@ glob_scan_max_depth = 8
       ([, access]) =>
         access === "deny" || (access as RpcMessage)["."] === "deny",
     );
-    const stores = permissions.credentialStorePaths ?? [];
-    expect(storeDenies).toHaveLength(stores.length);
-    for (const store of stores) {
-      expect(
-        storeDenies.filter(([key, access]) =>
-          access === "deny" ? matchesGlob(store, key) : key === store,
-        ),
-      ).toHaveLength(1);
-    }
     const snapshotFilesystem = {
       ...Object.fromEntries(
         permissions.readOnlyPaths.map((path) => [path, { ".": "read" }]),
@@ -475,6 +484,18 @@ glob_scan_max_depth = 8
         return result["stdout"] as string;
       });
     }
+    const stores = new Set([
+      ...(permissions.credentialStorePaths ?? []),
+      ...(shellPolicy?.paths ?? []),
+    ]);
+    expect(storeDenies).toHaveLength(stores.size);
+    for (const store of stores) {
+      expect(
+        storeDenies.filter(([key, access]) =>
+          access === "deny" ? matchesGlob(store, key) : key === store,
+        ),
+      ).toHaveLength(1);
+    }
     // Resolve the selected policy after exercising the normal snapshot/turn order.
     const selected = await rpc("thread/start", {
       cwd: repository,
@@ -537,6 +558,60 @@ test("patch model cannot read external Git configuration used by snapshots", asy
       const root = dirname(context.repository);
       const selected = join(root, "selected.gitconfig");
       const included = join(root, "included.gitconfig");
+      const hostedWindows = patchSnapshotWindowsConfig().includes('"elevated"');
+      // Emit only account roles and read outcomes for these three fixture files.
+      const reader = `const fs = require("node:fs");
+const whoami = require("node:path").join(process.env.SystemRoot, "System32", "whoami.exe");
+const who = (...args) => {
+  const r = require("node:child_process").spawnSync(whoami, args, { encoding: "utf8" });
+  return r.status === 0 ? r.stdout.toLowerCase() : "";
+};
+const role = who().trim().split(String.fromCharCode(92)).pop();
+const groups = who("/groups", "/fo", "csv", "/nh");
+const reads = ${JSON.stringify([selected, included, join(root, "ordinary.txt")])}.map(path => {
+  try { fs.closeSync(fs.openSync(path, "r")); return "ok"; }
+  catch (error) { return error.code; }
+});
+console.log(JSON.stringify({ role: ["codexsandboxoffline", "codexsandboxonline"].includes(role) ? role : role ? "other" : "unknown",
+  sandboxGroup: groups ? groups.includes("codexsandboxusers") : null, reads }));`;
+      const reportAcl = (phase: string) => {
+        // Read the actual DACL independently of the native helper's bookkeeping.
+        const command = `
+$ErrorActionPreference = 'Stop'
+$sid = try { ([Security.Principal.NTAccount]'CodexSandboxUsers').Translate([Security.Principal.SecurityIdentifier]) } catch [Security.Principal.IdentityNotMappedException] { $null }
+$state = if (Test-Path -LiteralPath $env:ACL_FIXTURE_STATE) { Get-Content -LiteralPath $env:ACL_FIXTURE_STATE -Raw | ConvertFrom-Json }
+foreach ($name in 'selected.gitconfig','included.gitconfig','ordinary.txt') {
+  $file = Join-Path $env:ACL_FIXTURE_ROOT $name
+  $rules = (Get-Acl -LiteralPath $file).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+  $aces = @($rules | Where-Object { $_.IdentityReference -eq $sid } | ForEach-Object { '{0}/{1:X8}/{2}' -f $_.AccessControlType, ([int]$_.FileSystemRights), $_.IsInherited })
+  $tracked = $false
+  if ($sid -and $state.principals) { $tracked = $state.principals.($sid.Value) -contains $file }
+  [pscustomobject]@{ file = $name; sandboxGroupAces = $aces; tracked = $tracked } | ConvertTo-Json -Compress
+}`;
+        const output = execFileSync(
+          join(
+            process.env["SystemRoot"]!,
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe",
+          ),
+          ["-NoProfile", "-NonInteractive", "-Command", command],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              ACL_FIXTURE_ROOT: root,
+              ACL_FIXTURE_STATE: join(
+                context.home,
+                ".sandbox",
+                "deny_read_acl_state.json",
+              ),
+            },
+          },
+        );
+        console.info("Windows external config", phase, output.trim());
+      };
       const readConfigs = `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const paths = ${JSON.stringify([selected, included])};
@@ -547,11 +622,19 @@ for (const path of paths) {
 const git = spawnSync("git", ["config", "--file", paths[0], "--get", "http.extraHeader"]);
 if (git.stdout) process.stdout.write(git.stdout);`;
       const expectModelDenied = async () => {
-        const reads = await inspectModel(readConfigs);
+        const reads = await inspectModel(
+          hostedWindows
+            ? readConfigs + "\n;(() => {" + reader + "})();"
+            : readConfigs,
+        );
         expect(reads).not.toContain("Synthetic fixture");
         expect(reads).not.toContain("Included fixture");
+        if (hostedWindows)
+          console.info(
+            "Windows external config model",
+            JSON.parse(reads.slice(reads.indexOf("{"))),
+          );
       };
-      await expectModelDenied();
       const gitEnvironment = {
         GIT_CONFIG_GLOBAL: selected,
         GIT_CONFIG_NOSYSTEM: "1",
@@ -567,19 +650,58 @@ if (git.stdout) process.stdout.write(git.stdout);`;
         profile: context.snapshotProfile,
         gitEnvironment,
       };
-      if (process.platform === "win32")
-        await ensureWindowsSnapshotConfigReadable(
-          context.controls!.snapshotConfigPaths,
-          (args, input, refreshWindowsReadGrants) =>
-            runRepositoryCommand("git", args, context.repository, {
-              input,
-              sandbox: {
-                ...sandbox,
-                gitEnvironment: { ...gitEnvironment, LC_ALL: "C" },
-                refreshWindowsReadGrants,
-              },
-            }),
+      const snapshotReader = async (phase: string) => {
+        // An unreadable selected global stops Git before it can dispatch this fixture alias.
+        // Keep its real profile and open the original files from the child.
+        const result = await runRepositoryCommand(
+          "git",
+          ["-c", "alias.fixture-reader=!node -", "fixture-reader"],
+          context.repository,
+          {
+            input: reader,
+            sandbox: {
+              ...sandbox,
+              gitEnvironment: { ...gitEnvironment, GIT_CONFIG_GLOBAL: "" },
+            },
+          },
         );
+        console.info("Windows external config", phase, JSON.parse(result));
+      };
+      if (hostedWindows) {
+        await writeFile(join(root, "ordinary.txt"), "ordinary");
+        await snapshotReader("snapshot before model");
+        reportAcl("before model");
+      }
+      await expectModelDenied();
+      if (process.platform === "win32") {
+        if (hostedWindows) reportAcl("after model");
+        try {
+          await ensureWindowsSnapshotConfigReadable(
+            context.controls!.snapshotConfigPaths,
+            (args, input, refreshWindowsReadGrants) =>
+              runRepositoryCommand("git", args, context.repository, {
+                input,
+                sandbox: {
+                  ...sandbox,
+                  gitEnvironment: { ...gitEnvironment, LC_ALL: "C" },
+                  refreshWindowsReadGrants,
+                },
+              }),
+          );
+        } finally {
+          // Leave the original Git error visible if the supplemental probe also fails.
+          if (hostedWindows)
+            try {
+              reportAcl("after snapshot probe");
+              await snapshotReader("snapshot after probe");
+            } catch (error) {
+              console.info(
+                "Windows snapshot diagnostic unavailable",
+                (error as NodeJS.ErrnoException).code,
+              );
+            }
+        }
+      }
       expect(
         await runRepositoryCommand(
           "git",
@@ -764,11 +886,43 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
   );
 }, 60_000);
 
-test("patch model and clean filters cannot read HTTP cookie files and TLS keys or netrc credentials", async () => {
+test("patch model and clean filters cannot read selected authentication files", async () => {
   const operator = await fixtures.create("patch-http-auth-files-");
   const config = join(operator, "selected.gitconfig");
   const selectedNetrc = join(operator, "selected credentials");
+  const awsDirectory = join(operator, ".aws");
+  const awsConfig = join(operator, "selected aws config");
+  const awsCredentials = join(operator, "selected aws credentials");
+  const clusterFiles = [
+    join(
+      operator,
+      process.platform === "win32" ? "cluster;one" : "cluster one",
+    ),
+    join(operator, "cluster two"),
+  ];
+  const policyCluster = join(operator, "policy cluster");
+  const registry = join(operator, "selected registry");
+  const npm = join(operator, "selected npmrc");
+  await mkdir(registry);
+  const clusterList = (files: string[]) =>
+    files
+      .map((file) => (process.platform === "win32" ? `"${file}"` : file))
+      .join(delimiter);
+  const pointers = {
+    KUBECONFIG: clusterList(clusterFiles),
+    DOCKER_CONFIG: registry,
+    NPM_CONFIG_USERCONFIG: npm,
+  };
+  const policySet = {
+    ...pointers,
+    KUBECONFIG: clusterList([...clusterFiles, policyCluster]),
+    FILTER_FIXTURE_SETTING: "from shell policy",
+  };
   const environment = {
+    ...pointers,
+    FILTER_FIXTURE_SETTING: "from host",
+    AWS_CONFIG_FILE: awsConfig,
+    AWS_SHARED_CREDENTIALS_FILE: awsCredentials,
     NETRC: selectedNetrc,
     HOME: operator,
     USERPROFILE: operator,
@@ -794,21 +948,33 @@ test("patch model and clean filters cannot read HTTP cookie files and TLS keys o
   const netrc = join(operator, ".netrc");
   const proxyKey = join(operator, "proxy key.pem");
   const scopedProxyKey = join(operator, "scoped proxy key.pem");
-  const existing = [...paths.slice(0, 2), netrc, proxyKey];
+  const clientCert = join(operator, "origin identity.pem");
+  const proxyCert = join(operator, "proxy identity.pem");
+  const existing = [...paths.slice(0, 2), netrc, proxyKey, clientCert];
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
     join(operator, "_netrc"),
     scopedProxyKey,
+    proxyCert,
     selectedNetrc,
+    join(awsDirectory, "config"),
+    join(awsDirectory, "credentials"),
+    awsConfig,
+    awsCredentials,
+    ...clusterFiles,
+    policyCluster,
+    join(registry, "config.json"),
+    npm,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
   const createInput = (i: number) =>
     writeFile(protectedPaths[i]!, contents[i]!, { mode: 0o600, flag: "wx" });
   for (const i of existing.keys()) await createInput(i);
-  const neighbor = join(operator, "ordinary-sibling.txt");
+  const neighbor = join(registry, "ordinary-sibling.txt");
   await writeFile(neighbor, "ordinary sibling");
   const readFiles = `const fs = require("node:fs");
+if (fs.readFileSync(${JSON.stringify(join(awsDirectory, "ordinary.txt"))}, "utf8") !== "AWS sibling") throw new Error("Cannot read the ordinary AWS sibling");
 if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
   throw new Error("Cannot read the ordinary sibling");
 const contents = [];
@@ -822,6 +988,10 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
     false,
     false,
     async (context, inspectModel) => {
+      // An operator may have no AWS profile directory when the first model tool runs.
+      expect(await inspectModel('process.stdout.write("ready")')).toBe("ready");
+      await mkdir(awsDirectory);
+      await writeFile(join(awsDirectory, "ordinary.txt"), "AWS sibling");
       // These files change after profile selection and before the two commands launch.
       for (let i = existing.length; i < protectedPaths.length; i++)
         await createInput(i);
@@ -841,7 +1011,9 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       await writeFile(
         join(repo, program),
         readFiles +
-          '\nprocess.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "utf8").toLowerCase());\n',
+          `\nprocess.stdout.write(process.env.FILTER_FIXTURE_SETTING + "\\n");
+for (const name of ${JSON.stringify(Object.keys(pointers))}) if (name in process.env) contents.push(name);
+process.stdout.write(contents.length ? contents.join("") : fs.readFileSync(0, "utf8").toLowerCase());\n`,
       );
       const git = (args: string[], extra: NodeJS.ProcessEnv = {}) =>
         execFileSync("git", args, {
@@ -852,7 +1024,9 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       const add = ["add", "--", "candidate.txt"];
       const staged = ["cat-file", "blob", ":candidate.txt"];
       git(add);
-      expect(git(staged)).toBe(contents.join(""));
+      expect(git(staged)).toBe(
+        "from host\n" + contents.join("") + Object.keys(pointers).join(""),
+      );
       const snapshot = {
         GIT_INDEX_FILE: join(repo, "snapshot-index"),
         GIT_OBJECT_DIRECTORY: join(repo, "snapshot-objects"),
@@ -867,19 +1041,40 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
             ...environment,
             CODEX_HOME: context.home,
           }),
-          gitEnvironment: { ...environment, ...snapshot },
+          gitEnvironment: {
+            ...snapshot,
+            GIT_CONFIG_GLOBAL: config,
+            GIT_CONFIG_NOSYSTEM: "1",
+            HOME: operator,
+            USERPROFILE: operator,
+            XDG_CONFIG_HOME: environment.XDG_CONFIG_HOME,
+            NETRC: environment.NETRC,
+          },
           profile: context.snapshotProfile,
         },
       });
+      const sharedCredentials = join(awsDirectory, "credentials");
+      const replacementCredentials = join(awsDirectory, "replacement");
+      await writeFile(
+        replacementCredentials,
+        contents[protectedPaths.indexOf(sharedCredentials)]!,
+        { mode: 0o600 },
+      );
+      await rename(replacementCredentials, sharedCredentials);
       const modelReads = await inspectModel(
         readFiles + "\nprocess.stdout.write(JSON.stringify(contents));",
       );
       expect({ staged: git(staged, snapshot), modelReads }).toEqual({
-        staged: "intended patch bytes\n",
+        staged: "from shell policy\nintended patch bytes\n",
         modelReads: "[]",
       });
+      expect(
+        git(["hash-object", "--path=candidate.txt", "candidate.txt"]),
+      ).toBe(git(["rev-parse", ":candidate.txt"]));
     },
-    (repository) => {
+    async (repository) => {
+      const literalTilde = join(repository, "~");
+      await mkdir(literalTilde);
       environment.NETRC = relative(repository, selectedNetrc);
       const scopedCookie = relative(repository, paths[2]!).replaceAll(
         "\\",
@@ -896,6 +1091,11 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       }
       for (const [setting, value] of [
         ...settings.map((setting, i) => [setting, values[i]!] as const),
+        ["http.sslCert", "~/origin identity.pem"],
+        [
+          "http.https://proxy.example.invalid/.proxySSLCert",
+          "~/" + relative(literalTilde, proxyCert).replaceAll("\\", "/"),
+        ],
         ["http.proxySSLKey", proxyKey],
         [
           "http.https://proxy.example.invalid/.proxySSLKey",
@@ -910,6 +1110,7 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
         program,
       );
     },
+    { set: policySet, paths: [policyCluster] },
   );
 }, 60_000);
 

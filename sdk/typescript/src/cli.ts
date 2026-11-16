@@ -1430,6 +1430,7 @@ interface SkillPermissions {
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
   readonly credentialStorePaths?: readonly string[];
+  readonly protectShellCredentialFiles?: PatchGitControls["protectShellCredentialFiles"];
   readonly unavailableFilters?: readonly string[];
   readonly externalConfigPaths?: readonly string[];
   readonly externalCachePaths?: readonly string[];
@@ -1638,11 +1639,20 @@ function publicationHookCommand(args: readonly string[]): boolean {
   return false;
 }
 
+function shellEnvironmentSettings(config: JsonObject): JsonObject | undefined {
+  const policy = config["shell_environment_policy"];
+  return isJsonObject(policy) && isJsonObject(policy["set"])
+    ? policy["set"]
+    : undefined;
+}
+
 async function resumeHookSandbox(
   directory: string,
   environment: NodeJS.ProcessEnv,
   gitDirectories: string[],
-  credentialStorePaths: readonly string[],
+  readCredentialStorePaths: (
+    configuration: JsonObject,
+  ) => Promise<readonly string[]>,
   signal: AbortSignal,
 ): Promise<PatchSnapshotSandbox> {
   const operator = resolveCodexCommand(environment);
@@ -1695,7 +1705,7 @@ async function resumeHookSandbox(
     profile: patchWorkspaceProfile(
       workspace,
       gitDirectories,
-      credentialStorePaths,
+      await readCredentialStorePaths(config),
     ),
     configuration: {
       sandbox_workspace_write: {
@@ -8763,18 +8773,9 @@ export async function main(
                   });
                 publicationHooks = await activePatchPublicationHooks(read);
                 if (!publicationHooks.events.size) return;
-                const credentialStorePaths = new Set<string>();
-                if (
+                const inspectCredentials =
                   publicationHooks.events.has("pre-push") ||
-                  publicationHooks.events.has("reference-transaction")
-                )
-                  await readPatchGitControls(
-                    directory,
-                    dependencies,
-                    false,
-                    "resumed-hook",
-                    { credentialStorePaths },
-                  );
+                  publicationHooks.events.has("reference-transaction");
                 const gitDirectories = (
                   await read([
                     "rev-parse",
@@ -8792,7 +8793,21 @@ export async function main(
                     directory,
                     dependencies.environment,
                     gitDirectories,
-                    [...credentialStorePaths],
+                    async (config) => {
+                      const paths = new Set<string>();
+                      if (inspectCredentials)
+                        await readPatchGitControls(
+                          directory,
+                          dependencies,
+                          false,
+                          "resumed-hook",
+                          {
+                            credentialStorePaths: paths,
+                            shellSettings: shellEnvironmentSettings(config),
+                          },
+                        );
+                      return [...paths];
+                    },
                     controller.signal,
                   );
                   await addPatchTransportWriters(
@@ -13644,19 +13659,28 @@ async function captureHiddenPatchContent(
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv,
   digests: Set<string>,
+  selection: "flagged" | "ident",
   signal?: AbortSignal,
 ): Promise<void> {
   const source = ["-C", checkout, "-c", "core.fsmonitor=false"];
+  // With the built-in ident conversion, git add can leave both the worktree
+  // and the index looking clean after an expanded $Id$ was edited.
+  const ident = selection === "ident";
+  const pathspecs = ident ? ["--", ":(attr:ident)"] : [];
   const tracked = await patchGitRecords(
     root,
-    [...source, "ls-files", "-v", "--stage", "-z"],
+    [...source, "ls-files", "-v", "--stage", "-z", ...pathspecs],
     dependencies,
-    { environment, patchSnapshot: [] },
+    {
+      environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
+      patchSnapshot: [],
+    },
   );
   const materialized = new Map<string, string>();
   for (const entry of tracked) {
     // Lowercase tags mean assume-unchanged and S means skip-worktree.
-    const header = /^[a-zS] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
+    if (entry.startsWith("H ") !== ident) continue;
+    const header = /^[a-zSH] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
       entry,
     );
     if (!header) continue;
@@ -13673,6 +13697,99 @@ async function captureHiddenPatchContent(
     if (digest !== undefined) materialized.set(path, digest);
   }
   if (!materialized.size) return;
+  let renderEnvironment = environment;
+  if (ident) {
+    // A staged attributes file can differ from the worktree attributes used
+    // by ls-files. Never run a new external driver to render these entries.
+    const settings = await patchGitRecords(
+      root,
+      [
+        ...source,
+        "config",
+        "--includes",
+        "--null",
+        "--get-regexp",
+        "^filter\\..+\\.(smudge|process|required)$",
+      ],
+      dependencies,
+      {
+        environment: { ...environment, GIT_CONFIG: undefined },
+        patchSnapshot: [],
+      },
+    ).catch((error: unknown) => {
+      if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+        return [];
+      throw error;
+    });
+    const commands = new Map<string, boolean>();
+    for (const setting of settings) {
+      if (!setting) continue;
+      const end = setting.indexOf("\n");
+      // Preserve Git's last assignment, including an explicitly empty override.
+      const key = end < 0 ? setting : setting.slice(0, end);
+      commands.set(key, end !== setting.length - 1);
+    }
+    const drivers = new Set<string>();
+    for (const [key, active] of commands)
+      if (active && !key.endsWith(".required"))
+        drivers.add(key.slice(7, key.lastIndexOf(".")));
+    if (drivers.size) {
+      // Unspecified attributes have no record in --all mode. A driver can be
+      // named "unspecified", "set", or "unset" just like any other driver.
+      const ambiguous = ["set", "unset"].filter((value) => drivers.has(value));
+      const literal = new Set(
+        ambiguous.length
+          ? await patchGitRecords(
+              root,
+              [
+                ...source,
+                "ls-files",
+                "-z",
+                "--",
+                ...ambiguous.map((name) => ":(attr:ident filter=" + name + ")"),
+              ],
+              dependencies,
+              {
+                environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
+                patchSnapshot: [],
+              },
+            )
+          : [],
+      );
+      const input = Buffer.from(
+        [...materialized.keys()].join("\0") + "\0",
+        "latin1",
+      );
+      for (const direction of [[], ["--cached"]]) {
+        const attributes = await patchGitRecords(
+          root,
+          [...source, "check-attr", ...direction, "-z", "--stdin", "--all"],
+          dependencies,
+          { environment, patchSnapshot: [], input },
+        );
+        for (let i = 0; i + 2 < attributes.length; i += 3) {
+          const path = attributes[i]!;
+          const value = attributes[i + 2]!;
+          if (
+            attributes[i + 1] === "filter" &&
+            drivers.has(value) &&
+            (!ambiguous.includes(value) || literal.has(path))
+          )
+            materialized.delete(path);
+        }
+      }
+      if (!materialized.size) return;
+    }
+    const filters = [...commands.keys()].map((key) => patchPathText(key));
+    renderEnvironment = {
+      ...environment,
+      GIT_CONFIG_PARAMETERS: patchFilterParameters(
+        filters,
+        false,
+        currentGitParameters(environment, dependencies.environment),
+      ),
+    };
+  }
   const directory = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-patch-checkout-"),
   );
@@ -13692,7 +13809,7 @@ async function captureHiddenPatchContent(
       root,
       {
         patchSnapshot: [directory],
-        environment,
+        environment: renderEnvironment,
         input: Buffer.from(
           [...materialized.keys()].join("\0") + "\0",
           "latin1",
@@ -14034,14 +14151,16 @@ async function preparePatchPublication(
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
-      await captureHiddenPatchContent(
-        root,
-        checkout,
-        dependencies,
-        environment,
-        nestedRepositoryDigests,
-        signal,
-      );
+      for (const selection of ["ident", "flagged"] as const)
+        await captureHiddenPatchContent(
+          root,
+          checkout,
+          dependencies,
+          environment,
+          nestedRepositoryDigests,
+          selection,
+          signal,
+        );
       // A conflict can also be reported as DD (both sides deleted).
       if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);
@@ -17034,6 +17153,7 @@ async function readPatchGitControls(
   mode: PatchGitControlMode,
   options: Pick<SkillRunOptions, "patchGitContext"> & {
     credentialStorePaths?: Set<string>;
+    shellSettings?: JsonObject;
   } = {},
 ) {
   const selectedGitDirectory = environmentValue(
@@ -17153,6 +17273,15 @@ async function readPatchGitControls(
     environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
     environmentEntry(dependencies.environment, "USERPROFILE") ?? null,
     environmentEntry(dependencies.environment, "NETRC") ?? null,
+    dependencies.environment,
+    mode === "external"
+      ? undefined
+      : (options.shellSettings ??
+          shellEnvironmentSettings(
+            resolveCodexProfile(
+              await readCodexHomeConfig(dependencies.environment),
+            ),
+          )),
   );
 }
 
@@ -17568,6 +17697,8 @@ async function runSkill(
                         name: patchPermissions,
                         readOnlyPaths: gitControls!.readOnlyPaths,
                         credentialStorePaths: gitControls!.credentialStorePaths,
+                        protectShellCredentialFiles:
+                          gitControls!.protectShellCredentialFiles,
                         unavailableFilters: gitControls!.unavailableFilters,
                         externalConfigPaths: gitControls!.externalConfigPaths,
                         ...(gitControls!.externalCachePaths.length
@@ -17898,7 +18029,10 @@ export async function readSkillCommandOutput(
             const profile = patchWorkspaceProfile(
               workspace,
               appServer.permissions.readOnlyPaths,
-              appServer.permissions.credentialStorePaths,
+              (await appServer.permissions.protectShellCredentialFiles?.(
+                shellEnvironmentSettings(config),
+                shellEnvironmentSettings(resolvedConfig),
+              )) ?? appServer.permissions.credentialStorePaths,
             );
             appServer.onPermissions?.(profile, {
               ...config,

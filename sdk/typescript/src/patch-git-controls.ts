@@ -12,7 +12,7 @@ import {
   stat,
   symlink,
 } from "node:fs/promises";
-import { tmpdir, userInfo } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   basename,
@@ -20,6 +20,7 @@ import {
   dirname,
   isAbsolute,
   join,
+  normalize,
   parse,
   relative,
   resolve,
@@ -30,6 +31,7 @@ import {
   proxyUserinfo,
   withoutUrlCredentials,
 } from "./patch-publication-hooks.js";
+import { awsAccountHome, awsProfileFiles } from "./continuum-aws.js";
 import { gitAlternatePathBytes, gitMarkerRoot } from "./targets.js";
 
 // Git hook entrypoints: https://git-scm.com/docs/githooks
@@ -206,6 +208,9 @@ export interface PatchGitControls {
   readonly modelOnlyReadOnlyPaths: readonly string[];
   readonly unavailableFilters: readonly string[];
   readonly credentialStorePaths: readonly string[];
+  protectShellCredentialFiles(
+    ...settings: (Readonly<Record<string, unknown>> | undefined)[]
+  ): Promise<readonly string[]>;
   readonly externalConfigPaths: readonly string[];
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
@@ -479,6 +484,97 @@ function httpCredentialPath(directory: string, file: string): string {
     }
   }
   return relativeFile(directory, file);
+}
+
+// Windows Go clients accept quotes around KUBECONFIG entries containing ';'.
+function kubeConfigFiles(value: string): string[] {
+  if (process.platform !== "win32") return value.split(delimiter);
+  const files: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const character of value) {
+    if (character === '"') quoted = !quoted;
+    else if (character === delimiter && !quoted) {
+      files.push(current);
+      current = "";
+    } else current += character;
+  }
+  files.push(current);
+  return files;
+}
+
+function credentialPointerFiles(
+  inherited: Readonly<Record<string, unknown>>,
+  settings?: Readonly<Record<string, unknown>>,
+): Set<string> {
+  const environment: NodeJS.ProcessEnv = Object.create(null);
+  const key = (name: string) =>
+    process.platform === "win32" ? name.toUpperCase() : name;
+  for (const source of [inherited, settings ?? {}])
+    for (const [name, value] of Object.entries(source))
+      if (typeof value === "string") environment[key(name)] = value;
+  const selected = new Set<string>();
+  for (const { defaultPath, path } of awsProfileFiles(
+    awsAccountHome(environment),
+    environment,
+  )) {
+    selected.add(defaultPath);
+    if (path) selected.add(path);
+  }
+  for (const [name, value] of Object.entries(environment)) {
+    if (typeof value !== "string" || !value) continue;
+    switch (name.toUpperCase()) {
+      case "KUBECONFIG":
+        for (const path of kubeConfigFiles(value)) if (path) selected.add(path);
+        break;
+      case "DOCKER_CONFIG":
+        // A filter can open the literal spelling. Docker cleans it before open.
+        selected.add(relativeFile(value, "config.json"));
+        selected.add(join(value, "config.json"));
+        if (process.platform === "win32" && /^[a-z]:$/iu.test(value))
+          selected.add(value + "config.json");
+        break;
+      case "NPM_CONFIG_USERCONFIG": {
+        selected.add(value);
+        // npm trims path settings and expands environment references before '~'.
+        const expanded = value
+          .trim()
+          .replace(
+            /(?<!\\)(\\*)\$\{([^$?{}]+)(\?)?\}/gu,
+            (
+              match,
+              escapes: string,
+              variable: string,
+              optional: string | undefined,
+            ) => {
+              if (escapes.length % 2)
+                return match.slice((escapes.length + 1) / 2);
+              const replacement = environment[key(variable)];
+              return (
+                escapes.slice(escapes.length / 2) +
+                (typeof replacement === "string"
+                  ? replacement
+                  : optional
+                    ? ""
+                    : "${" + variable + "}")
+              );
+            },
+          );
+        const homePrefix = process.platform === "win32" ? /^~[\\/]/u : /^~\//u;
+        if (homePrefix.test(expanded)) {
+          const home = environment[key("HOME")];
+          selected.add(
+            resolve(
+              typeof home === "string" && home ? home : homedir(),
+              expanded.slice(2),
+            ),
+          );
+        } else if (expanded) selected.add(normalize(expanded));
+        break;
+      }
+    }
+  }
+  return selected;
 }
 
 async function readGitMarker(
@@ -791,6 +887,8 @@ export async function capturePatchGitControls(
     null,
   userProfile: string | null = process.env["USERPROFILE"] ?? null,
   netrc: string | null = process.env["NETRC"] ?? null,
+  pointerEnvironment: Readonly<Record<string, unknown>> = process.env,
+  shellSettings?: Readonly<Record<string, unknown>>,
 ): Promise<PatchGitControls | undefined> {
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
@@ -1340,8 +1438,8 @@ export async function capturePatchGitControls(
       // The transport may create a cookie jar after capture. Keep host Git
       // from re-running a checkout filter even when the file is still absent.
       hostMayReadStore = true;
-      // Git passes a proxy SSL key verbatim to libcurl.
-      const file = /\.proxysslkey$/iu.test(key)
+      // Git passes the proxy SSL key and certificate paths verbatim to libcurl.
+      const file = /\.proxyssl(?:key|cert)$/iu.test(key)
         ? configPath(value)
         : await expandConfigurationPath(configPath(value));
       if (file)
@@ -1406,11 +1504,41 @@ export async function capturePatchGitControls(
       .filter(([, untrusted]) => untrusted)
       .map(([key]) => key);
   };
+  const inheritedPointerFiles =
+    mode === "external"
+      ? new Set<string>()
+      : credentialPointerFiles(pointerEnvironment);
+  if (mode !== "external" && shellSettings)
+    for (const file of credentialPointerFiles(
+      pointerEnvironment,
+      shellSettings,
+    ))
+      inheritedPointerFiles.add(file);
+  const protectPointerFiles = async (
+    checkout: string,
+    configurationDirectory: string,
+    files: Set<string>,
+  ) => {
+    if (mode === "external") return;
+    for (const file of files) {
+      if (process.platform !== "win32" && file === "/dev/null") continue;
+      hostMayReadStore = true;
+      await protectTransportFile(checkout, configurationDirectory, file);
+      // Commands may also inherit the original caller's subdirectory.
+      if (checkout === root && directory !== root && !isAbsolute(file))
+        await protectStore(httpCredentialPath(directory, file));
+    }
+  };
   const captureReferences = async (checkout: string): Promise<void> => {
     const configurationDirectory = await setupDirectory(checkout);
     for (const path of relativeDefaultStores)
       await protectStore(relativeFile(configurationDirectory, path));
     filterDirectories.set(checkout, configurationDirectory);
+    await protectPointerFiles(
+      checkout,
+      configurationDirectory,
+      inheritedPointerFiles,
+    );
     if (mode !== "external" && netrc) {
       hostMayReadStore = true;
       await protectTransportFile(checkout, configurationDirectory, netrc);
@@ -2578,6 +2706,23 @@ export async function capturePatchGitControls(
     modelOnlyReadOnlyPaths: [...modelOnlyReadOnlyPaths],
     unavailableFilters: unisolatedCredentialHelper ? protectedFilterKeys() : [],
     credentialStorePaths: [...credentialStorePaths],
+    async protectShellCredentialFiles(...settings) {
+      const newFiles = new Set<string>();
+      for (const source of new Set(settings))
+        if (source)
+          for (const file of credentialPointerFiles(pointerEnvironment, source))
+            if (!inheritedPointerFiles.has(file)) newFiles.add(file);
+      const previouslyUnisolated = unisolatedCredentialHelper;
+      for (const [checkout, configurationDirectory] of filterDirectories)
+        await protectPointerFiles(checkout, configurationDirectory, newFiles);
+      if (
+        !previouslyUnisolated &&
+        unisolatedCredentialHelper &&
+        (delegateFilters.size || publicationHooks.events.size)
+      )
+        checkDelegateCredentials(true);
+      return [...credentialStorePaths];
+    },
     externalConfigPaths: [...configurationFiles].filter(
       (path) => !insideSelectedRoots(path),
     ),
@@ -2587,13 +2732,8 @@ export async function capturePatchGitControls(
     hostRefreshFilters:
       mode === "sandbox" && automaticPublication ? protectedFilterKeys() : [],
     async hostFilterSettings(switchingBranch) {
-      // The commit reuses the verified native snapshot's blobs. An external
-      // filter can still run a model-edited script during the host index refresh.
-      if (
-        mode === "sandbox" &&
-        (hostMayReadStore || unisolatedCredentialHelper)
-      )
-        return protectedFilterKeys();
+      // These overrides also reach delegated hooks. The host-only refresh
+      // overrides above are removed when the dispatcher enters the sandbox.
       if (!hasConditionalFilters) return [...activeHostFilters];
       // Switching can activate a conditional config before Git calls post-checkout.
       if (switchingBranch)

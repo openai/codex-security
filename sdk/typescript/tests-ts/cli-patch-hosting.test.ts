@@ -1864,11 +1864,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           askPass.replaceAll("\\", "/"),
         );
       }
-      const client = await loopbackTls(config, git, "client");
+      const combined = !collision && credentials === "home netrc";
+      const client = await loopbackTls(config, git, "client", combined);
       const serverTls = await loopbackTls(config, git);
       const proxyClient = collision
         ? undefined
-        : await loopbackTls(config, git, "proxy-client");
+        : await loopbackTls(config, git, "proxy-client", combined);
       const origin = Bun.serve({
         tls: {
           ...serverTls,
@@ -1979,9 +1980,10 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           );
         environment["GIT_CONFIG_GLOBAL"] = config;
         // The proxy and origin require their own client keys.
-        for (const option of proxyClient
-          ? ["http.proxySSLKey", "http.sslKey"]
-          : ["http.sslKey"]) {
+        for (const prefix of proxyClient
+          ? ["http.proxySSL", "http.ssl"]
+          : ["http.ssl"]) {
+          const option = prefix + (combined ? "Cert" : "Key");
           await expect(
             promisify(execFile)(
               "git",
@@ -1994,7 +1996,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
               { cwd: directory, env: environment },
             ),
           ).rejects.toThrow();
-          if (option === "http.proxySSLKey") expect(proxy.tunnels).toBe(0);
+          if (prefix === "http.proxySSL") expect(proxy.tunnels).toBe(0);
           expect(requests).toBe(0);
         }
         if (credentials === "askpass") {

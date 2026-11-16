@@ -6,7 +6,7 @@ import type { PatchPublicationHooks } from "./patch-git-controls.js";
 export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
 
 export const httpCredentialFile =
-  /^http(?:\..*)?\.(?:cookiefile|sslkey|proxysslkey)$/iu;
+  /^http(?:\..*)?\.(?:cookiefile|(?:proxy)?ssl(?:key|cert))$/iu;
 
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
@@ -17,7 +17,7 @@ export function removePatchCredentials(
 ): void {
   for (const [name, value] of Object.entries(environment)) {
     if (
-      /^(?:DATABASE_URL|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
+      /^(?:DATABASE_URL|DOCKER_CONFIG|KUBECONFIG|NPM_CONFIG_USERCONFIG|OPENAI_FEDERATION_RULE_ID|PGPASSWORD)$|(?:^|_)(?:TOKEN|PASSWORD|SECRET|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|SECRET|PRIVATE)_KEY|AUTH_SOCK|DOCKER_AUTH_CONFIG)(?:_FILE)?$/iu.test(
         name,
       ) ||
       credentialNames.includes(name.toUpperCase()) ||

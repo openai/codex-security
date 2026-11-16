@@ -83,6 +83,36 @@ function expandedSetting(
   return path;
 }
 
+/** @internal Account home used for the standard AWS profile files. */
+export function awsAccountHome(environment: NodeJS.ProcessEnv): string {
+  const homePath = environmentEntry(environment, "HOMEPATH");
+  const configured = windows
+    ? (environmentEntry(environment, "USERPROFILE") ??
+      (homePath
+        ? (environmentEntry(environment, "HOMEDRIVE") ?? "") + homePath
+        : undefined))
+    : environmentEntry(environment, "HOME");
+  return configured ?? homedir();
+}
+
+/** @internal Both shared files can supply credentials for the active AWS profile. */
+export function awsProfileFiles(home: string, environment: NodeJS.ProcessEnv) {
+  return (
+    [
+      ["AWS_CONFIG_FILE", "config"],
+      ["AWS_SHARED_CREDENTIALS_FILE", "credentials"],
+    ] as const
+  ).map(([name, filename]) => {
+    const value = environmentEntry(environment, name);
+    const defaultPath = join(home, ".aws", filename);
+    const path =
+      value === undefined
+        ? defaultPath
+        : expandedSetting(name, value, home, environment);
+    return { name, value, defaultPath, path };
+  });
+}
+
 function pinSetting(
   name: string,
   path: string,
@@ -207,29 +237,15 @@ export async function prepareContinuumAws(
     if (path)
       child[name] = trustedSetting(path, `an account ${name} directory`);
   }
-  const configuredHome = windows
-    ? (child["USERPROFILE"] ??
-      (child["HOMEPATH"]
-        ? (child["HOMEDRIVE"] ?? "") + child["HOMEPATH"]
-        : undefined))
-    : child["HOME"];
   const home = trustedSetting(
-    configuredHome ?? homedir(),
+    awsAccountHome(child),
     "an account home directory",
   );
   child[windows ? "USERPROFILE" : "HOME"] = home;
 
   // AWS can run credential helpers from profiles and commands from aliases.
   const awsDirectory = join(home, ".aws");
-  for (const [name, filename] of [
-    ["AWS_CONFIG_FILE", "config"],
-    ["AWS_SHARED_CREDENTIALS_FILE", "credentials"],
-  ] as const) {
-    const value = child[name];
-    const path =
-      value === undefined
-        ? join(awsDirectory, filename)
-        : expandedSetting(name, value, home, environment);
+  for (const { name, value, path } of awsProfileFiles(home, environment)) {
     const safe = trustedSetting(path, `an ${name} file`);
     if (value !== undefined) child[name] = pinSetting(name, safe, child);
   }
