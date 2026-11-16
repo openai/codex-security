@@ -7,16 +7,17 @@ import { dirname, join } from "node:path";
 export async function loopbackTls(
   config: string,
   git: (...args: string[]) => string,
+  usage: "server" | "client" = "server",
 ) {
   const directory = dirname(config);
-  const settings = join(directory, "openssl.cnf");
-  const key = join(directory, "key.pem");
-  const cert = join(directory, "cert.pem");
+  const settings = join(directory, `${usage}-openssl.cnf`);
+  const key = join(directory, `${usage}-key.pem`);
+  const cert = join(directory, `${usage}-cert.pem`);
   await writeFile(
     settings,
     "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=extensions\n" +
-      "[dn]\nCN=Loopback test server\n" +
-      "[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=serverAuth\n" +
+      `[dn]\nCN=Loopback test ${usage}\n` +
+      `[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=${usage}Auth\n` +
       "subjectAltName=IP:127.0.0.1,IP:127.0.0.2\n",
   );
   // Git for Windows supplies OpenSSL on its shell PATH.
@@ -40,8 +41,16 @@ export async function loopbackTls(
     "-out",
     cert,
   );
-  git("config", "--file", config, "http.sslCAInfo", cert);
-  git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
+  if (usage === "client") {
+    git("config", "--file", config, "http.sslCert", cert);
+    git("config", "--file", config, "http.sslKey", key);
+    // Git for Windows also offers Schannel, which uses a certificate store.
+    if (process.platform === "win32")
+      git("config", "--file", config, "http.sslBackend", "openssl");
+  } else {
+    git("config", "--file", config, "http.sslCAInfo", cert);
+    git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
+  }
   return { key: await readFile(key), cert: await readFile(cert) };
 }
 
