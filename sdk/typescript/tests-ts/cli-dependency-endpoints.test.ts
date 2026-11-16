@@ -21,8 +21,8 @@ const advisory = {
     },
   ],
 };
-const caller =
-  "Assess the anonymous POST /fixture route and its configured decoder.";
+const instructions =
+  "Check whether this advisory applies to the fixture API in production.";
 const window = {
   start: "2026-01-01T00:00:00.000Z",
   end: "2026-01-01T00:01:00.000Z",
@@ -142,9 +142,13 @@ function profileRpc() {
   };
 }
 
-test.each([true, false])(
-  "exploitability wires configured endpoints and runtime with explicit caller scope=%s",
-  async (configuredCaller) => {
+test.each([
+  { configuredInstructions: true, configuredEndpoints: true },
+  { configuredInstructions: false, configuredEndpoints: true },
+  { configuredInstructions: true, configuredEndpoints: false },
+])(
+  "exploitability wires scope instructions and independent endpoint boundaries for %j",
+  async ({ configuredInstructions, configuredEndpoints }) => {
     await using repository = await scopedTemporaryDirectory("cve-endpoints-");
     await using settings = await scopedTemporaryDirectory("cve-config-");
     git(repository.path, "init", "--quiet");
@@ -157,8 +161,8 @@ test.each([true, false])(
       config,
       JSON.stringify({
         exploitability: {
-          ...supplied,
-          scope: { runtime, ...(configuredCaller && { caller }) },
+          ...(configuredEndpoints && supplied),
+          ...(configuredInstructions && { scope: { instructions } }),
           runtime_mcps: ["profiles"],
         },
         codex: {
@@ -171,8 +175,8 @@ test.each([true, false])(
         },
       }),
     );
-    const expectedCaller = configuredCaller
-      ? caller
+    const expectedCaller = configuredInstructions
+      ? instructions
       : "Assess production services, jobs";
     const rpc = profileRpc();
     const deps = dependencies({
@@ -187,24 +191,34 @@ test.each([true, false])(
         );
         expect(session.prompt).toContain(expectedCaller);
         const graph = session.dependencyGraph;
-        expect(
-          await graph.call("query_codex_security_graph", { endpoints: {} }),
-        ).toMatchObject({
+        const discovery = await graph.call("query_codex_security_graph", {
+          endpoints: {},
+        });
+        const boundary = configuredEndpoints ? "supplied" : "discover";
+        expect(discovery).toMatchObject({
           endpoints: {
-            boundary: { source: "supplied", sink: "supplied" },
-            runtime_scope: runtime,
-            page: {
-              total: 2,
-              items: [
-                { id: "request", role: "source", origin: "supplied" },
-                { id: "decoder", role: "sink", origin: "supplied" },
-              ],
-            },
+            boundary: { source: boundary, sink: boundary },
+            page: { total: configuredEndpoints ? 2 : 0 },
+            ...(configuredInstructions && { scope_instructions: instructions }),
           },
         });
-        if (configuredCaller) {
+        expect(discovery["endpoints"]).not.toHaveProperty("runtime_scope");
+        if (configuredEndpoints) {
+          expect(discovery).toMatchObject({
+            endpoints: {
+              page: {
+                items: [
+                  { id: "request", role: "source", origin: "supplied" },
+                  { id: "decoder", role: "sink", origin: "supplied" },
+                ],
+              },
+            },
+          });
+          const { window, ...selector } = runtime;
           const profileInput = {
             endpoints: { sources: ["request"], sinks: ["decoder"] },
+            selector,
+            window,
             limit: 1,
             measure: true,
           };
@@ -222,9 +236,8 @@ test.each([true, false])(
           });
           expect(JSON.stringify(collected)).not.toContain(rpc.outsideReply);
           expect(collected).not.toHaveProperty("graph_evidence");
-          const { window, ...scope } = runtime;
           const wireRequest = {
-            selector: { ...scope, frames: ["decode"] },
+            selector: { ...selector, frames: ["decode"] },
             window,
             limit: 1,
             measure: true,
@@ -270,7 +283,7 @@ test.each([true, false])(
               "collect_dependency_profiles",
               {
                 ...profileInput,
-                selector: { image_tag: "wrong-build" },
+                selector: { ...selector, frames: ["other-decoder"] },
               },
               rpc,
             ),
@@ -312,7 +325,9 @@ test.each([true, false])(
     deps.reviewDependencyReport = mock(async (prompt) => {
       const packet = JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1));
       expect(packet.callerScope).toContain(expectedCaller);
-      expect(Boolean(packet.callerScopeIsDefault)).toBe(!configuredCaller);
+      expect(Boolean(packet.callerScopeIsDefault)).toBe(
+        !configuredInstructions,
+      );
       return JSON.stringify({
         items: packet.items.map(
           (item: {

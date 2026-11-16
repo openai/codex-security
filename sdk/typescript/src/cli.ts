@@ -1394,7 +1394,7 @@ interface SkillRunOptions {
   onUsage?: (usage: ScanTokenUsage) => void;
   dependencyReport?: DependencyReportTool;
   dependencyGraph?: DependencyGraphTools;
-  dependencyCallerScope?: string;
+  dependencyScopeInstructions?: string;
   dependencyDiscoveryGuidance?: string;
   dependencyCodexConfig?: JsonObject;
   inventoryServers?: JsonObject;
@@ -3286,13 +3286,12 @@ export async function main(
             safeRelativePath(path, "exploitability.scope.exclude_paths"),
           );
         const dependencyConfiguration = project?.input.exploitability;
-        const productionDiscovery =
-          invocation.dependencyCallerScope === undefined &&
-          dependencyConfiguration?.scope?.caller === undefined;
-        const callerScope = [
+        const instructions =
           invocation.dependencyCallerScope ??
-            dependencyConfiguration?.scope?.caller ??
-            defaultDependencyCallerScope,
+          dependencyConfiguration?.scope?.instructions;
+        const productionDiscovery = instructions === undefined;
+        const callerScope = [
+          instructions ?? defaultDependencyCallerScope,
           ...(dependencyConfiguration?.sources !== undefined
             ? [
                 `Operator-supplied complete source boundary (scenario, not execution proof): ${JSON.stringify(dependencyConfiguration.sources)}`,
@@ -3301,11 +3300,6 @@ export async function main(
           ...(dependencyConfiguration?.sinks !== undefined
             ? [
                 `Operator-supplied complete sink boundary (scenario, not execution proof): ${JSON.stringify(dependencyConfiguration.sinks)}`,
-              ]
-            : []),
-          ...(dependencyConfiguration?.scope?.runtime
-            ? [
-                `Runtime observation filter: ${JSON.stringify(dependencyConfiguration.scope.runtime)}. This bounds runtime requests and evidence, not the caller investigation scope or proof of deployment, access or absence.`,
               ]
             : []),
           ...(excludedSourcePaths?.length
@@ -4019,7 +4013,7 @@ export async function main(
                 directory: repository,
                 signal,
                 context: JSON.stringify(advisory),
-                dependencyCallerScope: callerScope,
+                dependencyScopeInstructions: callerScope,
                 dependencyDiscoveryGuidance: discoveryGuidance,
                 dependencyCodexConfig: project?.input.codex,
                 dependencyGraph,
@@ -11122,10 +11116,10 @@ async function runSkill(
           : validate
             ? await standaloneValidationPrompt(plugin)
             : `Use the bundled $codex-security:${skill} skill at ${JSON.stringify(join(plugin, "skills", skill, "SKILL.md"))}.`,
-        ...(dependencyCheck && options.dependencyCallerScope !== undefined
+        ...(dependencyCheck && options.dependencyScopeInstructions !== undefined
           ? [
-              "Caller scope for this assessment (JSON data):",
-              JSON.stringify(options.dependencyCallerScope),
+              "Scope instructions for this assessment (JSON data):",
+              JSON.stringify(options.dependencyScopeInstructions),
               "Use the requested scope to select callers and workloads. When the scope names an entrypoint, bind the chain from that entrypoint to the affected operation. Keep distinct capabilities, entrypoints, and deployment variants separate. Match deployment and access claims to evidence for the same place. Investigate these facts when they could change the scoped verdict or answer an explicit request.",
             ]
           : []),

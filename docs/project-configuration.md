@@ -104,9 +104,12 @@ exploitability:
 
 This setting adds explicit exclusions to discovery. The default production
 scope also skips conventional example, test and documentation paths. A
-supplied `exploitability.scope.caller` uses the requested scope in place of
-those defaults. The command retains already discovered candidates and records
-matched omissions in the search audit. A different nested `SECURITY.md`
+supplied `exploitability.scope.instructions` guides the check in place of
+those defaults. An instruction can name a production workload, such as
+"Check whether this advisory applies to the example API in production."
+The investigator uses available read-only providers to resolve the target
+and select runtime lookups. The command retains already discovered
+candidates and records matched omissions in the search audit. A different nested `SECURITY.md`
 policy keeps that path in the search. Exact file traces or receipt-backed
 caller leads can reopen a file for follow-up. An omission records search
 scope. Runtime and vulnerability conclusions require their own evidence.

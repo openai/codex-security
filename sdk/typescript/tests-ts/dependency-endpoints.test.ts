@@ -89,7 +89,7 @@ test.each(boundaryCases)(
   },
 );
 
-test("loads the existing project config shape and validates endpoint, workload and window inputs", async () => {
+test("loads project config and validates endpoint inputs and internal runtime filters", async () => {
   const legacy = {
     exploitability: { scope: { exclude_paths: ["generated"] } },
   };
@@ -101,7 +101,7 @@ test("loads the existing project config shape and validates endpoint, workload a
   try {
     const file = join(root, "project.json");
     const input = {
-      exploitability: { sources: [], sinks: [sink], scope: { runtime } },
+      exploitability: { sources: [], sinks: [sink] },
     };
     await writeFile(file, JSON.stringify(input));
     expect((await loadProjectConfig(file)).exploitability).toEqual(
@@ -109,9 +109,10 @@ test("loads the existing project config shape and validates endpoint, workload a
     );
     const graph = await openDependencyEndpoints({
       configuration: input.exploitability,
+      runtimeScope: runtime,
     });
     expect(graph.runtimeScope).toEqual(runtime);
-    expect(graph.query({})).not.toHaveProperty("caller_scope");
+    expect(graph.query({})).not.toHaveProperty("scope_instructions");
     graph.runtimeScope!.window.start = runtime.window.end;
     expect(graph.runtimeScope).toEqual(runtime);
   } finally {
@@ -125,18 +126,25 @@ test("loads the existing project config shape and validates endpoint, workload a
       },
     }),
   ).toThrow("Duplicate supplied endpoint ID");
-  expect(() =>
-    resolveProjectConfig({
-      exploitability: {
-        scope: {
-          runtime: {
-            ...runtime,
-            window: { ...runtime.window, end: runtime.window.start },
-          },
-        },
+  await expect(
+    openDependencyEndpoints({
+      runtimeScope: {
+        ...runtime,
+        window: { ...runtime.window, end: runtime.window.start },
       },
     }),
-  ).toThrow("start must precede end");
+  ).rejects.toThrow("start must precede end");
+  for (const removed of [{ caller: "Choose the fixture API." }, { runtime }]) {
+    const configuration = {
+      scope: { instructions: "Assess the fixture.", ...removed },
+    };
+    expect(() =>
+      resolveProjectConfig({ exploitability: configuration }),
+    ).toThrow("/exploitability/scope");
+    await expect(openDependencyEndpoints({ configuration })).rejects.toThrow(
+      "Unrecognized key",
+    );
+  }
   expect(() =>
     resolveProjectConfig({
       exploitability: {
@@ -146,10 +154,11 @@ test("loads the existing project config shape and validates endpoint, workload a
   ).toThrow("line requires a location");
 });
 
-test("preserves caller scope from normal config independently of runtime scope", async () => {
-  const caller = "Callers in the invoice worker";
-  const exploitability = { scope: { caller } };
-  const root = await mkdtemp(join(tmpdir(), "endpoint-caller-scope-"));
+test("preserves scope instructions separately from endpoint and runtime inputs", async () => {
+  const instructions =
+    "Check whether this advisory applies to the invoice worker in production.";
+  const exploitability = { scope: { instructions } };
+  const root = await mkdtemp(join(tmpdir(), "endpoint-scope-instructions-"));
   try {
     const file = join(root, "project.json");
     await writeFile(file, JSON.stringify({ exploitability }));
@@ -165,7 +174,10 @@ test("preserves caller scope from normal config independently of runtime scope",
       snapshotPath,
     });
     const selection = graph.query({});
-    expect(selection["caller_scope"]).toBe(caller);
+    expect(selection).toMatchObject({
+      boundary: { source: "discover", sink: "discover" },
+      scope_instructions: instructions,
+    });
     expect(selection).not.toHaveProperty("runtime_scope");
     expect(
       JSON.parse(await readFile(snapshotPath, "utf8")).configuration,
@@ -174,21 +186,22 @@ test("preserves caller scope from normal config independently of runtime scope",
       configuration: loaded.exploitability,
       snapshotPath,
     });
-    expect(reopened.query({})["caller_scope"]).toBe(caller);
+    expect(reopened.query({})["scope_instructions"]).toBe(instructions);
 
     const both = await openDependencyEndpoints({
-      configuration: { scope: { caller, runtime } },
+      configuration: exploitability,
+      runtimeScope: runtime,
     });
     expect(both.query({})).toMatchObject({
-      caller_scope: caller,
+      scope_instructions: instructions,
       runtime_scope: runtime,
     });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
   expect(() =>
-    resolveProjectConfig({ exploitability: { scope: { caller: "" } } }),
-  ).toThrow("/exploitability/scope/caller");
+    resolveProjectConfig({ exploitability: { scope: { instructions: "" } } }),
+  ).toThrow("/exploitability/scope/instructions");
 });
 
 test("resolves exact selectors and keeps unresolved IDs and wrapper discoveries explicit", async () => {
@@ -324,7 +337,6 @@ test("pages compact records in the shared graph and keeps exact discoveries acro
   const snapshotPath = join(root, "graph.json");
   const configuration = {
     sources: [{ function: "receive" }],
-    scope: { runtime },
   };
   try {
     await mkdir(join(root, "mcp"));
@@ -350,7 +362,7 @@ test("pages compact records in the shared graph and keeps exact discoveries acro
       undefined,
       undefined,
       undefined,
-      { configuration, snapshotPath },
+      { configuration, runtimeScope: runtime, snapshotPath },
     );
     const query = async (endpoints: JsonObject) =>
       (await graph.call("query_codex_security_graph", { endpoints }))[
@@ -407,9 +419,11 @@ test("pages compact records in the shared graph and keeps exact discoveries acro
     }
     const saved = JSON.parse(await readFile(snapshotPath, "utf8"));
     expect(saved.configuration).toEqual(configuration);
+    expect(saved.runtimeScope).toEqual(runtime);
     expect(saved.endpoints).toBeArrayOfSize(34);
     const reopened = await openDependencyEndpoints({
       configuration,
+      runtimeScope: runtime,
       snapshotPath,
     });
     expect(reopened.get(saved.endpoints[0].id)).toMatchObject({

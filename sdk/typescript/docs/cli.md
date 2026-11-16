@@ -2580,28 +2580,18 @@ runtime selectors and evidence references. Investigators query them through the
 shared graph and can register advisory sinks or discovered intermediates without
 widening a supplied boundary.
 
-`exploitability.scope.caller` sets the caller investigation scope. An explicit
-SDK invocation scope takes precedence; otherwise the existing production default
-applies. `exploitability.scope.runtime` supplies the cluster, service and
-`window: {start, end}` for profile reads, with optional container and image name
-or tag. This runtime filter does not narrow the caller investigation scope or
-establish deployment or access. Existing configurations keep their defaults.
+Use `exploitability.scope.instructions` to describe the callers, workloads or
+scenario to assess. A named service can be resolved using the configured
+read-only evidence providers. The investigator records the evidence used to
+identify the workload and select any runtime lookups.
 
-For example, a caller scope and profile filter can be configured together:
+This configuration focuses the check on the example API in production.
 
 ```json
 {
   "exploitability": {
     "scope": {
-      "caller": "Only the example API request handler and code it calls.",
-      "runtime": {
-        "cluster": "example-cluster",
-        "service": "example-api",
-        "window": {
-          "start": "2026-01-01T00:00:00Z",
-          "end": "2026-01-01T00:01:00Z"
-        }
-      }
+      "instructions": "Check whether this advisory applies to the example API in production."
     }
   }
 }
@@ -2623,11 +2613,10 @@ invokes them. Packaging and build files can still establish what a production
 caller selects. Broad discovery skips conventional example, test and
 documentation paths by default. Specific source, build or runtime evidence can
 reopen a path. Maintainer advisories and exact documentation or regression tests
-can still answer a specific evidence question. When the invocation supplies an explicit
-caller scope, the check uses it instead, including examples, CI, build or test
-callers when requested. The resolved
-scope appears in JSON `assumptions` and bounds discovery, leads and conclusions.
-It does not establish a running deployment or caller access.
+can still answer a specific evidence question. Scope instructions can include
+examples, CI, build or test callers when requested. The resolved scope appears in
+JSON `assumptions` and bounds discovery, leads and conclusions. Deployment and
+access conclusions require matching evidence.
 
 The coordinator checks final coverage against that scope. It assigns an
 independent follow-up when a specific gap could change the result. Follow-up

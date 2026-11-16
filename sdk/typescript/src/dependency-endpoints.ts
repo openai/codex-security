@@ -92,15 +92,24 @@ const recordedEndpointSchema = z.union([
 ]);
 const recordInput = z.strictObject({ endpoint: recordedEndpointSchema });
 
+export const dependencyScopeSchema = z.strictObject({
+  instructions: text
+    .optional()
+    .describe(
+      "Plain-text instructions identifying the callers, workloads or other scenario to assess.",
+    ),
+  exclude_paths: z
+    .array(text)
+    .optional()
+    .describe(
+      "Literal checkout-relative files or directories to omit from broad exploitability structural discovery. Explicit file traces and exact caller leads can revisit them.",
+    ),
+});
+
 const configurationSchema = z.object({
   sources: z.array(dependencyEndpointInputSchema).optional(),
   sinks: z.array(dependencyEndpointInputSchema).optional(),
-  scope: z
-    .object({
-      caller: text.optional(),
-      runtime: dependencyRuntimeScopeSchema.optional(),
-    })
-    .optional(),
+  scope: dependencyScopeSchema.optional(),
 });
 
 export type DependencyEndpointConfiguration = z.input<
@@ -177,6 +186,7 @@ export function validateDependencyEndpointConfiguration(
 
 const snapshotSchema = z.strictObject({
   configuration: configurationSchema,
+  runtimeScope: dependencyRuntimeScopeSchema.optional(),
   boundary: z.strictObject({
     source: z.enum(["discover", "supplied"]),
     sink: z.enum(["discover", "supplied"]),
@@ -191,6 +201,7 @@ export type DependencyEndpointGraph = Awaited<
 export async function openDependencyEndpoints(
   options: {
     configuration?: DependencyEndpointConfiguration | undefined;
+    runtimeScope?: DependencyRuntimeScope;
     snapshotPath?: string;
   } = {},
 ) {
@@ -203,8 +214,10 @@ export async function openDependencyEndpoints(
     source: configuration.sources === undefined ? "discover" : "supplied",
     sink: configuration.sinks === undefined ? "discover" : "supplied",
   });
-  const callerScope = configuration.scope?.caller;
-  const runtimeScope = configuration.scope?.runtime;
+  const instructions = configuration.scope?.instructions;
+  const runtimeScope = dependencyRuntimeScopeSchema
+    .optional()
+    .parse(options.runtimeScope);
   const runtimeMappings = new Map<string, DependencyRuntimeSelector[]>();
   const retainDiscovery = (record: DependencyEndpoint) => {
     records.set(record.id, record);
@@ -256,7 +269,7 @@ export async function openDependencyEndpoints(
       dirname(snapshotPath),
       basename(snapshotPath),
       JSON.stringify(
-        { configuration, boundary, endpoints: [...saved] },
+        { configuration, runtimeScope, boundary, endpoints: [...saved] },
         null,
         2,
       ) + "\n",
@@ -267,7 +280,10 @@ export async function openDependencyEndpoints(
     const saved = await readSavedEvidence(snapshotPath);
     if (saved !== undefined) {
       const snapshot = snapshotSchema.parse(JSON.parse(saved));
-      if (!equivalent(snapshot.configuration, configuration))
+      if (
+        !equivalent(snapshot.configuration, configuration) ||
+        !equivalent(snapshot.runtimeScope ?? null, runtimeScope ?? null)
+      )
         throw new Error(
           "Saved endpoint graph belongs to a different endpoint configuration.",
         );
@@ -293,7 +309,7 @@ export async function openDependencyEndpoints(
   const get = (id: string) => structuredClone(records.get(id));
   const coverage = () => ({
     boundary,
-    ...(callerScope !== undefined && { caller_scope: callerScope }),
+    ...(instructions !== undefined && { scope_instructions: instructions }),
     ...(runtimeScope && { runtime_scope: structuredClone(runtimeScope) }),
   });
   let pending = Promise.resolve();

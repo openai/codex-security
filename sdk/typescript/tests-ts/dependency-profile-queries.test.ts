@@ -459,7 +459,7 @@ test("rejects wrong ancestry and accidental cross-rule pairs from a provider", a
   }
 });
 
-test("configured workload/window and supplied endpoint sides constrain host requests", async () => {
+test("internal workload/window and supplied endpoint sides constrain host requests", async () => {
   const endpoints = await openDependencyEndpoints({
     configuration: {
       sources: [
@@ -476,8 +476,8 @@ test("configured workload/window and supplied endpoint sides constrain host requ
           runtime_selectors: [{ name: "decode" }],
         },
       ],
-      scope: { runtime: { ...selector, window, image_tag: "build-a" } },
     },
+    runtimeScope: { ...selector, window, image_tag: "build-a" },
   });
   await endpoints.record({
     endpoint: {
@@ -539,8 +539,8 @@ test("unknown endpoint mappings remain visible while valid same-rule subsets pro
           runtime_selectors: [{ name: "decode" }],
         },
       ],
-      scope: { runtime: { ...selector, window } },
     },
+    runtimeScope: { ...selector, window },
   });
   const backend = provider(() => ({ rows: [observation(1)] }));
   const profiles = createDependencyProfileEvidence({
@@ -575,8 +575,8 @@ test("registered cache-writer discovery stays queryable without widening supplie
           runtime_selectors: [{ name: "decode" }],
         },
       ],
-      scope: { runtime: { ...selector, window } },
     },
+    runtimeScope: { ...selector, window },
   });
   await endpoints.record({
     endpoint: {

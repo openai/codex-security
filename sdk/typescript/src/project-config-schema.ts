@@ -1,7 +1,7 @@
 import { z } from "zod";
 import {
   dependencyEndpointInputSchema,
-  dependencyRuntimeScopeSchema,
+  dependencyScopeSchema,
 } from "./dependency-endpoints.js";
 import {
   DeepScanSettingsSchema,
@@ -99,26 +99,7 @@ export const ProjectConfigInputSchema = z.strictObject({
         .describe(
           "Complete supplied sink boundary. An empty array supplies a boundary with no members. Omit to discover sinks.",
         ),
-      scope: z
-        .strictObject({
-          caller: nonempty
-            .optional()
-            .describe(
-              "Caller investigation scope in plain text. Applies independently of runtime observation filters.",
-            ),
-          runtime: dependencyRuntimeScopeSchema
-            .optional()
-            .describe(
-              "Runtime workload and time window to investigate. This filter does not establish deployment or access.",
-            ),
-          exclude_paths: z
-            .array(nonempty)
-            .optional()
-            .describe(
-              "Literal checkout-relative files or directories to omit from broad exploitability structural discovery. Explicit file traces and exact caller leads can revisit them.",
-            ),
-        })
-        .optional(),
+      scope: dependencyScopeSchema.optional(),
       service_catalog_mcps: z
         .array(nonempty)
         .optional()
