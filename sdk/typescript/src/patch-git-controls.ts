@@ -208,6 +208,7 @@ export interface PatchGitControls {
 
 export interface PatchPublicationHooks {
   readonly gitDirectory: string;
+  readonly commonDirectory?: string;
   readonly events: Set<string>;
   readonly configured: Set<string>;
 }
@@ -2443,7 +2444,7 @@ export async function capturePatchGitControls(
       alternateObjectDirectories.push(path);
   }
   return {
-    publicationHooks: { ...publicationHooks, gitDirectory },
+    publicationHooks: { ...publicationHooks, gitDirectory, commonDirectory },
     readOnlyPaths: [
       ...new Set([
         ...alternateObjectDirectories,

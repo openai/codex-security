@@ -351,6 +351,7 @@ import {
   withCredentialHomeLock,
   requirePrivateSnapshotProfileHome,
   requirePrivateSnapshotProfileFile,
+  createWindowsHookMessageStage,
   requireSecureOutputAncestry,
   writeCredentialHomeConfig,
   requireOutputOutsideRepositories,
@@ -2040,7 +2041,10 @@ export async function runRepositoryCommand(
   let profileFile: string | undefined;
   let hookDirectory: string | undefined;
   let hookDataDirectory: string | undefined;
-  let messageDirectory: string | undefined;
+  const messageDirectories: Record<string, string> = {};
+  const windowsMessageStages: Awaited<
+    ReturnType<typeof createWindowsHookMessageStage>
+  >[] = [];
   let hostArgs = args;
   try {
     const home = sandbox && configuredCodexHome(sandbox.environment);
@@ -2153,13 +2157,35 @@ export async function runRepositoryCommand(
         hookDataDirectory = await mkdtemp(
           join(hooks.gitDirectory, "codex-security-hook-data-"),
         );
-        if (
-          options?.hookMessagePath &&
-          (hooks.events.has("prepare-commit-msg") ||
-            hooks.events.has("commit-msg"))
-        ) {
-          messageDirectory = join(hookDataDirectory, "message");
-          await mkdir(messageDirectory, { mode: 0o700 });
+        for (const event of ["prepare-commit-msg", "commit-msg"]) {
+          if (!options?.hookMessagePath || !hooks.events.has(event)) continue;
+          // A later message hook gets a fresh grant. Reprovisioning a directory
+          // already edited by an earlier hook could reach its links.
+          if (process.platform === "win32") {
+            const temp = await realpath(tmpdir());
+            for (const denied of [
+              canonicalHome,
+              await realpath(hooks.gitDirectory),
+              ...(hooks.commonDirectory ? [hooks.commonDirectory] : []),
+            ]) {
+              if (!isOutsidePath(relative(denied, temp)))
+                throw new CodexSecurityError(
+                  "The Windows hook message needs temporary storage outside Git administration and the private Codex home.",
+                );
+            }
+            const outer = join(
+              temp,
+              "codex-security-hook-message-" + randomUUID(),
+            );
+            windowsMessageStages.push(
+              await createWindowsHookMessageStage(outer),
+            );
+            messageDirectories[event] = join(outer, "message");
+          } else {
+            const directory = join(hookDataDirectory, event);
+            await mkdir(directory, { mode: 0o700 });
+            messageDirectories[event] = directory;
+          }
         }
       }
       const path = join(home, `${profile}.config.toml`);
@@ -2186,10 +2212,12 @@ export async function runRepositoryCommand(
           };
         }
         const profiles = { [profile]: permissions };
-        if (messageDirectory) {
+        for (const [event, messageDirectory] of Object.entries(
+          messageDirectories,
+        )) {
           // Native hooks and editors can replace their message by rename.
           // Grant the private message directory while keeping Git controls read-only.
-          profiles[profile + "_message"] = {
+          profiles[profile + "_" + event] = {
             ...permissions,
             filesystem: {
               ...(permissions["filesystem"] as JsonObject),
@@ -2265,7 +2293,8 @@ export async function runRepositoryCommand(
           profile,
           message: options?.hookMessagePath,
           data: hookDataDirectory!,
-          messageDirectory,
+          messageDirectories,
+          windowsMessageBinding: windowsMessageStages[0]?.binding,
           runner: PATCH_GIT_ENVIRONMENT_RUNNER,
           credentialNames,
           stripAwsCredentials: sandbox.stripAwsCredentials === true,
@@ -2458,11 +2487,17 @@ export async function runRepositoryCommand(
       : stdout;
     return options?.trim === false ? output : output.trim();
   } finally {
-    if (profileFile !== undefined) await rm(profileFile);
-    if (hookDirectory !== undefined)
-      await rm(hookDirectory, { recursive: true, force: true });
-    if (hookDataDirectory !== undefined)
-      await rm(hookDataDirectory, { recursive: true, force: true });
+    try {
+      await Promise.all(
+        windowsMessageStages.map(async (stage) => stage.close()),
+      );
+    } finally {
+      if (profileFile !== undefined) await rm(profileFile);
+      if (hookDirectory !== undefined)
+        await rm(hookDirectory, { recursive: true, force: true });
+      if (hookDataDirectory !== undefined)
+        await rm(hookDataDirectory, { recursive: true, force: true });
+    }
   }
 }
 

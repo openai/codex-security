@@ -62,7 +62,10 @@ pub(crate) struct ScanReadFileBackend {
 
 impl ScanReadRootBackend {
     pub(crate) fn open(path: Buffer) -> napi::Result<Self> {
-        let path = decode_path(path)?;
+        Self::open_path(&decode_path(path)?)
+    }
+
+    pub(crate) fn open_path(path: &Path) -> napi::Result<Self> {
         let path = std::path::absolute(path).map_err(native_error)?;
         let mut directories = Vec::new();
         // Fix each ancestor in place before opening a child through its path.
@@ -79,6 +82,15 @@ impl ScanReadRootBackend {
         let root = Arc::new(RootHandles { path, directories });
         root.verify().map_err(native_error)?;
         Ok(Self { root: Some(root) })
+    }
+
+    pub(crate) fn directory(&self) -> napi::Result<&File> {
+        Ok(&self
+            .root()?
+            .directories
+            .last()
+            .expect("root is pinned")
+            .file)
     }
 
     pub(crate) fn open_file(

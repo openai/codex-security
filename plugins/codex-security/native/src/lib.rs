@@ -8,4 +8,6 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
+mod windows_hook_message;
+#[cfg(windows)]
 mod windows_output;

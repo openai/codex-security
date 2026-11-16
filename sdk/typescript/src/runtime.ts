@@ -2753,23 +2753,38 @@ async function prepareOutputDirectory(
   }
 }
 
-async function windowsOutputBinding() {
+async function windowsBindingPath() {
+  return join(
+    await bundledPluginRoot(),
+    "mcp",
+    "native",
+    `win32-${process.arch}`,
+    "windows.node",
+  );
+}
+
+async function windowsOutputBinding(path?: string) {
   return createRequire(import.meta.url)(
-    join(
-      await bundledPluginRoot(),
-      "mcp",
-      "native",
-      `win32-${process.arch}`,
-      "windows.node",
-    ),
+    path ?? (await windowsBindingPath()),
   ) as {
     createPrivateWindowsDirectory(path: Buffer, checkOutput: boolean): number;
+    createWindowsHookMessageStage(path: Buffer): { close(): void };
     validateWindowsOutputPath(
       path: Buffer,
       writableLeaf?: boolean,
       retainedDirectory?: string,
     ): number;
   };
+}
+
+/** Pin the editable message outside Windows' read-only Git administration ACL. */
+export async function createWindowsHookMessageStage(path: string) {
+  const binding = await windowsBindingPath();
+  const native = await windowsOutputBinding(binding);
+  const stage = native.createWindowsHookMessageStage(
+    Buffer.from(win32.toNamespacedPath(path), "utf16le"),
+  );
+  return { binding, close: () => stage.close() };
 }
 
 export async function requireWindowsOutputPath(

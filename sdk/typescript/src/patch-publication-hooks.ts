@@ -274,6 +274,42 @@ function readMessage(opened) {
   }
   return bytes;
 }
+function readEditedMessage(file) {
+  const edited = openMessage(file, fs.constants.O_RDONLY);
+  try {
+    const bytes = readMessage(edited);
+    if (!unchanged(file, edited))
+      throw new Error(
+        "The hook's private commit-message file changed while reading it.",
+      );
+    return bytes;
+  } finally {
+    fs.closeSync(edited.fd);
+  }
+}
+// Git sends a message hook's stdout and stderr to its diagnostic stream.
+// Reserve stdout inside this sandbox for the validated message alone.
+function runWindowsMessageHook() {
+  const file = process.argv[1];
+  stageMessage();
+  const [binding, runner, ...args] = process.argv.slice(1);
+  const result = require("node:child_process").spawnSync(
+    process.execPath, ["-e", runner, "--", ...args], { stdio: [0, 2, 2] },
+  );
+  if (result.error) throw result.error;
+  const fs = require("node:fs");
+  if (result.status === 0 || fs.lstatSync(file, { throwIfNoEntry: false })) {
+    const bytes = require(binding).readWindowsHookMessage(
+      Buffer.from(require("node:path").toNamespacedPath(file), "utf16le"),
+    );
+    const size = Buffer.alloc(8);
+    size.writeBigUInt64BE(BigInt(bytes.length));
+    for (const part of [size, bytes])
+      for (let offset = 0; offset < part.length;)
+        offset += fs.writeSync(1, part, offset, part.length - offset);
+  }
+  process.exitCode = result.status ?? 1;
+}
 // Create the message under the hook's write grant. On Windows a file
 // created by the host before the sandbox starts can retain a read-only ACL.
 function stageMessage() {
@@ -299,7 +335,7 @@ try {
   if (messageEvent) {
     if (
       !plan.message ||
-      !plan.messageDirectory ||
+      !plan.messageDirectories[event] ||
       !args[0] ||
       fs.realpathSync.native(args[0]) !== fs.realpathSync.native(plan.message)
     )
@@ -309,11 +345,9 @@ try {
     original = openMessage(plan.message, fs.constants.O_RDWR);
     originalBytes = readMessage(original);
     privateMessage = path.join(
-      plan.messageDirectory,
+      plan.messageDirectories[event],
       path.basename(plan.message),
     );
-    // A failed launch must not copy back a previous hook's message.
-    fs.rmSync(privateMessage, { force: true });
     // Git for Windows passes slash-separated paths to both native and shell hooks.
     args[0] = privateMessage.split(path.sep).join("/");
   }
@@ -384,6 +418,12 @@ try {
       ...args,
     ];
   }
+  const windowsMessage = original && plan.windowsMessageBinding;
+  const runner = windowsMessage
+    ? [
+        stageMessage, "(" + runWindowsMessageHook + ")();",
+      ].join("\n")
+    : original ? "(" + stageMessage + ")();\n" + plan.runner : plan.runner;
   const result = spawnSync(
     plan.codex,
     [
@@ -394,14 +434,15 @@ try {
       "--profile",
       plan.profile,
       "--permission-profile",
-      messageEvent ? plan.profile + "_message" : plan.profile,
+      messageEvent ? plan.profile + "_" + event : plan.profile,
       "--include-managed-config",
       "--",
       plan.runtime,
       "-e",
-      original ? "(" + stageMessage + ")();\n" + plan.runner : plan.runner,
+      runner,
       "--",
       ...(original ? [privateMessage, String(originalBytes.length)] : []),
+      ...(windowsMessage ? [plan.windowsMessageBinding, plan.runner] : []),
       String(header.length),
       plan.git,
       "-C",
@@ -411,42 +452,45 @@ try {
     {
       env: environment,
       input: original ? Buffer.concat([originalBytes, header]) : header,
-      stdio: ["pipe", "inherit", "inherit"],
+      stdio: ["pipe", windowsMessage ? "pipe" : "inherit", "inherit"],
+      maxBuffer: Infinity,
       windowsHide: true,
     },
   );
   if (result.error) throw result.error;
   // Git keeps a validator's message edits even when it vetoes the commit.
-  if (
+  let bytes;
+  if (windowsMessage) {
+    if (result.stdout.length || result.status === 0) {
+      if (
+        result.stdout.length < 8 ||
+        result.stdout.readBigUInt64BE() !== BigInt(result.stdout.length - 8)
+      ) throw new Error("Incomplete edited commit-message frame.");
+      bytes = result.stdout.subarray(8);
+    }
+  } else if (
     original &&
     (result.status === 0 || fs.lstatSync(privateMessage, { throwIfNoEntry: false }))
   ) {
-    const edited = openMessage(privateMessage, fs.constants.O_RDONLY);
-    try {
-      const bytes = readMessage(edited);
-      if (!unchanged(privateMessage, edited))
-        throw new Error(
-          "The hook's private commit-message file changed while reading it.",
-        );
-      if (
-        !readMessage(original).equals(originalBytes) ||
-        !unchanged(plan.message, original)
-      )
-        throw new Error(
-          "The original Git commit-message file changed while the hook was running.",
-        );
-      for (let offset = 0; offset < bytes.length;)
-        offset += fs.writeSync(
-          original.fd,
-          bytes,
-          offset,
-          bytes.length - offset,
-          offset,
-        );
-      fs.ftruncateSync(original.fd, bytes.length);
-    } finally {
-      fs.closeSync(edited.fd);
-    }
+    bytes = readEditedMessage(privateMessage);
+  }
+  if (bytes !== undefined) {
+    if (
+      !readMessage(original).equals(originalBytes) ||
+      !unchanged(plan.message, original)
+    )
+      throw new Error(
+        "The original Git commit-message file changed while the hook was running.",
+      );
+    for (let offset = 0; offset < bytes.length;)
+      offset += fs.writeSync(
+        original.fd,
+        bytes,
+        offset,
+        bytes.length - offset,
+        offset,
+      );
+    fs.ftruncateSync(original.fd, bytes.length);
   }
   process.exitCode = result.status ?? 1;
 } finally {
@@ -469,7 +513,8 @@ export async function writePublicationHooks(
     profile: string;
     data: string;
     message?: string;
-    messageDirectory?: string;
+    messageDirectories: Record<string, string>;
+    windowsMessageBinding?: string;
     runner: string;
     credentialNames: string[];
     stripAwsCredentials: boolean;
