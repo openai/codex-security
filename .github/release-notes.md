@@ -12,6 +12,7 @@
 - add synthetic security workflow benchmarks ([#2618](https://github.com/openai/codex-security/pull/2618))
 - clarify Deep Scan preflight sandbox limits ([#2611](https://github.com/openai/codex-security/pull/2611))
 - preserve Windows helper exit codes ([#2651](https://github.com/openai/codex-security/pull/2651))
+- keep repository links usable in standalone copies ([#2664](https://github.com/openai/codex-security/pull/2664))
 
 </details>
 
