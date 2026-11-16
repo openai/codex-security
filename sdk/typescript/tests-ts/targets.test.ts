@@ -628,7 +628,7 @@ describe("scan target normalization", () => {
     expect(existsSync(leaked)).toBe(false);
   });
 
-  test("does not expose Git configuration to repository clean filters", async () => {
+  test("keeps Git and model credentials out of repository clean filters", async () => {
     const repo = await repository();
     const root = join(repo, "..");
     const filter = join(root, "clean-filter.js");
@@ -645,7 +645,7 @@ describe("scan target normalization", () => {
       [
         'import { readFileSync, writeFileSync } from "node:fs";',
         `writeFileSync(${JSON.stringify(executed)}, "executed");`,
-        `if (process.env.GIT_CONFIG_VALUE_0) writeFileSync(${JSON.stringify(leaked)}, process.env.GIT_CONFIG_VALUE_0);`,
+        `if (process.env.GIT_CONFIG_VALUE_0 || Object.keys(process.env).some(name => name.toUpperCase() === "MINIMAX_API_KEY")) writeFileSync(${JSON.stringify(leaked)}, "credential present");`,
         "process.stdout.write(readFileSync(0));",
       ].join("\n"),
     );
@@ -657,7 +657,9 @@ describe("scan target normalization", () => {
     );
     await utimes(join(repo, "src", "app.ts"), new Date(0), new Date(0));
 
-    const result = validateCommittedDiffWithCredentialConfig(repo);
+    const result = validateCommittedDiffWithCredentialConfig(repo, {
+      MiniMax_API_Key: "synthetic-key",
+    });
 
     expect(result.status).toBe(0);
     expect(existsSync(executed)).toBe(true);

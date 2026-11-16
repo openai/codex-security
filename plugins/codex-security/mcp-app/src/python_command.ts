@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { constants, promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { helperEnvironment } from "./helper-environment.ts";
 import {
   configuredExecutableValue,
   isExecutableFile,
@@ -144,6 +145,7 @@ export function runPythonWithInput(
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(python, ["-B", ...args], {
+      env: helperEnvironment(),
       signal,
       killSignal: "SIGKILL",
       stdio: ["pipe", "pipe", "pipe"],

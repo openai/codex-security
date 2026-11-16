@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { JsonObject } from "./types.js";
 import { isRecord } from "./record.js";
+import { helperEnvironment } from "./helper-environment.js";
 import {
   missingPythonHelperMessage,
   resolvePythonCommand,
@@ -117,7 +118,7 @@ async function executeWorkbench(
       cwd: PLUGIN_ROOT,
       windowsHide: true,
       env: {
-        ...process.env,
+        ...helperEnvironment(),
         CODEX_MCP_NODE_PATH:
           process.env.CODEX_MCP_NODE_PATH || process.execPath,
       },
