@@ -1,29 +1,10 @@
 import assert from "node:assert/strict";
-import path from "node:path";
 import type { CodexSdkWorkerExecutor as Executor } from "../src/deep-scan/executor.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 import { assertConfigOverrides } from "./assertions.ts";
-import { importSource } from "./import-module.ts";
 import { executor } from "./support/deep-scan-executor-module.ts";
 import { createFakeCodexFixture } from "./support/fake-codex-fixture.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
-
-export const {
-  bundledCodexSdkEnvironment,
-}: {
-  bundledCodexSdkEnvironment(
-    command: string,
-    environment: Record<string, string>,
-  ): Record<string, string>;
-} =
-  process.platform === "win32"
-    ? {}
-    : await importSource(
-        path.join(
-          import.meta.dirname,
-          "../../../../sdk/typescript/src/codex-sdk-environment.ts",
-        ),
-      );
 
 export const {
   resolveCodexPath,
