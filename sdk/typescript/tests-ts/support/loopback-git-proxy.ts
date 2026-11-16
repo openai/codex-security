@@ -12,6 +12,7 @@ export async function loopbackTls(
   config: string,
   git: (...args: string[]) => string,
   usage: "server" | "client" | "proxy-client" = "server",
+  combined = false,
 ) {
   const directory = dirname(config);
   const settings = join(directory, `${usage}-openssl.cnf`);
@@ -48,10 +49,19 @@ export async function loopbackTls(
     "-out",
     cert,
   );
+  const identity = { key: await readFile(key), cert: await readFile(cert) };
   if (usage !== "server") {
     const prefix = usage === "proxy-client" ? "http.proxySSL" : "http.ssl";
-    git("config", "--file", config, prefix + "Cert", cert);
-    git("config", "--file", config, prefix + "Key", key);
+    if (combined) {
+      const bundle = join(directory, usage + "-identity.pem");
+      await writeFile(bundle, Buffer.concat([identity.cert, identity.key]), {
+        mode: 0o600,
+      });
+      git("config", "--file", config, prefix + "Cert", bundle);
+    } else {
+      git("config", "--file", config, prefix + "Cert", cert);
+      git("config", "--file", config, prefix + "Key", key);
+    }
     // Git for Windows also offers Schannel, which uses a certificate store.
     if (process.platform === "win32")
       git("config", "--file", config, "http.sslBackend", "openssl");
@@ -59,7 +69,7 @@ export async function loopbackTls(
     git("config", "--file", config, "http.sslCAInfo", cert);
     git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
   }
-  return { key: await readFile(key), cert: await readFile(cert) };
+  return identity;
 }
 
 export async function loopbackProxy(originPort: number, tls?: ServerOptions) {

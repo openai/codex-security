@@ -903,6 +903,8 @@ test("isolates relative credential stores selected from an external Git caller",
     [
       ...stores.map(({ parent, name }) => join(caller, parent, name)),
       ...[caller, directory].flatMap((root) => [
+        join(root, "home", ".aws", "config"),
+        join(root, "home", ".aws", "credentials"),
         join(root, "home", ".netrc"),
         join(root, "home", "_netrc"),
         join(root, cookie),

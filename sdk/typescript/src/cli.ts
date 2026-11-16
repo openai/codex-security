@@ -166,7 +166,7 @@ import {
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
-import { isGitSsh } from "./git-remote.js";
+import { isGitSsh, parseGitRemote } from "./git-remote.js";
 import {
   collectContinuumFinding,
   collectContinuumIssues,
@@ -1430,6 +1430,7 @@ interface SkillPermissions {
   readonly readOnlyPaths: readonly string[];
   readonly modelOnlyReadOnlyPaths?: readonly string[];
   readonly credentialStorePaths?: readonly string[];
+  readonly protectShellCredentialFiles?: PatchGitControls["protectShellCredentialFiles"];
   readonly unavailableFilters?: readonly string[];
   readonly externalConfigPaths?: readonly string[];
   readonly externalCachePaths?: readonly string[];
@@ -1638,11 +1639,20 @@ function publicationHookCommand(args: readonly string[]): boolean {
   return false;
 }
 
+function shellEnvironmentSettings(config: JsonObject): JsonObject | undefined {
+  const policy = config["shell_environment_policy"];
+  return isJsonObject(policy) && isJsonObject(policy["set"])
+    ? policy["set"]
+    : undefined;
+}
+
 async function resumeHookSandbox(
   directory: string,
   environment: NodeJS.ProcessEnv,
   gitDirectories: string[],
-  credentialStorePaths: readonly string[],
+  readCredentialStorePaths: (
+    configuration: JsonObject,
+  ) => Promise<readonly string[]>,
   signal: AbortSignal,
 ): Promise<PatchSnapshotSandbox> {
   const operator = resolveCodexCommand(environment);
@@ -1695,7 +1705,7 @@ async function resumeHookSandbox(
     profile: patchWorkspaceProfile(
       workspace,
       gitDirectories,
-      credentialStorePaths,
+      await readCredentialStorePaths(config),
     ),
     configuration: {
       sandbox_workspace_write: {
@@ -8763,18 +8773,9 @@ export async function main(
                   });
                 publicationHooks = await activePatchPublicationHooks(read);
                 if (!publicationHooks.events.size) return;
-                const credentialStorePaths = new Set<string>();
-                if (
+                const inspectCredentials =
                   publicationHooks.events.has("pre-push") ||
-                  publicationHooks.events.has("reference-transaction")
-                )
-                  await readPatchGitControls(
-                    directory,
-                    dependencies,
-                    false,
-                    "resumed-hook",
-                    { credentialStorePaths },
-                  );
+                  publicationHooks.events.has("reference-transaction");
                 const gitDirectories = (
                   await read([
                     "rev-parse",
@@ -8792,7 +8793,21 @@ export async function main(
                     directory,
                     dependencies.environment,
                     gitDirectories,
-                    [...credentialStorePaths],
+                    async (config) => {
+                      const paths = new Set<string>();
+                      if (inspectCredentials)
+                        await readPatchGitControls(
+                          directory,
+                          dependencies,
+                          false,
+                          "resumed-hook",
+                          {
+                            credentialStorePaths: paths,
+                            shellSettings: shellEnvironmentSettings(config),
+                          },
+                        );
+                      return [...paths];
+                    },
                     controller.signal,
                   );
                   await addPatchTransportWriters(
@@ -11725,6 +11740,10 @@ async function patchPublicationDestination(
       "--jq",
       ".id",
     ]);
+  const githubBase = gitlab
+    ? undefined
+    : await githubPatchBase(fetchRemote, repository, dependencies);
+  const githubRepoArgs = githubBase ? ["--repo", githubBase] : [];
   const requestArguments = gitlab
     ? [
         "mr",
@@ -11750,6 +11769,7 @@ async function patchPublicationDestination(
         "url,state,headRefOid,headRepository,isCrossRepository",
         "--jq",
         "map({url, head: .headRefOid, state, repositoryId: .headRepository.id, crossRepository: .isCrossRepository}) | tojson",
+        ...githubRepoArgs,
       ];
   const existing = await run(command, requestArguments);
   type ExistingRequest = {
@@ -11807,6 +11827,7 @@ async function patchPublicationDestination(
     gitlab,
     command,
     existing: found,
+    githubBase,
     getSshCommand,
   };
 }
@@ -13009,6 +13030,246 @@ async function patchSshHostname(
   return /^hostname (.+)$/mu.exec(settings)?.[1] ?? url.hostname;
 }
 
+function githubPatchSelector(value: string): string {
+  if (!value.includes("://")) return value;
+  if (!URL.canParse(value))
+    throw new CodexSecurityError(
+      "The GitHub repository selector must be a valid URL.",
+    );
+  const url = new URL(value);
+  if (
+    !["https:", "http:", "ssh:", "git:", "git+ssh:", "git+https:"].includes(
+      url.protocol,
+    ) ||
+    !url.hostname
+  )
+    throw new CodexSecurityError(
+      "The GitHub repository selector must be a valid URL.",
+    );
+  const path = decodeURIComponent(url.pathname)
+    .replace(/^\/+|\/+$/gu, "")
+    .replace(/\.git$/u, "");
+  if (!/^[^/]+\/[^/]+$/u.test(path))
+    throw new CodexSecurityError(
+      "The GitHub repository selector must include an owner and repository.",
+    );
+  // Only an HTTPS endpoint selects the corresponding HTTPS API port.
+  // Userinfo and other URL components never belong in gh command arguments.
+  return `${url.protocol === "https:" ? url.host : url.hostname}/${path}`;
+}
+
+async function githubPatchBase(
+  fetchRemote: string,
+  repository: string,
+  dependencies: CliDependencies,
+): Promise<string | undefined> {
+  const override = environmentEntry(dependencies.environment, "GH_REPO");
+  if (override) return githubPatchSelector(override);
+  const host = environmentEntry(dependencies.environment, "GH_HOST");
+  if (host && /[\/@?#\\]/u.test(host))
+    throw new CodexSecurityError(
+      "GH_HOST must select a GitHub hostname and optional port.",
+    );
+  const apiHost = host ? new URL(`https://${host}`) : undefined;
+  if (apiHost && !apiHost.port) return undefined;
+  const customAuthority = (remote: string) => {
+    if (!remote.startsWith("https://") || !URL.canParse(remote))
+      return undefined;
+    const url = new URL(remote);
+    // gh accepts GitHub fetch URLs with exactly an owner and repository.
+    return url.port && /^\/+[^/]+\/[^/]+\/*$/u.test(url.pathname)
+      ? url.host
+      : undefined;
+  };
+  const run = (
+    command: "git" | "gh",
+    args: string[],
+    environment?: NodeJS.ProcessEnv,
+  ) =>
+    dependencies.runRepositoryCommand(command, args, repository, {
+      environment,
+    });
+  // gh uses Git's expanded remote -v output, preferring a usable fetch URL
+  // and otherwise taking the last push URL. A push-only remote has no fetch
+  // URL even though Git can list its push destination.
+  const listed = await run("git", ["remote", "-v"]);
+  const remotes = new Map<string, { fetch?: string; push?: string }>();
+  for (const line of listed.split("\n")) {
+    const entry = /^([^\t]+)\t(.+) \((fetch|push)\)/u.exec(line);
+    if (!entry) continue;
+    const [, name, url, direction] = entry;
+    let parsed;
+    try {
+      parsed = parseGitRemote(url!);
+    } catch {
+      continue;
+    }
+    if (
+      !parsed?.url.hostname ||
+      !/^[^/]+\/[^/]+$/u.test(parsed.path.replace(/^\/+|\/+$/gu, ""))
+    )
+      continue;
+    const remote = remotes.get(name!) ?? {};
+    if (direction === "fetch") remote.fetch = url;
+    else remote.push = url;
+    remotes.set(name!, remote);
+  }
+  const names = [...remotes.keys()];
+  const urls = [...remotes.values()].map(
+    (remote) => remote.fetch ?? remote.push!,
+  );
+  if (!apiHost && !urls.some(customAuthority)) return undefined;
+  const hosts = new Set(urls.map((url) => patchRemoteHost(url)));
+  // A port in GH_HOST prevents gh from matching a remote locally. Keep the
+  // complete authority for API calls and use just the hostname for discovery.
+  const hostname =
+    apiHost?.hostname ?? (hosts.size === 1 ? [...hosts][0] : undefined);
+  const environment = {
+    GH_REPO: "",
+    ...(hostname ? { GH_HOST: hostname } : {}),
+  };
+  // gh reads these markers with git config, including a caller's GIT_CONFIG.
+  const config = await run("git", [
+    "config",
+    "--null",
+    "--get-regexp",
+    "^remote\\..*\\.gh-resolved$",
+  ]).catch((error: unknown) => {
+    if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+      return "";
+    throw error;
+  });
+  const resolutions = new Map<string, string>();
+  for (const entry of config.split("\0").filter(Boolean)) {
+    const split = entry.indexOf("\n");
+    resolutions.set(
+      entry.slice("remote.".length, split - ".gh-resolved".length),
+      entry.slice(split + 1),
+    );
+  }
+  // gh gives configured defaults priority, then picks a remote according to
+  // its own host and fork rules. Tag those remotes so its choice retains the
+  // fetch authority even when several remotes use the same hostname.
+  const discover = async (
+    namesToMark: string[],
+    mark: (name: string) => string,
+    validate?: string,
+  ) => {
+    const quoted = await run("git", [
+      "rev-parse",
+      "--sq-quote",
+      ...names.map(
+        (name) =>
+          `remote.${name}.gh-resolved=${namesToMark.includes(name) ? mark(name) : ""}`,
+      ),
+    ]);
+    return run(
+      "gh",
+      ["repo", "set-default", "--view", ...(validate ? ["--", validate] : [])],
+      {
+        ...environment,
+        GIT_CONFIG: undefined,
+        GIT_CONFIG_PARAMETERS: [
+          environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS"),
+          quoted,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      },
+    );
+  };
+  const marked = names.filter((name) => resolutions.get(name));
+  const tag = (name: string) => `codex-security-target/${names.indexOf(name)}`;
+  let selected = marked.length ? await discover(marked, tag) : "";
+  if (!selected) selected = await discover(names, tag);
+  const index = names.findIndex((name) => tag(name) === selected);
+  if (index < 0)
+    throw new CodexSecurityError(
+      "Set GH_REPO to the GitHub host, owner and repository to select the patch destination.",
+    );
+  const remote = urls[index]!;
+  const authority = apiHost?.host ?? customAuthority(remote);
+  if (!authority) return undefined;
+  const name = names[index]!;
+  if (!apiHost) {
+    // Git's line-based remote display cannot delimit embedded newlines in a
+    // URL. Confirm the selected authority against Git's actual expanded URL.
+    const listedRemote = remotes.get(name)!;
+    let actual: string;
+    if (listedRemote.fetch) {
+      actual =
+        name === "origin"
+          ? fetchRemote
+          : await run("git", ["remote", "get-url", "--", name]);
+    } else {
+      const format = { trim: false, environment: { GIT_CONFIG: undefined } };
+      const values = await dependencies
+        .runRepositoryCommand(
+          "git",
+          ["config", "--null", "--get-all", `remote.${name}.pushurl`],
+          repository,
+          format,
+        )
+        .catch((error: unknown) => {
+          if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+            return "";
+          throw error;
+        });
+      const args = ["remote", "get-url", "--push", "--all", "--", name];
+      if (values) args.unshift("-c", `remote.${name}.url=.`);
+      const result = await dependencies.runRepositoryCommand(
+        "git",
+        args,
+        repository,
+        format,
+      );
+      const expanded = result.replace(/\n$/u, "").split("\n");
+      if (expanded.length !== (values ? values.split("\0").length - 1 : 1))
+        throw new CodexSecurityError(
+          "Set GH_REPO to disambiguate the GitHub patch destination.",
+        );
+      actual = expanded.at(-1)!;
+    }
+    if (actual !== remote)
+      throw new CodexSecurityError(
+        "Set GH_REPO to disambiguate the GitHub patch destination.",
+      );
+  }
+  const resolution = githubPatchSelector(resolutions.get(name) || "base");
+  // Without a positional argument, set-default --view silently falls back to
+  // the fetch repository when the stored owner/repository cannot be parsed.
+  if (
+    resolution !== "base" &&
+    names.includes(resolution) &&
+    !/^(?:[^/]+\/)?[^/]+\/[^/]+$/u.test(resolution)
+  )
+    throw new CodexSecurityError(
+      "The configured GitHub default must select an owner and repository.",
+    );
+  const slug = await discover(
+    [name],
+    () => resolution,
+    resolution === "base" ? undefined : resolution,
+  );
+  if (!slug)
+    throw new CodexSecurityError(
+      "Set GH_REPO to the GitHub host, owner and repository to select the patch destination.",
+    );
+  if (!apiHost) {
+    // An enterprise token can authenticate any hostname. gh checks whether
+    // this exact account host is configured before sending its status request.
+    const help = await run("gh", ["auth", "status", "--help"]);
+    await run("gh", [
+      "auth",
+      "status",
+      "--hostname",
+      authority,
+      ...(help.includes("--active") ? ["--active"] : []),
+    ]);
+  }
+  return `${authority}/${slug}`;
+}
+
 async function githubPatchRepository(
   pushRemote: string,
   requestUrl: URL,
@@ -13644,19 +13905,28 @@ async function captureHiddenPatchContent(
   dependencies: CliDependencies,
   environment: NodeJS.ProcessEnv,
   digests: Set<string>,
+  selection: "flagged" | "ident",
   signal?: AbortSignal,
 ): Promise<void> {
   const source = ["-C", checkout, "-c", "core.fsmonitor=false"];
+  // With the built-in ident conversion, git add can leave both the worktree
+  // and the index looking clean after an expanded $Id$ was edited.
+  const ident = selection === "ident";
+  const pathspecs = ident ? ["--", ":(attr:ident)"] : [];
   const tracked = await patchGitRecords(
     root,
-    [...source, "ls-files", "-v", "--stage", "-z"],
+    [...source, "ls-files", "-v", "--stage", "-z", ...pathspecs],
     dependencies,
-    { environment, patchSnapshot: [] },
+    {
+      environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
+      patchSnapshot: [],
+    },
   );
   const materialized = new Map<string, string>();
   for (const entry of tracked) {
     // Lowercase tags mean assume-unchanged and S means skip-worktree.
-    const header = /^[a-zS] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
+    if (entry.startsWith("H ") !== ident) continue;
+    const header = /^[a-zSH] (?:100644|100755|120000) ([0-9a-f]+) 0\t/u.exec(
       entry,
     );
     if (!header) continue;
@@ -13673,6 +13943,99 @@ async function captureHiddenPatchContent(
     if (digest !== undefined) materialized.set(path, digest);
   }
   if (!materialized.size) return;
+  let renderEnvironment = environment;
+  if (ident) {
+    // A staged attributes file can differ from the worktree attributes used
+    // by ls-files. Never run a new external driver to render these entries.
+    const settings = await patchGitRecords(
+      root,
+      [
+        ...source,
+        "config",
+        "--includes",
+        "--null",
+        "--get-regexp",
+        "^filter\\..+\\.(smudge|process|required)$",
+      ],
+      dependencies,
+      {
+        environment: { ...environment, GIT_CONFIG: undefined },
+        patchSnapshot: [],
+      },
+    ).catch((error: unknown) => {
+      if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+        return [];
+      throw error;
+    });
+    const commands = new Map<string, boolean>();
+    for (const setting of settings) {
+      if (!setting) continue;
+      const end = setting.indexOf("\n");
+      // Preserve Git's last assignment, including an explicitly empty override.
+      const key = end < 0 ? setting : setting.slice(0, end);
+      commands.set(key, end !== setting.length - 1);
+    }
+    const drivers = new Set<string>();
+    for (const [key, active] of commands)
+      if (active && !key.endsWith(".required"))
+        drivers.add(key.slice(7, key.lastIndexOf(".")));
+    if (drivers.size) {
+      // Unspecified attributes have no record in --all mode. A driver can be
+      // named "unspecified", "set", or "unset" just like any other driver.
+      const ambiguous = ["set", "unset"].filter((value) => drivers.has(value));
+      const literal = new Set(
+        ambiguous.length
+          ? await patchGitRecords(
+              root,
+              [
+                ...source,
+                "ls-files",
+                "-z",
+                "--",
+                ...ambiguous.map((name) => ":(attr:ident filter=" + name + ")"),
+              ],
+              dependencies,
+              {
+                environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
+                patchSnapshot: [],
+              },
+            )
+          : [],
+      );
+      const input = Buffer.from(
+        [...materialized.keys()].join("\0") + "\0",
+        "latin1",
+      );
+      for (const direction of [[], ["--cached"]]) {
+        const attributes = await patchGitRecords(
+          root,
+          [...source, "check-attr", ...direction, "-z", "--stdin", "--all"],
+          dependencies,
+          { environment, patchSnapshot: [], input },
+        );
+        for (let i = 0; i + 2 < attributes.length; i += 3) {
+          const path = attributes[i]!;
+          const value = attributes[i + 2]!;
+          if (
+            attributes[i + 1] === "filter" &&
+            drivers.has(value) &&
+            (!ambiguous.includes(value) || literal.has(path))
+          )
+            materialized.delete(path);
+        }
+      }
+      if (!materialized.size) return;
+    }
+    const filters = [...commands.keys()].map((key) => patchPathText(key));
+    renderEnvironment = {
+      ...environment,
+      GIT_CONFIG_PARAMETERS: patchFilterParameters(
+        filters,
+        false,
+        currentGitParameters(environment, dependencies.environment),
+      ),
+    };
+  }
   const directory = await mkdtemp(
     join(await realpath(tmpdir()), "codex-security-patch-checkout-"),
   );
@@ -13692,7 +14055,7 @@ async function captureHiddenPatchContent(
       root,
       {
         patchSnapshot: [directory],
-        environment,
+        environment: renderEnvironment,
         input: Buffer.from(
           [...materialized.keys()].join("\0") + "\0",
           "latin1",
@@ -14034,14 +14397,16 @@ async function preparePatchPublication(
       );
       for (const entry of entries)
         if (entry) nestedRepositoryPaths.push(`${prefix}/${entry.slice(3)}`);
-      await captureHiddenPatchContent(
-        root,
-        checkout,
-        dependencies,
-        environment,
-        nestedRepositoryDigests,
-        signal,
-      );
+      for (const selection of ["ident", "flagged"] as const)
+        await captureHiddenPatchContent(
+          root,
+          checkout,
+          dependencies,
+          environment,
+          nestedRepositoryDigests,
+          selection,
+          signal,
+        );
       // A conflict can also be reported as DD (both sides deleted).
       if (entries.some((entry) => /^(?:[AMTU]|D[DU])/u.test(entry)))
         await captureStagedBlobs(checkout);
@@ -14274,6 +14639,7 @@ async function publishPatchBranch(
       gitlab,
       command,
       existing,
+      githubBase,
       getSshCommand,
     } = await patchPublicationDestination(
       repository,
@@ -14282,6 +14648,7 @@ async function publishPatchBranch(
       approvedSshCommand,
     );
     const gitlabRepository = gitlab ? gitlabPatchRepository(remote) : remote;
+
     let url = existing?.url;
     if (existing) {
       if (
@@ -14299,7 +14666,15 @@ async function publishPatchBranch(
       let head = branch;
       if (!gitlab) {
         const base = new URL(
-          await run("gh", ["repo", "view", "--json", "url", "--jq", ".url"]),
+          await run("gh", [
+            "repo",
+            "view",
+            ...(githubBase ? [githubBase] : []),
+            "--json",
+            "url",
+            "--jq",
+            ".url",
+          ]),
         );
         let headRepository: URL | undefined;
         for (const pushRemote of remotes.filter(isNetworkPatchRemote)) {
@@ -14438,6 +14813,7 @@ async function publishPatchBranch(
               PATCH_PR_TITLE,
               "--body",
               body,
+              ...(githubBase ? ["--repo", githubBase] : []),
             ],
       );
     }
@@ -17034,6 +17410,7 @@ async function readPatchGitControls(
   mode: PatchGitControlMode,
   options: Pick<SkillRunOptions, "patchGitContext"> & {
     credentialStorePaths?: Set<string>;
+    shellSettings?: JsonObject;
   } = {},
 ) {
   const selectedGitDirectory = environmentValue(
@@ -17153,6 +17530,15 @@ async function readPatchGitControls(
     environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
     environmentEntry(dependencies.environment, "USERPROFILE") ?? null,
     environmentEntry(dependencies.environment, "NETRC") ?? null,
+    dependencies.environment,
+    mode === "external"
+      ? undefined
+      : (options.shellSettings ??
+          shellEnvironmentSettings(
+            resolveCodexProfile(
+              await readCodexHomeConfig(dependencies.environment),
+            ),
+          )),
   );
 }
 
@@ -17568,6 +17954,8 @@ async function runSkill(
                         name: patchPermissions,
                         readOnlyPaths: gitControls!.readOnlyPaths,
                         credentialStorePaths: gitControls!.credentialStorePaths,
+                        protectShellCredentialFiles:
+                          gitControls!.protectShellCredentialFiles,
                         unavailableFilters: gitControls!.unavailableFilters,
                         externalConfigPaths: gitControls!.externalConfigPaths,
                         ...(gitControls!.externalCachePaths.length
@@ -17898,7 +18286,10 @@ export async function readSkillCommandOutput(
             const profile = patchWorkspaceProfile(
               workspace,
               appServer.permissions.readOnlyPaths,
-              appServer.permissions.credentialStorePaths,
+              (await appServer.permissions.protectShellCredentialFiles?.(
+                shellEnvironmentSettings(config),
+                shellEnvironmentSettings(resolvedConfig),
+              )) ?? appServer.permissions.credentialStorePaths,
             );
             appServer.onPermissions?.(profile, {
               ...config,
