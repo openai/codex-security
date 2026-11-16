@@ -2788,13 +2788,14 @@ The native sandbox applies these rules when it launches a command. Keep these
 credential files stable until active patch commands finish. For a Windows
 credential file that does not yet exist, use a path the native sandbox can
 represent with ordinary drive or UNC syntax.
-Other helpers, including
-shell commands and OS credential managers, can use storage outside those
-files. A nonregular credential source such as a named pipe is handled the same
-way. When an operator configuration names one of these helpers, a patch
-stops before running a publication hook that could call it. Configured filters
-can stay installed. If a file's attributes select one, Git reports the
-incompatible helper before processing the file. An empty helper reset controls
+Other helpers, including shell commands and OS credential managers, can use
+storage outside those files. An operator Git configuration file can also
+select a `core.askPass` program to supply credentials to the HTTPS transport.
+A nonregular credential source such as a named pipe is handled the same way.
+When an operator configuration names one of these sources, a patch stops
+before running a publication hook that could call it. Configured filters can
+stay installed. If a file's attributes select one, Git reports the incompatible
+credential source before processing the file. An empty helper reset controls
 Git's lookup order. A filter can still read and invoke an earlier helper named
 in the same configuration. For patching with those delegates, select a
 configuration that omits the opaque helper. For automatic publication, a

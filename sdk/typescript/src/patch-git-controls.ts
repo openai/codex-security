@@ -303,7 +303,7 @@ export function patchFilterParameters(
     settings.set(
       key,
       block
-        ? 'echo "Cannot run Git filter with an operator credential helper whose backing store cannot be isolated." >&2; exit 1'
+        ? 'echo "Cannot run Git filter with an operator credential helper or askpass program whose backing store cannot be isolated." >&2; exit 1'
         : "",
     );
     settings.set(
@@ -1260,8 +1260,15 @@ export async function capturePatchGitControls(
     checkout: string,
     key: string,
     value: string,
+    origin: "file" | "command",
   ) => {
     if (mode === "external" || !value) return;
+    // Delegates lose command-scope askpass settings, but Git can still read a
+    // file-backed prompt and call it even when both askpass variables are unset.
+    if (key === "core.askpass" && origin === "file") {
+      unisolatedCredentialHelper = true;
+      return;
+    }
     if (httpCredentialFile.test(key)) {
       // The transport may create a cookie jar after capture. Keep host Git
       // from re-running a checkout filter even when the file is still absent.
@@ -1289,7 +1296,7 @@ export async function capturePatchGitControls(
     if (externalInlineAuthentication) rejectCredentialedGitDelegate();
     if (unisolatedCredentialHelper && canRunOtherDelegate)
       throw new Error(
-        "Cannot run Git filters or hooks with an operator credential helper whose backing store cannot be isolated. Select a Git configuration without that helper for patching.",
+        "Cannot run Git filters or hooks with an operator credential helper or askpass program whose backing store cannot be isolated. Select a Git configuration without that credential source for patching.",
       );
   };
   const snapshotFilter = (key: string) =>
@@ -1383,18 +1390,19 @@ export async function capturePatchGitControls(
         const inline = hasInlineGitAuthentication(key, value);
         if (
           (inline ||
+            key === "core.askpass" ||
             httpCredentialFile.test(key) ||
             /^credential(?:\..*)?\.helper$/iu.test(key)) &&
           (await userSelectedConfig(scope, configPath(origin), checkout))
         ) {
           externalInlineAuthentication ||= inline;
-          await captureCredentialSource(checkout, key, value);
+          await captureCredentialSource(checkout, key, value, "file");
         }
         const path = relativeFile(checkout, configPath(origin.slice(5)));
         activeConfigurations.add(path);
       } else if (scope === "command") {
         // Removing a command-scope setting does not prevent opening its file.
-        await captureCredentialSource(checkout, key, value);
+        await captureCredentialSource(checkout, key, value, "command");
       }
     }
     const captureHooks = async (configured?: string): Promise<void> => {
@@ -1522,7 +1530,7 @@ export async function capturePatchGitControls(
             key,
             value,
           );
-          await captureCredentialSource(checkout, key, value);
+          await captureCredentialSource(checkout, key, value, "file");
         }
         recordConfiguredHook(
           publicationHooks,
