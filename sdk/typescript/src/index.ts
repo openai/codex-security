@@ -53,6 +53,7 @@ export type {
   OwnerFinding,
   CodeownerIdentity,
   OwnerIdentity,
+  OwnerCandidate,
   OwnerSuggestion,
   OwnerSuggestions,
   SuggestOwnersOptions,

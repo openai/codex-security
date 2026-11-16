@@ -4,7 +4,10 @@ import { join } from "node:path";
 import { afterEach, expect, test, mock } from "bun:test";
 import { main } from "../src/cli.js";
 import type { FindingsDocument } from "../src/models.js";
-import type { OwnerSuggestions } from "../src/suggest-owners.js";
+import type {
+  OwnerCandidate,
+  OwnerSuggestions,
+} from "../src/suggest-owners.js";
 import { dependencies, FakeSignals } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
@@ -47,6 +50,24 @@ test("accepts exported findings, forwards model settings, and leaves the input u
   await mkdir(join(directory, "source repo"));
   const deps = dependencies({ currentDirectory: directory });
   const { stdout, stderr, runCli } = createCliTest(main);
+  const primary: OwnerCandidate = {
+    owner: { kind: "person", provider: "github", handle: "reviewer" },
+    reason: "Declared owner.",
+    evidence: [],
+  };
+  const ranked: OwnerSuggestions = {
+    ...report,
+    results: [
+      {
+        ...primary,
+        findingId: document.findings[0]!.findingId,
+        occurrenceId: null,
+        status: "identified",
+        suggestions: [primary],
+        limitations: [],
+      },
+    ],
+  };
 
   deps.suggestOwners = async (repository, findings, options, surface) => {
     expect(repository).toBe(join(directory, "source repo"));
@@ -58,7 +79,7 @@ test("accepts exported findings, forwards model settings, and leaves the input u
     });
     expect(options!.signal).toBeInstanceOf(AbortSignal);
     expect(surface).toBe("cli");
-    return report;
+    return ranked;
   };
   expect(
     await runCli(
@@ -77,7 +98,7 @@ test("accepts exported findings, forwards model settings, and leaves the input u
     ),
     stderr.text(),
   ).toBe(0);
-  expect(JSON.parse(stdout.text())).toEqual(report);
+  expect(JSON.parse(stdout.text())).toEqual(ranked);
   expect(await readFile(join(directory, "findings.json"), "utf8")).toBe(
     contents,
   );
@@ -101,6 +122,7 @@ test("uses the current repository by default and emits a partial report with exi
           owner: null,
           reason: "Model unavailable.",
           evidence: [],
+          suggestions: [],
           limitations: [],
         },
       ],
@@ -168,44 +190,4 @@ test("reports owner lookup errors without changing the diagnostic or leaving lis
   expect(stderr.text()).toBe("codex-security: Owner lookup failed.\n");
   expect(signals.listeners.get("SIGINT")?.size).toBe(0);
   expect(signals.listeners.get("SIGTERM")?.size).toBe(0);
-});
-
-test("emits a primary CODEOWNERS identity using the existing command and report fields", async () => {
-  const { directory, document } = await input();
-  const deps = dependencies({ currentDirectory: directory });
-  const declared: OwnerSuggestions = {
-    ...report,
-    results: [
-      {
-        findingId: document.findings[0]!.findingId,
-        occurrenceId: null,
-        status: "identified",
-        owner: {
-          kind: "group",
-          provider: "github",
-          handle: "example/maintainers",
-        },
-        reason: "Declared owner of an affected file in CODEOWNERS.",
-        evidence: [
-          {
-            id: "e1",
-            kind: "codeowners",
-            path: ".github/CODEOWNERS",
-            commit: report.revision,
-            startLine: 1,
-            endLine: 1,
-            rule: "* @example/maintainers",
-            matchedPath: "handler.ts",
-          },
-        ],
-        limitations: [],
-      },
-    ],
-  };
-  deps.suggestOwners = async () => declared;
-  const { stdout, runCli } = createCliTest(main);
-  expect(
-    await runCli(["suggest-owners", "findings.json", "--json"], deps),
-  ).toBe(0);
-  expect(JSON.parse(stdout.text())).toEqual(declared);
 });

@@ -386,6 +386,12 @@ const failSchema = {
 };
 const completeScanSchema = {
   ...scanSchema,
+  ownerSuggestions: z
+    .boolean()
+    .optional()
+    .describe(
+      "Check CODEOWNERS and Git history for optional finding owner suggestions before sealing.",
+    ),
   ...continuationMutationClaimSchema,
 };
 const occurrenceIdSchema = requiredText.max(256);
@@ -1573,11 +1579,12 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ scanId, handoffClaimToken }, extra) => {
+    async ({ scanId, handoffClaimToken, ownerSuggestions }, extra) => {
       try {
         const threadId = threadIdFromExtra(extra);
         const completed = await workbench("complete-scan", {
           scanId,
+          ownerSuggestions,
           claimToken: handoffClaimToken,
           threadId,
           modelThreadId: threadId ?? "",

@@ -11,6 +11,9 @@
     "inlineSources": true,
     "noEmit": false,
     "incremental": false,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "#plugin-shared/*": ["./dist/shared/*.d.ts"]
+    }
   }
 }

@@ -190,3 +190,8 @@ New completed findings must match the [scan draft schema](../schemas/tools/scan-
 - [Coverage schema](../schemas/coverage.schema.json) for legacy scans
 
 V1 consumers ignore unknown properties for forward compatibility. Producers must still validate documented fields and should not emit undocumented properties casually.
+
+
+### Optional owner suggestions
+
+When the caller requests ownership evidence for a committed repository scan, pass `ownerSuggestions: true` to `complete_codex_security_scan`. The workbench adds `extensions.ownerSuggestion.revision` and `extensions.ownerSuggestion.suggestions` before sealing each finding. Each suggestion has an owner, a reason, and citations. Matching CODEOWNERS appear first, followed by up to three Git contributors ordered by their most recent commit timestamp for the affected source. Completion consults Git history even when CODEOWNERS matches and needs no agent hint. An empty list means no candidate was identified. A missing list means there is no verified decision. Ownership failures appear in completion warnings.

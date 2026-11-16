@@ -204,10 +204,15 @@ files can set `scan.owner_suggestions: true`. The report uses the scan's finding
 IDs and frozen revision; it does not change the sealed findings or assign users.
 Owner failures leave the base scan completed and appear as
 `result.ownerSuggestionsError`; successful reports set `result.ownerSuggestionsPath`.
-The scan records optional owner hints within its existing session and budget.
-Report finalization applies CODEOWNERS and validates Git evidence without another
-model call, including when `maxCostUsd` is set. Missing hints abstain and invalid
-hints produce per-finding errors. Working-tree and directory snapshots are
+On Standard path scans, the bundled plugin also saves verified candidates in
+`extensions.ownerSuggestion.suggestions` at the first seal. Completion replay
+preserves those bytes. Deep Scan automatic completion uses the sidecar.
+
+Completion lists CODEOWNERS first, then reads Git blame for
+the reported lines, or the latest 100 non-merge commits touching a file when only a
+path is available. When Git evidence covers every affected path, it ranks up to
+three authors by their newest commit timestamp, breaking ties by email. This uses the checkout directly, including
+when `maxCostUsd` is set. Working-tree and directory snapshots are
 unsupported. Explicit owner-only analysis remains available through `suggestOwners`
 and `suggest-owners`, sharing the same evidence validation and report code.
 

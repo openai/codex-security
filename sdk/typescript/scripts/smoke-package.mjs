@@ -493,6 +493,16 @@ try {
     "Installed package must contain its declared CLI launcher.",
   );
 
+  run(
+    process.execPath,
+    [
+      join(packageRoot, "scripts", "fixtures", "package-owners.mjs"),
+      installedRoot,
+      consumer,
+    ],
+    { cwd: consumer },
+  );
+
   const shim = join(
     consumer,
     "node_modules",

@@ -242,31 +242,11 @@ validated, sealed scan receipt.
 
 ## Optional owner suggestions
 
-Set `ownerSuggestions: true` to record ownership evidence during the existing
-scan execution. The scan agent may include an optional hint on each finding:
-
-```json
-{
-  "extensions": {
-    "ownerSuggestion": {
-      "email": "alex@example.test",
-      "commit": "0123456789012345678901234567890123456789",
-      "reason": "Maintains the affected source."
-    }
-  }
-}
-```
-
-Use an observed contributor email and a full supporting commit hash from Git
-blame/history for the affected source. Omit the hint when ownership is unclear.
-The scan collects hints within its session and budget. Findings take priority
-over optional hints.
-
-After sealing the scan, the SDK builds `owner-suggestions.json` without inference.
-CODEOWNERS declarations take precedence. Other hints must match an observed Git
-identity and supporting commit in the finding's evidence. Missing hints abstain;
-invalid hints produce per-finding owner errors. Neither invalid hints nor report
-failures invalidate sealed findings. A completed receipt includes the artifact
+Set `ownerSuggestions: true` to resolve candidates directly from the checkout.
+Standard path scans write `extensions.ownerSuggestion.suggestions` at first
+completion. Declared CODEOWNERS appear first, followed by up to three Git authors
+ordered by their most recent commit timestamp. The resolver uses blame for the reported
+lines or the latest 100 non-merge commits touching a file-only location. The SDK also writes `owner-suggestions.json` without inference. A completed receipt includes the artifact
 when available, or `ownerSuggestionsError` if finalization fails.
 
 Read the owner report from the completed receipt. Finalization uses

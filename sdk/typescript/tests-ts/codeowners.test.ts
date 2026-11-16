@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { codeownersForPath, parseCodeowners } from "../src/codeowners.js";
+import {
+  codeownersForPath,
+  parseCodeowners,
+} from "../../../plugins/codex-security/mcp-app/src/owners/codeowners.js";
 
 test.each([
   ["*.ts", "src/a.ts", true],
@@ -46,7 +49,10 @@ test.each([
 });
 
 test("matches overlapping wildcards without backtracking", async () => {
-  const module = new URL("../src/codeowners.ts", import.meta.url).href;
+  const module = new URL(
+    "../../../plugins/codex-security/mcp-app/src/owners/codeowners.ts",
+    import.meta.url,
+  ).href;
   // Run in a child so a regression cannot hang the test runner's event loop.
   // The deadline is a watchdog, not a microbenchmark assertion.
   const { stdout } = await promisify(execFile)(
@@ -111,7 +117,10 @@ test.each([" ", "\t"])(
 );
 
 test("rejects Unicode case-fold aliases in GitHub handles under Node", async () => {
-  const module = new URL("../src/codeowners.ts", import.meta.url).href;
+  const module = new URL(
+    "../../../plugins/codex-security/mcp-app/src/owners/codeowners.ts",
+    import.meta.url,
+  ).href;
   const { stdout } = await promisify(execFile)("node", [
     "--experimental-strip-types",
     "--input-type=module",

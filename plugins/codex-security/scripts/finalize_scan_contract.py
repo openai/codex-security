@@ -33,6 +33,7 @@ from legacy_findings import (
     _legacy_sealed_findings_for_validation,
     _normalize_legacy_string_list_fields,
 )
+from owner_results import read_owner_results
 from posix_scan_local_files import (
     descriptor_relative_writes_available as _descriptor_relative_writes_available,
 )
@@ -3084,6 +3085,57 @@ def manifest_is_sealed(scan: dict[str, Any]) -> bool:
     return scan.get("sealedAt") is not None or scan.get("artifacts") not in (None, [])
 
 
+def _record_owner_results(
+    findings: list[dict[str, Any]],
+    repository: Path | None,
+    target: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    # Only the checkout verifier may populate the report. Preserve the optional scan hint.
+    for finding in findings:
+        extensions = finding.get("extensions")
+        hint = extensions.get("ownerSuggestion") if isinstance(extensions, dict) else None
+        if isinstance(hint, dict):
+            hint.pop("suggestions", None)
+            hint.pop("revision", None)
+            if not hint:
+                del extensions["ownerSuggestion"]
+    if not findings or repository is None or target.get("kind") != "git_revision":
+        return
+    try:
+        revision = target["revision"]
+        output, complete = read_owner_results(findings, repository, revision, warnings)
+        by_occurrence = {finding["occurrenceId"]: finding for finding in findings}
+        *records, tail = output.split("\n")
+        for line in records:
+            item = json.loads(line)
+            finding = by_occurrence.pop(item["occurrenceId"])
+            if item["findingId"] != finding["findingId"]:
+                raise ValueError("Owner result identities differ from the scan")
+            if item.get("warning"):
+                warnings.append(f"Owner verification for {item['occurrenceId']}: {item['warning']}")
+            if item["status"] == "error":
+                warnings.append(f"Skipped owner for {item['occurrenceId']}: {item['reason']}")
+                continue
+            try:
+                _require_safe_json_value(item["suggestions"], "owner suggestions")
+            except ContractError as error:
+                warnings.append(f"Skipped owner for {item['occurrenceId']}: {error}")
+                continue
+            extensions = finding.setdefault("extensions", {})
+            hint = extensions.get("ownerSuggestion")
+            if not isinstance(hint, dict):
+                hint = extensions["ownerSuggestion"] = {}
+            hint["revision"] = revision
+            hint["suggestions"] = item["suggestions"]
+        if tail:
+            raise ValueError("Incomplete owner result")
+        if by_occurrence and complete:
+            warnings.append(f"Owner verifier omitted results for {len(by_occurrence)} findings")
+    except Exception as error:
+        warnings.append(f"Optional owner suggestions could not be completed: {error}")
+
+
 def _prepare_scan_finalization(
     scan_dir: Path,
     schema_dir: Path | None = None,
@@ -3094,6 +3146,7 @@ def _prepare_scan_finalization(
     allow_missing_writeups: bool = False,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
+    owner_repository: Path | None = None,
 ) -> PreparedScanFinalization:
     """Prepare validated documents and warnings without writing any output files."""
 
@@ -3240,6 +3293,12 @@ def _prepare_scan_finalization(
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
     else:
+        _record_owner_results(
+            findings["findings"],
+            owner_repository if scan["status"] == "completed" else None,
+            scan["target"],
+            warnings,
+        )
         findings_bytes = _contract_json_bytes("findings.json", findings)
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
         if inline_review:

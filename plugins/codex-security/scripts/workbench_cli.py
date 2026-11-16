@@ -324,8 +324,10 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
 
     prepare_scan_completion = add_command("prepare-scan-completion", "--scan-id")
     prepare_scan_completion.add_argument("--claim-token")
+    prepare_scan_completion.add_argument("--owner-suggestions", action="store_true")
 
     complete_scan = add_command("complete-scan", "--scan-id")
+    complete_scan.add_argument("--owner-suggestions", action="store_true")
     complete_scan.add_argument("--model-thread-id")
     complete_scan.add_argument("--claim-token")
     complete_scan.add_argument("--cost-json")

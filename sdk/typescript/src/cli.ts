@@ -5893,7 +5893,8 @@ export async function main(
     .command(publication)
     .command("suggest-owners", {
       examples: [{ args: { findings: "findings.json" } }],
-      description: "Suggest finding owners from CODEOWNERS and Git history.",
+      description:
+        "Suggest ranked finding owners from CODEOWNERS and Git history.",
       destructive: false,
       args: z.object({
         findings: z
