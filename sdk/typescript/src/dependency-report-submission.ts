@@ -111,7 +111,7 @@ export const dependencyReviewQueueDescription = [
   reviewEvidenceContract,
 ].join("\n");
 
-const unavailableDataCoverage = z.discriminatedUnion("basis", [
+const lookupDataCoverage = z.discriminatedUnion("basis", [
   z
     .strictObject({
       basis: z.literal("observed_scope"),
@@ -150,12 +150,33 @@ const unavailableDataCoverage = z.discriminatedUnion("basis", [
   }),
 ]);
 
-export const dependencyInvestigationAbortSchema = z.strictObject({
+const startupDataCoverage = z.strictObject({
+  basis: z.literal("server_startup"),
+  server: identity.describe(
+    "The enabled inventory MCP configured as required.",
+  ),
+  receiptId: identity.describe(
+    "The current host receipt for this server's failed startup.",
+  ),
+  requiredCheck: identity.describe(
+    "Identify the required investigation check that could not start.",
+  ),
+});
+
+const abortFields = z.strictObject({
   reason: identity,
   category: z.literal("widespread_required_data_unavailable"),
-  tool: z.strictObject({ server: identity, name: identity }),
+  tool: z
+    .strictObject({ server: identity, name: identity })
+    .optional()
+    .describe(
+      "The enabled tool that returned the lookup evidence. Omit for server_startup.",
+    ),
   affectedScope: identity,
-  coverage: unavailableDataCoverage,
+  coverage: z.discriminatedUnion("basis", [
+    startupDataCoverage,
+    lookupDataCoverage,
+  ]),
   scopeImpact: identity.describe(
     "Why the missing data materially prevents the requested investigation after preserving independent useful work.",
   ),
@@ -163,8 +184,18 @@ export const dependencyInvestigationAbortSchema = z.strictObject({
   evidenceReferences: z.array(identity).default([]),
 });
 
-export const dependencyInvestigationBlockedSchema =
-  dependencyInvestigationAbortSchema.extend({
+const abortTargetMatchesCoverage = (input: z.infer<typeof abortFields>) =>
+  (input.coverage.basis === "server_startup") === (input.tool === undefined);
+const abortTargetError =
+  "Use a server startup receipt without a tool, or identify the enabled tool for lookup coverage.";
+
+export const dependencyInvestigationAbortSchema = abortFields.refine(
+  abortTargetMatchesCoverage,
+  abortTargetError,
+);
+
+export const dependencyInvestigationBlockedSchema = abortFields
+  .extend({
     status: z.literal("blocked"),
     code: z.literal("INVESTIGATION_BLOCKED"),
     nativeThreadId: identity.optional(),
@@ -178,7 +209,8 @@ export const dependencyInvestigationBlockedSchema =
       ),
       inventoryReceiptIds: z.array(identity),
     }),
-  });
+  })
+  .refine(abortTargetMatchesCoverage, abortTargetError);
 
 export type DependencyInvestigationBlocked = z.infer<
   typeof dependencyInvestigationBlockedSchema
@@ -397,6 +429,7 @@ export function createDependencyReportSubmission(options: {
   ) => Promise<string>;
   candidates?: Pick<DependencyCandidates, "snapshot">;
   inventoryServers?: Readonly<Record<string, readonly string[] | null>>;
+  requiredInventoryServerNames?: readonly string[];
   catalogServerNames?: readonly string[];
   sourceWorkCoverage?: () => DependencySourceWorkCoverage | undefined;
   profileCoverage?: ReturnType<
@@ -417,6 +450,11 @@ export function createDependencyReportSubmission(options: {
   );
   const inventoryServers = options.inventoryServers ?? {};
   const hasInventory = Object.keys(inventoryServers).length > 0;
+  const requiredInventoryServerNames = new Set(
+    options.requiredInventoryServerNames,
+  );
+  const startupFailures = new Map<string, string>();
+  let startupReceiptSequence = 0;
   const catalogServerNames = options.catalogServerNames ?? [];
   const coverage = new DependencyReportCoverage();
   const audit = new DependencySearchAudit();
@@ -1798,6 +1836,94 @@ export function createDependencyReportSubmission(options: {
     });
   }
 
+  function validateLookupAbort(
+    tool: NonNullable<z.infer<typeof abortFields>["tool"]>,
+    coverage: z.infer<typeof lookupDataCoverage>,
+  ) {
+    const configured = inventoryServers[tool.server];
+    const normalize = (name: string) => name.replace(/[^a-zA-Z0-9_]/gu, "_");
+    const sameTool = (name: string) => normalize(name) === normalize(tool.name);
+    if (
+      !Object.hasOwn(inventoryServers, tool.server) ||
+      (configured !== null && configured?.filter(sameTool).length !== 1) ||
+      options.isConfiguredTool?.(tool.server, tool.name) === false
+    )
+      throw new CodexSecurityError(
+        "Abort requires an enabled configured tool with widespread unavailable required data.",
+      );
+    const selectCoverage = (
+      selection: z.infer<typeof inventoryReceiptSelectionSchema>,
+    ) => {
+      const metadata = inventory.read({ receiptId: selection.receiptId });
+      if (typeof metadata["tool"] !== "string" || !sameTool(metadata["tool"]))
+        throw new CodexSecurityError(
+          "Coverage evidence must come from the named configured tool call.",
+        );
+      const original = inventory.readOriginalField(selection.receiptId, []);
+      const payloads = [inventoryResultPayload(original, null)];
+      if (selection.textBlock !== null)
+        payloads.push(inventoryResultPayload(original, selection.textBlock));
+      if (
+        payloads.some(
+          (payload) =>
+            isRecord(payload) &&
+            (payload["status"] === "not_recorded" ||
+              payload["status"] === "unsupported_tool"),
+        )
+      )
+        throw new CodexSecurityError(
+          "Unsupported archived requests do not establish widespread missing provider data. Preserve the archive coverage gap as an unknown or limitation.",
+        );
+      return inventory.bind([tool.server], [], [selection])[0]!;
+    };
+    const selected =
+      coverage.basis === "provider_declared"
+        ? [selectCoverage(coverage.selection)]
+        : coverage.checks.map((check) => selectCoverage(check.selection));
+    if (coverage.basis === "observed_scope") {
+      const { checks, checked, missing } = coverage;
+      const origins = new Set(
+        selected.map((receipt) =>
+          canonicalJson([
+            tool.server,
+            normalize(tool.name),
+            receipt.origin.arguments,
+          ]),
+        ),
+      );
+      if (
+        checked !== checks.length ||
+        missing !== checks.filter((check) => check.missing).length ||
+        new Set(checks.map((check) => check.requiredRecord)).size !== checked ||
+        origins.size !== checked
+      )
+        throw new CodexSecurityError(
+          "Observed coverage must enumerate distinct actual required-record checks with matching checked and missing counts.",
+        );
+      if (
+        checks.some(
+          (check, index) =>
+            check.missing &&
+            selected[index]!.outcome === undefined &&
+            selected[index]!.result !== null &&
+            !(
+              Array.isArray(selected[index]!.result) &&
+              selected[index]!.result.length === 0
+            ),
+        )
+      )
+        throw new CodexSecurityError(
+          "A missing check needs a current failed/unavailable result or a selected null/empty record result, not a healthy populated record.",
+        );
+    }
+    if (coverage.basis === "provider_declared") {
+      if (!selected.some((receipt) => receipt.result === coverage.declaration))
+        throw new CodexSecurityError(
+          "The provider declaration must exactly match its selected current original text.",
+        );
+    }
+  }
+
   return {
     recordGraphEvent(
       phase: "item/started" | "item/completed",
@@ -1861,8 +1987,10 @@ export function createDependencyReportSubmission(options: {
     ) {
       if (options.inventoryServers && !Object.hasOwn(inventoryServers, server))
         return undefined;
-      if (metadata?.tool && !metadata.outcome)
+      if (metadata?.tool && !metadata.outcome) {
+        startupFailures.delete(server);
         inventory.clearUnavailable(server);
+      }
       const receiptId = inventory.record(server, result, metadata);
       if (receiptId !== undefined)
         audit.recordInventory(receiptId, server, result, metadata);
@@ -1870,18 +1998,28 @@ export function createDependencyReportSubmission(options: {
     },
     recordInventoryStartup(
       server: string,
-      status: "ready" | "failed" | "cancelled",
+      status: "starting" | "ready" | "failed" | "cancelled",
       error: unknown,
     ) {
       if (!Object.hasOwn(inventoryServers, server)) return;
-      if (status === "ready") inventory.clearUnavailable(server);
-      else {
-        const result = { status, error };
-        const metadata = { outcome: "unavailable" } as const;
-        const receiptId = inventory.record(server, result, metadata);
-        if (receiptId !== undefined)
-          audit.recordInventory(receiptId, server, result, metadata);
+      startupFailures.delete(server);
+      if (status === "starting" || status === "ready") {
+        inventory.clearUnavailable(server);
+        return;
       }
+      // Do not revive the receipt from an earlier startup with the same error.
+      const result = {
+        status,
+        error,
+        startupSequence: ++startupReceiptSequence,
+      };
+      const metadata = { outcome: "unavailable" } as const;
+      const receiptId = inventory.record(server, result, metadata);
+      if (receiptId !== undefined) {
+        audit.recordInventory(receiptId, server, result, metadata);
+        if (status === "failed") startupFailures.set(server, receiptId);
+      }
+      return receiptId;
     },
     status: () => status(),
     readStatus,
@@ -2047,121 +2185,20 @@ export function createDependencyReportSubmission(options: {
           "The accepted report is final; the investigation cannot be aborted.",
         );
       const input = dependencyInvestigationAbortSchema.parse(value);
-      const configured = inventoryServers[input.tool.server];
-      const normalize = (name: string) => name.replace(/[^a-zA-Z0-9_]/gu, "_");
-      const sameTool = (name: string) =>
-        normalize(name) === normalize(input.tool.name);
-      if (
-        !Object.hasOwn(inventoryServers, input.tool.server) ||
-        (configured !== null && configured?.filter(sameTool).length !== 1) ||
-        options.isConfiguredTool?.(input.tool.server, input.tool.name) === false
-      )
-        throw new CodexSecurityError(
-          "Abort requires an enabled configured tool with widespread unavailable required data.",
-        );
-      const selectCoverage = (
-        selection: z.infer<typeof inventoryReceiptSelectionSchema>,
-      ) => {
-        const metadata = inventory.read({ receiptId: selection.receiptId });
-        const original = inventory.readOriginalField(selection.receiptId, []);
-        const payloads = [inventoryResultPayload(original, null)];
-        if (selection.textBlock !== null)
-          payloads.push(inventoryResultPayload(original, selection.textBlock));
+      if (input.coverage.basis === "server_startup") {
+        const { server, receiptId } = input.coverage;
         if (
-          payloads.some(
-            (payload) =>
-              isRecord(payload) &&
-              (payload["status"] === "not_recorded" ||
-                payload["status"] === "unsupported_tool"),
-          )
-        )
-          throw new CodexSecurityError(
-            "Unsupported archived requests do not establish widespread missing provider data. Preserve the archive coverage gap as an unknown or limitation.",
-          );
-        if (
-          metadata["tool"] === undefined &&
-          metadata["outcome"] === "unavailable" &&
-          selection.textBlock === null
+          !requiredInventoryServerNames.has(server) ||
+          !Object.hasOwn(inventoryServers, server) ||
+          startupFailures.get(server) !== receiptId ||
+          !inventory.isReceiptCurrent(receiptId)
         ) {
-          if (metadata["server"] !== input.tool.server)
-            throw new CodexSecurityError(
-              "Coverage evidence belongs to a different configured server.",
-            );
-          return {
-            receiptId: selection.receiptId,
-            origin: { tool: undefined, arguments: metadata["arguments"] },
-            result: inventory.readOriginalField(
-              selection.receiptId,
-              selection.record,
-            ),
-            outcome: "unavailable" as const,
-          };
+          throw new CodexSecurityError(
+            "Startup abort requires the current host-captured failed startup receipt for the same enabled required inventory server.",
+          );
         }
-        return inventory.bind([input.tool.server], [], [selection])[0]!;
-      };
-      const selected =
-        input.coverage.basis === "provider_declared"
-          ? [selectCoverage(input.coverage.selection)]
-          : input.coverage.checks.map((check) =>
-              selectCoverage(check.selection),
-            );
-      if (
-        selected.some((receipt) =>
-          receipt.origin.tool === undefined
-            ? receipt.outcome !== "unavailable"
-            : !sameTool(receipt.origin.tool),
-        )
-      )
-        throw new CodexSecurityError(
-          "Coverage evidence must come from the named configured tool or its unavailable server startup.",
-        );
-      if (input.coverage.basis === "observed_scope") {
-        const { checks, checked, missing } = input.coverage;
-        const origins = new Set(
-          selected.map((receipt) =>
-            canonicalJson([
-              input.tool.server,
-              receipt.origin.tool === undefined
-                ? undefined
-                : normalize(receipt.origin.tool),
-              receipt.origin.arguments,
-            ]),
-          ),
-        );
-        if (
-          checked !== checks.length ||
-          missing !== checks.filter((check) => check.missing).length ||
-          new Set(checks.map((check) => check.requiredRecord)).size !==
-            checked ||
-          origins.size !== checked
-        )
-          throw new CodexSecurityError(
-            "Observed coverage must enumerate distinct actual required-record checks with matching checked and missing counts.",
-          );
-        if (
-          checks.some(
-            (check, index) =>
-              check.missing &&
-              selected[index]!.outcome === undefined &&
-              selected[index]!.result !== null &&
-              !(
-                Array.isArray(selected[index]!.result) &&
-                selected[index]!.result.length === 0
-              ),
-          )
-        )
-          throw new CodexSecurityError(
-            "A missing check needs a current failed/unavailable result or a selected null/empty record result, not a healthy populated record.",
-          );
-      }
-      if (input.coverage.basis === "provider_declared") {
-        const coverage = input.coverage;
-        if (
-          !selected.some((receipt) => receipt.result === coverage.declaration)
-        )
-          throw new CodexSecurityError(
-            "The provider declaration must exactly match its selected current original text.",
-          );
+      } else {
+        validateLookupAbort(input.tool!, input.coverage);
       }
       blocked = new DependencyInvestigationBlockedError({
         ...input,

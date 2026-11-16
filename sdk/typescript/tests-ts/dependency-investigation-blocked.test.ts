@@ -49,6 +49,20 @@ type NativeRequest = {
   result?: { success?: boolean; [key: string]: unknown };
   [key: string]: unknown;
 };
+const startupBlocker = {
+  reason: blocker.reason,
+  category: blocker.category,
+  affectedScope: blocker.affectedScope,
+  scopeImpact: blocker.scopeImpact,
+  unblockCondition: blocker.unblockCondition,
+  evidenceReferences: blocker.evidenceReferences,
+  coverage: {
+    basis: "server_startup",
+    server: "runtime",
+    receiptId: "inventory-1",
+    requiredCheck: "Resolve the selected executor artifacts",
+  },
+};
 function recordBroadLoss(
   state: Pick<
     ReturnType<typeof createDependencyReportSubmission>,
@@ -75,15 +89,24 @@ function abortState(
   recordBroadLoss(state);
   return state;
 }
-async function writeRuntimeConfig(directory: string) {
+async function writeRuntimeConfig(directory: string, required = false) {
   const path = join(directory, "runtime.json");
   await writeFile(
     path,
     JSON.stringify({
-      exploitability: { runtime_mcps: ["runtime"] },
+      exploitability: {
+        runtime_mcps: required ? ["runtime", "other"] : ["runtime"],
+      },
       codex: {
         mcp_servers: {
-          runtime: { command: "fixture-runtime", enabled_tools: ["artifact"] },
+          runtime: {
+            command: "fixture-runtime",
+            enabled_tools: ["artifact"],
+            required,
+          },
+          ...(required
+            ? { other: { command: "fixture-other", required: true } }
+            : {}),
         },
       },
     }),
@@ -555,6 +578,98 @@ test("CLI returns structured BLOCKED and nonzero after the coordinator aborts, n
   expect(result).not.toHaveProperty("uses");
   expect(result).not.toHaveProperty("checks");
   expect(onCodex).toHaveBeenCalledTimes(1);
+});
+
+test("CLI binds a required MCP startup failure without tool discovery and retains existing evidence", async () => {
+  await using temp = await scopedTemporaryDirectory("blocked-startup-cli-");
+  git(temp.path, "init", "--quiet");
+  await writeFile(join(temp.path, "worker.ts"), "decode(input);\n");
+  const config = await writeRuntimeConfig(temp.path, true);
+  const replies: NativeRequest[] = [];
+  const onCodex = mock<OnCodex>(async (_args, output) => {
+    const appServer = output!.appServer!;
+    const tool = appServer.dependencyReport!;
+    expect(await tool.queue!({ items: [gapItem] })).toMatchObject({
+      queued: true,
+    });
+    const events = new PassThrough();
+    const send = (event: object) => events.write(JSON.stringify(event) + "\n");
+    const rootFailure = {
+      method: "mcpServer/startupStatus/updated",
+      params: {
+        threadId: "check",
+        name: "runtime",
+        status: "failed",
+        error: declaration,
+      },
+    };
+    const response = readSkillCommandOutput(events, {
+      ...appServer,
+      permissionProfile: "restricted",
+      cyberAccessProgram: "standard",
+      input: new Writable({
+        write(chunk, _encoding, done) {
+          const request = JSON.parse(String(chunk)) as NativeRequest;
+          replies.push(request);
+          if (request.method === "turn/start") {
+            send(rootFailure);
+            send(
+              call("wrong-server", "abort_codex_security_investigation", {
+                ...startupBlocker,
+                coverage: { ...startupBlocker.coverage, server: "other" },
+              }),
+            );
+          }
+          if (request.id === "wrong-server") {
+            send(
+              call(
+                "required-startup",
+                "abort_codex_security_investigation",
+                startupBlocker,
+              ),
+            );
+            events.end();
+          }
+          done();
+        },
+      }),
+    });
+    for (const event of setup()) send(event);
+    expect(await response).toMatchObject({
+      completed: false,
+      blocked: { status: "blocked", coverage: startupBlocker.coverage },
+    });
+    expect(output!.signal?.aborted).toBe(true);
+    return 143;
+  });
+  const deps = dependencies({ currentDirectory: temp.path, onCodex });
+  deps.lookupDependencyAdvisory = async () => advisory;
+  deps.reviewDependencyReport = async (prompt) => approve(prompt);
+  const { runCli, stdout, stderr } = createCliTest(main);
+  expect(
+    await runCli(
+      ["exploitability", "check", advisory.cve, "--json", "--config", config],
+      deps,
+    ),
+    stderr.text(),
+  ).toBe(2);
+  expect(stdout.text(), stderr.text()).toContain("INVESTIGATION_BLOCKED");
+  const outcome = JSON.parse(stdout.text());
+  expect(outcome).toMatchObject({
+    status: "blocked",
+    code: "INVESTIGATION_BLOCKED",
+    nativeThreadId: "check",
+    coverage: startupBlocker.coverage,
+    retainedEvidence: {
+      assessmentRevisions: [{ id: "source-gap", revision: 1 }],
+      inventoryReceiptIds: ["inventory-1"],
+    },
+  });
+  expect(outcome).not.toHaveProperty("tool");
+  expect(outcome).not.toHaveProperty("uses");
+  expect(replies.find(({ id }) => id === "wrong-server")).toMatchObject({
+    result: { success: false },
+  });
 });
 
 test("ordinary OpenGrep startup failure does not invoke exceptional data-loss abort", async () => {
@@ -1104,31 +1219,95 @@ test.each(["not_recorded", "unsupported_tool"])(
   },
 );
 
-test("a provider-wide startup declaration binds its exact original metadata field", async () => {
-  await using temp = await scopedTemporaryDirectory(
-    "declared-startup-data-loss-",
-  );
+test.each([
+  "optional",
+  "disabled",
+  "wrong-server",
+  "non-host",
+  "superseded",
+  "recovered",
+  "recovered-by-call",
+  "restarting",
+  "cancelled",
+  "lookup",
+  "tool-supplied",
+  "missing-check",
+])("rejects an invalid startup abort (%s)", async (scenario) => {
+  await using temp = await scopedTemporaryDirectory("startup-data-loss-");
   const state = createDependencyReportSubmission({
     repository: temp.path,
     advisory,
-    inventoryServers: { runtime: ["artifact"] },
+    inventoryServers:
+      scenario === "disabled"
+        ? { other: null }
+        : { runtime: null, other: null },
+    requiredInventoryServerNames:
+      scenario === "optional" ? ["other"] : ["runtime", "other"],
     review: async (prompt) => approve(prompt),
   });
   try {
-    state.recordInventoryStartup("runtime", "failed", declaration);
-    expect(
-      state.abort({
-        ...blocker,
-        coverage: {
-          ...blocker.coverage,
-          selection: {
-            receiptId: "inventory-1",
-            textBlock: null,
-            record: ["error"],
-          },
-        },
-      }),
-    ).toMatchObject({ status: "blocked" });
+    const receipt =
+      scenario === "non-host"
+        ? state.recordInventory(
+            "runtime",
+            { status: "failed", error: declaration },
+            { outcome: "unavailable" },
+          )
+        : state.recordInventoryStartup("runtime", "failed", declaration);
+    const coverage = {
+      ...startupBlocker.coverage,
+      receiptId: receipt ?? "inventory-1",
+    };
+    const input: object = { ...startupBlocker, coverage };
+    switch (scenario) {
+      case "wrong-server":
+        state.recordInventoryStartup("other", "failed", declaration);
+        coverage.server = "other";
+        break;
+      case "superseded":
+        state.recordInventoryStartup("runtime", "failed", declaration);
+        break;
+      case "recovered":
+        state.recordInventoryStartup("runtime", "ready", undefined);
+        break;
+      case "recovered-by-call":
+        state.recordInventory(
+          "runtime",
+          { structuredContent: { ok: true } },
+          { tool: "artifact" },
+        );
+        break;
+      case "restarting":
+        state.recordInventoryStartup("runtime", "starting", undefined);
+        break;
+      case "cancelled":
+        state.recordInventoryStartup("runtime", "cancelled", declaration);
+        break;
+      case "lookup":
+        expect(() =>
+          state.abort({
+            ...blocker,
+            coverage: {
+              ...blocker.coverage,
+              selection: {
+                receiptId: receipt,
+                textBlock: null,
+                record: ["error"],
+              },
+            },
+          }),
+        ).toThrow("named configured tool call");
+        expect(state.blockedOutcome()).toBeUndefined();
+        return;
+      case "tool-supplied":
+        Object.assign(input, { tool: blocker.tool });
+        break;
+      case "missing-check":
+        coverage.requiredCheck = "";
+        break;
+    }
+    expect(() => state.abort(input)).toThrow();
+    expect(state.blockedOutcome()).toBeUndefined();
   } finally {
     await state.close();
   }

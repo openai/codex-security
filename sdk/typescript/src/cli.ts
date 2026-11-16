@@ -1332,7 +1332,7 @@ const dependencyReportTools = {
   abort: {
     name: "abort_codex_security_investigation",
     description:
-      "Active coordinator only. Exceptionally end an investigation when a significant share of required data from one configured tool is unavailable across the affected scope. Identify the configured tool, current original coverage evidence, actual checked/missing records or an exact provider declaration, representativeness, material impact and unblock condition. Guessed aliases, isolated misses, optional failures, slow work or generic lack of progress do not justify abort. Preserve independent useful findings. This terminal operation returns a nonzero blocked outcome, not a reviewed exploitability verdict.",
+      "Active coordinator only. Exceptionally end an investigation after preserving independent useful evidence when significant required data is unavailable across the affected scope. For a failed startup, use coverage:{basis:'server_startup',server,receiptId,requiredCheck} with the current failed startup receipt from an enabled required inventory server. Omit tool. For lookup loss, identify the enabled tool and cite actual checked and missing records or an exact provider declaration from its calls. Explain the affected scope, material impact, and unblock condition. Isolated misses and optional failures do not justify this operational blocked outcome.",
     schema: dependencyInvestigationAbortSchema,
   },
 } as const;
@@ -3149,7 +3149,7 @@ export async function main(
         checks: z.array(
           z.union([
             dependencyPackageCheckOutputSchema.shape.checks.element,
-            dependencyInvestigationBlockedSchema.extend({
+            dependencyInvestigationBlockedSchema.safeExtend({
               advisoryId: z.string().nullable(),
             }),
           ]),
@@ -3527,6 +3527,8 @@ export async function main(
             profileCoverage: (findings) =>
               evidenceTools?.profileCoverage(findings),
             catalogServerNames,
+            requiredInventoryServerNames:
+              requiredInventoryServerNames(inventoryServers),
             inventoryServers: Object.fromEntries(
               Object.entries(inventoryServers).map(([name, server]) => {
                 const tools = isJsonObject(server)
@@ -10875,6 +10877,12 @@ function dependencyCapacityOverride(config: JsonObject): string | undefined {
   return undefined;
 }
 
+function requiredInventoryServerNames(servers: JsonObject): string[] {
+  return Object.entries(servers)
+    .filter(([, config]) => isJsonObject(config) && config["required"] === true)
+    .map(([name]) => name);
+}
+
 function dependencyCheckOverrides(
   repository: string,
   inventoryServers: JsonObject,
@@ -11129,7 +11137,7 @@ async function runSkill(
                 : []),
               ...(inventoryServerNames.length
                 ? [
-                    `Configured inventory MCP server names: ${JSON.stringify(inventoryServerNames)}. Servers selected for source-to-service catalog lookup: ${JSON.stringify(options.catalogServerNames ?? [])}.`,
+                    `Configured inventory MCP server names: ${JSON.stringify(inventoryServerNames)}. Required inventory servers: ${JSON.stringify(requiredInventoryServerNames(options.inventoryServers ?? {}))}. Servers selected for source-to-service catalog lookup: ${JSON.stringify(options.catalogServerNames ?? [])}.`,
                     ...(options.inventoryInstructions &&
                     Object.keys(options.inventoryInstructions).length
                       ? [
@@ -12483,7 +12491,8 @@ export async function readSkillCommandOutput(
         (params["threadId"] == null ||
           nativeSession.ownsThread(params["threadId"])) &&
         typeof params["name"] === "string" &&
-        (params["status"] === "ready" ||
+        (params["status"] === "starting" ||
+          params["status"] === "ready" ||
           params["status"] === "failed" ||
           params["status"] === "cancelled")
       ) {
