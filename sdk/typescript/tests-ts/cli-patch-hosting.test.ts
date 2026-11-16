@@ -38,6 +38,7 @@ describe("patch change tracking", () => {
     config: string,
     git: (...args: string[]) => string,
     usage: "server" | "client" | "proxy-client" = "server",
+    combined = false,
   ) {
     const directory = dirname(config);
     const settings = join(directory, `${usage}-openssl.cnf`);
@@ -74,10 +75,19 @@ describe("patch change tracking", () => {
       "-out",
       cert,
     );
+    const identity = { key: await readFile(key), cert: await readFile(cert) };
     if (usage !== "server") {
       const prefix = usage === "proxy-client" ? "http.proxySSL" : "http.ssl";
-      git("config", "--file", config, prefix + "Cert", cert);
-      git("config", "--file", config, prefix + "Key", key);
+      if (combined) {
+        const bundle = join(directory, usage + "-identity.pem");
+        await writeFile(bundle, Buffer.concat([identity.cert, identity.key]), {
+          mode: 0o600,
+        });
+        git("config", "--file", config, prefix + "Cert", bundle);
+      } else {
+        git("config", "--file", config, prefix + "Cert", cert);
+        git("config", "--file", config, prefix + "Key", key);
+      }
       // Git for Windows also offers Schannel, which uses a certificate store.
       if (process.platform === "win32")
         git("config", "--file", config, "http.sslBackend", "openssl");
@@ -85,7 +95,7 @@ describe("patch change tracking", () => {
       git("config", "--file", config, "http.sslCAInfo", cert);
       git("config", "--file", config, "http.schannelUseSSLCAInfo", "true");
     }
-    return { key: await readFile(key), cert: await readFile(cert) };
+    return identity;
   }
 
   test.each([
@@ -1192,11 +1202,12 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           askPass.replaceAll("\\", "/"),
         );
       }
-      const client = await loopbackTls(config, git, "client");
+      const combined = !collision && credentials === "home netrc";
+      const client = await loopbackTls(config, git, "client", combined);
       const serverTls = await loopbackTls(config, git);
       const proxyClient = collision
         ? undefined
-        : await loopbackTls(config, git, "proxy-client");
+        : await loopbackTls(config, git, "proxy-client", combined);
       const origin = Bun.serve({
         tls: {
           ...serverTls,
@@ -1331,9 +1342,10 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           );
         environment["GIT_CONFIG_GLOBAL"] = config;
         // The proxy and origin require their own client keys.
-        for (const option of proxyClient
-          ? ["http.proxySSLKey", "http.sslKey"]
-          : ["http.sslKey"]) {
+        for (const prefix of proxyClient
+          ? ["http.proxySSL", "http.ssl"]
+          : ["http.ssl"]) {
+          const option = prefix + (combined ? "Cert" : "Key");
           await expect(
             promisify(execFile)(
               "git",
@@ -1346,7 +1358,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
               { cwd: directory, env: environment },
             ),
           ).rejects.toThrow();
-          if (option === "http.proxySSLKey") expect(tunnels).toBe(0);
+          if (prefix === "http.proxySSL") expect(tunnels).toBe(0);
           expect(requests).toBe(0);
         }
         if (credentials === "askpass") {

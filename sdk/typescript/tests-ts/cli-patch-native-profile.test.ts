@@ -793,12 +793,15 @@ test("patch model and clean filters cannot read HTTP cookie files and TLS keys o
   const netrc = join(operator, ".netrc");
   const proxyKey = join(operator, "proxy key.pem");
   const scopedProxyKey = join(operator, "scoped proxy key.pem");
-  const existing = [...paths.slice(0, 2), netrc, proxyKey];
+  const clientCert = join(operator, "origin identity.pem");
+  const proxyCert = join(operator, "proxy identity.pem");
+  const existing = [...paths.slice(0, 2), netrc, proxyKey, clientCert];
   const protectedPaths = [
     ...existing,
     ...paths.slice(2),
     join(operator, "_netrc"),
     scopedProxyKey,
+    proxyCert,
     selectedNetrc,
   ];
   const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
@@ -878,7 +881,9 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
         modelReads: "[]",
       });
     },
-    (repository) => {
+    async (repository) => {
+      const literalTilde = join(repository, "~");
+      await mkdir(literalTilde);
       environment.NETRC = relative(repository, selectedNetrc);
       const scopedCookie = relative(repository, paths[2]!).replaceAll(
         "\\",
@@ -895,6 +900,11 @@ for (const path of ${JSON.stringify(protectedPaths)}) {
       }
       for (const [setting, value] of [
         ...settings.map((setting, i) => [setting, values[i]!] as const),
+        ["http.sslCert", "~/origin identity.pem"],
+        [
+          "http.https://proxy.example.invalid/.proxySSLCert",
+          "~/" + relative(literalTilde, proxyCert).replaceAll("\\", "/"),
+        ],
         ["http.proxySSLKey", proxyKey],
         [
           "http.https://proxy.example.invalid/.proxySSLKey",

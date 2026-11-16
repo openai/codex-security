@@ -1274,8 +1274,8 @@ export async function capturePatchGitControls(
       // The transport may create a cookie jar after capture. Keep host Git
       // from re-running a checkout filter even when the file is still absent.
       hostMayReadStore = true;
-      // Git passes a proxy SSL key verbatim to libcurl.
-      const file = /\.proxysslkey$/iu.test(key)
+      // Git passes the proxy SSL key and certificate paths verbatim to libcurl.
+      const file = /\.proxyssl(?:key|cert)$/iu.test(key)
         ? configPath(value)
         : await expandConfigurationPath(configPath(value));
       if (file) await protectTransportFile(checkout, file);
