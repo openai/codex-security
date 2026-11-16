@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
 import type {
@@ -52,16 +53,10 @@ export async function testExecutorExecutablePinning({
     ) => {
       const script = nativeScripts.get(command);
       if (script) nativeLaunches.push(command);
-      // Node's JS entry resolver rejects the extended drive form. Keep the
-      // native executable spelling intact for the pinning assertions.
-      const entry =
-        script ??
-        (command.startsWith("\\\\?\\") && command[5] === ":"
-          ? command.slice(4)
-          : command);
       return originalSpawn(
         script ? command : process.execPath,
-        [entry, ...args],
+        // Node resolves script entry points from ordinary drive or UNC paths.
+        [script ?? fileURLToPath(pathToFileURL(command)), ...args],
         options,
       );
     }) as typeof childProcess.spawn;
