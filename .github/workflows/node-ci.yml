@@ -573,6 +573,16 @@ jobs:
         working-directory: plugins/codex-security/mcp-app
         env: *windows-shard-env
         run: node --experimental-strip-types --test --test-reporter=tap tests/test_helper_files.ts tests/test_normalize_candidates.ts
+      - name: Test MCP app with long saved patch paths on Windows
+        if: matrix.shard == 4
+        working-directory: plugins/codex-security/mcp-app
+        env: *windows-shard-env
+        shell: pwsh
+        run: |
+          $deepTemp = Join-Path $env:TEMP 'remediation-smoke\local-app-workspace\temporary-files'
+          New-Item -ItemType Directory -Path $deepTemp -Force | Out-Null
+          $env:TEMP = $env:TMP = $env:TMPDIR = $deepTemp
+          node --experimental-strip-types --test --test-reporter=tap tests/test_mcp_app_smoke.ts
       - name: Upload Windows test reports
         if: always()
         continue-on-error: true
