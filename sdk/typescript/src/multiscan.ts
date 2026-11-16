@@ -66,7 +66,6 @@ import {
   canonicalConfigPath,
   createWindowsOutputDirectory,
   environmentValue,
-  expandHome,
   expandHomeForLookup,
   isPythonPathCandidate,
   executablePathForSpawn,
@@ -85,6 +84,7 @@ import {
   nullIfMissingPath,
   UNSUPPORTED_GIT_ENVIRONMENT,
   relativePathIsOutside,
+  resolveRepositoryPath,
   resolveTargetPath,
   type ScanMode,
 } from "./targets.js";
@@ -2566,49 +2566,71 @@ async function checkoutRevision(
       .map((entry) => entry.slice(entry.indexOf("	") + 1));
     const aliases = new Set<string>();
     const requiredDirectories = new Set<string>();
-    const trackedLinkTarget = async (name: string, visited: Set<string>) => {
-      visited.add(name);
-      aliases.add(name);
-      const target = (
-        await gitOutput(["show", `${task.revision}:${name}`])
-      ).toString("utf8");
-      // Preserve ".." after links until the filesystem resolves the path.
-      return isAbsolute(target)
-        ? target
-        : `${path}${sep}${dirname(name)}${sep}${target}`;
-    };
     const canonicalTrackedPath = async (
       requested: string,
       visited: Set<string>,
     ): Promise<string> => {
+      // Resolve the directory before each POSIX "..", including a tracked link
+      // that is currently missing. Only then is it safe to compare Git paths.
+      const parts = requested.split(sep);
+      const parent = parts.lastIndexOf("..");
+      if (sep === "/" && parent !== -1) {
+        const directory = await canonicalTrackedPath(
+          parts.slice(0, parent).join(sep) || sep,
+          visited,
+        );
+        // A retained file in place of the directory must fail before Git writes.
+        const physicalParent = await realpath(`${directory}${sep}..`).catch(
+          undefinedIfMissingFile,
+        );
+        if (
+          physicalParent === undefined &&
+          !relativePathIsOutside(relative(path, directory))
+        )
+          requiredDirectories.add(directory);
+        return canonicalTrackedPath(
+          join(
+            physicalParent ?? dirname(directory),
+            ...parts.slice(parent + 1),
+          ),
+          visited,
+        );
+      }
       for (let ancestor = requested; ; ancestor = dirname(ancestor)) {
-        try {
-          await realpath(ancestor);
-          for (const traversal of requested.matchAll(
-            /[\\/]\.\.(?=[\\/]|$)/gu,
-          )) {
-            const directory = await canonicalTrackedPath(
-              requested.slice(0, traversal.index),
-              new Set(visited),
-            );
-            if (!relativePathIsOutside(relative(path, directory)))
-              requiredDirectories.add(directory);
-          }
-          return canonicalCreationPath(requested);
-        } catch (error) {
-          undefinedIfMissingFile(error as NodeJS.ErrnoException);
+        const canonical = await realpath(ancestor).catch(
+          undefinedIfMissingFile,
+        );
+        if (canonical !== undefined) {
+          if (ancestor === requested) return canonical;
+          const candidate = resolve(canonical, relative(ancestor, requested));
+          // A live directory link may lead to another missing tracked link.
+          return canonical === ancestor
+            ? candidate
+            : canonicalTrackedPath(candidate, visited);
         }
         const name = links.find(
           (link) =>
             comparisonPath(link) ===
             comparisonPath(relative(path, ancestor).split(sep).join("/")),
         );
-        if (name !== undefined && !visited.has(name)) {
-          return canonicalTrackedPath(
-            (await trackedLinkTarget(name, visited)) +
-              requested.slice(ancestor.length),
-            visited,
+        if (name !== undefined) {
+          if (visited.has(name))
+            throw new Error("Symbolic link cycle in retained checkout target.");
+          aliases.add(name);
+          const target = (
+            await gitOutput(["show", `${task.revision}:${name}`])
+          ).toString("utf8");
+          const directory = await canonicalTrackedPath(
+            resolveTargetPath(target, join(path, dirname(name))),
+            new Set(visited).add(name),
           );
+          // A later component can traverse the same link again.
+          return ancestor === requested
+            ? directory
+            : canonicalTrackedPath(
+                directory + requested.slice(ancestor.length),
+                visited,
+              );
         }
         if (dirname(ancestor) === ancestor)
           return canonicalCreationPath(requested);
@@ -2616,35 +2638,15 @@ async function checkoutRevision(
     };
     const selectedPaths = new Set<string>();
     for (const requested of restore.paths) {
-      let selected =
-        relative(
-          path,
-          await canonicalCreationPath(resolve(path, expandHome(requested))),
-        )
-          .split(sep)
-          .join("/") || ".";
-      const visited = new Set<string>();
-      for (;;) {
-        const name = links.find(
-          (link) =>
-            comparisonPath(selected) === comparisonPath(link) ||
-            comparisonPath(selected).startsWith(comparisonPath(link) + "/"),
-        );
-        if (name === undefined || visited.has(name)) break;
-        selected = posix.join(
-          relative(
-            path,
-            await canonicalTrackedPath(
-              await trackedLinkTarget(name, visited),
-              visited,
-            ),
-          )
-            .split(sep)
-            .join("/"),
-          selected.slice(name.length + 1),
-        );
-      }
-      if (!relativePathIsOutside(selected)) selectedPaths.add(selected);
+      const selected = relative(
+        path,
+        await canonicalTrackedPath(
+          resolveRepositoryPath(requested, path),
+          new Set(),
+        ),
+      );
+      if (!relativePathIsOutside(selected))
+        selectedPaths.add(selected.split(sep).join("/") || ".");
     }
     const restoreAll = selectedPaths.has(".");
     const scopes = [...selectedPaths, ...aliases].map((name) =>

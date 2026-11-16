@@ -3898,16 +3898,20 @@ for (const missingCode of ["native", "ENOENT"]) {
   }
 }
 
-for (const { parentThroughLink, missing } of [
+for (const { parentThroughLink, missing, configured = false } of [
   { parentThroughLink: false, missing: "alias" },
   { parentThroughLink: true, missing: "alias" },
   { parentThroughLink: true, missing: "jump" },
   { parentThroughLink: true, missing: "both" },
   { parentThroughLink: false, missing: "nested" },
   { parentThroughLink: true, missing: "nested" },
+  { parentThroughLink: true, missing: "file", configured: true },
+  { parentThroughLink: true, missing: "jump", configured: true },
+  { parentThroughLink: true, missing: "replaced jump", configured: true },
+  { parentThroughLink: true, missing: "repeated self", configured: true },
 ]) {
   testPosix(
-    `retained requested-file recovery follows physical alias parent=${parentThroughLink} missing=${missing}`,
+    `retained requested-file recovery follows physical ${configured ? "configured target" : "alias"} parent=${parentThroughLink} missing=${missing}`,
     async () => {
       const paths = await fixture();
       const source = await repository(
@@ -3930,19 +3934,47 @@ for (const { parentThroughLink, missing } of [
         join(source.path, "alias"),
         "dir",
       );
+      const repeated = missing === "repeated self";
+      if (repeated)
+        await symlink(".", join(source.path, "nested", "deep", "self"), "dir");
+      if (configured && missing === "jump") {
+        // The lexical src is itself a tracked link to a different tree.
+        await rename(join(source.path, "src"), join(source.path, "decoy"));
+        await symlink("decoy", join(source.path, "src"), "dir");
+      }
       git(source.path, "add", ".");
       commitFixture(source.path, "Physical scope alias fixture");
       source.revision = git(source.path, "rev-parse", "HEAD");
-      await writeRecoveryTask(paths, source, "alias/app.ts");
-      const config = { pythonPath: PYTHON };
-      const { runs, initial } = await completedRetry(paths, {
-        config,
-      });
+      const target = repeated
+        ? "jump/self/self/../src/app.ts"
+        : "jump/../src/app.ts";
+      await writeRecoveryTask(
+        paths,
+        source,
+        configured ? undefined : "alias/app.ts",
+      );
+      const overrides = {
+        config: { pythonPath: PYTHON },
+        ...(configured && {
+          scanOptionsByMode: { standard: { target: [target] } },
+        }),
+      };
+      const { runs, initial } = await completedRetry(
+        paths,
+        overrides,
+        configured ? completedConfiguredPaths : undefined,
+      );
       const ledger = await readFile(initial.resultsPath);
       const checkout = recoveryCheckout(paths);
       git(paths.root, "clone", "--quiet", source.path, checkout);
-      if (missing !== "jump") await rm(join(checkout, "alias"));
-      if (missing !== "alias") await rm(join(checkout, "jump"));
+      if (!configured && missing !== "jump") await rm(join(checkout, "alias"));
+      if (repeated) await rm(join(checkout, "nested", "deep", "self"));
+      else if (missing !== "alias" && missing !== "file")
+        await rm(join(checkout, "jump"));
+      const obstructed = missing === "replaced jump";
+      const obstruction = "Preserve this regular file.\n";
+      if (obstructed) await writeFile(join(checkout, "jump"), obstruction);
+      if (configured) await rm(join(checkout, "src", "app.ts"));
       if (missing === "nested")
         await rm(join(checkout, "nested"), { recursive: true });
       else await rm(join(checkout, "nested", "src", "app.ts"));
@@ -3961,23 +3993,41 @@ for (const { parentThroughLink, missing } of [
         define: { "import.meta.url": JSON.stringify(sourceModule.href) },
       });
       const code = `const {runMultiscan} = require(process.argv[1]);
-      const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, config })};
+      const options=${JSON.stringify({ inputPath: paths.input, outputDir: paths.output, workers: 1, mode: "standard", maxAttempts: 2, ...overrides })};
       options.createSecurity=()=>({run:async()=>{throw new Error("Completed receipt must be reused");},close:async()=>{}});
       options.recoverScan=async()=>undefined;
       runMultiscan(options).then((result)=>console.log(JSON.stringify(result)),(error)=>{console.error(error);process.exitCode=1});`;
-      const summary = JSON.parse(
+      const reuse = () =>
         execFileSync("node", ["--eval", code, nodeModule], {
           encoding: "utf8",
-          env: process.env,
-        }),
-      );
-      expect(summary).toMatchObject({ completed: 1, skipped: 1 });
-      expect(await readFile(join(checkout, "alias", "app.ts"), "utf8")).toBe(
-        "export const nested = true;\n",
-      );
-      expect(await readFile(join(checkout, "src", "app.ts"))).toEqual(
-        await readFile(join(source.path, "src", "app.ts")),
-      );
+          stdio: "pipe",
+        });
+      if (obstructed) {
+        expect(reuse).toThrow(/ENOTDIR/);
+        expect(await readFile(join(checkout, "jump"), "utf8")).toBe(
+          obstruction,
+        );
+        await expect(
+          lstat(join(checkout, "nested", "src", "app.ts")),
+        ).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      } else {
+        expect(JSON.parse(reuse())).toMatchObject({ completed: 1, skipped: 1 });
+        expect(
+          await readFile(
+            `${checkout}/${configured ? target : "alias/app.ts"}`,
+            "utf8",
+          ),
+        ).toBe("export const nested = true;\n");
+      }
+      const decoy = join(checkout, "src", "app.ts");
+      if (configured)
+        await expect(lstat(decoy)).rejects.toMatchObject({ code: "ENOENT" });
+      else
+        expect(await readFile(decoy)).toEqual(
+          await readFile(join(source.path, "src", "app.ts")),
+        );
       expect(await readFile(join(checkout, "retained.txt"), "utf8")).toBe(
         "Preserve retained recovery data.\n",
       );
