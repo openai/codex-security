@@ -550,6 +550,60 @@ test("patch model cannot read external Git configuration used by snapshots", asy
       const root = dirname(context.repository);
       const selected = join(root, "selected.gitconfig");
       const included = join(root, "included.gitconfig");
+      const hostedWindows = patchSnapshotWindowsConfig().includes('"elevated"');
+      // Emit only account roles and read outcomes for these three fixture files.
+      const reader = `const fs = require("node:fs");
+const whoami = require("node:path").join(process.env.SystemRoot, "System32", "whoami.exe");
+const who = (...args) => {
+  const r = require("node:child_process").spawnSync(whoami, args, { encoding: "utf8" });
+  return r.status === 0 ? r.stdout.toLowerCase() : "";
+};
+const role = who().trim().split(String.fromCharCode(92)).pop();
+const groups = who("/groups", "/fo", "csv", "/nh");
+const reads = ${JSON.stringify([selected, included, join(root, "ordinary.txt")])}.map(path => {
+  try { fs.closeSync(fs.openSync(path, "r")); return "ok"; }
+  catch (error) { return error.code; }
+});
+console.log(JSON.stringify({ role: ["codexsandboxoffline", "codexsandboxonline"].includes(role) ? role : role ? "other" : "unknown",
+  sandboxGroup: groups ? groups.includes("codexsandboxusers") : null, reads }));`;
+      const reportAcl = (phase: string) => {
+        // Read the actual DACL independently of the native helper's bookkeeping.
+        const command = `
+$ErrorActionPreference = 'Stop'
+$sid = try { ([Security.Principal.NTAccount]'CodexSandboxUsers').Translate([Security.Principal.SecurityIdentifier]) } catch [Security.Principal.IdentityNotMappedException] { $null }
+$state = if (Test-Path -LiteralPath $env:ACL_FIXTURE_STATE) { Get-Content -LiteralPath $env:ACL_FIXTURE_STATE -Raw | ConvertFrom-Json }
+foreach ($name in 'selected.gitconfig','included.gitconfig','ordinary.txt') {
+  $file = Join-Path $env:ACL_FIXTURE_ROOT $name
+  $rules = (Get-Acl -LiteralPath $file).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+  $aces = @($rules | Where-Object { $_.IdentityReference -eq $sid } | ForEach-Object { '{0}/{1:X8}/{2}' -f $_.AccessControlType, ([int]$_.FileSystemRights), $_.IsInherited })
+  $tracked = $false
+  if ($sid -and $state.principals) { $tracked = $state.principals.($sid.Value) -contains $file }
+  [pscustomobject]@{ file = $name; sandboxGroupAces = $aces; tracked = $tracked } | ConvertTo-Json -Compress
+}`;
+        const output = execFileSync(
+          join(
+            process.env["SystemRoot"]!,
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe",
+          ),
+          ["-NoProfile", "-NonInteractive", "-Command", command],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              ACL_FIXTURE_ROOT: root,
+              ACL_FIXTURE_STATE: join(
+                context.home,
+                ".sandbox",
+                "deny_read_acl_state.json",
+              ),
+            },
+          },
+        );
+        console.info("Windows external config", phase, output.trim());
+      };
       const readConfigs = `const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const paths = ${JSON.stringify([selected, included])};
@@ -560,11 +614,19 @@ for (const path of paths) {
 const git = spawnSync("git", ["config", "--file", paths[0], "--get", "http.extraHeader"]);
 if (git.stdout) process.stdout.write(git.stdout);`;
       const expectModelDenied = async () => {
-        const reads = await inspectModel(readConfigs);
+        const reads = await inspectModel(
+          hostedWindows
+            ? readConfigs + "\n;(() => {" + reader + "})();"
+            : readConfigs,
+        );
         expect(reads).not.toContain("Synthetic fixture");
         expect(reads).not.toContain("Included fixture");
+        if (hostedWindows)
+          console.info(
+            "Windows external config model",
+            JSON.parse(reads.slice(reads.indexOf("{"))),
+          );
       };
-      await expectModelDenied();
       const gitEnvironment = {
         GIT_CONFIG_GLOBAL: selected,
         GIT_CONFIG_NOSYSTEM: "1",
@@ -580,19 +642,58 @@ if (git.stdout) process.stdout.write(git.stdout);`;
         profile: context.snapshotProfile,
         gitEnvironment,
       };
-      if (process.platform === "win32")
-        await ensureWindowsSnapshotConfigReadable(
-          context.controls!.snapshotConfigPaths,
-          (args, input, refreshWindowsReadGrants) =>
-            runRepositoryCommand("git", args, context.repository, {
-              input,
-              sandbox: {
-                ...sandbox,
-                gitEnvironment: { ...gitEnvironment, LC_ALL: "C" },
-                refreshWindowsReadGrants,
-              },
-            }),
+      const snapshotReader = async (phase: string) => {
+        // An unreadable selected global stops Git before it can dispatch this fixture alias.
+        // Keep its real profile and open the original files from the child.
+        const result = await runRepositoryCommand(
+          "git",
+          ["-c", "alias.fixture-reader=!node -", "fixture-reader"],
+          context.repository,
+          {
+            input: reader,
+            sandbox: {
+              ...sandbox,
+              gitEnvironment: { ...gitEnvironment, GIT_CONFIG_GLOBAL: "" },
+            },
+          },
         );
+        console.info("Windows external config", phase, JSON.parse(result));
+      };
+      if (hostedWindows) {
+        await writeFile(join(root, "ordinary.txt"), "ordinary");
+        await snapshotReader("snapshot before model");
+        reportAcl("before model");
+      }
+      await expectModelDenied();
+      if (process.platform === "win32") {
+        if (hostedWindows) reportAcl("after model");
+        try {
+          await ensureWindowsSnapshotConfigReadable(
+            context.controls!.snapshotConfigPaths,
+            (args, input, refreshWindowsReadGrants) =>
+              runRepositoryCommand("git", args, context.repository, {
+                input,
+                sandbox: {
+                  ...sandbox,
+                  gitEnvironment: { ...gitEnvironment, LC_ALL: "C" },
+                  refreshWindowsReadGrants,
+                },
+              }),
+          );
+        } finally {
+          // Leave the original Git error visible if the supplemental probe also fails.
+          if (hostedWindows)
+            try {
+              reportAcl("after snapshot probe");
+              await snapshotReader("snapshot after probe");
+            } catch (error) {
+              console.info(
+                "Windows snapshot diagnostic unavailable",
+                (error as NodeJS.ErrnoException).code,
+              );
+            }
+        }
+      }
       expect(
         await runRepositoryCommand(
           "git",
