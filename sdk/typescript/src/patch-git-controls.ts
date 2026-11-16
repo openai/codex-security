@@ -12,7 +12,7 @@ import {
   stat,
   symlink,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   basename,
@@ -760,6 +760,7 @@ export async function capturePatchGitControls(
   credentialStorePaths = new Set<string>(),
   commandParameters: string | null = process.env["GIT_CONFIG_PARAMETERS"] ??
     null,
+  userProfile: string | null = process.env["USERPROFILE"] ?? null,
 ): Promise<PatchGitControls | undefined> {
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
@@ -1108,6 +1109,18 @@ export async function capturePatchGitControls(
         throw error;
     }
   };
+  const protectTransportFile = async (checkout: string, file: string) => {
+    const selected = httpCredentialPath(checkout, file);
+    await protectStore(selected);
+    // Git can retain an external caller's cwd for transport.
+    if (checkout === root) {
+      const caller = await realControlPath(directory);
+      if (!inside(root, caller)) {
+        const fromCaller = httpCredentialPath(caller, file);
+        if (fromCaller !== selected) await protectStore(fromCaller);
+      }
+    }
+  };
   if (mode !== "external") {
     const legacy = await expandConfigurationPath("~/.git-credentials");
     if (legacy) await protectStore(relativeFile(root, legacy));
@@ -1115,6 +1128,23 @@ export async function capturePatchGitControls(
       ? relativeFile(configuration.xdgConfigHome, "git/credentials")
       : await expandConfigurationPath("~/.config/git/credentials");
     if (xdg) await protectStore(relativeFile(root, xdg));
+    // Git for Windows can initialize HOME from the drive and home path.
+    // libcurl otherwise falls back to USERPROFILE or the Unix account home.
+    let home = await expandConfigurationPath("~");
+    if (!home) {
+      if (process.platform === "win32") home = userProfile ?? undefined;
+      else {
+        try {
+          home = userInfo().homedir;
+        } catch {
+          // An effective UID need not have an entry in the password database.
+        }
+      }
+    }
+    if (home) {
+      await protectTransportFile(root, relativeFile(home, ".netrc"));
+      await protectTransportFile(root, relativeFile(home, "_netrc"));
+    }
   }
   const globalConfigurationPaths: string[] = [];
   if (configuration.global !== undefined) {
@@ -1234,19 +1264,11 @@ export async function capturePatchGitControls(
       // The transport may create a cookie jar after capture. Keep host Git
       // from re-running a checkout filter even when the file is still absent.
       hostMayReadStore = true;
-      const file = await expandConfigurationPath(configPath(value));
-      if (!file) return;
-      const selected = httpCredentialPath(checkout, file);
-      await protectStore(selected);
-      // Git can keep an external caller's cwd for transport while the
-      // coordinator runs its snapshot commands from the worktree root.
-      if (checkout === root) {
-        const caller = await realControlPath(directory);
-        if (!inside(root, caller)) {
-          const fromCaller = httpCredentialPath(caller, file);
-          if (fromCaller !== selected) await protectStore(fromCaller);
-        }
-      }
+      // Git passes a proxy SSL key verbatim to libcurl.
+      const file = /\.proxysslkey$/iu.test(key)
+        ? configPath(value)
+        : await expandConfigurationPath(configPath(value));
+      if (file) await protectTransportFile(checkout, file);
       return;
     }
     if (!/^credential(?:\..*)?\.helper$/iu.test(key)) return;

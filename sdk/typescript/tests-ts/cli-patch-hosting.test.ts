@@ -10,6 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { connect } from "node:net";
 import { delimiter, dirname, join, parse, relative } from "node:path";
 import { promisify } from "node:util";
@@ -36,17 +37,20 @@ describe("patch change tracking", () => {
   async function loopbackTls(
     config: string,
     git: (...args: string[]) => string,
-    usage: "server" | "client" = "server",
+    usage: "server" | "client" | "proxy-client" = "server",
   ) {
     const directory = dirname(config);
     const settings = join(directory, `${usage}-openssl.cnf`);
-    const key = join(directory, `${usage}-key.pem`);
+    const key = join(
+      directory,
+      usage === "proxy-client" ? "operator preferences" : `${usage}-key.pem`,
+    );
     const cert = join(directory, `${usage}-cert.pem`);
     await writeFile(
       settings,
       "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=extensions\n" +
         `[dn]\nCN=Loopback test ${usage}\n` +
-        `[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=${usage}Auth\n` +
+        `[extensions]\nbasicConstraints=critical,CA:TRUE\nextendedKeyUsage=${usage === "server" ? "serverAuth" : "clientAuth"}\n` +
         "subjectAltName=IP:127.0.0.1,IP:127.0.0.2\n",
     );
     // Git for Windows supplies OpenSSL on its shell PATH.
@@ -70,9 +74,10 @@ describe("patch change tracking", () => {
       "-out",
       cert,
     );
-    if (usage === "client") {
-      git("config", "--file", config, "http.sslCert", cert);
-      git("config", "--file", config, "http.sslKey", key);
+    if (usage !== "server") {
+      const prefix = usage === "proxy-client" ? "http.proxySSL" : "http.ssl";
+      git("config", "--file", config, prefix + "Cert", cert);
+      git("config", "--file", config, prefix + "Key", key);
       // Git for Windows also offers Schannel, which uses a certificate store.
       if (process.platform === "win32")
         git("config", "--file", config, "http.sslBackend", "openssl");
@@ -1103,7 +1108,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
   );
 
   test.each([false, true])(
-    "preserves the operator's proxy, HTTPS cookie and TLS key with collision=%j",
+    "preserves the operator's proxy, netrc credentials, HTTPS cookie and TLS key with collision=%j",
     async (collision) => {
       const { directory, git, remote } = await publicationRepository();
       const secondary = await fixtures.create("patch-proxy-secondary-");
@@ -1113,6 +1118,25 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
       if (collision) git("push", secondary, "HEAD:refs/heads/codex-security");
       let requests = 0;
       const environment = { ...process.env };
+      const home = await fixtures.create("patch-transport-home-");
+      environment["HOME"] = home;
+      if (process.platform === "win32") environment["USERPROFILE"] = home;
+      delete environment["NETRC"];
+      environment["GIT_CONFIG_NOSYSTEM"] = "1";
+      environment["GIT_TERMINAL_PROMPT"] = "0";
+      const netrcFile = join(
+        home,
+        process.platform === "win32" ? "_netrc" : ".netrc",
+      );
+      const username = "fixture";
+      const password = "synthetic-netrc-only";
+      await writeFile(
+        netrcFile,
+        `machine 127.0.0.2 login ${username} password ${password}\n`,
+        { mode: 0o600 },
+      );
+      const authorization =
+        "Basic " + Buffer.from(`${username}:${password}`).toString("base64");
       for (const key of Object.keys(environment))
         if (/^(?:https?|all|no)_proxy$/iu.test(key)) delete environment[key];
       const config = join(
@@ -1120,9 +1144,13 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         "gitconfig",
       );
       const client = await loopbackTls(config, git, "client");
+      const serverTls = await loopbackTls(config, git);
+      const proxyClient = collision
+        ? undefined
+        : await loopbackTls(config, git, "proxy-client");
       const origin = Bun.serve({
         tls: {
-          ...(await loopbackTls(config, git)),
+          ...serverTls,
           ca: client.cert,
           requestCert: true,
           rejectUnauthorized: true,
@@ -1131,6 +1159,11 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         port: 0,
         async fetch(request) {
           requests++;
+          if (request.headers.get("authorization") !== authorization)
+            return new Response(null, {
+              status: 401,
+              headers: { "WWW-Authenticate": 'Basic realm="fixture"' },
+            });
           if (request.headers.get("cookie") !== "patch-session=synthetic")
             return new Response(null, { status: 403 });
           const url = new URL(request.url);
@@ -1175,13 +1208,22 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           });
         },
       });
-      const proxy = createServer();
+      const proxy = proxyClient
+        ? createHttpsServer({
+            ...serverTls,
+            ca: proxyClient.cert,
+            requestCert: true,
+            rejectUnauthorized: true,
+          })
+        : createServer();
+      let tunnels = 0;
       // Only this tunnel maps the destination address to the loopback Git server.
       proxy.on("connect", (request, client, head) => {
         if (request.url !== `127.0.0.2:${origin.port}`) {
           client.end("HTTP/1.1 403 Forbidden\r\n\r\n");
           return;
         }
+        tunnels++;
         const upstream = connect(origin.port!, "127.0.0.1", () => {
           client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
           if (head.length) upstream.write(head);
@@ -1228,23 +1270,36 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
           "--file",
           config,
           "remote.origin.proxy",
-          `http://127.0.0.1:${address.port}`,
+          `${proxyClient ? "https" : "http"}://127.0.0.1:${address.port}`,
         );
+        if (proxyClient)
+          git(
+            "config",
+            "--file",
+            config,
+            "http.proxySSLCAInfo",
+            git("config", "--file", config, "http.sslCAInfo"),
+          );
         environment["GIT_CONFIG_GLOBAL"] = config;
-        // A public certificate alone cannot complete the client handshake.
-        await expect(
-          promisify(execFile)(
-            "git",
-            [
-              "-c",
-              `http.sslKey=${join(dirname(config), "missing.key")}`,
-              "ls-remote",
-              "origin",
-            ],
-            { cwd: directory, env: environment },
-          ),
-        ).rejects.toThrow();
-        expect(requests).toBe(0);
+        // The proxy and origin require their own client keys.
+        for (const option of proxyClient
+          ? ["http.proxySSLKey", "http.sslKey"]
+          : ["http.sslKey"]) {
+          await expect(
+            promisify(execFile)(
+              "git",
+              [
+                "-c",
+                `${option}=${join(dirname(config), "missing.key")}`,
+                "ls-remote",
+                "origin",
+              ],
+              { cwd: directory, env: environment },
+            ),
+          ).rejects.toThrow();
+          if (option === "http.proxySSLKey") expect(tunnels).toBe(0);
+          expect(requests).toBe(0);
+        }
         const remoteConfig = git("config", "--get-regexp", "^remote\\.");
         let models = 0;
         const outcome = await runWorkflow(
@@ -1280,6 +1335,7 @@ if (action === "get") process.stdout.write(${JSON.stringify(`username=${username
         );
         expect(outcome.exitCode, outcome.stderr).toBe(collision ? 2 : 0);
         expect(models).toBe(collision ? 0 : 1);
+        expect(tunnels).toBeGreaterThan(0);
         expect(requests).toBeGreaterThanOrEqual(2);
         expect(git("config", "--get-regexp", "^remote\\.")).toBe(remoteConfig);
         if (collision) expect(outcome.stderr).toContain("already exists");

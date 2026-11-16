@@ -763,7 +763,7 @@ process.stdout.write(JSON.stringify([...direct, fill(2), fill(0, "store"), fill(
   );
 }, 60_000);
 
-test("patch model and clean filters cannot read HTTP cookie files and TLS keys", async () => {
+test("patch model and clean filters cannot read HTTP cookie files and TLS keys or netrc credentials", async () => {
   const operator = await fixtures.create("patch-http-auth-files-");
   const config = join(operator, "selected.gitconfig");
   const environment = {
@@ -788,12 +788,27 @@ test("patch model and clean filters cannot read HTTP cookie files and TLS keys",
       "http.https://root.example.invalid/.sslKey",
     );
   const paths = settings.map((_, i) => join(operator, `auth ${i}.txt`));
-  const contents = settings.map((_, i) => `synthetic auth input ${i}\n`);
-  for (const i of [0, 1])
-    await writeFile(paths[i]!, contents[i]!, { mode: 0o600 });
+  const netrc = join(operator, ".netrc");
+  const proxyKey = join(operator, "proxy key.pem");
+  const scopedProxyKey = join(operator, "scoped proxy key.pem");
+  const existing = [...paths.slice(0, 2), netrc, proxyKey];
+  const protectedPaths = [
+    ...existing,
+    ...paths.slice(2),
+    join(operator, "_netrc"),
+    scopedProxyKey,
+  ];
+  const contents = protectedPaths.map((_, i) => `synthetic auth input ${i}\n`);
+  const createInput = (i: number) =>
+    writeFile(protectedPaths[i]!, contents[i]!, { mode: 0o600, flag: "wx" });
+  for (const i of existing.keys()) await createInput(i);
+  const neighbor = join(operator, "ordinary-sibling.txt");
+  await writeFile(neighbor, "ordinary sibling");
   const readFiles = `const fs = require("node:fs");
+if (fs.readFileSync(${JSON.stringify(neighbor)}, "utf8") !== "ordinary sibling")
+  throw new Error("Cannot read the ordinary sibling");
 const contents = [];
-for (const path of ${JSON.stringify(paths)}) {
+for (const path of ${JSON.stringify(protectedPaths)}) {
   try { contents.push(fs.readFileSync(path, "utf8")); }
   catch (error) { if (!["EACCES", "EPERM", "ENOENT"].includes(error.code)) throw error; }
 }`;
@@ -803,8 +818,15 @@ for (const path of ${JSON.stringify(paths)}) {
     false,
     false,
     async (context, inspectModel) => {
-      for (let i = 2; i < paths.length; i++)
-        await writeFile(paths[i]!, contents[i]!, { mode: 0o600, flag: "wx" });
+      // These files change after profile selection and before the two commands launch.
+      for (let i = existing.length; i < protectedPaths.length; i++)
+        await createInput(i);
+      const replacement = join(operator, "new-netrc");
+      await writeFile(replacement, contents[existing.indexOf(netrc)]!, {
+        mode: 0o600,
+        flag: "wx",
+      });
+      await rename(replacement, netrc);
       const repo = context.repository;
       const input = "INTENDED PATCH BYTES\n";
       await writeFile(join(repo, "candidate.txt"), input);
@@ -845,12 +867,13 @@ for (const path of ${JSON.stringify(paths)}) {
           profile: context.snapshotProfile,
         },
       });
-      expect(git(staged, snapshot)).toBe("intended patch bytes\n");
-      expect(
-        await inspectModel(
-          readFiles + "\nprocess.stdout.write(JSON.stringify(contents));",
-        ),
-      ).toBe("[]");
+      const modelReads = await inspectModel(
+        readFiles + "\nprocess.stdout.write(JSON.stringify(contents));",
+      );
+      expect({ staged: git(staged, snapshot), modelReads }).toEqual({
+        staged: "intended patch bytes\n",
+        modelReads: "[]",
+      });
     },
     (repository) => {
       const scopedCookie = relative(repository, paths[2]!).replaceAll(
@@ -866,8 +889,15 @@ for (const path of ${JSON.stringify(paths)}) {
           paths[5]!.slice(drive.length),
         );
       }
-      for (const [i, setting] of settings.entries())
-        execFileSync("git", ["config", "--file", config, setting, values[i]!]);
+      for (const [setting, value] of [
+        ...settings.map((setting, i) => [setting, values[i]!] as const),
+        ["http.proxySSLKey", proxyKey],
+        [
+          "http.https://proxy.example.invalid/.proxySSLKey",
+          relative(repository, scopedProxyKey).replaceAll("\\", "/"),
+        ],
+      ] as const)
+        execFileSync("git", ["config", "--file", config, setting, value]);
       return captureFilterPermissions(
         repository,
         environment,

@@ -15923,6 +15923,7 @@ async function readPatchGitControls(
     mode,
     credentialStorePaths,
     environmentEntry(dependencies.environment, "GIT_CONFIG_PARAMETERS") ?? null,
+    environmentEntry(dependencies.environment, "USERPROFILE") ?? null,
   );
 }
 

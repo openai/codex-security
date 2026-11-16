@@ -6,7 +6,8 @@ import type { PatchPublicationHooks } from "./patch-git-controls.js";
 
 export const proxyUserinfo = /^(?:[a-z][\w+.-]*:\/{1,3})?[^/@?#\s]+@/iu;
 
-export const httpCredentialFile = /^http(?:\..*)?\.(?:cookiefile|sslkey)$/iu;
+export const httpCredentialFile =
+  /^http(?:\..*)?\.(?:cookiefile|sslkey|proxysslkey)$/iu;
 
 // Also embedded in the standalone Git and hook runners.
 export function removePatchCredentials(
