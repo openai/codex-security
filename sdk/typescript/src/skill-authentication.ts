@@ -10,6 +10,7 @@ import {
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
   isExternalModelProvider,
+  huggingFaceCredentialField,
   modelProviderConfigOverride,
   scanModelProvider,
   type JsonObject,
@@ -31,6 +32,8 @@ export function resolveSkillAuthentication(
     stringifyToml(options.codexOverrides ?? {}),
   ) as JsonObject;
   const config = deepMerge(structuredClone(ambientConfig), overrides);
+  if (options.modelProvider !== undefined)
+    config["model_provider"] = options.modelProvider;
   const provider = options.modelProvider ?? scanModelProvider(config);
   // Native Codex ignores configured tables for these built-in providers.
   const providerConfiguration =
@@ -49,7 +52,11 @@ export function resolveSkillAuthentication(
     options.auth === "chatgpt" && !isExternalModelProvider(provider);
   const providerBearer =
     typeof providerConfiguration?.["experimental_bearer_token"] === "string";
-  const providerKeyConfigured = providerEnvKey !== undefined || providerBearer;
+  const providerKeyConfigured =
+    providerEnvKey !== undefined ||
+    providerBearer ||
+    (provider === "huggingface" &&
+      huggingFaceCredentialField(providerConfiguration) !== undefined);
   const requiresOpenAiAuth =
     !commandAuth &&
     (explicitChatgpt || !providerKeyConfigured) &&
@@ -75,6 +82,9 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
+      false,
+      undefined,
+      config,
     );
   }
   if (
@@ -90,6 +100,8 @@ export function resolveSkillAuthentication(
     processEnvironment,
     authentication.method === "command" ? "chatgpt" : options.auth,
     provider,
+    undefined,
+    config,
   );
   if (
     explicitChatgpt &&

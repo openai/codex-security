@@ -1,5 +1,6 @@
 import { CodexSecurity } from "../../src/api.js";
 import {
+  HUGGINGFACE_CODEX_PROVIDER,
   CHEAPERINFERENCE_CODEX_PROVIDER,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -11,6 +12,13 @@ import { parse } from "smol-toml";
 import type { TurnOptions } from "@openai/codex-sdk";
 
 export const EXTERNAL_PROVIDER_CASES = [
+  [
+    "Hugging Face",
+    "huggingface",
+    "HF_TOKEN",
+    "synthetic/model",
+    HUGGINGFACE_CODEX_PROVIDER,
+  ],
   [
     "OpenRouter",
     "openrouter",

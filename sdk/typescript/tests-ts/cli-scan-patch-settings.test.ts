@@ -46,6 +46,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (request.method === "model/list") {
     send({ id: request.id, result: { data: [{ model: "gpt-6.1-sol", availableAccessPrograms: { cyber: JSON.parse(process.env.SYNTHETIC_CYBER_PROGRAMS) } }], nextCursor: null } });
   } else if (request.method === "thread/start") {
+    receipt.hfProvider = request.params.config?.model_providers?.huggingface;
     receipt.daybreakEnabled = request.params.daybreakEnabled ?? null;
     receipt.approvalPolicy = request.params.approvalPolicy;
     receipt.sandbox = request.params.sandbox;
@@ -62,6 +63,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 `;
 
 interface ChildReceipt {
+  hfProvider?: { base_url: string; http_headers: Record<string, string> };
   argv: string[];
   homeTier: string | null;
   homeDaybreak: string | null;
@@ -172,6 +174,25 @@ async function patchSettings(
 }
 
 describe("inline patch provider configuration", () => {
+  test("inline patches use a private HF adapter and close it after the skill", async () => {
+    const child = await patchSettings([
+      "--provider",
+      "huggingface",
+      "--codex",
+      'model_providers.huggingface.env_key="SYNTHETIC_PROVIDER_KEY"',
+      "--codex",
+      'model_providers.huggingface.http_headers={ "X-HF-Bill-To" = "synthetic-organization" }',
+    ]);
+    expect(child.hfProvider?.base_url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\//u);
+    expect(child.hfProvider?.http_headers).toEqual({
+      "X-HF-Bill-To": "synthetic-organization",
+    });
+    expect(child.argv.join(" ")).not.toContain(child.hfProvider!.base_url);
+    expect(child.argv.join(" ")).not.toContain("synthetic-organization");
+    expect(child.providerKey).toBe("SYNTHETIC_PROVIDER_VALUE");
+    await expect(fetch(child.hfProvider!.base_url)).rejects.toThrow();
+  });
+
   const provider = {
     name: "Synthetic gateway",
     base_url: "https://root.example.test/v1",

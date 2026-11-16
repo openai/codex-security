@@ -90,6 +90,7 @@ interface BoundCodexExecutable {
 
 interface CodexSdkWorkerRuntimeSettings {
   hasProviderEnvKey?: boolean;
+  providerCredentialNames?: Set<string>;
   environment?: Record<string, string>;
   config: Record<string, unknown>;
   preflightProviderOverrides?: string[];
@@ -221,9 +222,31 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
           this.runtimeSettings = undefined;
           throw error;
         }));
+      // The snapshot can contain credentials for several providers. HF workers
+      // receive only their own declarations; other workers only receive HF_TOKEN
+      // if they explicitly use it, including as a header.
+      const credentials = runtimeSettings.providerCredentialNames;
+      const selectedProvider = runtimeSettings.config.model_provider;
+      const acceptsCredential = (name: string) =>
+        (selectedProvider !== "huggingface" &&
+          name.toUpperCase() !== "HF_TOKEN") ||
+        credentials?.has(
+          process.platform === "win32" ? name.toUpperCase() : name,
+        );
+      if (runtimeSettings.environment !== undefined) {
+        for (const name of Object.keys(childEnv)) {
+          if (
+            name.toUpperCase() === "HF_TOKEN" ||
+            (selectedProvider === "huggingface" &&
+              ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(name.toUpperCase()))
+          )
+            delete childEnv[name];
+        }
+      }
       for (const [name, value] of Object.entries(
         runtimeSettings.environment ?? {},
       )) {
+        if (!acceptsCredential(name)) continue;
         if (process.platform === "win32") {
           for (const key of Object.keys(childEnv)) {
             if (key.toUpperCase() === name.toUpperCase()) delete childEnv[key];
@@ -1010,8 +1033,10 @@ export async function workerRuntimeSettings(
     model_providers: legacyProviders,
     ...workerConfig
   } = isRecord(snapshot) ? snapshot : {};
-  if (isRecord(workerEnvironment)) {
-    settings.environment = workerEnvironment as Record<string, string>;
+  if (isRecord(snapshot)) {
+    settings.environment = isRecord(workerEnvironment)
+      ? (workerEnvironment as Record<string, string>)
+      : {};
   }
   if (typeof nativeProfile === "string") {
     // Match Codex's plain profile-v2 names before constructing a private file path.
@@ -1041,6 +1066,18 @@ export async function workerRuntimeSettings(
         typeof providerId === "string"
           ? nativeProfileConfig.model_providers[providerId]
           : undefined;
+      if (isRecord(provider)) {
+        const headers = isRecord(provider.env_http_headers)
+          ? Object.values(provider.env_http_headers)
+          : [];
+        settings.providerCredentialNames = new Set(
+          [provider.env_key, ...headers]
+            .filter((name): name is string => typeof name === "string")
+            .map((name) =>
+              process.platform === "win32" ? name.toUpperCase() : name,
+            ),
+        );
+      }
       if (
         isRecord(provider) &&
         typeof provider.env_key === "string" &&

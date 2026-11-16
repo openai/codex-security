@@ -277,14 +277,44 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
-### Hugging Face compatibility
+### Hugging Face Inference Providers
 
-In compatibility testing, Codex 0.166.0 sent its scan-completion tool inside a
-`namespace` and could request `web_search`. Hugging Face's published Responses
-implementation accepts `function` and remote `mcp` tool declarations. A named
-Hugging Face scan provider is deferred until the scanner and router can exchange
-the tools a complete scan requires. [Hugging Face's implementation notes](https://huggingface.co/docs/inference-providers/en/guides/gpt-oss#responses-api)
-and [request schema](https://github.com/huggingface/responses.js/blob/0e3e84c469a9f59ad16e2eb3a0d6f1c4de637a7b/src/schemas.ts#L219-L232).
+Set an HF token with **Make calls to Inference Providers** permission and choose
+an available model. A provider suffix pins routing:
+
+```bash
+export HF_TOKEN="<your-hugging-face-token>"
+codex-security scan . --provider huggingface --model zai-org/GLM-5.3:novita
+```
+
+The SDK accepts `codexOverrides: { model_provider: "huggingface", model:
+"zai-org/GLM-5.3:novita" }`. Existing native provider overrides, including
+`env_key`, `base_url`, and `http_headers`, still apply. For organization
+billing, set `model_providers.huggingface.http_headers` with `X-HF-Bill-To`.
+A custom gateway can authenticate through a static or environment-backed header.
+To send `HF_TOKEN` alongside supplemental headers on a custom gateway, set
+`env_key = "HF_TOKEN"` in its provider table.
+
+Standard scans and Deep Scan workers use a local adapter to send Codex
+requests to HF's Chat Completions endpoint. The adapter translates namespaced
+functions and freeform tools and restores their identities in the response and
+conversation history. Saved scan recipes retain the upstream URL. Rerunning
+or resuming a scan starts a new adapter. Patch and validation commands,
+including patches generated after a scan, close their adapter when the command
+finishes.
+
+The adapter supports text, images, local function tools, and JSON-schema
+output. Plaintext messages between agents keep their sender and recipient.
+Encrypted agent messages cannot be replayed. Hosted web search defaults to
+disabled. Hosted tools, remote compaction, and server-side Responses
+conversation state are unsupported.
+The adapter forwards reasoning effort and delivers generated output once the
+upstream completion finishes. For grammar-constrained tools, the adapter sends
+the grammar to the model as input guidance. The SDK reports token usage for
+these model IDs. `--max-cost` requires bundled prices.
+
+See [HF's Codex integration](https://huggingface.co/docs/inference-providers/integrations/codex)
+and [Responses API](https://huggingface.co/docs/inference-providers/guides/responses-api).
 
 ### Amazon Bedrock
 

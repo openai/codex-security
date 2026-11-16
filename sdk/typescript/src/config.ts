@@ -44,10 +44,66 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+export const HUGGINGFACE_CODEX_PROVIDER = {
+  name: "Hugging Face",
+  base_url: "https://router.huggingface.co/v1",
+  env_key: "HF_TOKEN",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
+/** Credential field read by the native provider. Other headers, such as billing, can accompany HF_TOKEN. */
+export function huggingFaceCredentialField(
+  native: unknown,
+): string | undefined {
+  if (!isObject(native) || native["auth"] != null || native["env_key"] != null)
+    return undefined;
+  if (typeof native["experimental_bearer_token"] === "string")
+    return "experimental_bearer_token";
+  const customGateway =
+    typeof native["base_url"] === "string" &&
+    native["base_url"].replace(/\/+$/u, "") !==
+      HUGGINGFACE_CODEX_PROVIDER.base_url;
+  for (const field of ["http_headers", "env_http_headers"] as const) {
+    const headers = native[field];
+    if (
+      isObject(headers) &&
+      Object.keys(headers).some(
+        (name) =>
+          /^(?:authorization|(?:x-)?api-key)$/iu.test(name) ||
+          (customGateway && name.toLowerCase() !== "x-hf-bill-to"),
+      )
+    )
+      return field;
+  }
+  return undefined;
+}
+
+/** Native Codex reads this credential directly from the selected private profile. */
+export function huggingFaceCredentialSource(
+  config: Readonly<JsonObject>,
+): string | undefined {
+  if (scanModelProvider(config) !== "huggingface") return undefined;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  return isObject(providers)
+    ? huggingFaceCredentialField(providers["huggingface"])
+    : undefined;
+}
+
+export function huggingFaceProviderDefaults(native: unknown): JsonObject {
+  const preset: JsonObject = { ...HUGGINGFACE_CODEX_PROVIDER };
+  if (
+    isObject(native) &&
+    (native["auth"] != null || huggingFaceCredentialField(native))
+  )
+    delete preset["env_key"];
+  return preset;
+}
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
+  huggingface: HUGGINGFACE_CODEX_PROVIDER,
 } as const;
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
@@ -242,6 +298,13 @@ export function scanProviderEnvKey(
     return undefined;
   const providers = resolveCodexProfile(config)["model_providers"];
   const provider = isObject(providers) ? providers[selected] : undefined;
+  if (
+    selected === "huggingface" &&
+    isObject(provider) &&
+    provider["env_key"] == null &&
+    (provider["auth"] != null || huggingFaceCredentialField(provider))
+  )
+    return undefined;
   return isObject(provider) && typeof provider["env_key"] === "string"
     ? provider["env_key"]
     : isExternalModelProvider(selected)
@@ -500,8 +563,29 @@ export async function mergedCodexConfig(
       await readCodexAuthConfig(profileHome, purpose === "login"),
     );
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
+  const modelProvider = scanModelProvider(effectiveOverrides);
+  const declaresHuggingFace = [
+    effectiveOverrides,
+    selectedScanProfile(effectiveOverrides),
+  ].some(
+    (layer) =>
+      isObject(layer?.["model_providers"]) &&
+      isObject(layer["model_providers"]["huggingface"]),
+  );
+  if (modelProvider === "huggingface" || declaresHuggingFace) {
+    const providers =
+      resolveCodexProfile(effectiveOverrides)["model_providers"];
+    const hf = isObject(providers) ? providers["huggingface"] : undefined;
+    defaults["model_providers"] = {
+      huggingface: huggingFaceProviderDefaults(hf),
+    };
+  }
+  if (modelProvider === "huggingface") {
+    defaults["web_search"] = "disabled";
+    defaults["model_reasoning_summary"] = "none";
+  }
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
-  if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {
+  if (modelProvider === "amazon-bedrock") {
     // Bedrock models can reject reasoning.summary before the scan starts.
     defaults["model_reasoning_summary"] = "none";
   }

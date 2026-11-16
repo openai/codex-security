@@ -1664,6 +1664,25 @@ describe("skill authentication", () => {
     },
   );
 
+  test("standalone validation loads the HF transport from its isolated home", async () => {
+    const result = await runProviderSkill(stateDirectory, {
+      command: "validate",
+      overrides: [
+        'model_provider="huggingface"',
+        'model_providers.huggingface.http_headers={ "X-HF-Bill-To" = "synthetic-organization" }',
+      ],
+      environment: { HF_TOKEN: "SYNTHETIC_HF_KEY" },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.launch?.args.join(" ")).not.toContain(
+      "synthetic-organization",
+    );
+    expect(result.launch?.config).toContain("synthetic-organization");
+    expect(result.launch?.config).toContain("http://127.0.0.1:");
+    expect(result.launch?.config).not.toContain("SYNTHETIC_HF_KEY");
+    expect(result.launch?.args).not.toContain("--ignore-user-config");
+  });
+
   test.each([
     ["validate", "auto", "gateway"],
     ["validate", "api-key", "gateway"],

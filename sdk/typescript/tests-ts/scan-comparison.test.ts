@@ -1854,6 +1854,64 @@ describe("semantic scan comparison", () => {
     expect(account).not.toHaveBeenCalled();
   });
 
+  test("read-only helpers use only the selected Hugging Face key", async () => {
+    const home = await temporaryDirectory();
+    const state = join(home, "state");
+    await mkdir(join(state, "codex-home"), { recursive: true });
+    const account = mock(async () => ({
+      authenticated: true,
+      details: "managed",
+    }));
+    const source = {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: state,
+      HF_TOKEN: "synthetic-huggingface-key",
+      OPENAI_API_KEY: "synthetic-openai-key",
+    };
+    const openai = await comparisonEnvironment(
+      source,
+      account,
+      undefined,
+      undefined,
+      { model_provider: "openai" },
+    );
+    expect(openai).not.toHaveProperty("HF_TOKEN");
+    expect(openai["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
+    await writeFile(
+      join(home, "config.toml"),
+      'model_provider = "huggingface"\n',
+    );
+    const selected = await comparisonEnvironment(source, account);
+    expect(selected["HF_TOKEN"]).toBe(source.HF_TOKEN);
+    expect(selected).not.toHaveProperty("OPENAI_API_KEY");
+    const onlyProvider = await comparisonEnvironment(
+      { ...source, OPENAI_API_KEY: undefined },
+      account,
+    );
+    expect(onlyProvider["CODEX_HOME"]).toBe(home);
+    const gateway = {
+      model_provider: "gateway",
+      model_providers: {
+        gateway: {
+          auth: { command: "synthetic-command" },
+          env_http_headers: { "X-Provider-Key": "HF_TOKEN" },
+        },
+      },
+    };
+    expect(
+      (
+        await comparisonEnvironment(
+          source,
+          account,
+          undefined,
+          undefined,
+          gateway,
+        )
+      )["HF_TOKEN"],
+    ).toBe(source.HF_TOKEN);
+    expect(account).not.toHaveBeenCalled();
+  });
+
   test.skipIf(process.platform !== "win32")(
     "recognizes provider scan variables regardless of Windows casing",
     async () => {
