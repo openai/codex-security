@@ -402,10 +402,12 @@ export function createDependencySourceEvidence(options: SourceOptions) {
           totalLines: lines.length,
         };
       }
-      const { startLine, endLine } = request;
-      if (startLine > endLine || endLine > lines.length)
+      const { startLine, endLine: requestedEndLine } = request;
+      const lineCount = lines.length;
+      const endLine = Math.min(requestedEndLine, lineCount);
+      if (startLine > endLine)
         throw new Error(
-          `Invalid source range ${startLine}–${endLine}; file has ${lines.length} lines.`,
+          `Invalid source range ${startLine}–${requestedEndLine}; file has ${lineCount} lines.`,
         );
       const excerpt = {
         sourceId,
@@ -414,7 +416,12 @@ export function createDependencySourceEvidence(options: SourceOptions) {
         endLine,
         text: lines.slice(startLine - 1, endLine).join(""),
       };
-      return { ...excerpt, receiptId: options.recordExcerpt(excerpt) };
+      return {
+        ...excerpt,
+        requestedRange: { startLine, endLine: requestedEndLine },
+        lineCount,
+        receiptId: options.recordExcerpt(excerpt),
+      };
     },
   };
 }

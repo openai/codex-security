@@ -87,9 +87,27 @@ test("captures pinned bytes once and binds exact source ranges for review", asyn
   expect(captures).toEqual([
     expect.objectContaining({ text: "\uFEFFfirst\r\n" }),
   ]);
-  await expect(
-    reopened.call("read_dependency_source", { ...excerpt, endLine: 3 }),
-  ).rejects.toThrow("Invalid source range");
+  expect(
+    await reopened.call("read_dependency_source", { ...excerpt, endLine: 3 }),
+  ).toMatchObject({
+    ...excerpt,
+    endLine: 2,
+    requestedRange: { startLine: 1, endLine: 3 },
+    lineCount: 2,
+    text: source,
+  });
+  expect(captures[1]).toMatchObject({ ...excerpt, endLine: 2, text: source });
+  for (const range of [
+    { startLine: 3, endLine: 4 },
+    { startLine: 2, endLine: 1 },
+    { startLine: 0, endLine: 3 },
+    { startLine: 1, endLine: Number.MAX_SAFE_INTEGER + 1 },
+  ]) {
+    await expect(
+      reopened.call("read_dependency_source", { sourceId, ...range }),
+    ).rejects.toThrow();
+  }
+  expect(captures).toHaveLength(2);
   await expect(
     tools.call("fetch_dependency_source", {
       ...commitRequest,
@@ -107,6 +125,23 @@ test("captures pinned bytes once and binds exact source ranges for review", asyn
   await expect(
     reopened.call("read_dependency_source", excerpt),
   ).rejects.toThrow("Saved source evidence changed");
+});
+
+test("keeps the capture byte budget for files that could be read through EOF", async () => {
+  const directory = await testDirectory();
+  const tools = createDependencyInvestigationTools({
+    directory,
+    repository: directory,
+    recordSourceExcerpt() {
+      throw new Error("An oversized capture cannot create a receipt.");
+    },
+    source: {
+      fetcher: async () => new Response(new Uint8Array(8 * 1024 * 1024 + 1)),
+    },
+  });
+  await expect(
+    tools.call("fetch_dependency_source", commitRequest),
+  ).rejects.toThrow("Source download exceeds");
 });
 
 test("captures and locates primary advisory text before independent review", async () => {

@@ -9,6 +9,7 @@ import {
 import { createDependencyCandidates } from "../src/dependency-candidates.js";
 import { readDependencyReportCode } from "../src/dependency-report-renderer.js";
 import { createDependencyReportSubmission } from "../src/dependency-report-submission.js";
+import { evidenceKey } from "../src/dependency-evidence-store.js";
 import { createDependencySourceEvidence } from "../src/dependency-source-evidence.js";
 import { createDependencySourceIdentityReader } from "../src/dependency-source-identity.js";
 import {
@@ -296,7 +297,7 @@ test("captures historical Git objects and exact range receipts without changing 
   const original = Buffer.from("const fix = true;\n");
   const pinned = await initialize(root.path, original);
   const file = join(root.path, "codec.ts");
-  await writeFile(file, "const fix = false;\n");
+  await writeFile(file, "const fix = false;\nconst added = true;\n");
   git(root.path, "add", "codec.ts");
   git(root.path, "commit", "-qm", "A different tree");
   const current = git(root.path, "rev-parse", "HEAD");
@@ -309,7 +310,7 @@ test("captures historical Git objects and exact range receipts without changing 
     },
     recordExcerpt(excerpt) {
       requests.push(excerpt);
-      return "receipt";
+      return evidenceKey(excerpt);
     },
   });
   const request = { kind: "git", ...pinned, path: "codec.ts" };
@@ -322,17 +323,35 @@ test("captures historical Git objects and exact range receipts without changing 
     matchingLines: [1],
   });
   expect(requests).toHaveLength(0);
-  expect(
-    await source.excerpt({ sourceId, startLine: 1, endLine: 1 }),
-  ).toMatchObject({
+  const clamped = await source.excerpt({ sourceId, startLine: 1, endLine: 2 });
+  expect(clamped).toMatchObject({
+    requestedRange: { startLine: 1, endLine: 2 },
+    startLine: 1,
+    endLine: 1,
+    lineCount: 1,
     git: { repositoryRoot: root.path, blob: pinned.blob },
     request: { kind: "git", commit: pinned.commit, path: "codec.ts" },
     sha256: sha256(original),
     text: original.toString("utf8"),
-    receiptId: "receipt",
   });
   expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({ startLine: 1, endLine: 1 });
+  const exact = await source.excerpt({ sourceId, startLine: 1, endLine: 1 });
+  const receiptId = evidenceKey(requests[0]);
+  expect(exact).toMatchObject({ receiptId });
+  expect(clamped).toMatchObject({ receiptId });
+  expect(requests[1]).toEqual(requests[0]);
+  await expect(
+    source.excerpt({ sourceId, startLine: 2, endLine: 3 }),
+  ).rejects.toThrow("Invalid source range");
+
   const range = { path: "codec.ts", startLine: 1, endLine: 1, supports: [] };
+  await expect(
+    readDependencyEvidence(
+      [{ ...range, commit: pinned.commit, endLine: 2 }],
+      root.path,
+    ),
+  ).rejects.toThrow("Invalid evidence range");
   const excerpts: DependencyExcerpt[] = [];
   await readDependencyEvidence(
     [range, { ...range, commit: pinned.commit }],
@@ -453,6 +472,22 @@ test("reviews the historical caller at its exact commit and refuses a lookalike 
     },
   });
   try {
+    expect(
+      await state.queue({
+        items: [
+          {
+            ...item,
+            use: {
+              ...item.use,
+              evidence: [{ ...item.use.evidence[0], endLine: 2 }],
+            },
+          },
+        ],
+      }),
+    ).toMatchObject({
+      queued: false,
+      feedback: expect.stringContaining("Invalid evidence range"),
+    });
     expect(await state.queue({ items: [item] })).toMatchObject({
       queued: true,
     });

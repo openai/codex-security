@@ -124,7 +124,7 @@ export function createDependencyInvestigationTools(
     {
       name: "read_dependency_source",
       description:
-        "Locate literal text in captured source, or read an exact inclusive line range and register its review receipt. Search returns line numbers without creating a receipt.",
+        "Locate literal text in captured source, or read an inclusive line range and register its review receipt. An end past EOF stops at the last line. Cite the returned startLine and endLine. Search returns line numbers without creating a receipt.",
       inputSchema: dependencySourceToolSchemas.excerpt,
       run: source.excerpt,
     },
