@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -10,11 +11,14 @@ import sys
 import uuid
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 from workbench_test_support import load_script, run_workbench, write_completed_contract
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = PLUGIN_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPTS))
 VALIDATOR = load_script("validate_scan_contract")
 SCHEMA = load_script("workbench_schema")
 RECEIPT_MIGRATION = next(
@@ -375,3 +379,119 @@ def test_invalid_source_is_rejected_before_creating_state(tmp_path: Path, mutati
     result = run_workbench(state, "finding-issues", input_text=json.dumps(payload), check=False)
     assert result["returncode"] != 0
     assert not state.exists()
+
+
+windows_only = pytest.mark.skipif(
+    os.name != "nt", reason="requires native Windows path-length behavior"
+)
+
+# The legacy Win32 limit is 260 characters, including the terminating null.
+LEGACY_MAX_PATH = 259
+
+
+def legacy_state_directory(tmp_path: Path) -> Path:
+    """Return a state directory whose database filename exceeds the legacy Windows path limit."""
+    state = tmp_path / "state"
+    while len(str(state / "workbench.sqlite3")) <= LEGACY_MAX_PATH:
+        state = state / "legacy-path-padding-segment"
+    return state
+
+
+class LegacyPathPolicy:
+    """Model a Windows process without long-path support, which rejects ordinary long filenames."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.stat_paths: list[str] = []
+        self.uris: list[str] = []
+        stat, connect = Path.stat, sqlite3.connect
+
+        def rejects(filename: str) -> bool:
+            return len(filename) > LEGACY_MAX_PATH and not filename.startswith("\\\\?\\")
+
+        def legacy_stat(path: Path, *args, **kwargs):
+            self.stat_paths.append(str(path))
+            if rejects(str(path)):
+                raise FileNotFoundError(2, "The system cannot find the path specified.", str(path))
+            return stat(path, *args, **kwargs)
+
+        def legacy_connect(database, *args, **kwargs):
+            if isinstance(database, str) and database.startswith("file:"):
+                self.uris.append(database)
+                if rejects(unquote(database.removeprefix("file:").split("?", 1)[0])):
+                    raise sqlite3.OperationalError("unable to open database file")
+            return connect(database, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", legacy_stat)
+        monkeypatch.setattr(sqlite3, "connect", legacy_connect)
+
+
+def inspect_in_process(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: Path,
+    scan_dir: Path,
+) -> dict:
+    """Run the finding-issues inspection in this process so a path policy can stand in for the OS."""
+    import workbench_db
+
+    payload = json.dumps(
+        {"action": "inspect", "scanDirectory": str(scan_dir), "destination": LINEAR}
+    )
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(payload.encode("utf-8"))))
+    monkeypatch.setattr(sys, "argv", ["workbench_db.py", "finding-issues"])
+    workbench_db.main()
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.native_windows
+@windows_only
+def test_inspection_reads_receipts_through_a_legacy_long_state_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scan_dir, validated = source(tmp_path)
+    state = legacy_state_directory(tmp_path)
+    recorded = issues(state, scan_dir, "record", receipts=[receipt_for(validated)])
+    assert recorded["storeExists"] is True
+
+    policy = LegacyPathPolicy(monkeypatch)
+    inspected = inspect_in_process(monkeypatch, capsys, state, scan_dir)
+
+    assert inspected["storeExists"] is True
+    assert inspected["receipts"] == recorded["receipts"]
+    # The read-only URI keeps its mode, its escaping, and an extended-length filename.
+    assert len(policy.uris) == 1
+    assert policy.uris[0].endswith("?mode=ro")
+    assert "\\" not in policy.uris[0]
+    assert unquote(policy.uris[0].removeprefix("file:").split("?", 1)[0]) == (
+        "\\\\?\\" + str(state / "workbench.sqlite3")
+    )
+
+
+@pytest.mark.native_windows
+@windows_only
+def test_inspection_reports_a_missing_store_through_a_legacy_long_state_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scan_dir, _ = source(tmp_path)
+    state = legacy_state_directory(tmp_path)
+    LegacyPathPolicy(monkeypatch)
+
+    inspected = inspect_in_process(monkeypatch, capsys, state, scan_dir)
+
+    assert inspected["storeExists"] is False
+    assert inspected["receipts"] == []
+    assert not state.exists()
+
+
+@pytest.mark.native_windows
+@windows_only
+def test_inspection_path_keeps_unc_state_filenames() -> None:
+    from workbench_publication import inspection_path
+
+    assert str(inspection_path(Path("\\\\server\\share\\state\\workbench.sqlite3"))) == (
+        "\\\\?\\UNC\\server\\share\\state\\workbench.sqlite3"
+    )
+    assert str(inspection_path(Path("C:\\state\\workbench.sqlite3"))) == (
+        "\\\\?\\C:\\state\\workbench.sqlite3"
+    )

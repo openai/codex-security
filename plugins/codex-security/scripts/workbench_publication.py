@@ -28,6 +28,7 @@ from finalize_scan_contract import (
 )
 from snapshot_sqlite import readonly_sqlite_uri
 from validate_scan_contract import validate_contract
+from windows_scan_local_files import _extended_path
 from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
 
@@ -171,6 +172,11 @@ def validate_issue_receipts(receipts: Any, selected: dict[str, str]) -> list[dic
     return receipts
 
 
+def inspection_path(path: Path) -> Path:
+    """Spell the state database so inspection reaches a filename beyond the legacy Win32 limit."""
+    return Path(_extended_path(path)) if os.name == "nt" else path
+
+
 def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("action") not in {
         "inspect",
@@ -211,7 +217,7 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "storeExists": True,
         "receipts": [],
     }
-    path = db.database_path()
+    path = inspection_path(db.database_path())
     if payload["action"] == "inspect" or require_history:
         try:
             path.stat()
