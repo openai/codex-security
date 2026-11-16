@@ -19,8 +19,7 @@ import { createTemporaryDirectoriesSync } from "./support/temporary-directories.
 import { nodeCommand } from "./support/shell.js";
 import { git } from "./git-fixture.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { resolveCodexCommand } from "../src/runtime.js";
-import { bundledCodexSdkEnvironment } from "../src/codex-sdk-environment.js";
+import { inventoryToolEnvironment } from "./support/inventory.js";
 
 const temporary = createTemporaryDirectoriesSync(true);
 const node = nodeCommand().command;
@@ -35,14 +34,7 @@ function fixture(name = "repository") {
     out = join(root, "output");
   mkdirSync(repo);
   git(repo, "init", "-q");
-  const toolEnvironment = bundledCodexSdkEnvironment(
-    resolveCodexCommand({}).command,
-    Object.fromEntries(
-      Object.entries(process.env).filter(
-        (entry): entry is [string, string] => entry[1] !== undefined,
-      ),
-    ),
-  );
+  const toolEnvironment = inventoryToolEnvironment();
   const write = (path: string, data: string | Buffer = "value = 1\n") => {
     const file = join(repo, path);
     mkdirSync(dirname(file), { recursive: true });

@@ -1,5 +1,6 @@
 import {
   environmentValue,
+  forEachFileLine,
   isMissingPathError,
   normalizePath,
   resolvedPathText as canonical,
@@ -21,6 +22,7 @@ import {
   exists,
   fsPath,
   inside,
+  linkedParent,
   lstat,
   regular,
   rejectStreams,
@@ -182,7 +184,156 @@ async function scopeCandidates(repo: string, scope: string): Promise<string[]> {
     .map((path) => append(repo, path));
 }
 
-function loadScopes(path: string): string[] {
+async function repositoryInventoryPaths(
+  repo: string,
+  requested: string,
+): Promise<string[]> {
+  const result = await runRipgrep(
+    [
+      "--files",
+      "--null",
+      "--hidden",
+      "--path-separator",
+      "/",
+      "--glob",
+      "!**/{.git,.svn}",
+      "--glob",
+      "!**/{.git,.svn}/**",
+      "--",
+      requested,
+    ],
+    repo,
+  ).catch((error: unknown) => {
+    throw new Error(
+      `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
+  if (result.status !== 0 && result.status !== 1)
+    throw new Error(
+      `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
+    );
+  let bytes = result.stdout;
+  const inWorktree = [...ancestors(repo)].some((path) => {
+    const marker = append(path, ".git");
+    // An empty .git directory can be a sandbox placeholder.
+    return (
+      exists(marker) &&
+      (!directory(marker) ||
+        exists(append(marker, "HEAD")) ||
+        regular(append(marker, "index")))
+    );
+  });
+  if (inWorktree) {
+    const paths = (await ignoredTrackedPaths(repo, requested)).filter((path) =>
+      regular(append(repo, path)),
+    );
+    const prefix = requested === "." || requested.startsWith("./") ? "./" : "";
+    bytes = Buffer.concat([
+      bytes,
+      encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
+    ]);
+  }
+  return decodePosixBytes(bytes)
+    .split("\0")
+    .filter((path) => {
+      if (!path || path.split("/").some((part) => sourceMetadata.has(part)))
+        return false;
+      if (/[\r\n]/u.test(path))
+        throw new Error(
+          "Repository contains a path that cannot fit in the file inventory",
+        );
+      return true;
+    });
+}
+
+interface PreparedInventory {
+  file: string;
+  scoped: boolean;
+}
+
+async function* directorySourcePaths(
+  repo: string,
+  directories: string[],
+  inventory?: PreparedInventory,
+) {
+  if (inventory && exists(inventory.file)) {
+    // The SDK stores scoped JSONL. The native host stores one review item per line.
+    const paths = new Set<string>();
+    const decode = inventory.scoped || windows ? decodeUtf8 : decodePosixBytes;
+    forEachFileLine(inventory.file, decode, (line) => {
+      if (!line) return;
+      const name = inventory.scoped ? JSON.parse(line)?.path : line;
+      if (
+        typeof name !== "string" ||
+        !name ||
+        name.includes("\0") ||
+        isAbsolute(name) ||
+        name.split(windows ? /[\\/]/u : "/").includes("..")
+      )
+        throw new Error(
+          "Prepared inventory contains an invalid repository-relative path.",
+        );
+      rejectStreams(name);
+      const path = append(repo, name);
+      if (
+        directories.some((scope) => {
+          const child = relative(scope, path);
+          return (
+            child &&
+            !isAbsolute(child) &&
+            child !== ".." &&
+            !child.startsWith(".." + sep)
+          );
+        })
+      )
+        paths.add(name);
+    });
+    for (const name of paths) yield append(repo, name);
+    return;
+  }
+  for (const scope of directories) {
+    if (inventory && !inventory.scoped) {
+      for (const name of await repositoryInventoryPaths(
+        repo,
+        inside(repo, scope),
+      ))
+        yield append(repo, name);
+    } else yield* await scopeCandidates(repo, scope);
+  }
+}
+
+export async function* scopedSourceFiles(
+  repo: string,
+  scopes: string[],
+  home: string | undefined,
+  inventory?: PreparedInventory,
+) {
+  const resolved = scopes.map((value) =>
+    scopePath(repo, value, home, true, true),
+  );
+  const directories = [];
+  for (const scope of resolved) {
+    if (regular(scope)) {
+      const name = inside(repo, scope);
+      if (!name.split("/").some((part) => sourceMetadata.has(part)))
+        yield { name, explicit: true };
+    } else directories.push(scope);
+  }
+  if (!directories.length) return;
+  for await (const path of directorySourcePaths(repo, directories, inventory)) {
+    let name: string;
+    try {
+      if (!regular(path) || linkedParent(repo, path)) continue;
+      name = inside(repo, canonical(path));
+    } catch {
+      continue;
+    }
+    if (!name.split("/").some((part) => sourceMetadata.has(part)))
+      yield { name, explicit: false };
+  }
+}
+
+export function loadScopes(path: string): string[] {
   let scopes: unknown;
   try {
     scopes = JSON.parse(decodeUtf8(readFile(path)));
@@ -302,58 +453,7 @@ export async function generateInventory(
     const requested = isAbsolute(expandHome(scope, home))
       ? inside(repo, absolute)
       : scope;
-    const result = await runRipgrep(
-      [
-        "--files",
-        "--null",
-        "--hidden",
-        "--path-separator",
-        "/",
-        "--glob",
-        "!**/{.git,.svn}",
-        "--glob",
-        "!**/{.git,.svn}/**",
-        "--",
-        requested,
-      ],
-      repo,
-    ).catch((error: unknown) => {
-      throw new Error(
-        `could not run ripgrep: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
-    if (result.status !== 0 && result.status !== 1)
-      throw new Error(
-        `ripgrep ${result.signal ? `terminated by ${result.signal}` : `exited with status ${result.status}`}${result.stderr.trim() ? `: ${result.stderr.trim()}` : ""}`,
-      );
-    let bytes = result.stdout;
-    const inWorktree = [...ancestors(repo)].some((path) => {
-      const marker = append(path, ".git");
-      // An empty .git directory can be a sandbox placeholder.
-      return (
-        exists(marker) &&
-        (!directory(marker) ||
-          exists(append(marker, "HEAD")) ||
-          regular(append(marker, "index")))
-      );
-    });
-    if (inWorktree) {
-      const paths = (await ignoredTrackedPaths(repo, requested)).filter(
-        (path) => regular(append(repo, path)),
-      );
-      const prefix =
-        requested === "." || requested.startsWith("./") ? "./" : "";
-      bytes = Buffer.concat([
-        bytes,
-        encodeGitPath(paths.map((path) => prefix + path + "\0").join("")),
-      ]);
-    }
-    for (const path of decodePosixBytes(bytes).split("\0").filter(Boolean)) {
-      if (path.split("/").some((part) => sourceMetadata.has(part))) continue;
-      if (/[\r\n]/u.test(path))
-        throw new Error(
-          "Repository contains a path that cannot fit in the file inventory",
-        );
+    for (const path of await repositoryInventoryPaths(repo, requested)) {
       inventoryRows.push(encodePosixPath(path + "\n"));
     }
   } else if (diff) {
@@ -426,22 +526,8 @@ export async function generateInventory(
     }
   } else {
     const scopes = loadScopes(expandHome(options.scopesFile!, home));
-    const resolved = scopes.map((value) =>
-      scopePath(repo, value, home, true, true),
-    );
-    for (const selected of resolved) {
-      for (const path of await scopeCandidates(repo, selected)) {
-        let name: string;
-        try {
-          if (!regular(path)) continue;
-          name = inside(repo, canonical(path));
-        } catch {
-          continue;
-        }
-        if (name.split("/").some((part) => sourceMetadata.has(part))) continue;
-        rankRows.set(name, { path: name });
-      }
-    }
+    for await (const { name } of scopedSourceFiles(repo, scopes, home))
+      rankRows.set(name, { path: name });
   }
   if (inventory) {
     const unique = [

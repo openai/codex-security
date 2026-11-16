@@ -54,6 +54,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
 )
 from finding_preview import bounded_finding_details
+from standard_validation import require_standard_decisions
 from windows_scan_local_files import pin_replay_metadata
 from workbench import handoff
 from workbench.storage import (
@@ -1373,17 +1374,12 @@ def complete_scan_locked(
                 if merge_parent_draft
                 else None
             )
-            completion_manifest = draft_documents[0] if draft_documents else current_manifest
-            if (
-                completion_manifest is not None
-                and isinstance(completion_manifest.get("scan"), dict)
-                and completion_manifest["scan"].get("complete") is False
-            ):
-                raise RecoverableContractError(
-                    "The latest saved scan draft is incomplete; continue the scan before completing it."
-                )
+            saved_results.require_complete_draft(
+                draft_documents[0] if draft_documents else current_manifest
+            )
             prepared = _prepare_scan_finalization(
                 scan_dir,
+                reconcile_review=partial(require_standard_decisions, scan, sealing=True),
                 expected_coverage_mode=expected_coverage_mode(scan),
                 completion_binding=completion_binding,
                 recover_unsealed=scan["mode"] != "deep",

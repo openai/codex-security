@@ -79,6 +79,11 @@ from workbench.saved_sources import (
     _unselected_root_order,
     _worker_outputs,
 )
+from workbench.standard_stop import (
+    STANDARD_STOP_SNAPSHOT,
+    STANDARD_UNREAD_FILES,
+    add_unfinished_standard_work,
+)
 from workbench_coverage_receipts import (
     _deferred_candidate_id,
     _generic_surface_updates,
@@ -259,6 +264,10 @@ def merge_saved_results(
             if frozen_source_digests is None:
                 source_times.update(_frozen_source_times(scan_dir, scan_id, recorded))
     paths: dict[str, str | None] = {}
+    standard_deferred = []
+    all_standard_files_reviewed = False
+    if stopped and scan_mode == "standard" and (scan_dir / STANDARD_STOP_SNAPSHOT).is_file():
+        paths[STANDARD_STOP_SNAPSHOT] = None
     reducer_paths: set[str] = set()
     current_results: set[str] = set()
     reducer_outputs: list[tuple[Any, str, list[str], int]] = []
@@ -364,6 +373,10 @@ def merge_saved_results(
             source_digests[relative] = digest
             source_times.setdefault(relative, observed)
             source_order[relative] = (0, source_times[relative])
+            if relative == STANDARD_STOP_SNAPSHOT:
+                standard_deferred = draft["reviewState"]["deferred"]
+                all_standard_files_reviewed = draft.get("allAssignedFilesReviewed") is True
+                continue
             directory = Path(relative).parent
             if directory.name in {"checkpoints", "checkpoint-heads"}:
                 directory = directory.parent
@@ -904,7 +917,7 @@ def merge_saved_results(
             ):
                 discarded_coverage_sources.add(relative)
 
-    if parent is None and not sources:
+    if parent is None and not sources and not standard_deferred:
         return None
     if (
         parent_manifest
@@ -2363,6 +2376,10 @@ def merge_saved_results(
             and not _has_candidate_metadata(row)
         )
 
+    provisional_duplicates = {
+        row["id"]: row["duplicateOf"] for row in standard_deferred if "decision" in row
+    }
+
     def retain_findings(relative, draft, worker_id, selected_candidates, skip_superseded_findings):
         normalized_findings = copy.deepcopy(draft["findings"])
         _ensure_finding_identities(
@@ -2371,6 +2388,13 @@ def merge_saved_results(
         for index, (value, normalized) in enumerate(
             zip(draft["findings"], normalized_findings, strict=True)
         ):
+            # A stale forward duplicate must not displace a confirmed finding with the same identity.
+            if (
+                provisional_duplicates
+                and isinstance(value, dict)
+                and finding_candidate_id(value) in provisional_duplicates
+            ):
+                continue
             if precedes_terminal_parent(relative, worker_id) or replaced_parent_finding(
                 relative, worker_id, value
             ):
@@ -3150,6 +3174,19 @@ def merge_saved_results(
     if stopped:
         if not isinstance(coverage.get("deferred"), list):
             coverage["deferred"] = []
+        if all_standard_files_reviewed:
+            coverage["deferred"] = [
+                row
+                for row in coverage["deferred"]
+                if not isinstance(row, dict) or row.get("id") != STANDARD_UNREAD_FILES
+            ]
+        if standard_deferred:
+            add_unfinished_standard_work(
+                standard_deferred,
+                coverage,
+                (f for f in findings if valid_finding(f)),
+                provisional_duplicates,
+            )
         item = {"id": "scan-stopped", "reason": reason}
         if item not in coverage["deferred"]:
             coverage["deferred"].append(item)

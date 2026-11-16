@@ -858,6 +858,35 @@ test("stages and hashes the selected workflow's audit briefs", async (t) => {
   assert.ok(!("baseline-auditor.md" in selected.referenceSha256));
 });
 
+test("uses the caller workflow for the selected core", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "source-audit-workflows-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const baseline = "baseline-auditor.md";
+  const rules = "standard-search-rules.md";
+  const corePromptPath = join(root, "standalone-core.md");
+  await writeFile(corePromptPath, `Use the baseline audit in ${baseline}.`);
+  const legacy = await prepareEval(join(root, "legacy"), { corePromptPath });
+  assert.equal(
+    await readFile(join(legacy.runtime, "references", baseline), "utf8"),
+    await readFile(
+      new URL(
+        `../../plugins/codex-security/references/${baseline}`,
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.ok(!(rules in legacy.referenceSha256));
+  assert.match(legacy.prompt, /including its baseline audit/);
+  assert.doesNotMatch(legacy.prompt, /keep the full queue in context/);
+
+  const current = await prepareEval(join(root, "current"));
+  assert.ok(rules in current.referenceSha256);
+  assert.ok(!(baseline in current.referenceSha256));
+  assert.match(current.prompt, /keep the full queue in context/);
+  assert.doesNotMatch(current.prompt, /including its baseline audit/);
+});
+
 test("stages production prompt unchanged and no labels; grades only the final SDK response", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "source-audit-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -874,7 +903,11 @@ test("stages production prompt unchanged and no labels; grades only the final SD
     production,
   );
   assert.ok(prepared.prompt.endsWith(production));
-  for (const brief of ["baseline-auditor.md", "focused-investigator.md"]) {
+  assert.match(
+    prepared.prompt,
+    /serial work or the native tool is unavailable, read the investigator brief/,
+  );
+  for (const brief of ["standard-search-rules.md", "focused-investigator.md"]) {
     const source = new URL(
       `../../plugins/codex-security/references/${brief}`,
       import.meta.url,

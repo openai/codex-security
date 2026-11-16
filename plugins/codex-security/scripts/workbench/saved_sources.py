@@ -21,6 +21,7 @@ from finalize_scan_contract import (
     write_scan_local_bytes,
 )
 from review_state import review_state, uses_legacy_review
+from workbench.standard_stop import STANDARD_STOP_SNAPSHOT
 from workbench_coverage_receipts import capture_receipt_checkpoints
 
 
@@ -701,7 +702,11 @@ def _worker_outputs(scan_dir: Path, worker: Any) -> list[tuple[str, int]]:
     return [(output.as_posix(), attempt), *archived]
 
 
-def _saved_result_paths(scan_dir: Path, workers: list[Any]) -> Iterator[tuple[str, str | None]]:
+def _saved_result_paths(
+    scan_dir: Path, workers: list[Any], mode: str | None = None
+) -> Iterator[tuple[str, str | None]]:
+    if mode == "standard" and (scan_dir / STANDARD_STOP_SNAPSHOT).is_file():
+        yield STANDARD_STOP_SNAPSHOT, None
     iteration = _latest_iteration(workers)
     yield "checkpoint-head.json", None
     for directory in ("checkpoint-heads", "checkpoints"):

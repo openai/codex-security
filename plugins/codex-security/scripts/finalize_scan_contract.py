@@ -3092,6 +3092,7 @@ def _prepare_scan_finalization(
     completion_binding: dict[str, Any] | None = None,
     recover_unsealed: bool = False,
     allow_missing_writeups: bool = False,
+    reconcile_review: Callable[[dict, dict, dict], bool] | None = None,
     draft_documents: tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None = None,
     finding_scope: list[tuple[str, bool]] | None = None,
 ) -> PreparedScanFinalization:
@@ -3183,6 +3184,11 @@ def _prepare_scan_finalization(
         _validate_findings(manifest, findings_for_validation)
     if was_sealed:
         _validate_derived_finding_identities(manifest, findings)
+    retain_deferred = (
+        not was_sealed
+        and reconcile_review is not None
+        and reconcile_review(manifest, findings, coverage)
+    )
     _validate_coverage(manifest, coverage, scan_dir)
     provisional_manifest = copy.deepcopy(manifest)
     provisional_manifest["scan"]["artifacts"] = [
@@ -3244,7 +3250,10 @@ def _prepare_scan_finalization(
         coverage_bytes = _contract_json_bytes("coverage.json", coverage)
         if inline_review:
             scan.update(inline_review)
-            scan.pop("reviewState", None)
+            if retain_deferred:
+                scan["reviewState"] = {"deferred": copy.deepcopy(coverage["deferred"])}
+            else:
+                scan.pop("reviewState", None)
         report_markdown_bytes = _generate_report_projection(manifest, findings, coverage)
         _validate_scan_local_output_path(scan_dir, scan_dir / "report.md", "report.md")
         scan["artifacts"] = [

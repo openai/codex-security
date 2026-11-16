@@ -19,6 +19,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    RecoverableContractError,
     ScanLocalIOError,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
@@ -39,6 +40,7 @@ from finalize_scan_contract import (
 )
 from finalize_scan_contract import finding_candidate_id as finding_candidate_id
 from review_state import checkpoint_review_state, review_state, review_summary, uses_legacy_review
+from standard_validation import has_standard_review_state, require_standard_decisions
 from workbench.retained_coverage import merge_saved_results as merge_saved_results
 from workbench.saved_coverage import (
     _saved_coverage_id as _saved_coverage_id,
@@ -70,6 +72,7 @@ from workbench.saved_sources import (
 from workbench.saved_sources import (
     _digest as _digest,
 )
+from workbench.standard_stop import capture_standard_stop
 from workbench.storage import saved_deep_workers
 from workbench_constants import PHASES
 from workbench_coverage_receipts import (
@@ -145,7 +148,7 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
         workers = saved_deep_workers(connection, scan)
-        paths = dict(_saved_result_paths(scan_dir, workers))
+        paths = dict(_saved_result_paths(scan_dir, workers, scan["mode"]))
         frozen_sources = scan["retained_source_digests_json"]
 
         def has_saved_source() -> bool:
@@ -288,7 +291,7 @@ def _recovery_source_digests(
     if previous_heads is None:
         previous_heads = _frozen_checkpoint_heads(scan_dir, scan["id"], frozen_sources or {})
     checkpoint_heads = dict(previous_heads)
-    paths = dict(_saved_result_paths(scan_dir, workers))
+    paths = dict(_saved_result_paths(scan_dir, workers, scan["mode"]))
     recovery_sources = dict(frozen_sources or {})
     parent_context: dict[str, str] = {}
     source_times = _frozen_source_times(scan_dir, scan["id"], recovery_sources, parent_context)
@@ -1004,6 +1007,17 @@ def save_scan_artifact(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     return {"scanId": scan_id, "path": str(scan_dir / output)}
 
 
+def require_complete_draft(completion_manifest: dict[str, Any] | None) -> None:
+    if (
+        completion_manifest is not None
+        and isinstance(completion_manifest.get("scan"), dict)
+        and completion_manifest["scan"].get("complete") is False
+    ):
+        raise RecoverableContractError(
+            "The latest saved scan draft is incomplete; continue the scan before completing it."
+        )
+
+
 def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
     """Publish a staged draft for the current continuation of a running, unsealed scan.
 
@@ -1041,6 +1055,8 @@ def write_scan_draft(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             draft["findings"],
             draft.get("reviewState", draft.get("coverage")),
         )
+        if manifest["scan"].get("complete") is not False:
+            require_standard_decisions(scan, manifest, findings, coverage)
         manifest["scan"]["reviewState"] = checkpoint_review_state(coverage)
         manifest["scan"].pop("coverageRef", None)
         binding = db.workbench_completion_binding(scan, db.now())
@@ -1315,6 +1331,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
         ):
             raise SystemExit("Codex Security scan progress not found.")
+        _capture_standard_work_on_stop(db, connection, scan)
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return db.scan_context(connection, scan["id"])
@@ -1379,12 +1396,31 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             scope_file_count if scan["scan_dir"] == observed["scan_dir"] else None,
         ):
             raise SystemExit("Codex Security scan progress not found.")
+        _capture_standard_work_on_stop(db, connection, scan)
     record_stopped_scan_usage(db, connection, scan_id, cost_json)
     preserve_stopped_results_after_transition(db, connection, scan["id"])
     return {
         **db.workspace_state(connection, scan["workspace_id"], result_scan_id=result_scan_id),
         "canceledScanId": scan["id"],
     }
+
+
+def _capture_standard_work_on_stop(db, connection, scan):
+    if scan["mode"] != "standard":
+        return
+    warnings = []
+    try:
+        scan_dir = Path(scan["scan_dir"])
+        if not has_standard_review_state(scan_dir):
+            return
+        capture_standard_stop(db.require_canonical_scan_directory(scan_dir), scan["id"], warnings)
+    except (OSError, SystemExit, TypeError, ValueError) as exc:
+        warnings.append(f"Could not retain the Standard review queue at stop: {exc}")
+    if warnings:
+        connection.execute(
+            "UPDATE scans SET completion_warnings_json = ? WHERE id = ?",
+            (json.dumps([*json.loads(scan["completion_warnings_json"]), *warnings]), scan["id"]),
+        )
 
 
 def record_stopped_scan_usage(

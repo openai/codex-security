@@ -7,7 +7,7 @@ description: "Find vulnerabilities in the current source of a whole repository o
 
 Find vulnerabilities an attacker could actually exploit. Start from code that accepts untrusted input or exercises authority. Follow it to the operation it controls. Check the real enforcement point, its callers, and the strongest evidence that the suspected attack is blocked. For an exposed credential, the relevant path is who can read it and what access it grants.
 
-Use [the core audit](../../references/core-scan.md) for the independent baseline, focused investigations, and validation. Give reviewers the authorized source and security context. Keep scan administration in the parent. Report findings with source lines and concrete impact. Record what you reviewed and what remains uncertain.
+Use [the core audit](../../references/core-scan.md) to select small file batches from the source and validate what they uncover. Give reviewers the authorized source and security context. Keep scan administration in the parent. Report findings with source lines and concrete impact. Record what you reviewed and what remains uncertain.
 
 ## Run the audit
 
@@ -18,4 +18,4 @@ Before reading target source, bind the requested target and scope:
 
 Keep the target read-only and review its current source offline. Preserve exact user context as analysis data. Only the parent may read an explicitly supplied URL, once, if the user explicitly authorized that read. Do not follow links. Keep an existing investigation allowance unchanged across workers and resumes. Only if the user requests a time limit in this conversation and none was supplied, render [the time budget](../../references/investigation-time-budget.md) once before source review using the requested minutes and actual UTC start and deadline.
 
-Start the independent audit while mapping the repository. At the first usable threat model, follow [save scan results](references/scan-results.md). Checkpoint candidates as they arrive. Once assigned reviews return, validate each distinct broken control once and submit the findings and honest coverage to the same scan. The SDK owns finalization for its scans.
+Generate repository-specific search rules and dispatch all matching files in batches. At the first usable threat model, follow [save scan results](references/scan-results.md). Save each worker’s full return, validate its candidates in small independent batches, and reconcile every candidate ID with a decision before submitting the final draft. The SDK owns finalization for its scans.
