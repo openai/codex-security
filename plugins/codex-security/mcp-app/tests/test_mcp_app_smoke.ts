@@ -2751,7 +2751,10 @@ try {
     markedApplyDelivered.structuredContent.scan.findings[0].remediationState
       .actionDeliveredAt,
   );
-  execFileSync("git", ["apply", "--no-index", savedPatchPath], { cwd: target });
+  execFileSync("git", ["apply", "--no-index", "-"], {
+    cwd: target,
+    input: await readFile(savedPatchPath),
+  });
   assert.match(
     await readFile(path.join(target, "src/a.py"), "utf8"),
     /^fixed\r?\n$/,
@@ -2893,9 +2896,11 @@ try {
     generatedLatin1.structuredContent.scan.findings[0].remediationState;
   const latin1PatchPath = path.join(initializedScanDir, patchPath);
   assert.equal(patchDigest, `sha256:${hash("sha256", latin1Patch)}`);
-  assert.deepEqual(await readFile(latin1PatchPath), latin1Patch);
-  execFileSync("git", ["apply", "--no-index", latin1PatchPath], {
+  const savedLatin1Patch = await readFile(latin1PatchPath);
+  assert.deepEqual(savedLatin1Patch, latin1Patch);
+  execFileSync("git", ["apply", "--no-index", "-"], {
     cwd: target,
+    input: savedLatin1Patch,
   });
   assert.match(await readFile(latin1Source, "latin1"), /^résolu\r?\n$/);
 
