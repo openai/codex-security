@@ -79,6 +79,14 @@ class ValidateScanContractTest(ScanFixtureTestCase):
         with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed"):
             VALIDATOR.validate_contract(self.scan_dir)
 
+    def test_rejects_non_string_scan_status(self) -> None:
+        manifest = self.read_json("scan-manifest.json")
+        manifest["scan"]["status"] = ["completed"]
+        self.write_json("scan-manifest.json", manifest)
+
+        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "manifest.scan.status"):
+            VALIDATOR.validate_contract(self.scan_dir)
+
     def test_finalizer_then_validator_cli_smoke(self) -> None:
         (self.scan_dir / "report.md").unlink()
         scan_dir = self.scan_dir.resolve()
