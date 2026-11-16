@@ -902,8 +902,11 @@ test("isolates relative credential stores selected from an external Git caller",
   expect(protectedStores?.toSorted()).toEqual(
     [
       ...stores.map(({ parent, name }) => join(caller, parent, name)),
-      join(caller, cookie),
-      join(directory, cookie),
+      ...[caller, directory].flatMap((root) => [
+        join(root, "home", ".netrc"),
+        join(root, "home", "_netrc"),
+        join(root, cookie),
+      ]),
     ].sort(),
   );
 });

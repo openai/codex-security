@@ -12,7 +12,7 @@ import {
   stat,
   symlink,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   basename,
@@ -210,6 +210,7 @@ export interface PatchGitControls {
   readonly externalCachePaths: readonly string[];
   readonly snapshotStoragePaths: readonly string[];
   readonly snapshotConfigPaths: readonly string[];
+  readonly hostRefreshFilters: readonly string[];
   hostFilterSettings(switchingBranch: boolean): Promise<readonly string[]>;
   validate(): Promise<void>;
   validateCapturedSelection(): Promise<void>;
@@ -217,6 +218,7 @@ export interface PatchGitControls {
 
 export interface PatchPublicationHooks {
   readonly gitDirectory: string;
+  readonly commonDirectory?: string;
   readonly events: Set<string>;
   readonly configured: Set<string>;
 }
@@ -312,7 +314,7 @@ export function patchFilterParameters(
     settings.set(
       key,
       block
-        ? 'echo "Cannot run Git filter with an operator credential helper whose backing store cannot be isolated." >&2; exit 1'
+        ? 'echo "Cannot run Git filter with an operator credential helper or askpass program whose backing store cannot be isolated." >&2; exit 1'
         : "",
     );
     settings.set(
@@ -787,6 +789,8 @@ export async function capturePatchGitControls(
   credentialStorePaths = new Set<string>(),
   commandParameters: string | null = process.env["GIT_CONFIG_PARAMETERS"] ??
     null,
+  userProfile: string | null = process.env["USERPROFILE"] ?? null,
+  netrc: string | null = process.env["NETRC"] ?? null,
 ): Promise<PatchGitControls | undefined> {
   const run: RunGit = (root, checkout, args, options) =>
     runGit(root, checkout, args, {
@@ -1136,6 +1140,23 @@ export async function capturePatchGitControls(
     }
   };
   const relativeDefaultStores: string[] = [];
+  const requestedDirectory =
+    mode === "resumed-hook" ? root : await realControlPath(directory);
+  const protectTransportFile = async (
+    checkout: string,
+    configurationDirectory: string,
+    file: string,
+  ) => {
+    // Git can keep an outside caller's cwd for transport, while snapshot
+    // commands and nested checkouts can use their own setup directory.
+    const paths = new Set([
+      httpCredentialPath(checkout, file),
+      httpCredentialPath(configurationDirectory, file),
+    ]);
+    if (checkout === root && !inside(root, requestedDirectory))
+      paths.add(httpCredentialPath(requestedDirectory, file));
+    for (const path of paths) await protectStore(path);
+  };
   if (mode !== "external") {
     const legacy = await expandConfigurationPath("~/.git-credentials");
     const xdg = configuration.xdgConfigHome
@@ -1145,6 +1166,23 @@ export async function capturePatchGitControls(
       if (!path) continue;
       if (isAbsolute(path)) await protectStore(path);
       else relativeDefaultStores.push(path);
+    }
+    // Git for Windows can initialize HOME from the drive and home path.
+    // libcurl otherwise falls back to USERPROFILE or the Unix account home.
+    let home = await expandConfigurationPath("~");
+    if (!home) {
+      if (process.platform === "win32") home = userProfile ?? undefined;
+      else {
+        try {
+          home = userInfo().homedir;
+        } catch {
+          // An effective UID need not have an entry in the password database.
+        }
+      }
+    }
+    if (home) {
+      await protectTransportFile(root, root, relativeFile(home, ".netrc"));
+      await protectTransportFile(root, root, relativeFile(home, "_netrc"));
     }
   }
   const globalConfigurationPaths: string[] = [];
@@ -1289,23 +1327,25 @@ export async function capturePatchGitControls(
     configurationDirectory: string,
     key: string,
     value: string,
+    origin: "file" | "command",
   ) => {
     if (mode === "external" || !value) return;
+    // Delegates lose command-scope askpass settings, but Git can still read a
+    // file-backed prompt and call it even when both askpass variables are unset.
+    if (key === "core.askpass" && origin === "file") {
+      unisolatedCredentialHelper = true;
+      return;
+    }
     if (httpCredentialFile.test(key)) {
       // The transport may create a cookie jar after capture. Keep host Git
       // from re-running a checkout filter even when the file is still absent.
       hostMayReadStore = true;
-      const file = await expandConfigurationPath(configPath(value));
-      if (!file) return;
-      // Git can keep a separate caller's cwd for transport, while snapshot
-      // commands and nested checkouts can use their own setup directory.
-      const paths = new Set([
-        httpCredentialPath(checkout, file),
-        httpCredentialPath(configurationDirectory, file),
-      ]);
-      if (checkout === root && !inside(root, requestedDirectory))
-        paths.add(httpCredentialPath(requestedDirectory, file));
-      for (const path of paths) await protectStore(path);
+      // Git passes a proxy SSL key verbatim to libcurl.
+      const file = /\.proxysslkey$/iu.test(key)
+        ? configPath(value)
+        : await expandConfigurationPath(configPath(value));
+      if (file)
+        await protectTransportFile(checkout, configurationDirectory, file);
       return;
     }
     if (!/^credential(?:\..*)?\.helper$/iu.test(key)) return;
@@ -1324,7 +1364,7 @@ export async function capturePatchGitControls(
     if (externalInlineAuthentication) rejectCredentialedGitDelegate();
     if (unisolatedCredentialHelper && canRunOtherDelegate)
       throw new Error(
-        "Cannot run Git filters or hooks with an operator credential helper whose backing store cannot be isolated. Select a Git configuration without that helper for patching.",
+        "Cannot run Git filters or hooks with an operator credential helper or askpass program whose backing store cannot be isolated. Select a Git configuration without that credential source for patching.",
       );
   };
   const snapshotFilter = (key: string) =>
@@ -1371,6 +1411,10 @@ export async function capturePatchGitControls(
     for (const path of relativeDefaultStores)
       await protectStore(relativeFile(configurationDirectory, path));
     filterDirectories.set(checkout, configurationDirectory);
+    if (mode !== "external" && netrc) {
+      hostMayReadStore = true;
+      await protectTransportFile(checkout, configurationDirectory, netrc);
+    }
     const records = await runConfigFields(checkout, [
       "config",
       "--null",
@@ -1420,6 +1464,7 @@ export async function capturePatchGitControls(
         const inline = hasInlineGitAuthentication(key, value);
         if (
           (inline ||
+            key === "core.askpass" ||
             httpCredentialFile.test(key) ||
             /^credential(?:\..*)?\.helper$/iu.test(key)) &&
           (await userSelectedConfig(
@@ -1434,6 +1479,7 @@ export async function capturePatchGitControls(
             configurationDirectory,
             key,
             value,
+            "file",
           );
         }
         const path = relativeFile(
@@ -1448,6 +1494,7 @@ export async function capturePatchGitControls(
           configurationDirectory,
           key,
           value,
+          "command",
         );
       }
     }
@@ -1584,6 +1631,7 @@ export async function capturePatchGitControls(
             configurationDirectory,
             key,
             value,
+            "file",
           );
         }
         recordConfiguredHook(
@@ -1710,8 +1758,6 @@ export async function capturePatchGitControls(
   const selectedDirectories = await Promise.all(
     selectedPaths.map(realControlPath),
   );
-  const requestedDirectory =
-    mode === "resumed-hook" ? root : await realControlPath(directory);
   if (mode === "resumed-hook") {
     // Resume has already found a hook. Inspect only its config graph, including
     // inactive includes it could open directly. No private index or working tree
@@ -2510,7 +2556,7 @@ export async function capturePatchGitControls(
       alternateObjectDirectories.push(path);
   }
   return {
-    publicationHooks: { ...publicationHooks, gitDirectory },
+    publicationHooks: { ...publicationHooks, gitDirectory, commonDirectory },
     readOnlyPaths: [
       ...new Set([
         ...alternateObjectDirectories,
@@ -2538,6 +2584,8 @@ export async function capturePatchGitControls(
     externalCachePaths: [...externalCachePaths],
     snapshotStoragePaths: [...snapshotStoragePaths],
     snapshotConfigPaths: [...snapshotConfigPaths],
+    hostRefreshFilters:
+      mode === "sandbox" && automaticPublication ? protectedFilterKeys() : [],
     async hostFilterSettings(switchingBranch) {
       // The commit reuses the verified native snapshot's blobs. An external
       // filter can still run a model-edited script during the host index refresh.

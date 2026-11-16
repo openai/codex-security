@@ -207,10 +207,11 @@ fn output_rights(file: &File, user: &str) -> Result<u32, u32> {
 
 const PIN_ACCESS: u32 = FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL;
 
-fn relative_directory(
+pub(crate) fn relative_directory(
     parent: &File,
     name: &OsStr,
     descriptor: Option<PSECURITY_DESCRIPTOR>,
+    additional_access: u32,
 ) -> Result<File, u32> {
     let mut units: Vec<_> = name.encode_wide().collect();
     let length = u16::try_from(units.len() * 2).map_err(|_| ERROR_FILENAME_EXCED_RANGE)?;
@@ -232,7 +233,7 @@ fn relative_directory(
     let status = unsafe {
         NtCreateFile(
             &mut handle,
-            PIN_ACCESS,
+            PIN_ACCESS | additional_access,
             &attributes,
             &mut io,
             null(),
@@ -270,7 +271,12 @@ pub(crate) fn inspect_output_path(
     let mut parent = 0;
     for entry in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
         let opened = if let Some(handle) = ancestors.last() {
-            relative_directory(handle, entry.file_name().ok_or(ERROR_ACCESS_DENIED)?, None)
+            relative_directory(
+                handle,
+                entry.file_name().ok_or(ERROR_ACCESS_DENIED)?,
+                None,
+                0,
+            )
         } else {
             OpenOptions::new()
                 .access_mode(PIN_ACCESS)
@@ -299,6 +305,7 @@ pub(crate) fn inspect_output_path(
                     ancestors.last().ok_or(ERROR_PATH_NOT_FOUND)?,
                     entry.file_name().ok_or(ERROR_ACCESS_DENIED)?,
                     create,
+                    0,
                 )?;
                 return Ok(());
             }
@@ -317,7 +324,7 @@ pub(crate) fn inspect_output_path(
             if rights & FILE_DELETE_CHILD != 0 {
                 return Err(ERROR_ACCESS_DENIED);
             }
-            let child = relative_directory(&file, name, None)?;
+            let child = relative_directory(&file, name, None, 0)?;
             if output_rights(&child, user)? & DELETE != 0 {
                 return Err(ERROR_ACCESS_DENIED);
             }
