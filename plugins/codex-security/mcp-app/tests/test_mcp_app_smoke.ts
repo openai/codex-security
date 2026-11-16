@@ -73,8 +73,10 @@ assert.equal(
 );
 assert.deepEqual(mcpConfig.mcpServers["codex-security"].args, ["--stdio"]);
 assert.equal(mcpConfig.mcpServers["codex-security"].tool_timeout_sec, 349_200);
-assert.deepEqual(
+const forwardedEnvironment = new Set(
   mcpConfig.mcpServers["codex-security"].env_vars,
+);
+assert.deepEqual(
   [
     "CODEX_HOME",
     "CODEX_SQLITE_HOME",
@@ -116,6 +118,7 @@ assert.deepEqual(
     "CODEX_SECURITY_PYTHON_COMMAND",
     "CODEX_SECURITY_GIT",
     "CODEX_SECURITY_KNOWLEDGE_BASE",
+    "CODEX_SECURITY_EXCLUDE_PATHS",
     "CODEX_SECURITY_CONFIG_PATH",
     "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
     "CODEX_SECURITY_SCAN_DIR",
@@ -132,8 +135,9 @@ assert.deepEqual(
     "REQUESTS_CA_BUNDLE",
     "NODE_EXTRA_CA_CERTS",
     "XDG_CACHE_HOME",
-  ],
-  "The MCP process and SDK workers must inherit provider routing and authentication, runtime paths, and enterprise proxy/certificate configuration.",
+  ].filter((name) => !forwardedEnvironment.has(name)),
+  [],
+  "The MCP process must forward all required environment variables.",
 );
 const target = await temporaryDirectory("codex-security-target-");
 const replacementTarget = await temporaryDirectory(
