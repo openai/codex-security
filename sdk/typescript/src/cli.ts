@@ -13028,27 +13028,61 @@ async function captureHiddenPatchContent(
   if (ident) {
     // A staged attributes file can differ from the worktree attributes used
     // by ls-files. Never run a new external driver to render these entries.
-    const keys = await patchGitRecords(
+    const settings = await patchGitRecords(
       root,
-      [...source, "config", "--includes", "--null", "--name-only", "--list"],
+      [
+        ...source,
+        "config",
+        "--includes",
+        "--null",
+        "--get-regexp",
+        "^filter\\..+\\.(smudge|process|required)$",
+      ],
       dependencies,
       {
         environment: { ...environment, GIT_CONFIG: undefined },
         patchSnapshot: [],
       },
-    );
-    const drivers = new Set<string>();
-    const filters: string[] = [];
-    for (const key of keys) {
-      const driver = /^filter\.(.+)\.(smudge|process|required)$/su.exec(key);
-      if (!driver) continue;
-      filters.push(patchPathText(key));
-      if (driver[2] !== "required") drivers.add(driver[1]!);
+    ).catch((error: unknown) => {
+      if (isJsonObject(error) && (error["code"] ?? error["status"]) === 1)
+        return [];
+      throw error;
+    });
+    const commands = new Map<string, boolean>();
+    for (const setting of settings) {
+      if (!setting) continue;
+      const end = setting.indexOf("\n");
+      // Preserve Git's last assignment, including an explicitly empty override.
+      const key = end < 0 ? setting : setting.slice(0, end);
+      commands.set(key, end !== setting.length - 1);
     }
+    const drivers = new Set<string>();
+    for (const [key, active] of commands)
+      if (active && !key.endsWith(".required"))
+        drivers.add(key.slice(7, key.lastIndexOf(".")));
     if (drivers.size) {
-      // A copy transformed by an external smudge or process driver cannot be
-      // verified by the built-in checkout representation. The checkout can
-      // consult indexed attributes even when worktree attributes have changed.
+      // Unspecified attributes have no record in --all mode. A driver can be
+      // named "unspecified", "set", or "unset" just like any other driver.
+      const ambiguous = ["set", "unset"].filter((value) => drivers.has(value));
+      const literal = new Set(
+        ambiguous.length
+          ? await patchGitRecords(
+              root,
+              [
+                ...source,
+                "ls-files",
+                "-z",
+                "--",
+                ...ambiguous.map((name) => ":(attr:ident filter=" + name + ")"),
+              ],
+              dependencies,
+              {
+                environment: { ...environment, GIT_LITERAL_PATHSPECS: "0" },
+                patchSnapshot: [],
+              },
+            )
+          : [],
+      );
       const input = Buffer.from(
         [...materialized.keys()].join("\0") + "\0",
         "latin1",
@@ -13056,16 +13090,24 @@ async function captureHiddenPatchContent(
       for (const direction of [[], ["--cached"]]) {
         const attributes = await patchGitRecords(
           root,
-          [...source, "check-attr", ...direction, "-z", "--stdin", "filter"],
+          [...source, "check-attr", ...direction, "-z", "--stdin", "--all"],
           dependencies,
           { environment, patchSnapshot: [], input },
         );
-        for (let i = 0; i + 2 < attributes.length; i += 3)
-          if (drivers.has(attributes[i + 2]!))
-            materialized.delete(attributes[i]!);
+        for (let i = 0; i + 2 < attributes.length; i += 3) {
+          const path = attributes[i]!;
+          const value = attributes[i + 2]!;
+          if (
+            attributes[i + 1] === "filter" &&
+            drivers.has(value) &&
+            (!ambiguous.includes(value) || literal.has(path))
+          )
+            materialized.delete(path);
+        }
       }
       if (!materialized.size) return;
     }
+    const filters = [...commands.keys()].map((key) => patchPathText(key));
     renderEnvironment = {
       ...environment,
       GIT_CONFIG_PARAMETERS: patchFilterParameters(

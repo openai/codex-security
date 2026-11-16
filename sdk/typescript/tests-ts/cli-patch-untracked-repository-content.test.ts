@@ -174,6 +174,11 @@ for (const kind of [
         const encodedIdent =
           kind === "encoded ident edit in initialized submodule";
         const encoding = encodedIdent ? "utf16le" : "utf8";
+        if (ordinaryIdent) {
+          // These names overlap Git's display of missing and boolean attributes.
+          for (const driver of ["unspecified", "unset"])
+            nestedGit("config", "filter." + driver + ".smudge", "exit 1");
+        }
         const trackedEdit =
           ordinaryIdent ||
           hiddenFlag !== undefined ||
@@ -190,7 +195,7 @@ for (const kind of [
             join(nested, ".gitattributes"),
             "local.txt ident " +
               (encodedIdent
-                ? "-text working-tree-encoding=UTF-16LE"
+                ? "-text -filter working-tree-encoding=UTF-16LE"
                 : "-text") +
               "\n.gitignore ident -text\n",
           );
