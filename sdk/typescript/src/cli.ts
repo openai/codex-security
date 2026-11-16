@@ -75,7 +75,10 @@ import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { formatJsonTokenView, type TokenView } from "./cli-token-view.js";
-import { formatCoverageScope } from "./coverage-presentation.js";
+import {
+  formatCoverageScope,
+  formatScopePath,
+} from "./coverage-presentation.js";
 import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
@@ -1346,6 +1349,7 @@ const scanPreflightOutput = z.looseObject({
   maxCostUsd: ScanSettingsSchema.shape.maxCostUsd,
   costLimitNote: z.string().optional(),
   knowledgeBasePaths: ScanSettingsSchema.shape.knowledgeBasePaths,
+  excludePaths: ScanSettingsSchema.shape.excludePaths,
   scanPromptFile: ScanSettingsSchema.shape.scanPromptFile,
   validationPromptFile: ScanSettingsSchema.shape.validationPromptFile,
   failOnSeverity: FailureSeveritySchema.optional(),
@@ -5513,6 +5517,13 @@ export async function main(
             .describe(
               "Scan only PATH; repeat for multiple repository-relative paths.",
             ),
+          excludePath: z
+            .array(optionValue("--exclude-path"))
+            .optional()
+            .meta({ default: [] })
+            .describe(
+              "Exclude a literal repository-relative file or directory; repeat for multiple paths.",
+            ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
             .optional()
@@ -5670,6 +5681,7 @@ export async function main(
             {
               ...pickScanSettings(options),
               target: scope.target,
+              excludePaths: options.excludePath,
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
@@ -8152,12 +8164,18 @@ export async function main(
           const overrides = Object.entries(sources)
             .filter(([, source]) => source !== "default")
             .map(([key, source]) => `${key} (${source})`);
-          const { mode, auth, target, maxCostUsd } = resolved.options;
+          const { mode, auth, target, maxCostUsd, excludePaths } =
+            resolved.options;
           renderedOutput =
             [
               `${PREVIEW_LABEL}: ${nextStep}`,
               `Configuration: ${project?.path ?? "defaults"}`,
               `Scope: ${typeof target === "string" ? target : JSON.stringify(target)}`,
+              ...(excludePaths?.length
+                ? [
+                    `Excluded paths: ${excludePaths.map(formatScopePath).join(", ")}`,
+                  ]
+                : []),
               `Scan: ${mode} · ${model.model} (${model.reasoningEffort}) · auth ${auth}`,
               ...(maxCostUsd === undefined
                 ? []
@@ -8930,6 +8948,11 @@ async function prepareScanArgumentsFromRecipe(
     fields.maxTimeMinutes,
     "investigation time limit",
   );
+  const excludePaths = readSetting(
+    "excludePaths",
+    fields.excludePaths,
+    "excluded paths",
+  );
   const deepScan = DeepScanSettingsSchema.optional().safeParse(
     recipe["deepScan"],
   );
@@ -9004,6 +9027,7 @@ async function prepareScanArgumentsFromRecipe(
     auth: auth ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram,
     ownerSuggestions,
+    excludePaths,
     ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:

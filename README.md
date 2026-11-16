@@ -73,6 +73,9 @@ Choose a scope and scan mode:
 # Scan selected paths.
 cs scan . --path src --path tests
 
+# Exclude a directory from the scan.
+cs scan . --exclude-path examples/
+
 # Scan committed changes from a base revision to HEAD.
 cs scan . --diff origin/main
 

@@ -508,13 +508,21 @@ callback, questions remain unresolved.
 ```bash
 codex-security scan .
 codex-security scan . --path src --path tests
+codex-security scan . --exclude-path examples/
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
 codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
-`--path` selects files or directories. The scan summary and saved scan details
+`--path` selects files or directories. Repeat `--exclude-path` to exclude literal
+repository-relative files or directories, including all descendants of a directory.
+Exclusions take precedence over `--path`, also apply to diff and Deep scans, and
+default to none. For persistent exclusions, set `scan.exclude_paths` in a selected
+project config. CLI exclusions replace that configured list. Excluded files remain
+readable as context, but findings whose locations are all excluded are removed
+from scan results.
+The scan summary and saved scan details
 show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
