@@ -166,6 +166,47 @@ def test_latest_scan_confirmation_uses_group_membership(
     assert finding["confirmedInLatestScan"] is False
 
 
+def test_global_findings_split_legacy_root_from_linked_group(workbench_api, indexed_collections):
+    connection, targets = indexed_collections
+    legacy_target = stable_target_id(targets[0])
+    # A second generation keeps the first target's legacy scan in its own target group.
+    connection.execute(
+        "INSERT INTO scans (id, workspace_id, target_id, target_path, target_revision, scope, "
+        "mode, scan_dir, status, phase, started_at, created_at, updated_at, repository_generation) "
+        "SELECT ?, workspace_id, target_id, target_path, target_revision, scope, mode, "
+        "scan_dir || '/replaced', status, phase, started_at, created_at, updated_at, "
+        "'synthetic-replaced-generation' FROM scans WHERE id = ?",
+        ("00000000-0000-4000-8000-999999999999", SCAN_IDS[0]),
+    )
+    connection.execute("UPDATE scans SET target_id = ? WHERE id = ?", (legacy_target, SCAN_IDS[2]))
+    connection.execute(
+        "UPDATE scans SET repository_generation = 'synthetic-linked-generation' WHERE id IN (?, ?)",
+        SCAN_IDS[1:],
+    )
+    # The legacy occurrence becomes the group root, then the linked current scans join it.
+    for before, after in [(0, 2), (2, 1)]:
+        connection.execute(
+            "INSERT INTO scan_comparisons VALUES (?, ?, '{}', 'now', 'now')",
+            (SCAN_IDS[before], SCAN_IDS[after]),
+        )
+        connection.execute(
+            "INSERT INTO scan_comparison_matches VALUES (?, ?, ?, ?, 'same issue')",
+            (SCAN_IDS[before], SCAN_IDS[after], f"occurrence-{before}", f"occurrence-{after}"),
+        )
+    connection.execute(
+        "INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at) "
+        "VALUES ('occurrence-0', 'closed', 'false_positive', 'Synthetic decision', "
+        "'2026-08-01T00:00:00Z')"
+    )
+    findings = workbench_api["native_indexes"].list_global_findings(connection, query_args())[
+        "findings"
+    ]
+    assert sorted((row["knownScanIds"], row["status"]) for row in findings) == [
+        ([SCAN_IDS[0]], "closed"),
+        (SCAN_IDS[1:], "open"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("completion", "status", "updated"),
     [

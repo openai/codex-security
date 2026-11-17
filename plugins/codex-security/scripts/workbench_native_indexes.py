@@ -277,12 +277,16 @@ def _indexed_findings(
 
     # Global comparisons do not bind legacy history across current targets. A scoped
     # projection already admits only its own target's legacy rows and decisions.
+    # Take each split group out first because its legacy root can map back to the same
+    # identity.
+    cross_target_groups = []
     for identity, occurrences in list(grouped.items()):
         current_targets = {
             row["target_id"] for row in occurrences if row["repository_generation"] is not None
         }
         if len(current_targets) <= 1 or scan_scope is not None:
             continue
+        del grouped[identity]
         current = []
         for row in occurrences:
             if row["repository_generation"] is None:
@@ -290,10 +294,10 @@ def _indexed_findings(
                 grouped.setdefault(legacy_identity, []).append(row)
             else:
                 current.append(row)
-        grouped[identity] = current
+        cross_target_groups.append(current)
 
     findings = []
-    for occurrences in grouped.values():
+    for occurrences in [*grouped.values(), *cross_target_groups]:
         latest = max(
             occurrences,
             key=lambda row: (timestamp_key(row["created_at"]), row["occurrence_id"]),
