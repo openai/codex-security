@@ -111,6 +111,31 @@
           "type": "string",
           "minLength": 1
         },
+        "validation": {
+          "description": "Optional host-side follow-up validation provider. Omit to use Codex static validation.",
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string", "minLength": 1 },
+            "continuum": {
+              "type": "object",
+              "properties": {
+                "environment_id": { "type": "string", "minLength": 1 },
+                "aws_profile": { "type": "string", "minLength": 1 },
+                "aws_region": { "type": "string", "minLength": 1 },
+                "wait_minutes": {
+                  "type": "number",
+                  "exclusiveMinimum": 0,
+                  "maximum": 240
+                },
+                "console_base_url": { "type": "string", "minLength": 1 }
+              },
+              "required": ["environment_id"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["provider"],
+          "additionalProperties": { "$ref": "#/definitions/__schema0" }
+        },
         "deep": {
           "description": "Deep defaults; a valid block may be retained while standard mode is selected.",
           "type": "object",
@@ -211,7 +236,7 @@
         "model_reasoning_effort": { "type": "string", "minLength": 1 },
         "model_provider": { "type": "string", "minLength": 1 }
       },
-      "additionalProperties": { "$ref": "#/definitions/__schema0" }
+      "additionalProperties": { "$ref": "#/definitions/__schema1" }
     },
     "limits": {
       "type": "object",
@@ -260,6 +285,20 @@
           "type": "object",
           "propertyNames": { "type": "string" },
           "additionalProperties": { "$ref": "#/definitions/__schema0" }
+        }
+      ]
+    },
+    "__schema1": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "items": { "$ref": "#/definitions/__schema1" } },
+        {
+          "type": "object",
+          "propertyNames": { "type": "string" },
+          "additionalProperties": { "$ref": "#/definitions/__schema1" }
         }
       ]
     }

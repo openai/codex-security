@@ -3,6 +3,7 @@ import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,
   ScanSettingsSchema,
+  ValidationProviderSettingsSchema,
 } from "./scan-settings.js";
 
 const nonempty = z.string().min(1);
@@ -56,6 +57,9 @@ export const ProjectConfigInputSchema = z.strictObject({
       ),
       validation_file: ScanSettingsSchema.shape.validationPromptFile.describe(
         "Custom validation instructions, relative to this file; not supported in active deep scans.",
+      ),
+      validation: ValidationProviderSettingsSchema.optional().describe(
+        "Optional host-side follow-up validation provider. Omit to use Codex static validation.",
       ),
       deep: z
         .strictObject({
