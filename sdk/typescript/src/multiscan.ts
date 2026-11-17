@@ -369,7 +369,6 @@ async function runCampaign(
   );
   const receipts = await readReceipts(
     ledger,
-    resolve(options.outputDir),
     new Map(tasks.map((task) => [task.id.toLowerCase(), task.id])),
     options.recoverScan !== undefined,
   );
@@ -408,13 +407,24 @@ async function runCampaign(
       join(output, "artifacts", task.id),
     );
     const artifactOutput = join(artifactRoot, `attempt-${receipt.attempt}`);
+    const selectedArtifactOutput = join(
+      resolve(options.outputDir),
+      "artifacts",
+      task.id,
+      `attempt-${receipt.attempt}`,
+    );
     const completedReceipt =
       receipt.status === "completed" ||
       (receipt.status === "failed" &&
         receipt.error === "Multiscan repository coverage is incomplete.");
-    const artifactsPresent = await hasArtifacts(artifactOutput);
+    const selectedOutputMatches =
+      receipt.outputDir === artifactOutput ||
+      receipt.outputDir === selectedArtifactOutput;
+    const artifactsPresent =
+      selectedOutputMatches && (await hasArtifacts(artifactOutput));
     if (
       completedReceipt &&
+      selectedOutputMatches &&
       (!(await hasCompletedContract(
         artifactOutput,
         await resumePluginRoot(),
@@ -1245,7 +1255,6 @@ async function ensureManifest(
 
 async function readReceipts(
   path: string,
-  selectedOutput: string,
   campaignIds: ReadonlyMap<string, string>,
   preserveInterrupted = false,
 ): Promise<Map<string, MultiscanHistory>> {
@@ -1258,7 +1267,6 @@ async function readReceipts(
   }
   const end = contents.lastIndexOf(10) + 1;
   const lines = contents.subarray(0, end).toString("utf8").split("\n");
-  const output = dirname(path);
   const receipts = new Map<string, MultiscanHistory>();
   for (const [index, line] of lines.entries()) {
     if (!line) continue;
@@ -1278,8 +1286,9 @@ async function readReceipts(
         throw new Error("Expected a completed or failed receipt status");
       const attemptPath = join("artifacts", taskId, `attempt-${saved.attempt}`);
       if (
-        saved.outputDir !== join(output, attemptPath) &&
-        saved.outputDir !== join(selectedOutput, attemptPath)
+        typeof saved.outputDir !== "string" ||
+        !isAbsolute(saved.outputDir) ||
+        !saved.outputDir.endsWith(sep + attemptPath)
       )
         throw new Error(
           "Expected outputDir to match the receipt task and attempt",

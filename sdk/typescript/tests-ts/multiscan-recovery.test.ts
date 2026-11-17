@@ -698,16 +698,11 @@ describe("multiscan", () => {
       const { resultsPath: ledger } = await runMultiscan(configured);
       const [receipt] = await results(ledger);
       const recoverScan = mock((directory: string) => completedScan(directory));
-      for (const [id, attempt] of [
-        ["receipt", 999],
-        ["other", 1],
-      ] as const) {
-        const outputDir = join(
-          paths.output,
-          "artifacts",
-          id,
-          `attempt-${attempt}`,
-        );
+      for (const outputDir of [
+        join(paths.output, "artifacts", "receipt", "attempt-999"),
+        join(paths.output, "artifacts", "other", "attempt-1"),
+        join("artifacts", "receipt", "attempt-1"),
+      ]) {
         const damaged = JSON.stringify({ ...receipt, outputDir }) + "\n";
         await writeFile(ledger, damaged);
         await expect(

@@ -1569,23 +1569,37 @@ describe("multiscan", () => {
     const output = join(linkedParent, "results");
     const security = client(mock(completeRun));
 
+    await runMultiscan(
+      options(paths, client(rejecting("Initial failure")), {
+        outputDir: output,
+        maxAttempts: 1,
+      }),
+    );
     const summary = await runMultiscan(
       options(paths, security, { outputDir: output }),
     );
 
     expect(summary).toMatchObject({ total: 1, completed: 1, failed: 0 });
     expect(summary.resultsPath).toBe(join(output, "results.jsonl"));
-    const [receipt] = await results(summary.resultsPath);
+    const [failed, receipt] = await results(summary.resultsPath);
     expect(receipt?.["outputDir"]).toBe(
-      join(canonicalParent, "results", "artifacts", "sample", "attempt-1"),
+      join(canonicalParent, "results", "artifacts", "sample", "attempt-2"),
     );
+    const oldAlias = join(paths.root, "previous-campaigns", "results");
     await writeFile(
       summary.resultsPath,
-      `${JSON.stringify({
-        ...receipt,
-        id: "SAMPLE",
-        outputDir: join(output, "artifacts", "sample", "attempt-1"),
-      })}\n`,
+      [
+        JSON.stringify({
+          ...failed,
+          outputDir: join(oldAlias, "artifacts", "sample", "attempt-1"),
+        }),
+        JSON.stringify({
+          ...receipt,
+          id: "SAMPLE",
+          outputDir: join(output, "artifacts", "sample", "attempt-2"),
+        }),
+        "",
+      ].join("\n"),
     );
     expect(
       await runMultiscan(options(paths, security, { outputDir: output })),
