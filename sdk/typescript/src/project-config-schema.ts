@@ -73,6 +73,33 @@ export const ProjectConfigInputSchema = z.strictObject({
         ),
     })
     .optional(),
+  exploitability: z
+    .strictObject({
+      scope: z
+        .strictObject({
+          instructions: nonempty.describe(
+            "Caller-provided investigation boundaries and assumptions.",
+          ),
+        })
+        .optional(),
+      evidence_sources: z
+        .array(
+          z.strictObject({
+            server: nonempty.describe("Server name in codex.mcp_servers."),
+            instructions: z
+              .string()
+              .regex(/\S/u)
+              .describe(
+                "When to use this server and what evidence its tools can provide.",
+              ),
+          }),
+        )
+        .optional()
+        .describe(
+          "MCP servers the investigator can query during a reviewed dependency check.",
+        ),
+    })
+    .optional(),
   codex: z
     .object({
       model: nonempty.optional(),

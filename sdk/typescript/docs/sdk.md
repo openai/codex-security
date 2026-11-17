@@ -847,30 +847,11 @@ pin in a requirements file. Both are build inputs. A deployment needs a separate
 observation that connects the running package to its source revision. Import
 matches and OpenGrep call locations are candidates for review.
 
-A runtime receipt carries a source label and the original UTF-8 payload. The
-investigator hashes these payload bytes. A producer can describe the observation
-with the following fields.
-
-```json
-{
-  "service": "sample-worker",
-  "package": { "ecosystem": "npm", "name": "sample-codec", "version": "1.2.0" },
-  "revision": "1111111111111111111111111111111111111111",
-  "coverage": "partial",
-  "evidence": "One request was sampled on this build.",
-  "access": {
-    "caller": "sample client",
-    "evidence": "The client submitted a request to the preview route."
-  }
-}
-```
-
-Supply the running commit only when it is known. The optional `access` object
-records separate evidence for the named caller. A running-build observation on
-its own leaves caller access unresolved. The accepted coverage values
-are `complete`, `partial` and `unknown` for the reported scope. Unrecognized
-payloads retain their hash and have unknown coverage. An empty sample or
-unavailable source tracer leaves caller reachability unresolved.
+For a reviewed repository check, select MCP servers through
+`exploitability.evidence_sources` in the project file. The investigator can
+query those servers and cite their replies. A deployment record can establish
+which build ran. Establishing caller access takes evidence of who could reach
+the affected operation. See the [CLI configuration example](cli.md#experimental-dependency-investigations).
 
 ## Containerized bulk scans
 
