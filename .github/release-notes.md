@@ -16,6 +16,7 @@
 - preserve symlink parent traversal in component paths ([#2692](https://github.com/openai/codex-security/pull/2692))
 - preserve Daybreak enrollment link attribution ([#2656](https://github.com/openai/codex-security/pull/2656))
 - add scan path exclusions ([#2699](https://github.com/openai/codex-security/pull/2699))
+- document Opper’s native profile requirements ([#1887](https://github.com/openai/codex-security/pull/1887))
 
 </details>
 
