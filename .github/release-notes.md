@@ -20,6 +20,8 @@
 - check whether the app still serves a route ([#200](https://github.com/openai/codex-security/pull/200))
 - show how --max-attempts works across two runs ([#100](https://github.com/openai/codex-security/pull/100))
 - add a software citation for Codex Security ([#2639](https://github.com/openai/codex-security/pull/2639))
+- document a tested xAI Responses gateway workaround ([#2437](https://github.com/openai/codex-security/pull/2437))
+- configure OrcaRouter through a native file profile ([#736](https://github.com/openai/codex-security/pull/736))
 
 </details>
 
