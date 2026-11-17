@@ -548,7 +548,9 @@ def git_changed_paths(repo: Path, base: str, head: str, mode: str) -> list[tuple
     raise SystemExit(f"Unknown diff mode: {mode}")
 
 
-def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int | None:
+def diff_scope_file_count(
+    target: Path, diff_target: dict[str, str], exclusions: tuple[str, ...] | list[str] = ()
+) -> int | None:
     base, head = diff_target["baseRevision"], diff_target["headRevision"]
     local = diff_target["kind"] == "working_tree"
     selected: list[str] = []
@@ -560,6 +562,8 @@ def diff_scope_file_count(target: Path, diff_target: dict[str, str]) -> int | No
         return None
     for path, status in changes:
         name = path.relative_to(target).as_posix()
+        if any(PurePosixPath(name).is_relative_to(PurePosixPath(scope)) for scope in exclusions):
+            continue
         if not local or status == "D":
             committed[name] = f"{base if status == 'D' else head}:{name}"
         else:
@@ -1477,7 +1481,9 @@ def directory_snapshot_regular_file_count(target: Path) -> int:
     return sum(1 for _ in directory_snapshot_regular_files(target))
 
 
-def scoped_regular_file_count(repository: Path, scopes: list[str]) -> int:
+def scoped_regular_file_count(
+    repository: Path, scopes: list[str], exclusions: tuple[str, ...] | list[str] = ()
+) -> int:
     # Count directory entries once while retaining explicitly requested ignored files.
     names: set[str] = set()
     for scope in scopes:
@@ -1490,7 +1496,15 @@ def scoped_regular_file_count(repository: Path, scopes: list[str]) -> int:
             names.add(selected.as_posix())
         elif selected.is_dir():
             names.update(path.as_posix() for path in directory_snapshot_regular_files(selected))
-    return len(names)
+    return sum(
+        not any(
+            PurePosixPath(Path(name).relative_to(repository).as_posix()).is_relative_to(
+                PurePosixPath(scope)
+            )
+            for scope in exclusions
+        )
+        for name in names
+    )
 
 
 def copy_directory_excluding(

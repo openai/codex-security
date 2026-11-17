@@ -1,6 +1,6 @@
 {
   "name": "@openai/codex-security",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "TypeScript SDK and CLI for Codex Security",
   "license": "Apache-2.0",
   "author": "OpenAI",
@@ -17,6 +17,11 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "imports": {
+    "#classify-severity-records-logs": {
+      "codex-security-records-logs-v1": "./dist/classify-severity-diagnostics.js"
+    }
+  },
   "exports": {
     "./server": {
       "types": "./dist/server/api.d.ts",

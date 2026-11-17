@@ -75,7 +75,10 @@ import stringWidth from "string-width";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { formatCliHelp } from "./cli-help.js";
 import { formatJsonTokenView, type TokenView } from "./cli-token-view.js";
-import { formatCoverageScope } from "./coverage-presentation.js";
+import {
+  formatCoverageScope,
+  formatScopePath,
+} from "./coverage-presentation.js";
 import { resolveSkillAuthentication } from "./skill-authentication.js";
 import { scanLogsJson } from "./cli-scan-logs-json.js";
 import {
@@ -172,6 +175,10 @@ import {
   savedScanWorkbench,
 } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
+import {
+  createSeverityDiagnostics,
+  severityDiagnosticsEnabled,
+} from "./classify-severity-diagnostics.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
@@ -349,6 +356,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  resolveMatchingBatch,
   selectedComparisonContext,
   comparisonForScan,
   matchScanFindingsInternal,
@@ -356,7 +364,7 @@ import {
   type matchScanFindings,
   type ScanComparisonInput,
   type ScanComparisonOptions,
-  type ScanMatchingBatch,
+  type ScanMatchingPlan,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
 import {
@@ -1346,6 +1354,7 @@ const scanPreflightOutput = z.looseObject({
   maxCostUsd: ScanSettingsSchema.shape.maxCostUsd,
   costLimitNote: z.string().optional(),
   knowledgeBasePaths: ScanSettingsSchema.shape.knowledgeBasePaths,
+  excludePaths: ScanSettingsSchema.shape.excludePaths,
   scanPromptFile: ScanSettingsSchema.shape.scanPromptFile,
   validationPromptFile: ScanSettingsSchema.shape.validationPromptFile,
   failOnSeverity: FailureSeveritySchema.optional(),
@@ -1373,14 +1382,6 @@ function scanOutputSchema(
     ])
     .optional();
 }
-
-type MatchingPlan = JsonObject & {
-  repository: string;
-  scanCount: number;
-  unavailableScans: number;
-  skippedPairs: number;
-  batches: (JsonObject & ScanMatchingBatch)[];
-};
 
 type SkillThreadSource = Extract<
   CodexSecurityThreadSource,
@@ -4671,7 +4672,7 @@ export async function main(
         },
       ],
       description:
-        "Read all AWS Continuum issues or collect one finding with its repository's patches.",
+        "Read all AWS Continuum issues or collect one finding with its matching validation evidence and patches.",
       hint: "Requires AWS CLI v2.38.5 or later installed outside the checkout. Bulk collection requires exactly one Git repository and allows S3 sources. For one finding, pass --finding-id and --source-root. The CLI checks for one Git repository and no S3 sources when --repository-name is omitted. Save --format json output for publish findings --provider continuum.",
       destructive: false,
       args: z.object({ environmentId: continuumEnvironmentId }),
@@ -5513,6 +5514,13 @@ export async function main(
             .describe(
               "Scan only PATH; repeat for multiple repository-relative paths.",
             ),
+          excludePath: z
+            .array(optionValue("--exclude-path"))
+            .optional()
+            .meta({ default: [] })
+            .describe(
+              "Exclude a literal repository-relative file or directory; repeat for multiple paths.",
+            ),
           knowledgeBase: z
             .array(optionValue("--knowledge-base"))
             .optional()
@@ -5670,6 +5678,7 @@ export async function main(
             {
               ...pickScanSettings(options),
               target: scope.target,
+              excludePaths: options.excludePath,
               knowledgeBasePaths: options.knowledgeBase,
               failureSeverity: options.failOnSeverity,
               maxCostUsd: options.maxCost,
@@ -5975,7 +5984,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; accepts --runs.",
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
           ),
         reprocess: z
           .boolean()
@@ -6682,7 +6691,7 @@ export async function main(
         provider: PROVIDER_OPTION,
         maxAttempts: positiveInteger
           .default(1)
-          .describe("Maximum scan attempts per repository."),
+          .describe("Try each CSV row up to this many times per run."),
         maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
           "Stop each repository attempt if estimated USD cost exceeds AMOUNT.",
         ),
@@ -8152,12 +8161,18 @@ export async function main(
           const overrides = Object.entries(sources)
             .filter(([, source]) => source !== "default")
             .map(([key, source]) => `${key} (${source})`);
-          const { mode, auth, target, maxCostUsd } = resolved.options;
+          const { mode, auth, target, maxCostUsd, excludePaths } =
+            resolved.options;
           renderedOutput =
             [
               `${PREVIEW_LABEL}: ${nextStep}`,
               `Configuration: ${project?.path ?? "defaults"}`,
               `Scope: ${typeof target === "string" ? target : JSON.stringify(target)}`,
+              ...(excludePaths?.length
+                ? [
+                    `Excluded paths: ${excludePaths.map(formatScopePath).join(", ")}`,
+                  ]
+                : []),
               `Scan: ${mode} · ${model.model} (${model.reasoningEffort}) · auth ${auth}`,
               ...(maxCostUsd === undefined
                 ? []
@@ -8190,6 +8205,19 @@ export async function main(
         };
       },
     });
+
+  if (
+    environmentEntry(
+      dependencies.environment,
+      "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY",
+    ) === "1"
+  ) {
+    cli.command(
+      Cli.create("exploitability", {
+        description: "Investigate dependency vulnerabilities in a repository.",
+      }),
+    );
+  }
 
   if (completion.success) {
     await writeCliOutput(
@@ -8507,6 +8535,11 @@ export async function main(
           ? await runHostRecordsProtocol(recordsCommand, input, output, {
               signal: controller.signal,
               classificationRuns,
+              diagnostics:
+                recordsCommand === "classify-severity" &&
+                severityDiagnosticsEnabled()
+                  ? createSeverityDiagnostics(() => dependencies.now())
+                  : undefined,
             })
           : remediationOperation !== undefined
             ? await runHostedRemediationProtocol(
@@ -8930,6 +8963,11 @@ async function prepareScanArgumentsFromRecipe(
     fields.maxTimeMinutes,
     "investigation time limit",
   );
+  const excludePaths = readSetting(
+    "excludePaths",
+    fields.excludePaths,
+    "excluded paths",
+  );
   const deepScan = DeepScanSettingsSchema.optional().safeParse(
     recipe["deepScan"],
   );
@@ -9004,6 +9042,7 @@ async function prepareScanArgumentsFromRecipe(
     auth: auth ?? DEFAULT_SCAN_AUTH,
     cyberAccessProgram,
     ownerSuggestions,
+    excludePaths,
     ...(severityRubric === undefined ? {} : { severityRubric }),
     // Saved scopes contain literal repository names, not home-relative inputs.
     target:
@@ -9317,7 +9356,7 @@ async function matchAllScans(
     }),
     undefined,
     options.signal,
-  )) as MatchingPlan;
+  )) as ScanMatchingPlan;
   const { repository, scanCount, unavailableScans, skippedPairs, batches } =
     result;
 
@@ -9326,13 +9365,14 @@ async function matchAllScans(
   let relatedPairs = 0;
   let uncertainPairs = 0;
   const newlyMatchedGroups: string[][] = [];
-  for (const {
-    afterScanId,
-    afterFindings,
-    beforeScans,
-    knownFindingGroups = [],
-  } of batches) {
+  for (const batch of batches) {
     options.signal?.throwIfAborted();
+    const {
+      afterScanId,
+      afterFindings,
+      beforeScans,
+      knownFindingGroups = [],
+    } = resolveMatchingBatch(batch, result.findingsByScanId);
     const before = beforeScans.flatMap(({ findings }) => findings);
     const knownGroups = unionFindingGroups([
       ...knownFindingGroups,

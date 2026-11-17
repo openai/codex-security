@@ -63,6 +63,7 @@ const PROJECT_SETTING_KEYS = {
   cyberAccessProgram: "scan.cyber_access_program",
   ownerSuggestions: "scan.owner_suggestions",
   target: "scan.scope",
+  excludePaths: "scan.exclude_paths",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
   validationPromptFile: "scan.validation_file",
@@ -223,6 +224,7 @@ export function projectConfigStarter(
     `#   mode: ${DEFAULT_SCAN_MODE}`,
     "#   scope:",
     "#     paths: [src] # Relative to each selected repository.",
+    "#   exclude_paths: [examples] # Relative to each selected repository.",
     "#   knowledge_base: [] # Paths relative to this file.",
     "#   instructions_file: instructions.md",
     "#   validation_file: validation.md # Standard mode only.",
@@ -419,6 +421,11 @@ export function resolveScanSettings(
     mode,
     maxTimeMinutes,
     target,
+    excludePaths: choose(
+      "scan.exclude_paths",
+      file?.scan?.exclude_paths,
+      overrides.excludePaths,
+    ),
     ownerSuggestions: choose(
       "scan.owner_suggestions",
       file?.scan?.owner_suggestions,
