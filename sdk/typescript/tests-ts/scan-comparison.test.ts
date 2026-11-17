@@ -49,6 +49,10 @@ import {
   removeTemporaryDirectory,
 } from "./support/temporary-directories.js";
 import { fail } from "./support/errors.js";
+import {
+  COMPAT_PROXY_BASE_URL_PATTERN,
+  normalizeCompatProxyProviders,
+} from "./support/responses-compat-proxy.js";
 import { planComponents } from "../src/component-plan.js";
 import { VERSION } from "../src/version.js";
 import { nodeCommand } from "./support/shell.js";
@@ -563,9 +567,17 @@ describe("semantic scan comparison", () => {
         });
         expect(profileClient.profiles).toHaveLength(1);
         const profile = profileClient.profiles[0]!;
-        expect(profile.config).toEqual({
+        // The live matcher profile routes the provider through the Responses
+        // compat proxy; every other provider field is unchanged.
+        const { providers, proxyUrls } = normalizeCompatProxyProviders(
+          profile.config["model_providers"] as JsonObject,
+          { [providerName]: provider },
+        );
+        expect({ model_providers: providers }).toEqual({
           model_providers: { [providerName]: provider },
         });
+        for (const proxyUrl of proxyUrls)
+          expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
         expect(startupCommands).toHaveLength(1);
         expect(parse(startupCommands[0]!.args![1]!)).toEqual({
           model_providers: {
@@ -1353,18 +1365,25 @@ describe("semantic scan comparison", () => {
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
           expect(profileClient.profiles).toHaveLength(1);
-          expect(profileClient.profiles[0]!.config).toEqual({
-            model_providers: {
-              "synthetic.provider": {
-                ...provider,
-                auth: {
-                  ...provider.auth,
-                  cwd: selection === "overrides" ? "~/helpers" : home,
-                  args: selection === "overrides" ? ["override"] : ["original"],
-                },
-              },
+          const expectedProvider = {
+            ...provider,
+            auth: {
+              ...provider.auth,
+              cwd: selection === "overrides" ? "~/helpers" : home,
+              args: selection === "overrides" ? ["override"] : ["original"],
             },
+          };
+          // The live matcher profile routes the provider through the Responses
+          // compat proxy; authentication and every other field are unchanged.
+          const { providers, proxyUrls } = normalizeCompatProxyProviders(
+            profileClient.profiles[0]!.config["model_providers"] as JsonObject,
+            { "synthetic.provider": expectedProvider },
+          );
+          expect({ model_providers: providers }).toEqual({
+            model_providers: { "synthetic.provider": expectedProvider },
           });
+          for (const proxyUrl of proxyUrls)
+            expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
           await expect(
             readFile(profileClient.profiles[0]!.path, "utf8"),
           ).rejects.toMatchObject({ code: "ENOENT" });
@@ -1516,9 +1535,18 @@ describe("semantic scan comparison", () => {
             ({ scanId }) => scanId === `current-${index}`,
           );
           expect(profile).toBeDefined();
-          expect(profile!.config).toEqual({
+          // The live matcher profile routes the provider through the Responses
+          // compat proxy; every other provider field is unchanged.
+          const { providers: normalized, proxyUrls } =
+            normalizeCompatProxyProviders(
+              profile!.config["model_providers"] as JsonObject,
+              { "synthetic.provider": provider },
+            );
+          expect({ model_providers: normalized }).toEqual({
             model_providers: { "synthetic.provider": provider },
           });
+          for (const proxyUrl of proxyUrls)
+            expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
           for (const markerIndex of [0, 1]) {
             expect(JSON.stringify(options!.config)).not.toContain(
               `synthetic-concurrent-header-${markerIndex}`,
@@ -3239,20 +3267,27 @@ describe("semantic scan comparison", () => {
           expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
           expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
           expect(captured?.apiKey).toBeUndefined();
-          expect(profileClient.profiles[0]!.config).toEqual({
-            model_providers: {
-              "synthetic.provider": {
-                ...provider,
-                auth: {
-                  ...provider.auth,
-                  cwd: selection === "overrides" ? "~/helpers" : home,
-                  args: selection === "overrides" ? ["override"] : ["original"],
-                  refresh_interval_ms:
-                    selection === "profile-partial" ? 4567 : 1234,
-                },
-              },
+          const expectedProvider = {
+            ...provider,
+            auth: {
+              ...provider.auth,
+              cwd: selection === "overrides" ? "~/helpers" : home,
+              args: selection === "overrides" ? ["override"] : ["original"],
+              refresh_interval_ms:
+                selection === "profile-partial" ? 4567 : 1234,
             },
+          };
+          // The live matcher profile routes the provider through the Responses
+          // compat proxy; authentication and every other field are unchanged.
+          const { providers, proxyUrls } = normalizeCompatProxyProviders(
+            profileClient.profiles[0]!.config["model_providers"] as JsonObject,
+            { "synthetic.provider": expectedProvider },
+          );
+          expect({ model_providers: providers }).toEqual({
+            model_providers: { "synthetic.provider": expectedProvider },
           });
+          for (const proxyUrl of proxyUrls)
+            expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
         } else {
           expect(captured?.env?.["OPENAI_API_KEY"]).toBe(
             "synthetic-ambient-key",

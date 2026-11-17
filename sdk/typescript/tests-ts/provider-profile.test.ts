@@ -16,8 +16,10 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import type { CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import {
+  adaptResponsesCompatProviders,
   createProfileCodex,
   createProviderProfile,
+  needsResponsesCompatProxy,
   providerPreflightCommand,
   restoreProviderProfile,
 } from "../src/provider-profile.js";
@@ -225,16 +227,36 @@ test.each([false, true])(
         environment,
       );
     const restored = await Promise.all([restore(0), restore(1)]);
+    const proxyUrls: string[] = [];
     for (const [index, profile] of profiles.entries()) {
-      expect(restored[index]).toEqual({
-        model_provider: "openrouter",
-        model_providers: providers[index]!,
-      });
+      if (replay) {
+        expect(restored[index]).toEqual({
+          model_provider: "openrouter",
+          model_providers: providers[index]!,
+        });
+      } else {
+        // The live profile routes the provider through its own compat proxy.
+        const restoredProviders = restored[index]!["model_providers"] as Record<
+          string,
+          Record<string, unknown>
+        >;
+        const rewritten = restoredProviders["openrouter"]!;
+        expect({
+          ...rewritten,
+          base_url: providers[index]!["openrouter"]!.base_url,
+        }).toEqual(providers[index]!["openrouter"]);
+        expect(rewritten["base_url"]).toMatch(
+          /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
+        );
+        proxyUrls.push(String(rewritten["base_url"]));
+      }
       if (process.platform !== "win32")
         expect((await stat(profile.path)).mode & 0o777).toBe(0o600);
     }
+    if (!replay) expect(proxyUrls[0]).not.toBe(proxyUrls[1]);
     await profiles[0]!.cleanup();
     expect(await restore(1)).toEqual(restored[1]);
+    await profiles[1]!.cleanup();
     await expect(
       restoreProviderProfile(
         {},
@@ -846,3 +868,183 @@ test.each([
     }
   },
 );
+
+test.each([
+  [
+    "xAI responses provider",
+    "xai",
+    { base_url: "https://api.x.ai/v1", wire_api: "responses" },
+    true,
+  ],
+  [
+    "responses provider without wire_api",
+    "gateway",
+    { base_url: "https://gateway.example.test/v1" },
+    true,
+  ],
+  [
+    "OpenAI host",
+    "openai",
+    { base_url: "https://api.openai.com/v1", wire_api: "responses" },
+    false,
+  ],
+  [
+    "Azure provider name",
+    "azure",
+    {
+      base_url: "https://example.openai.azure.com/openai/v1",
+      wire_api: "responses",
+    },
+    false,
+  ],
+  [
+    "Azure base URL",
+    "custom",
+    {
+      base_url: "https://example.cognitiveservices.azure.com/openai/v1",
+      wire_api: "responses",
+    },
+    false,
+  ],
+  [
+    "chat wire_api",
+    "xai",
+    { base_url: "https://api.x.ai/v1", wire_api: "chat" },
+    false,
+  ],
+  [
+    "loopback base URL",
+    "local",
+    { base_url: "http://127.0.0.1:8471/v1", wire_api: "responses" },
+    true,
+  ],
+  [
+    "localhost base URL",
+    "local",
+    { base_url: "http://localhost:8471/v1", wire_api: "responses" },
+    true,
+  ],
+  [
+    "huggingface provider",
+    "huggingface",
+    { base_url: "https://router.huggingface.co/v1", wire_api: "responses" },
+    false,
+  ],
+  ["provider without base_url", "openai", { wire_api: "responses" }, false],
+  ["non-record definition", "xai", null, false],
+] as const)(
+  "responses compat selection: %s",
+  (_name, id, definition, expected) => {
+    expect(needsResponsesCompatProxy(id, definition)).toBe(expected);
+  },
+);
+
+test("adaptResponsesCompatProviders rewrites only compatible responses providers", async () => {
+  const providers = {
+    xai: {
+      name: "xAI",
+      base_url: "https://api.x.ai/v1",
+      wire_api: "responses",
+      env_key: "XAI_API_KEY",
+    },
+    openai: {
+      name: "OpenAI",
+      base_url: "https://api.openai.com/v1",
+      wire_api: "responses",
+    },
+    chat: {
+      name: "Chat",
+      base_url: "https://chat.example.test/v1",
+      wire_api: "chat",
+    },
+  };
+  const adapted = await adaptResponsesCompatProviders(providers);
+  try {
+    const xai = adapted.providers["xai"] as Record<string, unknown>;
+    expect(xai["base_url"]).toMatch(
+      /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
+    );
+    expect({ ...xai, base_url: "https://api.x.ai/v1" }).toEqual(providers.xai);
+    expect(adapted.providers["openai"]).toEqual(providers.openai);
+    expect(adapted.providers["chat"]).toEqual(providers.chat);
+  } finally {
+    await adapted.cleanup();
+  }
+});
+
+test("private profiles route compatible providers through the compat proxy", async () => {
+  const home = await temporaryDirectory();
+  const profile = await createProviderProfile(home, {
+    model_provider: "xai",
+    model_providers: {
+      xai: {
+        name: "xAI",
+        base_url: "https://api.x.ai/v1",
+        wire_api: "responses",
+        env_key: "XAI_API_KEY",
+      },
+      openai: {
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        wire_api: "responses",
+      },
+    },
+  });
+  try {
+    const written = parse(await readFile(profile.path, "utf8")) as {
+      model_providers: Record<string, Record<string, unknown>>;
+    };
+    const xai = written.model_providers["xai"]!;
+    expect(xai["base_url"]).toMatch(
+      /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
+    );
+    expect(xai["name"]).toBe("xAI");
+    expect(xai["env_key"]).toBe("XAI_API_KEY");
+    expect(written.model_providers["openai"]).toEqual({
+      name: "OpenAI",
+      base_url: "https://api.openai.com/v1",
+      wire_api: "responses",
+    });
+    const proxyUrl = String(xai["base_url"]);
+    await profile.cleanup();
+    await expect(
+      fetch(`${proxyUrl}/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+    ).rejects.toThrow();
+    expect(await readFile(profile.path, "utf8").catch(() => null)).toBe(null);
+  } finally {
+    await profile.cleanup();
+  }
+});
+
+test("replay profiles preserve the original upstream base URL", async () => {
+  const root = await temporaryDirectory();
+  const environment = { CODEX_SECURITY_STATE_DIR: join(root, "state") };
+  const home = codexSecurityCredentialHome(environment);
+  const config = {
+    model_provider: "xai",
+    model_providers: {
+      xai: {
+        name: "xAI",
+        base_url: "https://api.x.ai/v1",
+        wire_api: "responses",
+      },
+    },
+  };
+  const profile = await createProviderProfile(home, config, { replay: true });
+  try {
+    expect(JSON.parse(await readFile(profile.path, "utf8"))).toEqual(config);
+    expect(
+      await restoreProviderProfile(
+        {},
+        { name: profile.name, home: "managed" },
+        environment,
+      ),
+    ).toEqual(config);
+  } finally {
+    await profile.cleanup();
+  }
+});
