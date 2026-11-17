@@ -298,6 +298,27 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
+For Opper, save this profile in `$CODEX_HOME/opper.config.toml`
+(default `~/.codex/opper.config.toml`). Opper requires `web_search = "disabled"`.
+
+```toml
+model_provider = "opper"
+model = "anthropic/claude-sonnet-4-6"
+web_search = "disabled"
+
+[model_providers.opper]
+name = "Opper"
+base_url = "https://api.opper.ai/v3/compat"
+wire_api = "responses"
+env_key = "OPPER_API_KEY"
+```
+
+Set `OPPER_API_KEY` in your environment and run
+`codex-security scan . --codex 'profile="opper"'`. Choose a model that supports
+tool calling and streaming. Verification covered profile loading and a request to
+a local Responses endpoint.
+See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents/codex).
+
 ### Hugging Face compatibility
 
 In compatibility testing, Codex 0.166.0 sent its scan-completion tool inside a
@@ -529,13 +550,21 @@ callback, questions remain unresolved.
 ```bash
 codex-security scan .
 codex-security scan . --path src --path tests
+codex-security scan . --exclude-path examples/
 codex-security scan . --diff origin/main --json
 codex-security scan . --working-tree
 codex-security scan . --owner-suggestions
 codex-security scan . --output-dir /path/outside/repository/results --dry-run
 ```
 
-`--path` selects files or directories. The scan summary and saved scan details
+`--path` selects files or directories. Repeat `--exclude-path` to exclude literal
+repository-relative files or directories, including all descendants of a directory.
+Exclusions take precedence over `--path`, also apply to diff and Deep scans, and
+default to none. For persistent exclusions, set `scan.exclude_paths` in a selected
+project config. CLI exclusions replace that configured list. Excluded files remain
+readable as context, but findings whose locations are all excluded are removed
+from scan results.
+The scan summary and saved scan details
 show requested paths and exclusions. `coverage.deferred` records unfinished
 requested work separately from optional `coverage.openQuestions` follow-up.
 Human-readable output quotes ambiguous paths, while JSON retains their original strings.
@@ -1455,10 +1484,10 @@ Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--post-scan-prompt-file` runs a follow-up even after failure, but not after
 cancellation or a cost stop.
 
-Concurrency defaults to four repositories. `--max-attempts` defaults to one
-attempt per pending repository per invocation. Repeating the command continues
-the campaign, skips completed results, and starts pending attempts. Occupied
-attempt directories stop that repository and suggest `--recover`.
+By default, `bulk-scan` runs up to four repositories concurrently and tries each
+unfinished CSV row once per run. With `--max-attempts 2`, a row that fails
+attempts 1 and 2 gets up to two more attempts (3 and 4) on the next run.
+An occupied attempt directory stops that row and prompts for `--recover`.
 If an ordinary attempt finds its checkout path already occupied, it stops before
 fetching. Use `--recover` to scan in a fresh checkout, or inspect and move the
 existing checkout before an ordinary retry.
