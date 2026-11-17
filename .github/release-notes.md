@@ -22,6 +22,7 @@
 - add a software citation for Codex Security ([#2639](https://github.com/openai/codex-security/pull/2639))
 - document a tested xAI Responses gateway workaround ([#2437](https://github.com/openai/codex-security/pull/2437))
 - configure OrcaRouter through a native file profile ([#736](https://github.com/openai/codex-security/pull/736))
+- compare vulnerable and repaired invoice ownership checks ([#2612](https://github.com/openai/codex-security/pull/2612))
 
 </details>
 
