@@ -8202,6 +8202,19 @@ export async function main(
       },
     });
 
+  if (
+    environmentEntry(
+      dependencies.environment,
+      "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY",
+    ) === "1"
+  ) {
+    cli.command(
+      Cli.create("exploitability", {
+        description: "Investigate dependency vulnerabilities in a repository.",
+      }),
+    );
+  }
+
   if (completion.success) {
     await writeCliOutput(
       output,

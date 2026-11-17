@@ -40,6 +40,16 @@ including file names that begin with a dash.
 - [Use a hosted executor](#hosted-standard-scan) or
   [run bulk scans in containers](#containerized-bulk-scans).
 
+## Experimental dependency investigations
+
+Set `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` to enable the experimental
+`exploitability` command group for an invocation. The group is hidden and unavailable
+by default. Use its help to see the commands available in your installed version.
+
+```sh
+CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability --help
+```
+
 ## Updating the CLI
 
 Run `cs update` to update an npm global installation managed by the running

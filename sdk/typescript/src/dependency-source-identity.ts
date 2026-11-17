@@ -1,0 +1,117 @@
+import { createHash, hash } from "node:crypto";
+import { realpath } from "node:fs/promises";
+import { z } from "zod";
+import { portableRelativePath } from "./contract-values.js";
+import { CodexSecurityError } from "./errors.js";
+import { gitOutput } from "./targets.js";
+
+export const dependencyGitCommitSchema = z
+  .string()
+  .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u, "Expected a full Git commit ID.");
+
+const localObjects = {
+  GIT_NO_LAZY_FETCH: "1",
+  GIT_NO_REPLACE_OBJECTS: "1",
+  GIT_ALLOW_PROTOCOL: "",
+  GIT_LITERAL_PATHSPECS: "1",
+};
+
+/** Resolve the exact regular blob in the requested commit, including when the worktree is dirty. */
+export async function readDependencyGitSource(
+  repository: string,
+  revision: string,
+  relativePath: string,
+  signal?: AbortSignal,
+) {
+  const commit = dependencyGitCommitSchema.parse(revision);
+  const path = portableRelativePath(relativePath, "Git source path");
+  const repositoryRoot = await realpath(
+    await gitOutput(
+      repository,
+      ["rev-parse", "--show-toplevel"],
+      signal,
+      localObjects,
+    ),
+  );
+  const git = (args: string[]) =>
+    gitOutput(repositoryRoot, args, signal, localObjects);
+  if ((await git(["rev-parse", "--verify", commit + "^{commit}"])) !== commit)
+    throw new CodexSecurityError(
+      "Expected the complete ID of a Git commit object.",
+    );
+  const entry = await git(["ls-tree", "-z", "--full-tree", commit, "--", path]);
+  const match = /^100(?:644|755) blob ([0-9a-f]+)\t([^\0]+)\0$/u.exec(entry);
+  if (!match || match[2] !== path)
+    throw new CodexSecurityError(`No regular Git file at ${commit}:${path}.`);
+  const blob = match[1]!;
+  const bytes = await gitOutput(
+    repositoryRoot,
+    ["cat-file", "blob", blob],
+    signal,
+    localObjects,
+    repositoryRoot,
+    "buffer",
+  );
+  const actual = createHash(blob.length === 40 ? "sha1" : "sha256")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+  if (actual !== blob)
+    throw new CodexSecurityError(
+      "Git file bytes do not match their object ID.",
+    );
+  return {
+    bytes,
+    identity: {
+      kind: "git" as const,
+      status: "verified" as const,
+      repositoryRoot,
+      repositoryPath: path,
+      commit,
+      blob,
+      contentSha256: hash("sha256", bytes),
+    },
+  };
+}
+
+export async function readDependencySourceCitation(
+  repository: string,
+  commit: string,
+  range: { path: string; startLine: number; endLine: number },
+  signal?: AbortSignal,
+) {
+  if (
+    !Number.isSafeInteger(range.startLine) ||
+    !Number.isSafeInteger(range.endLine) ||
+    range.startLine < 1 ||
+    range.endLine < range.startLine
+  )
+    throw new CodexSecurityError(
+      "Expected a one-based source range in ascending order.",
+    );
+  const { bytes, identity } = await readDependencyGitSource(
+    repository,
+    commit,
+    range.path,
+    signal,
+  );
+  const text = new TextDecoder("utf-8", {
+    fatal: true,
+    ignoreBOM: true,
+  }).decode(bytes);
+  const lines = text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+  if (range.startLine > lines.length)
+    throw new CodexSecurityError(
+      "Source range starts past the end of the Git file.",
+    );
+  const endLine = Math.min(range.endLine, lines.length);
+  return {
+    path: identity.repositoryPath,
+    commit: identity.commit,
+    blob: identity.blob,
+    contentSha256: identity.contentSha256,
+    startLine: range.startLine,
+    endLine,
+    excerpt: lines.slice(range.startLine - 1, endLine).join(""),
+  };
+}
