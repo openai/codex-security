@@ -45,6 +45,9 @@ export const ProjectConfigInputSchema = z.strictObject({
       scope: ProjectScopeSchema.optional().describe(
         "One scope variant. Omit for the whole repository. Mode compatibility is checked after overrides.",
       ),
+      exclude_paths: ScanSettingsSchema.shape.excludePaths.describe(
+        "Literal files or directories relative to the selected repository. Exclusions take precedence over inclusions.",
+      ),
       knowledge_base: ScanSettingsSchema.shape.knowledgeBasePaths.describe(
         "Context files or directories, relative to this file. An empty list selects no additional context.",
       ),

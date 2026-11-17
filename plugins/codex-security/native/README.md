@@ -4,7 +4,7 @@ These internal bindings supply OS operations that Node does not expose. The `res
 
 ## Package inputs
 
-For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run [native-artifacts](../../../.github/workflows/native-artifacts.yml) manually on a pushed branch. From the repository root, substitute the run ID and the full artifact name shown on that run. Pull request artifacts use the tested merge commit.
+For universal builds, SDK tests, or Docker builds, select a successful run for the checkout's native sources. You can run [native-artifacts](https://github.com/openai/codex-security/blob/main/.github/workflows/native-artifacts.yml) manually on a pushed branch. From the repository root, substitute the run ID and the full artifact name shown on that run. Pull request artifacts use the tested merge commit.
 
 ```sh
 gh run download RUN_ID --name native-universal-COMMIT --dir plugins/codex-security/native/prebuilt
