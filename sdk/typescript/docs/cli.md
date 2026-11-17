@@ -857,6 +857,11 @@ scan:
 codex-security scan . --validate -c codex-security.yaml
 ```
 
+In Codex CLI, explicitly select the same project file when requesting a plugin
+scan. Standard, diff and Deep Scan completion runs the configured provider on
+the MCP host after sealing, and includes its supplemental report and paths in
+the existing completion result. No provider means no additional work.
+
 AWS Continuum is the first built-in adapter. It submits reported code findings
 before waiting in parallel under one deadline. Per-item rejections and timeouts
 remain visible without failing the completed scan. The existing trusted AWS

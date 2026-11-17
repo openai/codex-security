@@ -42,6 +42,13 @@ export interface ValidationProviderAssessment {
 export interface ValidationProviderContext {
   repositoryPath: string;
   signal?: AbortSignal;
+  /** Use the hosting plugin's path protection instead of locating an SDK bundle. */
+  resolveHostPaths?: (
+    cwd: string,
+    roots: readonly string[],
+  ) =>
+    | ((path: string) => string | null)
+    | Promise<(path: string) => string | null>;
 }
 
 /** Host-side extension point for supplemental finding validation. */

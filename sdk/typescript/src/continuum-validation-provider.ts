@@ -413,6 +413,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
       context.repositoryPath,
       process.env,
       context.signal,
+      undefined,
+      context.resolveHostPaths,
     );
     return async (operation, args, signal) => {
       const common = [

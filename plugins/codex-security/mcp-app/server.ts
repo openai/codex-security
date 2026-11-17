@@ -44,6 +44,11 @@ import type {
   DeepScanRunState,
 } from "./src/deep-scan/types.js";
 import { PLUGIN_ROOT, runWorkbench, scanRoot } from "./src/workbench-client.js";
+import {
+  bindValidationProvider,
+  validateCompletedScan,
+  validationCompletionText,
+} from "./src/validation-provider.js";
 
 const USER_INPUT_WAIT_TIMEOUT_MS = 14 * 60 * 1000;
 const trimmedText = z.string().trim();
@@ -159,7 +164,13 @@ const startScanSchema = {
   model: requiredText.max(200).optional(),
   reasoningEffort: requiredText.max(32).optional(),
 };
+const selectedProjectConfigSchema = pathSchema
+  .optional()
+  .describe(
+    "Project YAML/JSON configuration explicitly selected by the user. Never discover a repository configuration automatically.",
+  );
 const startPromptOnlyScanSchema = {
+  projectConfigPath: selectedProjectConfigSchema,
   diffTarget: diffTargetSchema
     .optional()
     .describe("Exact local Git revisions for Review changes mode."),
@@ -181,6 +192,7 @@ const startPromptOnlyScanSchema = {
     .describe("Optional security focus supplied by the user."),
 };
 const startHeadlessStandardScanSchema = {
+  projectConfigPath: selectedProjectConfigSchema,
   targetPath: pathSchema.describe("Resolved local target path."),
   scope: pathSchema
     .optional()
@@ -259,7 +271,7 @@ const targetInspectionSchema = {
 const projectConfigPathSchema = pathSchema
   .optional()
   .describe(
-    "Project YAML/JSON configuration explicitly selected by the user. Never discover or select a repository file automatically. Supported for Deep Scan only.",
+    "Project YAML/JSON configuration explicitly selected by the user. Never discover or select a repository file automatically. Provider validation runs host-side after sealing.",
   );
 const submissionSchema = {
   projectConfigPath: projectConfigPathSchema,
@@ -577,7 +589,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ targetPath, scope, targetSummary, userContext }, extra) => {
+    async (
+      { targetPath, scope, targetSummary, userContext, projectConfigPath },
+      extra,
+    ) => {
       const threadId = threadIdFromExtra(extra);
       if (!threadId) {
         return toolErrorResult(
@@ -585,7 +600,7 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const started = await startHeadlessStandardScan(
-        { targetPath, scope, targetSummary, userContext },
+        { targetPath, scope, targetSummary, userContext, projectConfigPath },
         threadId,
         codexModelSettingsFromExtra(extra),
       );
@@ -645,7 +660,15 @@ export function createCodexSecurityServer(): McpServer {
       _meta: modelActionMeta,
     },
     async (
-      { mode, targetPath, scope, targetSummary, userContext, diffTarget },
+      {
+        mode,
+        targetPath,
+        scope,
+        targetSummary,
+        userContext,
+        diffTarget,
+        projectConfigPath,
+      },
       extra,
     ) => {
       if (mode === "diff" && !diffTarget) {
@@ -670,7 +693,15 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const promptOnly = await startPromptOnlyScan(
-        { mode, targetPath, scope, targetSummary, userContext, diffTarget },
+        {
+          mode,
+          targetPath,
+          scope,
+          targetSummary,
+          userContext,
+          diffTarget,
+          projectConfigPath,
+        },
         threadId,
         codexModelSettingsFromExtra(extra),
       );
@@ -972,7 +1003,11 @@ export function createCodexSecurityServer(): McpServer {
             };
           // Rate-limit snapshots can grow independently of the measured scan totals.
           const { accountRateLimits: _limits, ...scanUsage } = usage ?? {};
+          const validation = await validateCompletedScan(
+            completion.scan as JsonObject,
+          );
           return deepScanTerminalResult(run, {
+            ...(validation ? { validation } : {}),
             scan: {
               progress: { status: progress.status },
               reportAvailable,
@@ -1583,9 +1618,16 @@ export function createCodexSecurityServer(): McpServer {
           modelThreadId: threadId ?? "",
           turnId: securityScanTurnId(extra),
         });
+        const validation = isJsonObject(completed.scan)
+          ? await validateCompletedScan(completed.scan)
+          : undefined;
         return scanActionResult(
-          modelScanContext(completed),
-          "Validated and indexed the completed Codex Security scan.",
+          modelScanContext({
+            ...completed,
+            ...(validation ? { validation } : {}),
+          }),
+          "Validated and indexed the completed Codex Security scan." +
+            validationCompletionText(validation),
           isJsonObject(completed.scan) ? completed.scan.scanId : undefined,
         );
       } catch (error) {
@@ -1901,7 +1943,7 @@ async function startPromptOnlyScan(
 ): Promise<JsonObject> {
   const { mode, targetPath, scope, targetSummary, userContext, diffTarget } =
     input;
-  return await workbench(
+  const started = await workbench(
     "start-prompt-only-scan",
     {
       threadId,
@@ -1916,6 +1958,14 @@ async function startPromptOnlyScan(
     },
     userContext,
   );
+  const scan = started.scan as JsonObject;
+  await bindValidationProvider(
+    String(scan.scanId),
+    String(scan.targetPath),
+    input.projectConfigPath,
+    started.startDisposition === "created",
+  );
+  return started;
 }
 
 async function startHeadlessStandardScan(
@@ -1924,11 +1974,12 @@ async function startHeadlessStandardScan(
     scope?: string;
     targetSummary?: string;
     userContext?: string;
+    projectConfigPath?: string;
   },
   threadId: string,
   modelSettings: { model?: string; reasoningEffort?: string } = {},
 ): Promise<JsonObject> {
-  return await workbench(
+  const started = await workbench(
     "start-headless-standard-scan",
     {
       threadId,
@@ -1941,6 +1992,14 @@ async function startHeadlessStandardScan(
     },
     input.userContext,
   );
+  const scan = started.scan as JsonObject;
+  await bindValidationProvider(
+    String(scan.scanId),
+    String(scan.targetPath),
+    input.projectConfigPath,
+    started.startDisposition === "created",
+  );
+  return started;
 }
 
 async function deepScanProjectSetup(
@@ -2227,7 +2286,12 @@ function deepScanTerminalResult(
           : { completion, reportPath: resolve(run.scanDir, "report.md") }),
         instructions,
       },
-      instructions,
+      instructions +
+        validationCompletionText(
+          isJsonObject(completion?.validation)
+            ? completion.validation
+            : undefined,
+        ),
     );
   }
   if (run.status === "canceled") {

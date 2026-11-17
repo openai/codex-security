@@ -67,12 +67,15 @@ export async function readDeepScanProjectConfig(
   const unsupported = [
     ...Object.keys(input).filter((key) => !["$schema", "scan"].includes(key)),
     ...Object.keys(input.scan ?? {})
-      .filter((key) => !["mode", "max_time_minutes", "deep"].includes(key))
+      .filter(
+        (key) =>
+          !["mode", "max_time_minutes", "deep", "validation"].includes(key),
+      )
       .map((key) => `scan.${key}`),
   ];
   if (unsupported.length > 0) {
     throw new Error(
-      `Unsupported native Deep Scan project settings: ${unsupported.join(", ")}. Only scan.mode, scan.max_time_minutes, and scan.deep are supported.`,
+      `Unsupported native Deep Scan project settings: ${unsupported.join(", ")}. Only scan.mode, scan.max_time_minutes, scan.deep, and scan.validation are supported.`,
     );
   }
   if (input.scan?.mode !== undefined && input.scan.mode !== "deep") {
