@@ -352,6 +352,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  resolveMatchingBatch,
   selectedComparisonContext,
   comparisonForScan,
   matchScanFindingsInternal,
@@ -359,7 +360,7 @@ import {
   type matchScanFindings,
   type ScanComparisonInput,
   type ScanComparisonOptions,
-  type ScanMatchingBatch,
+  type ScanMatchingPlan,
 } from "./scan-comparison.js";
 import { scanActivitiesFromEvent } from "./scan-activity.js";
 import {
@@ -1377,14 +1378,6 @@ function scanOutputSchema(
     ])
     .optional();
 }
-
-type MatchingPlan = JsonObject & {
-  repository: string;
-  scanCount: number;
-  unavailableScans: number;
-  skippedPairs: number;
-  batches: (JsonObject & ScanMatchingBatch)[];
-};
 
 type SkillThreadSource = Extract<
   CodexSecurityThreadSource,
@@ -9341,7 +9334,7 @@ async function matchAllScans(
     }),
     undefined,
     options.signal,
-  )) as MatchingPlan;
+  )) as ScanMatchingPlan;
   const { repository, scanCount, unavailableScans, skippedPairs, batches } =
     result;
 
@@ -9350,13 +9343,14 @@ async function matchAllScans(
   let relatedPairs = 0;
   let uncertainPairs = 0;
   const newlyMatchedGroups: string[][] = [];
-  for (const {
-    afterScanId,
-    afterFindings,
-    beforeScans,
-    knownFindingGroups = [],
-  } of batches) {
+  for (const batch of batches) {
     options.signal?.throwIfAborted();
+    const {
+      afterScanId,
+      afterFindings,
+      beforeScans,
+      knownFindingGroups = [],
+    } = resolveMatchingBatch(batch, result.findingsByScanId);
     const before = beforeScans.flatMap(({ findings }) => findings);
     const knownGroups = unionFindingGroups([
       ...knownFindingGroups,

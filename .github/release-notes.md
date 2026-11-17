@@ -25,6 +25,7 @@
 - compare vulnerable and repaired invoice ownership checks ([#2612](https://github.com/openai/codex-security/pull/2612))
 - reject receipt IDs missing from the campaign ([#2677](https://github.com/openai/codex-security/pull/2677))
 - stop on Codex misalignment policy refusals ([#2410](https://github.com/openai/codex-security/pull/2410))
+- avoid repeating findings in bulk scan matching ([#149](https://github.com/openai/codex-security/pull/149))
 
 </details>
 
