@@ -19,6 +19,7 @@
 - document Opper’s native profile requirements ([#1887](https://github.com/openai/codex-security/pull/1887))
 - check whether the app still serves a route ([#200](https://github.com/openai/codex-security/pull/200))
 - show how --max-attempts works across two runs ([#100](https://github.com/openai/codex-security/pull/100))
+- add a software citation for Codex Security ([#2639](https://github.com/openai/codex-security/pull/2639))
 
 </details>
 
