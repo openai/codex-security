@@ -158,6 +158,7 @@ load the same config also use that setting. The usual config file is
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |
 | `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode                   | Built-in validation                |
+| `scan.validation.provider`     | Host-side follow-up provider; `--validate=NAME` can override its name                | Static Codex validation            |
 | `scan.owner_suggestions`       | Generate an owner-suggestions report after a committed Git scan                      | `false`                            |
 | `scan.deep`                    | Deep discovery settings shown below                                                  | Existing deep defaults             |
 | `codex`                        | Native Codex settings and profiles                                                   | Existing isolated configuration    |
@@ -190,6 +191,7 @@ The resolver maps file keys to the existing SDK options:
 | `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`                                   |
 | `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`                                 |
 | `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`                           |
+| `scan.validation`                         | `validationProviderConfig`            | `--validate=NAME` overrides the provider name        |
 | `scan.owner_suggestions`                  | `ownerSuggestions`                    | `--owner-suggestions`                                |
 | `scan.deep.workers`                       | `workers`                             | `--workers`                                          |
 | `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                                        |

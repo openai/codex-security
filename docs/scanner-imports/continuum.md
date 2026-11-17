@@ -4,6 +4,49 @@ Import Continuum issues to create one Codex Security record per issue ARN. The
 issue provides exploitability and severity analysis, supporting details, and an
 initial patch when available.
 
+## Use Continuum for follow-up validation
+
+Select `scan.validation.provider: continuum` in a trusted project file:
+
+```yaml
+scan:
+  validation:
+    provider: continuum
+    continuum:
+      environment_id: example
+      aws_region: us-east-1
+      wait_minutes: 45
+```
+
+```sh
+codex-security scan . --validate -c codex-security.yaml
+codex-security scan . --validate=continuum -c codex-security.yaml
+```
+
+An optional `aws_profile` selects named credentials; otherwise the AWS CLI uses
+its usual credential chain. Calls run through the existing trusted host launcher,
+not the scan model. The environment must contain the matching source and the
+caller must be authorized to submit findings and read their issues and artifacts.
+
+The adapter sends reported code findings as sink-first OCSF 2002. It submits all
+items before polling up to four concurrently under one `wait_minutes` deadline,
+including throttling backoff. It follows created, duplicate and merged issues and
+waits for both `VALIDATION_EVIDENCE` and scorer `EVIDENCE`. Rejections, missing
+locations and deadlines are unavailable results per item, not scan failures.
+
+After the seal, `validation.md` and `validation.json` show verdict, original and
+supplemental severity, reasons with GRAPH, CODE or INFERRED bases, claim match,
+issue link and evidence freshness. Neither contains raw proof bodies or console
+output. A related-flaw mismatch says “not validated: Continuum proved a related
+flaw” and keeps Codex severity. Claim matching is a text-and-path heuristic, not a
+service-certified identity. Evidence predating submission is marked stale.
+Deployment source identity and local-tree drift are not checked.
+
+Provider assessments do not change sealed findings or `--fail-on-severity`.
+Provider work is not included in Codex cost accounting. Posture questions and
+other deferred review work are not submitted. Anonymised recorded-shape tests
+are offline replays, not live results.
+
 ## Quick start
 
 Open the matching checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
