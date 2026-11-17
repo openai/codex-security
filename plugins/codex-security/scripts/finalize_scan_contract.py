@@ -3198,23 +3198,35 @@ def _prepare_scan_finalization(
     validate_against_schema(findings_for_validation, schema_dir / "findings.schema.json")
     validate_against_schema(coverage, schema_dir / "coverage.schema.json")
     _require_hardening_portfolio_file(scan_dir, scan)
-    if finding_scope is not None:
+    requested_exclusions = (
+        completion_binding.get("scope", {}).get("excludePaths", [])
+        if completion_binding is not None
+        else []
+    )
+    if finding_scope is not None or requested_exclusions:
         # Accepted worker/reducer files remain immutable; only the new parent
         # projection is scoped, after the existing validation of every finding.
         scoped_findings = []
         excluded_findings = []
         for finding in findings["findings"]:
             in_scope = any(
-                PurePosixPath(location["path"]) == PurePosixPath(path)
-                if is_file
-                else path_within_scope(location["path"], path)
+                not any(path_within_scope(location["path"], path) for path in requested_exclusions)
+                and (
+                    finding_scope is None
+                    or any(
+                        PurePosixPath(location["path"]) == PurePosixPath(path)
+                        if is_file
+                        else path_within_scope(location["path"], path)
+                        for path, is_file in finding_scope
+                    )
+                )
                 for location in finding["locations"]
-                for path, is_file in finding_scope
             )
             (scoped_findings if in_scope else excluded_findings).append(finding)
         if was_sealed and len(scoped_findings) != len(findings["findings"]):
+            label = "Deep scan" if finding_scope is not None else "scan"
             raise ContractError(
-                "The sealed Deep scan contains findings outside its requested paths; "
+                f"The sealed {label} contains findings outside its requested scope; "
                 "start a new scan to produce scoped results."
             )
         if not was_sealed:

@@ -662,7 +662,8 @@ for (const command of ["generate-in-scope-files", "make-repo-scope-input"]) {
       });
       const shell = join(f.root, "operator's shell");
       mkdirSync(shell);
-      const envAlias = join(f.root, "launch-env");
+      // Multicall implementations select the utility by its executable name.
+      const envAlias = join(f.root, "env");
       symlinkSync("/usr/bin/env", envAlias);
       symlinkSync("/bin/sh", join(shell, "final-sh"));
       writeFileSync(
