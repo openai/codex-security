@@ -30,7 +30,7 @@ Cloud publication requires a destination that supports the provider and its repo
 | [AWS Continuum](continuum.md)                               | `continuum`   | Code issues with linked evidence, or saved findings and patches                 |
 | [Black Duck SCA](blackduck.md)                              | `blackduck`   | BOM-6 vulnerable components for one project version                             |
 | [Checkmarx SAST](checkmarx.md)                              | `checkmarx`   | Checkmarx One CLI JSON or self-managed CxSAST XML for one scan                  |
-| [CrowdStrike](crowdstrike.md)                               | `crowdstrike` | FCS CLI 4.x IaC scan JSON (local only)                                          |
+| [CrowdStrike](crowdstrike.md)                               | `crowdstrike` | FCS CLI 4.x IaC scan JSON from the scanned checkout                                          |
 | [Endor Labs](endor.md)                                      | `endor`       | Native Finding JSON, or self-contained `endorctl` SARIF with finding UUIDs      |
 | [GitHub code scanning](github-code-scanning.md)             | `github`      | Alerts selected for one repository and Git ref                                  |
 | [GitHub Dependabot](github-dependabot.md)                   | `github`      | Dependency alerts exported from one repository                                  |
@@ -78,8 +78,7 @@ from the preview for your destination](sonar.md#import-and-verify).
 **Save locally.** Remove `--dry-run` and confirm. In automation, use `--yes`
 after reviewing the preview.
 
-**Send to Cloud.** CrowdStrike reports support local import only. For a
-Cloud-supported report, keep the file, provider,
+**Send to Cloud.** Keep the file, provider,
 source key, and scanner options from your local preview. Change the destination
 to `--to cloud`, and pass the connected repository URL or Cloud ID to
 `--repository`. Preview again with `--dry-run --format json`. [Cloud setup](../../sdk/typescript/docs/cli.md#preview-and-publish)

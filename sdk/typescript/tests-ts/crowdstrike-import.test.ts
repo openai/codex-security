@@ -2,7 +2,6 @@ import { expect, mock, test } from "bun:test";
 import { main } from "../src/cli.js";
 import { readCrowdStrikeFindings } from "../src/crowdstrike-findings.js";
 import {
-  type NormalizedExternalPublicationOptions,
   prepareExternalPublication,
   prepareNormalizedExternalPublication,
 } from "../src/external-findings-publish.js";
@@ -14,70 +13,16 @@ import {
   updateStoredFinding,
 } from "./external-findings-local-helpers.js";
 import { createCliTest } from "./support/cli-run.js";
-import { createHash } from "node:crypto";
+import {
+  detection,
+  misconfiguration,
+  secret,
+  report,
+} from "./support/crowdstrike-import-fixtures.js";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const repositoryUrl = "https://github.com/example/repo";
-// The checkout fixture writes empty files, as FCS scanned them.
-const emptyFile = createHash("sha256").update("").digest("hex");
-const detection = {
-  file: "infra/net/main.tf",
-  file_sha256: emptyFile,
-  line: 7,
-  resource_type: "aws_security_group",
-  resource_name: "example",
-  issue_type: "IncorrectValue",
-  reason: "aws_security_group[example] 'SSH' (Port:22) is public",
-  recommendation:
-    "aws_security_group[example] 'SSH' (Port:22) should not be public",
-};
-const misconfiguration = {
-  rule_name: "Example Sensitive Port Is Exposed",
-  rule_uuid: "10000000-0000-4000-8000-000000000001",
-  rule_category: "Networking and Firewall",
-  description: "Example rule description",
-  severity: "High",
-  platform: "Terraform",
-  cloud_provider: "AWS",
-  service: "EC2",
-  rule_type: "Example",
-  detections: [detection],
-};
-const secret = {
-  rule_name: "Passwords And Secrets - Example Access Key",
-  rule_uuid: "20000000-0000-4000-8000-000000000002",
-  rule_category: "Secret Management",
-  description: "Example secret description",
-  severity: "Critical",
-  platform: "Generic",
-  cloud_provider: "common",
-  service: "common",
-  rule_type: "Example",
-  detections: [
-    {
-      file: "infra/provider.tf",
-      file_sha256: emptyFile,
-      line: 3,
-      resource_type: null,
-      resource_name: null,
-      issue_type: "RedundantAttribute",
-      reason: "Hardcoded secret key appears in source",
-      recommendation: "Hardcoded secret key should not appear in source",
-    },
-  ],
-};
-const report = {
-  fcs_version: "4.2.3",
-  path: ".",
-  project_name: "",
-  scan_type: "Local",
-  scan_uuid: "30000000-0000-4000-8000-000000000003",
-  scan_performed_at: "2026-11-10T12:00:00Z",
-  rule_detections: [misconfiguration, secret],
-  detection_summary: {},
-  stats: {},
-};
 const source = {
   provider: "crowdstrike",
   sourceKey: "example/crowdstrike/repo",
@@ -531,32 +476,43 @@ test("replayed findings keep the location of their native detection", async () =
   );
 });
 
-test("Cloud rejects local CrowdStrike findings before file access or credential lookup", async () => {
+test("Cloud verifies the scanned checkout and retained evidence before authentication", async () => {
   await using fixture = await checkout();
-  const options = { ...source, repository: fixture.repository };
+  await fixture.writeJson(single);
+  const options = { ...source, repository: repositoryUrl };
   const unexpected = mock(async () => {
     throw new Error("Unexpected Cloud call");
   });
   const deps = {
     environment: fixture.environment,
+    sourceCheckout: fixture.repository,
     fetch: unexpected,
     credentials: unexpected,
   };
-  // JavaScript callers may supply a local provider despite the SDK's Cloud types.
-  const cloudOptions =
-    options as unknown as NormalizedExternalPublicationOptions;
-  const empty = { read: 0, findings: [], excluded: [] };
-  await expect(
-    prepareExternalPublication(fixture.file, cloudOptions, deps),
-  ).rejects.toThrow(/local/i);
-  await expect(
-    prepareNormalizedExternalPublication(empty, cloudOptions, deps),
-  ).rejects.toThrow(/local/i);
-  await fixture.writeJson(single);
   const { preview } = await fixture.prepare();
-  const relabeled = { ...options, provider: "wiz" as const };
   await expect(
-    prepareNormalizedExternalPublication(preview, relabeled, deps),
-  ).rejects.toThrow(/local/i);
+    prepareNormalizedExternalPublication(
+      preview,
+      { ...options, provider: "wiz" },
+      deps,
+    ),
+  ).rejects.toThrow(/crowdstrike provider/i);
+  fixture.git(
+    "remote",
+    "set-url",
+    "origin",
+    "https://github.com/example/other",
+  );
+  await expect(
+    prepareExternalPublication(fixture.file, options, deps),
+  ).rejects.toThrow(/fetch remote/i);
+  fixture.git("remote", "set-url", "origin", repositoryUrl);
+  await writeFile(join(fixture.repository, "infra", "net", "main.tf"), "stale");
+  await expect(
+    prepareExternalPublication(fixture.file, options, deps),
+  ).rejects.toThrow(/changed after the FCS scan/);
+  await expect(
+    prepareNormalizedExternalPublication(preview, options, deps),
+  ).rejects.toThrow(/changed after the FCS scan/);
   expect(unexpected).not.toHaveBeenCalled();
 });

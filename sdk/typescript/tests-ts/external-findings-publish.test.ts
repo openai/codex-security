@@ -1,4 +1,8 @@
 import {
+  report as crowdstrikeReport,
+  misconfiguration as crowdstrikeRule,
+} from "./support/crowdstrike-import-fixtures.js";
+import {
   snykJson,
   snykPluginExport,
   snykSarif,
@@ -81,7 +85,10 @@ import {
 import { readTenableFindings } from "../src/tenable-findings.js";
 import { tenableReport } from "./support/tenable-import-fixtures.js";
 import { readVendorFindings } from "../src/wiz-findings.js";
-import type { CloudFindingsReader } from "../src/external-findings-read.js";
+import {
+  EXTERNAL_FINDINGS_READERS,
+  type ExternalFindingsReader,
+} from "../src/external-findings-read.js";
 import {
   cloudRepositoryUrlKey,
   validateExternalEvidence,
@@ -1667,6 +1674,44 @@ test("Tenable SDK retry publishes the approved file selection with the native oc
       source_data: { asset: capture.asset, finding: capture.findings[0] },
     },
   });
+});
+
+test("selected CrowdStrike findings use the saved checkout and validate the Cloud destination", async () => {
+  const report = { ...crowdstrikeReport, rule_detections: [crowdstrikeRule] };
+  const cloud = await fixture(report, exampleRepository);
+  await using local = await storedPublicationFixture(cloud);
+  const { repository, deps } = local;
+  await mkdir(join(repository, "infra", "net"), { recursive: true });
+  await writeFile(join(repository, "infra", "net", "main.tf"), "");
+  const imported = await prepareLocalExternalImport(
+    cloud.file,
+    {
+      provider: "crowdstrike",
+      sourceKey: "fcs/main",
+      repository,
+      sourceRepositoryUrl: exampleRepository,
+    },
+    deps,
+  );
+  await imported.import();
+  await rm(cloud.file);
+  const [row] = await listLocalExternalFindings({ repository }, deps);
+  const selection = {
+    repository,
+    findings: [{ id: row!.id, version: row!.version }],
+  };
+  cloud.state.repositoryUrl = "https://github.com/example/other";
+  await expect(local.prepare(selection)).rejects.toThrow(
+    /selected Cloud repository/,
+  );
+  expect(cloud.posts).toHaveLength(0);
+  cloud.state.repositoryUrl = exampleRepository;
+  const { groups } = await local.prepare(selection);
+  expect(cloud.posts).toHaveLength(0);
+  expect((await groups[0]!.publish(groups[0]!.reviewId)).verified).toBe(1);
+  expect(cloud.reports.get(row!.sourceFindingId)?.evidence.source_data).toEqual(
+    row!.evidence.source_data,
+  );
 });
 
 test("stored Tenable publication verifies the catalog and publishes the selected local version", async () => {
@@ -9378,6 +9423,7 @@ const readerReports = {
     finding: { ...continuumDetail(), createdIssueId: "oneissue" },
     patches: [continuumPatch],
   },
+  crowdstrike: { ...crowdstrikeReport, rule_detections: [crowdstrikeRule] },
   endor: [endorSource],
   github: [importedAlert()],
   inspector: inspectorReport(),
@@ -9397,10 +9443,10 @@ const readerReports = {
       vulnerableAsset: { id: "asset-1" },
     },
   ],
-} satisfies Record<CloudFindingsReader, unknown>;
+} satisfies Record<ExternalFindingsReader, unknown>;
 
 const scannerReports = [
-  ...(Object.keys(readerReports) as CloudFindingsReader[]).map((reader) => ({
+  ...EXTERNAL_FINDINGS_READERS.map((reader) => ({
     name: reader,
     reader,
     report: readerReports[reader],
@@ -9426,6 +9472,14 @@ test.each(scannerReports)(
       reader === "tenable" ? tenableReport.repository_url : exampleRepository;
     const { f, deps, inbox, uploads, jobs, fileId } =
       await privateUploadFixture(report, provider, url);
+    const sourceCheckout = join(f.root, "checkout");
+    if (reader === "crowdstrike") {
+      await mkdir(join(sourceCheckout, "infra", "net"), { recursive: true });
+      await writeFile(join(sourceCheckout, "infra", "net", "main.tf"), "");
+      const git = promisify(execFile);
+      await git("git", ["-C", sourceCheckout, "init", "--quiet"]);
+      await git("git", ["-C", sourceCheckout, "remote", "add", "origin", url]);
+    }
     const paths: string[] = [];
     const prepare = () =>
       prepareExternalPublication(
@@ -9439,6 +9493,7 @@ test.each(scannerReports)(
         },
         {
           ...deps,
+          sourceCheckout,
           fetch(url, init) {
             paths.push(new URL(url).pathname);
             return deps.fetch(url, init);

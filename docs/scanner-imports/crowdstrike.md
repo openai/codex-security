@@ -1,6 +1,6 @@
 # Import CrowdStrike findings locally
 
-Use a saved JSON report from `fcs scan iac` in the CrowdStrike Falcon Cloud Security (FCS) CLI 4.x. The reader imports each detection in `rule_detections` as one misconfiguration or secret finding. It works offline and does not run the FCS CLI. Reports in the older `violations` format and image scan reports are not supported. CrowdStrike reports support local import only.
+Use a saved JSON report from `fcs scan iac` in the CrowdStrike Falcon Cloud Security (FCS) CLI 4.x. The reader imports each detection in `rule_detections` as one misconfiguration or secret finding. It works offline and does not run the FCS CLI. Reports in the older `violations` format and image scan reports are not supported. For Cloud publication, run from the scanned checkout and provide its verified repository URL. The destination must advertise CrowdStrike support.
 
 ## Create the report
 

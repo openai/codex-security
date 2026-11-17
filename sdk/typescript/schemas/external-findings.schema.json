@@ -392,7 +392,8 @@
             "checkmarx",
             "trivy",
             "armorcode",
-            "tenable"
+            "tenable",
+            "crowdstrike"
           ],
           "title": "Provider",
           "type": "string"

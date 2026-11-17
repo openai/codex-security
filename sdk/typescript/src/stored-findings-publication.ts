@@ -1,3 +1,4 @@
+import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
 import { isDeepStrictEqual } from "node:util";
 import cloudSchema from "../schemas/external-findings.schema.json" with { type: "json" };
 import { CodexSecurityError } from "./errors.js";
@@ -75,7 +76,11 @@ function cloudSelection(
     read: metadata?.excluded.length ?? 0,
     findings: [],
     excluded: [...(metadata?.excluded ?? [])],
-    report: metadata?.report,
+    report:
+      metadata?.report ??
+      (rows[0]?.provider === "crowdstrike"
+        ? { format: crowdstrikeReportFormat }
+        : undefined),
   };
   const skipped = new Set(selected.excluded.map((item) => item.position));
   let position = 0;

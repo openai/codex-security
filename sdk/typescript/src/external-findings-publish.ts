@@ -35,6 +35,7 @@ import {
   tenableSourceRepository,
 } from "./tenable-findings.js";
 import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
+import { verifyCrowdStrikeCloudSource } from "./external-findings-local.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -51,10 +52,9 @@ import {
 import {
   EXTERNAL_FINDINGS_PROVIDERS,
   readExternalFindings,
-  requireCloudReader,
   semgrepSarifRepositories,
   snykFileRepositories,
-  type CloudFindingsReader,
+  type ExternalFindingsReader,
 } from "./external-findings-read.js";
 import { canonicalJson, isRecord } from "./record.js";
 import { notify } from "./value.js";
@@ -155,11 +155,13 @@ export interface NormalizedExternalPublicationOptions {
 
 /** File readers accepted by the Cloud publisher. */
 export interface ExternalPublicationOptions extends LocalExternalImportOptions {
-  provider: CloudFindingsReader;
+  provider: ExternalFindingsReader;
 }
 
 /** Optional transport, account, cancellation, and progress hooks. */
 export interface ExternalPublicationDependencies {
+  /** Directory FCS scanned. Defaults to the working directory for file and SDK imports. */
+  sourceCheckout?: string;
   /** Independently verified source repositories supplied by the reader. */
   sourceRepositories?: readonly ExternalSourceRepository[];
   environment?: NodeJS.ProcessEnv;
@@ -615,8 +617,10 @@ function checkFindingProvider(
       throw new CodexSecurityError(
         "Retained Tenable evidence requires the tenable provider.",
       );
-    if (format === crowdstrikeReportFormat)
-      requireCloudReader({ provider: "crowdstrike" });
+    if (format === crowdstrikeReportFormat && provider !== "crowdstrike")
+      throw new CodexSecurityError(
+        "Retained CrowdStrike evidence requires the crowdstrike provider.",
+      );
     if (format === guardianSelectionFormat && provider !== "semgrep")
       throw new CodexSecurityError(
         "Use the semgrep provider for Guardian findings.",
@@ -636,7 +640,6 @@ export async function prepareExternalPublication(
   dependencies: ExternalPublicationDependencies = {},
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings);
   const readerSources = snapshotSourceRepositories(
     dependencies.sourceRepositories,
   );
@@ -743,14 +746,15 @@ export async function prepareNormalizedPublication(
   workbench?: WorkbenchPublication | "preview",
 ): Promise<PreparedExternalPublication> {
   const settings = snapshotImportOptions(options);
-  requireCloudReader(settings);
   return preparePublicationInput(
     normalizedPublicationInput(input, settings.provider),
     settings,
     dependencies,
     snapshotSourceRepositories(dependencies.sourceRepositories),
     workbench,
-    settings.provider === "tenable" ? settings.sourceRepositoryUrl : undefined,
+    settings.provider === "tenable" || settings.provider === "crowdstrike"
+      ? settings.sourceRepositoryUrl
+      : undefined,
   );
 }
 
@@ -1139,6 +1143,20 @@ async function preparePublicationInput(
     if (!parsed.findings.length) throw new NoPublishableFindingsError(parsed);
   }
   if (typeof supplied !== "function") checkSelection(supplied);
+  const crowdstrikeSource =
+    options.provider === "crowdstrike" && typeof supplied !== "function"
+      ? await verifyCrowdStrikeCloudSource(
+          supplied.current,
+          declaredUrl,
+          readerSources,
+          (workbench && workbench !== "preview"
+            ? workbench.checkout
+            : undefined) ??
+            dependencies.sourceCheckout ??
+            process.cwd(),
+          dependencies,
+        )
+      : undefined;
   progress({ phase: "discovering", completed: 0 });
   const apiBaseUrl = cloudBaseUrl(environment);
   const cloudApiUrl = `${apiBaseUrl}/external`;
@@ -1783,6 +1801,13 @@ async function preparePublicationInput(
           `Finding ${JSON.stringify(id)} belongs to ${JSON.stringify(url)}, which does not match the selected Cloud repository ${JSON.stringify(destination.url)}. Verify the source repository mapping before publishing.`,
         );
     }
+    if (
+      crowdstrikeSource &&
+      catalogKey(crowdstrikeSource.url) !== catalogKey(approvedUrl)
+    )
+      throw new CodexSecurityError(
+        "CrowdStrike's source repository does not match the selected Cloud repository.",
+      );
     if (provider === "armorcode")
       requireDestination("ArmorCode source", declaredUrl);
     if (report?.["format"] === guardianSelectionFormat)
@@ -2206,7 +2231,11 @@ async function preparePublicationInput(
         ? suppliedSemgrepScopeDigest()
         : saved?.semgrepPartialScopeDigest,
     approvedRepositoryUrl:
-      hosted || options.provider === "tenable" ? approvedUrl : undefined,
+      hosted ||
+      options.provider === "tenable" ||
+      options.provider === "crowdstrike"
+        ? approvedUrl
+        : undefined,
   };
   if (
     saved?.approvedRepositoryPlatform ||
