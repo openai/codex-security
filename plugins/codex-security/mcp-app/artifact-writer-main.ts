@@ -41,11 +41,15 @@ export async function createCodexSecurityArtifactWriterServer(
   // Older coordinators sent only the requested paths, with lexical scope matching.
   const includePaths = isRecord(scopeInput) ? scopeInput.paths : scopeInput;
   const filePaths = isRecord(scopeInput) ? scopeInput.filePaths : undefined;
+  const excludePaths = isRecord(scopeInput)
+    ? scopeInput.excludePaths
+    : undefined;
   const isPathList = (paths: unknown): paths is string[] =>
     Array.isArray(paths) && paths.every((path) => typeof path === "string");
   if (
     (scopeInput !== undefined && !isPathList(includePaths)) ||
-    (filePaths !== undefined && !isPathList(filePaths))
+    (filePaths !== undefined && !isPathList(filePaths)) ||
+    (excludePaths !== undefined && !isPathList(excludePaths))
   ) {
     throw new Error(
       "The coordinator-bound include paths must be an array of paths.",
@@ -77,6 +81,7 @@ export async function createCodexSecurityArtifactWriterServer(
     ...defined("scope", scope),
     ...defined("includePaths", includePaths as string[] | undefined),
     ...defined("filePaths", filePaths as string[] | undefined),
+    ...defined("excludePaths", excludePaths as string[] | undefined),
     ...defined("pluginRoot", pluginRoot),
     ...defined("pythonCommand", pythonCommand),
   };

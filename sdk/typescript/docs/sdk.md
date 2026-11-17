@@ -174,12 +174,17 @@ assume an open `CodexSecurity` client named `security`; close it when finished.
 ```ts
 const result = await security.run("/path/to/repository", {
   target: ["src", "tests"],
+  excludePaths: ["src/examples"],
   knowledgeBasePaths: ["/path/to/architecture.md"],
   scanPrompt: "Focus on authentication and authorization.",
   outputDir: "/path/outside/repository/results",
   maxCostUsd: 5,
 });
 ```
+
+`excludePaths` takes literal repository-relative files or directories. A directory
+excludes all descendants, and exclusions take precedence over `target`. The default
+is no exclusions. Requested exclusions are recorded in `result.manifest.scan.scope.excludePaths`.
 
 | Option                                      | Use                                                                            |
 | ------------------------------------------- | ------------------------------------------------------------------------------ |
