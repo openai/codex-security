@@ -1,12 +1,17 @@
 import { codexWithRun, jsonCodex } from "./support/codex.js";
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, test, mock } from "bun:test";
+import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
 import type { CodexSecurityConfig, JsonObject } from "../src/index.js";
 import { DiffTarget, type ScanOptions } from "../src/index.js";
+import { createProfileCodex } from "../src/provider-profile.js";
+import { nodeCommand } from "./support/shell.js";
 import { main } from "../src/cli.js";
 import { normalizeTarget } from "../src/targets.js";
 import {
+  disabledMcpServers,
   matchScanFindings,
   type ScanComparisonInput,
 } from "../src/scan-comparison.js";
@@ -1151,6 +1156,364 @@ describe("CLI workbench", () => {
       findingMatches: 4,
       relatedPairs: 0,
       uncertainPairs: 1,
+    });
+  });
+
+  describe("batch matching failures", () => {
+    const argv = ["scans", "match", "--all", "--json"];
+    function batchWorkbench(
+      ids: string[],
+      sources = ["source"],
+      onSave?: (after: string) => void,
+    ) {
+      const saved: string[][] = [];
+      const finding = (id: string) => ({ occurrenceId: id, findingId: id });
+      const batches = ids.map((id) => ({
+        afterScanId: id,
+        afterFindings: [finding(id)],
+        beforeScans: sources.map((scanId) => ({
+          scanId,
+          findings: [finding(scanId)],
+        })),
+      }));
+      return {
+        batches,
+        saved,
+        onWorkbench(args: readonly string[]): JsonObject {
+          if (args[0] === "list-unmatched-scan-pairs") return { batches };
+          expect(args[0]).toBe("save-scan-comparison");
+          onSave?.(args[4]!);
+          saved.push([args[2]!, args[4]!]);
+          return {};
+        },
+      };
+    }
+
+    function batchWithInitialSave() {
+      const fixture = batchWorkbench(["empty", "match", "later"]);
+      fixture.batches[0]!.afterFindings.length = 0;
+      return fixture;
+    }
+
+    test("skips conflicting and failed batches without losing saved groups", async () => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const { saved, onWorkbench } = batchWorkbench(
+        ["saved", "conflict", "unavailable", "later"],
+        ["first", "second"],
+      );
+      const matcher = mock<typeof matchScanFindings>(async (input) => {
+        const after = input.after[0]!.occurrenceId;
+        if (after === "unavailable")
+          throw new Error("Service temporarily\nunavailable");
+        const before = after === "conflict" ? "second" : "first";
+        return {
+          matches: [
+            {
+              beforeOccurrenceIds: [before],
+              afterOccurrenceIds: [after],
+              confidence: "high",
+              reason: "Same cause.",
+            },
+          ],
+          uncertain:
+            after === "conflict"
+              ? [
+                  {
+                    beforeOccurrenceId: before,
+                    afterOccurrenceId: after,
+                    reason: "Inconsistent uncertainty.",
+                  },
+                ]
+              : [],
+        };
+      });
+      const code = await runCli(
+        argv,
+        dependencies({ onWorkbench, onMatch: matcher }),
+      );
+      expect(code).toBe(0);
+      expect(saved).toEqual([
+        ["first", "saved"],
+        ["second", "saved"],
+        ["first", "later"],
+        ["second", "later"],
+      ]);
+      expect(matcher.mock.calls.at(-1)?.[0].knownFindingGroups).toEqual([
+        ["first", "saved"],
+      ]);
+      const warnings = stderr.text().trim().split("\n");
+      expect(warnings).toHaveLength(2);
+      expect(warnings[0]).toMatch(
+        /warning:.*conflict.*conflicting confirmed and uncertain findings/u,
+      );
+      expect(warnings[1]).toMatch(
+        /warning:.*unavailable.*Service temporarily unavailable/u,
+      );
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        matchedPairs: 4,
+        findingMatches: 2,
+        unmatchedBatches: 2,
+      });
+    });
+
+    test("stops on an incomplete bundled runtime after saving an empty pair", async () => {
+      await using temp = await scopedTemporaryDirectory("incomplete-codex-");
+      const platform =
+        process.platform === "android" ? "linux" : process.platform;
+      const packageRoot = join(
+        temp.path,
+        "node_modules",
+        "@openai",
+        `codex-${platform}-${process.arch}`,
+      );
+      await mkdir(packageRoot, { recursive: true });
+      await writeFile(join(packageRoot, "package.json"), "{}");
+      const { saved, onWorkbench } = batchWithInitialSave();
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async () => {
+            resolveBundledCodexExecutable(join(temp.path, "package.json"));
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      );
+      expect(code).toBe(2);
+      expect(saved).toEqual([["source", "empty"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("Reinstall @openai/codex");
+    });
+
+    test("stops on invalid MCP configuration output after an empty batch", async () => {
+      const { saved, onWorkbench } = batchWithInitialSave();
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async () => {
+            await disabledMcpServers(
+              {
+                command: nodeCommand().command,
+                args: ["-e", 'console.log("invalid JSON")', "--"],
+              },
+              undefined,
+              {},
+              {},
+            );
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      );
+      expect(code, stderr.text()).toBe(2);
+      expect(saved).toEqual([["source", "empty"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).toContain("MCP configuration");
+    });
+
+    test("returns the first matcher error if every batch fails", async () => {
+      const { saved, onWorkbench } = batchWorkbench(["first", "second"]);
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async (input) => {
+            throw new Error(
+              `Matcher failed on ${input.after[0]!.occurrenceId}`,
+            );
+          },
+        }),
+      );
+      expect(code).toBe(2);
+      expect(saved).toEqual([]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text().match(/codex-security: warning:/gu)).toHaveLength(2);
+      expect(stderr.text().trim().split("\n").at(-1)).toContain(
+        "Matcher failed on first",
+      );
+    });
+
+    test.each([
+      [
+        "malformed configuration",
+        "Could not read the configured Codex provider",
+      ],
+      ["invalid credential home", "credential home is not a directory"],
+      [
+        "rejected configuration",
+        "Could not read MCP configuration for a read-only helper",
+      ],
+      ["missing executable", "missing-codex.exe"],
+    ] as const)(
+      "stops on %s after saving an empty pair",
+      async (problem, expected) => {
+        await using home = await scopedTemporaryDirectory("match-all-config-");
+        const file = join(home.path, "config.toml");
+        if (problem === "malformed configuration")
+          await writeFile(file, "[broken\n");
+        else if (problem === "invalid credential home")
+          await writeFile(join(home.path, "codex-home"), "");
+        else if (problem === "rejected configuration")
+          await writeFile(file, "model = []\n");
+        const { batches, saved, onWorkbench } = batchWithInitialSave();
+        batches[2]!.afterFindings.length = 0;
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const code = await runCli(
+          argv,
+          dependencies({
+            currentDirectory: home.path,
+            environment: {
+              CODEX_HOME: home.path,
+              ...(problem === "missing executable" && {
+                CODEX_CLI_PATH: join(home.path, "missing-codex.exe"),
+              }),
+              ...(problem === "invalid credential home"
+                ? { CODEX_SECURITY_STATE_DIR: home.path }
+                : { OPENAI_API_KEY: "synthetic-key" }),
+            },
+            onWorkbench,
+            onMatch: matchScanFindings,
+          }),
+        );
+        expect(code).toBe(2);
+        expect(saved).toEqual([["source", "empty"]]);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text()).toContain(expected);
+        if (problem === "rejected configuration")
+          expect(stderr.text()).toContain("model");
+      },
+    );
+
+    test.each(["401", "permission fallback"])(
+      "stops on a native matcher %s after preserving earlier batches",
+      async (failure) => {
+        await using temp = await scopedTemporaryDirectory(
+          "match-all-native-turn-",
+        );
+        const preload = join(temp.path, "turn.mjs");
+        await writeFile(
+          preload,
+          [
+            "for await (const _ of process.stdin) {}",
+            "const message = process.env.TURN_ERROR;",
+            'console.log(JSON.stringify(process.env.FALLBACK === "1" ? { type: "item.completed", item: { type: "error", message } } : { type: "turn.failed", error: { message } }));',
+            "process.exit(0);",
+          ].join("\n"),
+        );
+        const { batches, saved, onWorkbench } = batchWorkbench([
+          "empty",
+          "retry",
+          "auth",
+          "later",
+        ]);
+        batches[0]!.afterFindings.length = 0;
+        batches[3]!.afterFindings.length = 0;
+        const unauthorized =
+          "unexpected status 401 Unauthorized: synthetic authentication failure, url: https://example.invalid/v1/responses";
+        const fatalMessage =
+          failure === "401"
+            ? unauthorized
+            : "Configured value for `permission_profile` is disallowed by requirements; falling back from `synthetic_read_only` to required value `:workspace`.";
+        const { stdout, stderr, runCli } = createCliTest(main);
+        const code = await runCli(
+          argv,
+          dependencies({
+            onWorkbench,
+            onMatch: async (input, options) => {
+              const retry = input.after[0]?.occurrenceId === "retry";
+              const codex = await createProfileCodex(
+                {
+                  codexPathOverride: nodeCommand().command,
+                  env: {
+                    NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+                    FALLBACK:
+                      !retry && failure === "permission fallback" ? "1" : "",
+                    TURN_ERROR: retry
+                      ? `unexpected status 503 Service Unavailable: ${unauthorized}`
+                      : fatalMessage,
+                  },
+                },
+                "synthetic",
+                "synthetic_read_only",
+              );
+              return matchScanFindings(input, { ...options, codex });
+            },
+          }),
+        );
+        expect(code, stderr.text()).toBe(2);
+        expect(saved).toEqual([["source", "empty"]]);
+        expect(stdout.text()).toBe("");
+        expect(stderr.text().match(/codex-security: warning:/gu)).toHaveLength(
+          1,
+        );
+        expect(stderr.text()).toContain("unexpected status 503");
+        expect(stderr.text().trim().split("\n").at(-1)).toContain(fatalMessage);
+      },
+    );
+
+    test.each([
+      ["save", new Error("Storage failed")],
+      ["cancellation", new Error("Interrupted matcher")],
+    ] as const)("stops on %s after a saved batch", async (failure, error) => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      const signals = new FakeSignals();
+      const matched: string[] = [];
+      const { saved, onWorkbench } = batchWorkbench(
+        ["first", "second", "third"],
+        ["source"],
+        (id) => {
+          if (id === "second" && failure === "save") throw error;
+        },
+      );
+      const code = await runCli(
+        argv,
+        dependencies({
+          signals,
+          onWorkbench,
+          onMatch: async (input) => {
+            const id = input.after[0]!.occurrenceId;
+            matched.push(id);
+            if (id === "second" && failure === "cancellation") {
+              signals.emit("SIGINT");
+              throw error;
+            }
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      );
+      expect(code).toBe(failure === "cancellation" ? 130 : 2);
+      expect(matched).toEqual(["first", "second"]);
+      expect(saved).toEqual([["source", "first"]]);
+      expect(stdout.text()).toBe("");
+      expect(stderr.text()).not.toContain("warning:");
+      expect(stderr.text()).toContain(
+        failure === "cancellation"
+          ? "Saved comparisons are preserved"
+          : error.message,
+      );
+    });
+
+    test("preserves later comparisons when the warning stream fails", async () => {
+      const { stdout, stderr, runCli } = createCliTest(main);
+      stderr.stream.write = throwing("Synthetic warning write failed");
+      const { saved, onWorkbench } = batchWorkbench(["failed", "healthy"]);
+      const code = await runCli(
+        argv,
+        dependencies({
+          onWorkbench,
+          onMatch: async (input) => {
+            if (input.after[0]!.occurrenceId === "failed")
+              throw new Error("Synthetic matcher failure");
+            return { matches: [], uncertain: [] };
+          },
+        }),
+      );
+      expect(code).toBe(0);
+      expect(saved).toEqual([["source", "healthy"]]);
+      expect(JSON.parse(stdout.text()).unmatchedBatches).toBe(1);
     });
   });
 

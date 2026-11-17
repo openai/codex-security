@@ -46,7 +46,12 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  ConfigurationError,
+  errorMessage,
+} from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   createProfileCodex,
@@ -370,7 +375,25 @@ export async function matchScanFindingsInternal(
   try {
     for (;;) {
       options.signal?.throwIfAborted();
-      const turn = await thread.run(prompt, turnOptions);
+      const turn = await thread
+        .run(prompt, turnOptions)
+        .catch((error: unknown) => {
+          if (
+            error instanceof Error &&
+            error.name === "PermissionProfileFallbackError"
+          )
+            throw new ConfigurationError(error.message, { cause: error });
+          // Native thread clients expose failed turns as Error(message), without an HTTP status field.
+          if (
+            error instanceof Error &&
+            error.message.startsWith("unexpected status 401 Unauthorized:")
+          ) {
+            throw new AuthenticationRequiredError(error.message, {
+              cause: error,
+            });
+          }
+          throw error;
+        });
       let response: unknown;
       try {
         response = JSON.parse(turn.finalResponse);
@@ -796,31 +819,37 @@ export async function disabledMcpServers(
   environment: Record<string, string>,
   options: ReadOnlyCodexOptions,
 ): Promise<JsonObject> {
-  const { success, stdout, stderr } = await runCodexCommand(
-    command,
-    [
-      "-C",
-      options.workingDirectory ?? process.cwd(),
-      "-c",
-      "features.plugins=false",
-      "mcp",
-      "list",
-      "--json",
-    ],
-    environment,
-    undefined,
-    options.signal,
-  );
-  if (!success)
-    throw new CodexSecurityError(
-      `Could not read MCP configuration for a read-only helper: ${stderr.trim()}`,
+  let inheritedNames: string[];
+  try {
+    const { success, stdout, stderr } = await runCodexCommand(
+      command,
+      [
+        "-C",
+        options.workingDirectory ?? process.cwd(),
+        "-c",
+        "features.plugins=false",
+        "mcp",
+        "list",
+        "--json",
+      ],
+      environment,
+      undefined,
+      options.signal,
     );
-  const inherited = JSON.parse(stdout) as { name: string }[];
+    if (!success) throw new Error(stderr.trim());
+    inheritedNames = z
+      .array(z.object({ name: z.string() }))
+      .parse(JSON.parse(stdout))
+      .map(({ name }) => name);
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    throw new ConfigurationError(
+      `Could not read MCP configuration for a read-only helper: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
   const configured = (config?.["mcp_servers"] ?? {}) as JsonObject;
-  const names = new Set([
-    ...Object.keys(configured),
-    ...inherited.map(({ name }) => name),
-  ]);
+  const names = new Set([...Object.keys(configured), ...inheritedNames]);
   return Object.fromEntries(
     [...names].map((name) => [
       name,
