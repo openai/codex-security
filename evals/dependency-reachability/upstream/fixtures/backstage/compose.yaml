@@ -1,0 +1,29 @@
+services:
+  portal:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./portal.conf:/etc/nginx/conf.d/default.conf:ro
+    secrets:
+      - portal_users
+    depends_on:
+      - backstage
+
+  backstage:
+    build:
+      context: ..
+      dockerfile: packages/backend/Dockerfile
+    command:
+      [node, packages/backend, --config, app-config.yaml, --config, portal.yaml]
+    environment:
+      - BACKEND_SECRET
+      - GITHUB_TOKEN
+    volumes:
+      - ./app-config.yaml:/app/portal.yaml:ro
+      - ./template.yaml:/app/catalog/template.yaml:ro
+      - ../packages/create-app/templates/default-app/examples/template/content:/app/catalog/content:ro
+
+secrets:
+  portal_users:
+    file: ${PORTAL_HTPASSWD:?Set PORTAL_HTPASSWD to the portal password file}
