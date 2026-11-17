@@ -146,7 +146,7 @@ export async function runBulkScanWizard(
     return null;
   }
 
-  prompt.write(`\nFound ${discovered.length} repositories.\n`);
+  prompt.write(`\nFound ${formatRepositoryCount(discovered.length)}.\n`);
   const repositories = await selectGitHubRepositories(
     discovered,
     prompt,
@@ -166,7 +166,7 @@ export async function runBulkScanWizard(
   const inputPath = join(outputDir, "repositories.csv");
   await validateWizardOutput(outputDir);
   prompt.write(
-    `\nReady to scan ${repositories.length} repositories?\n` +
+    `\nReady to scan ${formatRepositoryCount(repositories.length)}?\n` +
       `Results: ${outputDir}\nRepository list: ${inputPath}\n`,
   );
   if (!(await prompt.confirm("Start scanning?", false, signal))) {
@@ -225,20 +225,26 @@ async function selectGitHubOwner(
   return personal;
 }
 
+function formatRepositoryCount(count: number): string {
+  return count === 1 ? "1 repository" : `${count} repositories`;
+}
+
 async function selectGitHubRepositories(
   repositories: GitHubRepository[],
   prompt: BulkScanPrompt,
   signal?: AbortSignal,
 ): Promise<GitHubRepository[]> {
+  const allLabel =
+    repositories.length === 1
+      ? "All repositories"
+      : `All ${formatRepositoryCount(repositories.length)}`;
   const selected = new Set<string>();
   while (selected.size < repositories.length) {
     const choice = await prompt.select(
       "Select repositories to scan (type to filter)",
       [
         {
-          label: selected.size
-            ? `Done (${selected.size} selected)`
-            : `All ${repositories.length} repositories`,
+          label: selected.size ? `Done (${selected.size} selected)` : allLabel,
           value: "",
         },
         ...repositories
@@ -346,15 +352,16 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       output.write(value);
     },
     async confirm(message, defaultValue = false, signal) {
-      const { confirm } = await import("@inquirer/prompts");
+      const { default: confirm } = await import("@inquirer/confirm");
       return confirm({ message, default: defaultValue }, context(signal));
     },
     async input(message, defaultValue, signal) {
-      const { input } = await import("@inquirer/prompts");
+      const { default: input } = await import("@inquirer/input");
       return input({ message, default: defaultValue }, context(signal));
     },
     async checkbox(message, options, presentation, signal) {
-      const { checkbox, Separator } = await import("@inquirer/prompts");
+      const { default: checkbox, Separator } =
+        await import("@inquirer/checkbox");
       return checkbox(
         {
           message,
@@ -374,7 +381,7 @@ export function createTerminalPrompt(output: PromptOutput): BulkScanPrompt {
       );
     },
     async select(message, options, presentation, signal) {
-      const { search } = await import("@inquirer/prompts");
+      const { default: search } = await import("@inquirer/search");
       return search(
         {
           message,

@@ -36,6 +36,11 @@ for (const resumed of [false, true]) {
       { scope: "." },
       ["api", "jobs", "unrelated", "prefix", "file-descendant"],
     ],
+    [
+      "repository with exclusion",
+      { scope: ".", excludePaths: ["api"] },
+      ["jobs", "unrelated", "prefix"],
+    ],
   ] as const) {
     test(`${label} worker filters reconciled findings with resumed=${resumed}`, async (t) => {
       const f = await fixture(t, "worker");
@@ -77,6 +82,32 @@ for (const resumed of [false, true]) {
         );
     });
   }
+}
+
+for (const mode of ["deep", "standard"] as const) {
+  test(`${mode} parent excludes findings from requested directories`, async (t) => {
+    const f = await fixture(t, mode);
+    f.context.targetContract = {
+      ...f.context.targetContract,
+      scope: { requiredIncludePaths: ["."], requiredExcludePaths: ["api"] },
+    };
+    const mixed = finding("mixed", "api/source.py");
+    mixed.locations.push({
+      path: "background jobs/source.py",
+      startLine: 1,
+      endLine: 2,
+    });
+    await f.write({ ...f.draft({}, true), findings: [...findings, mixed] });
+    const result = await readJson(f.root, "findings.json");
+    assert.deepEqual(
+      result.findings.map(
+        (row: { identity: { anchor: string } }) => row.identity.anchor,
+      ),
+      ["jobs", "unrelated", "prefix", "mixed"],
+    );
+    const manifest = await readJson(f.root, "scan-manifest.json");
+    assert.deepEqual(manifest.scan.scope.excludePaths, ["api"]);
+  });
 }
 
 for (const mode of ["deep", "standard"] as const) {
@@ -169,6 +200,27 @@ for (const legacy of [false, true]) {
     }
   });
 }
+
+test("a supplied scope file must name its paths before the worker can accept drafts", async (t) => {
+  const { importSource } = await import("./import-module.ts");
+  const { createCodexSecurityArtifactWriterServer } = await importSource(
+    "../artifact-writer-main.ts",
+    { absWorkingDir: import.meta.dirname },
+  );
+  const f = await fixture(t, "worker");
+  const scopeFile = join(f.root, "../missing-paths.json");
+  await writeFile(scopeFile, JSON.stringify({ filePaths: ["api/source.py"] }));
+  await assert.rejects(
+    createCodexSecurityArtifactWriterServer({
+      CODEX_SECURITY_ARTIFACT_ROOT: f.root,
+      CODEX_SECURITY_REPO_ROOT: f.root,
+      CODEX_SECURITY_SCAN_ID: f.context.scanId,
+      CODEX_SECURITY_SCOPE: ".",
+      CODEX_SECURITY_INCLUDE_PATHS_FILE: scopeFile,
+    }),
+    /coordinator-bound include paths/,
+  );
+});
 
 test("worker scope keeps a finding with any matching location and supports exact files", async (t) => {
   const f = await fixture(t, "worker");

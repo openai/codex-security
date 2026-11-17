@@ -1,8 +1,7 @@
 // Compare Bun JUnit inventories before changing the required CI runner.
-import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { parseArgs } from "node:util";
-import { minimatch } from "minimatch";
 import { SaxesParser, type SaxesTagNS } from "saxes";
 
 type Output = Pick<Console, "log" | "error">;
@@ -17,59 +16,6 @@ type TestRecord = {
   attributes: SaxesTagNS["attributes"];
   status: TestStatus;
 };
-function matchingReports(pattern: string): string[] {
-  // Python glob treats ** as one component and does not expand braces/extglobs.
-  const directoriesOnly =
-    pattern.endsWith(sep) ||
-    (process.platform === "win32" && pattern.endsWith("/"));
-  if (!/[*?[]/u.test(pattern)) {
-    try {
-      const stat = directoriesOnly ? statSync(pattern) : lstatSync(pattern);
-      return !directoriesOnly || stat.isDirectory() ? [pattern] : [];
-    } catch {
-      return [];
-    }
-  }
-  const parent = dirname(pattern);
-  const namePattern = basename(pattern);
-  return (/[*?[]/u.test(parent) ? matchingReports(parent) : [parent]).flatMap(
-    (directory) => {
-      let names: string[];
-      try {
-        names = readdirSync(directory);
-      } catch {
-        return [];
-      }
-      return names
-        .filter(
-          (name) =>
-            (!name.startsWith(".") || namePattern.startsWith(".")) &&
-            minimatch(
-              name,
-              namePattern.replaceAll("\\", "\\\\").replaceAll("[^", "[\\^"),
-              {
-                dot: true,
-                nobrace: true,
-                noext: true,
-                noglobstar: true,
-                nonegate: true,
-                nocomment: true,
-                nocase: process.platform === "win32",
-              },
-            ),
-        )
-        .map((name) => join(directory, name))
-        .filter((path) => {
-          if (!directoriesOnly) return true;
-          try {
-            return statSync(path).isDirectory();
-          } catch {
-            return false;
-          }
-        });
-    },
-  );
-}
 
 function integer(value: string): bigint {
   if (!/^[+-]?\d(?:_?\d)*$/u.test(value.trim())) {
@@ -163,31 +109,30 @@ function readReport(path: string, output: Output) {
   };
 }
 
-function readReports(patterns: string[], output: Output) {
+function readReports(paths: string[], group: string, output: Output) {
+  if (!paths.length) throw new Error(`No ${group} reports supplied`);
   const cases = new Map<string, number>();
   const durations: number[] = [];
   let failed = false;
-  for (const pattern of patterns) {
-    const paths = matchingReports(pattern).sort((a, b) =>
-      Buffer.compare(Buffer.from(a), Buffer.from(b)),
-    );
-    if (!paths.length) throw new Error(`No reports match ${pattern}`);
-    for (const path of paths) {
-      const report = readReport(path, output);
-      failed ||= report.failed;
-      for (const [identity, count] of report.cases)
-        cases.set(identity, (cases.get(identity) ?? 0) + count);
-      durations.push(report.duration);
-    }
+  for (const path of paths) {
+    const report = readReport(path, output);
+    failed ||= report.failed;
+    for (const [identity, count] of report.cases)
+      cases.set(identity, (cases.get(identity) ?? 0) + count);
+    durations.push(report.duration);
   }
   return { cases, durations, failed };
 }
 
-function compareGroups(patterns: string[], output: Output): number {
+function compareGroups(
+  baselinePaths: string[],
+  candidatePaths: string[],
+  output: Output,
+): number {
   output.log("| Report | Cases | Skipped | Seconds |");
   output.log("| --- | ---: | ---: | ---: |");
-  const baseline = readReports([patterns[0]!], output);
-  const candidate = readReports(patterns.slice(1), output);
+  const baseline = readReports(baselinePaths, "baseline", output);
+  const candidate = readReports(candidatePaths, "candidate", output);
   let failed = baseline.failed || candidate.failed;
   for (const [label, left, right] of [
     ["Missing", baseline.cases, candidate.cases],
@@ -233,29 +178,34 @@ export function compareTestReports(
   argv: string[],
   output: Output = console,
 ): number {
+  const separator = argv.indexOf("--");
   let args: { values: { help?: boolean }; positionals: string[] };
   try {
     args = parseArgs({
-      args: argv,
+      args: separator === -1 ? argv : argv.slice(0, separator),
       options: { help: { type: "boolean", short: "h" } },
       allowPositionals: true,
     });
-    if (!args.values.help && args.positionals.length < 2)
-      throw new Error(
-        "a baseline and at least one candidate report are required",
-      );
   } catch (error) {
     output.error((error as Error).message);
     return 2;
   }
   if (args.values.help) {
     output.log(
-      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node --experimental-strip-types compare-test-reports.mts baseline candidates [candidates ...]\nBaseline and candidates are JUnit files or glob patterns.",
+      "Compare Bun JUnit inventories before changing the required CI runner.\n\nUsage: node --experimental-strip-types compare-test-reports.mts baseline candidate [candidate ...]\n   or: node --experimental-strip-types compare-test-reports.mts baseline [baseline ...] -- candidate [candidate ...]\nPass JUnit filenames. Your shell can expand wildcard patterns.",
     );
     return 0;
   }
+  if (separator === -1 && args.positionals.length < 2) {
+    output.error("a baseline and at least one candidate report are required");
+    return 2;
+  }
+  const baselinePaths =
+    separator === -1 ? args.positionals.slice(0, 1) : args.positionals;
+  const candidatePaths =
+    separator === -1 ? args.positionals.slice(1) : argv.slice(separator + 1);
   try {
-    return compareGroups(args.positionals, output);
+    return compareGroups(baselinePaths, candidatePaths, output);
   } catch (error) {
     output.error((error as Error).message);
     return 1;

@@ -1,5 +1,6 @@
 import { basename, relative } from "node:path";
 import stringWidth from "string-width";
+import { cliShellLabel, quoteCliPath } from "./cli-argument.js";
 import { fitCell, graphemes } from "./terminal-columns.js";
 import type { JsonObject } from "./config.js";
 import {
@@ -16,6 +17,7 @@ type RendererOptions = {
   repository?: string;
   scanRoot?: string;
   showLinkedFindings?: boolean;
+  missingRepositoryHistory?: boolean;
 };
 
 const STALE_SCAN_MILLISECONDS = 24 * 60 * 60 * 1_000;
@@ -124,7 +126,8 @@ export function renderScanHistory(
   const finding = (entry: JsonObject, includeReason = true): void => {
     const severity = findingSeverity(entry);
     const title = clean(entry["title"]);
-    const badge = paint(severity.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
+    const label = severity === "INFORMATIONAL" ? "INFO" : severity;
+    const badge = paint(label.padEnd(8), SEVERITY_COLORS[severity] ?? 37);
     wrap(title, 14, `    ${badge}  `);
     const before = entry["beforeOccurrenceIds"] as string[] | undefined;
     const after = entry["afterOccurrenceIds"] as string[] | undefined;
@@ -193,16 +196,7 @@ export function renderScanHistory(
   };
 
   if (command === "list") {
-    const scans = (result["scans"] as JsonObject[]).filter((scan) => {
-      if ((scan["progress"] as JsonObject)["status"] !== "running") {
-        return true;
-      }
-      const updated = Date.parse(scan["updatedAt"] as string);
-      return (
-        !Number.isFinite(updated) ||
-        (options.now ?? Date.now()) - updated < STALE_SCAN_MILLISECONDS
-      );
-    });
+    const scans = result["scans"] as JsonObject[];
     const repository = basename(
       String(
         options.scanRoot ??
@@ -219,7 +213,7 @@ export function renderScanHistory(
       new Set(scans.map((scan) => scan["targetPath"])).size > 1;
     const wide = width >= (multipleRepositories ? 97 : 80);
     lines.push(
-      `  ${strong(clean(repository))}  ${accent("·")}  ${scans.length} ${scans.length === 1 ? "scan" : "scans"}${latest === undefined ? "" : `  ${accent("·")}  latest: ${clean(latest)} findings`}`,
+      `  ${strong(clean(repository))}  ${accent("·")}  ${scans.length} ${scans.length === 1 ? "scan" : "scans"}${latest === undefined ? "" : `  ${accent("·")}  latest: ${clean(latest)} finding${latest === 1 ? "" : "s"}`}`,
       "",
     );
     if (wide) {
@@ -245,7 +239,7 @@ export function renderScanHistory(
       } else {
         lines.push(`  ${clean(scan["scanId"])}`);
         const separator = `  ${accent("·")}  `;
-        const summary = `${findings} findings${separator}${statusLabel}`;
+        const summary = `${findings} finding${scan["findingCount"] === 1 ? "" : "s"}${separator}${statusLabel}`;
         const location = multipleRepositories
           ? `${scanRepository}${separator}`
           : "";
@@ -257,18 +251,47 @@ export function renderScanHistory(
           lines.push(line);
         }
       }
+      const updatedAt = scan["updatedAt"];
+      if (
+        status === "running" &&
+        typeof updatedAt === "string" &&
+        (options.now ?? Date.now()) - Date.parse(updatedAt) >=
+          STALE_SCAN_MILLISECONDS
+      ) {
+        lines.push(`    ${dim(`Last activity: ${clean(updatedAt)}`)}`);
+        if (
+          (scan["mode"] === "deep" || scan["mode"] === "standard") &&
+          scan["recipeAvailable"] === true &&
+          scan["handoffStatus"] === "delivered" &&
+          scan["continuationThreadId"]
+        ) {
+          const id = quoteCliPath(clean(scan["scanId"]));
+          lines.push(
+            `    If interrupted${cliShellLabel(id)}: codex-security scans resume ${id}`,
+          );
+        }
+      }
     }
   } else if (command === "findings") {
     const findings = result["findings"] as JsonObject[];
-    lines.push(
-      `  ${strong(clean(basename(result["repository"] as string)))}  ${accent("·")}  ${findings.length} open finding${findings.length === 1 ? "" : "s"}`,
-    );
+    const repository = clean(result["repository"]);
+    if (options.missingRepositoryHistory) {
+      lines.push(`  No saved scan for ${repository}`);
+    } else {
+      lines.push(
+        `  ${strong(basename(repository))}  ${accent("·")}  ${findings.length} open finding${findings.length === 1 ? "" : "s"}`,
+      );
+    }
     for (const entry of findings) {
       lines.push(
         "",
         `  ${strong(entry["confirmedInLatestScan"] ? "Seen this scan" : "Not confirmed in latest scan")}`,
       );
       finding(entry);
+      if (typeof entry["occurrenceId"] === "string")
+        lines.push(
+          `              ${dim("Occurrence")} ${clean(entry["occurrenceId"])}`,
+        );
     }
   } else if (command === "show") {
     const status = clean((result["progress"] as JsonObject)["status"]);
@@ -318,7 +341,7 @@ export function renderScanHistory(
               Object.keys(SEVERITY_COLORS).indexOf(right.toUpperCase()),
           )
           .map(([severity, count]) => {
-            const label = severity.toUpperCase();
+            const label = clean(severity).toUpperCase();
             return paint(
               `${clean(count)} ${label}`,
               SEVERITY_COLORS[label] ?? 37,
@@ -361,7 +384,9 @@ export function renderScanHistory(
             ]),
         ...(coverage["filesTotal"] == null
           ? []
-          : [`${clean(coverage["filesTotal"])} files`]),
+          : [
+              `${clean(coverage["filesTotal"])} file${coverage["filesTotal"] === 1 ? "" : "s"}`,
+            ]),
       ];
       if (parts.length > 0) {
         lines.push(
@@ -436,32 +461,18 @@ export function renderScanHistory(
     lines.push(
       `  ${clean(result["beforeScanId"]).slice(0, 8)} → ${clean(result["afterScanId"]).slice(0, 8)}`,
     );
-    const findings = (result["findings"] as JsonObject[]).map((entry) =>
+    const groups = Map.groupBy(result["findings"] as JsonObject[], (entry) =>
       entry["status"] === "unknown" &&
       entry["reason"] ===
         "The affected path was excluded or outside the later scope."
-        ? { ...entry, status: "not_rescanned" }
-        : entry,
+        ? "not_rescanned"
+        : String(entry["status"]).toLowerCase(),
     );
-    const notRescanned = findings.filter(
-      (entry) => entry["status"] === "not_rescanned",
-    ).length;
-    const summary: JsonObject = {
-      ...(result["summary"] as JsonObject),
-      ...(notRescanned
-        ? {
-            unknown:
-              Number((result["summary"] as JsonObject)["unknown"] ?? 0) -
-              notRescanned,
-            not_rescanned: notRescanned,
-          }
-        : {}),
-    };
     lines.push("");
     let summaryLine = "  ";
     let summaryLength = 2;
     for (const [status, style] of Object.entries(STATUS_STYLES)) {
-      const value = summary[status];
+      const value = groups.get(status)?.length;
       if (!value) continue;
       const label = `${style.icon} ${clean(value)} ${status.replaceAll("_", " ")}`;
       if (summaryLength > 2 && summaryLength + label.length + 4 > width - 2) {
@@ -475,10 +486,8 @@ export function renderScanHistory(
     if (summaryLength > 2) lines.push(summaryLine);
 
     for (const status of Object.keys(STATUS_STYLES)) {
-      const group = findings.filter(
-        (entry) => String(entry["status"]).toLowerCase() === status,
-      );
-      if (group.length === 0) continue;
+      const group = groups.get(status);
+      if (!group) continue;
       group.sort(
         (first, second) =>
           Object.keys(SEVERITY_COLORS).indexOf(findingSeverity(first)) -

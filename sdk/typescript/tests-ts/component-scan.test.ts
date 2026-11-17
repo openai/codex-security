@@ -34,6 +34,7 @@ import {
   type ComponentScanEvent,
   type ComponentScanOptions,
 } from "../src/component-scan.js";
+import * as deepScan from "../src/deep-scan.js";
 import type { Finding, SeverityLevel } from "../src/models.js";
 import { ScanResult } from "../src/result.js";
 import * as runtime from "../src/runtime.js";
@@ -55,7 +56,7 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { mockWorkbench } from "./support/api-client.js";
+import { mockWorkbench, TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
 
 const { temporaryDirectory, cleanup } =
@@ -354,6 +355,98 @@ test("links independently scoped saved models including a failed component", asy
   expect(summary).toMatchObject({ completed: 1, failed: 1 });
 });
 
+test("retains unpriced partial usage for failed components without a progress observer", async () => {
+  const paths = await fixture();
+  const measurement = {
+    coverage: "partial" as const,
+    cost: null,
+    observedAt: "2026-10-01T00:00:00.000Z",
+    threadCount: 1,
+    missingThreadCount: 1,
+    usage: {
+      input_tokens: 100,
+      cached_input_tokens: 0,
+      cache_write_input_tokens: 0,
+      cache_write_input_tokens_reported: false,
+      output_tokens: 5,
+      reasoning_output_tokens: 0,
+      total_tokens: 105,
+    },
+  };
+  const result = await scan(paths, {
+    components: components.slice(0, 1),
+    createSecurity: client(async (_repository, options) => {
+      options.onMeasurement?.(measurement);
+      throw new Error("Synthetic component failure");
+    }),
+  });
+  expect(await json(result.summaryPath!)).toMatchObject({
+    components: [{ status: "failed", outcome: "failed", measurement }],
+  });
+});
+
+test.each([
+  ["caller only", false, "observe", "observe"],
+  ["both observers", true, "observe", "observe"],
+  ["throwing caller", true, "throw", "observe"],
+  ["rejecting caller", true, "reject", "observe"],
+  ["throwing component observer", true, "observe", "throw"],
+  ["rejecting component observer", true, "observe", "reject"],
+] as const)(
+  "preserves the caller measurement observer with %s",
+  async (_label, withEvents, callerBehavior, eventBehavior) => {
+    const paths = await fixture();
+    const measurement = {
+      coverage: "unavailable" as const,
+      cost: null,
+      observedAt: "2026-10-01T00:00:00.000Z",
+      threadCount: 0,
+      missingThreadCount: 1,
+      usage: null,
+    };
+    const callerMeasurements: unknown[] = [];
+    const componentMeasurements: unknown[] = [];
+    const result = await scan(paths, {
+      components: components.slice(0, 1),
+      scanOptions: {
+        onMeasurement: (value) => {
+          callerMeasurements.push(value);
+          if (callerBehavior === "throw")
+            throw new Error("Synthetic caller observer failure.");
+          if (callerBehavior === "reject")
+            return Promise.reject(
+              new Error("Synthetic caller observer rejection."),
+            );
+        },
+      },
+      ...(withEvents
+        ? {
+            onScanEvent: (event: ComponentScanEvent) => {
+              if (event.type !== "measurement") return;
+              componentMeasurements.push(event.value);
+              if (eventBehavior === "throw")
+                throw new Error("Synthetic component observer failure.");
+              if (eventBehavior === "reject")
+                return Promise.reject(
+                  new Error("Synthetic component observer rejection."),
+                );
+            },
+          }
+        : {}),
+      createSecurity: client(async (repository, options) => {
+        options.onMeasurement?.(measurement);
+        return completed(repository, options, []);
+      }),
+    });
+    expect(result).toMatchObject({ completed: 1, failed: 0 });
+    expect(callerMeasurements).toEqual([measurement]);
+    expect(componentMeasurements).toEqual(withEvents ? [measurement] : []);
+    expect(await json(result.summaryPath!)).toMatchObject({
+      components: [{ status: "completed", outcome: "completed", measurement }],
+    });
+  },
+);
+
 test("omits a failed component's stale model link while retaining its model", async () => {
   const paths = await fixture();
   execFileSync("git", ["-C", paths.repository, "init", "--quiet"]);
@@ -391,6 +484,69 @@ test("omits a failed component's stale model link while retaining its model", as
   );
 });
 
+test.each([
+  [9, 2],
+  [3, 1],
+])(
+  "divides a $%i budget across concurrent components",
+  async (total, expected) => {
+    const paths = await fixture();
+    const config = join(paths.root, "settings.yaml");
+    await writeFile(config, "scan:\n  owner_suggestions: true\n");
+    const matchFindings = mock(rejecting("unexpected unmetered model call"));
+    const { code, stderr, stdout } = await cli(
+      paths,
+      [
+        ...components.flatMap(({ paths }) => ["--component", paths[0]!]),
+        "--config",
+        config,
+        "--workers",
+        "3",
+        "--max-cost",
+        "2",
+        "--max-total-cost",
+        String(total),
+      ],
+      {
+        createSecurity: client(async (repository, options) => {
+          expect(options.maxCostUsd).toBe(expected);
+          expect(options.skipFindingMatching).toBe(true);
+          expect(options.ownerSuggestions).toBe(false);
+          return completed(repository, options);
+        }),
+        matchFindings,
+      },
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      completed: 3,
+      findingCount: 3,
+      deduplication: { status: "skipped" },
+    });
+    expect(stderr).toContain(`$${expected}.00 per component`);
+    expect(matchFindings).not.toHaveBeenCalled();
+  },
+);
+
+test("rejects unmetered planning and post-scan prompts under a total limit", async () => {
+  const paths = await fixture();
+  const planComponents = mock(rejecting("unexpected planner call"));
+  const result = await cli(
+    paths,
+    ["--auto", "--plan-only", "--max-total-cost", "2"],
+    { planComponents },
+  );
+  expect(result.code).toBe(2);
+  expect(result.stderr).toContain("--component or --components-file");
+  expect(planComponents).not.toHaveBeenCalled();
+  await expect(
+    scan(paths, {
+      maxTotalCostUsd: 2,
+      scanOptions: { postScanPrompt: "Extra turn" },
+    }),
+  ).rejects.toThrow("post-scan prompt");
+});
+
 test("bounds standard scans, continues after failure, and preserves partial results", async () => {
   const paths = await fixture();
   let active = 0,
@@ -403,6 +559,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     scanOptions: {
       auth: "chatgpt",
       scanPrompt: "Check access controls",
+      ownerSuggestions: true,
       maxCostUsd: 3,
     },
     onProgress: throwing("optional observer"),
@@ -417,6 +574,7 @@ test("bounds standard scans, continues after failure, and preserves partial resu
           mode: "standard",
           auth: "chatgpt",
           scanPrompt: "Check access controls",
+          ownerSuggestions: true,
           maxCostUsd: 3,
         });
         if (scope(repository, options) === "apps/api")
@@ -470,6 +628,49 @@ test("bounds standard scans, continues after failure, and preserves partial resu
     "./component-2/report.md",
   );
 });
+
+test.each([true, false])(
+  "keeps the registered scan ID on a failed receipt when the component client aborts (lifecycle observer: %p)",
+  async (observe) => {
+    const paths = await fixture();
+    const controller = new AbortController();
+    const stateDir = join(paths.root, "state");
+    const client = TestClient.withDependencies({
+      runWorkbench: runtime.runWorkbench,
+      environment: {
+        PATH: process.env["PATH"],
+        SystemRoot: process.env["SystemRoot"],
+        CODEX_SECURITY_STATE_DIR: stateDir,
+      },
+    });
+    const events: ComponentScanEvent[] = [];
+    const summary = await scan(paths, {
+      components: [components[0]!],
+      createSecurity: () => ({
+        close: () => client.close(),
+        run: (repository, options) =>
+          client.run(repository, {
+            ...options,
+            mock: true,
+            signal: controller.signal,
+            onScanStarted: () => controller.abort(),
+          }),
+      }),
+      onScanEvent: observe ? (event) => events.push(event) : undefined,
+    });
+    const [receipt] = (await json(summary.summaryPath!)).components;
+    expect(receipt.status).toBe("failed");
+    expect(typeof receipt.scanId).toBe("string");
+    expect(events.filter((event) => event.type === "lifecycle")).toMatchObject(
+      observe
+        ? ["running", "canceled"].map((status) => ({
+            componentId: receipt.id,
+            value: { status, scanId: receipt.scanId },
+          }))
+        : [],
+    );
+  },
+);
 
 test("forwards scan events with their component identity without letting observers stop scans", async () => {
   const paths = await fixture();
@@ -578,6 +779,54 @@ test("forwards scan events with their component identity without letting observe
     });
   }
 });
+
+test.each([true, false])(
+  "CLI displays Deep component review counts (headless: %p)",
+  async (headless) => {
+    const paths = await fixture();
+    const config = join(paths.root, "settings.yaml");
+    await writeFile(config, "scan:\n  mode: deep\n");
+    const { stderr, runCli } = createCliTest(main, { stderr: true });
+    const code = await runCli(
+      [
+        "scan-components",
+        paths.repository,
+        "--config",
+        config,
+        "--component",
+        "apps/api",
+        "--output-dir",
+        paths.outputDir,
+        ...(headless ? ["--headless"] : []),
+      ],
+      {
+        ...dependencies({
+          currentDirectory: paths.root,
+          environment: { NO_COLOR: "1" },
+        }),
+        createSecurity: client(async (repository, options) => {
+          expect(options.mode).toBe("deep");
+          options.onDeepProgress?.({ completed: 3, active: 2, maximum: 40 });
+          await Promise.resolve();
+          options.onDeepProgress?.({
+            completed: 5,
+            active: 0,
+            maximum: 40,
+            consolidating: true,
+          });
+          return completed(repository, options);
+        }),
+      },
+    );
+    expect(code).toBe(0);
+    expect(stderr.text()).toContain(
+      headless
+        ? "apps/api discovery | Reviews: 3 completed, 2 active, cap 40"
+        : "3 done, 2 active",
+    );
+    expect(stderr.text()).toContain("consolidating results");
+  },
+);
 
 test.each([
   ["dashboard", []],
@@ -698,8 +947,14 @@ test.each([
   },
 );
 
-test("CLI escapes component failure controls while preserving the saved error", async () => {
+test("CLI escapes component names and errors in headless output and preserves their saved values", async () => {
   const paths = await fixture();
+  const name = "API\u001b[2J\nnext\u009bline";
+  const planFile = join(paths.root, "plan.json");
+  await writeFile(
+    planFile,
+    JSON.stringify({ components: [{ name, paths: ["apps/api"] }] }),
+  );
   const failure = "Component failed: token=SYNTHETIC_VALUE\u001b[2J\ncontinued";
   const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -708,25 +963,36 @@ test("CLI escapes component failure controls while preserving the saved error", 
       [
         "scan-components",
         paths.repository,
-        "--component",
-        "apps/api",
+        "--components-file",
+        planFile,
+        "--headless",
         "--output-dir",
         paths.outputDir,
         "--json",
       ],
       {
         ...dependencies({ currentDirectory: paths.root }),
-        createSecurity: client(rejecting(failure)),
+        createSecurity: client(async (_repository, options) => {
+          options.onProgress?.({
+            phase: "validation",
+            filesCompleted: 1,
+            filesTotal: 1,
+          });
+          throw new Error(failure);
+        }),
       },
     ),
   ).toBe(2);
+  expect(stderr.text()).toContain("API [2J next line validating findings");
+  expect(stderr.text()).toContain("API [2J next line failed:");
   expect(stderr.text()).toContain(
     "Component failed: token=SYNTHETIC_VALUE [2J continued\n",
   );
   expect(stderr.text()).not.toContain("\u001b");
+  expect(stderr.text()).not.toContain("\u009b");
   const result = JSON.parse(stdout.text());
   expect(await json(result.summaryPath)).toMatchObject({
-    components: [expect.objectContaining({ error: failure })],
+    components: [expect.objectContaining({ name, error: failure })],
   });
 });
 
@@ -1011,6 +1277,31 @@ test("rejects escaped component paths and output inside the enclosing worktree",
     }),
   ).rejects.toThrow();
 });
+
+test.skipIf(process.platform === "win32")(
+  "follows symlink parent traversal through component planning and execution",
+  async () => {
+    const paths = await fixture();
+    await mkdir(join(paths.repository, "api"));
+    await writeFile(join(paths.repository, "api", "decoy.ts"), "export {};\n");
+    await symlink("apps/web", join(paths.repository, "link"));
+    const proposed = { components: [{ name: "API", paths: ["link/../api"] }] };
+    const planned = await planComponents(paths.repository, {
+      codex: fakeCodex(() => proposed),
+    });
+    const run = mock(completed);
+    const summary = await scan(paths, {
+      ...proposed,
+      createSecurity: client(run),
+    });
+    const expected = { name: "API", paths: ["apps/api"] };
+    expect(planned.components[0]).toEqual(expected);
+    expect(await json(summary.planPath)).toEqual({ components: [expected] });
+    expect(run.mock.calls.map(([, options]) => options.target)).toEqual([
+      [join(paths.repository, "apps/api")],
+    ]);
+  },
+);
 
 test("keeps literal component paths through planning and execution", async () => {
   const name = "keeps literal component paths through planning and execution";
@@ -1705,19 +1996,58 @@ test.each(["auto", "explicit", "file"])(
         : selection === "file"
           ? ["--components-file", planFile]
           : selected.flatMap(({ paths }) => ["--component", paths[0]!]);
-    const result = await cli(paths, [...args, "--plan-only"], {
-      planComponents: async () => ({ components: selected }),
-      createSecurity: throwing("unexpected scan"),
-    });
-    expect(result.code).toBe(0);
+    const result = await cli(
+      paths,
+      [
+        ...args,
+        "--plan-only",
+        ...(selection === "auto"
+          ? []
+          : [
+              "--auth",
+              "api-key",
+              "--workers=2",
+              "--max-total-cost=3",
+              "--max-cost",
+              "1.5",
+              "--codex",
+              'model_providers.example.http_headers.Example="synthetic-header"',
+            ]),
+      ],
+      {
+        environment: {},
+        planComponents: async () => ({ components: selected }),
+        createSecurity: throwing("unexpected scan"),
+      },
+    );
+    expect(result.code, result.stderr).toBe(0);
     expect(await json(join(paths.outputDir, "components.json"))).toEqual({
       components:
         selection === "explicit"
           ? selected.map(({ paths }) => ({ name: paths[0], paths }))
           : selected,
     });
-    expect(JSON.parse(result.stdout).planPath).toBe(
-      join(paths.outputDir, "components.json"),
+    const plan = JSON.parse(result.stdout);
+    expect(plan.planPath).toBe(join(paths.outputDir, "components.json"));
+    expect(plan.nextCommand).toContain("codex-security scan-components");
+    expect(plan.nextCommand).toContain("--components-file");
+    expect(plan.nextCommand).toContain(join(paths.outputDir, "results"));
+    if (selection !== "auto") {
+      expect(plan.nextCommand).toContain("--auth api-key");
+      expect(plan.nextCommand).toContain("--workers 2");
+      expect(plan.nextCommand).toContain("--max-cost 1.5");
+      expect(plan.nextCommand).toContain("--max-total-cost 3");
+      expect(plan.nextCommandNote).toContain("--codex");
+      expect(result.stdout + result.stderr).not.toContain("synthetic-header");
+    }
+    const occupied = await cli(paths, [
+      "--components-file",
+      plan.planPath,
+      "--plan-only",
+    ]);
+    expect(occupied.code).toBe(2);
+    expect(occupied.stderr).toContain(
+      "Choose a new or empty directory with --output-dir",
     );
   },
 );
@@ -1774,27 +2104,45 @@ test.each(["auto", "chatgpt", "api-key"] as const)(
 );
 
 test.each([
-  ["openrouter", "api-key"],
-  ["openrouter", "chatgpt"],
-  ["fireworks", "api-key"],
-  ["fireworks", "chatgpt"],
+  ["openrouter", "api-key", "inline"],
+  ["openrouter", "chatgpt", "inline"],
+  ["fireworks", "api-key", "inline"],
+  ["fireworks", "chatgpt", "inline"],
+  ["openrouter", "api-key", "CODEX_HOME"],
+  ["openrouter", "api-key", "codex_home"],
 ] as const)(
-  "component planning honors command authentication for %s with %s selection",
-  async (provider, auth) => {
+  "component planning honors command authentication for %s with %s selection via %s",
+  async (provider, auth, homeKey) => {
     const paths = await fixture();
+    const sourceHome =
+      homeKey === "inline" ? undefined : join(paths.root, "home");
+    if (sourceHome !== undefined) {
+      await mkdir(sourceHome);
+      await writeFile(
+        join(sourceHome, "review.config.toml"),
+        `model = "synthetic-component-model"
+model_provider = "${provider}"
+[model_providers.${provider}.auth]
+command = "synthetic-auth-helper"
+`,
+      );
+    }
     const plan = mock(async () => ({ components }));
     const result = await scan(paths, {
       components: undefined,
       auto: true,
       planOnly: true,
-      environment: {},
+      environment: sourceHome === undefined ? {} : { [homeKey]: sourceHome },
       config: {
-        codexOverrides: {
-          model_provider: provider,
-          model_providers: {
-            [provider]: { auth: { command: "synthetic-auth-helper" } },
-          },
-        },
+        codexOverrides:
+          sourceHome === undefined
+            ? {
+                model_provider: provider,
+                model_providers: {
+                  [provider]: { auth: { command: "synthetic-auth-helper" } },
+                },
+              }
+            : { profile: "review" },
       },
       scanOptions: { auth },
       planComponents: plan,
@@ -1852,6 +2200,10 @@ test.each([
         return preparedRuntime("unused").plugin;
       }),
       spyOn(runtime, "probeCodexSandbox").mockImplementation(async () => {}),
+      // The Node child below implements only `codex exec`.
+      spyOn(deepScan, "readDeepScanParentConfig").mockImplementation(
+        async ({ codexOptions }) => codexOptions.config ?? {},
+      ),
       spyOn(runtime, "resolvePluginPython").mockResolvedValue(
         "/managed/python",
       ),
@@ -2092,6 +2444,12 @@ test("CLI rejects ambiguous component selection", async () => {
   }
 });
 
+test("explains the component selector requirement when neither is set", async () => {
+  const paths = await fixture();
+  await expect(scan(paths, { components: undefined })).rejects.toThrow(
+    "Choose exactly one",
+  );
+});
 (process.platform === "win32" ? test.skip : test)(
   "component inventory excludes checkout-local Git when planning a subdirectory",
   async () => {

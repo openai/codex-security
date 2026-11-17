@@ -285,6 +285,7 @@ describe("bulk scan repository discovery", () => {
     const result = await runBulkScanWizard(dependencies);
 
     expect(result?.outputDir).toBe(join(root, "custom-results"));
+    expect(prompt.messages.join("")).toContain("Ready to scan 2 repositories?");
     expect(prompt.searchOptions).toEqual([
       ["All 3 repositories", "acme/owl", "acme/openai", "acme/unrelated"],
       ["Done (1 selected)", "acme/openai", "acme/unrelated"],
@@ -387,6 +388,10 @@ describe("bulk scan repository discovery", () => {
     const result = await runBulkScanWizard(dependencies);
 
     expect(prompt.searchOptions[0]).toEqual(["acme", "personal-account"]);
+    expect(prompt.searchOptions[1]).toContain("All repositories");
+    const messages = prompt.messages.join("");
+    expect(messages).toContain("Found 1 repository.");
+    expect(messages).toContain("Ready to scan 1 repository?");
     expect(
       requests.find(({ path }) => path === "/graphql")?.variables?.owner,
     ).toBe("personal-account");

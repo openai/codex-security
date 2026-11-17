@@ -1,3 +1,5 @@
+"""Check how finalization reconciles completed deferred work with the remaining coverage record."""
+
 from __future__ import annotations
 
 import json

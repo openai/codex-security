@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isMain } from "../../../sdk/typescript/scripts/is-main.mjs";
 import { runGit } from "../sastbench/scripts/hydrate-sastbench-repos.mts";
 
 import {
@@ -95,7 +96,10 @@ function ensureGitCheckout(job: ReturnType<typeof plannedJobs>[number]) {
     return "already current";
   }
 
-  runGit(["fetch", "--depth", "1", "origin", job.checkoutRef], job.targetDir);
+  runGit(
+    ["fetch", "--depth", "1", "--", "origin", `${job.checkoutRef}:`],
+    job.targetDir,
+  );
   runGit(["checkout", "--detach", "FETCH_HEAD"], job.targetDir);
   return "hydrated";
 }
@@ -112,11 +116,7 @@ export function plannedJobs(
   }));
 }
 
-if (
-  process.argv[1] &&
-  fs.existsSync(process.argv[1]) &&
-  import.meta.filename === fs.realpathSync(process.argv[1])
-) {
+if (isMain(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
   const dataset = readCalibrationDataset(args.dataset);
   const jobs = plannedJobs(dataset, args);

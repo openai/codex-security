@@ -16,7 +16,20 @@ def require(condition, message):
 
 
 def validate(model, assessment_bytes: bytes):
+    """Check the explorer graph and its citations against the assessment before rendering.
+
+    Args:
+        model (dict): Parsed explorer JSON containing the graph, scenarios, and evidence.
+        assessment_bytes (bytes): Original UTF-8 bytes used to match quotations, line ranges,
+            and the optional assessment digest. Preserve the original line endings.
+
+    Raises:
+        ValueError: A graph relationship, layout value, or evidence check fails.
+        KeyError: A required field is missing when accessed by name.
+    """
+
     def indexed(key, default=None):
+        """Index a model collection by its unique, nonempty string IDs."""
         items = model.get(key, default)
         require(isinstance(items, list), f"{key} must be a list")
         ids = [item.get("id") for item in items]
@@ -148,6 +161,7 @@ def validate(model, assessment_bytes: bytes):
     source_roles(model.get("participants", []), "participants", participant=True)
 
     def chain(item, scenario_id, route_id):
+        """Return the edge IDs of a connected route after checking its assessment references."""
         ids = item.get("edges", [])
         require(
             isinstance(ids, list) and ids and all(i in edges for i in ids),
@@ -163,6 +177,7 @@ def validate(model, assessment_bytes: bytes):
         return ids
 
     def applicable_routes(control, routes, sources):
+        """Return the routes selected by both the control and any sources it targets."""
         return [
             route
             for route in routes
@@ -482,6 +497,7 @@ def validate(model, assessment_bytes: bytes):
 
 
 def embedded(value):
+    """Encode a value as JSON for an HTML script element, escaping HTML delimiters."""
     return (
         json.dumps(value, ensure_ascii=False, allow_nan=False)
         .replace("<", "\\u003c")
@@ -491,7 +507,10 @@ def embedded(value):
 
 
 def enters_node(start, end, node):
-    """Intersect the segment's parameter interval with the open box on each axis."""
+    """Return whether the segment between two (x, y) points enters the open node rectangle.
+
+    Contact with an edge or corner alone is allowed when routing a connector.
+    """
     enter, leave = 0, 1
     for a, b, low, size in zip(start, end, (node["x"], node["y"]), (node["w"], node["h"])):
         high = low + size
@@ -505,6 +524,7 @@ def enters_node(start, end, node):
 
 
 def connector_warnings(model):
+    """Yield layout warnings for diagonal end bends and connectors that enter node interiors."""
     for edge in model["edges"]:
         segments = [(a, b) for a, b in pairwise(edge["points"]) if a != b]
         diagonal = [a[0] != b[0] and a[1] != b[1] for a, b in segments]
@@ -518,6 +538,7 @@ def connector_warnings(model):
 
 
 def main():
+    """Validate the assessment and model, write a self-contained HTML file, and print layout warnings."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", type=Path)
     parser.add_argument("--assessment", required=True, type=Path)

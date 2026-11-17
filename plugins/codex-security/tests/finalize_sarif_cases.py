@@ -1,3 +1,5 @@
+"""Exercise SARIF source locations, URI encoding, and fingerprints against the scan's captured source."""
+
 from __future__ import annotations
 
 import io

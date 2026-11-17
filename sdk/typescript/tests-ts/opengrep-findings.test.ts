@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import {
   normalizeOpenGrepFindings as normalize,
+  projectStoredOpenGrepFinding,
   readOpenGrepFindings,
 } from "../src/opengrep-findings.js";
 import {
@@ -136,6 +137,45 @@ test("one source occurrence retains every trace observation in deterministic ord
   input.results.reverse();
   expect(normalize(input, options)).toEqual(output);
   expect(input.results.reverse()).toEqual(original.results);
+});
+
+test("stored OpenGrep groups publish eligible sibling traces and identify every excluded retained trace", () => {
+  const input = opengrepTraceJson();
+  const deep = structuredClone(input.results[0]!);
+  let trace: unknown = "leaf";
+  for (let level = 0; level < 20; level++) trace = { child: trace };
+  Object.assign(deep.extra.metadata, { trace });
+  input.results.push(deep);
+  const stored = normalize(input, options, "local").findings[0]!;
+  const traces = stored.evidence.source_data![
+    "results"
+  ] as typeof input.results;
+  expect(traces).toHaveLength(3);
+  const native = normalize({ ...input, results: traces }, options, "cloud");
+  const projected = projectStoredOpenGrepFinding(stored)!;
+  expect(projected.read).toBe(3);
+  expect(projected.findings).toEqual(native.findings);
+  expect(projected.excluded).toEqual(native.excluded);
+  expect(projected.excluded).toEqual([
+    {
+      position:
+        traces.findIndex((result) => "trace" in result.extra.metadata) + 1,
+      source_finding_id: stored.source_finding_id,
+      reason: expect.stringContaining("depth limit"),
+    },
+  ]);
+  expect(projected.findings[0]!.evidence.source_data!["results"]).toHaveLength(
+    2,
+  );
+  expect(projected.findings[0]!.evidence.source_data!["scan_error_count"]).toBe(
+    input.errors.length,
+  );
+  expect(
+    projectStoredOpenGrepFinding({ ...stored, source_finding_id: "custom-id" }),
+  ).toBeUndefined();
+  const edited = structuredClone(stored);
+  edited.evidence.title = "Reviewed title";
+  expect(projectStoredOpenGrepFinding(edited)).toBeUndefined();
 });
 
 test("an invalid observation does not hide a valid sibling at the same source range", () => {

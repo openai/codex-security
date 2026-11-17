@@ -1,32 +1,16 @@
+import {
+  CodexSdkWorkerExecutor,
+  fakeCodexFixture,
+  assertReadOnlyWorkerPolicy,
+} from "./deep_scan_executor_fixture.ts";
 import assert from "node:assert/strict";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
-import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
 import { readJson } from "./support/json.ts";
 import { assertConfigOverrides } from "./assertions.ts";
 
-export async function testConcurrentWorkerExecutableAliases({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  parentSandbox,
-  bundledCodexSdkEnvironment,
-  assertReadOnlyWorkerPolicy,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: () => Promise<{
-    root: string;
-    executablePath: string;
-    markerPath: string;
-    preflightMarkerPath: string;
-  }>;
-  parentSandbox: DeepWorkerParentSandbox;
-  bundledCodexSdkEnvironment: (
-    command: string,
-    environment: Record<string, string>,
-  ) => Record<string, string>;
-  assertReadOnlyWorkerPolicy: (args: readonly string[]) => void;
-}) {
+export async function testConcurrentWorkerExecutableAliases() {
   const saved = [
     "CODEX_CLI_PATH",
     "CODEX_HOME",
@@ -81,20 +65,18 @@ export async function testConcurrentWorkerExecutableAliases({
       });
     }
     delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-    for (const kind of ["discovery", "dedup"] as const) {
+    {
+      const kind = "discovery";
       for (const resumeThreadId of [undefined, "resumed-thread"]) {
         await Promise.all(
           scans.map((scan) => {
-            Object.assign(
-              process.env,
-              bundledCodexSdkEnvironment(scan.alias, {
-                PATH: "",
-                CODEX_CLI_PATH: scan.alias,
-                CODEX_HOME: scan.fixture.root,
-                CODEX_SECURITY_CONFIG_PATH: scan.configPath,
-                FAKE_CODEX_MARKER: scan.fixture.markerPath,
-              }),
-            );
+            Object.assign(process.env, {
+              PATH: scan.tools,
+              CODEX_CLI_PATH: scan.alias,
+              CODEX_HOME: scan.fixture.root,
+              CODEX_SECURITY_CONFIG_PATH: scan.configPath,
+              FAKE_CODEX_MARKER: scan.fixture.markerPath,
+            });
             return scan.executor.run({
               promptPath: scan.promptPath,
               workingDirectory: scan.fixture.root,

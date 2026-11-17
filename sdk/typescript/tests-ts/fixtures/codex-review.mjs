@@ -1,17 +1,64 @@
+import refusalMessages from "./codex-refusal-messages.json" with { type: "json" };
 import assert from "node:assert/strict";
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const [scenario, transcript, checkout, stage = "pair-review"] =
   process.argv.slice(2);
+
+const transportStatus = /^transport-(?:request|turn)-(\d+)$/.exec(
+  scenario,
+)?.[1];
+const transportFailure = transportStatus
+  ? {
+      message: `Safety policy: request refused by upstream with ${transportStatus}`,
+      codexErrorInfo: {
+        httpConnectionFailed: { httpStatusCode: Number(transportStatus) },
+      },
+    }
+  : scenario === "transport-wording-request"
+    ? {
+        message: "Request flagged for possible cybersecurity risk.",
+        codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+      }
+    : undefined;
 const turnFailures = {
+  ...(scenario.startsWith("transport-turn-")
+    ? { [scenario]: transportFailure }
+    : {}),
+  "transport-null-turn": {
+    message: "Request flagged for possible cybersecurity risk.",
+    codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } },
+  },
+  "transport-timeout-turn": {
+    message: "Safety policy: request refused because the service timed out",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 504 } },
+  },
+
+  "determiner-service-error": {
+    message:
+      "Safety policy: this request is refused because the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "sentence-service-error": {
+    message: "Safety policy: request refused. Service unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
   "policy-turn-code": {
     message: "Request blocked.",
     codexErrorInfo: "cyberPolicy",
   },
   "policy-turn": {
     message: "Request flagged for possible cybersecurity risk.",
-    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+    codexErrorInfo: "other",
+  },
+  "policy-accordance-turn": {
+    message: "This request was refused in accordance with the safety policy.",
+    codexErrorInfo: "other",
+  },
+  "policy-terse-turn": {
+    message: "Refused due to the safety policy",
+    codexErrorInfo: "other",
   },
   "failed-turn": {
     message: "Rate limit exceeded",
@@ -23,6 +70,41 @@ const turnFailures = {
   },
   "server-error": {
     message: "Provider temporarily unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "service-unavailable": {
+    message: "Connection refused: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "network-request-error": {
+    message: "Network request refused: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "http-request-error": {
+    message: "HTTP request blocked: safety policy service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-network-error": {
+    message:
+      "Failed to contact safety policy: request refused by upstream with 503",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-because-error": {
+    message:
+      "Safety policy: request refused because the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-as-error": {
+    message:
+      "Safety policy: request refused as the upstream service is unavailable.",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-service-error": {
+    message: "Safety policy: request refused: service unavailable",
+    codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
+  },
+  "prefix-upstream-error": {
+    message: "Safety policy: request refused by upstream with 503",
     codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 503 } },
   },
   "connection-error": {
@@ -78,9 +160,21 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(message.params.apiKey, "synthetic-review-key");
     send({ id: message.id, result: { type: "apiKey" } });
   } else if (message.method === "thread/start") {
+    if (transportFailure && !scenario.startsWith("transport-turn-")) {
+      send({
+        id: message.id,
+        error: {
+          code: -32000,
+          message: transportFailure.message,
+          data: { codexErrorInfo: transportFailure.codexErrorInfo },
+        },
+      });
+      continue;
+    }
     if (
       [
         "request-error",
+        "sentence-service-request-error",
         "credential-error",
         "policy-request",
         "policy-request-code",
@@ -91,17 +185,25 @@ for await (const line of createInterface({ input: process.stdin })) {
         error: {
           code: -32000,
           message:
-            scenario === "policy-request-code"
-              ? "Request blocked."
-              : scenario === "policy-request"
-                ? "Request rejected: cyber_policy."
-                : scenario === "credential-error"
-                  ? "Authentication failed: Bearer synthetic-review-key"
-                  : "Authentication required",
+            scenario === "sentence-service-request-error"
+              ? "Safety policy: request refused. Service unavailable."
+              : scenario === "policy-request-code"
+                ? "Request blocked."
+                : scenario === "policy-request"
+                  ? "Request rejected: cyber_policy."
+                  : scenario === "credential-error"
+                    ? "Authentication failed: Bearer synthetic-review-key"
+                    : "Authentication required",
           data:
-            scenario === "policy-request-code"
-              ? { codexErrorInfo: "cyberPolicy" }
-              : "Synthetic private response data",
+            scenario === "sentence-service-request-error"
+              ? {
+                  codexErrorInfo: {
+                    httpConnectionFailed: { httpStatusCode: 503 },
+                  },
+                }
+              : scenario === "policy-request-code"
+                ? { codexErrorInfo: "cyberPolicy" }
+                : "Synthetic private response data",
         },
       });
       continue;
@@ -231,7 +333,8 @@ for await (const line of createInterface({ input: process.stdin })) {
       submit("invalid", { decision: "UNKNOWN" });
     } else if (
       scenario === "text-only" ||
-      scenario === "refusal-text" ||
+      scenario === "service-timeout-text" ||
+      Object.hasOwn(refusalMessages, scenario) ||
       ([
         "text-only-correction",
         "cancel-continuation",
@@ -247,9 +350,9 @@ for await (const line of createInterface({ input: process.stdin })) {
           item: {
             type: "agentMessage",
             text:
-              scenario === "refusal-text"
-                ? "I'm sorry, but I can't assist with that request."
-                : '{"decision":"SAME"}',
+              scenario === "service-timeout-text"
+                ? "Safety policy: request refused because the service timed out"
+                : (refusalMessages[scenario] ?? '{"decision":"SAME"}'),
           },
         },
       });
@@ -279,8 +382,25 @@ for await (const line of createInterface({ input: process.stdin })) {
         {
           reason:
             scenario === "policy-reported-error"
-              ? "Request refused due to cybersecurity policy violation."
-              : "Required source revision could not be read.",
+              ? "Request refusal due to the safety policy."
+              : scenario === "required-source-error-policy-file"
+                ? "Connection refused while fetching content-policy.ts"
+                : scenario === "required-source-error-upload-policy"
+                  ? "Artifact upload was blocked by the content policy."
+                  : scenario === "required-source-error-publication-policy"
+                    ? "Artifact publication was refused due to the content policy."
+                    : scenario === "required-source-error-publication-refusal"
+                      ? "Artifact publication refusal due to the content policy."
+                      : scenario ===
+                          "required-source-error-policy-requires-refusal"
+                        ? "Artifact upload failed because the content policy requires refusal of unsupported media"
+                        : scenario ===
+                            "required-source-error-upload-content-policy-violation"
+                          ? "Artifact upload failed due to content policy violation"
+                          : scenario ===
+                              "required-source-error-upload-safety-policy-violation"
+                            ? "Artifact upload failed due to safety policy violation"
+                            : "Required source revision could not be read.",
         },
         { tool: "submit_error" },
       );

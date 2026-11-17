@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rm,
   stat,
@@ -13,6 +14,10 @@ import { type ThreadEvent } from "@openai/codex-sdk";
 import { describe, expect, test } from "bun:test";
 import { OutputDirectoryError, ScanInterruptedError } from "../src/index.js";
 import { resolveCodexProfile, type JsonObject } from "../src/config.js";
+import {
+  readOperationTelemetry,
+  type OperationTelemetryEvent,
+} from "../src/operation-telemetry.js";
 import { runWorkbench } from "../src/runtime.js";
 
 import { reviewSqliteHome } from "../src/deduplication/codex-review.js";
@@ -249,13 +254,22 @@ describe("CodexSecurity finding validation", () => {
       yield* validationEvents();
     }
     const fixture = await persistedValidationClient(events);
+    fixture.enableTelemetry();
     await using client = fixture.client;
     const workflowId = await fixture.bindWorkflow(
       "explicit-validation-evidence",
     );
-    const request = { ...fixture.options, workflowId };
+    const request = {
+      ...fixture.options,
+      workflowId,
+      outputDir: join(fixture.stateDirectory, "telemetry"),
+    };
     const first = await client.validate(request);
     expect(await client.validate(request)).toEqual(first);
+    expect(await client.validate({ ...request, outputDir: undefined })).toEqual(
+      first,
+    );
+    expect(await readdir(first.outputDir)).toEqual(["proof.txt"]);
     expect(modelCalls).toBe(1);
     if (process.platform !== "win32") {
       await chmod(first.outputDir, 0o770);
@@ -267,6 +281,16 @@ describe("CodexSecurity finding validation", () => {
       OutputDirectoryError,
     );
     expect(modelCalls).toBe(1);
+    expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
+      "Changed evidence.\n",
+    );
+    const regenerated = await client.validate({
+      ...request,
+      outputDir: undefined,
+    });
+    expect(regenerated.outputDir).not.toBe(first.outputDir);
+    expect(modelCalls).toBe(2);
+    expect(await readdir(first.outputDir)).toEqual(["proof.txt"]);
     expect(await readFile(join(first.outputDir, "proof.txt"), "utf8")).toBe(
       "Changed evidence.\n",
     );
@@ -389,15 +413,20 @@ describe("CodexSecurity finding validation", () => {
       yield* validationEvents();
     }
     const original = await persistedValidationClient(events);
+    original.enableTelemetry();
     usePersistedValidationWorkbench(original, () => targetChanged);
     await using originalClient = original.client;
     await original.bindWorkflow("validation-retry");
+    const finished: Readonly<OperationTelemetryEvent>[] = [];
     const request = {
       ...original.options,
       outputDir: undefined,
       scanId: "recorded-scan",
       workflowId: "validation-retry",
       safetyIdentifier: "synthetic-validation-first",
+      onTelemetry: (event: Readonly<OperationTelemetryEvent>) => {
+        if (event.type === "attempt_finished") finished.push(event);
+      },
     };
     const first = await originalClient.validate(request);
     await expect(
@@ -410,6 +439,7 @@ describe("CodexSecurity finding validation", () => {
       PLUGIN_ROOT,
       original.root,
     );
+    resumed.enableTelemetry();
     usePersistedValidationWorkbench(resumed, () => targetChanged);
     await using client = resumed.client;
     expect(await client.validate(request)).toEqual(first);
@@ -421,6 +451,17 @@ describe("CodexSecurity finding validation", () => {
       "scan target changed",
     );
     expect(modelCalls).toBe(3);
+    expect(finished.map((event) => event.reusedResult)).toEqual([
+      false,
+      false,
+      true,
+      false,
+      false,
+    ]);
+    const { events: journal } = await readOperationTelemetry(
+      original.stateDirectory,
+    );
+    expect(journal.filter((event) => event.reusedResult)).toHaveLength(1);
   });
 
   test("separates persisted validation by model and access program across clients", async () => {

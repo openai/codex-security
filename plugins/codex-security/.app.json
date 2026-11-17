@@ -2,18 +2,22 @@
   "apps": {
     "codex-security-cloud": {
       "id": "connector_openai_defense_factory",
+      "required": false,
       "category": "Code Hosting & Security Findings"
     },
     "linear": {
       "id": "asdk_app_69a089a326dc8191b32a3f2553f5be2c",
+      "required": false,
       "category": "Work Tracking & Coordination"
     },
     "github": {
       "id": "connector_76869538009648d5b282a4bb21c3d157",
+      "required": false,
       "category": "Code Hosting & Security Findings"
     },
     "atlassian": {
       "id": "asdk_app_6a83901dde988191b3f3cefdcc19acfa",
+      "required": false,
       "category": "Work Tracking & Coordination",
       "capabilities": [
         "read",

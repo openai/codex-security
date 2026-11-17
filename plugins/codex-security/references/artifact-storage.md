@@ -22,7 +22,7 @@ Select `storage` explicitly:
 - `persistent`: retained documents/evidence under the authoritative scan directory or standalone collection. The default root is `$CODEX_SECURITY_STATE_DIR/scans`, or `$CODEX_HOME/state/plugins/codex-security/scans` when no state override is set; `CODEX_HOME` defaults to `~/.codex`. The existing `CODEX_SECURITY_SCAN_ROOT` override still takes precedence for plugin-created output. The workbench state directory must be writable; set `CODEX_SECURITY_STATE_DIR` explicitly on hosts with an unwritable default. Preserve an existing scan's saved path, including older temporary paths.
 - `temporary`: disposable staging and execution output in a context-specific OS temporary directory. Standalone temporary saves and reads do not create or require the persistent collection. It is not part of the completed result and must not be referenced from canonical findings or coverage. It can disappear independently of retained files.
 
-Relative storage overrides resolve from the plugin directory, matching the workbench, regardless of the MCP launch directory.
+Relative storage overrides resolve from the plugin directory, matching the workbench, regardless of the MCP launch directory. On POSIX, `CODEX_SECURITY_SCAN_ROOT` preserves trailing whitespace. A value with leading padding is trimmed. Use an absolute path or a `./` prefix for a relative directory name that begins with whitespace.
 
 Omit `path`, `content` and `sourcePath` to prepare the selected directory. Use the returned `directory`; never construct or guess the physical path. A save with a file requires `path` plus exactly one of `content` or `sourcePath`.
 
@@ -53,4 +53,4 @@ End each shared threat model with these two lines:
 - `Repository: <stable target identity from scan-contract.md>`
 - `Version: <revision for an immutable Git tree; snapshot digest otherwise>`
 
-Completed/sealed scan files cannot be edited through the save tool. For later write-ups or hardening requests, use the standalone target collection and link those returned files separately. Preserve the original result and its references. Temporary cleanup must not remove retained files or recovery checkpoints. The save tool publishes running-scan files under the same completion lock as finalization; surface a stopped/sealed-scan rejection and preserve existing output.
+Completed/sealed scan files cannot be edited through the save tool. For a workbench Generate request, save or register the patch with `set_codex_security_finding_remediation` using `state: "generated"`. For later write-ups or hardening requests, use the standalone target collection and link those returned files separately. Preserve the original result and its references. Temporary cleanup must not remove retained files or recovery checkpoints. The save tool publishes running-scan files under the same completion lock as finalization; surface a stopped/sealed-scan rejection and preserve existing output.

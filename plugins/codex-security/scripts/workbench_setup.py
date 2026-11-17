@@ -22,6 +22,7 @@ from workbench_target import (
 
 
 def require_target(value: str) -> Path:
+    """Return the resolved local directory or raise SystemExit if the supplied path is relative or missing."""
     expanded = Path(value).expanduser()
     if not expanded.is_absolute():
         raise SystemExit("Scan target must be an absolute local directory path.")
@@ -32,6 +33,7 @@ def require_target(value: str) -> Path:
 
 
 def inspect_target(target: Path) -> dict[str, Any]:
+    """Return the target path, display name, and local Git metadata used by setup."""
     return {
         "displayName": target.name,
         "targetMetadata": git_target_metadata(target),
@@ -40,6 +42,7 @@ def inspect_target(target: Path) -> dict[str, Any]:
 
 
 def resolve_git_commit(target: Path, revision: str, label: str) -> str:
+    """Resolve a revision to a local commit ID or raise SystemExit with the caller’s label."""
     value = optional_text(revision, maximum=512)
     if not value:
         raise SystemExit(f"{label} is required.")
@@ -62,13 +65,18 @@ def require_diff_target(
     head_revision: str | None,
     content_digest: str | None,
 ) -> dict[str, str]:
+    """Resolve the selected Git change to its base and head commits.
+
+    For a working-tree selection, also return the current content digest and reject
+    changes since selection. Invalid or stale selections raise SystemExit.
+    """
     current_head = require_review_changes_target(target)
     if kind not in DIFF_TARGET_KINDS:
         raise SystemExit("Choose which Git changes to review before starting a diff scan.")
     if kind == "working_tree":
         base = resolve_git_commit(target, base_revision or "HEAD", "Working-tree base")
         head = resolve_git_commit(target, head_revision or current_head, "Working-tree HEAD")
-        current_digest = worktree_content_digest(target)
+        current_digest = worktree_content_digest(target, expected_digest=content_digest)
         if base != current_head or head != current_head:
             raise SystemExit(
                 "Repository HEAD changed after these working-tree changes were selected. "
@@ -131,6 +139,7 @@ def inspect_setup_values(
     diff_head_revision: str | None,
     diff_content_digest: str | None,
 ) -> dict[str, Any]:
+    """Validate the target, scope, and scan mode and return their normalized values and resolved diff target."""
     target = require_target(target_path)
     inspected = require_scannable_target(target)
     normalized_scope = require_scope(scope, mode, target)
@@ -165,6 +174,7 @@ def inspect_setup_values(
 
 
 def require_review_changes_target(target: Path) -> str:
+    """Return the checked-out revision or raise SystemExit if target is not the worktree root."""
     revision = require_git_worktree_head(target)
     repository_root = git_output(target, "rev-parse", "--show-toplevel")
     if repository_root is None or not Path(repository_root).samefile(target):
@@ -175,6 +185,7 @@ def require_review_changes_target(target: Path) -> str:
 
 
 def require_scannable_target(target: Path) -> dict[str, Any]:
+    """Return the inspected target metadata, rejecting a Git repository that has no checked-out worktree."""
     inspected = inspect_target(target)
     metadata = inspected["targetMetadata"]
     if metadata["isGit"] and not metadata["isWorktree"]:
@@ -185,6 +196,7 @@ def require_scannable_target(target: Path) -> dict[str, Any]:
 
 
 def require_scope(scope: str, mode: str, target: Path) -> str:
+    """Return the existing scan directory relative to the target, requiring the whole repository for deep mode."""
     value = scope if scope.strip() else "."
     requested_scope = Path(value)
     if "\\" in value and (os.name != "nt" or not requested_scope.is_absolute()):
@@ -220,7 +232,7 @@ def inspect_selected_setup(args: argparse.Namespace) -> dict[str, Any]:
     )
     if args.mode == "deep":
         inspected["deepScanConfig"] = resolve_deep_scan_setup(
-            os.cpu_count() or 1, args.deep_scan_project_json
+            project_json=args.deep_scan_project_json
         )
     elif args.deep_scan_project_json is not None:
         raise SystemExit("Project Deep Scan settings require Deep Scan mode.")

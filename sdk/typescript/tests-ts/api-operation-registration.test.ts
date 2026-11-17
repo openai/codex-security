@@ -1,14 +1,24 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { CodexSecurity } from "../src/api.js";
 import * as targets from "../src/targets.js";
+import { createApiTestFixtures } from "./support/temporary-directories.js";
 
-function client() {
+const { temporaryDirectory, cleanup } = createApiTestFixtures(
+  "operation-registration-",
+);
+afterEach(cleanup);
+
+async function client() {
   const forbidden = () => {
     throw new Error("Unexpected runtime or model boundary");
   };
   return new CodexSecurity(
     {},
-    { environment: {}, createCodex: forbidden, prepareRuntime: forbidden },
+    {
+      environment: { CODEX_SECURITY_STATE_DIR: await temporaryDirectory() },
+      createCodex: forbidden,
+      prepareRuntime: forbidden,
+    },
     { surface: "sdk" },
   );
 }
@@ -16,7 +26,7 @@ function client() {
 test.each(["validate", "patch"] as const)(
   "%s reserves its operation before serializing a finding",
   async (method) => {
-    const security = client();
+    const security = await client();
     const gate = Promise.withResolvers<void>();
     const signals: AbortSignal[] = [];
     const normalize = spyOn(targets, "normalizeRepository").mockImplementation(
@@ -66,7 +76,7 @@ test.each(["validate", "patch"] as const)(
 );
 
 test("a synchronous operation callback failure permits same-turn retry", async () => {
-  await using security = client();
+  await using security = await client();
   const failure = new Error("Synthetic option getter");
   const pending = security
     .run("/synthetic-never-read", {
@@ -95,7 +105,7 @@ test("a synchronous operation callback failure permits same-turn retry", async (
 });
 
 test("an asynchronously rejected operation owns its slot until settlement", async () => {
-  await using security = client();
+  await using security = await client();
   const failure = new Error("Synthetic finding serialization");
   const pending = security
     .validate({

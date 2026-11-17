@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
-import type { Inputs } from './inputs.js';
-import type { Target } from './targets.js';
-import type { ScanResults } from './results.js';
+import type { Inputs } from './inputs.ts';
+import type { Target } from './targets.ts';
+import type { ScanResults } from './results.ts';
 
 export function plain(value: string, limit?: number): string {
   const text = value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, '');
@@ -22,7 +22,7 @@ export function resultTitle(result: ScanResults, inputs: Inputs): string {
   if (inputs.failOnSeverity === 'none') return 'Scan completed. Findings are reported without failing the job.';
   return 'Scan completed. No findings meet the failure threshold.';
 }
-export function resultSummary(result: ScanResults, inputs: Inputs, target: Target): string {
+export function resultSummary(result: ScanResults, inputs: Inputs, target: Target, artifactUrl?: string): string {
   const esc = (value: string, limit = 4000) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(' · ') : 'unavailable';
   const usage = result.usage;
@@ -33,6 +33,7 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     : result.estimatedCost === undefined ? 'unavailable' : `$${result.estimatedCost.toFixed(4)}`;
   const parts = [
     `**Scan:** ${result.scanStatus} · **Findings policy:** ${result.policyStatus} · **Report:** ${result.reportStatus}`,
+    ...(artifactUrl ? [`**Reports:** <a href="${html(artifactUrl)}">${esc(inputs.artifactName)}</a> · Retention: up to ${inputs.retentionDays} days.`] : []),
     `**Findings:** ${counts}`,
     `**Scope:** ${inputs.scope}${inputs.paths.length ? ` <code>${esc(inputs.paths.join(', '))}</code>` : ''} · **Mode:** ${inputs.mode}`,
     `**Commit:** <code>${target.scannedSha}</code>`,
@@ -42,13 +43,17 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     ...(inputs.maxCost !== undefined ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : []),
     'Applicable root and nested SECURITY.md policy is discovered by the scanner.',
   ];
+  if (result.scopeLimitations?.length) {
+    parts.push('**Scope limitations**\n\n' + result.scopeLimitations.map(note => `- ${esc(note)}`).join('\n'));
+  }
   if (result.reportStatus === 'partial') parts.push('SARIF report is unavailable; scan results and other reports are still available.');
   if (result.scanStatus !== 'completed') parts.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
   for (const error of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error)}</pre>`);
   for (const finding of result.findings.slice(0, 30)) {
     parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
   }
-  if (result.findings.length > 30) parts.push(`${result.findings.length - 30} additional findings are available in the JSON/SARIF reports.`);
+  const additional = result.findings.length - 30;
+  if (additional > 0) parts.push(`${additional} additional ${additional === 1 ? 'finding is' : 'findings are'} available in the JSON/SARIF reports.`);
   parts.push('Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.');
   // GitHub check output is byte bounded. Truncate at UTF-8 boundaries.
   return Buffer.from(parts.join('\n\n')).subarray(0, 58_000).toString('utf8').replace(/\uFFFD$/, '');

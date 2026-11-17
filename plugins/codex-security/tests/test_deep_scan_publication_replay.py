@@ -1,3 +1,5 @@
+"""Replay the inputs selected before a publication crash while protecting newer canonical output."""
+
 from __future__ import annotations
 
 import json
@@ -9,8 +11,6 @@ from pathlib import Path
 
 import pytest
 from test_deep_scan_publication_authority import stage_publication
-from test_deep_scan_successful_publication import add_worker
-from test_deep_scan_successful_publication import publication_scan as publication_scan
 
 _CRASH_PUBLICATION = """
 import json, os, runpy, sqlite3, sys
@@ -60,7 +60,7 @@ def test_publication_crash_replays_selected_input_without_stale_overwrite(
     workbench_api, workbench_db, publication_scan, tmp_path, boundary
 ):
     scan = publication_scan()
-    result_path = add_worker(workbench_db, scan)
+    result_path = scan.add_worker()
     with workbench_db:
         workbench_db.execute(
             "UPDATE deep_scan_runs SET coordinator_generation = 3 WHERE scan_id = ?",

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { resolveScanTargets } from "./invoice-desk-target.mjs";
+import { resolveScanTarget } from "./invoice-desk-target.mjs";
 
 const repository = "example/invoices";
 const sourceSha = "1".repeat(40);
@@ -29,7 +29,7 @@ function pullRequest(overrides = {}) {
 
 test("initial selection and approval recheck require the selected PR and revision to remain eligible", async () => {
   const target = { pr: 7, sha: sourceSha };
-  // The approval step must use its matrix target even if dispatch inputs differ.
+  // The approval step must use its original target even if dispatch inputs differ.
   const recheck = {
     ...context,
     target: { ...target },
@@ -37,21 +37,21 @@ test("initial selection and approval recheck require the selected PR and revisio
   };
   for (const request of [context, recheck]) {
     for (const [overrides, expected] of [
-      [{}, [target]],
+      [{}, target],
       [
         {
           draft: true,
           head: { sha: sourceSha, repo: { full_name: "contributor/invoices" } },
         },
-        [target],
+        target,
       ],
-      [{ state: "closed" }, []],
-      [{ base: { ref: "release", repo: { full_name: repository } } }, []],
-      [{ base: { ref: "main", repo: { full_name: "other/invoices" } } }, []],
-      [{ head: { sha: mainSha } }, []],
-      [{ head: { sha: "3".repeat(40) } }, []],
+      [{ state: "closed" }, null],
+      [{ base: { ref: "release", repo: { full_name: repository } } }, null],
+      [{ base: { ref: "main", repo: { full_name: "other/invoices" } } }, null],
+      [{ head: { sha: mainSha } }, null],
+      [{ head: { sha: "3".repeat(40) } }, null],
     ]) {
-      const actual = await resolveScanTargets(request, async (number) => {
+      const actual = await resolveScanTarget(request, async (number) => {
         assert.equal(number, "7");
         return pullRequest(overrides);
       });
@@ -74,10 +74,10 @@ test("manual and scheduled baselines use the trusted workflow commit before and 
     { ...scheduled, target: { ...target } },
   ]) {
     assert.deepEqual(
-      await resolveScanTargets(request, () =>
+      await resolveScanTarget(request, () =>
         assert.fail("unexpected API call"),
       ),
-      [target],
+      target,
     );
   }
 });
@@ -90,7 +90,7 @@ test("incomplete or invalid PR inputs fail instead of falling back to a baseline
     { pr_number: "7", source_sha: "main" },
   ]) {
     await assert.rejects(
-      resolveScanTargets({ ...context, event: { inputs } }, () =>
+      resolveScanTarget({ ...context, event: { inputs } }, () =>
         assert.fail("unexpected API call"),
       ),
       /require both/,
@@ -114,10 +114,10 @@ test("PR events and completed PR workflows do not queue inference or query GitHu
     },
   ]) {
     assert.deepEqual(
-      await resolveScanTargets({ ...context, ...trigger }, () =>
+      await resolveScanTarget({ ...context, ...trigger }, () =>
         assert.fail("unexpected API call"),
       ),
-      [],
+      null,
       trigger.eventName,
     );
   }
@@ -128,7 +128,6 @@ test("resolver CLI emits the requested target without dispatching another workfl
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const eventPath = join(root, "event.json");
   const outputPath = join(root, "output.txt");
-  writeFileSync(eventPath, JSON.stringify(context.event));
   const scriptUrl = new URL("./invoice-desk-target.mjs", import.meta.url);
   const script = `
     import assert from "node:assert/strict";
@@ -143,23 +142,28 @@ test("resolver CLI emits the requested target without dispatching another workfl
     process.argv[1] = ${JSON.stringify(fileURLToPath(scriptUrl))};
     await import(${JSON.stringify(scriptUrl.href)});
   `;
-  const result = execFileSync(
-    process.execPath,
-    ["--input-type=module", "--eval", script],
-    {
-      encoding: "utf8",
-      env: {
-        GITHUB_REPOSITORY: repository,
-        GITHUB_SHA: mainSha,
-        GITHUB_EVENT_NAME: "workflow_dispatch",
-        GITHUB_EVENT_PATH: eventPath,
-        GITHUB_OUTPUT: outputPath,
+  writeFileSync(eventPath, JSON.stringify(context.event));
+  for (const [eventName, message, output] of [
+    ["workflow_dispatch", /PR #7/, `sha=${sourceSha}\npr=7\n`],
+    ["schedule", /Main baseline/, `sha=${mainSha}\npr=\n`],
+    ["pull_request", /Skipped/, "sha=\npr=\n"],
+  ]) {
+    writeFileSync(outputPath, "");
+    const result = execFileSync(
+      process.execPath,
+      ["--input-type=module", "--eval", script],
+      {
+        encoding: "utf8",
+        env: {
+          GITHUB_REPOSITORY: repository,
+          GITHUB_SHA: mainSha,
+          GITHUB_EVENT_NAME: eventName,
+          GITHUB_EVENT_PATH: eventPath,
+          GITHUB_OUTPUT: outputPath,
+        },
       },
-    },
-  );
-  assert.match(result, /PR #7/);
-  assert.equal(
-    readFileSync(outputPath, "utf8"),
-    `targets=${JSON.stringify([{ pr: 7, sha: sourceSha }])}\n`,
-  );
+    );
+    assert.match(result, message);
+    assert.equal(readFileSync(outputPath, "utf8"), output);
+  }
 });

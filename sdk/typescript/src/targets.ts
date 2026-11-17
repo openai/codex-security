@@ -1,8 +1,17 @@
 import { isNonEmptyString } from "./value.js";
+import { isUtf8 } from "node:buffer";
 import { execFile as execFileCallback } from "node:child_process";
 import { realpathSync, type Stats } from "node:fs";
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import {
+  copyFile,
+  lstat,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import {
   basename,
   dirname,
@@ -122,16 +131,59 @@ export interface NormalizedTarget {
   headRef?: string;
 }
 
+/** Exclusions are literal repository-relative names and may be absent in a checkout. */
+export function normalizeExcludedPaths(
+  values: readonly string[] | undefined,
+): string[] {
+  if (values === undefined) return [];
+  if (!Array.isArray(values))
+    throw new InvalidTargetError("Excluded paths must be an array of paths.");
+  const paths = new Set<string>();
+  for (const value of values) {
+    if (
+      typeof value !== "string" ||
+      !value ||
+      !value.isWellFormed() ||
+      /[\u0000-\u001f]/u.test(value)
+    )
+      throw new InvalidTargetError(
+        "Excluded paths must be non-empty UTF-8 paths.",
+      );
+    const path =
+      process.platform === "win32" ? value.replaceAll("\\", "/") : value;
+    if (
+      isAbsolute(value) ||
+      path.startsWith("/") ||
+      /^[a-z]:/iu.test(path) ||
+      path.includes("\\") ||
+      path.split("/").includes("..")
+    )
+      throw new InvalidTargetError(
+        `Excluded path must be relative to the repository: ${value}`,
+      );
+    paths.add(
+      path
+        .split("/")
+        .filter((part) => part && part !== ".")
+        .join("/") || ".",
+    );
+  }
+  return [...paths];
+}
+
 export async function normalizeRepository(
   repository: string,
   signal?: AbortSignal,
 ): Promise<string> {
   const candidate = resolveRepositoryPath(repository);
   requirePortableWindowsRepositoryPath(candidate);
-  let canonical: string;
+  let resolved: Buffer;
   try {
-    canonical = await abortable(() => realpath(candidate), signal);
-    if (!(await abortable(() => stat(canonical), signal)).isDirectory()) {
+    resolved = await abortable(
+      () => realpath(candidate, { encoding: "buffer" }),
+      signal,
+    );
+    if (!(await abortable(() => lstat(resolved), signal)).isDirectory()) {
       throw new Error("not a directory");
     }
   } catch (error) {
@@ -143,12 +195,46 @@ export async function normalizeRepository(
       },
     );
   }
+  requireUtf8Path("Repository path", candidate, resolved);
+  const canonical = resolved.toString();
   requirePortableWindowsRepositoryPath(canonical);
   return canonical;
 }
 
-export function resolveRepositoryPath(repository: string): string {
-  return resolve(expandHome(repository));
+export function resolveRepositoryPath(
+  repository: string,
+  directory = process.cwd(),
+): string {
+  requireUtf8Path("Repository path", repository);
+  return resolveTargetPath(expandHome(repository), directory);
+}
+
+/** Preserve filesystem resolution of symlink/.. paths on POSIX. */
+export function resolveTargetPath(
+  value: string,
+  directory = process.cwd(),
+): string {
+  if (sep === "\\") return resolve(directory, value);
+  const base = isAbsolute(directory)
+    ? directory
+    : `${process.cwd()}/${directory}`;
+  const absolute = isAbsolute(value) ? value : `${base}/${value}`;
+  const parts = absolute
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  return `/${parts.join("/")}`;
+}
+
+function requireUtf8Path(
+  label: "Repository path" | "Path target",
+  value: string,
+  resolved?: Buffer,
+): void {
+  if (resolved === undefined ? !value.isWellFormed() : !isUtf8(resolved)) {
+    throw new InvalidTargetError(
+      `${label} cannot be represented as UTF-8: ${value}`,
+    );
+  }
 }
 
 function requirePortableWindowsRepositoryPath(path: string): void {
@@ -161,12 +247,19 @@ function requirePortableWindowsRepositoryPath(path: string): void {
   }
 }
 
+type ReadWorktreeGit = (
+  repository: string,
+  args: readonly string[],
+  signal?: AbortSignal,
+) => Promise<string>;
+
 export async function enclosingGitWorktreeRoot(
   repository: string,
   signal?: AbortSignal,
-  options: { requireIfPresent?: boolean } = {},
+  options: { requireIfPresent?: boolean; readGit?: ReadWorktreeGit } = {},
 ): Promise<string | null> {
   const strict = options.requireIfPresent === true;
+  const readGit = options.readGit ?? gitOutput;
   const markerRoot = strict
     ? await gitMarkerRoot(repository, signal, "nearest")
     : null;
@@ -174,7 +267,7 @@ export async function enclosingGitWorktreeRoot(
   try {
     if (strict) {
       if (
-        (await gitOutput(
+        (await readGit(
           repository,
           ["rev-parse", "--is-inside-git-dir"],
           signal,
@@ -186,7 +279,7 @@ export async function enclosingGitWorktreeRoot(
       }
       if (markerRoot === null) return null;
     }
-    const root = await gitOutput(
+    const root = await readGit(
       repository,
       ["rev-parse", "--show-toplevel"],
       signal,
@@ -215,7 +308,7 @@ export async function enclosingGitWorktreeRoot(
     );
   }
   if (markerRoot !== null)
-    await requireGitWorktreeBinding(canonicalRoot, signal);
+    await requireGitWorktreeBinding(canonicalRoot, signal, readGit);
   return canonicalRoot;
 }
 
@@ -321,11 +414,12 @@ export async function isGitMetadataDirectory(
 export async function gitMetadataDirectories(
   repository: string,
   signal?: AbortSignal,
-  options: { includeLocalObjects?: boolean } = {},
+  options: { includeLocalObjects?: boolean; readGit?: ReadWorktreeGit } = {},
 ): Promise<[string, string, ...string[]]> {
+  const readGit = options.readGit ?? gitOutput;
   const [directory, commonDirectory] = await Promise.all([
-    gitOutput(repository, ["rev-parse", "--absolute-git-dir"], signal),
-    gitOutput(repository, ["rev-parse", "--git-common-dir"], signal),
+    readGit(repository, ["rev-parse", "--absolute-git-dir"], signal),
+    readGit(repository, ["rev-parse", "--git-common-dir"], signal),
   ]);
   const roots = await Promise.all([
     abortable(() => realpath(resolve(repository, directory)), signal),
@@ -434,13 +528,15 @@ export async function gitObjectDirectories(
 
 async function requireGitWorktreeBinding(
   repository: string,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  readGit: ReadWorktreeGit,
 ): Promise<void> {
   let cause: unknown;
   try {
     const [directory, commonDirectory] = await gitMetadataDirectories(
       repository,
       signal,
+      { readGit },
     );
     if (
       [directory, commonDirectory].every(
@@ -451,11 +547,7 @@ async function requireGitWorktreeBinding(
     if (relative(directory, commonDirectory) === "") {
       // The toplevel check already verified the configured worktree path.
       if (
-        await gitOutput(
-          repository,
-          ["config", "--get", "core.worktree"],
-          signal,
-        )
+        await readGit(repository, ["config", "--get", "core.worktree"], signal)
       )
         return;
     } else {
@@ -566,25 +658,34 @@ export async function normalizeTarget(
         "Path scan targets must not contain an empty path.",
       );
     }
-    const candidate = isAbsolute(expandHome(value))
-      ? resolve(expandHome(value))
-      : resolve(root, expandHome(value));
-    let metadata: Stats;
+    requireUtf8Path("Path target", value);
+    const candidate = resolveTargetPath(expandHome(value), root);
     let canonical: string;
     try {
-      metadata = await abortable(() => stat(candidate), signal);
-      canonical = await abortable(() => realpath(candidate), signal);
+      // Some runtimes cannot canonicalize special files to filesystem paths.
+      requireScanPathType(
+        value,
+        await abortable(() => stat(candidate), signal),
+      );
+      const resolved = await abortable(
+        () => realpath(candidate, { encoding: "buffer" }),
+        signal,
+      );
+      canonical = resolved.toString();
+      if (!isAbsolute(canonical)) {
+        throw new InvalidTargetError(`Could not resolve path target: ${value}`);
+      }
+      requireScanPathType(
+        value,
+        await abortable(() => lstat(resolved), signal),
+      );
+      requireUtf8Path("Path target", value, resolved);
     } catch (error) {
       throwIfAborted(signal);
+      if (error instanceof InvalidTargetError) throw error;
       throw new InvalidTargetError(`Path target does not exist: ${value}`, {
         cause: error,
       });
-    }
-    // Match the bundled scan scope resolver's supported filesystem types.
-    if (!metadata.isFile() && !metadata.isDirectory()) {
-      throw new InvalidTargetError(
-        `Path target is not a regular file or directory: ${value}`,
-      );
     }
     const relativePath = relative(root, canonical);
     if (relativePathIsOutside(relativePath)) {
@@ -604,6 +705,14 @@ export async function normalizeTarget(
     paths.add(normalized);
   }
   return { kind: "paths", paths: [...paths] };
+}
+
+function requireScanPathType(value: string, metadata: Stats): void {
+  if (!metadata.isFile() && !metadata.isDirectory()) {
+    throw new InvalidTargetError(
+      `Path target is not a regular file or directory: ${value}`,
+    );
+  }
 }
 
 export async function validateCommittedDiffCheckout(
@@ -631,11 +740,59 @@ export async function validateCommittedDiffCheckout(
     );
   }
 
-  const tracked = await gitOutput(repository, ["ls-files", "-t", "-z"], signal);
-  if (tracked.split("\0").some((entry) => entry.startsWith("S "))) {
+  const tracked = (
+    await gitOutput(repository, ["ls-files", "-v", "-z"], signal)
+  ).split("\0");
+  if (tracked.some((entry) => /^[Ss] /u.test(entry))) {
     throw new InvalidTargetError(
       "Committed-diff scans require a full repository checkout. Sparse checkouts are not supported; materialize skipped tracked files and retry.",
     );
+  }
+  if (tracked.some((entry) => entry.startsWith("h "))) {
+    await verifyAssumedUnchangedFiles(repository, signal);
+  }
+}
+
+async function verifyAssumedUnchangedFiles(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const index = await gitOutput(
+    repository,
+    ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    signal,
+  );
+  // Git changes to the repository before resolving GIT_INDEX_FILE, even when TMPDIR is relative.
+  const directory = await mkdtemp(
+    join(await realpath(tmpdir()), "codex-security-git-index-"),
+  );
+  const copy = join(directory, "index");
+  try {
+    // Git refreshes stat data and flags. Keep that write and any hooks out of the checkout.
+    await copyFile(index, copy);
+    await gitOutput(
+      repository,
+      [
+        "-c",
+        `core.hooksPath=${directory}`,
+        "-c",
+        "core.splitIndex=false",
+        "update-index",
+        "--really-refresh",
+      ],
+      signal,
+      { GIT_INDEX_FILE: copy },
+    );
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === 1) {
+      throw new InvalidTargetError(
+        "Committed-diff scans require a clean repository checkout. A tracked file marked assume-unchanged has changed on disk.",
+        { cause: error },
+      );
+    }
+    throw error;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 }
 
@@ -722,8 +879,15 @@ export async function gitHistoryIdentity(
   repository: string,
   git: TrustedExecutable,
   signal?: AbortSignal,
-): Promise<{ commonDirectory: string | null; origin: string | null }> {
-  const read = async (args: readonly string[]): Promise<string | null> => {
+): Promise<{
+  commonDirectory: string | null;
+  origin: string | null;
+  relativePath: string | null;
+}> {
+  const read = async (
+    args: readonly string[],
+    allowEmpty = false,
+  ): Promise<string | null> => {
     try {
       const { stdout } = await execFile(
         git.executable,
@@ -735,20 +899,44 @@ export async function gitHistoryIdentity(
           maxBuffer: Infinity,
         },
       );
-      return (
-        stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "") ||
-        null
+      const value = stdout.replace(
+        process.platform === "win32" ? /\r?\n$/u : /\n$/u,
+        "",
       );
+      return value || (allowEmpty ? "" : null);
     } catch {
       throwIfAborted(signal);
       return null;
     }
   };
-  const [commonDirectory, origin] = await Promise.all([
+  const [commonDirectory, origin, relativePath] = await Promise.all([
     read(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
     read(["remote", "get-url", "origin"]),
+    read(["rev-parse", "--show-prefix"], true),
   ]);
-  return { commonDirectory, origin };
+  return { commonDirectory, origin, relativePath };
+}
+
+/** Resolve Git and its sanitized executable search path for a single selected checkout. */
+export async function trustedGitCommand(
+  repository: string,
+  preserveConfiguration: boolean,
+  sourceEnvironment: NodeJS.ProcessEnv,
+  protectedRoots: string | readonly string[],
+  signal?: AbortSignal,
+) {
+  const command = await resolveTrustedExecutable(
+    "git",
+    isolatedGitEnvironment(preserveConfiguration, sourceEnvironment),
+    [
+      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
+      ...(typeof protectedRoots === "string"
+        ? [protectedRoots]
+        : protectedRoots),
+    ],
+  );
+  if (!command) throw new Error("Git is not available on a trusted PATH.");
+  return command;
 }
 
 export function gitOutput(
@@ -782,26 +970,30 @@ export async function gitOutput(
   sourceEnvironment: NodeJS.ProcessEnv = process.env,
 ): Promise<string | Buffer> {
   throwIfAborted(signal);
-  const command = await resolveTrustedExecutable(
-    "git",
-    isolatedGitEnvironment(
-      args[0] === "rev-parse" ||
-        args[0] === "config" ||
-        args[0] === "ls-files" ||
-        (args[0] === "remote" &&
-          (args.length === 1 ||
-            (args[1] === "get-url" && args[2] === "--all"))),
-      sourceEnvironment,
-    ),
-    [
-      (await gitMarkerRoot(repository, signal, "outermost")) ?? repository,
-      ...(typeof protectedRoots === "string"
-        ? [protectedRoots]
-        : protectedRoots),
-    ],
+  const command = await trustedGitCommand(
+    repository,
+    args[0] === "rev-parse" ||
+      (args[0] === "symbolic-ref" &&
+        args[1] === "--quiet" &&
+        args[2] === "HEAD" &&
+        args.length === 3) ||
+      (args[0] === "--exec-path" && args.length === 1) ||
+      args[0] === "config" ||
+      (args[0] === "fetch-pack" &&
+        args[1] === "--diag-url" &&
+        args.length === 3) ||
+      (args[0] === "ls-remote" &&
+        args[1] === "--get-url" &&
+        (args.length === 2 || (args[2] === "--" && args.length === 4))) ||
+      args[0] === "ls-files" ||
+      (args[0] === "remote" &&
+        (args.length === 1 ||
+          (args[1] === "get-url" &&
+            (args[2] === "--all" || args[2] === "--")))),
+    sourceEnvironment,
+    protectedRoots,
+    signal,
   );
-  if (command === null)
-    throw new Error("Git is not available on a trusted PATH.");
   throwIfAborted(signal);
   const { stdout } = await execFile(
     command.executable,
@@ -813,9 +1005,38 @@ export async function gitOutput(
       maxBuffer: Infinity,
     },
   );
-  return typeof stdout === "string"
-    ? stdout.replace(process.platform === "win32" ? /\r?\n$/u : /\n$/u, "")
-    : stdout;
+  if (typeof stdout !== "string") return stdout;
+  // Git writes remote URLs to binary stdout even on Windows. Only the final LF
+  // is a delimiter; a preceding CR belongs to the configured URL.
+  const remoteUrl = args[0] === "remote" && args[1] === "get-url";
+  return stdout.replace(
+    process.platform === "win32" && !remoteUrl ? /\r?\n$/u : /\n$/u,
+    "",
+  );
+}
+
+function unavailableGitMarkerPath(
+  error: unknown,
+  search: "nearest" | "outermost",
+): boolean {
+  const { code } = error as NodeJS.ErrnoException;
+  return (
+    code === "ENOENT" ||
+    code === "ENOTDIR" ||
+    (search === "outermost" &&
+      ["EACCES", "EPERM", "ELOOP", "ENAMETOOLONG"].includes(code ?? ""))
+  );
+}
+
+/** Bound repository-supplied document links to the selected checkout or directory. */
+export async function documentSourceRoot(
+  repository: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  return (
+    (await gitMarkerRoot(repository, signal, "nearest")) ??
+    (await realpath(repository))
+  );
 }
 
 export async function gitMarkerRoot(
@@ -823,7 +1044,7 @@ export async function gitMarkerRoot(
   signal: AbortSignal | undefined,
   search: "nearest" | "outermost",
 ): Promise<string | null> {
-  let candidate = resolve(repository);
+  let candidate = resolveTargetPath(repository);
   let current: string;
   while (true) {
     try {
@@ -835,11 +1056,7 @@ export async function gitMarkerRoot(
     } catch (error) {
       // Stale or inaccessible descendants still belong to their accessible checkout ancestors.
       throwIfAborted(signal);
-      const code = (error as NodeJS.ErrnoException).code;
-      if (
-        search !== "outermost" ||
-        !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].includes(code ?? "")
-      )
+      if (search !== "outermost" || !unavailableGitMarkerPath(error, search))
         throw error;
       const parent = dirname(candidate);
       if (parent === candidate) throw error;
@@ -875,13 +1092,7 @@ async function walkGitMarkers(
       root = current;
     } catch (error) {
       throwIfAborted(signal);
-      const code = (error as NodeJS.ErrnoException).code;
-      if (
-        code !== "ENOENT" &&
-        code !== "ENOTDIR" &&
-        (search !== "outermost" || (code !== "EACCES" && code !== "EPERM"))
-      )
-        throw error;
+      if (!unavailableGitMarkerPath(error, search)) throw error;
     }
     const parent = dirname(current);
     if (parent === current) return root;
@@ -941,7 +1152,12 @@ function expandHome(value: string): string {
     return homedir();
   }
   if (value.startsWith("~/") || value.startsWith("~\\")) {
-    return resolve(homedir(), value.slice(2).replace(/^[/\\]+/, ""));
+    const separators =
+      sep === "/" && value.startsWith("~/") ? /^\/+/ : /^[/\\]+/;
+    const suffix = value.slice(2).replace(separators, "");
+    const home = homedir();
+    if (process.platform === "win32") return resolve(home, suffix);
+    return home === "" ? resolveTargetPath(suffix) : `${home}${sep}${suffix}`;
   }
   return value;
 }

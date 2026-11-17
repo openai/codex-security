@@ -20,7 +20,7 @@ scanner. The application contains no QA-specific branches or vulnerability label
 | ID-010 | Stored HTML injection               | Notes become unescaped HTML in another user's invoice view.         |
 
 These are ten distinct root causes, not ten disjoint OWASP Top Ten groups. Some
-share broader authorization or disclosure classifications. The manifest gives
+share broader authorization or disclosure classifications. The [scenario manifest](expected-findings.json) gives
 suggested CWE tags and source symbols; equivalent, more precise classifications
 are acceptable. Multiple reports of the same root cause count once.
 

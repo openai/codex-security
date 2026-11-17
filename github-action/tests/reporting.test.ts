@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { plain, resultSummary, resultTitle } from '../src/reporting.js';
-import { parseInputs } from '../src/inputs.js';
-import type { ScanResults } from '../src/results.js';
+import { plain, resultSummary, resultTitle } from '../src/reporting.ts';
+import { parseInputs } from '../src/inputs.ts';
+import type { ScanResults } from '../src/results.ts';
 
 test('credential-shaped text and encodings remain in diagnostics',()=>{
   assert.equal(plain('CANA\x01RY_VALUE'),'CANARY_VALUE');
@@ -29,6 +29,13 @@ test('finding titles and messages cannot become Markdown links, images or raw HT
   assert.ok(!summary.includes('### HIGH:')); assert.ok(!summary.includes('<img'));
 });
 
+test('findings beyond the summary limit are counted with the matching noun', () => {
+  const finding = {severity:'low',title:'Finding',summary:'Summary',path:'src/app.ts',startLine:1};
+  const summarize = (count: number) => resultSummary({scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:0,medium:0,low:count,informational:0},errors:[],
+    findings:Array(count).fill(finding)} as unknown as ScanResults,parseInputs(()=>'', '/checkout'),{repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
+  assert.ok(summarize(31).includes('1 additional finding is available in the JSON/SARIF reports.'));
+  assert.ok(summarize(32).includes('2 additional findings are available in the JSON/SARIF reports.'));
+});
 test('completed findings are subject to severity policy without a coverage qualification', () => {
   const result = {scanStatus:'completed',policyStatus:'failed',reportStatus:'ready',counts:{critical:0,high:1,medium:0,low:0,informational:0},
     errors:[],findings:[{severity:'high',title:'Extraction issue',summary:'Archive traversal reaches files outside the destination.',path:'src/extract.ts',startLine:12}]} as unknown as ScanResults;

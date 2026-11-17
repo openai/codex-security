@@ -28,13 +28,7 @@ The Codex provider runs from the common runner's throwaway skill directory. Its 
 
 ## Verdict mapping
 
-| Triage verdict   | SastBench interpretation |
-| ---------------- | ------------------------ |
-| `confirmed`      | predicts true positive   |
-| `not_actionable` | predicts false positive  |
-| `needs_review`   | abstains                 |
-
-Strict metrics count an abstention as incorrect for that row. Decided-only metrics exclude abstentions and report coverage. Workflow metrics separately measure true-positive retention, unsafe closure, false-alert auto-closure, false-alert escalation, confirmed precision, abstention, and remaining analyst workload. Model errors and invalid output remain unresolved work.
+The [verdict mapping](README.md#verdict-mapping) defines how strict and decided-only metrics count each triage verdict, abstention, and execution error. The [aggregate metric definitions](README.md#aggregate-metric-definitions) give the formulas and explain how unresolved work affects the analyst workload.
 
 ## Reproducibility
 

@@ -1,7 +1,8 @@
+"""Rebuild stopped scan coverage from worker surfaces, deferred links, and matching artifact receipts."""
+
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from pathlib import Path
 
@@ -18,9 +19,11 @@ from workbench_test_support import (
     preserve_scan_results,
     read_review_state,
     saved_draft,
+    select_checkpoint,
     upsert_deep_worker,
     worker_paths,
     write_checkpoint,
+    write_result_draft,
 )
 
 
@@ -256,10 +259,11 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
         "receiptRefs": ["artifacts/other.md"],
     }
     task = {"id": "review-api", "reason": "Review remains.", "surfaceIds": ["api"]}
-    result.write_text(
-        json.dumps(saved_draft(scan_id, complete=True, surfaces=[surface, writer], deferred=[task]))
+    write_result_draft(
+        result,
+        saved_draft(scan_id, complete=True, surfaces=[surface, writer], deferred=[task]),
+        mtime_ns=100,
     )
-    os.utime(result, ns=(100, 100))
     historical = write_checkpoint(
         output / "checkpoints",
         saved_draft(
@@ -272,15 +276,14 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
                 }
             ],
         ),
+        mtime_ns=50,
     )
-    os.utime(historical, ns=(50, 50))
     selected = write_checkpoint(
-        output / "checkpoints", saved_draft(scan_id, complete=True, surfaces=[writer])
+        output / "checkpoints",
+        saved_draft(scan_id, complete=True, surfaces=[writer]),
+        mtime_ns=300,
     )
-    os.utime(selected, ns=(300, 300))
-    head = output / "checkpoint-head.json"
-    head.write_text(json.dumps({"checkpoint": selected.name}))
-    os.utime(head, ns=(400, 400))
+    head = select_checkpoint(output, selected, mtime_ns=400)
     originals = {
         path: path.read_bytes()
         for path in (result, historical, selected, head, current_receipt, historical_receipt)

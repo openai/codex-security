@@ -1,3 +1,11 @@
+// Codex's upstream limit applies to Unicode characters in one user message.
+// https://github.com/openai/codex/blob/956f590ad549e75913894614ce0cbec4d5fd677a/codex-rs/protocol/src/user_input.rs#L8-L9
+export const MAX_CODEX_INPUT_CHARACTERS = 1 << 20;
+
+export function characterCount(value: string): number {
+  return value[Symbol.iterator]().reduce((count) => count + 1, 0);
+}
+
 export function shellEnvironmentReference(name: string, suffix = ""): string {
   return `"${process.platform === "win32" ? "$env:" : "$"}${name}${suffix}"`;
 }

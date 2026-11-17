@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { runCommand } from "./support/shell.js";
 import { createSeverityDiagnostics } from "../src/classify-severity-diagnostics.js";
@@ -28,6 +29,7 @@ test.each([false, true])(
       cliDiagnostics?: HostDiagnosticBatch;
     }[] = [];
     const run = runHostRecordsProtocol(
+      "classify-severity",
       input,
       {
         write(line) {
@@ -40,33 +42,51 @@ test.each([false, true])(
           if (frame.method === "review.run")
             queueMicrotask(() =>
               input.write(
-                JSON.stringify({ jsonrpc: "2.0", id: frame.id, result: {} }) +
-                  "\n",
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: frame.id,
+                  error: { code: -32000, message: "Review failed" },
+                }) + "\n",
               ),
             );
           return true;
         },
       },
-      async (_params, options) => {
-        diagnostics?.emit("input_validated");
-        diagnostics?.emit("review_requested", 1);
-        await options.reviewRunner.run({ requestId: "one" });
-        diagnostics?.emit("review_failed", 1);
-        return { status: "unresolved" as const };
-      },
-      undefined,
-      diagnostics?.take,
+      { diagnostics, classificationRuns: 1 },
     );
+    const findingJson = JSON.stringify({
+      findingId: "one",
+      title: "Example report",
+      summary: "Example summary",
+    });
     input.write(
       JSON.stringify({
         jsonrpc: "2.0",
         id: "run-one",
         method: "run",
-        params: {},
+        params: {
+          version: 1,
+          model: "synthetic-model",
+          effort: "high",
+          records: [
+            {
+              id: "one",
+              revision: 1,
+              findingJson,
+              inputSha256: createHash("sha256")
+                .update(findingJson)
+                .digest("hex"),
+            },
+          ],
+        },
       }) + "\n",
     );
     expect(await run).toBe(1);
-    expect(frames.map((frame) => frame.id)).toEqual(["one", "run-one"]);
+    expect(frames.map((frame) => frame.method)).toEqual([
+      "review.run",
+      undefined,
+    ]);
+    expect(frames[1]?.id).toBe("run-one");
     expect(frames.map((frame) => frame.cliDiagnostics)).toEqual(
       enabled
         ? [

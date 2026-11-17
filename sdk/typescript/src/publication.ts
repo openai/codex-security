@@ -40,7 +40,7 @@ export interface PrepareScanPublicationOptions {
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
   expectedScanId?: string;
-  /** Publish only these finding IDs from the supplied scan; dedupe representatives may belong to other scans. */
+  /** Publish only these finding IDs from the supplied scan. Use scanRepresentativeFindingIds from saved-scan dedupe. */
   findingIds?: readonly string[];
   /** Use this assessment; otherwise use the scan's saved classification when present. */
   classification?: SeverityClassification | ScanSeverityClassification;

@@ -21,6 +21,18 @@ export const cases = [
     skill: "triage-finding",
   },
   {
+    id: "acquire-scanner-evidence",
+    request:
+      "Fetch the two existing Guardian findings I selected on main and preview importing them into this checkout.",
+    skill: "publish-findings",
+  },
+  {
+    id: "publish-stored-evidence",
+    request:
+      "Publish the high-severity scanner findings from yesterday’s local import to the connected Cloud repository.",
+    skill: "publish-findings",
+  },
+  {
     id: "dependency-alert",
     request:
       "Grype flagged a vulnerable package in this repo. What pulls it in, and can we upgrade it?",
@@ -37,6 +49,12 @@ export const cases = [
     request:
       "Verify that the existing security fix closes the reported cross-user invoice access in GET /invoices/:id. Check legitimate owner access too. Do not modify code.",
     skill: "verify-fix",
+  },
+  {
+    id: "skill-before-install",
+    request:
+      "I downloaded an agent skill. Review the files in ./downloaded-skill for security risks before I install it.",
+    skill: "check-skills",
   },
   {
     id: "ordinary-bug-fix",

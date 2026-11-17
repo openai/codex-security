@@ -74,17 +74,29 @@ export const runSchema = z
       ),
       config: configSchema,
       includePaths: z.array(z.string()).optional(),
+      excludePaths: z.array(z.string()).optional(),
       filePaths: z.array(z.string()).optional(),
       scanId: requiredString,
       sdkOwnsCompletion: z.boolean().optional(),
+      serviceTier: optionalString,
       coordinatorGeneration: optionalValue(positiveInteger),
+      discoveryStarted: z.boolean().optional(),
       createdAt: optionalString,
       updatedAt: optionalString,
       targetPath: requiredString,
       scope: requiredString,
       userContext: optionalString,
+      severityRubric: z
+        .object({
+          markdown: z.string(),
+          revision: z.number(),
+          sha256: z.string(),
+        })
+        .optional(),
       scanDir: requiredString,
+      workerUsageDirectory: optionalString,
       dispatchedCount: nonNegativeInteger,
+      completionSequence: nonNegativeInteger.optional(),
       noNewStreak: nonNegativeInteger,
       consecutiveErrors: nonNegativeInteger
         .nullish()
@@ -116,8 +128,14 @@ function parseResponse<T extends z.ZodType>(
   const result = schema.safeParse(value);
   if (result.success) return result.data;
   const issue = result.error.issues[0];
-  if (issue.path[0] === "includePaths" || issue.path[0] === "filePaths")
-    throw new Error(`deepScan.${issue.path[0]} must be an array of paths.`);
+  if (
+    ["includePaths", "filePaths", "excludePaths"].includes(
+      String(issue.path[0]),
+    )
+  )
+    throw new Error(
+      `deepScan.${String(issue.path[0])} must be an array of paths.`,
+    );
   const path = [field, ...issue.path]
     .join(".")
     .replace(/workers\.\d+/g, "worker")

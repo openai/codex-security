@@ -4,9 +4,9 @@ import { mkdtemp, readFile, writeFile, rm, realpath, symlink, link } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { analyzeResults, readReportFile, type ResultOptions } from '../src/results.js';
-import { collectReports } from '../src/artifacts.js';
-import { copyCompletedScan } from './fixtures.js';
+import { analyzeResults, readReportFile, type ResultOptions } from '../src/results.ts';
+import { collectReports } from '../src/artifacts.ts';
+import { copyCompletedScan } from './fixtures.ts';
 
 async function fixture(t: { after(fn: () => Promise<void>): void }): Promise<ResultOptions> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'codex-results-test-')));

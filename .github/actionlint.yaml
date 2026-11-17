@@ -9,7 +9,12 @@ paths:
       # actionlint 1.7.12 predates GitHub’s reference to the defining workflow's commit.
       # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsuses
       - '^specifying action "\$/\.github/actions/native-cache-key" in invalid format because ref is missing\.'
-  .github/workflows/invoice-desk-scan.yml:
+  .github/workflows/{node-release,sign-darwin-release}.yml:
+    ignore:
+      # actionlint 1.7.12 predates GitHub’s reference to the defining workflow's commit.
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsuses
+      - '^specifying action "\$/\.github/actions/revalidate-release-tag" in invalid format because ref is missing\.'
+  .github/workflows/{invoice-desk-scan,sign-darwin-release}.yml:
     ignore:
       # actionlint 1.7.12 predates GitHub's job-level cache permissions.
       # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idcache-mode

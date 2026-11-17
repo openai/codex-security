@@ -19,6 +19,9 @@ import {
   scanInputIdentity,
 } from "../src/scan-inputs.js";
 import { workbenchCommand } from "./support/workbench-command.js";
+import { useTestPython } from "./support/python.js";
+
+const pythonExecutable = useTestPython(false);
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -31,12 +34,13 @@ test("rerun recognizes unchanged context after the workbench serializes its reci
   await mkdir(scanDir, { mode: 0o700 });
   await writeFile(join(repository, "source.ts"), "// synthetic source\n");
   const document = join(root, "architecture.md");
-  await writeFile(document, "Original architecture.");
+  const selectedDocument = join(root, "architecture.md");
+  await writeFile(selectedDocument, "Original architecture.");
   const scanInputs = scanInputIdentity(
     undefined,
     await readKnowledgeBaseSnapshot([document]),
   );
-  const python = Bun.which("python3") ?? Bun.which("python");
+  const python = pythonExecutable();
   expect(python).not.toBeNull();
   const command = workbenchCommand(python!, join(root, "state"));
   const saved = await command(
@@ -162,19 +166,39 @@ test("rerun identifies changed instructions and captures current knowledge for t
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
   await mkdir(repository);
-  const document = join(root, "architecture.md");
-  const prompt = join(root, "instructions.md");
-  await writeFile(document, "Original architecture.");
+  let context = root;
+  if (process.platform !== "win32") {
+    const physical = join(root, "physical");
+    await mkdir(join(physical, "child"), { recursive: true });
+    const link = join(root, "context");
+    await symlink(join(physical, "child"), link);
+    context = `${link}/..`;
+    await writeFile(`${context}/architecture.md`, "Outside architecture.");
+    await writeFile(join(root, "instructions.md"), "Other instructions.");
+  }
+  const document = `${context}/architecture.md`;
+  const prompt = `${context}/instructions.md`;
+  const selectedDocument = join(root, "architecture.md");
+  await writeFile(selectedDocument, "Original architecture.");
   const scanInputs = scanInputIdentity(
     "Original instructions.",
     await readKnowledgeBaseSnapshot([document]),
   );
-  await writeFile(document, "Current architecture.");
+  await writeFile(selectedDocument, "Current architecture.");
   await writeFile(prompt, "Current instructions.");
   let selected: unknown;
   const stderr = captureCli(main, "stderr");
   const code = await stderr.run(
-    ["scans", "rerun", "saved", "--scan-prompt-file", prompt, "--json"],
+    [
+      "scans",
+      "rerun",
+      "saved",
+      "--scan-prompt-file",
+      prompt,
+      "--validation-prompt-file",
+      prompt,
+      "--json",
+    ],
     dependencies({
       currentDirectory: repository,
       onWorkbench: async () => ({
@@ -198,6 +222,7 @@ test("rerun identifies changed instructions and captures current knowledge for t
   expect(selected).toMatchObject({
     parentScanId: "saved",
     scanPrompt: "Current instructions.",
+    validationPrompt: "Current instructions.",
     knowledgeBaseSnapshot: {
       documents: { "0-architecture.md.txt": "Current architecture." },
     },

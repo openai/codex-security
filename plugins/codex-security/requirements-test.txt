@@ -1,7 +1,11 @@
 # Development test and lint dependencies; install from the repository root.
-jsonschema[format-nongpl]==4.26.0
+backports.zstd==1.8.0; python_version < "3.14"
+jsonschema==4.26.0
 packaging==26.3
-pytest==9.1.1
+pytest==9.2.0
 pytest-xdist==3.8.0
 PyYAML==6.0.3
-ruff==0.17.2
+# jsonschema uses these to check timestamps in artifacts and URIs in schemas.
+rfc3339-validator==0.1.4
+rfc3986-validator==0.1.1
+ruff==0.17.3

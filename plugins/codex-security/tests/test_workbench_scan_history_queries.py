@@ -1,3 +1,5 @@
+"""Check repository matching and finding relationships across legacy, linked, and unlinked scan records."""
+
 from __future__ import annotations
 
 import json
@@ -96,6 +98,8 @@ def link(db, previous, current, reason="Confirmed link."):
 def test_legacy_repository_matching_excludes_confirmed_links_from_another_checkout(
     workbench_api, workbench_db, tmp_path
 ):
+    for directory in ("selected", "other"):
+        (tmp_path / directory).mkdir()
     for index, (scan, repository) in enumerate(
         [
             ("foreign-before", "other"),
@@ -360,15 +364,101 @@ def test_cached_group_status_follows_coverage_uncertainty_and_confirmed_links(
     assert compare() == unlinked
 
 
+def test_matching_reuses_repository_membership_for_repeated_scans(
+    workbench_api, workbench_db, tmp_path, monkeypatch
+):
+    history = workbench_api["scan_history"]
+    repository = tmp_path / "current"
+    previous_path = tmp_path / "previous"
+    add_scan(workbench_db, "current", repository, target_id="selected")
+    add_scan(workbench_db, "moved", previous_path, target_id="selected")
+    add_scan(workbench_db, "legacy-current", repository)
+    add_scan(workbench_db, "legacy-previous", previous_path)
+    add_scan(workbench_db, "another-legacy-previous", previous_path)
+    add_scan(workbench_db, "clone", tmp_path / "clone")
+    import workbench_target_state as target_state
+
+    inspect = target_state._inspect_repository_target
+    probes = []
+
+    def tracked_inspect(connection, target_id, path, *args, **kwargs):
+        probes.append((target_id, path))
+        return inspect(connection, target_id, path, *args, **kwargs)
+
+    monkeypatch.setattr(target_state, "_inspect_repository_target", tracked_inspect)
+    selected = []
+    history.list_unmatched_scan_pairs(
+        workbench_db,
+        Namespace(repository=str(repository), force=False),
+        backfill_finding_details=lambda _, scan: selected.append(scan["id"]),
+        read_coverage=lambda _: {},
+    )
+    assert sorted(selected) == ["current", "moved"]
+    assert probes == [("selected", str(repository))]
+
+
+def test_automatic_matching_uses_completion_order(workbench_api, workbench_db, tmp_path):
+    history = workbench_api["scan_history"]
+    db = workbench_db
+    for index in range(3):
+        scan = f"scan-{index}"
+        add_scan(db, scan, tmp_path, target_id="target", started_at=f"2026-08-01T0{index}:00:00Z")
+        add_occurrence(db, scan, scan)
+        db.execute(
+            "UPDATE scans SET completed_at = ? WHERE id = ?",
+            (f"2026-08-01T0{index + 3}:00:00Z", scan),
+        )
+
+    def planned(focus=None):
+        result = history.list_unmatched_scan_pairs(
+            db,
+            Namespace(repository=str(tmp_path), force=False, after_scan_id=focus),
+            backfill_finding_details=lambda *_: None,
+            read_coverage=lambda _: {},
+        )
+        return [
+            (before["scanId"], batch["afterScanId"])
+            for batch in result["batches"]
+            for before in batch["beforeScans"]
+        ], result["skippedPairs"]
+
+    db.execute(
+        "UPDATE scans SET status = 'running', completed_at = NULL, completion_sequence = NULL WHERE id = 'scan-0'"
+    )
+    assert planned("scan-2") == ([("scan-1", "scan-2")], 0)
+    db.execute(
+        "UPDATE scans SET status = 'complete', completed_at = '2026-08-01T06:00:00Z' WHERE id = 'scan-0'"
+    )
+    assert planned("scan-0") == ([("scan-1", "scan-0"), ("scan-2", "scan-0")], 0)
+    assert planned("scan-2") == ([("scan-1", "scan-2")], 0)
+    assert planned("scan-1") == ([], 0)
+
+    cache_comparison(db, "scan-2", "scan-0")
+    assert planned("scan-0") == ([("scan-1", "scan-0")], 1)
+    assert planned() == ([("scan-0", "scan-1"), ("scan-1", "scan-2")], 1)
+    db.execute("DELETE FROM scan_comparisons")
+    db.execute(
+        "UPDATE scans SET completion_sequence = NULL, completed_at = CASE id WHEN 'scan-0' THEN NULL "
+        "WHEN 'scan-1' THEN '2026-08-01T05:00:00+01:00' ELSE '2026-08-01T04:00:00Z' END"
+    )
+    assert planned("scan-0") == ([], 0)
+    assert planned("scan-1") == ([("scan-0", "scan-1")], 0)
+    assert planned("scan-2") == ([("scan-0", "scan-2"), ("scan-1", "scan-2")], 0)
+    legacy = dict(db.execute("SELECT * FROM scans WHERE id = 'scan-0'").fetchone())
+    order = history._scan_completion_order(legacy)
+    del legacy["completed_at"]
+    assert history._scan_completion_order(legacy) == order
+
+
 def test_matching_reads_each_scan_once_and_skips_cached_links(
-    workbench_api, workbench_db, tmp_path
+    workbench_api, workbench_db, tmp_path, monkeypatch
 ):
     history = workbench_api["scan_history"]
     db = workbench_db
     repository = tmp_path / "repository"
     for index in range(3):
         scan = f"scan-{index}"
-        add_scan(db, scan, repository, started_at=f"2026-01-01T00:00:0{index}Z")
+        add_scan(db, scan, repository, target_id="target", started_at=f"2026-01-01T00:00:0{index}Z")
         add_occurrence(db, scan, scan)
     queries = []
     backfilled = []
@@ -388,13 +478,23 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
             for batch in result["batches"]
         ]
 
+    monkeypatch.delenv("CODEX_SECURITY_MATCHING_PLAN_FORMAT", raising=False)
+    inline = pending()
+    assert "findingsByScanId" not in inline
+    assert inline["batches"][0]["afterFindings"][0]["occurrenceId"] == "scan-1"
+    assert inline["batches"][0]["beforeScans"][0]["findings"][0]["occurrenceId"] == "scan-0"
+
+    monkeypatch.setenv("CODEX_SECURITY_MATCHING_PLAN_FORMAT", "compact")
+    queries.clear()
+    backfilled.clear()
     result = pending()
     assert result["scanCount"] == 3
     assert batches(result) == [("scan-1", ["scan-0"]), ("scan-2", ["scan-0", "scan-1"])]
-    for batch in result["batches"]:
-        assert [row["occurrenceId"] for row in batch["afterFindings"]] == [batch["afterScanId"]]
-        for before in batch["beforeScans"]:
-            assert [row["occurrenceId"] for row in before["findings"]] == [before["scanId"]]
+    assert {
+        scan_id: [row["occurrenceId"] for row in findings]
+        for scan_id, findings in result["findingsByScanId"].items()
+    } == {scan_id: [scan_id] for scan_id in ("scan-0", "scan-1", "scan-2")}
+    assert json.dumps(result).count('"occurrenceId"') == 3
     assert sorted(backfilled) == ["scan-0", "scan-1", "scan-2"]
     assert sum("from finding_occurrences " in sql.lower() for sql in queries) <= 3
 
@@ -403,6 +503,7 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
     queries.clear()
     cached = pending()
     assert (cached["batches"], cached["skippedPairs"]) == ([], 3)
+    assert cached["findingsByScanId"] == {}
     assert not any("FROM scan_comparison_matches" in sql for sql in queries)
 
     for scan in ("foreign-a", "foreign-b"):
@@ -423,7 +524,7 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
 
     for index in (3, 4):
         scan = f"scan-{index}"
-        add_scan(db, scan, repository, started_at=f"2026-01-01T00:00:0{index}Z")
+        add_scan(db, scan, repository, target_id="target", started_at=f"2026-01-01T00:00:0{index}Z")
         add_occurrence(db, scan, scan, finding_id=f"scan-{index - 3}")
 
     def coverage(scan):

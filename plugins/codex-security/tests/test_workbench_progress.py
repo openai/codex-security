@@ -1,3 +1,5 @@
+"""Carry phase receipts and historical preflight diagnostics through workbench progress updates."""
+
 import json
 import sqlite3
 from pathlib import Path
@@ -13,8 +15,8 @@ from workbench_test_support import (
 def test_progress_preserves_phase_receipts_until_validation(tmp_path: Path) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
 
     discovery = update_progress(
         state_dir,
@@ -69,8 +71,8 @@ def test_progress_preserves_phase_receipts_until_validation(tmp_path: Path) -> N
 def test_historical_preflight_issues_survive_progress_updates(tmp_path: Path) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
-    started = start_delivered_scan(state_dir, "--workspace-id", str(saved["id"]))
-    scan_id = str(started["results"]["scanId"])
+    started = start_delivered_scan(state_dir, str(saved["id"]))
+    scan_id = str(started["scanId"])
     issues = [
         {
             "capability": "delegated_workers",

@@ -98,7 +98,7 @@ describe("scan history renderer", () => {
     expect(text).toContain("0 → 2");
   });
 
-  test("orders severity totals from critical to informational", () => {
+  test("orders severity totals and escapes labels in saved history", () => {
     const text = renderScanHistory(
       {
         scanId: "synthetic-scan",
@@ -106,6 +106,7 @@ describe("scan history renderer", () => {
         progress: { status: "complete" },
         findings: [],
         severityCounts: {
+          ["fu\u001b[2Jture"]: 6,
           low: 4,
           informational: 5,
           medium: 3,
@@ -116,6 +117,8 @@ describe("scan history renderer", () => {
       "show",
       { color: false },
     );
+    expect(text).not.toContain("\u001b[2J");
+    expect(text).toContain("6 FUTURE");
     expect(text).toMatch(
       /1 CRITICAL.*2 HIGH.*3 MEDIUM.*4 LOW.*5 INFORMATIONAL/,
     );
@@ -148,25 +151,42 @@ describe("scan history renderer", () => {
   ] as const)(
     "wraps %s titles at terminal columns",
     (_name, title, expected) => {
+      const badges = [
+        ["critical", "CRITICAL", 31],
+        ["high", "HIGH", 31],
+        ["medium", "MEDIUM", 33],
+        ["low", "LOW", 36],
+        ["informational", "INFO", 37],
+      ] as const;
       for (const color of [false, true]) {
         const output = renderScanHistory(
           {
             repository: "/repo",
-            findings: [{ title, severity: "high", path: "source.ts" }],
+            findings: badges.map(([severity]) => ({
+              title,
+              severity,
+              path: `${severity}.ts`,
+            })),
           },
           "findings",
           { columns: 48, color },
         );
         const lines = stripVTControlCharacters(output).split("\n");
-        const start = lines.findIndex((line) => line.startsWith("    HIGH"));
-        const end = lines.indexOf("              source.ts");
-        expect(lines.slice(start, end)).toEqual(
-          expected.map(
-            (line, index) =>
-              `${index === 0 ? "    HIGH      " : "              "}${line}`,
-          ),
-        );
-        if (color) expect(output).toContain("\u001B[31mHIGH    \u001B[0m");
+        for (const [severity, label, ansiColor] of badges) {
+          const badge = label.padEnd(8);
+          const start = lines.findIndex((line) =>
+            line.startsWith(`    ${badge}  `),
+          );
+          expect(lines.slice(start, start + expected.length + 1)).toEqual([
+            ...expected.map(
+              (line, index) =>
+                `${index === 0 ? `    ${badge}  ` : "              "}${line}`,
+            ),
+            `              ${severity}.ts`,
+          ]);
+          if (color)
+            expect(output).toContain(`\u001B[${ansiColor}m${badge}\u001B[0m`);
+        }
       }
     },
   );
@@ -387,6 +407,26 @@ describe("scan history renderer", () => {
     }
   });
 
+  test("uses the singular for one finding or reviewed file", () => {
+    const scan = {
+      scanId: "12345678-abcd-4567-abcd-1234567890ab",
+      targetPath: "/demo/service",
+      mode: "standard",
+      progress: { status: "complete", coverage: { filesTotal: 1 } },
+      findingCount: 1,
+      startedAt: "2026-07-24T12:00:00Z",
+    };
+    const list = stripVTControlCharacters(
+      renderScanHistory({ scans: [scan] }, "list", { columns: 60 }),
+    );
+    expect(list).toMatch(/1 scan {2}· {2}latest: 1 finding$/mu);
+    expect(list).toContain("1 finding  ·  ✓ COMPLETE");
+    const show = stripVTControlCharacters(
+      renderScanHistory({ ...scan, findings: [] }, "show"),
+    );
+    expect(show).toMatch(/REVIEW {2}1 file$/mu);
+  });
+
   test("shows bounded findings, saved configuration, and failure reasons", () => {
     const scan = {
       scanId: "12345678-abcd-4567-abcd-1234567890ab",
@@ -553,20 +593,27 @@ describe("scan history renderer", () => {
       targetPath: "/synthetic/repository",
       progress: { status: "complete" },
       findings: [
-        { title: relation.beforeTitle, severity: "high", related: [relation] },
+        {
+          title: relation.beforeTitle,
+          severity: "informational",
+          related: [relation],
+        },
       ],
     };
     const compact = renderScanHistory(scan, "show", { color: false });
-    expect(compact).toContain("1 related finding, kept separate");
+    expect(compact).toContain(`\n    INFO      ${relation.beforeTitle}\n`);
+    expect(compact).toContain(
+      "\n              ↔ 1 related finding, kept separate",
+    );
     expect(compact).not.toContain(relation.reason);
     const expanded = renderScanHistory(scan, "show", {
       color: false,
       showLinkedFindings: true,
     });
     for (const value of [
-      relation.afterTitle,
-      relation.scanId.slice(0, 8),
-      relation.reason,
+      `\n                RELATED SCAN ${relation.scanId.slice(0, 8)}`,
+      `\n                  ↳ ${relation.afterTitle}`,
+      `\n                    ${relation.reason}`,
     ]) {
       expect(expanded).toContain(value);
     }

@@ -1,6 +1,5 @@
 import { posix } from "node:path";
 import { z } from "zod";
-import validSemver from "semver/functions/valid.js";
 import type {
   ExternalFinding,
   ExternalFindings,
@@ -9,7 +8,7 @@ import type {
 import {
   cloudRepositoryUrlKey,
   repositoryUrlKey,
-  validateExternalEvidence,
+  validateEnrichedExternalEvidence,
   type ExternalImportTarget,
 } from "./external-import-contract.js";
 import { isGitHubCloudHost } from "./git-remote.js";
@@ -17,11 +16,15 @@ import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
+  awsTimestampSeconds,
+  concreteVersion,
   normalizeRecords,
   readScannerJson,
   record,
-  relativePath,
+  repositoryFilePath,
   requiredText,
+  scannerSeverity,
+  strings,
   text,
 } from "./scanner-import.js";
 
@@ -330,6 +333,7 @@ const repositoryFinding = z.object({
         fileName: optionalValue,
         filePath: optionalValue,
         startLine: optionalValue,
+        endLine: optionalValue,
       }),
       sourceLambdaLayerArn: absent,
     })
@@ -444,27 +448,8 @@ export function inspectorReportRepository(
   };
 }
 
-function repoFile(value: unknown): string | null {
-  const relative = relativePath(value);
-  if (!relative) return null;
-  const path = posix.normalize(relative);
-  return path === "." ||
-    path.endsWith("/") ||
-    /^(?:[a-z][a-z\d+.-]*:|~[^/]*(?:\/|$)|[^/]+@[^/]+:)/iu.test(path)
-    ? null
-    : path;
-}
-
 function timestamp(value: unknown): number {
-  const seconds =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" &&
-          /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/u.test(
-            value,
-          )
-        ? Date.parse(value) / 1000
-        : NaN;
+  const seconds = awsTimestampSeconds(value);
   if (!Number.isFinite(seconds))
     throw new Error("Invalid Inspector timestamp.");
   return Math.floor(seconds);
@@ -529,41 +514,6 @@ function manifestPath(path: string | null): string | null {
     : null;
 }
 
-function concreteVersion(
-  value: unknown,
-  ecosystem: string | null,
-  osPackage: boolean,
-): string | null {
-  const version = text(value);
-  if (!version) return null;
-  // Debian versions use internal tildes for prereleases and backports.
-  if (osPackage && version.includes("~"))
-    return /^(?:\d+:)?\d[a-z\d.+~]*(?:-[a-z\d.+~]+)*$/iu.test(version)
-      ? version
-      : null;
-  if (validSemver(version)) return version;
-  if (ecosystem === "npm" || ecosystem === "cargo") return null;
-  if (ecosystem === "java" || ecosystem === "maven") {
-    if (
-      version === "LATEST" ||
-      version === "RELEASE" ||
-      version.startsWith("latest.")
-    )
-      return null;
-    return /^[a-z\d][\w.+-]*$/iu.test(version) && !version.endsWith("+")
-      ? version
-      : null;
-  }
-  if (!ecosystem && version.endsWith("+")) return null;
-  const publicVersion =
-    ecosystem === "pypi" ? version.split("+", 1)[0]! : version;
-  return /\d/u.test(version) &&
-    /^(?:\d+:)?[a-z\d][\w.+!-]*$/iu.test(version) &&
-    !/(?:^|\.)x(?:\.|$)/iu.test(publicVersion)
-    ? version
-    : null;
-}
-
 function evidence(
   { native: finding, pkg, code }: ReturnType<typeof selectedFinding>,
   id: string,
@@ -587,7 +537,7 @@ function evidence(
   const level = requiredText(severity, "Inspector severity").toLowerCase();
   const paths = new Set<string>();
   const packages = (pkg?.vulnerablePackages ?? []).map((item) => {
-    const path = repoFile(item.filePath);
+    const path = repositoryFilePath(item.filePath);
     if (path) paths.add(path);
     const ecosystem = ecosystems.get(text(item.packageManager) ?? "") ?? null;
     const version = (value: unknown) =>
@@ -607,53 +557,59 @@ function evidence(
   const locations: { path: string; line: number | null }[] = [...paths].map(
     (path) => ({ path, line: null }),
   );
+  let endLine: number | null = null;
   if (code) {
-    const { fileName, filePath, startLine } = code.filePath;
-    const path = repoFile(filePath);
-    if (path && posix.basename(path) === fileName)
-      locations.push({
-        path,
-        line:
-          typeof startLine === "number" &&
-          Number.isSafeInteger(startLine) &&
-          startLine > 0
-            ? startLine
-            : null,
-      });
-  }
-  return validateExternalEvidence(
-    {
-      title:
-        text(finding["title"]) ??
-        pkg?.vulnerabilityId ??
-        code?.detectorName ??
-        id,
-      description: requiredText(description, "Inspector description"),
-      severity: ["critical", "high", "medium", "low", "informational"].includes(
-        level,
+    const { fileName, filePath, startLine, endLine: end } = code.filePath;
+    const path = repositoryFilePath(filePath);
+    if (path && posix.basename(path) === fileName) {
+      const line =
+        typeof startLine === "number" &&
+        Number.isSafeInteger(startLine) &&
+        startLine > 0
+          ? startLine
+          : null;
+      locations.push({ path, line });
+      if (
+        line !== null &&
+        typeof end === "number" &&
+        Number.isSafeInteger(end) &&
+        end >= line
       )
-        ? level
-        : "unknown",
-      url: text(pkg?.sourceUrl),
-      advisory_ids: pkg
-        ? [
-            ...new Set([
-              pkg.vulnerabilityId,
-              ...(pkg.relatedVulnerabilities ?? []),
-            ]),
-          ]
-        : [],
-      packages,
-      locations,
-      source_updated_at: updatedAt === undefined ? null : timestamp(updatedAt),
-      source_data: {
-        format,
-        sourceRepositoryUrl: source,
-        finding: structuredClone(finding),
-      },
+        endLine = end;
+    }
+  }
+  const advisoryIds = pkg ? [pkg.vulnerabilityId] : [];
+  const base = {
+    title:
+      text(finding["title"]) ??
+      pkg?.vulnerabilityId ??
+      code?.detectorName ??
+      id,
+    description: requiredText(description, "Inspector description"),
+    severity: scannerSeverity(level),
+    url: text(pkg?.sourceUrl),
+    advisory_ids: advisoryIds,
+    packages,
+    locations,
+    source_updated_at: updatedAt === undefined ? null : timestamp(updatedAt),
+    source_data: {
+      format,
+      sourceRepositoryUrl: source,
+      finding: structuredClone(finding),
     },
-    target,
-  );
+  };
+  const enrichment = code
+    ? {
+        details: {
+          kind: "sast",
+          repository: { url: source },
+          rule: { id: code.detectorId, name: code.detectorName },
+          weakness_ids: strings(code.cwes),
+          code: endLine === null ? null : { end_line: endLine },
+        },
+      }
+    : undefined;
+  return validateEnrichedExternalEvidence(base, target, enrichment);
 }
 
 export function normalizeInspectorFindings(
@@ -688,24 +644,22 @@ export function normalizeInspectorFindings(
     ({ finding }) => identity(record(finding, "Inspector finding")).arn,
     target,
   );
-  if (result.excluded.length && result.findings.length) {
-    // Only surviving rows can supply shared provider and host evidence on replay.
-    const skipped = new Set(result.excluded.map((row) => row.position));
-    const retained = rows.filter((row) => !skipped.has(row.position));
-    checkReportScope(retained, target, projectMap, (row, error) => {
-      skipped.add(row.position);
-      result.excluded.push({
-        position: row.position,
-        source_finding_id: identity(record(row.finding, "Inspector finding"))
-          .arn,
-        reason: errorMessage(error),
-      });
+  if (!result.excluded.length || !result.findings.length) return result;
+  // Only surviving rows can supply shared provider and host evidence on replay.
+  const skipped = new Set(result.excluded.map((row) => row.position));
+  const retained = rows.filter((row) => !skipped.has(row.position));
+  checkReportScope(retained, target, projectMap, (row, error) => {
+    skipped.add(row.position);
+    result.excluded.push({
+      position: row.position,
+      source_finding_id: identity(record(row.finding, "Inspector finding")).arn,
+      reason: errorMessage(error),
     });
-    result.findings = result.findings.filter(
-      (_, i) => !skipped.has(retained[i]!.position),
-    );
-    result.excluded.sort((a, b) => a.position - b.position);
-  }
+  });
+  result.findings = result.findings.filter(
+    (_, i) => !skipped.has(retained[i]!.position),
+  );
+  result.excluded.sort((a, b) => a.position - b.position);
   return result;
 }
 

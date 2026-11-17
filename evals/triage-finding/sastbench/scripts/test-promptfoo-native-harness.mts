@@ -115,20 +115,31 @@ const dispatchRoot = fs.mkdtempSync(
 );
 try {
   const runner = path.join(evalRoot, "scripts", "run-promptfoo.mts");
-  for (const module of [runner]) {
-    for (const entry of ["-", path.join(dispatchRoot, "virtual-entry.mts")]) {
-      const imported = execFileSync(
-        process.execPath,
-        [
-          "--experimental-strip-types",
-          "--input-type=module",
-          "--eval",
-          `process.argv[1] = ${JSON.stringify(entry)}; await import(${JSON.stringify(pathToFileURL(module).href)}); console.log("imported");`,
-        ],
-        { encoding: "utf8" },
-      );
-      assert.equal(imported.trim(), "imported");
-    }
+  const modules = [
+    runner,
+    path.join(evalRoot, "scripts", "generate-calibration-tests.mts"),
+    path.join(evalRoot, "scripts", "hydrate-calibration-repos.mts"),
+    path.join(sastbenchRoot, "scripts", "install-sastbench.mts"),
+    path.join(sastbenchRoot, "scripts", "hydrate-sastbench-repos.mts"),
+  ].map((module) => pathToFileURL(module).href);
+  for (const entry of [
+    undefined,
+    "-",
+    path.join(dispatchRoot, "virtual-entry.mts"),
+  ]) {
+    const imported = execFileSync(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        "--input-type=module",
+        "--eval",
+        `process.argv[1] = ${JSON.stringify(entry)};
+         for (const module of ${JSON.stringify(modules)}) await import(module);
+         console.log("imported");`,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(imported.trim(), "imported");
   }
   if (process.platform !== "win32") {
     const link = path.join(dispatchRoot, "sastbench-runner.mts");

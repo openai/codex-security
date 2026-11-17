@@ -10,6 +10,7 @@ import {
   readInspectorFindings,
 } from "../src/inspector-findings.js";
 import {
+  inspectorCodeFinding as codeFinding,
   inspectorIntegrationArn,
   inspectorPackageFinding,
   inspectorProjectId,
@@ -24,28 +25,6 @@ function normalize(
   projectMap?: ReadonlyMap<string, string>,
 ) {
   return normalizeInspectorFindings({ findings }, source, target, projectMap);
-}
-
-function codeFinding(
-  filePath = "src/example.ts",
-  fileName = "example.ts",
-  startLine = 8,
-) {
-  const { packageVulnerabilityDetails: _packages, ...common } =
-    inspectorPackageFinding();
-  return {
-    ...common,
-    type: "CODE_VULNERABILITY",
-    findingArn: common.findingArn.replace(/a{32}$/u, "b".repeat(32)),
-    title: "Synthetic code finding",
-    codeVulnerabilityDetails: {
-      detectorId: "synthetic-detector",
-      detectorName: "Synthetic detector",
-      cwes: ["CWE-79"],
-      detectorTags: ["example-tag"],
-      filePath: { fileName, filePath, startLine, endLine: 12 },
-    },
-  };
 }
 
 function projectFinding(
@@ -73,7 +52,7 @@ test("preserves the native package finding and projects only reported dependency
     title: native.title,
     severity: "high",
     description: native.description,
-    advisory_ids: ["CVE-2099-1234", "GHSA-2345-6789-cfgh"],
+    advisory_ids: ["CVE-2099-1234"],
     url: native.packageVulnerabilityDetails.sourceUrl,
     packages: [
       {
@@ -108,6 +87,24 @@ test("preserves the native package finding and projects only reported dependency
   expect(row.evidence.source_data?.["finding"]).toMatchObject({
     status: "ACTIVE",
   });
+});
+
+test("related vulnerabilities stay in native evidence even when they exceed the Cloud advisory ID limit", () => {
+  const native = inspectorPackageFinding();
+  native.packageVulnerabilityDetails.relatedVulnerabilities = Array.from(
+    { length: 100 },
+    (_, i) => `CVE-2099-${4000 + i}`,
+  );
+  const report = { findings: [native] };
+  const { findings, excluded } = normalizeInspectorFindings(
+    report,
+    inspectorRepositoryUrl,
+  );
+  expect(excluded).toEqual([]);
+  expect(findings[0]!.evidence.advisory_ids).toEqual([
+    native.packageVulnerabilityDetails.vulnerabilityId,
+  ]);
+  expect(findings[0]!.evidence.source_data?.["finding"]).toEqual(native);
 });
 
 test.each([
@@ -213,6 +210,23 @@ test("projects only repository-relative code locations with a matching filename"
   const evidence = (finding: ReturnType<typeof codeFinding>) =>
     normalize([finding]).findings[0]!.evidence;
   const code = codeFinding();
+  expect(evidence(code).details).toMatchObject({
+    kind: "sast",
+    repository: { url: inspectorRepositoryUrl },
+    rule: {
+      id: code.codeVulnerabilityDetails.detectorId,
+      name: code.codeVulnerabilityDetails.detectorName,
+    },
+    weakness_ids: code.codeVulnerabilityDetails.cwes,
+    code: { end_line: 12 },
+  });
+  expect(
+    evidence(codeFinding("src/other.ts")).details?.code?.end_line ?? null,
+  ).toBeNull();
+  expect(
+    evidence(codeFinding("src/example.ts", "example.ts", 13)).details?.code
+      ?.end_line ?? null,
+  ).toBeNull();
   expect(evidence(code).locations).toEqual([
     { path: "src/example.ts", line: 8 },
   ]);
@@ -232,6 +246,34 @@ test("projects only repository-relative code locations with a matching filename"
   expect(
     evidence(codeFinding("src\\example.ts", "example.ts", 0)).locations,
   ).toEqual([{ path: "src/example.ts", line: null }]);
+});
+
+test("oversized optional SAST fields preserve the complete Inspector finding", () => {
+  const native = codeFinding();
+  native.codeVulnerabilityDetails.detectorId = "a".repeat(513);
+  const { findings, excluded } = normalize([native]);
+  expect(excluded).toEqual([]);
+  expect(findings[0]!.evidence.source_data?.["finding"]).toEqual(native);
+  expect(findings[0]!.evidence.locations).toEqual([
+    { path: "src/example.ts", line: 8 },
+  ]);
+  expect(
+    normalize([native], inspectorRepositoryUrl, "local").findings[0]!.evidence
+      .details?.rule?.id,
+  ).toBe(native.codeVulnerabilityDetails.detectorId);
+});
+
+test("SAST details do not displace native evidence at the Cloud byte limit", () => {
+  const native = { ...codeFinding(), padding: "" };
+  const { details: _, ...base } = normalize([native]).findings[0]!.evidence;
+  native.padding = " ".repeat(
+    262_144 - Buffer.byteLength(JSON.stringify(base)),
+  );
+  expect(
+    normalize([native]).findings[0]!.evidence.source_data?.["finding"],
+  ).toEqual(native);
+  native.padding += " ";
+  expect(normalize([native]).excluded[0]?.reason).toContain("256 KiB");
 });
 
 test("accepts Unix and timezone-qualified ISO timestamps", () => {

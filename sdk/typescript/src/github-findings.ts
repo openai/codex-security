@@ -1,8 +1,13 @@
 import type { ExternalImportTarget } from "./external-import-contract.js";
 import { hash } from "node:crypto";
+import { isProxy } from "node:util/types";
 import { GHSA_ID, githubRepositoryParts } from "./github-identifiers.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
-import { validateExternalEvidence } from "./external-import-contract.js";
+import {
+  cloudRepositoryUrlKey,
+  exportedGitHubRecord,
+  validateExternalEvidence,
+} from "./external-import-contract.js";
 import type { ExternalFinding, ExternalFindings } from "./external-findings.js";
 import type { ImportedGitHubCodeScanningAlert } from "./github.js";
 import type { ImportedGitHubAdvisory } from "./github-advisories.js";
@@ -10,13 +15,13 @@ import {
   isGitHubDependabotAlert,
   normalizeGitHubDependabotAlerts,
 } from "./github-dependabot-findings.js";
-import { parseJsonOrJsonl, readScannerText, text } from "./scanner-import.js";
-
-function object(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
+import { asRecord } from "./record.js";
+import {
+  parseJsonOrJsonl,
+  readScannerText,
+  scannerSeverity,
+  text,
+} from "./scanner-import.js";
 
 function repositoryName(value: unknown): string {
   const repository = text(value);
@@ -45,20 +50,21 @@ function sourceTimestamp(value: unknown): number | null {
   return Math.floor(seconds);
 }
 
-function severity(value: unknown): string {
-  // SARIF error/warning/note are not vulnerability severity ratings.
-  return typeof value === "string" &&
-    ["critical", "high", "medium", "low", "informational"].includes(value)
-    ? value
-    : "unknown";
+function codeScanningPrefix(
+  { parsed, host }: ReturnType<typeof sourceUrl>,
+  repository: string,
+  number: number,
+): string | undefined {
+  const name = repository.toLowerCase();
+  const path = parsed.pathname.toLowerCase();
+  const alert = `code-scanning/${number}`;
+  if (path === `/${name}/${alert}` || path === `/${name}/security/${alert}`)
+    return `${host}/${name}/${alert}/`;
 }
 
-function codeScanningFinding(
-  record: Record<string, unknown>,
-  target: ExternalImportTarget = "cloud",
-): ExternalFinding {
-  const repository = repositoryName(record["repository"]);
-  const alert = object(record["alert"]);
+function codeScanningSource(record: Record<string, unknown>) {
+  const name = repositoryName(record["repository"]);
+  const alert = asRecord(record["alert"]);
   const number = record["number"];
   if (
     !alert ||
@@ -73,27 +79,31 @@ function codeScanningFinding(
   const url = text(record["url"]);
   if (!url || url !== alert["html_url"])
     throw new Error("GitHub alert URL must match the original alert.");
-  const { parsed: parsedUrl, host, origin } = sourceUrl(url);
-  if (
-    !["security/code-scanning", "code-scanning"].some(
-      (route) =>
-        parsedUrl.pathname.toLowerCase() ===
-        `/${repository}/${route}/${number}`.toLowerCase(),
-    )
-  )
+  const link = sourceUrl(url);
+  const prefix = codeScanningPrefix(link, name, number);
+  if (!prefix)
     throw new Error(
       "GitHub alert URL does not match the selected repository and alert.",
     );
-  const rule = object(alert["rule"]);
-  const instance = object(alert["most_recent_instance"]);
+  const repository = { url: `${link.origin}/${name}`, name };
+  return { alert, number, prefix, url, repository };
+}
+
+function codeScanningFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
+  const { alert, number, prefix, url, repository } = codeScanningSource(record);
+  const rule = asRecord(alert["rule"]);
+  const instance = asRecord(alert["most_recent_instance"]);
   const ref = text(instance?.["ref"]);
   if (!ref)
     throw new Error(
       "GitHub code-scanning evidence requires the selected instance ref.",
     );
-  const location = object(instance?.["location"]);
-  const tool = object(alert["tool"]);
-  const message = text(object(instance?.["message"])?.["text"]);
+  const location = asRecord(instance?.["location"]);
+  const tool = asRecord(alert["tool"]);
+  const message = text(asRecord(instance?.["message"])?.["text"]);
   const description =
     text(rule?.["full_description"]) ?? text(rule?.["description"]);
   const tags = Array.isArray(rule?.["tags"]) ? rule["tags"] : [];
@@ -109,56 +119,54 @@ function codeScanningFinding(
     ),
   ];
   const path = text(location?.["path"]);
-  const sourceId = `${host}/${repository.toLowerCase()}/code-scanning/${number}/${hash("sha256", ref)}`;
   return {
-    source_finding_id: sourceId,
-    evidence: validateExternalEvidence(
-      {
-        title:
-          text(rule?.["name"]) ??
-          text(rule?.["description"]) ??
-          `GitHub code-scanning alert #${number}`,
-        severity: severity(rule?.["security_severity_level"]),
-        description:
-          [...new Set([message, description].filter(Boolean))].join("\n\n") ||
-          null,
-        url,
-        locations: path
-          ? [{ path, line: location?.["start_line"] ?? null }]
-          : [],
-        branch: ref,
-        code_revision: text(instance?.["commit_sha"]),
-        source_updated_at: sourceTimestamp(alert["updated_at"]),
-        source_data: record,
-        details: {
-          kind: "sast",
-          repository: {
-            url: `${origin}/${repository}`,
-            name: repository,
-          },
-          // Dismissal covers every branch; detection state belongs to the selected ref.
-          source_status:
-            alert["state"] === "dismissed"
-              ? "dismissed"
-              : (text(instance?.["state"]) ?? text(alert["state"])),
-          scanner_origin: text(tool?.["name"]),
-          rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
-          weakness_ids: weaknessIds,
-          remediation_instructions: text(rule?.["help"]),
-          code: path ? { end_line: location?.["end_line"] ?? null } : null,
-        },
+    source_finding_id: prefix + hash("sha256", ref),
+    evidence: {
+      title:
+        text(rule?.["name"]) ??
+        text(rule?.["description"]) ??
+        `GitHub code-scanning alert #${number}`,
+      // SARIF error, warning and note describe diagnostics. Use the security rating.
+      severity: scannerSeverity(text(rule?.["security_severity_level"])),
+      description:
+        [...new Set([message, description].filter(Boolean))].join("\n\n") ||
+        null,
+      url,
+      locations: path ? [{ path, line: location?.["start_line"] ?? null }] : [],
+      branch: ref,
+      code_revision: text(instance?.["commit_sha"]),
+      source_updated_at: sourceTimestamp(alert["updated_at"]),
+      source_data: record,
+      details: {
+        kind: "sast",
+        repository,
+        // Dismissal covers every branch; detection state belongs to the selected ref.
+        source_status:
+          alert["state"] === "dismissed"
+            ? "dismissed"
+            : (text(instance?.["state"]) ?? text(alert["state"])),
+        scanner_origin: text(tool?.["name"]),
+        rule: { id: text(rule?.["id"]), name: text(rule?.["name"]) },
+        weakness_ids: weaknessIds,
+        remediation_instructions: text(rule?.["help"]),
+        code: path ? { end_line: location?.["end_line"] ?? null } : null,
       },
-      target,
-    ),
+    },
   };
 }
 
-function advisoryFinding(
-  record: Record<string, unknown>,
-  target: ExternalImportTarget = "cloud",
-): ExternalFinding {
-  const repository = repositoryName(record["repository"]);
-  const advisory = object(record["advisory"]);
+function advisorySourceId(
+  host: string,
+  selection: "global" | "repository",
+  repository: string,
+  id: string,
+): string {
+  return `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`;
+}
+
+function advisorySource(record: Record<string, unknown>) {
+  const name = repositoryName(record["repository"]);
+  const advisory = asRecord(record["advisory"]);
   const id = text(record["ghsaId"]);
   const selection = record["selection"];
   if (
@@ -182,7 +190,7 @@ function advisoryFinding(
     selection === "global" && parsedUrl.host === "github.com";
   const expectedPath =
     selection === "repository"
-      ? `/${repository}/security/advisories/${id}`
+      ? `/${name}/security/advisories/${id}`
       : `/advisories/${id}`;
   if (
     !host ||
@@ -192,6 +200,16 @@ function advisoryFinding(
     throw new Error(
       "GitHub advisory URL does not match the selected source and GHSA ID.",
     );
+  const repository = { url: `${origin}/${name}`, name };
+  return { advisory, id, selection, url, host, repository } as const;
+}
+
+function advisoryFinding(record: Record<string, unknown>): {
+  source_finding_id: string;
+  evidence: unknown;
+} {
+  const { advisory, id, selection, url, host, repository } =
+    advisorySource(record);
   const vulnerabilities =
     advisory["vulnerabilities"] === null ? [] : advisory["vulnerabilities"];
   if (!Array.isArray(vulnerabilities))
@@ -202,11 +220,11 @@ function advisoryFinding(
   const advisoryIds = [
     id,
     text(advisory["cve_id"]),
-    ...identifiers.map((identifier) => text(object(identifier)?.["value"])),
+    ...identifiers.map((identifier) => text(asRecord(identifier)?.["value"])),
   ].filter((value): value is string => value !== null);
   const packages = vulnerabilities.flatMap((value) => {
-    const vulnerability = object(value);
-    const pkg = object(vulnerability?.["package"]);
+    const vulnerability = asRecord(value);
+    const pkg = asRecord(vulnerability?.["package"]);
     const name = text(pkg?.["name"]);
     // GitHub permits incomplete package metadata in advisory disclosures.
     // Preserve it in source_data without inventing a typed package identity.
@@ -227,46 +245,93 @@ function advisoryFinding(
   });
   const cwes = Array.isArray(advisory["cwes"]) ? advisory["cwes"] : [];
   return {
-    source_finding_id: `${host}/${selection === "repository" ? repository.toLowerCase() : "global"}/security-advisory/${id.toUpperCase()}`,
-    evidence: validateExternalEvidence(
-      {
-        title: text(advisory["summary"]) ?? id,
-        severity: severity(advisory["severity"]),
-        description: text(advisory["description"]),
-        url,
-        advisory_ids: [...new Set(advisoryIds)],
-        packages,
-        source_updated_at: sourceTimestamp(advisory["updated_at"]),
-        source_data: record,
-        details: {
-          kind: "advisory",
-          advisory: { source: selection },
-          ...(selection === "repository"
-            ? {
-                repository: {
-                  url: `${origin}/${repository}`,
-                  name: repository,
-                },
-              }
-            : {}),
-          source_status: text(advisory["withdrawn_at"])
-            ? "withdrawn"
-            : (text(advisory["state"]) ??
-              (selection === "global" ? "published" : null)),
-          scanner_origin: "GitHub Security Advisories",
-          weakness_ids: cwes
-            .map((value) => text(object(value)?.["cwe_id"]))
-            .filter((value): value is string => value !== null),
-        },
+    source_finding_id: advisorySourceId(host, selection, repository.name, id),
+    evidence: {
+      title: text(advisory["summary"]) ?? id,
+      severity: scannerSeverity(text(advisory["severity"])),
+      description: text(advisory["description"]),
+      url,
+      advisory_ids: [...new Set(advisoryIds)],
+      packages,
+      source_updated_at: sourceTimestamp(advisory["updated_at"]),
+      source_data: record,
+      details: {
+        kind: "advisory",
+        advisory: { source: selection },
+        ...(selection === "repository" ? { repository } : {}),
+        source_status: text(advisory["withdrawn_at"])
+          ? "withdrawn"
+          : (text(advisory["state"]) ??
+            (selection === "global" ? "published" : null)),
+        scanner_origin: "GitHub Security Advisories",
+        weakness_ids: cwes
+          .map((value) => text(asRecord(value)?.["cwe_id"]))
+          .filter((value): value is string => value !== null),
       },
-      target,
-    ),
+    },
   };
+}
+
+/** Keep the repository from a retained collector export when SDK callers supply their own projection. */
+export function retainedGitHubRepository(
+  { evidence }: ExternalFinding,
+  repositoryKey = cloudRepositoryUrlKey,
+): string | undefined {
+  const data = evidence.source_data;
+  if (!data?.["url"] || !data["repository"]) return;
+  let source;
+  if (
+    data["source"] === "github-code-scanning" &&
+    data["number"] !== undefined &&
+    asRecord(data["alert"])?.["html_url"]
+  ) {
+    source = codeScanningSource(data);
+  } else if (
+    data["source"] === "github-security-advisory" &&
+    data["ghsaId"] &&
+    data["githubHost"] &&
+    data["selection"] &&
+    asRecord(data["advisory"])?.["html_url"]
+  ) {
+    source = advisorySource(data);
+    if (source.selection === "global") {
+      if (evidence.details?.repository)
+        throw new CodexSecurityError(
+          "Global advisory evidence cannot claim a source repository.",
+        );
+      return;
+    }
+  } else return;
+  const native = source.repository.url;
+  const projected = evidence.details?.repository?.url;
+  if (projected && repositoryKey(projected) !== repositoryKey(native))
+    throw new CodexSecurityError(
+      "The normalized repository does not match the original GitHub finding.",
+    );
+  return native;
+}
+
+function mapRecord(input: unknown) {
+  const record = asRecord(input);
+  if (!record) throw new Error("GitHub finding must be an object.");
+  if (record["source"] === "github-code-scanning")
+    return codeScanningFinding(record);
+  if (record["source"] === "github-security-advisory")
+    return advisoryFinding(record);
+  throw new Error(
+    "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
+  );
+}
+
+function ownData(value: unknown, key: string): unknown {
+  if (value && typeof value === "object" && !isProxy(value))
+    return Object.getOwnPropertyDescriptor(value, key)?.value;
 }
 
 function normalizeRecords(
   records: readonly unknown[],
-  target: ExternalImportTarget = "cloud",
+  target: ExternalImportTarget,
+  snapshot = false,
 ): ExternalFindings {
   const result: ExternalFindings = {
     read: records.length,
@@ -274,30 +339,31 @@ function normalizeRecords(
     excluded: [],
   };
   const identities = new Set<string>();
-  for (const [index, value] of records.entries()) {
-    const record = object(value);
+  for (const [index, input] of records.entries()) {
+    let exported = input;
     try {
-      if (!record) throw new Error("GitHub finding must be an object.");
-      let finding: ExternalFinding;
-      if (record["source"] === "github-code-scanning")
-        finding = codeScanningFinding(record, target);
-      else if (record["source"] === "github-security-advisory")
-        finding = advisoryFinding(record, target);
-      else
-        throw new Error(
-          "Expected saved output from import github or import github-advisories; raw or incomplete API responses need an explicit mapping.",
-        );
-      if (identities.has(finding.source_finding_id))
+      if (snapshot) {
+        const capture = exportedGitHubRecord(input, index, target);
+        exported = capture.record;
+        if (capture.invalid) throw capture.invalid;
+      }
+      const { source_finding_id: id, evidence: mapped } = mapRecord(exported);
+      const evidence = validateExternalEvidence(mapped, target);
+      if (identities.has(id))
         throw new CodexSecurityError(
-          `Duplicate source finding id ${JSON.stringify(finding.source_finding_id)}. Select each GitHub occurrence once.`,
+          `Duplicate source finding id ${JSON.stringify(id)}. Select each GitHub occurrence once.`,
         );
-      identities.add(finding.source_finding_id);
-      result.findings.push(finding);
+      identities.add(id);
+      result.findings.push({ source_finding_id: id, evidence });
     } catch (error) {
       if (error instanceof CodexSecurityError) throw error;
+      const url =
+        snapshot && exported === input
+          ? ownData(input, "url")
+          : asRecord(exported)?.["url"];
       result.excluded.push({
         position: index + 1,
-        source_finding_id: text(record?.["url"]),
+        source_finding_id: text(url),
         reason: errorMessage(error),
       });
     }
@@ -310,7 +376,7 @@ export function normalizeGitHubCodeScanningAlerts(
   alerts: readonly ImportedGitHubCodeScanningAlert[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(alerts, target);
+  return normalizeRecords(alerts, target, true);
 }
 
 /** Map advisory disclosures without asserting an installed vulnerable dependency. */
@@ -318,7 +384,7 @@ export function normalizeGitHubAdvisories(
   advisories: readonly ImportedGitHubAdvisory[],
   target: ExternalImportTarget = "cloud",
 ): ExternalFindings {
-  return normalizeRecords(advisories, target);
+  return normalizeRecords(advisories, target, true);
 }
 
 /** Read unfiltered JSON/JSONL output saved by the read-only GitHub import commands. */

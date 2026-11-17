@@ -36,6 +36,14 @@ FINDING_ATTACK_PATH_PREVIEW_BYTES = 4_000
 FINDING_CODE_EVIDENCE_LIMIT = 4
 FINDING_CODE_EVIDENCE_SNIPPET_BYTES = 1_500
 FINDING_EVIDENCE_EXCERPT_BYTES = 8_000
+FINDING_LOCATION_ORDER_SQL = "CASE WHEN role = 'root_control' THEN 0 ELSE 1 END, sort_order"
+# The outer query binds finding_occurrences as occurrences.
+PRIMARY_FINDING_LOCATION_SQL = f"""
+    FROM finding_locations
+    WHERE occurrence_id = occurrences.id
+    ORDER BY {FINDING_LOCATION_ORDER_SQL}
+    LIMIT 1
+"""
 FINDING_LOCATIONS_LIMIT = 8
 FINDING_TITLE_BYTES = 512
 FINDING_SUMMARY_BYTES = 2_000
@@ -50,6 +58,8 @@ GIT_REPOSITORY_ENVIRONMENT = (
     "GIT_COMMON_DIR",
     "GIT_DIR",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
     "GIT_INDEX_FILE",
     "GIT_NAMESPACE",
     "GIT_OBJECT_DIRECTORY",
@@ -63,6 +73,7 @@ EMPTY_GIT_TREES = {
 
 
 def optional_text(value: str | None, *, maximum: int | None = None) -> str | None:
+    """Strip surrounding whitespace, return None for blank text, and enforce the character limit."""
     if value is None:
         return None
     normalized = value.strip()
@@ -72,6 +83,7 @@ def optional_text(value: str | None, *, maximum: int | None = None) -> str | Non
 
 
 def positive_int(value: str) -> int:
+    """Parse a CLI count and reject values below one with an argparse validation error."""
     parsed = int(value)
     if parsed < 1:
         raise argparse.ArgumentTypeError("expected a positive integer")

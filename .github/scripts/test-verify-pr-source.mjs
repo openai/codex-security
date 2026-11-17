@@ -193,6 +193,31 @@ test("pending sources settle, genuine red remains red, and newer attempts cannot
   }
 });
 
+test("a cancelled metadata edit preserves a source failure without qualifying a success", async () => {
+  const cancelled = edit(5, { conclusion: "cancelled" });
+  const failed = run(2, { conclusion: "failure" });
+  const pending = run(2, { status: "in_progress", conclusion: null });
+  assert.equal(
+    await fixture(
+      [
+        [pending, cancelled],
+        [failed, cancelled],
+      ],
+      {
+        wait: true,
+      },
+    ).check(),
+    "failed",
+  );
+  for (const history of [
+    [run(2), cancelled],
+    [run(2, { conclusion: "cancelled" }), cancelled],
+    [failed, cancelled, edit(8)],
+  ]) {
+    assert.equal(await fixture([history]).check(), "full");
+  }
+});
+
 test("retrying a failed edit cannot replace its full checks with older green results", async () => {
   const retry = fixture([[run(2)]], { runAttempt: 2 });
   assert.equal(await retry.check(), "full");

@@ -1,5 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { parseJson, stringifyJson } from "../helpers/json";
+import { sqliteFilename } from "../windows-path";
 import { requireSqliteText } from "./database";
 import type { Finding } from "./findings";
 import { transaction } from "./transaction";
@@ -33,6 +34,7 @@ export type SeverityCheckpoint =
       findingIds: string[];
       assessedAt: string;
       rubricSha256: string | null;
+      rubric?: { sha256: string | null; revision?: number };
       knowledgeBaseSha256: string | null;
       classificationRuns?: number;
     }
@@ -94,14 +96,15 @@ export function severityCheckpoint(
       database
         .prepare(
           `INSERT INTO scan_severity_classifications (
-            scan_id, finding_ids_json, assessed_at, rubric_sha256, knowledge_base_sha256, classification_runs
-          ) VALUES (?, ?, ?, ?, ?, ?)
+            scan_id, finding_ids_json, assessed_at, rubric_sha256, knowledge_base_sha256, classification_runs, rubric_binding_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(scan_id) DO UPDATE SET
             finding_ids_json = excluded.finding_ids_json,
             assessed_at = excluded.assessed_at,
             rubric_sha256 = excluded.rubric_sha256,
             knowledge_base_sha256 = excluded.knowledge_base_sha256,
-            classification_runs = excluded.classification_runs`,
+            classification_runs = excluded.classification_runs,
+            rubric_binding_json = excluded.rubric_binding_json`,
         )
         .run(
           payload.scanId,
@@ -110,6 +113,9 @@ export function severityCheckpoint(
           payload.rubricSha256,
           payload.knowledgeBaseSha256,
           payload.classificationRuns ?? null,
+          payload.rubric === undefined
+            ? null
+            : stringifyJson(payload.rubric, 0),
         );
       // Cache hits are not saved again by the classifier. Keep each scan's own assessments.
       database
@@ -196,28 +202,31 @@ export function readSeverityClassification(
   scanId: string,
 ): unknown {
   requireSqliteText([scanId]);
-  const database = new DatabaseSync(databasePath, { readOnly: true });
+  const database = new DatabaseSync(sqliteFilename(databasePath), {
+    readOnly: true,
+  });
   try {
     database.exec("PRAGMA busy_timeout = 5000");
     return transaction(database, "BEGIN", () => {
-      if (
-        !database
-          .prepare(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_classifications'",
-          )
-          .get()
-      )
-        return {};
-      const hasRunCount = database
+      const tables = database
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'table'
+           AND name IN ('scan_severity_classifications', 'scan_severity_assessments')`,
+        )
+        .all()
+        .map((row) => row.name);
+      if (!tables.includes("scan_severity_classifications")) return {};
+      const columns = database
         .prepare("PRAGMA table_info(scan_severity_classifications)")
         .all()
-        .some((column) => column.name === "classification_runs");
+        .map((column) => column.name);
       const row = database
         .prepare(
           `SELECT json_object(
             'findingIds', json(finding_ids_json), 'assessedAt', assessed_at,
             'rubricSha256', rubric_sha256, 'knowledgeBaseSha256', knowledge_base_sha256
-            ${hasRunCount ? ", 'classificationRuns', classification_runs" : ""}
+            ${columns.includes("classification_runs") ? ", 'classificationRuns', classification_runs" : ""}
+            ${columns.includes("rubric_binding_json") ? ", 'rubric', json(rubric_binding_json)" : ""}
           ) AS value FROM scan_severity_classifications WHERE scan_id = ?`,
         )
         .get(scanId);
@@ -225,18 +234,13 @@ export function readSeverityClassification(
       const classification = parseJson(String(row.value)) as {
         findingIds: string[];
       };
-      const hasScanAssessments = database
-        .prepare(
-          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scan_severity_assessments'",
-        )
-        .get();
       return {
         scanId,
         ...classification,
         assessments: assessments(
           database,
           classification.findingIds,
-          hasScanAssessments ? scanId : undefined,
+          tables.includes("scan_severity_assessments") ? scanId : undefined,
         ),
       };
     });

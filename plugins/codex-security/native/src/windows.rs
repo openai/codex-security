@@ -14,19 +14,19 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        GetLastError, LocalFree, SetLastError, ERROR_FILE_NOT_FOUND, ERROR_INVALID_HANDLE,
-        ERROR_INVALID_PARAMETER, HANDLE, INVALID_HANDLE_VALUE,
+        GetLastError, LocalFree, SetLastError, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND,
+        ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, HANDLE,
+        INVALID_HANDLE_VALUE,
     },
     Security::{
         Authorization::{
             ConvertSidToStringSidA, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             SDDL_REVISION_1,
         },
-        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, SECURITY_MAX_SID_SIZE, TOKEN_QUERY,
-        TOKEN_USER,
+        GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES,
     },
     Storage::FileSystem::*,
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+    System::{SystemServices::SE_TOKEN_USER, Threading::GetCurrentProcess},
 };
 
 fn invalid(message: &str) -> napi::Error {
@@ -41,8 +41,10 @@ fn status(success: i32) -> u32 {
     }
 }
 
-fn io_error(error: io::Error) -> u32 {
-    error.raw_os_error().unwrap() as u32
+pub(crate) fn io_error(error: io::Error) -> u32 {
+    error
+        .raw_os_error()
+        .map_or(ERROR_ACCESS_DENIED, |code| code as u32)
 }
 
 fn io_status(result: io::Result<()>) -> u32 {
@@ -85,7 +87,7 @@ fn wide_bytes(units: impl IntoIterator<Item = u16>) -> Buffer {
         .into()
 }
 
-fn os_string(bytes: Buffer) -> napi::Result<OsString> {
+pub(crate) fn os_string(bytes: Buffer) -> napi::Result<OsString> {
     let path = wide_path(bytes)?;
     Ok(OsString::from_wide(&path[..path.len() - 1]))
 }
@@ -655,48 +657,54 @@ pub fn create_windows_directories(path: Buffer) -> napi::Result<u32> {
     Ok(io_status(fs::create_dir_all(os_string(path)?)))
 }
 
-#[napi]
-pub fn create_private_windows_directory(path: Buffer) -> napi::Result<u32> {
-    let path = wide_path(path)?;
-    let mut token = null_mut();
-    let error = status(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) });
-    if error != 0 {
-        return Ok(error);
-    }
-    let token = unsafe { OwnedHandle::from_raw_handle(token) };
-    // TOKEN_USER is followed by the SID; use Windows' defined maximum SID size.
-    #[repr(C)]
-    struct TokenUserBuffer {
-        user: TOKEN_USER,
-        sid: [u8; SECURITY_MAX_SID_SIZE as usize],
-    }
-    let mut user = TokenUserBuffer {
-        user: TOKEN_USER::default(),
-        sid: [0; SECURITY_MAX_SID_SIZE as usize],
-    };
+pub(crate) fn current_user_sid() -> Result<String, u32> {
+    // GetCurrentProcessToken() is the SDK's query-only pseudo-handle.
+    const CURRENT_PROCESS_TOKEN: HANDLE = -4isize as HANDLE;
+    let mut user = SE_TOKEN_USER::default();
     let mut length = 0;
     let error = status(unsafe {
         GetTokenInformation(
-            token.as_raw_handle(),
+            CURRENT_PROCESS_TOKEN,
             TokenUser,
-            (&mut user as *mut TokenUserBuffer).cast(),
-            size_of::<TokenUserBuffer>() as u32,
+            (&raw mut user).cast(),
+            size_of::<SE_TOKEN_USER>() as u32,
             &mut length,
         )
     });
     if error != 0 {
-        return Ok(error);
+        return Err(error);
     }
+    // GetTokenInformation filled the inline user SID in this buffer.
+    unsafe { sid_string(user.Anonymous1.User.Sid) }
+}
+
+/// The SID must remain valid until Windows has copied its string representation.
+pub(crate) unsafe fn sid_string(value: windows_sys::Win32::Security::PSID) -> Result<String, u32> {
     let mut sid = null_mut();
-    let error = status(unsafe { ConvertSidToStringSidA(user.user.User.Sid, &mut sid) });
+    let error = status(unsafe { ConvertSidToStringSidA(value, &mut sid) });
     if error != 0 {
-        return Ok(error);
+        return Err(error);
     }
-    let descriptor = format!(
-        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{})",
-        unsafe { CStr::from_ptr(sid.cast()) }.to_str().unwrap()
-    );
+    // A string SID contains only ASCII digits, hyphens and the S prefix.
+    let text = unsafe { CStr::from_ptr(sid.cast()) }
+        .to_str()
+        .unwrap()
+        .to_owned();
     unsafe { LocalFree(sid.cast()) };
+    Ok(text)
+}
+
+#[napi]
+pub fn create_private_windows_directory(
+    path: Buffer,
+    check_output: Option<bool>,
+) -> napi::Result<u32> {
+    let path = wide_path(path)?;
+    let sid = match current_user_sid() {
+        Ok(sid) => sid,
+        Err(error) => return Ok(error),
+    };
+    let descriptor = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{sid})");
     let mut attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
         ..Default::default()
@@ -714,7 +722,19 @@ pub fn create_private_windows_directory(path: Buffer) -> napi::Result<u32> {
     if error != 0 {
         return Ok(error);
     }
-    let error = status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) });
+    let error = if check_output == Some(true) {
+        let target = OsString::from_wide(&path[..path.len() - 1]);
+        crate::windows_output::inspect_output_path(
+            std::path::Path::new(&target),
+            &sid,
+            Some(attributes.lpSecurityDescriptor),
+            None,
+            None,
+        )
+        .map_or_else(|error| error, |()| 0)
+    } else {
+        status(unsafe { CreateDirectoryW(path.as_ptr(), &attributes) })
+    };
     unsafe { LocalFree(attributes.lpSecurityDescriptor) };
     Ok(error)
 }
@@ -729,6 +749,22 @@ impl WindowsHandle {
 
     #[napi]
     pub fn attributes(&self) -> AttributesResult {
+        let mut basic = FILE_BASIC_INFO::default();
+        let error = status(unsafe {
+            GetFileInformationByHandleEx(
+                self.raw(),
+                FileBasicInfo,
+                (&mut basic as *mut FILE_BASIC_INFO).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        });
+        if error != 0 || basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            return AttributesResult {
+                error,
+                attributes: basic.FileAttributes,
+                reparse_tag: 0,
+            };
+        }
         let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
         let error = status(unsafe {
             GetFileInformationByHandleEx(
@@ -748,7 +784,7 @@ impl WindowsHandle {
     #[napi]
     pub fn identity(&self) -> IdentityResult {
         let mut info = FILE_ID_INFO::default();
-        let error = status(unsafe {
+        let mut error = status(unsafe {
             GetFileInformationByHandleEx(
                 self.raw(),
                 FileIdInfo,
@@ -756,6 +792,18 @@ impl WindowsHandle {
                 size_of::<FILE_ID_INFO>() as u32,
             )
         });
+        if matches!(error, ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED) {
+            // Some filesystems expose only the legacy 64-bit file index.
+            let mut legacy = BY_HANDLE_FILE_INFORMATION::default();
+            error = status(unsafe { GetFileInformationByHandle(self.raw(), &mut legacy) });
+            if error == 0 {
+                info.VolumeSerialNumber = u64::from(legacy.dwVolumeSerialNumber);
+                let index =
+                    (u64::from(legacy.nFileIndexHigh) << 32) | u64::from(legacy.nFileIndexLow);
+                info.FileId.Identifier = [0; 16];
+                info.FileId.Identifier[..8].copy_from_slice(&index.to_le_bytes());
+            }
+        }
         IdentityResult {
             error,
             volume: info.VolumeSerialNumber.to_string(),

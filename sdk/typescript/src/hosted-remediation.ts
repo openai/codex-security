@@ -89,7 +89,7 @@ export interface HostedRemediationResult {
   execution?: RemediationExecutionResult;
   patch?: FindingPatch;
   verification?: FindingVerification;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; reason?: "revision_changed" };
 }
 
 export class HostedRemediationPreparationError extends Error {
@@ -117,7 +117,7 @@ export async function runHostedRemediation(
     throw new HostedRemediationPreparationError();
   const pluginRoot = await bundledPluginRoot();
   const { version: pluginVersion } = await pluginMetadata(pluginRoot);
-  const prompt = await remediationPrompt({
+  let prompt = await remediationPrompt({
     operation: input.operation,
     pluginRoot,
     contents: [
@@ -129,6 +129,13 @@ export async function runHostedRemediation(
     validationInstructions: input.validationInstructions,
     verificationMode: input.verificationMode,
   });
+  if (input.operation === "patch") {
+    prompt = [
+      "Work in the supplied checkout and leave all patch edits uncommitted for the host to capture, even if repository or validation instructions ask you to commit or use a separate worktree.",
+      `Keep HEAD at the pinned revision ${input.revision}. Before returning, check git rev-parse HEAD and git status --short to confirm the revision and the files you report.`,
+      prompt,
+    ].join("\n");
+  }
   const target = {
     version: 1 as const,
     operation: input.operation,
@@ -170,10 +177,22 @@ export async function runHostedRemediation(
       );
     if (execution.status !== "completed")
       return { ...base, status: execution.status, execution };
-    if ((await repositoryRevision(repository)) !== input.revision)
-      throw new Error(
-        "Checkout changed from the frozen revision during execution.",
-      );
+    const revision = await repositoryRevision(repository);
+    if (revision === null)
+      throw new Error("Could not resolve HEAD after remediation execution.");
+    if (revision !== input.revision) {
+      return {
+        ...base,
+        status: "failed",
+        execution,
+        error: {
+          code: "INVALID_RESULT",
+          reason: "revision_changed",
+          message:
+            "Checkout changed from the frozen revision during execution.",
+        },
+      };
+    }
     const response = execution.finalResponse ?? "";
     const outcome =
       input.operation === "patch"

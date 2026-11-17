@@ -1,3 +1,5 @@
+"""Distinguish portable sealed-artifact names from the source paths a finding may cite."""
+
 from __future__ import annotations
 
 import copy
