@@ -610,6 +610,11 @@ describe("multiscan", () => {
     ["non-object", "null", false],
     ["missing ID", { id: undefined }, false],
     ["non-string ID", { id: 42 }, false],
+    [
+      "unknown task ID",
+      '{"id":"other-task","attempt":2,"status":"failed","outputDir":"artifacts/other-task/attempt-2"}',
+      true,
+    ],
     ["missing attempt", { attempt: undefined }, false],
     ["string attempt", { attempt: "1" }, false],
     ["zero attempt", { attempt: 0 }, false],
