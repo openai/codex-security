@@ -4,7 +4,7 @@ type: software
 title: Codex Security
 authors:
   - name: OpenAI
-version: "0.10.1"
+version: "0.10.2"
 repository-code: https://github.com/openai/codex-security
 repository-artifact: https://www.npmjs.com/package/@openai/codex-security
 url: https://developers.openai.com/codex/security
