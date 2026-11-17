@@ -1591,7 +1591,7 @@ failed or interrupted attempt:
   revision, preserving old artifacts and checkouts.
 
 Each nonempty committed line in `results.jsonl` must be valid JSON with a string
-task ID and a positive safe integer attempt number. If a line fails these checks,
+task ID from the manifest and a positive safe integer attempt number. For an invalid line,
 the command reports its line number and preserves the ledger. Restore a complete
 ledger backup that includes every committed attempt, or start a separate campaign
 in a new `--output-dir`. If a repository exhausts its attempt numbers, starting

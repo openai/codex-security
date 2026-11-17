@@ -23,6 +23,8 @@
 - document a tested xAI Responses gateway workaround ([#2437](https://github.com/openai/codex-security/pull/2437))
 - configure OrcaRouter through a native file profile ([#736](https://github.com/openai/codex-security/pull/736))
 - compare vulnerable and repaired invoice ownership checks ([#2612](https://github.com/openai/codex-security/pull/2612))
+- reject receipt IDs missing from the campaign ([#2677](https://github.com/openai/codex-security/pull/2677))
+- stop on Codex misalignment policy refusals ([#2410](https://github.com/openai/codex-security/pull/2410))
 
 </details>
 
