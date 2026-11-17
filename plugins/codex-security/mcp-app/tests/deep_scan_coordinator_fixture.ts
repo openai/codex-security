@@ -29,6 +29,7 @@ export const {
   AsyncLock,
   classifyCodexWorkerError,
   codexWorkerTurnError,
+  knownPolicyRefusalFromAbort,
   startOrJoinDeepScanCoordinator,
   recordCodexSecurityWorkerScanDraft,
 } = await importModule({
@@ -36,7 +37,11 @@ export const {
     contents: `
       export * from "./registry.ts";
       export { WorkbenchDeepScanStore } from "./store.ts";
-      export { classifyCodexWorkerError, codexWorkerTurnError } from "./errors.ts";
+      export {
+        classifyCodexWorkerError,
+        codexWorkerTurnError,
+        knownPolicyRefusalFromAbort,
+      } from "./errors.ts";
       export { recordCodexSecurityWorkerScanDraft } from "../artifact-scan-draft.ts";
     `,
     resolveDir: path.join(import.meta.dirname, "../src/deep-scan/"),
@@ -131,6 +136,7 @@ export class FakeStore {
   failureMessages: string[] = [];
   finishCalls: StoreInput<"finish">[] = [];
   failFinish = false;
+  finishGate?: PromiseWithResolvers<void>;
   rejectFailurePersistence = false;
   replacementManifestBeforeFinishRejection: string | undefined = undefined;
   iterationResponseGate?: PromiseWithResolvers<void>;
@@ -241,6 +247,7 @@ export class FakeStore {
 
   async finish(input: StoreInput<"finish">) {
     this.finishCalls.push(structuredClone(input));
+    await this.finishGate?.promise;
     if (this.run.status === "succeeded") return structuredClone(this.run);
     if (this.failFinish) {
       if (this.replacementManifestBeforeFinishRejection) {

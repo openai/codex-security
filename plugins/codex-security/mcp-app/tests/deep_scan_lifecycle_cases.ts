@@ -6,8 +6,10 @@ import {
   coordinatorFixture,
   startCoordinator,
   DeepScanCoordinatorRegistry,
+  eventually,
   FakeExecutor,
   FakeStore,
+  knownPolicyRefusalFromAbort,
   pausePoint,
   fixtureRun,
   immediateClock,
@@ -28,9 +30,25 @@ export async function testDeepScanLifecycle(context: TestContext) {
     stopAfterNoNew: 1,
     maxDiscoveryRuns: 1,
   };
+  // The exact refusal text from issue #276: a Desktop parent turn refused
+  // with this diagnostic while a Deep Scan was running.
+  const parentTurnRefusal =
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
+  // Discovery worker ids are random UUIDs; find a persisted worker by its
+  // directory label (discovery-0001, discovery-0002, ...).
+  const workerByLabel = (store: FakeStore, label: string) =>
+    [...store.workers.values()].find(
+      (worker) =>
+        path.basename(path.dirname(worker.artifactDir ?? "")) === label,
+    );
   for (const check of [
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
+    parentTurnRefusalFailsScanWithOriginalDiagnostic,
+    plainParentDetachKeepsScanRunning,
+    lateWorkerCompletionCannotOverwriteParentRefusalFailure,
+    parentTurnRefusalDuringPublicationFailsScan,
+    parentTurnRefusalDuringFinishFailsScan,
     canceledPublicationWaitsForHeartbeat,
     delayedIterationDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
@@ -108,6 +126,309 @@ export async function testDeepScanLifecycle(context: TestContext) {
         await Promise.allSettled([terminal, cancellation]);
       }
     }
+  }
+
+  async function parentTurnRefusalFailsScanWithOriginalDiagnostic() {
+    const config = {
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 2,
+      maxDiscoveryRuns: 2,
+    };
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    const secondDiscoveryGate = pausePoint();
+    const executor = new FakeExecutor({
+      discoveryCandidateId: "276-parent-refusal",
+      discoveryGates: { "discovery-0002": secondDiscoveryGate.pause() },
+    });
+    const registry = new DeepScanCoordinatorRegistry();
+    const coordinator = registry.start({
+      ...fixture,
+      store,
+      executor,
+      threadId: "fixture-owner",
+      heartbeatIntervalMs: 60_000,
+    });
+    const terminal = coordinator.settled();
+    void terminal.catch(() => {});
+    try {
+      // The first batch merges a finding, then the second worker parks at
+      // its gate with the scan still running.
+      await store.iterationCommitted.promise;
+      await eventually(() => executor.discoveryCalls === 2);
+      assert.equal(coordinator.snapshot().status, "running");
+
+      const waiterController = new AbortController();
+      const waiter = coordinator.wait(waiterController.signal);
+      void waiter.catch(() => {});
+      waiterController.abort(parentTurnRefusal);
+      const waiterError = await waiter.then(
+        () => assert.fail("expected the waiter to reject after the abort"),
+        (error: unknown) => error,
+      );
+      assert.equal(waiterError.name, "AbortError");
+      assert.equal(waiterError.cause, parentTurnRefusal);
+      assert.equal(knownPolicyRefusalFromAbort(waiterError), parentTurnRefusal);
+      assert.equal(coordinator.failOnParentRefusal(parentTurnRefusal), true);
+      assert.equal(
+        coordinator.failOnParentRefusal(parentTurnRefusal),
+        false,
+        "a parent refusal arms the failure exactly once",
+      );
+      // A new parent turn rejoining before settlement sees the same
+      // coordinator, not a fresh scan.
+      const rejoined = registry.start({
+        ...fixture,
+        store,
+        executor,
+        threadId: "fixture-rejoiner",
+        heartbeatIntervalMs: 60_000,
+      });
+      assert.equal(rejoined, coordinator);
+    } finally {
+      secondDiscoveryGate.release();
+    }
+    const stopped = await terminal;
+    assert.equal(stopped.status, "failed");
+    assert.equal(stopped.error, parentTurnRefusal);
+    assert.deepEqual(store.failureMessages, [parentTurnRefusal]);
+    assert.equal(store.finishCalls.length, 0);
+    assert.equal(store.iterations.length, 1);
+    assert.equal(executor.discoveryCalls, 2);
+    assert.equal(workerByLabel(store, "discovery-0002")?.status, "canceled");
+    registry.shutdown("fixture cleanup");
+    await terminal;
+  }
+
+  async function plainParentDetachKeepsScanRunning() {
+    const config = {
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 2,
+      maxDiscoveryRuns: 2,
+    };
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    const secondDiscoveryGate = pausePoint();
+    const executor = new FakeExecutor({
+      discoveryCandidateId: "276-plain-detach",
+      discoveryGates: { "discovery-0002": secondDiscoveryGate.pause() },
+    });
+    const registry = new DeepScanCoordinatorRegistry();
+    const coordinator = registry.start({
+      ...fixture,
+      store,
+      executor,
+      threadId: "fixture-owner",
+      heartbeatIntervalMs: 60_000,
+    });
+    const terminal = coordinator.settled();
+    void terminal.catch(() => {});
+    try {
+      await store.iterationCommitted.promise;
+      await eventually(() => executor.discoveryCalls === 2);
+      assert.equal(coordinator.snapshot().status, "running");
+
+      const waiterController = new AbortController();
+      const waiter = coordinator.wait(waiterController.signal);
+      void waiter.catch(() => {});
+      waiterController.abort("detach the first Deep Scan waiter");
+      const waiterError = await waiter.then(
+        () => assert.fail("expected the waiter to reject after the detach"),
+        (error: unknown) => error,
+      );
+      assert.equal(waiterError.name, "AbortError");
+      assert.equal(
+        knownPolicyRefusalFromAbort(waiterError),
+        undefined,
+        "a plain detach is not a policy refusal",
+      );
+      assert.equal(coordinator.snapshot().status, "running");
+      const rejoined = registry.start({
+        ...fixture,
+        store,
+        executor,
+        threadId: "fixture-rejoiner",
+        heartbeatIntervalMs: 60_000,
+      });
+      assert.equal(rejoined, coordinator);
+    } finally {
+      secondDiscoveryGate.release();
+    }
+    const stopped = await terminal;
+    assert.equal(stopped.status, "succeeded");
+    assert.deepEqual(store.failureMessages, []);
+    assert.equal(store.finishCalls.length, 1);
+    assert.equal(store.iterations.length, 2);
+    assert.equal(executor.discoveryCalls, 2);
+    registry.shutdown("fixture cleanup");
+    await terminal;
+  }
+
+  async function lateWorkerCompletionCannotOverwriteParentRefusalFailure() {
+    const config = {
+      workers: 2,
+      subagents: 0,
+      stopAfterNoNew: 1,
+      maxDiscoveryRuns: 2,
+    };
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    const secondDiscoveryGate = pausePoint();
+    const executor = new FakeExecutor({
+      discoveryCandidateId: "276-race-a",
+      discoveryGates: { "discovery-0002": secondDiscoveryGate.pause() },
+    });
+    const registry = new DeepScanCoordinatorRegistry();
+    const coordinator = registry.start({
+      ...fixture,
+      store,
+      executor,
+      threadId: "fixture-owner",
+      heartbeatIntervalMs: 60_000,
+    });
+    const terminal = coordinator.settled();
+    void terminal.catch(() => {});
+    try {
+      await eventually(() => executor.discoveryCalls === 2);
+      // The first worker is accepted (buffered) before the refusal arrives;
+      // the second is still in flight at its gate.
+      await eventually(
+        () => workerByLabel(store, "discovery-0001")?.status === "succeeded",
+      );
+      const waiterController = new AbortController();
+      const waiter = coordinator.wait(waiterController.signal);
+      void waiter.catch(() => {});
+      waiterController.abort(parentTurnRefusal);
+      const waiterError = await waiter.then(
+        () => assert.fail("expected the waiter to reject after the abort"),
+        (error: unknown) => error,
+      );
+      assert.equal(knownPolicyRefusalFromAbort(waiterError), parentTurnRefusal);
+      assert.equal(coordinator.failOnParentRefusal(parentTurnRefusal), true);
+    } finally {
+      secondDiscoveryGate.release();
+    }
+    const stopped = await terminal;
+    assert.equal(stopped.status, "failed");
+    assert.equal(stopped.error, parentTurnRefusal);
+    assert.deepEqual(store.failureMessages, [parentTurnRefusal]);
+    assert.equal(store.finishCalls.length, 0);
+    assert.equal(store.iterations.length, 0);
+    assert.equal(executor.discoveryCalls, 2);
+    assert.equal(workerByLabel(store, "discovery-0001")?.status, "succeeded");
+    assert.equal(
+      workerByLabel(store, "discovery-0001")?.mergeState,
+      "buffered",
+      "the first worker finished but its batch never merged",
+    );
+    assert.equal(workerByLabel(store, "discovery-0002")?.status, "canceled");
+    registry.shutdown("fixture cleanup");
+    await terminal;
+  }
+
+  async function parentTurnRefusalDuringPublicationFailsScan() {
+    const config = {
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 1,
+      maxDiscoveryRuns: 1,
+    };
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    const executor = new FakeExecutor({
+      discoveryCandidateId: "276-publication",
+    });
+    const publicationGate = pausePoint();
+    const registry = new DeepScanCoordinatorRegistry();
+    const coordinator = registry.start({
+      ...fixture,
+      store,
+      executor,
+      threadId: "fixture-owner",
+      heartbeatIntervalMs: 60_000,
+      onComplete: async () => {
+        await publicationGate.pause();
+      },
+    });
+    const terminal = coordinator.settled();
+    void terminal.catch(() => {});
+    try {
+      const waiterController = new AbortController();
+      const waiter = coordinator.wait(waiterController.signal);
+      void waiter.catch(() => {});
+      // Discovery finishes and publication starts; the refusal arrives
+      // while onComplete is still running.
+      await publicationGate.entered;
+      waiterController.abort(parentTurnRefusal);
+      const waiterError = await waiter.then(
+        () => assert.fail("expected the waiter to reject after the abort"),
+        (error: unknown) => error,
+      );
+      assert.equal(knownPolicyRefusalFromAbort(waiterError), parentTurnRefusal);
+      assert.equal(coordinator.failOnParentRefusal(parentTurnRefusal), true);
+    } finally {
+      publicationGate.release();
+    }
+    const stopped = await terminal;
+    assert.equal(stopped.status, "failed");
+    assert.equal(stopped.error, parentTurnRefusal);
+    assert.deepEqual(store.failureMessages, [parentTurnRefusal]);
+    assert.equal(store.finishCalls.length, 0);
+    assert.equal(store.iterations.length, 1);
+    registry.shutdown("fixture cleanup");
+    await terminal;
+  }
+
+  async function parentTurnRefusalDuringFinishFailsScan() {
+    const config = {
+      workers: 1,
+      subagents: 0,
+      stopAfterNoNew: 1,
+      maxDiscoveryRuns: 1,
+    };
+    const fixture = await fixtureRun(config);
+    const store = new FakeStore(fixture.run);
+    store.finishGate = Promise.withResolvers<void>();
+    const executor = new FakeExecutor({
+      discoveryCandidateId: "276-finish",
+    });
+    const registry = new DeepScanCoordinatorRegistry();
+    const coordinator = registry.start({
+      ...fixture,
+      store,
+      executor,
+      threadId: "fixture-owner",
+      heartbeatIntervalMs: 60_000,
+    });
+    const terminal = coordinator.settled();
+    void terminal.catch(() => {});
+    try {
+      const waiterController = new AbortController();
+      const waiter = coordinator.wait(waiterController.signal);
+      void waiter.catch(() => {});
+      // The scan reaches store.finish; the refusal arrives while the
+      // finish persistence is still in flight.
+      await eventually(() => store.finishCalls.length === 1);
+      waiterController.abort(parentTurnRefusal);
+      const waiterError = await waiter.then(
+        () => assert.fail("expected the waiter to reject after the abort"),
+        (error: unknown) => error,
+      );
+      assert.equal(knownPolicyRefusalFromAbort(waiterError), parentTurnRefusal);
+      assert.equal(coordinator.failOnParentRefusal(parentTurnRefusal), true);
+    } finally {
+      store.finishGate.resolve();
+    }
+    const stopped = await terminal;
+    assert.equal(stopped.status, "failed");
+    assert.equal(stopped.error, parentTurnRefusal);
+    assert.deepEqual(store.failureMessages, [parentTurnRefusal]);
+    assert.equal(store.finishCalls.length, 1);
+    assert.equal(store.iterations.length, 1);
+    registry.shutdown("fixture cleanup");
+    await terminal;
   }
 
   async function lateCancellationWaitsForPersistence(context: TestContext) {

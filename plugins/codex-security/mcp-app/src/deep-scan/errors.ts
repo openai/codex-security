@@ -102,6 +102,31 @@ export function abortError(reason?: unknown): Error {
   return error;
 }
 
+/**
+ * The exact known policy refusal carried by a parent-turn abort, if any.
+ * The waiter abort preserves the MCP cancellation reason as the cause of its
+ * AbortError; only that reason counts, and only when it exactly matches a
+ * known refusal. A worker refusal is not a parent-turn refusal, and no
+ * substring or nested cause is ever classified.
+ */
+export function knownPolicyRefusalFromAbort(
+  error: unknown,
+): string | undefined {
+  const reason = error instanceof Error ? error.cause : error;
+  if (typeof reason === "string")
+    return CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(reason)
+      ? reason
+      : undefined;
+  if (
+    reason instanceof Error &&
+    !(reason instanceof DeepScanNonRetryableError)
+  )
+    return CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(reason.message)
+      ? reason.message
+      : undefined;
+  return undefined;
+}
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

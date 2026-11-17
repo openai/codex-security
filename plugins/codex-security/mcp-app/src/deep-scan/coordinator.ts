@@ -125,6 +125,7 @@ export class DeepScanCoordinator {
   private canceled = false;
   private externallyFailed = false;
   private failurePersisted = false;
+  private parentRefusalFailure: string | undefined;
   private setupComplete = false;
   private discoveryDeadlineReached = false;
   private state: DeepScanRunState;
@@ -350,6 +351,29 @@ export class DeepScanCoordinator {
     // run() waits for workers instead of rewriting it as cancellation.
   }
 
+  /**
+   * Fail the scan because the owning parent turn was refused with a known
+   * policy refusal. Terminal-state ownership stays in the coordinator: the
+   * transition is idempotent, an already-terminal, canceled, or
+   * already-failed coordinator is left alone, and a late worker completion
+   * cannot overwrite the failure with success. Returns true when this call
+   * armed the failure.
+   */
+  failOnParentRefusal(refusal: string): boolean {
+    if (
+      this.terminal ||
+      this.canceled ||
+      this.externallyFailed ||
+      this.failurePersisted ||
+      this.parentRefusalFailure !== undefined
+    )
+      return false;
+    this.parentRefusalFailure = refusal;
+    this.abortController.abort(new DeepScanNonRetryableError(refusal));
+    this.publicationAbortController.abort(refusal);
+    return true;
+  }
+
   private async run(): Promise<void> {
     try {
       // A replacement coordinator must honor a worker failure committed before handoff.
@@ -402,6 +426,10 @@ export class DeepScanCoordinator {
         },
       );
       if (this.canceled || this.externallyFailed) return;
+      // A parent-turn refusal that arrived during publication fails the scan
+      // instead of publishing a success the owning turn never saw.
+      if (this.parentRefusalFailure !== undefined)
+        throw new DeepScanNonRetryableError(this.parentRefusalFailure);
       const completed = await this.options.store.finish({
         scanId: this.state.scanId,
         reason: loopResult.reason,
@@ -409,6 +437,10 @@ export class DeepScanCoordinator {
         omittedWorkerIds: [],
       });
       if (this.canceled || this.externallyFailed) return;
+      // The same refusal can land while store.finish is persisting. The
+      // failure below supersedes the success that persistence just wrote.
+      if (this.parentRefusalFailure !== undefined)
+        throw new DeepScanNonRetryableError(this.parentRefusalFailure);
       this.state = completed;
       this.log({
         event: "coordinator_terminal",
@@ -419,7 +451,14 @@ export class DeepScanCoordinator {
       if (this.canceled || this.externallyFailed) {
         return;
       }
-      if (await this.stopAfterOwnershipChange(this.options.threadId, error)) {
+      // A parent-turn refusal is the terminal verdict on this scan. Do not
+      // let ownership adoption resurrect a success the refusal arrived
+      // alongside, for example when the refusal lands while store.finish is
+      // still persisting.
+      if (
+        this.parentRefusalFailure === undefined &&
+        (await this.stopAfterOwnershipChange(this.options.threadId, error))
+      ) {
         return;
       }
       if (

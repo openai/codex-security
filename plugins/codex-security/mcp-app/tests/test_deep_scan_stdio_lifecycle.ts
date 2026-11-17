@@ -1215,6 +1215,11 @@ service_tier = "ultrafast"
       await restartedServer.stop();
     }
     await testDetachedTargetReplay(serverBundlePath, environment, targetPath);
+    await testParentTurnRefusalFailsScan(
+      serverBundlePath,
+      environment,
+      targetPath,
+    );
     await testCliDeepScanEngine({
       fixtureRoot,
       environment,
@@ -1280,6 +1285,70 @@ async function testDetachedTargetReplay(
     const fresh = await server.waitForResponse(3, 60_000);
     assertNoError(fresh);
     assert.notEqual(fresh.result.structuredContent.scanId, scanId);
+  } finally {
+    await server.stop();
+  }
+}
+
+async function testParentTurnRefusalFailsScan(
+  serverBundlePath: string,
+  environment: NodeJS.ProcessEnv,
+  targetPath: string,
+) {
+  // The exact refusal text from issue #276: the Desktop parent turn is
+  // refused while its Deep Scan is running. The scan must fail with this
+  // diagnostic instead of detaching silently and later reporting success.
+  const refusal =
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
+  const threadId = "deep-scan-stdio-refusal-thread";
+  const request = toolCall(
+    "start_codex_security_deep_scan",
+    { targetPath },
+    threadId,
+  );
+  let server = startServer(serverBundlePath, environment);
+  try {
+    await server.initialize("parent-turn-refusal");
+    server.sendRequest(2, "tools/call", request);
+    const scanId = await waitForScanId({ server, requestId: 2 });
+    await waitForDeepScanWorker({ environment, scanId, threadId });
+    server.notify("notifications/cancelled", {
+      requestId: 2,
+      reason: refusal,
+    });
+    await waitFor(async () => {
+      const state = await getDeepScan({ environment, scanId, threadId });
+      return state.status === "failed";
+    }, "the refused parent turn to fail the scan");
+    assert.equal(server.response(2)?.result?.structuredContent, undefined);
+    const failedState = await getDeepScan({ environment, scanId, threadId });
+    assert.equal(failedState.status, "failed");
+    assert.equal(failedState.error, refusal);
+    assert.equal(
+      failedState.workers.some(
+        (worker: PersistedDeepScanWorker) => worker.kind === "setup",
+      ),
+      false,
+    );
+    assert.equal(
+      failedState.workers.every(
+        (worker: PersistedDeepScanWorker) =>
+          !["queued", "running"].includes(worker.status),
+      ),
+      true,
+    );
+
+    const failedLateJoin = await server.callTool(
+      3,
+      toolCall("start_codex_security_deep_scan", { scanId }, threadId),
+    );
+    const failedLateJoinText =
+      failedLateJoin.result?.content
+        ?.map((item: { text: string }) => item.text)
+        .join(" ") ?? "";
+    assert.equal(failedLateJoin.result?.isError, true);
+    assert.equal(failedLateJoin.result?.structuredContent, undefined);
+    assert.ok(failedLateJoinText.includes(refusal));
   } finally {
     await server.stop();
   }
