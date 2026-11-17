@@ -777,19 +777,28 @@ function jsonRpcPreflightError(
       failure.message += "\n" + error.message;
     return failure;
   }
-  return new Error(
+  const message =
     failedOperation(context) +
-      " because the selected Codex executable " +
-      JSON.stringify(codexPath) +
-      " returned an error for " +
-      JSON.stringify(method) +
-      (code === undefined ? "" : " (JSON-RPC code " + code + ")") +
-      ". Check the Codex configuration and retry. " +
-      subject(context) +
-      " did not run." +
-      (typeof error?.message === "string" ? "\n" + error.message : ""),
-    { cause: value },
-  );
+    " because the selected Codex executable " +
+    JSON.stringify(codexPath) +
+    " returned an error for " +
+    JSON.stringify(method) +
+    (code === undefined ? "" : " (JSON-RPC code " + code + ")") +
+    ". Check the Codex configuration and retry. " +
+    subject(context) +
+    " did not run." +
+    (typeof error?.message === "string" ? "\n" + error.message : "");
+  // The native config deserializer cannot repair an invalid type by retrying.
+  // Other internal RPC errors can be transient and remain retryable.
+  if (
+    method === "config/read" &&
+    code === -32603 &&
+    typeof error?.message === "string" &&
+    error.message.startsWith("invalid configuration: invalid type: ")
+  ) {
+    return new DeepScanNonRetryableError(message, { cause: value });
+  }
+  return new Error(message, { cause: value });
 }
 
 function codexExecutableStartError(
