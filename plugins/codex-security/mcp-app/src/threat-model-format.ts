@@ -10,7 +10,10 @@ function collapse(value: string): string {
   return value.replace(whitespace, " ").replace(/^ | $/gu, "");
 }
 
-/** Match report_projection._escape_markdown without changing URL ampersands. */
+/**
+ * Match report_projection._escape_markdown without changing URL ampersands or
+ * the underscores inside URL words.
+ */
 function escapeMarkdown(value: string): string {
   const urls = [
     ...value.matchAll(
@@ -32,15 +35,21 @@ function escapeMarkdown(value: string): string {
     }
   }
   const pattern = new RegExp(
-    /(?<!`)`[^`\n]+`(?!`)|[\\`*_\[\]<>]/u.source + "|" + entityAmp.source,
+    /(?<!`)`[^`\n]+`(?!`)|((?<=[A-Za-z0-9])_(?=[A-Za-z0-9]))|[\\`*_\[\]<>]/u
+      .source +
+      "|" +
+      entityAmp.source,
     "gu",
   );
-  return value.replace(pattern, (match, offset: number) =>
-    match.length > 1 ||
-    (match === "&" &&
-      urls.some(({ start, end }) => start <= offset && offset < end))
-      ? match
-      : "\\" + match,
+  // An underscore between ASCII letters or digits cannot delimit emphasis.
+  return value.replace(
+    pattern,
+    (match, word: string | undefined, offset: number) =>
+      match.length > 1 ||
+      ((match === "&" || word !== undefined) &&
+        urls.some(({ start, end }) => start <= offset && offset < end))
+        ? match
+        : "\\" + match,
   );
 }
 

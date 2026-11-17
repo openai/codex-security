@@ -165,6 +165,32 @@ equivalent("footer URL ampersands", markdownModel, {
     )
     .join(" "),
 });
+equivalent("footer URL underscores", markdownModel, {
+  target: [
+    "https://example.com/SQL_Injection_Prevention_Cheat_Sheet.html",
+    "www.example.com/a_b_c",
+    "example.com/path_with_underscore?first=1",
+    "//example.com/a_b",
+    "https://example.com/pkg/__init__.py",
+    "https://example.com/_private_/a_b.",
+    "snake_case",
+  ].join(" then "),
+});
+test("bare URL underscores stay literal unless they can delimit emphasis", () => {
+  const rendered = renderThreatModel({
+    threatModel: markdownModel,
+    provenance: {
+      target:
+        "https://example.com/Cheat_Sheet.html https://example.com/__init__.py snake_case",
+    },
+  });
+  assert.ok(
+    rendered.includes(
+      String.raw`https://example.com/Cheat_Sheet.html https://example.com/\_\_init\_\_.py snake\_case`,
+    ),
+    rendered,
+  );
+});
 for (const [paths, expected] of [
   [
     [
