@@ -724,6 +724,16 @@ second,${source.path},${source.revision}
         warning,
       });
     }
+    const [receipt] = await results(summary.resultsPath);
+    const damaged =
+      JSON.stringify({ ...receipt, warnings: { length: 1 } }) + "\n";
+    await writeFile(summary.resultsPath, damaged);
+    const recovered = await runMultiscan(
+      options(paths, client(rejecting("must not rerun"))),
+    );
+    expect(recovered).toMatchObject({ completed: 1, skipped: 1, failed: 0 });
+    expect(recovered).not.toHaveProperty("warnings");
+    expect(await readFile(summary.resultsPath, "utf8")).toBe(damaged);
   });
 
   test.each([false, true])(
