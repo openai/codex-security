@@ -26,6 +26,7 @@
 - reject receipt IDs missing from the campaign ([#2677](https://github.com/openai/codex-security/pull/2677))
 - stop on Codex misalignment policy refusals ([#2410](https://github.com/openai/codex-security/pull/2410))
 - avoid repeating findings in bulk scan matching ([#149](https://github.com/openai/codex-security/pull/149))
+- update the Python and Node devcontainer features ([#2560](https://github.com/openai/codex-security/pull/2560))
 
 </details>
 
