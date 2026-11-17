@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { JsonObject, JsonValue } from "./config.js";
+import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   dependencyEndpointQuerySchema,
   dependencyEndpointTool,
@@ -21,9 +21,14 @@ import {
   type DependencyInventoryReceiptQuery,
   type DependencyInventoryRpc,
 } from "./dependency-inventory.js";
-import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
-import { readDependencyEvidence } from "./dependency-reachability.js";
 import { createDependencySourceIdentityReader } from "./dependency-source-identity.js";
+import {
+  dependencySourceNoteQuerySchema,
+  dependencySourceNoteSchema,
+  prepareDependencySourceNote,
+  queryDependencySourceNotes,
+  saveDependencySourceNote,
+} from "./dependency-source-notes.js";
 import {
   createDependencySourceWorkTools,
   sourceWorkQuerySchema,
@@ -42,23 +47,6 @@ export type DependencyCatalogAnswer = Awaited<
 >[number];
 
 export const dependencyGraphNamespace = "codex_security_dependency";
-
-const sourceReferenceSchema = z.strictObject({
-  path: z.string().trim().min(1),
-  commit: dependencyGitCommitSchema.optional(),
-  startLine: z.number().int().positive(),
-  endLine: z.number().int().positive(),
-});
-const sourceEvidenceSchema = z.strictObject({
-  question: z.string().trim().min(1),
-  scope: z.string().trim().min(1),
-  claim: z.string().trim().min(1),
-  evidence: z.array(sourceReferenceSchema).min(1),
-});
-const evidenceQuerySchema = z.strictObject({
-  id: z.string().trim().min(1).optional(),
-  search: z.string().trim().min(1).optional(),
-});
 
 export interface DependencyGraphTools {
   tools: { name: string; description: string; inputSchema: JsonObject }[];
@@ -102,6 +90,7 @@ export async function openDependencyGraph(
   excludedSourcePaths?: readonly string[],
   endpointOptions?: Parameters<typeof openDependencyEndpoints>[0] & {
     productionDiscovery?: boolean;
+    attempt?: DependencyAttemptStore;
   },
 ): Promise<DependencyGraphTools & { endpoints: DependencyEndpointGraph }> {
   const sourceRoot = await realpath(repository);
@@ -145,29 +134,13 @@ export async function openDependencyGraph(
       signal,
     });
   const sourceWork = createDependencySourceWorkTools();
-  const sourceEvidence = new Map<
-    string,
-    {
-      id: string;
-      investigator_assertion: {
-        question: string;
-        scope: string;
-        claim: string;
-      };
-      excerpts: {
-        path: string;
-        commit?: string;
-        startLine: number;
-        endLine: number;
-        text: string;
-      }[];
-    }
-  >();
+  const attempt =
+    endpointOptions?.attempt ?? new DependencyAttemptStore(":memory:");
   const withEvidence = (result: JsonObject): JsonObject => {
     const summary = evidence?.summary();
     return {
       ...result,
-      source_evidence_count: sourceEvidence.size,
+      source_evidence_count: attempt.size("source-note"),
       ...(summary ? { graph_evidence: summary } : {}),
     };
   };
@@ -191,7 +164,7 @@ export async function openDependencyGraph(
     const coverage = await readServiceCoverage();
     return {
       ...payload,
-      source_evidence_count: sourceEvidence.size,
+      source_evidence_count: attempt.size("source-note"),
       service_resolution: coverage,
     };
   };
@@ -240,7 +213,9 @@ export async function openDependencyGraph(
                   endpoints: z.toJSONSchema(
                     dependencyEndpointQuerySchema,
                   ) as JsonObject,
-                  evidence: z.toJSONSchema(evidenceQuerySchema) as JsonObject,
+                  evidence: z.toJSONSchema(
+                    dependencySourceNoteQuerySchema,
+                  ) as JsonObject,
                   sourceWork: z.toJSONSchema(
                     sourceWorkQuerySchema,
                   ) as JsonObject,
@@ -260,16 +235,20 @@ export async function openDependencyGraph(
         name: "record_codex_security_evidence",
         description:
           "Save source evidence for a deciding question in this investigation's shared graph. The host validates and reads the cited lines. If a range extends past the last line, the reply lists the ranges actually captured and identifies the shortened ranges. Use those exact ranges in assessments. Question, scope and claim remain investigator assertions. Returns an immutable evidence ID for other investigators and the coordinator to retrieve.",
-        inputSchema: z.toJSONSchema(sourceEvidenceSchema) as JsonObject,
+        inputSchema: z.toJSONSchema(dependencySourceNoteSchema) as JsonObject,
       },
     ],
     ...(graph.boundTraceResponse && {
       boundTraceResponse: graph.boundTraceResponse,
     }),
     async close() {
-      await endpoints.flush();
-      await evidence?.flush();
-      await graph.close();
+      try {
+        await endpoints.flush();
+        await evidence?.flush();
+        await graph.close();
+      } finally {
+        if (!endpointOptions?.attempt) attempt.close();
+      }
     },
     flush: async () => {
       await endpoints.flush();
@@ -306,53 +285,12 @@ export async function openDependencyGraph(
       if (supplemental?.tools.some((tool) => tool.name === name))
         return focusedReply(await supplemental.call(name, args, inventoryRpc));
       if (name === "record_codex_security_evidence") {
-        const {
-          question,
-          scope,
-          claim,
-          evidence: references,
-        } = sourceEvidenceSchema.parse(args);
-        const excerpts: {
-          path: string;
-          commit?: string;
-          startLine: number;
-          endLine: number;
-          text: string;
-        }[] = [];
-        const warnings: string[] = [];
-        await readDependencyEvidence(
-          references.map((reference) => ({ ...reference, supports: [] })),
-          sourceRoot,
+        const captured = await prepareDependencySourceNote(sourceRoot, args, {
           signal,
-          (excerpt) => excerpts.push({ ...excerpt }),
           readSourceIdentity,
-          (path, startLine, requestedEnd, endLine) =>
-            warnings.push(
-              `Source note range ${path}:${startLine}-${requestedEnd} ended at line ${endLine}. Use the captured ranges.`,
-            ),
-        );
-        signal?.throwIfAborted();
-        const note = {
-          investigator_assertion: { question, scope, claim },
-          excerpts,
-        };
-        const id =
-          "source-evidence-" +
-          createHash("sha256").update(JSON.stringify(note)).digest("hex");
-        const saved = { id, ...note };
-        sourceEvidence.set(id, saved);
-        return sourceEvidenceReply({
-          id,
-          ...(warnings.length && {
-            ranges: excerpts.map(({ path, commit, startLine, endLine }) => ({
-              path,
-              ...(commit && { commit }),
-              startLine,
-              endLine,
-            })),
-            warnings,
-          }),
         });
+        signal?.throwIfAborted();
+        return sourceEvidenceReply(saveDependencySourceNote(attempt, captured));
       }
       if (
         name === "query_codex_security_graph" &&
@@ -370,19 +308,8 @@ export async function openDependencyGraph(
         isRecord(args) &&
         args["evidence"] !== undefined
       ) {
-        const { id, search } = evidenceQuerySchema.parse(args["evidence"]);
-        const notes = [...sourceEvidence.values()].filter(
-          (note) =>
-            (id === undefined || note.id === id) &&
-            (search === undefined || JSON.stringify(note).includes(search)),
-        );
         return sourceEvidenceReply(
-          id !== undefined
-            ? (notes[0] ?? null)
-            : notes.map(({ id, investigator_assertion }) => ({
-                id,
-                ...investigator_assertion,
-              })),
+          queryDependencySourceNotes(attempt, args["evidence"]),
         );
       }
       const result = await graph.call(name, args, signal);

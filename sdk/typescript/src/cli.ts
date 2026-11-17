@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 import { classificationRunsSchema } from "./severity-review.js";
 import { severityRubricSchema } from "./severity-rubric.js";
+import { saveDependencyReport } from "./dependency-report-file.js";
+import { executeStackRun, stackRunTools } from "./dependency-stack-run.js";
+import { stackInvestigationReportSchema } from "./dependency-stack-assessment.js";
+import {
+  runLocalStackInvestigation,
+  stackInvestigationPermissions,
+  stackInvestigationPrompt,
+  type StackInvestigationSession,
+} from "./dependency-stack-launcher.js";
+
 import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
@@ -26,7 +36,6 @@ import {
   constants,
   createReadStream,
   existsSync,
-  linkSync,
   lstatSync,
   realpathSync,
   writeSync,
@@ -138,6 +147,7 @@ import {
   parseDependencyPackage,
   type DependencyIssue,
 } from "./dependency-advisory.js";
+import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   dependencyCheckOutputSchema,
   dependencyPackageCheckOutputSchema,
@@ -1349,6 +1359,7 @@ type SkillDiagnosticObserver = (
 
 interface SkillCommandOutput {
   readonly signal?: AbortSignal;
+  readonly stackTarget?: string;
   readonly responseSchema?: ValidateFunction;
   readonly readOnlySkillRoot?: string;
   readonly allowedMcpServers?: readonly string[];
@@ -1394,6 +1405,7 @@ interface SkillRunOptions {
   onUsage?: (usage: ScanTokenUsage) => void;
   dependencyReport?: DependencyReportTool;
   dependencyGraph?: DependencyGraphTools;
+  stackInvestigation?: StackInvestigationSession;
   dependencyScopeInstructions?: string;
   dependencyDiscoveryGuidance?: string;
   dependencyCodexConfig?: JsonObject;
@@ -1837,6 +1849,7 @@ async function runCodexSkillProcess(
   }
   let releaseCredentialHome: (() => Promise<void>) | undefined;
   const dependencyCheck = output?.appServer?.dependencyReport !== undefined;
+  const dependencyAuth = dependencyCheck || output?.stackTarget !== undefined;
   const ambientHome = configuredCodexHome(processEnvironment);
   let dependencyHome: string | undefined;
   try {
@@ -1848,7 +1861,7 @@ async function runCodexSkillProcess(
     // runSkill selects auth; other process callers supply their own environment.
     if (output?.auth !== undefined) {
       const ambientConfig =
-        output.appServer === undefined
+        !output.appServer && !dependencyAuth
           ? {}
           : resolveCodexProfile(
               await readCodexHomeConfig(processEnvironment, signal),
@@ -1867,7 +1880,7 @@ async function runCodexSkillProcess(
       const resolved = resolveSkillAuthentication(
         { ...output, auth: output.auth },
         processEnvironment,
-        dependencyCheck
+        dependencyAuth
           ? resolveCommandAuthConfig(ambientConfig, ambientHome)
           : ambientConfig,
       );
@@ -1881,9 +1894,7 @@ async function runCodexSkillProcess(
       selectedProviderDefinition = providerConfiguration;
       modelProvider =
         output.modelProvider ??
-        (dependencyCheck && typeof provider === "string"
-          ? provider
-          : undefined);
+        (dependencyAuth && typeof provider === "string" ? provider : undefined);
       let credentialConfig: JsonObject | undefined;
       let selected = resolved.environment;
       args = [
@@ -1899,7 +1910,10 @@ async function runCodexSkillProcess(
         );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory, signal)),
+          ...(await enclosingGitWorktreeRoots(
+            output.stackTarget ?? directory,
+            signal,
+          )),
         ];
         const codexHome = await prepareCodexSecurityCredentialHome(
           selected,
@@ -1916,7 +1930,7 @@ async function runCodexSkillProcess(
           { ...selected, CODEX_HOME: codexHome },
           signal,
         );
-        if (dependencyCheck) {
+        if (dependencyAuth) {
           // Stored login remains in its locked credential home. Only accept the
           // settings written by Codex Security's managed credential workflows.
           const supported = new Set<string>([
@@ -2038,17 +2052,22 @@ async function runCodexSkillProcess(
           selected = { ...selected, [providerEnvKey]: providerKey };
         }
       }
-      if (dependencyCheck && releaseCredentialHome === undefined) {
-        const directory = await realpath(output.appServer!.directory);
+      if (dependencyAuth && releaseCredentialHome === undefined) {
+        const directory = await realpath(
+          output.directory ?? output.appServer!.directory,
+        );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory, signal)),
+          ...(await enclosingGitWorktreeRoots(
+            output.stackTarget ?? directory,
+            signal,
+          )),
         ];
         dependencyHome = await createIsolatedHome(undefined, (path) =>
           requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
         );
-        // App-server has no exec --ignore-user-config. Carry only the selected
-        // provider and login settings into its private home, never auth.json.
+        // Dependency investigations load only the selected provider and login
+        // settings from their private home.
         await writeCodexConfig(join(dependencyHome, "config.toml"), {
           ...Object.fromEntries(
             CODEX_AUTH_CONFIG_KEYS.filter(
@@ -2075,7 +2094,8 @@ async function runCodexSkillProcess(
           ),
         ];
       }
-      if (output.appServer === undefined) await releaseCredentialHome?.();
+      if (!output.appServer && !output.stackTarget)
+        await releaseCredentialHome?.();
       processEnvironment = selected;
     }
     const configuredHome =
@@ -2090,6 +2110,20 @@ async function runCodexSkillProcess(
       environment["CODEX_HOME"] = resolve(
         expandHome(configuredHome, processEnvironment),
       );
+    }
+    if (output?.stackTarget && output.directory) {
+      const profile = stackInvestigationPermissions(output.directory, [
+        ambientHome,
+        codexSecurityCredentialHome(environment),
+        configuredCodexHome(environment),
+      ]);
+      args = [
+        ...args,
+        "--config",
+        'default_permissions="codex_security_stacks"',
+        "--config",
+        `permissions.codex_security_stacks=${inlineToml(profile)}`,
+      ];
     }
     let permissionProfile: string | undefined;
     if (
@@ -2288,6 +2322,7 @@ async function runCodexSkillProcess(
                         input: invocation.stdin!,
                       },
                   output.onUsage,
+                  output.stackTarget !== undefined,
                 ),
                 new Promise<undefined>((resolve) => {
                   forceCaptureCompletion = () => resolve(undefined);
@@ -2340,7 +2375,8 @@ async function runCodexSkillProcess(
         }
         if (
           status === 0 &&
-          output?.appServer !== undefined &&
+          (output?.appServer !== undefined ||
+            (output?.stackTarget !== undefined && !events?.completed)) &&
           (events?.error || events?.connectionError)
         ) {
           status = 1;
@@ -2362,7 +2398,9 @@ async function runCodexSkillProcess(
           return status;
         }
         if (
-          (output.appServer !== undefined && events?.completed !== true) ||
+          ((output.appServer !== undefined ||
+            output.stackTarget !== undefined) &&
+            events?.completed !== true) ||
           events?.message === undefined ||
           events.message.trim().length === 0
         ) {
@@ -3101,7 +3139,7 @@ export async function main(
     description: "Assess dependency vulnerabilities in the current checkout.",
   }).command("check", {
     description:
-      "Check a CVE or an ecosystem-qualified package and report reviewed results for each place. Requires OpenGrep on PATH.",
+      "Investigate a CVE with captured sources, sinks and stacks, or run a reviewed CVE or package check with OpenGrep.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
@@ -3120,6 +3158,17 @@ export async function main(
       codex: SKILL_CONFIG_OPTIONS.shape.codex.describe(
         `${SKILL_CODEX_OVERRIDE_DESCRIPTION} Dependency checks also support features.multi_agent_v2.max_concurrent_threads_per_session=49 for 48 investigators plus the coordinator.`,
       ),
+      sources: optionValue("--sources")
+        .optional()
+        .describe(
+          "Captured source endpoints JSON file. Supply together with --sinks and --stacks for one CVE.",
+        ),
+      sinks: optionValue("--sinks")
+        .optional()
+        .describe("Captured CVE sink endpoints and advisory JSON file."),
+      stacks: optionValue("--stacks")
+        .optional()
+        .describe("Captured stack observations and target revision JSON file."),
       progressEvents: z
         .string()
         .trim()
@@ -3142,6 +3191,7 @@ export async function main(
     }),
     output: z.union([
       ...dependencyCheckOutputSchema.options,
+      stackInvestigationReportSchema,
       dependencyInvestigationBlockedSchema,
       dependencyPackageCheckOutputSchema.extend({
         status: z.literal("blocked"),
@@ -3183,6 +3233,31 @@ export async function main(
           ? undefined
           : resolve(directoryAtStart, options.reportFile);
 
+      async function publishReport(
+        report: unknown,
+        verdicts: Record<
+          "exploitable" | "potentially_exploitable" | "unknown" | "ruled_out",
+          number
+        >,
+        limitations: number,
+      ) {
+        await saveDependencyReport(
+          reportPath,
+          report,
+          controller.signal,
+          () => {
+            outcome = "completed";
+            emit({
+              type: "report_ready",
+              subject: args.subject,
+              verdicts,
+              limitations,
+              ...(reportPath !== undefined && { path: reportPath }),
+            });
+          },
+        );
+      }
+
       async function finishReport(
         report: z.infer<typeof dependencyCheckOutputSchema>,
       ) {
@@ -3203,47 +3278,8 @@ export async function main(
           await rm(temporary, { recursive: true, force: true });
           temporary = undefined;
         }
-        let staging: string | undefined;
-        try {
-          let stagedReport: string | undefined;
-          if (reportPath !== undefined) {
-            staging = await mkdtemp(join(dirname(reportPath), ".report-"));
-            stagedReport = join(staging, "report.json");
-            await writeFile(
-              stagedReport,
-              `${JSON.stringify(report, null, 2)}\n`,
-              { flag: "wx", mode: 0o600 },
-            );
-          }
-          controller.signal.throwIfAborted();
-          if (reportPath !== undefined && stagedReport !== undefined) {
-            try {
-              // Check cancellation and publish without yielding or replacing a file.
-              linkSync(stagedReport, reportPath);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === "EEXIST")
-                throw new CodexSecurityError(
-                  `Report destination already exists: ${reportPath}`,
-                  { cause: error },
-                );
-              throw error;
-            }
-          }
-          outcome = "completed";
-          emit({
-            type: "report_ready",
-            subject: args.subject,
-            verdicts,
-            limitations,
-            ...(reportPath !== undefined && { path: reportPath }),
-          });
-          return report;
-        } finally {
-          if (staging)
-            await rm(staging, { recursive: true, force: true }).catch(() => {
-              // Cleanup cannot undo publication or replace the save error.
-            });
-        }
+        await publishReport(report, verdicts, limitations);
+        return report;
       }
 
       try {
@@ -3269,6 +3305,82 @@ export async function main(
           subject: args.subject,
           checkout: basename(directoryAtStart),
         });
+        if (
+          options.sources !== undefined ||
+          options.sinks !== undefined ||
+          options.stacks !== undefined
+        ) {
+          if (
+            options.sources === undefined ||
+            options.sinks === undefined ||
+            options.stacks === undefined
+          )
+            throw new CodexSecurityError(
+              "Supply --sources, --sinks and --stacks together for one CVE.",
+            );
+          if (
+            !/^CVE-\d{4}-\d{4,}$/iu.test(args.subject) ||
+            options.vulnDescription !== undefined
+          )
+            throw new CodexSecurityError(
+              "Captured stack investigations require one CVE ID with its advisory in --sinks.",
+            );
+          const directory = await normalizeRepository(
+            directoryAtStart,
+            controller.signal,
+          );
+          const repository = await enclosingGitWorktreeRoot(
+            directory,
+            controller.signal,
+            { requireIfPresent: true },
+          );
+          if (!repository)
+            throw new CodexSecurityError(
+              "A captured stack investigation requires a Git checkout at the target revision.",
+            );
+          const project = await selectedProjectConfig(
+            options.config,
+            dependencies,
+          );
+          const report = await runLocalStackInvestigation({
+            cve: args.subject.toUpperCase(),
+            repository,
+            sourcesPath: resolveCliPath(directoryAtStart, options.sources),
+            sinksPath: resolveCliPath(directoryAtStart, options.sinks),
+            stacksPath: resolveCliPath(directoryAtStart, options.stacks),
+            signal: controller.signal,
+            async investigate(session) {
+              exitCode = await runSkill(
+                "dependency-exploitability-stacks",
+                [],
+                options,
+                { write: () => true },
+                errorOutput,
+                dependencies,
+                {
+                  directory: session.directory,
+                  signal: controller.signal,
+                  dependencyCodexConfig: project?.input.codex,
+                  stackInvestigation: session,
+                },
+              );
+              return exitCode;
+            },
+          });
+          const verdicts = {
+            exploitable: 0,
+            potentially_exploitable: 0,
+            unknown: 0,
+            ruled_out: 0,
+          };
+          for (const item of report.assessments) verdicts[item.verdict]++;
+          await publishReport(
+            report,
+            verdicts,
+            report.remainingQuestions.length,
+          );
+          return report;
+        }
         const pkg = /^CVE-/iu.test(args.subject)
           ? undefined
           : parseDependencyPackage(args.subject);
@@ -3373,6 +3485,21 @@ export async function main(
         }
 
         async function assess(advisory: DependencyIssue, scope = issueScope()) {
+          const attempt = new DependencyAttemptStore(
+            join(reviewDirectory, `${randomUUID()}.sqlite`),
+          );
+          try {
+            return await assessInAttempt(advisory, scope, attempt);
+          } finally {
+            attempt.close();
+          }
+        }
+
+        async function assessInAttempt(
+          advisory: DependencyIssue,
+          scope: ReturnType<typeof issueScope>,
+          attempt: DependencyAttemptStore,
+        ) {
           const { signal } = scope;
           let dependencyGraph: DependencyGraphTools | undefined;
           let serviceCatalog:
@@ -3494,6 +3621,7 @@ export async function main(
           const submission = createDependencyReportSubmission({
             repository,
             advisory,
+            attempt,
             callerScope,
             ...(productionDiscovery && {
               callerScopeIsDefault: true,
@@ -3807,6 +3935,7 @@ export async function main(
               excludedSourcePaths,
               {
                 configuration: dependencyConfiguration,
+                attempt,
                 productionDiscovery,
                 snapshotPath: join(
                   reviewDirectory,
@@ -4239,6 +4368,73 @@ export async function main(
       }
     },
   });
+  const stackRun = Cli.create("run", {
+    description:
+      "Read and update a single stack investigation. Each command prints JSON.",
+  });
+  for (const tool of stackRunTools) {
+    const paths = z.object({
+      state: optionValue("--state").describe(
+        "Path to the investigation SQLite file.",
+      ),
+    });
+    const options =
+      tool.name === "init"
+        ? paths.extend({
+            inputs: optionValue("--inputs").describe(
+              "Directory containing the prepared input packet.",
+            ),
+            repo: optionValue("--repo").describe("Target Git checkout."),
+          })
+        : tool.inputSchema
+          ? paths.extend({
+              jsonStdin: z
+                .boolean()
+                .describe("Read one JSON input document from stdin."),
+            })
+          : paths;
+    stackRun.command(tool.name, {
+      description: tool.description,
+      options,
+      mcp: false,
+      async run(context) {
+        const opts = context.options;
+        const directory = dependencies.currentDirectory();
+        let input: unknown;
+        if (tool.inputSchema) {
+          if (!("jsonStdin" in opts && opts.jsonStdin))
+            throw new CodexSecurityError(
+              `Use --json-stdin to provide input for ${tool.name}.`,
+            );
+          const chunks: Buffer[] = [];
+          for await (const data of dependencies.recordsInput ?? process.stdin)
+            chunks.push(Buffer.from(data));
+          input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        }
+        const controller = new AbortController();
+        const removeSignals = listenForAbort(dependencies, controller);
+        try {
+          return await executeStackRun(tool.name, {
+            state: resolveCliPath(directory, opts.state),
+            ...("inputs" in opts &&
+              typeof opts.inputs === "string" && {
+                inputs: resolveCliPath(directory, opts.inputs),
+              }),
+            ...("repo" in opts &&
+              typeof opts.repo === "string" && {
+                repo: resolveCliPath(directory, opts.repo),
+              }),
+            input,
+            signal: controller.signal,
+          });
+        } finally {
+          removeSignals();
+        }
+      },
+    });
+  }
+  exploitability.command(stackRun);
+
   const scanHistory = Cli.create("scans", {
     description: "Review saved scans (default: list).",
   })
@@ -9233,6 +9429,24 @@ export async function main(
       return externalImportsDisabledMessage;
   }
   argv = normalizeScanImportArguments(defaultListCommand(argv));
+  const stackRunIndex = cliCommandIndex(argv);
+  if (
+    argv[stackRunIndex] === "exploitability" &&
+    argv[stackRunIndex + 1] === "run" &&
+    !argv.some(
+      (arg) =>
+        OUTPUT_OPTION.test(arg) ||
+        [
+          "--json",
+          "--help",
+          "-h",
+          "--schema",
+          "--llms",
+          "--llms-full",
+        ].includes(arg),
+    )
+  )
+    argv = [...argv, "--format", "json"];
   const frameworkArgv = argv.flatMap((argument) => {
     const separator = argument.indexOf("=");
     if (
@@ -10907,7 +11121,8 @@ async function runSkill(
     | "fix-finding"
     | "verify-fix"
     | "assess-patch-risk"
-    | "dependency-exploitability",
+    | "dependency-exploitability"
+    | "dependency-exploitability-stacks",
   inputs: readonly (string | ImportedIssue)[],
   configuration: SkillConfiguration,
   stdout: Writable,
@@ -11098,6 +11313,11 @@ async function runSkill(
   const preparedPrompt = await prepareFindingPrompt(
     JSON.stringify(contents),
     async (findingData) => {
+      if (options.stackInvestigation)
+        return await stackInvestigationPrompt(
+          join(plugin, "skills", skill),
+          options.stackInvestigation,
+        );
       let prompt = [
         patch || verify
           ? await remediationPrompt(
@@ -11201,15 +11421,16 @@ async function runSkill(
       },
       {
         surface: "cli",
-        command: dependencyCheck
-          ? "exploitability check"
-          : assess
-            ? "assess-patch-risk"
-            : verify
-              ? "verify-fix"
-              : patch
-                ? "patch"
-                : "validate",
+        command:
+          dependencyCheck || options.stackInvestigation
+            ? "exploitability check"
+            : assess
+              ? "assess-patch-risk"
+              : verify
+                ? "verify-fix"
+                : patch
+                  ? "patch"
+                  : "validate",
         pluginVersion,
         providerResolved: provider !== undefined || validate,
       },
@@ -11230,7 +11451,12 @@ async function runSkill(
       [
         ...(appServer
           ? ["app-server"]
-          : ["exec", "--ignore-user-config", "--thread-source", threadSource]),
+          : [
+              "exec",
+              ...(options.stackInvestigation ? [] : ["--ignore-user-config"]),
+              "--thread-source",
+              threadSource,
+            ]),
         "--disable",
         "plugins",
         ...(appServer ? [] : ["--ephemeral", "--color", "never", "--json"]),
@@ -11253,10 +11479,10 @@ async function runSkill(
               )
               .flatMap((value) => ["--config", value])
           : []),
-        ...modelProviderConfigOverride(effectiveOverrides).flatMap((value) => [
-          "--config",
-          value,
-        ]),
+        ...(!options.stackInvestigation
+          ? modelProviderConfigOverride(effectiveOverrides)
+          : []
+        ).flatMap((value) => ["--config", value]),
         "--config",
         verify || assess
           ? 'approval_policy="on-request"'
@@ -11292,8 +11518,18 @@ async function runSkill(
         ...(appServer
           ? []
           : [
-              "--sandbox",
-              validate ? "read-only" : "workspace-write",
+              ...(options.stackInvestigation
+                ? [
+                    ...untrustedProjectConfigOverrides(directory),
+                    "allow_login_shell=false",
+                    'shell_environment_policy.inherit="core"',
+                    "project_doc_max_bytes=0",
+                    "features.multi_agent=false",
+                    "features.multi_agent_v2=false",
+                    'web_search="disabled"',
+                    "mcp_servers={}",
+                  ].flatMap((value) => ["--config", value])
+                : ["--sandbox", validate ? "read-only" : "workspace-write"]),
               ...(validate ? ["--config", 'web_search="disabled"'] : []),
               ...(schemaPath === undefined
                 ? []
@@ -11305,18 +11541,22 @@ async function runSkill(
             ]),
       ],
       {
-        command: dependencyCheck
-          ? "exploitability check"
-          : verify
-            ? "verify-fix"
-            : patch || assess
-              ? "patch"
-              : "validate",
+        command:
+          dependencyCheck || options.stackInvestigation
+            ? "exploitability check"
+            : verify
+              ? "verify-fix"
+              : patch || assess
+                ? "patch"
+                : "validate",
         ...(dependencyCheck
           ? {
               readOnlySkillRoot: join(plugin, "skills", skill),
               allowedMcpServers: inventoryServerNames,
             }
+          : {}),
+        ...(options.stackInvestigation
+          ? { stackTarget: options.stackInvestigation.repo }
           : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
         ...(options.onDiagnostic ? { onDiagnostic: options.onDiagnostic } : {}),
@@ -11389,6 +11629,7 @@ export async function readSkillCommandOutput(
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
   onUsage?: (usage: ScanTokenUsage) => void,
+  trackExecCompletion = false,
 ): Promise<{
   message?: string;
   error?: string;
@@ -12561,10 +12802,14 @@ export async function readSkillCommandOutput(
       ) {
         message = item["text"];
       }
-    } else if (value["type"] === "turn.completed" && onUsage) {
-      const usage = tokenUsage(value["usage"]);
-      if (usage) notify(() => onUsage(usage));
+    } else if (value["type"] === "turn.completed") {
+      completed = true;
+      if (onUsage) {
+        const usage = tokenUsage(value["usage"]);
+        if (usage) notify(() => onUsage(usage));
+      }
     } else if (value["type"] === "turn.failed") {
+      completed = false;
       const detail = value["error"];
       if (isJsonObject(detail) && typeof detail["message"] === "string") {
         error = detail["message"];
@@ -12585,7 +12830,7 @@ export async function readSkillCommandOutput(
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
-    ...(appServer === undefined ? {} : { completed }),
+    ...(appServer !== undefined || trackExecCompletion ? { completed } : {}),
     ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
     ...(connectionFailure === undefined
       ? {}

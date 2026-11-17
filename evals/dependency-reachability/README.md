@@ -204,6 +204,16 @@ JSON answer to stdout. The scoped grader checks the verdict, dependency
 version, and exact source quotes. Baseline reports are written to
 `reports/run-*/report.json`. [Shared eval runtime](../secret-discovery/README.md#run)
 
+## Quick sampled-stack eval
+
+From the repository root, run the built CLI on two synthetic packets with the same model. Each starts one investigator. The first packet binds the sampled service to a fixed dependency version. The second leaves the running version unknown.
+
+```sh
+node --experimental-strip-types evals/dependency-reachability/run-stack-fixture.mts --model "$MODEL"
+```
+
+Use `--cli /checkout/sdk/typescript/bin/codex-security.mjs` to select another built checkout. The grader checks the original frame indices and workload, work-item coverage, exact claim references, and source or capture citations. The fixed case must cite the version binding to rule out the path. The unbound case must identify the missing deployed version. Each run saves the reports, fixture digests, CLI revision and elapsed times under `evals/dependency-reachability/reports/stack-*/`.
+
 ## Deterministic checks
 
 CI runs these checks without model calls or upstream clones.

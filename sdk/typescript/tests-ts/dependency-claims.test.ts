@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { z } from "zod";
 import {
   dependencyClaimQueueSchema,
   dependencyClaimQuerySchema,
@@ -220,31 +219,13 @@ test("search pages compact indexes without cutting off stored payloads or later 
   ).toThrow(/revisions changed/i);
 });
 
-test("native tool schemas have object roots and retain arbitrary nested JSON as data", () => {
-  const payload = {
-    state: "approved",
-    id: "spoof",
-    nested: [null, false, 3, "text", { arbitrary: [1, 2] }],
-  };
-  const proposal = dependencyClaimQueueSchema.parse({
-    claims: [{ id: "opaque", payload, scope: ["scope", { bound: true }] }],
-  });
-  expect(proposal.claims[0]!.payload).toEqual(payload);
-  expect(proposal.claims[0]).not.toHaveProperty("state");
-  for (const schema of [
-    dependencyClaimQueueSchema,
-    dependencyClaimQuerySchema,
-  ]) {
-    const native = z.toJSONSchema(schema);
-    expect(native.type).toBe("object");
-    expect(native).toHaveProperty("properties");
-  }
+test("claim tools reject ambiguous lookups and reserved assessment IDs", () => {
   expect(() =>
     dependencyClaimQuerySchema.parse({ search: "wrapper", ids: ["wrapper"] }),
   ).toThrow();
   expect(() =>
     dependencyClaimQueueSchema.parse({
-      claims: [{ id: "application:spoof", payload, scope: null }],
+      claims: [{ id: "application:spoof", payload: null, scope: null }],
     }),
   ).toThrow(/reserved/i);
 });

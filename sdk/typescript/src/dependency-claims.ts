@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import { z } from "zod";
 import type { JsonValue } from "./config.js";
+import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   inventoryReceiptSelectionSchema,
   type BoundDependencyInventoryReceipt,
@@ -85,7 +86,7 @@ export const dependencyClaimProposalSchema = z.strictObject({
     .array(dependencyClaimReferenceSchema)
     .default([])
     .describe(
-      "Exact currently approved dependencies. Query pending claims to avoid duplicate work; wait for their approval before depending on them.",
+      "Exact current revisions this claim depends on. Investigations with independent review require each dependency to be approved first.",
     ),
   expectedRevision: z
     .number()
@@ -132,7 +133,8 @@ export const dependencyClaimEvidenceSchema = z.strictObject({
 });
 
 export type DependencyClaimState =
-  "pending" | "approved" | "rejected" | "stale";
+  "pending" | "approved" | "rejected" | "stale" | "recorded";
+export type DependencyClaimPolicy = "reviewed" | "single_agent";
 export interface PreparedDependencyClaim {
   id: string;
   payload: JsonValue;
@@ -166,12 +168,6 @@ export function dependencyClaimHash(value: unknown): string {
 function reference(record: DependencyClaimReference): DependencyClaimReference {
   return { id: record.id, revision: record.revision, hash: record.hash };
 }
-function sameReference(
-  a: DependencyClaimReference,
-  b: DependencyClaimReference,
-) {
-  return a.id === b.id && a.revision === b.revision && a.hash === b.hash;
-}
 function receiptIdentity(receipt: BoundDependencyInventoryReceipt) {
   const { server, originalPayloadSha256, origin, selection, outcome } = receipt;
   return { server, originalPayloadSha256, origin, selection, outcome };
@@ -194,32 +190,98 @@ function evidenceMaterial(claim: PreparedDependencyClaim) {
   };
 }
 
-/** Immutable claim revisions in the existing investigation's review lifecycle. */
+/** Immutable claim revisions, scoped to one attempt and its review policy. */
 export function createDependencyClaims(
   context: JsonValue,
   onInvalidatedApplication?: (assessmentId: string) => void,
+  attempt = new DependencyAttemptStore(":memory:"),
+  policy: DependencyClaimPolicy = "reviewed",
 ) {
   const contextHash = dependencyClaimHash(context);
-  const history = new Map<string, Map<number, DependencyClaimRecord>>();
-  const current = new Map<string, DependencyClaimRecord>();
-  const reviewing = new Set<string>();
-  const dependents = new Map<string, Set<string>>();
-  const recordsByKey = new Map<string, DependencyClaimRecord>();
-  let generation = 0;
+  attempt.transaction(() => {
+    const stored = attempt.get<{
+      contextHash: string;
+      policy: DependencyClaimPolicy;
+    }>("claims", "context");
+    if (!stored) attempt.set("claims", "context", { contextHash, policy });
+    else if (stored.contextHash !== contextHash || stored.policy !== policy)
+      throw new CodexSecurityError(
+        "This claim ledger belongs to a different investigation context or review policy.",
+      );
+  });
 
   const key = (ref: DependencyClaimReference) =>
     JSON.stringify([ref.id, ref.revision, ref.hash]);
+  function parseRecord(row: { [key: string]: unknown } | null | undefined) {
+    return row
+      ? (JSON.parse(row["value"] as string) as DependencyClaimRecord)
+      : undefined;
+  }
+  function latest(id: string) {
+    return parseRecord(
+      attempt
+        .statement(
+          "SELECT value FROM claim_revisions WHERE id = ? ORDER BY revision DESC LIMIT 1",
+        )
+        .get(id),
+    );
+  }
+  function currentRecords() {
+    return attempt
+      .statement(
+        `
+      SELECT c.value FROM claim_revisions c
+      JOIN (SELECT id, MAX(revision) AS revision, MIN(rowid) AS first FROM claim_revisions GROUP BY id) latest
+        ON c.id = latest.id AND c.revision = latest.revision
+      ORDER BY latest.first
+    `,
+      )
+      .all()
+      .map((row) => parseRecord(row)!);
+  }
+  function save(record: DependencyClaimRecord) {
+    attempt
+      .statement(
+        "UPDATE claim_revisions SET value = ? WHERE id = ? AND revision = ?",
+      )
+      .run(JSON.stringify(record), record.id, record.revision);
+  }
+  function isReviewing(ref: DependencyClaimReference) {
+    return !!attempt
+      .statement(
+        "SELECT 1 FROM claim_review_leases WHERE id = ? AND revision = ? AND hash = ?",
+      )
+      .get(ref.id, ref.revision, ref.hash);
+  }
+  function releaseReview(ref: DependencyClaimReference) {
+    return !!attempt
+      .statement(
+        "DELETE FROM claim_review_leases WHERE id = ? AND revision = ? AND hash = ? AND owner = ?",
+      )
+      .run(ref.id, ref.revision, ref.hash, attempt.reviewOwner).changes;
+  }
   function find(
     ref: DependencyClaimReference,
   ): DependencyClaimRecord | undefined {
-    const record = history.get(ref.id)?.get(ref.revision);
-    return record && sameReference(record, ref) ? record : undefined;
+    return parseRecord(
+      attempt
+        .statement(
+          "SELECT value FROM claim_revisions WHERE id = ? AND revision = ? AND hash = ?",
+        )
+        .get(ref.id, ref.revision, ref.hash),
+    );
   }
   function isCurrent(ref: DependencyClaimReference): boolean {
-    const record = current.get(ref.id);
-    return !!record && sameReference(record, ref);
+    const row = attempt
+      .statement(
+        "SELECT revision, hash FROM claim_revisions WHERE id = ? ORDER BY revision DESC LIMIT 1",
+      )
+      .get(ref.id);
+    return (
+      !!row && row["revision"] === ref.revision && row["hash"] === ref.hash
+    );
   }
-  function approved(
+  function usable(
     ref: DependencyClaimReference,
     memo = new Map<string, boolean>(),
     visiting = new Set<string>(),
@@ -231,7 +293,7 @@ export function createDependencyClaims(
     if (
       !record ||
       !isCurrent(ref) ||
-      record.state !== "approved" ||
+      record.state !== (policy === "reviewed" ? "approved" : "recorded") ||
       visiting.has(record.id)
     ) {
       memo.set(selected, false);
@@ -239,7 +301,7 @@ export function createDependencyClaims(
     }
     const next = new Set(visiting).add(record.id);
     const result = record.dependencies.every((dependency) =>
-      approved(dependency, memo, next),
+      usable(dependency, memo, next),
     );
     memo.set(selected, result);
     return result;
@@ -258,15 +320,34 @@ export function createDependencyClaims(
       seen.add(selected);
       const record = find(next.ref);
       if (!record || record.state === "stale") continue;
-      if (record.state === "approved" && record.application)
-        onInvalidatedApplication?.(record.application.assessmentId);
+      if (
+        record.state === "approved" &&
+        record.application &&
+        onInvalidatedApplication
+      ) {
+        const assessmentId = record.application.assessmentId;
+        attempt.afterCommit(() => onInvalidatedApplication(assessmentId));
+      }
       record.state = "stale";
       invalidated.push(reference(record));
       record.error = next.reason;
-      for (const child of dependents.get(selected) ?? []) {
-        const dependent = recordsByKey.get(child)!;
+      save(record);
+      const children = attempt
+        .statement(
+          `
+        SELECT c.id, c.revision, c.hash FROM claim_dependencies d
+        JOIN claim_revisions c ON c.id = d.dependent_id AND c.revision = d.dependent_revision
+        WHERE d.premise_id = ? AND d.premise_revision = ? AND d.premise_hash = ?
+      `,
+        )
+        .all(record.id, record.revision, record.hash);
+      for (const child of children) {
         pending.push({
-          ref: reference(dependent),
+          ref: {
+            id: child["id"] as string,
+            revision: child["revision"] as number,
+            hash: child["hash"] as string,
+          },
           reason: `Dependency ${record.id} revision ${record.revision} is stale: ${next.reason}`,
         });
       }
@@ -298,9 +379,11 @@ export function createDependencyClaims(
           `Choose one exact approved revision for dependency ${dependency.id}.`,
         );
       ids.add(dependency.id);
-      if (!approved(dependency, memo))
+      if (!usable(dependency, memo))
         throw new CodexSecurityError(
-          `Claim dependency ${dependency.id} revision ${dependency.revision} is missing, pending, rejected or stale. Query its current claim and use an approved exact revision.`,
+          policy === "reviewed"
+            ? `Claim dependency ${dependency.id} revision ${dependency.revision} is missing, pending, rejected or stale. Query its current claim and use an approved exact revision.`
+            : `Claim dependency ${dependency.id} revision ${dependency.revision} is missing or stale. Query the exact current revision.`,
         );
     }
   }
@@ -308,7 +391,7 @@ export function createDependencyClaims(
     const { excerpts, receipts, ...data } = record;
     return structuredClone({
       ...data,
-      reviewing: reviewing.has(key(record)),
+      reviewing: isReviewing(record),
       evidence: {
         sources: excerpts.map(
           ({ path, startLine, endLine, text, sourceIdentity }) => ({
@@ -329,6 +412,12 @@ export function createDependencyClaims(
 
   function proposal(input: PreparedDependencyClaim, expectedRevision?: number) {
     const prepared = structuredClone(input);
+    if (policy === "single_agent") {
+      for (const excerpt of prepared.excerpts) {
+        if (excerpt.sourceIdentity)
+          excerpt.sourceIdentity.repositoryRoot = null;
+      }
+    }
     if (cycle(prepared.id, prepared.dependencies))
       throw new CodexSecurityError(
         `Claim ${prepared.id} would create a dependency cycle.`,
@@ -338,7 +427,7 @@ export function createDependencyClaims(
       contextHash,
       ...evidenceMaterial(prepared),
     });
-    const previous = current.get(prepared.id);
+    const previous = latest(prepared.id);
     if (previous?.hash === hash && previous.state !== "stale")
       return { prepared, previous, hash, changed: false };
     if (previous && expectedRevision !== previous.revision)
@@ -356,7 +445,10 @@ export function createDependencyClaims(
     contextHash,
     reference,
     isCurrent,
-    isApproved: approved,
+    isApproved: (ref: DependencyClaimReference) =>
+      policy === "reviewed" && attempt.read(() => usable(ref)),
+    isUsable: (ref: DependencyClaimReference) =>
+      attempt.read(() => usable(ref)),
     state(ref: DependencyClaimReference) {
       const record = find(ref);
       return (
@@ -370,207 +462,241 @@ export function createDependencyClaims(
       );
     },
     currentReference(id: string) {
-      const record = current.get(id);
+      const record = latest(id);
       return record && reference(record);
     },
     pendingReferences() {
-      return [...current.values()]
+      return currentRecords()
         .filter(
           (record) =>
-            record.state === "pending" &&
-            !record.error &&
-            !reviewing.has(key(record)),
+            record.state === "pending" && !record.error && !isReviewing(record),
         )
         .map((record) => ({
           ...reference(record),
           isApplication: record.application !== undefined,
         }));
     },
-    invalidate,
+    invalidate(ref: DependencyClaimReference, reason: string) {
+      return attempt.transaction(() => invalidate(ref, reason));
+    },
     requireDependencies,
-    get(ref: DependencyClaimReference) {
-      const record = find(ref);
-      return record && structuredClone(record);
-    },
-    latest(id: string) {
-      const record = current.get(id);
-      return record && structuredClone(record);
-    },
+    get: find,
+    latest,
     preview(input: PreparedDependencyClaim, expectedRevision?: number) {
       const { hash, changed, previous } = proposal(input, expectedRevision);
       return { hash, changed, currentRevision: previous?.revision };
     },
     propose(input: PreparedDependencyClaim, expectedRevision?: number) {
-      const { prepared, previous, hash, changed } = proposal(
-        input,
-        expectedRevision,
-      );
-      if (!changed) return { record: envelope(previous!), changed: false };
-      if (previous)
-        invalidate(
-          previous,
-          "A new immutable revision supersedes this subject.",
+      return attempt.transaction(() => {
+        const { prepared, previous, hash, changed } = proposal(
+          input,
+          expectedRevision,
         );
-      const record: DependencyClaimRecord = {
-        ...prepared,
-        revision: (previous?.revision ?? 0) + 1,
-        hash,
-        contextHash,
-        state: "pending",
-      };
-      const revisions =
-        history.get(record.id) ?? new Map<number, DependencyClaimRecord>();
-      revisions.set(record.revision, record);
-      history.set(record.id, revisions);
-      current.set(record.id, record);
-      generation++;
-      recordsByKey.set(key(record), record);
-      for (const dependency of record.dependencies) {
-        const children = dependents.get(key(dependency)) ?? new Set<string>();
-        children.add(key(record));
-        dependents.set(key(dependency), children);
-      }
-      return { record: envelope(record), changed: true };
+        if (!changed) return { record: envelope(previous!), changed: false };
+        if (previous)
+          invalidate(
+            previous,
+            "A new immutable revision supersedes this subject.",
+          );
+        const record: DependencyClaimRecord = {
+          ...prepared,
+          revision: (previous?.revision ?? 0) + 1,
+          hash,
+          contextHash,
+          state: policy === "reviewed" ? "pending" : "recorded",
+        };
+        attempt
+          .statement(
+            "INSERT INTO claim_revisions (id, revision, hash, value) VALUES (?, ?, ?, ?)",
+          )
+          .run(record.id, record.revision, record.hash, JSON.stringify(record));
+        for (const dependency of record.dependencies) {
+          attempt
+            .statement(
+              "INSERT INTO claim_dependencies (premise_id, premise_revision, premise_hash, dependent_id, dependent_revision) VALUES (?, ?, ?, ?, ?)",
+            )
+            .run(
+              dependency.id,
+              dependency.revision,
+              dependency.hash,
+              record.id,
+              record.revision,
+            );
+        }
+        return { record: envelope(record), changed: true };
+      });
     },
     pending() {
-      return [...current.values()]
+      return currentRecords()
         .filter(
           (record) =>
-            record.state === "pending" &&
-            !record.error &&
-            !reviewing.has(key(record)),
+            record.state === "pending" && !record.error && !isReviewing(record),
         )
         .map((record) => structuredClone(record));
     },
     lease(ref: DependencyClaimReference) {
-      const record = find(ref);
-      if (
-        !record ||
-        !isCurrent(ref) ||
-        record.state !== "pending" ||
-        reviewing.has(key(ref))
-      )
-        return undefined;
-      requireDependencies(record.dependencies);
-      reviewing.add(key(ref));
-      return structuredClone(record);
+      return attempt.transaction(() => {
+        const record = find(ref);
+        if (
+          !record ||
+          !isCurrent(ref) ||
+          record.state !== "pending" ||
+          isReviewing(ref)
+        )
+          return undefined;
+        requireDependencies(record.dependencies);
+        attempt
+          .statement(
+            "INSERT INTO claim_review_leases (id, revision, hash, pid, owner) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(
+            ref.id,
+            ref.revision,
+            ref.hash,
+            process.pid,
+            attempt.reviewOwner,
+          );
+        return record;
+      });
     },
     complete(ref: DependencyClaimReference, decision: DependencyClaimDecision) {
-      const record = find(ref);
-      if (
-        !record ||
-        !reviewing.delete(key(ref)) ||
-        !isCurrent(ref) ||
-        record.state !== "pending"
-      )
-        return false;
-      const memo = new Map<string, boolean>();
-      if (
-        !record.dependencies.every((dependency) => approved(dependency, memo))
-      ) {
-        invalidate(
-          ref,
-          "A pinned dependency changed while this subject was being reviewed.",
-        );
-        return false;
-      }
-      record.decision = structuredClone(decision);
-      record.state = decision.accepted ? "approved" : "rejected";
-      return true;
+      return attempt.transaction(() => {
+        const record = find(ref);
+        if (
+          !record ||
+          !releaseReview(ref) ||
+          !isCurrent(ref) ||
+          record.state !== "pending"
+        )
+          return false;
+        const memo = new Map<string, boolean>();
+        if (
+          !record.dependencies.every((dependency) => usable(dependency, memo))
+        ) {
+          invalidate(
+            ref,
+            "A pinned dependency changed while this subject was being reviewed.",
+          );
+          return false;
+        }
+        record.decision = structuredClone(decision);
+        record.state = decision.accepted ? "approved" : "rejected";
+        save(record);
+        return true;
+      });
     },
     reviewError(ref: DependencyClaimReference, reason: string) {
-      reviewing.delete(key(ref));
-      const record = find(ref);
-      if (record && isCurrent(ref) && record.state === "pending")
-        record.error = reason;
+      attempt.transaction(() => {
+        if (!releaseReview(ref) && isReviewing(ref)) return;
+        const record = find(ref);
+        if (record && isCurrent(ref) && record.state === "pending") {
+          record.error = reason;
+          save(record);
+        }
+      });
     },
     retry(ref: DependencyClaimReference) {
-      const record = find(ref);
-      if (
-        record &&
-        isCurrent(ref) &&
-        record.state === "pending" &&
-        !reviewing.has(key(ref))
-      )
-        delete record.error;
+      attempt.transaction(() => {
+        const record = find(ref);
+        if (
+          record &&
+          isCurrent(ref) &&
+          record.state === "pending" &&
+          !isReviewing(ref)
+        ) {
+          delete record.error;
+          save(record);
+        }
+      });
     },
     query(value: unknown) {
-      const query = dependencyClaimQuerySchema.parse(value);
-      if (query.ids) {
-        const ids = [...new Set(query.ids)].sort();
+      return attempt.read(() => {
+        const query = dependencyClaimQuerySchema.parse(value);
+        const generation = attempt
+          .statement("SELECT COUNT(*) AS generation FROM claim_revisions")
+          .get()!["generation"] as number;
+        if (query.ids) {
+          const ids = [...new Set(query.ids)].sort();
+          const claims = [];
+          const missingIds = [];
+          for (const id of ids) {
+            const record = latest(id);
+            if (record) claims.push(envelope(record));
+            else missingIds.push(id);
+          }
+          return {
+            claims,
+            missingIds,
+            generation,
+            total: claims.length,
+            nextCursor: null,
+          };
+        }
+        const search = query.search!.toLowerCase();
+        const matches = currentRecords().filter((record) =>
+          `${record.id}\n${canonicalJson(record.scope)}\n${canonicalJson(record.payload)}`
+            .toLowerCase()
+            .includes(search),
+        );
+        matches.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        const cursor = query.page?.cursor;
+        if (cursor && cursor.generation !== generation)
+          throw new CodexSecurityError(
+            "Claim revisions changed this search index. Start a fresh search page; no stored claims were removed.",
+          );
+        const after = cursor
+          ? matches.findIndex((record) => record.id === cursor.after)
+          : -1;
+        if (cursor && after === -1)
+          throw new CodexSecurityError(
+            "Unknown claim search cursor for this query.",
+          );
+        const page = matches.slice(
+          after + 1,
+          after + 1 + (query.page?.limit ?? 50),
+        );
         return {
-          claims: ids.flatMap((id) => {
-            const record = current.get(id);
-            return record ? [envelope(record)] : [];
-          }),
-          missingIds: ids.filter((id) => !current.has(id)),
+          claims: page.map((record) => ({
+            ...reference(record),
+            state: record.state,
+            reviewing: isReviewing(record),
+            ...(record.error && { hasError: true }),
+            sourceCount: record.excerpts.length,
+            receiptCount: record.receipts.length,
+            dependencyCount: record.dependencies.length,
+            ...(record.application && {
+              application: { assessmentId: record.application.assessmentId },
+            }),
+          })),
+          missingIds: [],
           generation,
-          total: ids.filter((id) => current.has(id)).length,
-          nextCursor: null,
+          total: matches.length,
+          nextCursor:
+            after + 1 + page.length < matches.length
+              ? { generation, after: page.at(-1)!.id }
+              : null,
+          details:
+            "Compact search index. Query exact ids to retrieve the selected payload, scope, immutable dependencies and provenance.",
         };
-      }
-      const search = query.search!.toLowerCase();
-      const matches = [...current.values()].filter((record) =>
-        `${record.id}\n${canonicalJson(record.scope)}\n${canonicalJson(record.payload)}`
-          .toLowerCase()
-          .includes(search),
-      );
-      matches.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-      const cursor = query.page?.cursor;
-      if (cursor && cursor.generation !== generation)
-        throw new CodexSecurityError(
-          "Claim revisions changed this search index. Start a fresh search page; no stored claims were removed.",
-        );
-      const after = cursor
-        ? matches.findIndex((record) => record.id === cursor.after)
-        : -1;
-      if (cursor && after === -1)
-        throw new CodexSecurityError(
-          "Unknown claim search cursor for this query.",
-        );
-      const page = matches.slice(
-        after + 1,
-        after + 1 + (query.page?.limit ?? 50),
-      );
-      return {
-        claims: page.map((record) => ({
-          ...reference(record),
-          state: record.state,
-          reviewing: reviewing.has(key(record)),
-          ...(record.error && { hasError: true }),
-          sourceCount: record.excerpts.length,
-          receiptCount: record.receipts.length,
-          dependencyCount: record.dependencies.length,
-          ...(record.application && {
-            application: { assessmentId: record.application.assessmentId },
-          }),
-        })),
-        missingIds: [],
-        generation,
-        total: matches.length,
-        nextCursor:
-          after + 1 + page.length < matches.length
-            ? { generation, after: page.at(-1)!.id }
-            : null,
-        details:
-          "Compact search index. Query exact ids to retrieve the selected payload, scope, immutable dependencies and provenance.",
-      };
+      });
     },
     closure(refs: readonly DependencyClaimReference[]) {
-      const selected = new Map<string, DependencyClaimRecord>();
-      const memo = new Map<string, boolean>();
-      const visit = (ref: DependencyClaimReference) => {
-        if (!approved(ref, memo))
-          throw new CodexSecurityError(
-            `Claim ${ref.id} revision ${ref.revision} is not currently approved.`,
-          );
-        if (selected.has(key(ref))) return;
-        const record = find(ref)!;
-        selected.set(key(ref), record);
-        for (const dependency of record.dependencies) visit(dependency);
-      };
-      for (const ref of refs) visit(ref);
-      return [...selected.values()].map((record) => structuredClone(record));
+      return attempt.read(() => {
+        const selected = new Map<string, DependencyClaimRecord>();
+        const memo = new Map<string, boolean>();
+        const visit = (ref: DependencyClaimReference) => {
+          if (!usable(ref, memo))
+            throw new CodexSecurityError(
+              `Claim ${ref.id} revision ${ref.revision} is not currently ${policy === "reviewed" ? "approved" : "recorded"}.`,
+            );
+          if (selected.has(key(ref))) return;
+          const record = find(ref)!;
+          selected.set(key(ref), record);
+          for (const dependency of record.dependencies) visit(dependency);
+        };
+        for (const ref of refs) visit(ref);
+        return [...selected.values()].map((record) => structuredClone(record));
+      });
     },
   };
 }

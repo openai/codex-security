@@ -2324,6 +2324,83 @@ The installer uses host Git for the selected repository and respects
 
 <a id="check-a-dependency-cve"></a>
 
+### Investigate captured stacks for one CVE
+
+Run this command from a Git checkout at the target revision recorded in the capture.
+The CLI starts one Codex investigator with the bundled captured-stack skill.
+
+```bash
+cs exploitability check CVE-2023-4863 \
+  --sources sources.json --sinks sinks.json --stacks stacks.json \
+  --json --report-file assessment.json
+```
+
+Supply all three JSON inputs together. `sources.json` lists source endpoints and may
+have an empty `sources` array for a sink-only capture. `sinks.json` supplies the CVE,
+frozen advisory, affected package/version ranges, and sink endpoints. `stacks.json`
+supplies the target repository and full Git SHA, the capture scope, queries and
+original leaf-first stack frames. Use the document formats
+`codex-security.stack-sources/v1`, `codex-security.stack-sinks/v1` and
+`codex-security.sampled-stacks/v1` respectively. The investigator uses the supplied
+advisory and evidence without discovering stacks through OpenGrep. The package
+includes the [input schemas](../schemas/dependency-stack-inputs-v1.schema.json).
+
+Each observation’s `sinkIndex` identifies the frame matched by the captured query.
+Use `sinkMatches` to map catalog endpoints to their original leaf-first frame
+indices. For example, a query can match a wrapper at index 4 while
+`[{"sinkId":"decoder","rawIndex":1}]` records the decoding implementation.
+`sinkIds` is shorthand for endpoints at `sinkIndex`.
+
+The report preserves the requested workload scope and any differing representative
+scope from the returned capture. A specific container or image tag can refine a
+broader query. When the capture identifies a conflicting service, cluster,
+environment, container, image or tag selection, that observation stays `unknown`
+and its report lists the conflicting values.
+
+The resulting `codex-security.pipeline-stacks.report/v1` report identifies the input
+digest, target, exact claim revisions, per-path assessments, coverage, and unresolved
+questions. A supported `unknown` is a successful report. Use a fresh destination for
+`--report-file`. Missing inputs, target mismatches and failed investigations return
+a nonzero status. See the [report schema](../schemas/stack-investigation-report-v1.schema.json).
+
+To prepare a packet for another investigator, set `TARGET` to the pinned checkout,
+`PACKET` to a new directory in an existing run folder, and `TOOL_REVISION` to the
+CLI build identifier. The SDK copies the three files byte for byte and writes
+`manifest.json` with their hashes, the advisory, target and attempt identity.
+
+```js
+import { prepareStackPacket } from "@openai/codex-security/stack-packet";
+
+const packet = await prepareStackPacket({
+  cve: "CVE-2023-4863",
+  sourcesPath: "sources.json",
+  sinksPath: "sinks.json",
+  stacksPath: "stacks.json",
+  repository: process.env.TARGET,
+  inputsDir: process.env.PACKET,
+  toolRevision: process.env.TOOL_REVISION,
+});
+console.log(packet.manifest.inputDigest);
+```
+
+An agent with an existing prepared packet can use the same commands in successive
+shell processes. The packet directory contains the three original files and their
+`manifest.json`. Keep one SQLite file per attempt.
+
+```bash
+cs exploitability run init --inputs "$PACKET" --repo "$TARGET" --state "$STATE"
+cs exploitability run tools --state "$STATE"
+cs exploitability run next --state "$STATE"
+cs exploitability run record-evidence --state "$STATE" --json-stdin < evidence.json
+```
+
+Use `tools` for the input schema of each available command. Read captured frames
+with `read-stacks`, save exact claim references with `record-claims` and retrieve
+them with `query-claims`. Use `record-assessments` for each outstanding item,
+then `summarize-coverage` and `finalize` to obtain the verified report.
+
+### Run a reviewed CVE or package check
+
 Use `cs exploitability check <subject>` with a CVE ID or a package in
 `ecosystem:name` form. Install OpenGrep on `PATH` outside the scanned checkout.
 Run the check from anywhere in the Git checkout. Outside Git it uses the

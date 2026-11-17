@@ -10,8 +10,14 @@ import { createDependencyCandidates } from "../src/dependency-candidates.js";
 import { readDependencyReportCode } from "../src/dependency-report-renderer.js";
 import { createDependencyReportSubmission } from "../src/dependency-report-submission.js";
 import { evidenceKey } from "../src/dependency-evidence-store.js";
+import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
 import { createDependencySourceEvidence } from "../src/dependency-source-evidence.js";
 import { createDependencySourceIdentityReader } from "../src/dependency-source-identity.js";
+import {
+  prepareDependencySourceNote,
+  queryDependencySourceNotes,
+  saveDependencySourceNote,
+} from "../src/dependency-source-notes.js";
 import {
   readRegularInputFile,
   readRegularInputFileBytes,
@@ -62,6 +68,63 @@ async function initialize(
 
 const sha256 = (bytes: Buffer) =>
   createHash("sha256").update(bytes).digest("hex");
+
+test("a pinned source note reopens with the same identity in another checkout", async () => {
+  await using root = await scopedTemporaryDirectory("pinned-note-");
+  const repository = join(root.path, "repository");
+  const other = join(root.path, "other");
+  const { commit, blob } = await initialize(repository, "decode(input);\n");
+  git(root.path, "clone", "--quiet", repository, other);
+  await writeFile(join(other, "codec.ts"), "workingTreeOnly();\n");
+  const input = {
+    question: "Does the entry point decode input?",
+    scope: "codec",
+    claim: "The entry point calls decode.",
+    evidence: [{ path: "codec.ts", startLine: 1, endLine: 1 }],
+  };
+  const options = { targetSha: commit, logicalRepository: "fixture" };
+  const captured = await prepareDependencySourceNote(
+    repository,
+    input,
+    options,
+  );
+  const state = join(root.path, "attempt.sqlite");
+  const writer = new DependencyAttemptStore(state);
+  try {
+    saveDependencySourceNote(writer, captured);
+  } finally {
+    writer.close();
+  }
+  const reader = new DependencyAttemptStore(state, { create: false });
+  try {
+    const second = await prepareDependencySourceNote(other, input, options);
+    expect(second.acknowledgement.id).toBe(captured.note.id);
+    expect(
+      queryDependencySourceNotes(reader, { id: second.note.id }),
+    ).toMatchObject({
+      id: captured.note.id,
+      repository: "fixture",
+      excerpts: [
+        {
+          text: "decode(input);",
+          sourceIdentity: { repositoryRoot: null, commit, blob },
+        },
+      ],
+    });
+    await expect(
+      prepareDependencySourceNote(
+        other,
+        {
+          ...input,
+          evidence: [{ ...input.evidence[0]!, commit: "a".repeat(40) }],
+        },
+        options,
+      ),
+    ).rejects.toThrow("differs from the investigation target");
+  } finally {
+    reader.close();
+  }
+});
 
 test.each(["sha1", "sha256"])(
   "captures the exact %s commit, relative path, blob and full-file bytes for every submitted range",

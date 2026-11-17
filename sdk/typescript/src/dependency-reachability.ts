@@ -429,7 +429,7 @@ export interface DependencyAssessmentCoverage {
 
 /** Derive the report verdict from validated uses and explicit remaining gaps. */
 export function aggregateDependencyVerdict(
-  uses: readonly DependencyUse[],
+  uses: readonly Pick<DependencyUse, "verdict">[],
   coverage: DependencyAssessmentCoverage = {},
 ): DependencyVerdict {
   if (uses.some((use) => use.verdict === "exploitable")) return "exploitable";

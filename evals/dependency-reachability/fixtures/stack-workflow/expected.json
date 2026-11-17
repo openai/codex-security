@@ -1,0 +1,13 @@
+{
+  "cve": "CVE-2099-0001",
+  "workItemId": "decode/deployment/sample",
+  "fixed": {
+    "verdict": "ruled_out",
+    "decidingEvidence": "deployment.json",
+    "reason": "The sampled deployment pins sample-codec 2.1.0 outside the affected range."
+  },
+  "unbound": {
+    "verdict": "unknown",
+    "missingFact": "The version of sample-codec running in the sampled workload."
+  }
+}

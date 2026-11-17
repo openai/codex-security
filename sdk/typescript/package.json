@@ -28,8 +28,15 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./stack-packet": {
+      "types": "./dist/stack-packet.d.ts",
+      "import": "./dist/stack-packet.js",
+      "default": "./dist/stack-packet.js"
+    },
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json",
-    "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json"
+    "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json",
+    "./schemas/dependency-stack-inputs-v1.schema.json": "./schemas/dependency-stack-inputs-v1.schema.json",
+    "./schemas/stack-investigation-report-v1.schema.json": "./schemas/stack-investigation-report-v1.schema.json"
   },
   "bin": {
     "codex-security": "./bin/codex-security.mjs",
@@ -60,7 +67,7 @@
   "scripts": {
     "audit:prod": "pnpm audit --prod --audit-level high",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "node --run clean && node scripts/generate-plugin-defaults.mjs && tsc -p tsconfig.build.json && node scripts/build-embedding-tokenizer.mjs && node scripts/generate-project-config-schema.mjs",
+    "build": "node --run clean && node scripts/generate-plugin-defaults.mjs && tsc -p tsconfig.build.json && node scripts/build-embedding-tokenizer.mjs && node scripts/generate-project-config-schema.mjs && node scripts/generate-stack-schemas.mjs",
     "build:ci": "tsc -p tsconfig.ci.json",
     "build:evals": "node --run build && tsc -p ../../evals/tsconfig.json",
     "build:examples": "tsc -p tsconfig.examples.json",

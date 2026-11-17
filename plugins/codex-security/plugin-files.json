@@ -133,6 +133,8 @@
     "skills/deep-security-scan/agents/openai.yaml",
     "skills/define-security-policy/SKILL.md",
     "skills/define-security-policy/agents/openai.yaml",
+    "skills/dependency-exploitability-stacks/SKILL.md",
+    "skills/dependency-exploitability-stacks/agents/openai.yaml",
     "skills/dependency-exploitability/SKILL.md",
     "skills/dependency-exploitability/agents/openai.yaml",
     "skills/finding-discovery/SKILL.md",

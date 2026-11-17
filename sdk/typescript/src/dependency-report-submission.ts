@@ -12,6 +12,7 @@ import {
   type PreparedDependencyClaim,
 } from "./dependency-claims.js";
 import type { DependencyIssue } from "./dependency-advisory.js";
+import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import type {
   DependencyCandidate,
   DependencyCandidates,
@@ -303,6 +304,8 @@ interface PreparedItem {
 }
 interface ItemState extends PreparedItem {
   revision: number;
+  // Requeuing a failed review can keep the same immutable claim revision.
+  queueVersion: number;
   status: DependencyReviewItemStatus;
   queuedAt: number;
   conclusionClaim: DependencyClaimReference;
@@ -374,6 +377,26 @@ function excerptKey(range: Omit<DependencyExcerpt, "text">): string {
     range.startLine,
     range.endLine,
   ]);
+}
+
+export async function readDependencyClaimExcerpts(
+  ranges: readonly Pick<
+    DependencyExcerpt,
+    "path" | "commit" | "startLine" | "endLine"
+  >[],
+  repository: string,
+  signal?: AbortSignal,
+  readSourceIdentity = createDependencySourceIdentityReader(repository),
+): Promise<DependencyExcerpt[]> {
+  const excerpts = new Map<string, DependencyExcerpt>();
+  await readDependencyEvidence(
+    ranges.map((range) => ({ ...range, supports: [] })),
+    repository,
+    signal,
+    (excerpt) => excerpts.set(excerptKey(excerpt), excerpt),
+    readSourceIdentity,
+  );
+  return [...excerpts.values()];
 }
 type CallSite = NonNullable<DependencyVerdictUpdate["callSite"]>;
 
@@ -526,6 +549,7 @@ function contextLimit(error: unknown): boolean {
 export function createDependencyReportSubmission(options: {
   repository: string;
   advisory: DependencyIssue;
+  attempt?: DependencyAttemptStore;
   callerScope?: string;
   callerScopeIsDefault?: true;
   review: (
@@ -564,11 +588,29 @@ export function createDependencyReportSubmission(options: {
   const catalogServerNames = options.catalogServerNames ?? [];
   const coverage = new DependencyReportCoverage();
   const audit = new DependencySearchAudit();
-  const items = new Map<string, ItemState>();
-  // A queued use is known work even when no discovered candidate was attached.
-  const knownUses = new Map<string, PreparedItem>();
-  const knownSourceGaps = new Map<string, PreparedItem>();
-  const decisions = new Map<string, Decision>();
+  const attempt = options.attempt ?? new DependencyAttemptStore(":memory:");
+  const getItem = (id: string) =>
+    attempt.get<ItemState>("review-assessment", id);
+  const getItems = () => attempt.values<ItemState>("review-assessment");
+  const saveItem = (item: ItemState) =>
+    attempt.set("review-assessment", item.input.id, item);
+  const currentItem = (item: ItemState) => {
+    const current = getItem(item.input.id);
+    return current?.queueVersion === item.queueVersion ? current : undefined;
+  };
+  function setItemStatus(
+    item: ItemState,
+    status: DependencyReviewItemStatus,
+    feedback?: string,
+  ) {
+    const current = currentItem(item);
+    if (current)
+      saveItem({
+        ...current,
+        status,
+        ...(feedback !== undefined && { feedback }),
+      });
+  }
   const inFlight = new Set<Promise<void>>();
   const scheduledClaims = new Set<string>();
   const claimQueuedAt = new Map<string, number>();
@@ -590,6 +632,9 @@ export function createDependencyReportSubmission(options: {
   let terminalError: Error | undefined;
   let blocked: DependencyInvestigationBlockedError | undefined;
   let closing: Promise<void> | undefined;
+  let closedStatus: ReturnType<typeof liveStatus> | undefined;
+  let closedItems:
+    Map<string, Pick<ItemState, "input" | "revision">> | undefined;
 
   const claims = createDependencyClaims(
     {
@@ -598,6 +643,7 @@ export function createDependencyReportSubmission(options: {
       callerScopeIsDefault: options.callerScopeIsDefault ?? false,
     } as unknown as JsonValue,
     (id) => notifyReviewedUse(id),
+    attempt,
   );
   const claimKey = (ref: DependencyClaimReference) =>
     JSON.stringify([ref.id, ref.revision, ref.hash]);
@@ -628,9 +674,8 @@ export function createDependencyReportSubmission(options: {
       throw new CodexSecurityError("Dependency review queue is closed.");
     if (terminalError) throw terminalError;
   }
-  function status(includeInventory = true) {
+  function liveStatus(includeInventory = true, visible = getItems()) {
     const candidates = snapshot();
-    const visible = [...items.values()];
     return {
       candidateGeneration: candidates.generation,
       candidates: candidates.candidates,
@@ -660,12 +705,22 @@ export function createDependencyReportSubmission(options: {
       closed,
     };
   }
+  function status(includeInventory = true) {
+    if (!closedStatus) return liveStatus(includeInventory);
+    return structuredClone({
+      ...closedStatus,
+      inventoryReceipts: includeInventory ? closedStatus.inventoryReceipts : [],
+    });
+  }
+  function readItem(id: string) {
+    return closedItems ? closedItems.get(id) : getItem(id);
+  }
   function readStatus(value: unknown = {}) {
     const request = dependencyReviewStatusInputSchema.parse(value);
     const current = status(request.inventoryReceipts === true);
     const summary = summarizeDependencyReviewStatus(current, request);
     const assessmentItems = request.assessmentIds?.map((id) => {
-      const state = items.get(id);
+      const state = readItem(id);
       if (!state) throw new CodexSecurityError(`Unknown assessment ID: ${id}.`);
       return { revision: state.revision, item: structuredClone(state.input) };
     });
@@ -683,7 +738,7 @@ export function createDependencyReportSubmission(options: {
       const page = current.items.slice(cursor + 1, cursor + 1 + limit);
       assessmentPage = {
         items: page.map((state) => {
-          const input = items.get(state.id)!.input;
+          const input = readItem(state.id)!.input;
           return {
             id: input.id,
             revision: state.revision,
@@ -762,7 +817,13 @@ export function createDependencyReportSubmission(options: {
     checkOpen();
     claims.requireDependencies(input.supportingClaims ?? []);
     const sourceGap =
-      input.kind === "unresolved" ? undefined : knownSourceGaps.get(input.id);
+      input.kind === "unresolved"
+        ? undefined
+        : attempt.get<PreparedItem>("review-source-gap", input.id);
+    const prior =
+      input.kind === "use"
+        ? undefined
+        : attempt.get<PreparedItem>("review-use", input.id);
     if (
       input.kind !== "use" &&
       input.classification &&
@@ -776,7 +837,7 @@ export function createDependencyReportSubmission(options: {
     if (
       input.kind === "dismissed" &&
       !input.candidateIds.length &&
-      !knownUses.has(input.id) &&
+      !prior &&
       !sourceGap
     )
       throw new CodexSecurityError(
@@ -921,7 +982,6 @@ export function createDependencyReportSubmission(options: {
           `${use.location}: Inventory observations from ${server} require a successful result to establish a fact. Use supports: [] to document an inconclusive attempt.`,
         );
     }
-    const prior = input.kind === "use" ? undefined : knownUses.get(input.id);
     const previousUse =
       prior?.input.kind === "use"
         ? { use: prior.input.use, candidates: prior.candidates }
@@ -1041,18 +1101,18 @@ export function createDependencyReportSubmission(options: {
     }
   }
   function upsert(prepared: PreparedItem): ItemState {
-    const old = items.get(prepared.input.id);
+    const old = getItem(prepared.input.id);
     const subject = application(prepared);
     const previous = claims.currentReference(subject.id);
     const proposed = claims.propose(subject, previous?.revision);
     const conclusionClaim = claims.reference(proposed.record);
     if (prepared.input.kind === "use")
-      knownUses.set(prepared.input.id, prepared);
+      attempt.set("review-use", prepared.input.id, prepared);
     if (
       prepared.input.kind === "unresolved" &&
       !prepared.input.candidateIds.length
     )
-      knownSourceGaps.set(prepared.input.id, prepared);
+      attempt.set("review-source-gap", prepared.input.id, prepared);
     if (
       old?.fingerprint === prepared.fingerprint &&
       old.status !== "error" &&
@@ -1060,13 +1120,17 @@ export function createDependencyReportSubmission(options: {
       proposed.record.state !== "stale"
     ) {
       old.input = prepared.input;
+      saveItem(old);
       return old;
     }
     claims.retry(conclusionClaim);
     // This cache includes stable assessment ID, exact own source/copy/receipt
     // bindings and pinned premise revisions. A new caller or changed dependency
     // cannot inherit an old application decision merely by citing a premise.
-    const cached = decisions.get(prepared.fingerprint);
+    const cached = attempt.get<Decision>(
+      "review-decision",
+      prepared.fingerprint,
+    );
     if (cached && proposed.record.state === "pending") {
       if (claims.lease(conclusionClaim))
         claims.complete(conclusionClaim, cached);
@@ -1075,6 +1139,7 @@ export function createDependencyReportSubmission(options: {
       ...prepared,
       conclusionClaim,
       revision: proposed.record.revision,
+      queueVersion: (old?.queueVersion ?? 0) + 1,
       status: cached
         ? cached.accepted
           ? "accepted"
@@ -1085,24 +1150,57 @@ export function createDependencyReportSubmission(options: {
       queuedAt: Date.now(),
       ...(cached ? { feedback: cached.reason } : {}),
     };
-    items.set(prepared.input.id, state);
-    accepted = undefined;
-    if (cached?.accepted && claims.state(conclusionClaim)?.state === "approved")
-      publishReviewedUse(state, cached);
+    saveItem(state);
+    attempt.afterCommit(() => {
+      accepted = undefined;
+      if (
+        cached?.accepted &&
+        claims.state(conclusionClaim)?.state === "approved"
+      )
+        publishReviewedUse(state, cached);
+    });
     return state;
   }
+  function storeItems(prepared: PreparedItem[]) {
+    return attempt.transaction(() => {
+      preflightClaims(
+        prepared.map((item) => ({
+          prepared: application(item),
+          expectedRevision: claims.currentReference(
+            applicationId(item.input.id),
+          )?.revision,
+        })),
+      );
+      return prepared.map(upsert);
+    });
+  }
   function setDecision(item: ItemState, decision: Decision) {
-    if (items.get(item.input.id) !== item) return;
-    if (!claims.complete(item.conclusionClaim, decision)) {
-      item.status = "error";
-      item.feedback =
-        "The exact application or a pinned premise changed during review. Query current claims and revise this assessment; the delayed decision was discarded.";
-      return;
-    }
-    decisions.set(item.fingerprint, decision);
-    item.status = decision.accepted ? "accepted" : "rejected";
-    item.feedback = decision.reason;
-    if (decision.accepted) publishReviewedUse(item, decision);
+    attempt.transaction(() => {
+      if (!currentItem(item)) return;
+      if (!claims.complete(item.conclusionClaim, decision)) {
+        setItemStatus(
+          item,
+          "error",
+          "The exact application or a pinned premise changed during review. Query current claims and revise this assessment; the delayed decision was discarded.",
+        );
+        return;
+      }
+      attempt.set("review-decision", item.fingerprint, decision);
+      setItemStatus(
+        item,
+        decision.accepted ? "accepted" : "rejected",
+        decision.reason,
+      );
+      if (decision.accepted)
+        attempt.afterCommit(() => publishReviewedUse(item, decision));
+    });
+  }
+  function failReview(item: ItemState, reason: string, feedback = reason) {
+    attempt.transaction(() => {
+      if (!currentItem(item)) return;
+      claims.reviewError(item.conclusionClaim, reason);
+      setItemStatus(item, "error", feedback);
+    });
   }
 
   function notifyReviewedUse(id: string, review?: DependencyVerdictUpdate) {
@@ -1190,10 +1288,20 @@ export function createDependencyReportSubmission(options: {
   /** Re-read only selected sources and original receipt identities, once per boundary. */
   async function refreshClaims(records: readonly DependencyClaimRecord[]) {
     const all = new Map<string, DependencyClaimRecord>();
-    const affected = new Map<string, DependencyClaimReference>();
+    const markStale = (ref: DependencyClaimReference) => {
+      const subject = claims.state(ref);
+      if (!subject?.application || subject.state !== "stale") return;
+      const item = getItem(subject.application.assessmentId);
+      if (!item || claimKey(item.conclusionClaim) !== claimKey(ref)) return;
+      const feedback = subject.error ?? "A pinned claim is stale.";
+      if (item.status !== "error" || item.feedback !== feedback)
+        setItemStatus(item, "error", feedback);
+    };
     const invalidate = (ref: DependencyClaimReference, reason: string) => {
-      for (const changed of claims.invalidate(ref, reason))
-        affected.set(claimKey(changed), changed);
+      attempt.transaction(() => {
+        for (const changed of claims.invalidate(ref, reason))
+          markStale(changed);
+      });
     };
     for (const record of records) {
       all.set(claimKey(record), record);
@@ -1243,14 +1351,7 @@ export function createDependencyReportSubmission(options: {
           .find((reason) => reason !== undefined);
       if (stale) invalidate(record, stale);
     }
-    for (const ref of [...affected.values(), ...records]) {
-      const subject = claims.state(ref);
-      if (!subject?.application || subject.state !== "stale") continue;
-      const item = items.get(subject.application.assessmentId);
-      if (!item || claimKey(item.conclusionClaim) !== claimKey(ref)) continue;
-      item.status = "error";
-      item.feedback = subject.error ?? "A pinned claim is stale.";
-    }
+    for (const record of records) markStale(record);
   }
   function approvedProjection(refs: readonly DependencyClaimReference[]) {
     return claims.closure(refs).map((record) => {
@@ -1303,7 +1404,7 @@ export function createDependencyReportSubmission(options: {
     const approved = claims.closure(refs).map((record) => {
       const keys = new Set(record.decision?.evidenceKeys);
       const item = record.application
-        ? items.get(record.application.assessmentId)
+        ? getItem(record.application.assessmentId)
         : undefined;
       const exactApplication =
         item && claimKey(item.conclusionClaim) === claimKey(record)
@@ -1397,7 +1498,9 @@ export function createDependencyReportSubmission(options: {
     ];
   }
   function reviewedItemEvidence(item: ItemState) {
-    const keys = new Set(decisions.get(item.fingerprint)?.evidenceKeys);
+    const keys = new Set(
+      attempt.get<Decision>("review-decision", item.fingerprint)?.evidenceKeys,
+    );
     const references = decidingReferences(item.excerpts, item.receipts, keys);
     const usedPremises = decidingPremises(
       item.input.supportingClaims ?? [],
@@ -1535,18 +1638,11 @@ export function createDependencyReportSubmission(options: {
           }),
         );
         return batch.filter((item) => {
-          if (
-            items.get(item.input.id) !== item ||
-            !claims.lease(item.conclusionClaim)
-          )
+          if (!currentItem(item) || !claims.lease(item.conclusionClaim))
             return false;
           const stale = inventory.staleReason(item.receipts);
           if (!stale) return true;
-          if (items.get(item.input.id) === item) {
-            item.status = "error";
-            item.feedback = stale;
-          }
-          claims.reviewError(item.conclusionClaim, stale);
+          failReview(item, stale);
           return false;
         });
       });
@@ -1599,15 +1695,11 @@ export function createDependencyReportSubmission(options: {
         }
         for (const item of batch)
           if (!seen.has(item.input.id)) {
-            claims.reviewError(
-              item.conclusionClaim,
+            failReview(
+              item,
               "The reviewer omitted this application. It remains pending and unapproved; explicitly requeue to retry.",
+              "Review failed: The reviewer omitted this application. It remains unreviewed; explicitly requeue to retry.",
             );
-            if (items.get(item.input.id) === item) {
-              item.status = "error";
-              item.feedback =
-                "Review failed: The reviewer omitted this application. It remains unreviewed; explicitly requeue to retry.";
-            }
           }
         for (const resultItem of result.items) {
           const item = expected.get(resultItem.id)!;
@@ -1740,12 +1832,14 @@ export function createDependencyReportSubmission(options: {
       }
       await serial(async () => {
         for (const item of batch) {
-          if (items.get(item.input.id) !== item) continue;
-          claims.reviewError(item.conclusionClaim, errorMessage(error));
-          item.status = "error";
-          item.feedback = contextLimit(error)
-            ? `This review item alone exceeds the upstream input/context limit: ${errorMessage(error)}. Do not requeue the unchanged packet. Split independent assessments or narrow cited source excerpts and use precise receiptSelections for the deciding records of current inventory receipts.${item.previousUse ? ` This disposition also retains the previously queued use's proof; narrowing only the disposition's new citations cannot shrink that history. First revise the same item ID (${item.input.id}) as kind=use with bounded current evidence, obtain approval for that revised use, then withdraw it through a disposition under the same ID. Keep its actual uncertainty and do not discard deciding evidence to fit.` : ""} If a single cited source line or deciding receipt is itself too large, explain that concrete review limitation with the available smaller evidence rather than repeatedly submitting the oversized payload.`
-            : `Review failed: ${errorMessage(error)}. Requeue this item to retry.`;
+          if (!currentItem(item)) continue;
+          failReview(
+            item,
+            errorMessage(error),
+            contextLimit(error)
+              ? `This review item alone exceeds the upstream input/context limit: ${errorMessage(error)}. Do not requeue the unchanged packet. Split independent assessments or narrow cited source excerpts and use precise receiptSelections for the deciding records of current inventory receipts.${item.previousUse ? ` This disposition also retains the previously queued use's proof; narrowing only the disposition's new citations cannot shrink that history. First revise the same item ID (${item.input.id}) as kind=use with bounded current evidence, obtain approval for that revised use, then withdraw it through a disposition under the same ID. Keep its actual uncertainty and do not discard deciding evidence to fit.` : ""} If a single cited source line or deciding receipt is itself too large, explain that concrete review limitation with the available smaller evidence rather than repeatedly submitting the oversized payload.`
+              : `Review failed: ${errorMessage(error)}. Requeue this item to retry.`,
+          );
         }
       });
     }
@@ -1933,7 +2027,7 @@ export function createDependencyReportSubmission(options: {
   function pump() {
     clearScheduled();
     if (closed || signal.aborted) return;
-    let pending = [...items.values()]
+    let pending = getItems()
       .filter((item) => item.status === "queued")
       .sort((a, b) => a.queuedAt - b.queuedAt);
     let premises = claims
@@ -1963,7 +2057,7 @@ export function createDependencyReportSubmission(options: {
             const record = claims.get(ref);
             return record ? [record] : [];
           });
-      for (const item of batch) item.status = "reviewing";
+      for (const item of batch) setItemStatus(item, "reviewing");
       for (const record of premiseBatch) scheduledClaims.add(claimKey(record));
       // Claim leases are taken in the existing serialized mutation path before review.
       const operation = batch.length
@@ -1984,14 +2078,21 @@ export function createDependencyReportSubmission(options: {
     for (;;) {
       checkOpen();
       pump();
+      const current = selected.map((item) => {
+        const active = currentItem(item);
+        if (!active)
+          throw new CodexSecurityError(
+            "Selected assessments changed during finalization. Check status and resubmit.",
+          );
+        return active;
+      });
       if (
-        selected.some((item) => items.get(item.input.id) !== item) ||
-        selected.every(
+        !inFlight.size ||
+        current.every(
           (item) => item.status !== "queued" && item.status !== "reviewing",
         )
       )
-        return;
-      if (!inFlight.size) return;
+        return current;
       await Promise.race(inFlight);
     }
   }
@@ -2019,7 +2120,7 @@ export function createDependencyReportSubmission(options: {
         acceptedSourceWork !==
           (options.sourceWorkCoverage?.()?.generation() ?? 0) ||
         [...acceptedItems].some(([id, revision]) => {
-          const item = items.get(id);
+          const item = getItem(id);
           return (
             !item ||
             item.revision !== revision ||
@@ -2036,7 +2137,7 @@ export function createDependencyReportSubmission(options: {
   }
 
   function omittedSourceGaps(selected: ReadonlySet<string>): string[] {
-    return [...knownSourceGaps.keys()].filter((id) => !selected.has(id));
+    return attempt.keys("review-source-gap").filter((id) => !selected.has(id));
   }
 
   function refreshAcceptedReport(): Promise<void> {
@@ -2045,7 +2146,7 @@ export function createDependencyReportSubmission(options: {
       if (!currentReport()) return;
       await refreshClaims(
         [...acceptedItems.keys()].flatMap((id) => {
-          const item = items.get(id);
+          const item = getItem(id);
           const record = item && claims.get(item.conclusionClaim);
           return record ? [record] : [];
         }),
@@ -2273,16 +2374,26 @@ export function createDependencyReportSubmission(options: {
             prepared: PreparedDependencyClaim;
             expectedRevision?: number;
           }[] = [];
+          // Claims in a batch often cite the same immutable Git ranges.
+          const pinnedExcerpts = new Map<string, DependencyExcerpt[]>();
           for (const proposal of input.claims) {
             claims.requireDependencies(proposal.dependencies);
-            const excerpts = new Map<string, DependencyExcerpt>();
-            await readDependencyEvidence(
-              proposal.evidence.map((range) => ({ ...range, supports: [] })),
-              options.repository,
-              signal,
-              (excerpt) => excerpts.set(excerptKey(excerpt), excerpt),
-              readSourceIdentity,
-            );
+            const key = proposal.evidence.every(
+              (range) => range.commit !== undefined,
+            )
+              ? JSON.stringify(proposal.evidence)
+              : undefined;
+            let excerpts =
+              key === undefined ? undefined : pinnedExcerpts.get(key);
+            if (excerpts === undefined) {
+              excerpts = await readDependencyClaimExcerpts(
+                proposal.evidence,
+                options.repository,
+                signal,
+                readSourceIdentity,
+              );
+              if (key !== undefined) pinnedExcerpts.set(key, excerpts);
+            }
             const selectedReceiptIds = [
               ...(proposal.receiptIds ?? []),
               ...(proposal.receiptSelections ?? []).map(
@@ -2311,7 +2422,7 @@ export function createDependencyReportSubmission(options: {
                 payload: proposal.payload,
                 scope: proposal.scope,
                 dependencies: proposal.dependencies,
-                excerpts: [...excerpts.values()],
+                excerpts,
                 receipts,
               },
               ...(proposal.expectedRevision === undefined
@@ -2320,14 +2431,18 @@ export function createDependencyReportSubmission(options: {
             });
           }
           checkOpen();
-          preflightClaims(proposals);
-          const result = proposals.map(({ prepared, expectedRevision }) => {
-            const proposed = claims.propose(prepared, expectedRevision);
-            if (!proposed.changed) claims.retry(proposed.record);
-            const ref = claims.reference(proposed.record);
-            if (proposed.record.state === "pending")
-              claimQueuedAt.set(claimKey(ref), Date.now());
-            return ref;
+          const result = attempt.transaction(() => {
+            preflightClaims(proposals);
+            return proposals.map(({ prepared, expectedRevision }) => {
+              const proposed = claims.propose(prepared, expectedRevision);
+              if (!proposed.changed) claims.retry(proposed.record);
+              const ref = claims.reference(proposed.record);
+              if (proposed.record.state === "pending")
+                attempt.afterCommit(() =>
+                  claimQueuedAt.set(claimKey(ref), Date.now()),
+                );
+              return ref;
+            });
           });
           schedulePump();
           return {
@@ -2363,15 +2478,7 @@ export function createDependencyReportSubmission(options: {
             prepared.push(await prepare(item, candidates));
           }
           checkOpen();
-          preflightClaims(
-            prepared.map((item) => ({
-              prepared: application(item),
-              expectedRevision: claims.currentReference(
-                applicationId(item.input.id),
-              )?.revision,
-            })),
-          );
-          const queuedItems = prepared.map(upsert);
+          const queuedItems = storeItems(prepared);
           const items = queuedItems.map((state) => ({
             id: state.input.id,
             revision: state.revision,
@@ -2424,7 +2531,7 @@ export function createDependencyReportSubmission(options: {
         code: "INVESTIGATION_BLOCKED",
         ...(nativeThreadId === undefined ? {} : { nativeThreadId }),
         retainedEvidence: {
-          assessmentRevisions: [...items.values()].map((item) => ({
+          assessmentRevisions: getItems().map((item) => ({
             id: item.input.id,
             revision: item.revision,
             status: item.status,
@@ -2489,7 +2596,7 @@ export function createDependencyReportSubmission(options: {
               "Each selected assessment must have a unique ID.",
             );
           const selected = input.reviewItems.map(({ id, revision }) => {
-            const item = items.get(id);
+            const item = getItem(id);
             if (!item)
               throw new CodexSecurityError(`Unknown review item ID: ${id}.`);
             if (item.revision !== revision)
@@ -2511,16 +2618,7 @@ export function createDependencyReportSubmission(options: {
           }
           if (changed.length) {
             checkOpen();
-            preflightClaims(
-              changed.map((item) => ({
-                prepared: application(item),
-                expectedRevision: claims.currentReference(
-                  applicationId(item.input.id),
-                )?.revision,
-              })),
-            );
-            const revisions = changed.map((current) => {
-              const updated = upsert(current);
+            const revisions = storeItems(changed).map((updated) => {
               return `${updated.input.id} (revision ${updated.revision})`;
             });
             schedulePump();
@@ -2534,9 +2632,9 @@ export function createDependencyReportSubmission(options: {
           item.kind === "use" ? [item.use] : [],
         );
         const selectedIds = new Set(selected.map((item) => item.input.id));
-        const omittedUses = [...knownUses.keys()].filter(
-          (id) => !selectedIds.has(id),
-        );
+        const omittedUses = attempt
+          .keys("review-use")
+          .filter((id) => !selectedIds.has(id));
         if (omittedUses.length)
           return reject(
             `Previously queued uses are missing from the final selection: ${omittedUses.join(", ")}. Include each use, or upsert the same item ID as an evidence-backed dismissed/unresolved disposition and include that ID. A known use cannot silently disappear.`,
@@ -2594,8 +2692,8 @@ export function createDependencyReportSubmission(options: {
             "An empty assessment must explain its scope or remaining uncertainty in limitations.",
           );
         pump();
-        await flush(selected);
-        const gaps = selected
+        const reviewed = await flush(selected);
+        const gaps = reviewed
           .filter((item) => item.status !== "accepted")
           .map(
             (item) =>
@@ -2616,11 +2714,11 @@ export function createDependencyReportSubmission(options: {
             snapshot().generation !== candidateSnapshot.generation ||
             inventory.generation() !== inventoryGeneration ||
             (sourceWork?.generation() ?? 0) !== sourceWorkGeneration ||
-            [...knownUses.keys()].some((id) => !selectedIds.has(id)) ||
+            attempt.keys("review-use").some((id) => !selectedIds.has(id)) ||
             omittedSourceGaps(selectedIds).length > 0 ||
             selected.some(
               (item) =>
-                items.get(item.input.id) !== item ||
+                !currentItem(item) ||
                 !claims.isApproved(item.conclusionClaim) ||
                 !!inventory.staleReason(item.receipts),
             )
@@ -2808,8 +2906,20 @@ export function createDependencyReportSubmission(options: {
       clearScheduled();
       closing = Promise.resolve().then(async () => {
         controller.abort(new Error("Dependency report review closed."));
-        await mutations;
-        await Promise.allSettled([...inFlight]);
+        try {
+          await mutations;
+          await Promise.allSettled([...inFlight]);
+          const visible = getItems();
+          closedStatus = liveStatus(true, visible);
+          closedItems = new Map(
+            visible.map(({ input, revision }) => [
+              input.id,
+              { input, revision },
+            ]),
+          );
+        } finally {
+          if (!options.attempt) attempt.close();
+        }
       });
       return closing;
     },

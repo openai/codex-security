@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
 import { createDependencyCandidates } from "../src/dependency-candidates.js";
 import type { DependencyUseProof } from "../src/dependency-report-proof.js";
 import type { DependencyAssessment } from "../src/dependency-reachability.js";
@@ -145,6 +146,43 @@ function queueUse(
     items: [{ id, kind: "use", candidateIds: [], use }],
   });
 }
+
+test("a reopened attempt retains an independently reviewed assessment and its exact evidence", async () => {
+  await using repo = await scopedTemporaryDirectory("review-sources-");
+  await using state = await scopedTemporaryDirectory("review-state-");
+  await writeFile(join(repo.path, "worker.ts"), "start\nchecked entry\n");
+  let reviews = 0;
+  async function run(create: boolean) {
+    const attempt = new DependencyAttemptStore(join(state.path, "run.sqlite"), {
+      create,
+    });
+    const submission = createDependencyReportSubmission({
+      repository: repo.path,
+      advisory,
+      attempt,
+      review: async (prompt) => {
+        reviews++;
+        return reviewDecision(prompt, approved);
+      },
+    });
+    try {
+      if (create)
+        expect(await queueUse(submission, draft().uses[0]!)).toMatchObject({
+          queued: true,
+        });
+      expect(await finalize(submission, [], ["worker"])).toMatchObject({
+        accepted: true,
+      });
+      return submission.publicReport();
+    } finally {
+      await submission.close();
+      attempt.close();
+    }
+  }
+  const original = await run(true);
+  expect(await run(false)).toEqual(original);
+  expect(reviews).toBe(1);
+});
 
 test("distinguishes default scope from an explicit deployment assumption", async () => {
   await using repo = await scopedTemporaryDirectory("review-caller-scope-");
