@@ -1583,6 +1583,7 @@ describe("multiscan", () => {
       summary.resultsPath,
       `${JSON.stringify({
         ...receipt,
+        id: "SAMPLE",
         outputDir: join(output, "artifacts", "sample", "attempt-1"),
       })}\n`,
     );

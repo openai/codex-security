@@ -689,6 +689,40 @@ describe("multiscan", () => {
     },
   );
 
+  test.each(["ordinary", "explicit"])(
+    "rejects a receipt for a different artifact directory during %s recovery",
+    async (mode) => {
+      const { paths } = await repositoryFixture("receipt");
+      const run = mock(completeRun);
+      const configured = options(paths, client(run));
+      const { resultsPath: ledger } = await runMultiscan(configured);
+      const [receipt] = await results(ledger);
+      const recoverScan = mock((directory: string) => completedScan(directory));
+      for (const [id, attempt] of [
+        ["receipt", 999],
+        ["other", 1],
+      ] as const) {
+        const outputDir = join(
+          paths.output,
+          "artifacts",
+          id,
+          `attempt-${attempt}`,
+        );
+        const damaged = JSON.stringify({ ...receipt, outputDir }) + "\n";
+        await writeFile(ledger, damaged);
+        await expect(
+          runMultiscan({
+            ...configured,
+            ...(mode === "explicit" ? { recoverScan } : {}),
+          }),
+        ).rejects.toThrow(`${ledger}:1: Expected outputDir`);
+        expect(await readFile(ledger, "utf8")).toBe(damaged);
+      }
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(recoverScan).not.toHaveBeenCalled();
+    },
+  );
+
   test.each(["rerun", "recover receipt", "recover directory"])(
     "preserves exhausted attempt numbers on %s",
     async (mode) => {

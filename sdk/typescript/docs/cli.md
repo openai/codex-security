@@ -1591,8 +1591,10 @@ failed or interrupted attempt:
   revision, preserving old artifacts and checkouts.
 
 Each nonempty committed line in `results.jsonl` must be a JSON object with a task ID
-from the manifest, a nonempty output directory, a supported status, and a positive
-safe integer attempt number. An occupied checkout or knowledge base failure happens
+from the manifest, a supported status, and a positive safe integer attempt number.
+Its `outputDir` must match `artifacts/<task ID>/attempt-<number>` under the
+canonical campaign directory or the selected output path.
+An occupied checkout or knowledge base failure happens
 before scanning, so its receipt must have failed status and omit the policy
 verdict. Optional receipt flags must be booleans, and a pending checkout
 cleanup must name `checkout` or `recovery-checkout`. If a line fails these checks,
